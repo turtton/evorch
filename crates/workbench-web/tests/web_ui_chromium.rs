@@ -82,11 +82,20 @@ fn other_big_body_text() -> String {
     )
 }
 
+/// A third body of the same byte length again.
+fn third_big_body_text() -> String {
+    format!(
+        "第三の本文の先頭です。\n\n{}\n\n大きな本文の終わり。",
+        "uvwxyzabcd ".repeat(14_000)
+    )
+}
+
 fn body_source(base: &str) -> String {
     match base {
         "body-1" => body_text(),
         "body-2" => big_body_text(),
         "body-3" => other_big_body_text(),
+        "body-4" => third_big_body_text(),
         other => panic!("unknown body {other}"),
     }
 }
@@ -173,6 +182,8 @@ struct World {
     /// Reads of the newest page; body ids carry it, as the host issues new
     /// ids on every read.
     newest_reads: usize,
+    /// Refuse this many next reads of the newest page.
+    failing_newest_reads: usize,
     /// Every body id read, in order.
     body_reads: Vec<String>,
     snapshot_reads: usize,
@@ -258,6 +269,7 @@ impl World {
             stale_inputs: vec!["ap-2".to_owned()],
             history_reads: 0,
             newest_reads: 0,
+            failing_newest_reads: 0,
             body_reads: Vec::new(),
             snapshot_reads: 0,
             replay_on_resume: false,
@@ -450,6 +462,17 @@ impl UiBackend {
         let total = body_source(to).len().to_string();
         world.history[position]["content"]["payload"] =
             json!({"body_id": to, "total_bytes": total});
+    }
+
+    /// The same run and index now hold another inline text (a renumbering).
+    fn replace_text(&self, from: &str, to: &str) {
+        let mut world = self.world.lock().unwrap();
+        let message = world
+            .history
+            .iter_mut()
+            .find(|m| m["content"]["payload"]["text"] == from)
+            .unwrap();
+        message["content"]["payload"]["text"] = json!(to);
     }
 
     /// Drop every event stream without a terminal event, as a lost
@@ -654,6 +677,10 @@ impl UiBackend {
                 let start = end.saturating_sub(limit);
                 let next = (start > 0).then(|| format!("b{start}"));
                 if p["page"]["cursor"].is_null() {
+                    if world.failing_newest_reads > 0 {
+                        world.failing_newest_reads -= 1;
+                        return refused("internal", "same_request");
+                    }
                     world.newest_reads += 1;
                 }
                 let generation = world.newest_reads;
@@ -1527,24 +1554,58 @@ async fn web_workbench_main_flows_in_chromium() {
     ))
     .await;
 
-    eprintln!("step: a body read answered after a snapshot is dropped");
+    eprintln!("step: a failed rebuild, a late body answer, then a retry");
+    // The next chunk of the large body is asked for and held. The core then
+    // renumbers (run-root#225 gets another body of the same length,
+    // run-root#226 another text) and resyncs, and the first rebuild fails.
+    // Neither the late answer nor retrying by hand may bring back anything
+    // from before the snapshot.
+    const ASK: &str = "ログイン後のリダイレクト先が壊れています。直してください。";
+    const RENUMBERED: &str = "再採番で同じ位置に来た別の入力";
     let held_body = backend.hold("read_body");
     ui.eval(&format!(
         "(() => {{ const m = {BIG}; window.bigElement = m; {CONTINUE}.click(); }})()"
     ))
     .await;
     held_body.entered().await;
+    backend.replace_body("body-3", "body-4");
+    backend.replace_text(ASK, RENUMBERED);
+    backend.world.lock().unwrap().failing_newest_reads = 1;
     backend.drop_streams();
-    ui.wait(&format!(
-        r##"() => {{ const m = {BIG}; return m && m !== window.bigElement && !document.querySelector(".history-status").textContent; }}"##
-    ))
-    .await;
+    ui.wait(r##"() => { const retry = document.querySelector(".thread .history-status + button.small");
+        return retry && !retry.hidden && document.querySelector(".history-status").textContent; }"##)
+        .await;
+    assert_eq!(
+        ui.eval(
+            r##"document.querySelector(".messages").textContent.includes("異なる本文の先頭")"##
+        )
+        .await,
+        true,
+        "the failed rebuild leaves the old list on screen"
+    );
     backend.unhold("read_body");
     ui.wait(
         r##"() => window.bigElement.querySelector(".body-status").textContent !== "読み込み中…""##,
     )
     .await;
-    // Open the thread again: nothing read before the snapshot comes back.
+    ui.click(".thread .history-status + button.small").await;
+    let rebuilt = ui
+        .wait(&format!(
+            r##"() => {{ if (document.querySelector(".history-status").textContent) return false;
+                if (!document.querySelector(".thread .history-status + button.small").hidden) return false;
+                const text = document.querySelector(".messages").textContent;
+                const m = {BIG};
+                const buttons = [...m.querySelectorAll("button")].filter((b) => !b.hidden).map((b) => b.textContent.replace(/（.*/, ""));
+                return {{ new_text: text.includes({RENUMBERED:?}), old_text: text.includes({ASK:?}), old_body: text.includes("異なる本文の先頭"),
+                          same: m === window.bigElement, body: m.querySelector(".body-text").textContent, buttons }}; }}"##
+        ))
+        .await;
+    assert_eq!(
+        rebuilt,
+        json!({"new_text": true, "old_text": false, "old_body": false, "same": false, "body": "", "buttons": ["本文を読み込む"]}),
+        "nothing from before the snapshot is reused"
+    );
+    // Open the thread again: the late answer was not kept either.
     ui.eval(r##"location.hash = "#/""##).await;
     ui.wait(r##"() => !document.querySelector(".thread")"##)
         .await;
@@ -1561,6 +1622,14 @@ async fn web_workbench_main_flows_in_chromium() {
         json!({"text": "", "buttons": ["本文を読み込む"]}),
         "the late answer did not bring the old body back"
     );
+    ui.eval(&format!(
+        r##"{BIG}.querySelector(".msg-body button.small:not([hidden])").click()"##
+    ))
+    .await;
+    ui.wait(&format!(
+        r##"() => {BIG}.querySelector(".body-text").textContent.includes("第三の本文の先頭")"##
+    ))
+    .await;
     ui.eval("window.scrollTo(0, document.scrollingElement.scrollHeight)")
         .await;
     ui.settle().await;

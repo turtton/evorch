@@ -672,6 +672,7 @@ export function threadView(ctx, threadId) {
     } else {
       article.setBodyRef = bodyPlaceholder(content, role, message.content.payload, bodyKey(message));
     }
+    article.generation = ctx.store.snapshotMark();
     return article;
   }
 
@@ -815,6 +816,12 @@ export function threadView(ctx, threadId) {
   function renderMessages() {
     if (!history) return;
     const messages = history.messages();
+    // An element is reused only within the snapshot it was made in: after a
+    // snapshot the same run and index may name another message.
+    const generation = ctx.store.snapshotMark();
+    for (const child of [...list.children]) {
+      if (child.generation !== generation) child.remove();
+    }
     reconcile(list, messages, messageKey, messageElement, updateMessage);
     older.hidden = !history.hasOlder;
   }
@@ -847,6 +854,11 @@ export function threadView(ctx, threadId) {
   // the view is at the bottom when the result is shown, the message at the
   // top of the screen stays where it was.
   async function rebuildHistory({ reread = false, asked = false } = {}) {
+    if (reread && history && history.generation !== ctx.store.snapshotMark()) {
+      // The history on screen is from before a snapshot whose rebuild has
+      // not succeeded yet: a retry is that rebuild, not a re-read.
+      reread = false;
+    }
     if (reread && !asked && building && !building.reread) {
       // A rebuild after a snapshot is running; it reads the newest page
       // anyway, and must not be replaced by a re-read that may wait.
@@ -862,6 +874,7 @@ export function threadView(ctx, threadId) {
       }),
     );
     next.reread = reread;
+    next.generation = ctx.store.snapshotMark();
     building = next;
     // A re-read shows no status line: it sits above the list, and adding or
     // removing it would move what is on screen.
