@@ -675,6 +675,15 @@ impl AgentRuntime {
         match execute {
             Ok(notifications) => {
                 if let Err(error) = claim.ack(&store.handle, host.now_ns()) {
+                    // A management commit may release the whole batch after input
+                    // acceptance. The receipt/prefix remain durable; retry uses that
+                    // same receipt. This is a superseded claim, not storage failure.
+                    if matches!(
+                        &error,
+                        storage::StorageError::LaneDeliveryConflict("stale_claim")
+                    ) {
+                        return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost));
+                    }
                     if let Err(nack) = claim.nack(
                         &store.handle,
                         LaneDeliveryNack::StorageFailed,
@@ -722,6 +731,7 @@ impl AgentRuntime {
                     self.fail_lane_nudges(&target, lane, host.now_ns());
                 }
                 if reason == LaneDeliveryNack::RestoreFailed
+                    && !failing_nudge
                     && claim.lane().is_some()
                     && let Err(error) = self.record_lane_harness_failure(
                         target.root_run_id,
@@ -1176,7 +1186,9 @@ impl AgentRuntime {
         let Some(lane) = store.handle.lane_by_thread(&thread)? else {
             return Ok(());
         };
-        if lane.root_run_id.as_deref() != Some(&run.to_string()) {
+        if lane.root_run_id.as_deref() != Some(&run.to_string())
+            || lane.policy == event_bus::LanePolicy::Detached
+        {
             return Ok(());
         }
         let appended = store.handle.append_lane_report_with_delivery(
