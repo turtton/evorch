@@ -262,7 +262,7 @@ fn attention_note(own: Attention, hidden: Attention) -> Option<&'static str> {
 
 /// What a thread row shows besides its title: its own states, what its
 /// collapsed descendants hide, and the title color its state calls for.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 struct RowMarks {
     attention: Attention,
     hidden: Hidden,
@@ -270,7 +270,6 @@ struct RowMarks {
     pull_request: Option<crate::model::pull_requests::PullRequestBadge>,
     /// Offer "Link PR…" in the title's menu.
     link_pr: bool,
-    drag_intent: Option<workspace_ui::lane_management::LaneDragIntent>,
 }
 
 /// What a collapsed row hides, so collapsing a family never hides work that
@@ -431,10 +430,7 @@ fn render_tree(
                         display_root,
                         hidden.count,
                         retention,
-                        thread
-                            .lane
-                            .as_ref()
-                            .and_then(|_| sidebar.lane_drag_intent(&thread.id)),
+                        sidebar,
                         action,
                     );
                 } else {
@@ -458,12 +454,9 @@ fn render_tree(
                                 .and_then(|badges| badges.get(&thread.id))
                                 .copied(),
                             link_pr: indicators.pull_requests.enabled,
-                            drag_intent: thread
-                                .lane
-                                .as_ref()
-                                .and_then(|_| sidebar.lane_drag_intent(&thread.id)),
                         },
                         family_running,
+                        sidebar,
                         action,
                     );
                 }
@@ -681,6 +674,7 @@ fn active_row(
     state: ThreadState,
     marks: RowMarks,
     family_running: bool,
+    sidebar: &SidebarState,
     action: &mut Option<SidebarAction>,
 ) {
     let RowMarks {
@@ -689,7 +683,6 @@ fn active_row(
         title_color,
         pull_request,
         link_pr,
-        drag_intent,
     } = marks;
     let note = attention_note(attention, hidden.attention);
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -778,7 +771,7 @@ fn active_row(
             thread,
             !display_root,
             (note, title_color, link_pr),
-            drag_intent,
+            sidebar,
             action,
         );
     });
@@ -790,7 +783,7 @@ fn archived_row(
     display_root: bool,
     hidden_count: usize,
     retention: Option<&RetentionStatus>,
-    drag_intent: Option<workspace_ui::lane_management::LaneDragIntent>,
+    sidebar: &SidebarState,
     action: &mut Option<SidebarAction>,
 ) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -805,7 +798,7 @@ fn archived_row(
             thread,
             !display_root,
             (note.as_deref(), None, false),
-            drag_intent,
+            sidebar,
             action,
         );
     });
@@ -930,7 +923,7 @@ fn thread_title(
     thread: &ThreadRecord,
     child: bool,
     (note, color, link_pr): (Option<&str>, Option<egui::Color32>, bool),
-    drag_intent: Option<workspace_ui::lane_management::LaneDragIntent>,
+    sidebar: &SidebarState,
     action: &mut Option<SidebarAction>,
 ) {
     // Indentation and the caret already show nesting; "↳" stays in the
@@ -941,9 +934,14 @@ fn thread_title(
     };
     // Use the title's existing widget ID so selection and right-click menus
     // keep their pointer ownership. A separate full-row drag overlay steals it.
-    let title = if let Some(intent) = drag_intent {
+    let title = if thread.lane.is_some() {
         let title = title.interact(Sense::click_and_drag());
-        title.dnd_set_drag_payload(intent);
+        // Resolve a family once per gesture, not once per lane per frame.
+        if title.drag_started()
+            && let Some(intent) = sidebar.lane_drag_intent(&thread.id)
+        {
+            title.dnd_set_drag_payload(intent);
+        }
         title
     } else {
         title
@@ -1442,6 +1440,7 @@ mod tests {
                                 ThreadState::Running,
                                 RowMarks::default(),
                                 true,
+                                &workspace_ui::SidebarState::default(),
                                 action,
                             );
                         });

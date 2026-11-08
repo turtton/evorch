@@ -23,7 +23,8 @@ pub struct SidebarProjectionSnapshot {
 }
 
 impl crate::StorageHandle {
-    /// Snapshot read under the host's shared-sidebar lock. No state is ACKed here.
+    /// Capture authoritative membership. File repair calls this under the shared
+    /// sidebar lock; a later mirror rechecks it with a CAS. No state is ACKed here.
     pub fn sidebar_projection_snapshot(
         &self,
         thread_ids: Vec<String>,
