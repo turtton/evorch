@@ -25,6 +25,11 @@ import { composerRoleFor } from "./store.js";
 import { command, describeError, formatBytes, pageRequest, randomUuid } from "./wire.js";
 
 const LIST_PAGE_SIZE = 50;
+/** Events without a place within this time cause one re-read of the history. */
+const REREAD_DEBOUNCE_MS = 300;
+/** Automatic re-reads allowed within REREAD_WINDOW_MS before they stop. */
+const MAX_REREADS = 6;
+const REREAD_WINDOW_MS = 60_000;
 
 function badges(attention) {
   const out = [];
@@ -459,6 +464,11 @@ export function threadView(ctx, threadId) {
   /** The history window on screen, and the one being built to replace it. */
   let history = null;
   let building = null;
+  /** A pending debounced re-read of the newest page (see requestReread). */
+  let rereadTimer = null;
+  /** When recent automatic re-reads started, to stop a runaway loop. */
+  let rereads = [];
+  let rereadPaused = false;
   let runsSignature = null;
   /** Reading this thread's runs: "loading", "complete" or a failure. */
   let runsLoad = { state: "loading" };
@@ -703,11 +713,15 @@ export function threadView(ctx, threadId) {
     older.hidden = !history.hasOlder;
   }
 
-  // Rebuild the history from scratch (first open, or after a snapshot: the
-  // stream had a gap, so the messages on screen may be incomplete). Events
-  // that arrive while the walk runs are kept by the new window itself and
-  // applied after the walk; the old window's live messages are dropped.
-  async function rebuildHistory({ resyncs = 0 } = {}) {
+  // Rebuild the history from scratch (first open, after a snapshot: the
+  // stream had a gap, so the messages on screen may be incomplete; or a
+  // re-read because an event had no known place). Events that arrive while
+  // the walk runs are kept by the new window itself and applied after the
+  // walk; the old window's live messages are dropped. A re-read keeps as
+  // many pages as were loaded and the scroll position unless at the bottom.
+  async function rebuildHistory({ reread = false } = {}) {
+    const keepPages = reread && history ? history.pages.length : 1;
+    const follow = !reread || nearBottom();
     const next = new HistoryWindow((cursor) =>
       ctx.api.query("read_committed_history", {
         direction: "backward",
@@ -716,9 +730,13 @@ export function threadView(ctx, threadId) {
       }),
     );
     building = next;
-    historyStatus.textContent = "履歴を読み込み中…";
+    historyStatus.textContent = reread ? "履歴を更新中…" : "履歴を読み込み中…";
     reload.hidden = true;
-    const result = await next.open();
+    let result = await next.open();
+    if (result.resync) next.unplaced = true;
+    while (result.ok && next.pages.length < keepPages && next.hasOlder && building === next && !destroyed) {
+      result = await next.loadOlder();
+    }
     if (destroyed || building !== next) return;
     building = null;
     if (!result.ok) {
@@ -726,25 +744,45 @@ export function threadView(ctx, threadId) {
       reload.hidden = false;
       return;
     }
-    if (result.resync) {
-      // An event arrived during the read that cannot be placed; read again,
-      // a few times at most.
-      if (resyncs < 3) {
-        rebuildHistory({ resyncs: resyncs + 1 });
-        return;
-      }
-      historyStatus.textContent = "新しいメッセージの位置を判定できませんでした。履歴を読み込み直してください。";
-      reload.hidden = false;
-      return;
-    }
     historyStatus.textContent = "";
+    const s = document.scrollingElement;
+    const top = s.scrollTop;
     history = next;
     list.replaceChildren();
     renderMessages();
-    scrollToBottom();
+    if (follow) scrollToBottom();
+    else s.scrollTop = top;
+    // The page is right for its cut; an event held during the read that had
+    // no place only means another read is due.
+    if (next.unplaced) requestReread();
   }
 
-  reload.addEventListener("click", () => rebuildHistory());
+  // An event had no known place on screen: read the newest page again,
+  // once for a burst of such events. A run of re-reads that does not settle
+  // stops and leaves it to the person.
+  function requestReread() {
+    if (rereadPaused || rereadTimer !== null || destroyed) return;
+    rereadTimer = setTimeout(() => {
+      rereadTimer = null;
+      if (destroyed) return;
+      const now = Date.now();
+      rereads = rereads.filter((at) => now - at < REREAD_WINDOW_MS);
+      if (rereads.length >= MAX_REREADS) {
+        rereadPaused = true;
+        historyStatus.textContent = "履歴の更新が続いているため、自動の読み直しを止めました。読み込み直すと最新の状態になります。";
+        reload.hidden = false;
+        return;
+      }
+      rereads.push(now);
+      rebuildHistory({ reread: true });
+    }, REREAD_DEBOUNCE_MS);
+  }
+
+  reload.addEventListener("click", () => {
+    rereadPaused = false;
+    rereads = [];
+    rebuildHistory();
+  });
 
   older.addEventListener("click", async () => {
     if (!history) return;
@@ -947,8 +985,9 @@ export function threadView(ctx, threadId) {
   function onMessage(message) {
     if (message.thread !== threadId) return;
     if (building) {
-      // The window being built holds it until its walk ends.
-      building.append(message);
+      // The window being built holds it until its walk ends; one without a
+      // place there asks for another read once the walk is adopted.
+      if (building.append(message) === "resync") building.unplaced = true;
       return;
     }
     if (!history) return;
@@ -958,7 +997,7 @@ export function threadView(ctx, threadId) {
       renderMessages();
       if (follow) scrollToBottom();
     } else if (placed === "resync") {
-      rebuildHistory();
+      requestReread();
     }
   }
 
@@ -1030,6 +1069,7 @@ export function threadView(ctx, threadId) {
     },
     destroy() {
       destroyed = true;
+      clearTimeout(rereadTimer);
       observer?.disconnect();
     },
   };

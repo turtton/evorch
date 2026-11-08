@@ -363,8 +363,9 @@ test("history appends live messages once", async () => {
   window.append(message("r1", 4));
   await window.open();
   eq(window.append(message("r1", 4)), "ignored", "a duplicate event is dropped");
-  eq(window.append(message("r2", 0)), "added", "the first message of a new run");
-  eq(window.messages().map(messageKey), ["r1#0", "r1#1", "r1#2", "r1#3", "r1#4", "r2#0"]);
+  eq(window.append(message("r1", 5)), "added");
+  eq(window.append(message("r2", 0)), "resync", "a run the page does not show, even at its start");
+  eq(window.messages().map(messageKey), ["r1#0", "r1#1", "r1#2", "r1#3", "r1#4", "r1#5"]);
 });
 
 test("replayed messages older than the page never land after it", async () => {
@@ -390,10 +391,25 @@ test("each run has its own boundary, and an unplaceable message asks for a re-re
   eq(window.append(message("c", 0)), "resync", "an unknown run may be older than the page, even at #0");
   eq(window.append(message("b", 2)), "added", "newer for b even though a is further along");
   eq(window.append(message("a", 3)), "added");
-  // b#2 was committed after the cut, so every later event is too.
-  eq(window.append(message("c", 0)), "added", "a run started after the cut");
-  eq(window.append(message("d", 7)), "added", "after the cut, even when its start is older");
-  eq(window.messages().map(messageKey), ["a#0", "b#0", "a#1", "b#1", "a#2", "b#2", "a#3", "c#0", "d#7"]);
+  // Messages above a boundary prove nothing about runs the page lacks.
+  eq(window.append(message("c", 0)), "resync", "still no place for a run the page does not show");
+  eq(window.append(message("d", 7)), "resync");
+  eq(window.messages().map(messageKey), ["a#0", "b#0", "a#1", "b#1", "a#2", "b#2", "a#3"]);
+});
+
+test("a late user input of another run is never put after the newest messages", async () => {
+  // The page has a#0..a#1 then b#0..b#2. Run a's input was accepted before
+  // b#1 but delivered late: the core places it at its acceptance time, so
+  // its place on screen is not the end even though a#2 is above a's boundary.
+  const items = [message("a", 0), message("a", 1), message("b", 0), message("b", 1), message("b", 2)];
+  const window = new HistoryWindow(async () => ({ ok: true, value: { items, snapshot_revision: "1" } }));
+  await window.open();
+  const late = { ...message("a", 2), role: "user" };
+  eq(window.append(late), "resync", "a user input above the boundary has no known place");
+  eq(window.append({ ...message("b", 3), role: "user" }), "resync", "nor in the run that is newest");
+  eq(window.append(message("b", 3)), "added", "a reply above its run's boundary is new");
+  eq(window.append({ ...message("a", 1), role: "user" }), "ignored", "at or below the boundary it is on screen");
+  eq(window.messages().map(messageKey), ["a#0", "a#1", "b#0", "b#1", "b#2", "b#3"]);
 });
 
 test("a whole older run replayed from #0 is not put after the newest page", async () => {
@@ -414,11 +430,10 @@ test("a whole older run replayed from #0 is not put after the newest page", asyn
   eq(window.messages().map(messageKey).slice(0, 3), ["a#0", "a#1", "b#0"], "the older page puts run a first");
 });
 
-test("an empty history takes every message as new", async () => {
+test("in an empty history every message needs a read", async () => {
   const window = new HistoryWindow(async () => ({ ok: true, value: { items: [], snapshot_revision: "1" } }));
   await window.open();
-  eq(window.append(message("x", 0)), "added");
-  eq(window.append(message("x", 1)), "added");
+  eq(window.append(message("x", 0)), "resync");
 });
 
 test("an unplaceable message during the first read makes the read report it", async () => {

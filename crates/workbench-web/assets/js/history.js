@@ -11,16 +11,16 @@
 // a reconnect) are placed by their position, not by arrival: `index` counts
 // the messages of one run. The newest page holds every run's latest messages
 // at the cut it was read at, so an event at or below its run's highest index
-// is already on screen or older than the page and is dropped; only a higher
-// index is new and goes after the page.
+// is already on screen or older than the page and is dropped.
 //
-// A run the page does not show may be older than the page (all its messages
-// precede the newest page) or newer (started after the cut); its index says
-// nothing about which, even 0. Events arrive in cursor order, so once one of
-// them is provably after the cut (a message above its run's boundary), every
-// later event is too: from then on, a message of a run the page does not
-// show is new. Until then such a message cannot be placed and the caller
-// re-reads the history. An empty history has no cut to be behind.
+// Only one kind of event is appended after the page: a message of a run the
+// page shows, above that run's boundary, that is not a user input. Anything
+// else has no known place and the caller re-reads the newest page:
+// - a run the page does not show may have ended before the page or started
+//   after it, and its index (even 0) does not say which;
+// - a user input is placed at the time it was accepted, which can be before
+//   messages of other runs that are already on screen when its delivery was
+//   late; the index only orders it within its own run.
 
 import { compareDecimal } from "./wire.js";
 
@@ -46,8 +46,8 @@ export class HistoryWindow {
     this.opened = false;
     /** Highest index on screen per run: the boundary new messages must pass. */
     this.latest = new Map();
-    /** An event already proved the stream to be past the newest page's cut. */
-    this.pastCut = false;
+    /** An event without a place arrived while this window was being built. */
+    this.unplaced = false;
   }
 
   note(message) {
@@ -64,14 +64,16 @@ export class HistoryWindow {
     this.pages = [result.value.items];
     this.olderCursor = result.value.next_cursor ?? null;
     for (const message of result.value.items) this.note(message);
-    this.pastCut = result.value.items.length === 0 && this.olderCursor === null;
     this.opened = true;
     const buffered = this.pending;
     this.pending = [];
+    let resync = false;
     for (const message of buffered) {
-      if (this.append(message) === "resync") return { ok: true, resync: true };
+      if (this.append(message) === "resync") resync = true;
     }
-    return { ok: true };
+    // The page itself is right for its cut; a held event without a place
+    // only means another read is due.
+    return resync ? { ok: true, resync: true } : { ok: true };
   }
 
   get hasOlder() {
@@ -100,13 +102,9 @@ export class HistoryWindow {
       return "held";
     }
     const held = this.latest.get(message.run);
-    if (held === undefined) {
-      if (!this.pastCut) return "resync";
-    } else if (compareDecimal(message.index, held) <= 0) {
-      return "ignored";
-    } else {
-      this.pastCut = true;
-    }
+    if (held === undefined) return "resync";
+    if (compareDecimal(message.index, held) <= 0) return "ignored";
+    if (message.role === "user") return "resync";
     this.live.push(message);
     this.note(message);
     return "added";

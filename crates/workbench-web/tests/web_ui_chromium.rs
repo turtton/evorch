@@ -59,6 +59,8 @@ const SENT_TEXT: &str = "修正案 A で進めてください。テストも追�
 const UNKNOWN_TEXT: &str = "結果が分からない送信";
 const DROPPED_TEXT: &str = "読まれずに終わった送信";
 const RESUMED_TEXT: &str = "再接続のあとに届いた新しいメッセージ";
+const LATE_INPUT_TEXT: &str = "遅れて届いた古い run への入力";
+const FRESH_REPLY_TEXT: &str = "ページのあとに届いた返信";
 
 fn body_text() -> String {
     format!(
@@ -367,6 +369,25 @@ impl UiBackend {
     fn count(&self, kind: &str) -> usize {
         let world = self.world.lock().unwrap();
         world.commands.iter().filter(|c| c["type"] == kind).count()
+    }
+
+    /// Run-root commits one more reply, after everything on screen.
+    fn commit_reply(&self, text: &str) {
+        let mut world = self.world.lock().unwrap();
+        let message = json!({"thread": "thr-1", "run": "run-root", "index": world.history.len().to_string(), "role": "assistant", "content": {"type": "inline", "payload": {"text": text}}});
+        world.history.push(message.clone());
+        world.publish(json!({"type": "message_committed", "payload": {"message": message}}));
+    }
+
+    /// A user input of the old run, accepted before the last `before`
+    /// messages but delivered only now: the core puts it at its acceptance
+    /// time, not after the newest message.
+    fn deliver_late(&self, before: usize) {
+        let mut world = self.world.lock().unwrap();
+        let message = json!({"thread": "thr-1", "run": "run-old", "index": OLD_RUN_LEN.to_string(), "role": "user", "content": {"type": "inline", "payload": {"text": LATE_INPUT_TEXT}}});
+        let at = world.history.len() - before;
+        world.history.insert(at, message.clone());
+        world.publish(json!({"type": "message_committed", "payload": {"message": message}}));
     }
 
     /// Drop every event stream without a terminal event, as a lost
@@ -1146,8 +1167,12 @@ async fn web_workbench_main_flows_in_chromium() {
     let reads_before = backend.world.lock().unwrap().history_reads;
     backend.world.lock().unwrap().replay_on_resume = true;
     backend.drop_streams();
+    // The re-read replaces the window in which the replay was handled; wait
+    // for its page (181..230) rather than the first sign of the new message.
     ui.wait(&format!(
-        r##"() => document.querySelector(".messages .msg:last-child")?.textContent.includes({RESUMED_TEXT:?})"##
+        r##"() => {{ const bodies = [...document.querySelectorAll(".messages .msg .msg-body")];
+            return bodies.length === 50 && bodies[0].textContent === "メッセージ 181"
+                && document.querySelector(".messages .msg:last-child").textContent.includes({RESUMED_TEXT:?}); }}"##
     ))
     .await;
     let after_replay = ui
@@ -1167,7 +1192,39 @@ async fn web_workbench_main_flows_in_chromium() {
         backend.world.lock().unwrap().history_reads > reads_before,
         "the unplaceable replay made the view read the history again"
     );
-    for expected in [100, 150, 200, 231] {
+
+    eprintln!("step: a late user input of another run");
+    // A reply of run-root arrives first and is appended: the stream is now
+    // past the page. Then run-old's input is delivered late and belongs
+    // before the last three messages: it must show there, not after the
+    // newest, although every event now comes after the page's cut.
+    backend.commit_reply(FRESH_REPLY_TEXT);
+    ui.wait(&format!(
+        r##"() => document.querySelector(".messages .msg:last-child")?.textContent.includes({FRESH_REPLY_TEXT:?})"##
+    ))
+    .await;
+    let reads_before = backend.world.lock().unwrap().history_reads;
+    backend.deliver_late(3);
+    let late = ui
+        .wait(&format!(
+            r##"() => {{ const bodies = [...document.querySelectorAll(".messages .msg .msg-body")].map((b) => b.textContent);
+                const at = bodies.indexOf({LATE_INPUT_TEXT:?});
+                return at >= 0 && {{ fromEnd: bodies.length - at, count: bodies.length,
+                    last: bodies.at(-1).includes({FRESH_REPLY_TEXT:?}),
+                    status: document.querySelector(".history-status").textContent }}; }}"##
+        ))
+        .await;
+    assert_eq!(
+        late,
+        json!({"fromEnd": 4, "count": 50, "last": true, "status": ""}),
+        "the late input sits at its place, before the last three messages"
+    );
+    assert!(
+        backend.world.lock().unwrap().history_reads > reads_before,
+        "the late input made the view read the newest page again"
+    );
+
+    for expected in [100, 150, 200, 233] {
         ui.click("button.older").await;
         ui.wait(&format!(
             r##"() => document.querySelectorAll(".messages .msg").length === {expected}"##
