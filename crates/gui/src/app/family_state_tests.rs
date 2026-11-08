@@ -135,7 +135,7 @@ fn a_locked_sidebar_leaves_a_version_switch_and_a_rewind_undone() {
 }
 
 #[test]
-fn an_escalated_thread_only_joins_the_family_and_reads_its_newest_state() {
+fn a_handoff_thread_keeps_its_own_unarchived_unpinned_family() {
     // Given: window B's parent is stale; A archived it.
     let directory = tempfile::tempdir().unwrap();
     let (mut a, mut b, path) = two_windows(directory.path());
@@ -147,13 +147,36 @@ fn an_escalated_thread_only_joins_the_family_and_reads_its_newest_state() {
     b.save_sidebar();
     b.import_shared_sidebar();
 
-    // Then: the child is a member that reads the family's state; no state of its own
-    // was made, and the family still has the one series A numbered.
+    // Then: handoff provenance never joins the source's archived family.
     let on_disk = workspace_ui::load_sidebar(&path).unwrap();
-    assert_eq!(resolved(&on_disk, "escalation-run-2"), parent);
-    assert_eq!(series(&b, "escalation-run-2"), parent);
-    assert_eq!(on_disk.families.len(), 1);
-    assert_eq!(on_disk.families[0].archive_revision, 1);
+    assert_eq!(resolved(&on_disk, "thread"), parent);
+    assert_eq!(resolved(&on_disk, "escalation-run-2"), (false, None, 0));
+    assert_eq!(series(&b, "escalation-run-2"), (false, None, 0));
+    assert_eq!(pin_series(&on_disk, "escalation-run-2"), (false, 0));
+    let target = on_disk
+        .threads
+        .iter()
+        .find(|t| t.id == ThreadId::new("escalation-run-2"))
+        .unwrap();
+    assert!(target.parent_thread_id.is_none());
+    assert_eq!(target.escalation_source_run_id.as_deref(), Some("run-1"));
+    let declaration = directory.path().join("target-only");
+    b.sidebar
+        .threads
+        .iter_mut()
+        .find(|t| t.id == ThreadId::new("escalation-run-2"))
+        .unwrap()
+        .extra_read_dirs = vec![declaration.clone()];
+    b.apply_events([escalation("run-1", "run-2")]);
+    assert_eq!(
+        b.sidebar
+            .threads
+            .iter()
+            .find(|t| t.id == ThreadId::new("escalation-run-2"))
+            .unwrap()
+            .extra_read_dirs,
+        vec![declaration]
+    );
 }
 
 /// A mirroring window on the shared file, with the database it mirrors into.
@@ -229,18 +252,18 @@ fn a_family_edit_reaches_every_member_of_the_database_and_a_new_member_gets_the_
     barrier(&storage);
 
     // Then: every member's row carries the family's two series.
-    for id in [
-        "thread",
-        &fork.to_string(),
-        &version.to_string(),
-        "escalation-run-2",
-    ] {
+    for id in ["thread", &fork.to_string(), &version.to_string()] {
         assert_eq!(
             projected(&config, id),
             Some((true, Some(1), true, Some(1))),
             "{id}"
         );
     }
+
+    assert_eq!(
+        projected(&config, "escalation-run-2"),
+        Some((false, Some(0), false, Some(0)))
+    );
 
     // When: a member joins afterwards.
     let late = b.branch_thread(&fork, None, LineageKind::Fork).unwrap();
@@ -266,10 +289,11 @@ fn pinning_acts_on_the_whole_family_and_leaves_the_archive_series_alone() {
     a.toggle_pin(root.clone()).unwrap();
 
     let on_disk = workspace_ui::load_sidebar(&path).unwrap();
-    for id in ["thread", &fork.to_string(), "escalation-run-2"] {
+    for id in ["thread", &fork.to_string()] {
         assert_eq!(pin_series(&on_disk, id), (true, 1), "{id}");
         assert_eq!(resolved(&on_disk, id), (false, None, 0), "{id}");
     }
+    assert_eq!(pin_series(&on_disk, "escalation-run-2"), (false, 0));
     // A pinned family is not archived by an archive click on it.
     a.toggle_archive(root.clone()).unwrap();
     assert!(!series(&a, "thread").0);
@@ -314,8 +338,8 @@ fn a_stale_window_replaying_a_known_member_never_rewinds_the_database() {
     let mut b = window_on(&path);
     a.apply_events([escalation("run-1", "run-2")]);
     a.save_sidebar();
-    a.toggle_archive(ThreadId::new("thread")).unwrap();
-    a.toggle_archive(ThreadId::new("thread")).unwrap();
+    a.toggle_archive(ThreadId::new("escalation-run-2")).unwrap();
+    a.toggle_archive(ThreadId::new("escalation-run-2")).unwrap();
     a.force_thread_mirror();
     barrier(&storage);
     let after_restore = projected(&config, "escalation-run-2").unwrap();
@@ -326,21 +350,18 @@ fn a_stale_window_replaying_a_known_member_never_rewinds_the_database() {
     b.apply_events([escalation("run-1", "run-2")]);
     b.save_sidebar();
     a.import_shared_sidebar();
-    a.toggle_archive(ThreadId::new("thread")).unwrap();
+    a.toggle_archive(ThreadId::new("escalation-run-2")).unwrap();
     a.force_thread_mirror();
     barrier(&storage);
 
     // Then: the series only moved forward, in the file and in the database.
     let on_disk = workspace_ui::load_sidebar(&path).unwrap();
     assert_eq!(resolved(&on_disk, "escalation-run-2").2, 3);
-    assert_eq!(on_disk.families.len(), 1);
-    for id in ["thread", "escalation-run-2"] {
-        assert_eq!(
-            projected(&config, id).map(|row| (row.0, row.1)),
-            Some((true, Some(3))),
-            "{id}"
-        );
-    }
+    assert_eq!(resolved(&on_disk, "thread"), (false, None, 0));
+    assert_eq!(
+        projected(&config, "escalation-run-2").map(|row| (row.0, row.1)),
+        Some((true, Some(3))),
+    );
 }
 
 /// Whether the database lists the thread among those search may return.
@@ -394,16 +415,18 @@ fn a_child_added_while_the_sidebar_is_locked_is_told_only_with_the_state_the_fil
     b.force_thread_mirror();
     barrier(&storage);
 
-    // Then: the child reaches the database with the family state the file holds, so it
-    // is out of search from its first row on; the family's rows agree.
-    for id in ["thread", "escalation-run-2"] {
-        assert_eq!(
-            projected(&config, id).map(|row| (row.0, row.1)),
-            Some((true, Some(1))),
-            "{id}"
-        );
-        assert!(!searchable(&config, id), "{id}");
-    }
+    // The saved handoff target reaches the database with its independent state,
+    // while importing the newer archive series only affects the source family.
+    assert_eq!(
+        projected(&config, "thread").map(|r| (r.0, r.1)),
+        Some((true, Some(1)))
+    );
+    assert!(!searchable(&config, "thread"));
+    assert_eq!(
+        projected(&config, "escalation-run-2").map(|r| (r.0, r.1)),
+        Some((false, Some(0)))
+    );
+    assert!(searchable(&config, "escalation-run-2"));
 
     // When: B takes the file in.
     b.import_shared_sidebar();
@@ -411,10 +434,11 @@ fn a_child_added_while_the_sidebar_is_locked_is_told_only_with_the_state_the_fil
     barrier(&storage);
 
     // Then: B agrees, and the database did not change.
-    assert_eq!(series(&b, "escalation-run-2"), series(&a, "thread"));
+    assert_eq!(series(&b, "thread"), series(&a, "thread"));
+    assert_eq!(series(&b, "escalation-run-2"), (false, None, 0));
     assert_eq!(
         projected(&config, "escalation-run-2").map(|row| (row.0, row.1)),
-        Some((true, Some(1)))
+        Some((false, Some(0)))
     );
 }
 

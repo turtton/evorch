@@ -12,6 +12,7 @@ pub(crate) struct PublicationToken(Arc<PublicationFence>);
 
 struct PublicationFence {
     gate: Mutex<()>,
+    incarnation: RunId,
     cancelled: AtomicBool,
 }
 
@@ -25,6 +26,7 @@ impl ExecutionControl {
             approvals,
             publication: PublicationToken(Arc::new(PublicationFence {
                 gate: Mutex::new(()),
+                incarnation: crate::run_ids::RunIds::default().next(),
                 cancelled: AtomicBool::new(cancelled),
             })),
             cancel_tx: watch::channel(if cancelled {
@@ -51,6 +53,9 @@ impl ExecutionControl {
 }
 
 impl PublicationToken {
+    pub(crate) fn incarnation(&self) -> String {
+        self.0.incarnation.to_string()
+    }
     pub(crate) fn commit<T>(
         &self,
         publish: impl FnOnce() -> Result<T, String>,

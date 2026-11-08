@@ -228,7 +228,7 @@ fn require(conn: &Connection, lane_id: &str) -> Result<LaneRecord, StorageError>
 pub(crate) fn unstarted(conn: &Connection, limit: usize) -> Result<Vec<LaneRecord>, StorageError> {
     let limit = i64::try_from(limit.clamp(1, 200)).unwrap_or(200);
     let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM lanes WHERE generation = 0 AND start_blocked_reason IS NULL AND {LIVE} ORDER BY lane_id LIMIT ?1"
+        "SELECT {COLUMNS} FROM lanes WHERE generation = 0 AND start_blocked_reason IS NULL AND NOT EXISTS (SELECT 1 FROM lane_handoffs h WHERE h.lane_id=lanes.lane_id AND h.state IN ('preparing','prepared')) AND {LIVE} ORDER BY lane_id LIMIT ?1"
     ))?;
     Ok(statement
         .query_map([limit], from_row)?
@@ -455,6 +455,7 @@ pub(crate) fn start_run(
             last_activity_at_ns = max(last_activity_at_ns, ?3) WHERE lane_id = ?1",
         params![lane_id, root_run_id, at_ns],
     )?;
+    tx.execute("UPDATE lane_handoffs SET state='started',failure=NULL WHERE lane_id=?1 AND state IN ('committed','recoverable_start_failure')",[lane_id])?;
     bump_revision(&tx)?;
     let lane = require(&tx, lane_id)?;
     tx.commit()?;

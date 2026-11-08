@@ -632,6 +632,14 @@ async fn an_escalation_carries_the_directories_to_its_child_thread() {
     ]));
     let (factory, mounts) = recording_factory();
     let (runtime, bus) = dirs.runtime(model.clone(), Some(factory));
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("handoff.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let runtime =
+        runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
     runtime.set_thread_read_only_directories("thread-a", vec![dirs.drafts.clone()]);
     let mut events = bus.subscribe();
 
@@ -648,6 +656,14 @@ async fn an_escalation_carries_the_directories_to_its_child_thread() {
             break new_run_id.parse::<RunId>().unwrap();
         }
     };
+    loop {
+        let event = events.recv().await.unwrap();
+        let started = matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) if run_id == &target.to_string());
+
+        if started {
+            break;
+        }
+    }
     assert_eq!(runtime.wait(target).await.unwrap(), AgentRunPhase::Done);
     let again = start_in(&runtime, "thread-a", Role::Worker, "AGAIN");
     assert_eq!(runtime.wait(again).await.unwrap(), AgentRunPhase::Done);

@@ -109,13 +109,17 @@ fn table() -> BTreeMap<&'static str, Guard> {
         (
             "runtime/questions.rs::answer_user_question",
             Guarded {
-                via: &["answer_question", "answer_question_with_mode"],
+                via: &[
+                    "answer_question",
+                    "answer_question_with_mode",
+                    "handoff_answer_recipients",
+                ],
             },
         ),
         (
             "runtime/questions.rs::answer_user_question_if_pending",
             Guarded {
-                via: &["answer_question_with_mode"],
+                via: &["answer_question_with_mode", "handoff_answer_recipients"],
             },
         ),
         ("runtime.rs::send_agent_message", Exempt(RESTORE_PATH)),
@@ -200,8 +204,8 @@ fn mentions_guard(text: &str) -> bool {
     text.contains("deny_deleted") || text.contains("check_thread") || text.contains("check_run")
 }
 
-/// The function `name` defined in `file`: a chain stays inside the entry's own file, where
-/// names like `resume` are not ambiguous.
+/// Resolve same-file calls, except the uniquely named handoff authority helper.
+/// Generic names like `resume` must never match another module accidentally.
 fn definition<'a>(sources: &'a [(String, String)], file: &str, name: &str) -> Option<&'a str> {
     let pattern = Regex::new(&format!(
         r"\n[ \t]*(?:pub(?:\([a-z:]+\))?\s+)?(?:async\s+)?fn\s+{name}\s*[<(]"
@@ -209,7 +213,13 @@ fn definition<'a>(sources: &'a [(String, String)], file: &str, name: &str) -> Op
     .unwrap();
     sources
         .iter()
-        .filter(|(path, _)| path == file)
+        .filter(|(path, _)| {
+            path == if name == "handoff_answer_recipients" {
+                "escalation/questions.rs"
+            } else {
+                file
+            }
+        })
         .find_map(|(_, text)| {
             pattern
                 .find(text)

@@ -11,6 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct PendingEscalation {
     pub source_run_id: RunId,
     pub requires_ownership: bool,
+    /// Preserve source resource caps through committed admission recovery.
+    #[serde(default)]
+    pub budget: crate::budget_tracker::BudgetSettings,
     /// Host-authored text, kept separate from the worker's escalation memo.
     pub trusted_request: Option<String>,
     /// Only writers retaining complete human input set this. Legacy snapshots
@@ -69,6 +72,7 @@ pub(crate) fn persist_escalation_seed(
         pending_escalation: Some(PendingEscalation {
             source_run_id,
             requires_ownership,
+            budget: config.budget.clone(),
             trusted_request: runtime.trusted_thread_request(source_run_id),
             trusted_request_complete: true,
         }),
@@ -108,12 +112,35 @@ pub(crate) fn persist_escalation_seed(
         updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
         host_inputs_json: "[]".into(),
     };
-    // The run ID is new: the seed is its first snapshot. The caller hands the
-    // committed revision to the run it starts, which continues from the seed.
-    let write = provenance.write(record, 0)?;
+    // An uncommitted preparation retry refreshes this seed under its current
+    // snapshot CAS. Once responsibility commits the coordinator never rewrites it.
+    let expected = store
+        .restore_bundle(run_id)?
+        .map_or(0, |bundle| bundle.snapshot_revision);
+    if expected != 0
+        && !store
+            .handle
+            .handoff_for_target(run_id.to_string())?
+            .is_some_and(|receipt| !receipt.state.is_committed())
+    {
+        return Err(SnapshotError::Storage(storage::StorageError::StaleMutation));
+    }
+    let write = provenance.write(record, expected)?;
     let saved = store
         .handle
         .save_snapshot_bundle(&write)
         .map_err(super::provenance::storage_error)?;
+    // Copy trusted host input as evidence owned by the new root. In particular,
+    // legacy pending seeds must remain resumable without a live source review edge.
+    if let Some(request) = runtime.trusted_thread_request(source_run_id) {
+        store
+            .handle
+            .record_review_evidence(&[crate::run_store::evidence_row(
+                &run_id.to_string(),
+                &run_id.to_string(),
+                "host_chat",
+                &request,
+            )])?;
+    }
     Ok(saved.snapshot_revision)
 }

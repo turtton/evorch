@@ -305,7 +305,7 @@ fn assert_projection(state: &mut WorkbenchState<DemoSource>) {
     assert_eq!(state.sidebar().threads.len(), 3);
     let child = &state.sidebar().threads[2];
     assert_eq!(child.id, ThreadId::new("escalation-run-2"));
-    assert_eq!(child.parent_thread_id, Some(ThreadId::new("parent")));
+    assert_eq!(child.parent_thread_id, None);
     assert_eq!(child.escalation_source_run_id.as_deref(), Some("run-1"));
     assert_eq!(child.run_ids, ["run-2", "run-3"]);
     assert_eq!(state.sidebar().threads[0].run_ids, ["run-1"]);
@@ -334,7 +334,7 @@ fn assert_projection(state: &mut WorkbenchState<DemoSource>) {
 }
 
 #[test]
-fn escalation_owns_a_child_conversation_and_links_both_directions() {
+fn escalation_owns_an_independent_conversation_and_keeps_provenance_links() {
     let dir = tempfile::tempdir().unwrap();
     let bindings = Bindings::default();
     let mut state = state(dir.path(), bindings.clone());
@@ -355,9 +355,11 @@ fn escalation_owns_a_child_conversation_and_links_both_directions() {
             .find_tab(&workspace_ui::PanelId::new("agent-run-2"))
             .is_none()
     );
+    // A detached target is opened as its own thread, not a source child link.
+    state
+        .switch_thread(ThreadId::new("escalation-run-2"))
+        .unwrap();
     let mut gui = HeadlessWorkbench::new(state, [1600.0, 1400.0]);
-    gui.run();
-    gui.click_label("↳ Child thread: Orchestrator · Worker task");
     gui.run();
     assert_eq!(
         gui.state().sidebar().active_thread,
@@ -369,7 +371,10 @@ fn escalation_owns_a_child_conversation_and_links_both_directions() {
         gui.state().composer().role,
         gui::model::composer::ComposerRole::Orchestrator
     );
-    gui.click_label("← Parent thread: Worker task");
+    assert!(!gui.has_label("← Parent thread: Worker task"));
+    gui.state_mut()
+        .switch_thread(ThreadId::new("parent"))
+        .unwrap();
     gui.run();
     assert_eq!(
         gui.state().sidebar().active_thread,
@@ -459,7 +464,7 @@ fn escalation_summary_stays_in_child_and_source_is_unchanged_on_start_done_or_er
         for state in [&mut live, &mut replay] {
             assert_eq!(state.transcript().entries(), source);
             let child = &state.sidebar().threads[2];
-            assert_eq!(child.parent_thread_id, Some(ThreadId::new("parent")));
+            assert_eq!(child.parent_thread_id, None);
             assert_eq!(child.escalation_source_run_id.as_deref(), Some("run-1"));
             assert_eq!(child.run_ids, ["run-2"]);
             state
@@ -568,7 +573,7 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
 }
 
 #[test]
-fn escalation_from_archived_parent_inherits_family_archive_state() {
+fn handoff_from_archived_source_starts_an_independent_visible_thread() {
     let dir = tempfile::tempdir().unwrap();
     let sidebar_path = dir.path().join("sidebar.json");
     let mut state = state(dir.path(), Bindings::default()).with_sidebar_path(sidebar_path.clone());
@@ -580,11 +585,12 @@ fn escalation_from_archived_parent_inherits_family_archive_state() {
         .iter()
         .find(|thread| thread.id == ThreadId::new("escalation-run-2"))
         .unwrap();
-    assert!(child.archived);
-    assert_eq!(child.parent_thread_id, Some(ThreadId::new("parent")));
+    assert!(!child.archived);
+    assert!(!child.pinned);
+    assert_eq!(child.parent_thread_id, None);
     let saved = workspace_ui::load_sidebar(&sidebar_path).unwrap();
     assert!(
-        saved
+        !saved
             .threads
             .iter()
             .find(|thread| thread.id == child.id)

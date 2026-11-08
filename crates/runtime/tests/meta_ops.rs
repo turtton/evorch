@@ -12,7 +12,7 @@ use event_bus::{
     AgentRunPhase, CompactionEvent, CompactionReason, Event, EventBus, EventKind, LifecycleEvent,
 };
 use providers::{ContentBlock, FinishReason, ToolResultContent};
-use runtime::{AgentRuntime, EscalationMemo, RunConfig};
+use runtime::{AgentRuntime, EscalationMemo, RunConfig, RunId};
 use sandbox::DirectSandbox;
 use serde_json::json;
 use tokio::time::{Duration, timeout};
@@ -422,9 +422,17 @@ async fn escalate_records_memo_and_terminates_run_done() {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime =
-        AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_sequential_run_ids();
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("handoff.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone())
+        .with_sequential_run_ids()
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
     let mut receiver = bus.subscribe();
+    let mut all_events = bus.subscribe();
 
     // When: run を実行して終端を待つ
     let run_id =
@@ -446,15 +454,24 @@ async fn escalate_records_memo_and_terminates_run_done() {
             suggested_next: "Orchestrator で担当を分割する".to_string(),
         })
     );
-    timeout(Duration::from_secs(5), async {
-        while model.observed().await.len() < 2 {
-            tokio::task::yield_now().await;
+    let target = loop {
+        if let EventKind::Lifecycle(LifecycleEvent::EscalationRequested { new_run_id, .. }) =
+            receiver.recv().await.unwrap().kind
+        {
+            break new_run_id.parse::<RunId>().unwrap();
         }
-    })
-    .await
-    .expect("escalation handoff model call timeout");
+    };
+    loop {
+        let event = receiver.recv().await.unwrap();
+        let started = matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) if run_id == &target.to_string());
+
+        if started {
+            break;
+        }
+    }
+    runtime.wait(target).await.unwrap();
     assert_eq!(model.observed().await.len(), 2);
-    let events = drain_events(&mut receiver).await;
+    let events = drain_events(&mut all_events).await;
     assert!(
         events.iter().any(|event| matches!(
             &event.kind,
