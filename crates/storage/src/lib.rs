@@ -75,6 +75,7 @@ pub mod maintenance;
 pub mod memory;
 mod migrations;
 mod projection;
+pub mod pull_request_auto_fix;
 pub mod pull_requests;
 mod read;
 mod repo;

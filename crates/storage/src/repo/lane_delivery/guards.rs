@@ -26,7 +26,35 @@ pub(super) fn update_guard_in_transaction(
     expected: u64,
     signal: LaneGuardSignal,
 ) -> Result<LaneWakeGuard, StorageError> {
-    let mut state = guard(conn, lane_id)?;
+    let before = guard(conn, lane_id)?;
+    let state = advance_guard(before.clone(), expected, signal)?;
+    if state != before {
+        conn.execute(
+            "UPDATE lanes SET wake_guard_json=?2 WHERE lane_id=?1",
+            params![lane_id, json(&state)?],
+        )?;
+    }
+    Ok(state)
+}
+pub(crate) fn capacity_diagnostic(
+    conn: &Connection,
+    lane_id: &str,
+) -> Result<Option<QuestionCapacityBlocked>, StorageError> {
+    lane(conn, lane_id)?;
+    let value: Option<String> = conn.query_row(
+        "SELECT question_capacity_blocked_json FROM lanes WHERE lane_id=?1",
+        [lane_id],
+        |r| r.get(0),
+    )?;
+    value.as_deref().map(parse).transpose()
+}
+
+/// Shared algorithm; source adapters restrict the admitted signals.
+pub(crate) fn advance_guard(
+    mut state: LaneWakeGuard,
+    expected: u64,
+    signal: LaneGuardSignal,
+) -> Result<LaneWakeGuard, StorageError> {
     if state.revision != expected {
         return Err(StorageError::StaleRevision {
             kind: "wake_guard",
@@ -73,21 +101,5 @@ pub(super) fn update_guard_in_transaction(
         .revision
         .checked_add(1)
         .ok_or(StorageError::OutOfRange("guard revision"))?;
-    conn.execute(
-        "UPDATE lanes SET wake_guard_json=?2 WHERE lane_id=?1",
-        params![lane_id, json(&state)?],
-    )?;
     Ok(state)
-}
-pub(crate) fn capacity_diagnostic(
-    conn: &Connection,
-    lane_id: &str,
-) -> Result<Option<QuestionCapacityBlocked>, StorageError> {
-    lane(conn, lane_id)?;
-    let value: Option<String> = conn.query_row(
-        "SELECT question_capacity_blocked_json FROM lanes WHERE lane_id=?1",
-        [lane_id],
-        |r| r.get(0),
-    )?;
-    value.as_deref().map(parse).transpose()
 }

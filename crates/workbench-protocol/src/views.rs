@@ -23,8 +23,8 @@ pub struct Page<T> {
     /// Present when more items follow. Opaque: valid only for the same query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<PageCursor>,
-    /// Revision of the listed collection when the page was cut, so a reader can
-    /// tell a page from a later state.
+    /// Equality token of the listed collection at this cut. It may be a content
+    /// hash: compare for equality only, never numeric age/order.
     pub snapshot_revision: Revision,
 }
 
@@ -221,6 +221,10 @@ pub struct ApprovalView {
     pub run: RunId,
     pub tool_name: String,
     pub summary: String,
+    /// True when either the registry or projection bounded this summary.
+    pub summary_truncated: bool,
+    /// Original canonical JSON input bytes, before secret masking.
+    pub input_bytes: ByteOffset,
     pub state: ApprovalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_by: Option<Provenance>,
@@ -322,29 +326,8 @@ impl BodyChunk {
         offset: ByteOffset,
         max_bytes: u32,
     ) -> Result<Self, ValidationError> {
-        if max_bytes < MIN_BODY_CHUNK_BYTES {
-            return Err(ValidationError::OutOfRange {
-                field: "max_bytes",
-                reason: "smaller than one UTF-8 scalar",
-            });
-        }
-        let start = usize::try_from(offset.get())
-            .ok()
-            .filter(|start| *start <= body.len())
-            .ok_or(ValidationError::OutOfRange {
-                field: "offset",
-                reason: "beyond the end of the body",
-            })?;
-        if !body.is_char_boundary(start) {
-            return Err(ValidationError::OutOfRange {
-                field: "offset",
-                reason: "not on a character boundary",
-            });
-        }
-        let mut end = body.len().min(start.saturating_add(max_bytes as usize));
-        while !body.is_char_boundary(end) {
-            end -= 1;
-        }
+        let range = chunk_range(body, offset, max_bytes)?;
+        let (start, end) = (range.start, range.end);
         Ok(Self {
             body_id,
             offset,
@@ -355,41 +338,87 @@ impl BodyChunk {
     }
 
     pub fn validate(&self, max_chunk_bytes: u32) -> Result<(), ValidationError> {
-        check_bytes("text", &self.text, max_chunk_bytes as usize, true)?;
-        let end = self
-            .offset
-            .get()
-            .checked_add(self.text.len() as u64)
-            .ok_or(ValidationError::OutOfRange {
-                field: "offset",
-                reason: "offset plus chunk length overflows",
-            })?;
-        if end > self.total_bytes.get() {
-            return Err(ValidationError::Inconsistent {
-                field: "total_bytes",
-                reason: "chunk extends past the end of the body",
-            });
-        }
-        if self.text.is_empty() && self.next_offset.is_some() {
-            // A reader following next_offset would loop without making progress.
-            return Err(ValidationError::Inconsistent {
-                field: "text",
-                reason: "a chunk that is not the last must carry text",
-            });
-        }
-        match self.next_offset {
-            Some(next) if next.get() != end || end >= self.total_bytes.get() => {
-                Err(ValidationError::Inconsistent {
-                    field: "next_offset",
-                    reason: "must equal the chunk end and lie inside the body",
-                })
-            }
-            None if end != self.total_bytes.get() => Err(ValidationError::Inconsistent {
+        validate_text_chunk(
+            self.offset,
+            &self.text,
+            self.total_bytes,
+            self.next_offset,
+            max_chunk_bytes,
+        )
+    }
+}
+
+pub(crate) fn chunk_range(
+    body: &str,
+    offset: ByteOffset,
+    max_bytes: u32,
+) -> Result<std::ops::Range<usize>, ValidationError> {
+    if max_bytes < MIN_BODY_CHUNK_BYTES {
+        return Err(ValidationError::OutOfRange {
+            field: "max_bytes",
+            reason: "smaller than one UTF-8 scalar",
+        });
+    }
+    let start = usize::try_from(offset.get())
+        .ok()
+        .filter(|start| *start <= body.len())
+        .ok_or(ValidationError::OutOfRange {
+            field: "offset",
+            reason: "beyond the end of the body",
+        })?;
+    if !body.is_char_boundary(start) {
+        return Err(ValidationError::OutOfRange {
+            field: "offset",
+            reason: "not on a character boundary",
+        });
+    }
+    let mut end = body.len().min(start.saturating_add(max_bytes as usize));
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(start..end)
+}
+
+pub(crate) fn validate_text_chunk(
+    offset: ByteOffset,
+    text: &str,
+    total_bytes: ByteOffset,
+    next_offset: Option<ByteOffset>,
+    max_chunk_bytes: u32,
+) -> Result<(), ValidationError> {
+    check_bytes("text", text, max_chunk_bytes as usize, true)?;
+    let end = offset
+        .get()
+        .checked_add(text.len() as u64)
+        .ok_or(ValidationError::OutOfRange {
+            field: "offset",
+            reason: "offset plus chunk length overflows",
+        })?;
+    if end > total_bytes.get() {
+        return Err(ValidationError::Inconsistent {
+            field: "total_bytes",
+            reason: "chunk extends past the end of the body",
+        });
+    }
+    if text.is_empty() && next_offset.is_some() {
+        // A reader following next_offset would loop without making progress.
+        return Err(ValidationError::Inconsistent {
+            field: "text",
+            reason: "a chunk that is not the last must carry text",
+        });
+    }
+    match next_offset {
+        Some(next) if next.get() != end || end >= total_bytes.get() => {
+            Err(ValidationError::Inconsistent {
                 field: "next_offset",
-                reason: "missing before the end of the body",
-            }),
-            _ => Ok(()),
+                reason: "must equal the chunk end and lie inside the body",
+            })
         }
+        None if end != total_bytes.get() => Err(ValidationError::Inconsistent {
+            field: "next_offset",
+            reason: "missing before the end of the body",
+        }),
+        _ => Ok(()),
     }
 }
 

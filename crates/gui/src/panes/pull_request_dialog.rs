@@ -118,6 +118,49 @@ pub fn link_dialog(
     action
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationDialogAction {
+    Move,
+    Cancel,
+}
+
+pub const MOVE_LABEL: &str = "Move here";
+
+/// The confirmation before auto fix moves to this thread from the one that has it.
+pub fn destination_dialog(
+    ctx: &egui::Context,
+    dialog: &crate::app::pull_requests::DestinationDialog,
+) -> Option<DestinationDialogAction> {
+    let mut action = None;
+    let modal = egui::Modal::new(egui::Id::new("pull-request-destination-dialog"))
+        .backdrop_color(palette().OVERLAY)
+        .frame(surface_frame(palette().SURFACE_RAISED))
+        .show(ctx, |ui| {
+            ui.set_width(
+                (ctx.viewport_rect().width() * 0.5).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0,
+            );
+            ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
+            ui.label(h3("Move auto fix here?"));
+            ui.label(format!(
+                "Auto fix is on in \u{201c}{}\u{201d}. Turning it on here sends this pull \
+                 request's CI failures to this thread instead.",
+                dialog.previous_label
+            ));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if primary_button(ui, MOVE_LABEL).clicked() {
+                    action = Some(DestinationDialogAction::Move);
+                }
+                if ui.add(ghost("Cancel")).clicked() {
+                    action = Some(DestinationDialogAction::Cancel);
+                }
+            });
+        });
+    if action.is_none() && modal.should_close() {
+        action = Some(DestinationDialogAction::Cancel);
+    }
+    action
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

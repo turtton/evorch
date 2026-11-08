@@ -126,6 +126,25 @@ impl ConversationProvenance {
         }
     }
 
+    /// Persist identity at the append position, independent of the wire role/text.
+    /// Fork copies retain this as original_origin; compaction keeps the raw map.
+    pub(crate) fn harness_notice(&mut self, messages: &[Message], raw_index: usize, id: &str) {
+        let mut mapped = self.map(messages, 0);
+        if let Some(message) = mapped
+            .messages
+            .iter_mut()
+            .find(|m| m.raw_index == raw_index)
+        {
+            for block in &mut message.blocks {
+                block.origin = BlockOrigin::HarnessNotice {
+                    notification_id: id.to_owned(),
+                };
+                block.excluded_reason = Some(ExcludedReason::GeneratedBoundary);
+            }
+        }
+        self.messages = mapped.messages;
+    }
+
     pub(crate) fn generated_since(&mut self, messages: &[Message], raw_start: usize) {
         let mut mapped = self.map(messages, 0);
         for message in mapped

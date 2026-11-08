@@ -103,6 +103,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             _ => {}
         }
+        if matches!(
+            &event.kind,
+            EventKind::Lifecycle(LifecycleEvent::HarnessNoticeDelivered { .. })
+        ) {
+            // Live, replayed from the log or seen through another window: one card per
+            // notice, read from the stored notice.
+            self.note_harness_notices();
+        }
         let lane_changed = self.apply_lane_event(event);
         self.note_attention_event(event);
         let touched = self.touch_thread_activity(event);

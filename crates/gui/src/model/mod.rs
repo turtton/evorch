@@ -14,6 +14,7 @@ pub mod evaluations;
 pub mod failure_text;
 pub mod folder_picker;
 pub mod fuzzy;
+pub mod harness_card;
 pub mod html_snapshots;
 pub mod lane_attention;
 pub mod lanes;

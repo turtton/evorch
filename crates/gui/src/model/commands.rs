@@ -143,6 +143,34 @@ pub enum WorkbenchCommand {
         thread_id: String,
         candidate_id: u64,
     },
+    /// Turn the pull request's auto fix on for this thread, or off. Revisions are what the
+    /// person saw: a refusal follows when either moved.
+    SetPullRequestAutoFix {
+        thread_id: String,
+        link_revision: u64,
+        policy_revision: u64,
+        enabled: bool,
+    },
+    /// Start the automatic count again and turn auto fix on.
+    ResetPullRequestAutoFixBudget {
+        thread_id: String,
+        link_revision: u64,
+        policy_revision: u64,
+    },
+    /// Turn auto fix on here after the person confirmed which thread had it.
+    ChangePullRequestAutoFixDestination {
+        thread_id: String,
+        link_revision: u64,
+        policy_revision: u64,
+        confirmed_previous: Option<String>,
+    },
+    /// Send the pull request's failing head to the agent now. `expected_head` is the commit
+    /// the person saw: another head is refused, never sent in its place.
+    SendPullRequestNotice {
+        thread_id: String,
+        link_revision: u64,
+        expected_head: String,
+    },
     /// A thread was derived from another: it may take the parent's open pull request.
     /// Idempotent, and sent when the thread is created, before any run exists.
     InheritPullRequest {
@@ -409,7 +437,11 @@ impl CommandSink for FixtureLoopAdapter {
             WorkbenchCommand::LinkPullRequest { thread_id, .. }
             | WorkbenchCommand::UnlinkPullRequest { thread_id, .. }
             | WorkbenchCommand::RefreshPullRequest { thread_id }
-            | WorkbenchCommand::ConfirmPullRequestCandidate { thread_id, .. } => {
+            | WorkbenchCommand::ConfirmPullRequestCandidate { thread_id, .. }
+            | WorkbenchCommand::SetPullRequestAutoFix { thread_id, .. }
+            | WorkbenchCommand::ResetPullRequestAutoFixBudget { thread_id, .. }
+            | WorkbenchCommand::ChangePullRequestAutoFixDestination { thread_id, .. }
+            | WorkbenchCommand::SendPullRequestNotice { thread_id, .. } => {
                 vec![LoopEvent::PullRequestRejected {
                     thread_id,
                     reason: "Pull requests are unavailable in demo mode".into(),

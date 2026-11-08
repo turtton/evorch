@@ -88,6 +88,10 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
             | WorkbenchCommand::LinkPullRequest { .. }
             | WorkbenchCommand::UnlinkPullRequest { .. }
             | WorkbenchCommand::RefreshPullRequest { .. }
+            | WorkbenchCommand::SetPullRequestAutoFix { .. }
+            | WorkbenchCommand::ResetPullRequestAutoFixBudget { .. }
+            | WorkbenchCommand::ChangePullRequestAutoFixDestination { .. }
+            | WorkbenchCommand::SendPullRequestNotice { .. }
             | WorkbenchCommand::ConfirmPullRequestCandidate { .. }
             | WorkbenchCommand::DismissPullRequestCandidate { .. }
             | WorkbenchCommand::InheritPullRequest { .. } => None,

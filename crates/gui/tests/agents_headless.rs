@@ -634,6 +634,7 @@ fn assert_run_entries(
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Unreadable { .. }
+            | TranscriptEntry::HarnessNotice { .. }
             | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -654,6 +655,7 @@ fn assert_run_entries(
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Unreadable { .. }
+            | TranscriptEntry::HarnessNotice { .. }
             | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();
