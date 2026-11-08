@@ -12,9 +12,15 @@
 // the messages of one run. The newest page holds every run's latest messages
 // at the cut it was read at, so an event at or below its run's highest index
 // is already on screen or older than the page and is dropped; only a higher
-// index is new and goes after the page. An event of a run the page does not
-// know is the first message of a new run when its index is 0; any other
-// index cannot be placed, and the caller re-reads the history.
+// index is new and goes after the page.
+//
+// A run the page does not show may be older than the page (all its messages
+// precede the newest page) or newer (started after the cut); its index says
+// nothing about which, even 0. Events arrive in cursor order, so once one of
+// them is provably after the cut (a message above its run's boundary), every
+// later event is too: from then on, a message of a run the page does not
+// show is new. Until then such a message cannot be placed and the caller
+// re-reads the history. An empty history has no cut to be behind.
 
 import { compareDecimal } from "./wire.js";
 
@@ -40,6 +46,8 @@ export class HistoryWindow {
     this.opened = false;
     /** Highest index on screen per run: the boundary new messages must pass. */
     this.latest = new Map();
+    /** An event already proved the stream to be past the newest page's cut. */
+    this.pastCut = false;
   }
 
   note(message) {
@@ -56,6 +64,7 @@ export class HistoryWindow {
     this.pages = [result.value.items];
     this.olderCursor = result.value.next_cursor ?? null;
     for (const message of result.value.items) this.note(message);
+    this.pastCut = result.value.items.length === 0 && this.olderCursor === null;
     this.opened = true;
     const buffered = this.pending;
     this.pending = [];
@@ -92,9 +101,11 @@ export class HistoryWindow {
     }
     const held = this.latest.get(message.run);
     if (held === undefined) {
-      if (message.index !== "0") return "resync";
+      if (!this.pastCut) return "resync";
     } else if (compareDecimal(message.index, held) <= 0) {
       return "ignored";
+    } else {
+      this.pastCut = true;
     }
     this.live.push(message);
     this.note(message);

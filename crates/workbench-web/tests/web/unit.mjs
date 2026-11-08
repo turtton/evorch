@@ -387,11 +387,38 @@ test("each run has its own boundary, and an unplaceable message asks for a re-re
   await window.open();
   eq(window.append(message("b", 1)), "ignored");
   eq(window.append(message("a", 1)), "ignored");
+  eq(window.append(message("c", 0)), "resync", "an unknown run may be older than the page, even at #0");
   eq(window.append(message("b", 2)), "added", "newer for b even though a is further along");
   eq(window.append(message("a", 3)), "added");
-  eq(window.append(message("c", 0)), "added", "a new run starts at 0");
-  eq(window.append(message("d", 7)), "resync", "a run the page does not know, not at its start");
-  eq(window.messages().map(messageKey), ["a#0", "b#0", "a#1", "b#1", "a#2", "b#2", "a#3", "c#0"]);
+  // b#2 was committed after the cut, so every later event is too.
+  eq(window.append(message("c", 0)), "added", "a run started after the cut");
+  eq(window.append(message("d", 7)), "added", "after the cut, even when its start is older");
+  eq(window.messages().map(messageKey), ["a#0", "b#0", "a#1", "b#1", "a#2", "b#2", "a#3", "c#0", "d#7"]);
+});
+
+test("a whole older run replayed from #0 is not put after the newest page", async () => {
+  // Run a committed a#0, a#1; then run b committed 60 messages. The newest
+  // page holds b#10..b#59 only. A reconnect replays from a#0.
+  const all = [message("a", 0), message("a", 1), ...Array.from({ length: 60 }, (_, i) => message("b", i))];
+  const window = new HistoryWindow(async (cursor) => {
+    const end = cursor === null ? all.length : Number(cursor);
+    const start = Math.max(0, end - 50);
+    return { ok: true, value: { items: all.slice(start, end), next_cursor: start > 0 ? String(start) : undefined, snapshot_revision: "1" } };
+  });
+  await window.open();
+  eq(window.append(message("a", 0)), "resync", "a#0 is older than the page");
+  eq(window.append(message("a", 1)), "resync");
+  eq(window.append(message("b", 59)), "ignored");
+  eq(window.messages().map(messageKey).slice(-2), ["b#58", "b#59"], "nothing was appended after b");
+  await window.loadOlder();
+  eq(window.messages().map(messageKey).slice(0, 3), ["a#0", "a#1", "b#0"], "the older page puts run a first");
+});
+
+test("an empty history takes every message as new", async () => {
+  const window = new HistoryWindow(async () => ({ ok: true, value: { items: [], snapshot_revision: "1" } }));
+  await window.open();
+  eq(window.append(message("x", 0)), "added");
+  eq(window.append(message("x", 1)), "added");
 });
 
 test("an unplaceable message during the first read makes the read report it", async () => {

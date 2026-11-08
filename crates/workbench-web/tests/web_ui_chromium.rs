@@ -87,6 +87,8 @@ fn now_millis() -> String {
         .to_string()
 }
 
+const OLD_RUN_LEN: usize = 2;
+
 fn history() -> Vec<Value> {
     let markdown = "## 調査結果\n\n`login.rs` の **redirect** 処理が原因です。\n\n- 修正案 A: 戻り先を検証する\n- 修正案 B: 既定の戻り先を使う\n\n詳細: https://example.com/docs と [設計書](https://example.com/design)。\n\n<img src=x onerror=alert(1)> は表示されません。[危険](javascript:alert(1))\n\n```rust\nfn redirect_target() -> &'static str { \"/home\" }\n```";
     (0..HISTORY_LEN)
@@ -99,7 +101,11 @@ fn history() -> Vec<Value> {
                 i if i % 3 == 0 => ("user", json!({"type": "inline", "payload": {"text": format!("メッセージ {i}")}})),
                 i => ("assistant", json!({"type": "inline", "payload": {"text": format!("メッセージ {i}")}})),
             };
-            json!({"thread": "thr-1", "run": "run-root", "index": index.to_string(), "role": role, "content": content})
+            // The first two messages belong to an earlier run that ended long
+            // before the newest page: a replay from its start must not put
+            // it after the newest messages.
+            let run = if index < OLD_RUN_LEN { "run-old" } else { "run-root" };
+            json!({"thread": "thr-1", "run": run, "index": index.to_string(), "role": role, "content": content})
         })
         .collect()
 }
@@ -734,9 +740,14 @@ impl WorkbenchBackend for UiBackend {
         if let Some(after) = subscribe.after
             && std::mem::take(&mut world.replay_on_resume)
         {
-            // Resume without a snapshot, then replay messages 170..229 (the
-            // page shows 180..229) and commit one new message.
-            let replayed: Vec<Value> = world.history[170..230].to_vec();
+            // Resume without a snapshot, then replay the old run from its
+            // start and messages 170..229 (the page shows 180..229), and
+            // commit one new message.
+            let replayed: Vec<Value> = world.history[..OLD_RUN_LEN]
+                .iter()
+                .chain(&world.history[170..230])
+                .cloned()
+                .collect();
             for message in replayed {
                 world
                     .publish(json!({"type": "message_committed", "payload": {"message": message}}));
@@ -1128,8 +1139,11 @@ async fn web_workbench_main_flows_in_chromium() {
     ui.screenshot("04-thread-top").await;
     eprintln!("step: replay after a reconnect");
     // A reconnect resumes after the last cursor; the core replays messages
-    // that are already on screen or older than the page. Only the one new
-    // message may appear, after the newest.
+    // that are already on screen or older than the page, starting with a
+    // whole run that ended before the page. Its place is unknown, so the view
+    // reads the newest page again; only the one new message may appear,
+    // after the newest.
+    let reads_before = backend.world.lock().unwrap().history_reads;
     backend.world.lock().unwrap().replay_on_resume = true;
     backend.drop_streams();
     ui.wait(&format!(
@@ -1139,15 +1153,21 @@ async fn web_workbench_main_flows_in_chromium() {
     let after_replay = ui
         .eval(
             r##"(() => { const bodies = [...document.querySelectorAll(".messages .msg .msg-body")].map((b) => b.textContent);
-                return { count: bodies.length, first: bodies[0], beforeLast: bodies.at(-2).includes("本文の終わり。") }; })()"##,
+                return { count: bodies.length, first: bodies[0], beforeLast: bodies.at(-2).includes("本文の終わり。"),
+                         oldRunAtEnd: bodies.slice(-3).some((t) => t === "メッセージ 0" || t === "メッセージ 1"),
+                         status: document.querySelector(".history-status").textContent }; })()"##,
         )
         .await;
     assert_eq!(
         after_replay,
-        json!({"count": 51, "first": "メッセージ 180", "beforeLast": true}),
-        "replayed old messages were dropped"
+        json!({"count": 50, "first": "メッセージ 181", "beforeLast": true, "oldRunAtEnd": false, "status": ""}),
+        "the newest page was read again and nothing replayed was put after it"
     );
-    for expected in [101, 151, 201, 231] {
+    assert!(
+        backend.world.lock().unwrap().history_reads > reads_before,
+        "the unplaceable replay made the view read the history again"
+    );
+    for expected in [100, 150, 200, 231] {
         ui.click("button.older").await;
         ui.wait(&format!(
             r##"() => document.querySelectorAll(".messages .msg").length === {expected}"##
