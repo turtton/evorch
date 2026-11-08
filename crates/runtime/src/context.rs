@@ -166,6 +166,8 @@ impl ResponsesReplayState {
 /// (ownership) によって構成上保証される。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentContext {
+    /// Adopted harness input still awaiting a successful provider request.
+    pub(crate) harness_notice_pending: bool,
     pub(crate) provenance: crate::restore::provenance::ConversationProvenance,
     /// Revision of this run's last committed (or read) snapshot; the next save's CAS precondition.
     pub(crate) snapshot_revision: crate::restore::revision::SnapshotRevision,
@@ -211,6 +213,7 @@ impl AgentContext {
         snapshot_revision: crate::restore::revision::SnapshotRevision,
     ) -> Self {
         Self {
+            harness_notice_pending: false,
             provenance: crate::restore::provenance::ConversationProvenance::unknown(),
             snapshot_revision,
             run_id,

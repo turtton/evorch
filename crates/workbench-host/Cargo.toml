@@ -41,4 +41,4 @@ storage = { path = "../storage", features = ["test-support"] }
 async-trait = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

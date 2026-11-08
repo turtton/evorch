@@ -76,7 +76,11 @@ const C_GC: u64 = 24;
 /// lane header columns and fences: 255 frames with 100,000 rows), and v49 (the host chat submission
 /// table with its index and fence: 270 frames with 100,000 rows). The row-independent
 /// ceiling includes these schema pages; the VM-step comparison below still forbids scans.
-const MIGRATION_FRAMES: u64 = 280;
+// Full v38 -> latest open includes v50 (display title) and v51: three PR tables, their indexes and
+// the outbox rebuild. Allow 40 additional fixed schema frames (observed 308
+// total with 100,000 pre-existing rows). The independent VM-step scaling
+// assertion below still forbids work proportional to those existing rows.
+const MIGRATION_FRAMES: u64 = 280 + 40;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -292,7 +296,7 @@ fn tick_work_ignores_the_size_of_the_reference_table() {
     );
 }
 
-/// WAL frames of applying migrations v39 to the latest (v49) to a database at v38 holding `rows` rows.
+/// WAL frames of applying migrations v39 to the latest (v51) to a database at v38 holding `rows` rows.
 fn migration_cost(rows: i64) -> (u64, u64) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("io.db");
@@ -313,6 +317,8 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v51.sql"),
+                    include_str!("../undo/undo_v50.sql"),
                     include_str!("../undo/undo_v49.sql"),
                     include_str!("../undo/undo_v48.sql"),
                     include_str!("../undo/undo_v47.sql")
@@ -352,8 +358,8 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     (frames, scanned)
 }
 
-/// The migration creates two tables and converts nothing: its writes do not follow the
-/// number of rows already in the database.
+/// The full upgrade creates the blob tables and later schema objects: its writes
+/// must not scale with unrelated thread/run rows already in the database.
 fn migration_does_not_scale_with_existing_rows() {
     let (small, small_steps) = migration_cost(10);
     let (large, large_steps) = migration_cost(100_000);

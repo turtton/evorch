@@ -355,6 +355,9 @@ fn question_view(
 }
 pub(crate) fn approval_view(a: &ApprovalSnapshot) -> Option<ApprovalView> {
     use sandbox::approval::{ApprovalActor, ApprovalSurface};
+    let summary = text(&a.summary, 1024);
+    let summary_truncated =
+        a.summary.len() < a.input_bytes || summary.len() < super::masked(&a.summary).len();
     Some(ApprovalView {
         id: ApprovalId::new(&a.id.value).ok()?,
         core_epoch: InstanceEpoch(a.id.core_epoch),
@@ -362,7 +365,9 @@ pub(crate) fn approval_view(a: &ApprovalSnapshot) -> Option<ApprovalView> {
         thread: ThreadId::new(a.thread_id.as_ref()?).ok()?,
         run: RunId::new(&a.run_id).ok()?,
         tool_name: text(&a.tool_name, 256),
-        summary: text(&a.summary, 1024),
+        summary,
+        summary_truncated,
+        input_bytes: ByteOffset(a.input_bytes as u64),
         state: match a.state {
             RegistryState::Pending => ApprovalState::Pending,
             RegistryState::Approved => ApprovalState::Approved,

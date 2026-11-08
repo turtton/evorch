@@ -16,7 +16,7 @@ use workbench_protocol::{
     errors::{ErrorCode, WorkbenchError},
     events::*,
     ids::*,
-    queries::{PageRequest, Query, QueryReply},
+    queries::{PageRequest, Query, QueryReply, ReadSnapshot, SnapshotPage},
     views::*,
     wire::*,
 };
@@ -26,10 +26,15 @@ struct Replay {
     event: UiEvent,
     bytes: usize,
 }
+/// Frozen cuts survive connection closure, but not epoch invalidation.
+const SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const MAX_SNAPSHOTS: usize = 4;
 struct Frozen {
     id: SnapshotId,
     items: Vec<SnapshotItem>,
     revision: Revision,
+    high_water: EventCursor,
+    created_at: tokio::time::Instant,
 }
 struct State {
     #[cfg(test)]
@@ -48,6 +53,11 @@ struct State {
     answer_provenance: BTreeMap<String, Provenance>,
 }
 impl State {
+    fn expire_snapshots(&mut self) {
+        let now = tokio::time::Instant::now();
+        self.snapshots
+            .retain(|s| now.saturating_duration_since(s.created_at) < SNAPSHOT_TTL);
+    }
     fn next_cursor(&mut self) -> EventCursor {
         self.sequence = self
             .sequence
@@ -395,6 +405,9 @@ impl Projection {
     }
     pub fn query(&self, query: &Query) -> Result<QueryReply, WorkbenchError> {
         query.validate(&Default::default())?;
+        if let Query::ReadSnapshot(q) = query {
+            return Ok(QueryReply::Snapshot(self.read_snapshot(q)?));
+        }
         if let Query::ReadBody(q) = query {
             return Ok(QueryReply::Body(self.bodies.read(&self.runtime, q)?));
         }
@@ -513,6 +526,7 @@ impl Projection {
             }
             _ => {}
         }
+        state.expire_snapshots();
         state.subscribers.retain(|s| s.queue.strong_count() > 0);
         if state.subscribers.len() >= 1024 {
             return Err(queries::error(ErrorCode::Busy, "too many subscriptions"));
@@ -556,8 +570,10 @@ impl Projection {
                 id: id.clone(),
                 items,
                 revision,
+                high_water: cursor,
+                created_at: tokio::time::Instant::now(),
             });
-            while state.snapshots.len() > 4 {
+            while state.snapshots.len() > MAX_SNAPSHOTS {
                 state.snapshots.pop_front();
             }
             (Some(id), Some(page))
@@ -621,19 +637,51 @@ impl Projection {
         snapshot: &SnapshotId,
         page: &PageRequest,
     ) -> Result<Page<SnapshotItem>, WorkbenchError> {
+        Ok(self
+            .read_snapshot(&ReadSnapshot {
+                snapshot_id: snapshot.clone(),
+                page: page.clone(),
+            })?
+            .page)
+    }
+    pub fn read_snapshot(&self, request: &ReadSnapshot) -> Result<SnapshotPage, WorkbenchError> {
+        request.page.validate()?;
         let mut state = self.state.lock().unwrap();
         self.refresh_locked(&mut state)?;
+        state.expire_snapshots();
         let snapshot = state
             .snapshots
             .iter()
-            .find(|s| &s.id == snapshot)
-            .ok_or_else(|| queries::error(ErrorCode::Conflict, "snapshot expired"))?;
-        self.pager.page(
-            snapshot.id.as_str(),
-            &snapshot.items,
+            .find(|s| s.id == request.snapshot_id)
+            .ok_or_else(|| {
+                queries::error(
+                    ErrorCode::ResyncRequired,
+                    "snapshot expired or its epoch changed",
+                )
+            })?;
+        let page = self
+            .pager
+            .page(
+                snapshot.id.as_str(),
+                &snapshot.items,
+                &request.page,
+                snapshot.revision,
+            )
+            .map_err(|e| {
+                if e.code == ErrorCode::Conflict {
+                    queries::error(
+                        ErrorCode::ResyncRequired,
+                        "snapshot cursor expired or belongs to another cut",
+                    )
+                } else {
+                    e
+                }
+            })?;
+        Ok(SnapshotPage {
+            snapshot_id: snapshot.id.clone(),
+            high_water: snapshot.high_water,
             page,
-            snapshot.revision,
-        )
+        })
     }
     pub fn unsubscribe(&self, id: &SubscriptionId) {
         let mut state = self.state.lock().unwrap();

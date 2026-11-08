@@ -195,6 +195,7 @@ context_window_tokens = 1000000
     turn(&mut turns, run).await;
     bridge.flush().unwrap();
     let query = Query::ReadCommittedHistory(ReadCommittedHistory {
+        direction: workbench_protocol::queries::HistoryDirection::Forward,
         thread: ThreadId::new("thread").unwrap(),
         run: None,
         page: Default::default(),

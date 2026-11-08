@@ -97,6 +97,7 @@ const PERMISSIONS_KEYS: &[&str] = &["preset"];
 const METRICS_KEYS: &[&str] = &["enabled", "retention_days"];
 const PULL_REQUESTS_KEYS: &[&str] = &[
     "enabled",
+    "auto_fix_enabled",
     "include_in_review",
     "pending_poll_seconds",
     "stable_poll_seconds",

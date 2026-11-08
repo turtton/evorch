@@ -29,8 +29,8 @@ pub use ownership::{OwnershipAction, OwnershipEvent};
 pub mod otel;
 pub mod pull_request;
 pub use pull_request::{
-    PullRequestCandidateState, PullRequestChangedField, PullRequestEvent, PullRequestFetchStatus,
-    PullRequestLinkEnd, PullRequestLinkOrigin, PullRequestRef,
+    PullRequestAutoFixChange, PullRequestCandidateState, PullRequestChangedField, PullRequestEvent,
+    PullRequestFetchStatus, PullRequestLinkEnd, PullRequestLinkOrigin, PullRequestRef,
 };
 pub mod ring;
 pub mod thread_goal;

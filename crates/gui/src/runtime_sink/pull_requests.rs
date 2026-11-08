@@ -18,6 +18,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use runtime::ownership::OwnerPermit;
 use runtime::pull_requests::{DerivedThreadKind, PullRequestError, PullRequestService};
+use storage::StorageError;
+use storage::pull_request_auto_fix::PrAutoFixRejection;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::model::commands::{LoopEvent, PullRequestDerivation, WorkbenchCommand};
@@ -105,7 +107,11 @@ impl WorkbenchCommand {
             | Self::UnlinkPullRequest { thread_id, .. }
             | Self::RefreshPullRequest { thread_id }
             | Self::ConfirmPullRequestCandidate { thread_id, .. }
-            | Self::DismissPullRequestCandidate { thread_id, .. } => Some(thread_id),
+            | Self::DismissPullRequestCandidate { thread_id, .. }
+            | Self::SetPullRequestAutoFix { thread_id, .. }
+            | Self::ResetPullRequestAutoFixBudget { thread_id, .. }
+            | Self::ChangePullRequestAutoFixDestination { thread_id, .. }
+            | Self::SendPullRequestNotice { thread_id, .. } => Some(thread_id),
             _ => None,
         }
     }
@@ -119,10 +125,35 @@ fn reason(error: &PullRequestError) -> String {
             "Another window holds this thread in write mode".into()
         }
         PullRequestError::StaleRevision => {
-            "The pull request link changed meanwhile; check it and try again".into()
+            "The pull request changed meanwhile; it is reloaded, check it and try again".into()
+        }
+        PullRequestError::Ineligible => {
+            "The pull request changed since it was shown, or there is nothing to send; it is reloaded".into()
+        }
+        PullRequestError::Storage(StorageError::PrAutoFix(rejection)) => {
+            auto_fix_reason(*rejection)
         }
         other => other.to_string(),
     }
+}
+
+/// An auto fix refusal as the person reads it.
+fn auto_fix_reason(rejection: PrAutoFixRejection) -> String {
+    use PrAutoFixRejection::*;
+    match rejection {
+        DestinationConfirmationRequired => {
+            "Another thread has auto fix on; the screen is reloaded, confirm the move and try again"
+        }
+        BudgetResetRequired | BudgetExhausted => "The automatic sends are used up; reset the count",
+        AlreadyAdopted => "This commit was already sent to an agent",
+        ArchivedDestination => "The thread that had auto fix is archived",
+        NotLinked | StaleLink => "The pull request link changed meanwhile",
+        Cooldown => "Auto fix is cooling down",
+        WakeSuppressed => "Paused after repeated sends; a message of yours resumes it",
+        InvalidHeadSha => "The commit is not valid",
+        _ => "Auto fix could not be changed; the screen is reloaded",
+    }
+    .to_owned()
 }
 
 impl WorkbenchCommand {
@@ -135,6 +166,10 @@ impl WorkbenchCommand {
                 | Self::RefreshPullRequest { .. }
                 | Self::ConfirmPullRequestCandidate { .. }
                 | Self::DismissPullRequestCandidate { .. }
+                | Self::SetPullRequestAutoFix { .. }
+                | Self::ResetPullRequestAutoFixBudget { .. }
+                | Self::ChangePullRequestAutoFixDestination { .. }
+                | Self::SendPullRequestNotice { .. }
                 | Self::InheritPullRequest { .. }
         )
     }
@@ -266,6 +301,58 @@ async fn run(work: Work) -> Result<(), PullRequestError> {
             Some(permit),
         ) => service
             .dismiss_candidate(&thread_id, candidate_id, &permit)
+            .await
+            .map(drop),
+        (
+            WorkbenchCommand::SetPullRequestAutoFix {
+                thread_id,
+                link_revision,
+                policy_revision,
+                enabled,
+            },
+            Some(permit),
+        ) => service
+            .set_auto_fix(&thread_id, link_revision, policy_revision, enabled, &permit)
+            .await
+            .map(drop),
+        (
+            WorkbenchCommand::ResetPullRequestAutoFixBudget {
+                thread_id,
+                link_revision,
+                policy_revision,
+            },
+            Some(permit),
+        ) => service
+            .reset_auto_fix_budget(&thread_id, link_revision, policy_revision, &permit)
+            .await
+            .map(drop),
+        (
+            WorkbenchCommand::ChangePullRequestAutoFixDestination {
+                thread_id,
+                link_revision,
+                policy_revision,
+                confirmed_previous,
+            },
+            Some(permit),
+        ) => service
+            .change_auto_fix_destination(
+                &thread_id,
+                link_revision,
+                policy_revision,
+                confirmed_previous,
+                &permit,
+            )
+            .await
+            .map(drop),
+        (
+            WorkbenchCommand::SendPullRequestNotice {
+                thread_id,
+                link_revision,
+                expected_head,
+            },
+            Some(permit),
+        ) => service
+            .request_manual_notice(&thread_id, link_revision, &expected_head, &permit)
             .await
             .map(drop),
         _ => Err(PullRequestError::NotOwner),

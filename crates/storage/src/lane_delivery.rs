@@ -64,7 +64,7 @@ pub struct LaneDeliveryDestination {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneDeliveryClaim {
+pub struct LaneDeliveryClaim<N = LaneNotification> {
     pub destination_thread_id: String,
     pub destination_epoch: u64,
     pub claim_epoch: u64,
@@ -74,7 +74,7 @@ pub struct LaneDeliveryClaim {
     /// A completed-root wake, fixed from the claim request. Active deliveries
     /// do not count toward the per-source automatic-wake guard.
     pub completed_root_wake: bool,
-    pub notifications: Vec<LaneNotification>,
+    pub notifications: Vec<N>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +86,8 @@ pub enum LaneDeliveryNack {
     Stopped,
     RestoreFailed,
     StorageFailed,
+    /// The referenced PR body is absent or cannot fit the immutable input batch.
+    PayloadUnavailable,
 }
 
 /// Rebinding ownership/root never implicitly resumes a stopped destination.
@@ -98,8 +100,8 @@ pub enum LaneDestinationAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LaneClaimResult {
-    Claimed(LaneDeliveryClaim),
+pub enum LaneClaimResult<N = LaneNotification> {
+    Claimed(LaneDeliveryClaim<N>),
     Empty,
     Busy,
     Stopped,

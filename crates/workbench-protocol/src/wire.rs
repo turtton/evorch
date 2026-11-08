@@ -67,7 +67,9 @@ macro_rules! wire_u64 {
 }
 
 wire_u64!(
-    /// Version of one entity; bumped on every change so stale writes are detectable.
+    /// Opaque equality token identifying an entity/collection state. Thread, run,
+    /// receipt and project revisions may be content hashes: NEVER compare them
+    /// numerically. Use EventCursor (epoch + sequence) for event ordering.
     Revision
 );
 wire_u64!(

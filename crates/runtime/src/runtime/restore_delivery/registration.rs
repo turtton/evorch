@@ -248,6 +248,7 @@ mod review_tests {
                     execution,
                     (run, None, Role::Worker, RunConfig::default(), run),
                     RestoredState {
+                        harness_notice_pending: false,
                         provenance: Default::default(),
                         snapshot_revision: crate::restore::revision::SnapshotRevision::fresh(),
                         responses_replay: Default::default(),

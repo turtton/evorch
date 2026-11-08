@@ -131,7 +131,8 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             | LifecycleEvent::AutoContinuationPaused { .. }
             | LifecycleEvent::HostInputDelivered { .. }
             | LifecycleEvent::HostInputDropped { .. }
-            | LifecycleEvent::HostInputUnknown { .. } => {}
+            | LifecycleEvent::HostInputUnknown { .. }
+            | LifecycleEvent::HarnessNoticeDelivered { .. } => {}
             // entry 判定は session/task を更新しない。
             LifecycleEvent::RoutingDecision { .. } => {}
             LifecycleEvent::EscalationRequested { .. } => {}

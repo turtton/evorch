@@ -5,6 +5,9 @@
 //! default frame once JSON escaping (at most 2x, because control characters
 //! other than `\t`, `\n` and `\r` are rejected) is applied. A test pins that.
 
+/// Maximum complete approval input size, independent of chunk size.
+pub const MAX_APPROVAL_INPUT_BYTES: usize = 1024 * 1024;
+
 /// Longest identifier, in bytes.
 pub const MAX_ID_BYTES: usize = 128;
 /// Longest short name (profile, model, skill, role label, tool name), in bytes.
