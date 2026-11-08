@@ -148,6 +148,36 @@ impl StorageHandle {
             Ok(())
         })
     }
+    /// Copy authentic human evidence and its acceptance order into a new root.
+    /// These are historical acceptances, not new user submissions: do not notify
+    /// delivery outboxes or enqueue the old inputs in the target's inbox.
+    pub fn copy_handoff_evidence(
+        &self,
+        lineage: Vec<String>,
+        target: String,
+    ) -> Result<bool, StorageError> {
+        self.lane_job(true, move |conn| {
+            let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+            let mut rows = crate::repo::review_evidence::for_lineage(&tx, &lineage)?;
+            let ids = serde_json::to_string(&rows.iter().map(|row| &row.id).collect::<Vec<_>>()).map_err(|e|StorageError::Serialization(e.to_string()))?;
+            for row in &mut rows {
+                row.id = format!("handoff-evidence-{target}-{}", row.id);
+                row.root_run_id.clone_from(&target);
+                row.target_run_id.clone_from(&target);
+            }
+            crate::repo::review_evidence::insert(&tx, &rows)?;
+            let receipts = {
+                let mut query = tx.prepare("SELECT prompt_id,evidence_id,text,image_count,status,reason,accepted_at_ns,status_at_ns,provenance_json FROM host_input_receipts WHERE evidence_id IN (SELECT value FROM json_each(?1)) ORDER BY acceptance_seq")?;
+                query.query_map([ids], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,i64>(6)?,r.get::<_,i64>(7)?,r.get::<_,String>(8)?)))?.collect::<Result<Vec<_>,_>>()?
+            };
+            for (prompt,evidence,text,images,status,reason,accepted,updated,provenance) in receipts {
+                tx.execute("INSERT OR IGNORE INTO host_input_receipts(prompt_id,run_id,root_run_id,text,image_count,status,reason,accepted_at_ns,status_at_ns,evidence_id,provenance_json,acceptance_seq) VALUES(?1,?2,?2,?3,?4,?5,?6,?7,?8,?9,?10,(SELECT COALESCE(MAX(acceptance_seq),0)+1 FROM host_input_receipts))",params![format!("handoff-acceptance-{target}-{prompt}"),target,text,images,status,reason,accepted,updated,format!("handoff-evidence-{target}-{evidence}"),provenance])?;
+            }
+            tx.commit()?;
+            Ok(!rows.is_empty())
+        })
+    }
+
     /// Record a failed provider admission without replacing the target or seed.
     pub fn note_handoff_start_failure(
         &self,
@@ -181,20 +211,114 @@ impl StorageHandle {
         goal_json: Option<String>,
         todo_json: Option<String>,
     ) -> Result<HandoffReceipt, StorageError> {
-        self.lane_job(true, move |conn| {
-            if !matches!((expected,next),(HandoffState::Preparing,HandoffState::Prepared)|(HandoffState::Prepared,HandoffState::Committed)) {
-                return Err(StorageError::Serialization("invalid handoff transition".into()));
-            }
-            let guard=crate::entity::SecretGuard::from_env();
-            for (field,text) in [("goal",goal_json.as_deref()),("todo",todo_json.as_deref())] {if let Some(text)=text {guard.check_text("handoff",field,text)?;}}
-            let label = |state| match state {HandoffState::Preparing=>"preparing",HandoffState::Prepared=>"prepared",HandoffState::Committed=>"committed",HandoffState::Started=>"started",HandoffState::RecoverableStartFailure=>"recoverable_start_failure"};
-            let tx=conn.unchecked_transaction()?;
-            let changed = tx.execute("UPDATE lane_handoffs SET state=?4,goal_json=COALESCE(?5,goal_json),todo_json=COALESCE(?6,todo_json) WHERE source_run_id=?1 AND source_incarnation=?2 AND state=?3",params![source,incarnation,label(expected),label(next),goal_json,todo_json])?;
-            if changed != 1 { return Err(StorageError::Serialization("stale handoff incarnation or state".into())); }
-            if next==HandoffState::Committed {tx.execute("UPDATE lane_handoff_questions SET committed=1 WHERE source_run_id=?1 AND source_incarnation=?2",params![source,incarnation])?;}
-            let result=operation(&tx,&source,&incarnation)?.expect("advanced receipt");
-            tx.commit()?;
-            Ok(result)
+        self.write_handoff_transition(HandoffTransition {
+            source,
+            incarnation,
+            expected,
+            next,
+            goal_json,
+            todo_json,
         })
     }
+}
+
+pub(crate) struct HandoffTransition {
+    pub source: String,
+    pub incarnation: String,
+    pub expected: HandoffState,
+    pub next: HandoffState,
+    pub goal_json: Option<String>,
+    pub todo_json: Option<String>,
+}
+
+pub(crate) fn advance(
+    conn: &rusqlite::Connection,
+    change: HandoffTransition,
+    limits: &crate::HardLimits,
+    accounting: &mut crate::repo::event::EventAccounting,
+) -> Result<(HandoffReceipt, u64, u64), StorageError> {
+    let HandoffTransition {
+        source,
+        incarnation,
+        expected,
+        next,
+        goal_json,
+        todo_json,
+    } = change;
+    if !matches!(
+        (expected, next),
+        (HandoffState::Preparing, HandoffState::Prepared)
+            | (HandoffState::Prepared, HandoffState::Committed)
+    ) {
+        return Err(StorageError::Serialization(
+            "invalid handoff transition".into(),
+        ));
+    }
+    let guard = crate::entity::SecretGuard::from_env();
+    for (field, text) in [
+        ("goal", goal_json.as_deref()),
+        ("todo", todo_json.as_deref()),
+    ] {
+        if let Some(text) = text {
+            guard.check_text("handoff", field, text)?;
+        }
+    }
+    let label = |state| match state {
+        HandoffState::Preparing => "preparing",
+        HandoffState::Prepared => "prepared",
+        HandoffState::Committed => "committed",
+        HandoffState::Started => "started",
+        HandoffState::RecoverableStartFailure => "recoverable_start_failure",
+    };
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute("UPDATE lane_handoffs SET state=?4,goal_json=COALESCE(?5,goal_json),todo_json=COALESCE(?6,todo_json) WHERE source_run_id=?1 AND source_incarnation=?2 AND state=?3",params![source,incarnation,label(expected),label(next),goal_json,todo_json])?;
+    if changed != 1 {
+        return Err(StorageError::Serialization(
+            "stale handoff incarnation or state".into(),
+        ));
+    }
+    let result = operation(&tx, &source, &incarnation)?.expect("advanced receipt");
+    let mut next_accounting = accounting.clone();
+    let mut events_written = 0_u64;
+    let mut event_payload_bytes = 0_u64;
+    if next == HandoffState::Committed {
+        tx.execute("UPDATE lane_handoff_questions SET committed=1 WHERE source_run_id=?1 AND source_incarnation=?2",params![source,incarnation])?;
+        let thread = event_bus::escalation_thread_id(&result.target_run_id);
+        let mut events = Vec::new();
+        if let Some(json) = &result.goal_json {
+            let snapshot: event_bus::ThreadGoalSnapshot = serde_json::from_str(json)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            if snapshot.thread_id != thread || snapshot.root_run_id != result.target_run_id {
+                return Err(StorageError::Serialization(
+                    "handoff goal belongs to a different target".into(),
+                ));
+            }
+            events.push(event_bus::OrchestratorEvent::ThreadGoalUpdated { snapshot });
+        }
+        if let Some(json) = &result.todo_json {
+            let snapshot: event_bus::ThreadTodoSnapshot = serde_json::from_str(json)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            if snapshot.thread_id != thread {
+                return Err(StorageError::Serialization(
+                    "handoff procedure belongs to a different target".into(),
+                ));
+            }
+            events.push(event_bus::OrchestratorEvent::ThreadTodoUpdated { snapshot });
+        }
+        for kind in events {
+            crate::repo::event::append_event_in_transaction(
+                &tx,
+                None,
+                &event_bus::Event::new(kind),
+                limits,
+                &mut next_accounting,
+            )?;
+            events_written += 1;
+            event_payload_bytes =
+                event_payload_bytes.saturating_add(next_accounting.last_event_bytes);
+        }
+    }
+    tx.commit()?;
+    *accounting = next_accounting;
+    Ok((result, events_written, event_payload_bytes))
 }

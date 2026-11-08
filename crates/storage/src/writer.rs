@@ -44,6 +44,10 @@ type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 // 増やすためサイズを許容する。
 #[allow(clippy::large_enum_variant)]
 enum Command {
+    AdvanceHandoff(
+        crate::handoffs::HandoffTransition,
+        ReplyTx<crate::handoffs::HandoffReceipt>,
+    ),
     Usage(Vec<UsageBucket>),
     RecordUsageRequests(Vec<crate::usage::UsageRequestRecord>, ReplyTx),
     AttributeUsageRuns(Vec<crate::usage::RunAttribution>),
@@ -1470,5 +1474,14 @@ impl UsageSink for StorageHandle {
                 tracing::warn!("storage writer is closed; dropping metrics");
             }
         }
+    }
+}
+
+impl StorageHandle {
+    pub(crate) fn write_handoff_transition(
+        &self,
+        change: crate::handoffs::HandoffTransition,
+    ) -> Result<crate::handoffs::HandoffReceipt, StorageError> {
+        self.request(|reply| Command::AdvanceHandoff(change, reply))
     }
 }

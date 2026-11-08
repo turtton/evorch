@@ -137,23 +137,19 @@ pub(crate) fn persist_escalation_seed(
     let target = run_id.to_string();
     let mut lineage = store.review_lineage_ancestors(&source)?;
     lineage.push(source);
-    let mut evidence = store.review_evidence_for_lineage(&lineage)?;
-    for row in &mut evidence {
-        row.id = format!("handoff-evidence-{target}-{}", row.id);
-        row.root_run_id.clone_from(&target);
-        row.target_run_id.clone_from(&target);
-    }
+    let copied = store
+        .handle
+        .copy_handoff_evidence(lineage, target.clone())?;
     // Legacy host seeds may predate the durable evidence ledger entirely.
-    if evidence.is_empty()
-        && let Some(request) = runtime.trusted_thread_request(source_run_id)
-    {
-        evidence.push(crate::run_store::evidence_row(
-            &target,
-            &target,
-            "host_chat",
-            &request,
-        ));
+    if !copied && let Some(request) = runtime.trusted_thread_request(source_run_id) {
+        store
+            .handle
+            .record_review_evidence(&[crate::run_store::evidence_row(
+                &target,
+                &target,
+                "host_chat",
+                &request,
+            )])?;
     }
-    store.handle.record_review_evidence(&evidence)?;
     Ok(saved.snapshot_revision)
 }

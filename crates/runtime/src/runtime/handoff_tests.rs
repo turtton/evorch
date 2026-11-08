@@ -922,6 +922,45 @@ async fn handoff_copies_authentic_question_answers_without_sharing_review_author
     runtime
         .answer_user_question(&question.id, "Read only the failing output")
         .unwrap();
+    // Creation time deliberately disagrees with acceptance order. The most
+    // recently accepted attachment must win, not the last evidence-row sort key.
+    for (prompt, body, created) in [
+        ("skill-first", "older accepted body", 200),
+        ("skill-last", "current accepted skill body", 100),
+    ] {
+        let mut row = crate::run_store::evidence_row_with_attachments(
+            &source.to_string(),
+            &source.to_string(),
+            "host_chat",
+            &format!("Use @workflow ({prompt})"),
+            vec![storage::EvidenceAttachment {
+                name: "workflow".into(),
+                scope: "user".into(),
+                body: body.into(),
+            }],
+        );
+        row.created_at_ns = created;
+        db.handle()
+            .append_host_input_accepted(
+                std::slice::from_ref(&row),
+                &[],
+                None,
+                &storage::HostInputReceipt {
+                    provenance: storage::host_input::HostInputProvenance::User,
+                    prompt_id: prompt.into(),
+                    run_id: source.to_string(),
+                    root_run_id: source.to_string(),
+                    text: row.text.clone(),
+                    image_count: 0,
+                    status: storage::host_input::HostInputStatus::Delivered,
+                    reason: None,
+                    accepted_at_ns: created,
+                    status_at_ns: created,
+                    evidence_id: Some(row.id.clone()),
+                },
+            )
+            .unwrap();
+    }
     let store = runtime.shared.run_store.get().unwrap();
     let before = store
         .review_evidence_for_lineage(&[source.to_string()])
@@ -967,6 +1006,319 @@ async fn handoff_copies_authentic_question_answers_without_sharing_review_author
         &context.user_requests,
         &runtime.shared.review_runs.lock().unwrap()[&source].user_requests
     ));
+    assert_eq!(
+        context
+            .attached_requests()
+            .iter()
+            .map(|r| r.attachments[0].body.as_str())
+            .collect::<Vec<_>>(),
+        ["older accepted body", "current accepted skill body"]
+    );
+    // Recopying is idempotent and does not turn historical acceptances into
+    // new inbox deliveries or change their order.
+    db.handle()
+        .copy_handoff_evidence(vec![source.to_string()], target.to_string())
+        .unwrap();
+    assert_eq!(
+        store
+            .review_attachment_acceptances_for_lineage(&[target.to_string()])
+            .unwrap()
+            .len(),
+        2
+    );
+    runtime.stop(source, StopScope::SelfOnly).unwrap();
+    runtime.wait(source).await.unwrap();
+    reclaim_handoff_thread(&config, &db, source, target, true);
+    let context = crate::run_store::materialize_review_context(store, target).unwrap();
+    let (review_context, _) = crate::escalation_review::review_context(context, None).unwrap();
+    let reviewer = Arc::new(crate::escalation_review::support::ScriptedModel::new([Ok(
+        crate::escalation_review::support::text_response(
+            r#"{"approve":true,"reason":"inspect","risk_level":"low","authorization_level":"high"}"#,
+            providers::FinishReason::Stop,
+        ),
+    )]));
+    crate::escalation_review::QuickModelReviewer::new(reviewer.clone())
+        .review_with_context(
+            &target.to_string(),
+            "git status",
+            "inspect",
+            Some(review_context),
+        )
+        .await
+        .unwrap();
+    let observed = reviewer.observed().await;
+    let providers::ContentBlock::Text { text } = &observed[0][1].content[0] else {
+        panic!("reviewer JSON missing");
+    };
+    let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+    let skills = payload["context"]["loaded_skills"].as_array().unwrap();
+    let skill = skills.iter().find(|s| s["name"] == "workflow").unwrap();
+    assert_eq!(skill["text"], "current accepted skill body");
+    assert_eq!(skill["loaded_by"], "user_mention");
+    assert_eq!(skill["trust"], "user-attached");
+}
+
+struct CrashAtHandoffStartModel {
+    worker: RepeatedHandoffModel,
+    target_entered: Notify,
+}
+#[async_trait::async_trait]
+impl crate::AgentModel for CrashAtHandoffStartModel {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "handoff-start-crash".into()
+    }
+    async fn complete(
+        &self,
+        invocation: &crate::AgentInvocationContext,
+        role: Role,
+        messages: &[providers::Message],
+        tools: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, RuntimeError> {
+        if role == Role::Orchestrator {
+            self.target_entered.notify_one();
+            std::future::pending::<()>().await;
+        }
+        self.worker
+            .complete(invocation, role, messages, tools)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn started_target_restores_initial_control_state_when_recorder_was_stopped() {
+    use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("recorder-stopped.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(256));
+    let mut recorder = OwnedStorageBridge::spawn(
+        bus.clone(),
+        db,
+        |h| StorageBridge::new(h, "before-handoff"),
+        std::time::Duration::from_secs(60),
+    )
+    .unwrap();
+    let handle = recorder.handle();
+    let model = Arc::new(CrashAtHandoffStartModel {
+        worker: RepeatedHandoffModel {
+            entered: Notify::new(),
+            release: Notify::new(),
+            worker_calls: Default::default(),
+        },
+        target_entered: Notify::new(),
+    });
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(crate::RunStore::open(&config, handle.clone()).unwrap());
+    let source = runtime
+        .delegate_chat(
+            "source",
+            Role::Worker,
+            "Keep original restrictions".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    model.worker.entered.notified().await;
+    let mut goal = runtime
+        .create_thread_goal("source", source, "goal".into(), vec!["evidence".into()])
+        .unwrap();
+    goal.phase = event_bus::ThreadGoalPhase::Blocked;
+    goal.reason = Some("blocked before handoff".into());
+    goal.original_request = "Keep original restrictions".into();
+    goal.checks_paused = true;
+    goal.usage.input_tokens = 333;
+    goal.usage.output_tokens = 777;
+    goal.max_tokens = Some(654_321);
+    runtime.restore_thread_goal(goal).unwrap();
+    runtime
+        .restore_thread_todo(event_bus::ThreadTodoSnapshot {
+            list_id: "procedure".into(),
+            thread_id: "source".into(),
+            revision: 7,
+            items: vec![event_bus::ThreadTodoItem {
+                content: "retain this procedure".into(),
+                status: event_bus::ThreadTodoStatus::Pending,
+            }],
+        })
+        .unwrap();
+    // Join the real recorder before preparation. No initial target event can
+    // reach SQLite through EventBus, regardless of runner scheduling.
+    recorder.shutdown();
+    model.worker.release.notify_one();
+    runtime.wait(source).await.unwrap();
+    model.target_entered.notified().await;
+    let receipt = handle
+        .handoff_for_source(source.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.state, HandoffState::Started);
+    let target: RunId = receipt.target_run_id.parse().unwrap();
+    let expected_goal: event_bus::ThreadGoalSnapshot =
+        serde_json::from_str(receipt.goal_json.as_ref().unwrap()).unwrap();
+    let expected_todo: event_bus::ThreadTodoSnapshot =
+        serde_json::from_str(receipt.todo_json.as_ref().unwrap()).unwrap();
+    let task = lock_runs(&runtime.shared.runs)
+        .get_mut(&target)
+        .unwrap()
+        ._join
+        .take()
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop(runtime);
+    drop(handle);
+    drop(recorder);
+    // Reopen actual SQLite as a fresh host, using only the normal event restore
+    // source. Never synthesize a goal event or replay the Started receipt.
+    let db = storage::Storage::open(config.clone()).unwrap();
+    let runtime = runtime_for_handoff_restart(
+        &config,
+        &db,
+        Arc::new(RepeatedHandoffModel {
+            entered: Notify::new(),
+            release: Notify::new(),
+            worker_calls: Default::default(),
+        }),
+    );
+    let thread = event_bus::escalation_thread_id(&target.to_string());
+    runtime.restore_committed_handoff(target).unwrap();
+    assert!(runtime.thread_goal(&thread).is_none());
+    let mut restored_goal = None;
+    let mut restored_todo = None;
+    for row in storage::Database::open(&config)
+        .unwrap()
+        .orchestrator_events_ordered()
+        .unwrap()
+    {
+        match row.event.kind {
+            event_bus::EventKind::Orchestrator(
+                event_bus::OrchestratorEvent::ThreadGoalUpdated { snapshot },
+            ) if snapshot.thread_id == thread => restored_goal = Some(snapshot),
+            event_bus::EventKind::Orchestrator(
+                event_bus::OrchestratorEvent::ThreadTodoUpdated { snapshot },
+            ) if snapshot.thread_id == thread => restored_todo = Some(snapshot),
+            _ => {}
+        }
+    }
+    assert_eq!(restored_goal.as_ref(), Some(&expected_goal));
+    assert_eq!(restored_todo.as_ref(), Some(&expected_todo));
+    runtime.restore_thread_goal(restored_goal.unwrap()).unwrap();
+    runtime.restore_thread_todo(restored_todo.unwrap()).unwrap();
+    let goal = runtime.thread_goal(&thread).unwrap();
+    assert_eq!(goal.phase, event_bus::ThreadGoalPhase::Blocked);
+    assert_eq!(goal.reason.as_deref(), Some("blocked before handoff"));
+    assert!(goal.checks_paused);
+    assert_eq!(
+        (goal.usage.input_tokens, goal.usage.output_tokens),
+        (333, 777)
+    );
+    assert_eq!(goal.max_tokens, Some(654_321));
+    assert_eq!(goal.original_request, "Keep original restrictions");
+    assert_eq!(runtime.thread_todo(&thread).unwrap(), expected_todo);
+}
+
+#[tokio::test]
+async fn initial_control_event_failure_rolls_back_commit_and_keeps_source_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("control-event-failure.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    let model = Arc::new(Model {
+        worker_entered: Notify::new(),
+        target_calls: Default::default(),
+    });
+    let bus = Arc::new(EventBus::new(128));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(crate::RunStore::open(&config, db.handle()).unwrap());
+    let source = runtime
+        .delegate_chat(
+            "source",
+            Role::Worker,
+            "Keep working on preparation failure".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    model.worker_entered.notified().await;
+    let goal = runtime
+        .create_thread_goal("source", source, "goal".into(), vec!["evidence".into()])
+        .unwrap();
+    runtime
+        .restore_thread_todo(event_bus::ThreadTodoSnapshot {
+            list_id: "procedure".into(),
+            thread_id: "source".into(),
+            revision: 1,
+            items: vec![],
+        })
+        .unwrap();
+    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    // Fail the second event, after the goal INSERT succeeded inside the same
+    // transaction. Neither an initial goal nor responsibility may leak out.
+    conn.execute_batch("CREATE TRIGGER fail_initial_todo BEFORE INSERT ON events WHEN NEW.subkind='ThreadTodoUpdated' BEGIN SELECT RAISE(ABORT,'initial procedure event injection'); END;").unwrap();
+    let publication = runtime.execution_snapshot(source).unwrap().publication();
+    assert!(
+        runtime
+            .prepare_handoff_to_lane(
+                &memo(source),
+                &RunConfig::default(),
+                Default::default(),
+                &publication
+            )
+            .is_err()
+    );
+    let receipt = db
+        .handle()
+        .handoff_for_source(source.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.state, HandoffState::Prepared);
+    assert_eq!(
+        runtime.inspect_agent(source).unwrap().phase,
+        AgentRunPhase::Running
+    );
+    assert_eq!(runtime.thread_goal("source").unwrap().goal_id, goal.goal_id);
+    assert_eq!(model.target_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        storage::Database::open(&config)
+            .unwrap()
+            .orchestrator_events_ordered()
+            .unwrap()
+            .is_empty()
+    );
+    conn.execute_batch("DROP TRIGGER fail_initial_todo")
+        .unwrap();
+    let target = runtime
+        .prepare_handoff_to_lane(
+            &memo(source),
+            &RunConfig::default(),
+            Default::default(),
+            &publication,
+        )
+        .unwrap();
+    assert_eq!(target.to_string(), receipt.target_run_id);
+    assert_eq!(
+        db.handle()
+            .handoff_for_target(target.to_string())
+            .unwrap()
+            .unwrap()
+            .state,
+        HandoffState::Committed
+    );
+    assert_eq!(
+        storage::Database::open(&config)
+            .unwrap()
+            .orchestrator_events_ordered()
+            .unwrap()
+            .len(),
+        2
+    );
     runtime.stop(source, StopScope::SelfOnly).unwrap();
     runtime.wait(source).await.unwrap();
 }
