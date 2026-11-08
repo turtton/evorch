@@ -2,15 +2,18 @@
 
 use crate::commands::CommandReply;
 use crate::errors::WorkbenchError;
+use crate::events::{EventCursor, SnapshotItem};
 use crate::handshake::{Capability, CoreStatus, WireLimits};
-use crate::ids::{BodyId, PageCursor, ProjectId, RequestId, RunId, ThreadId};
+use crate::ids::{
+    ApprovalId, BodyId, PageCursor, ProjectId, RequestId, RunId, SnapshotId, ThreadId,
+};
 use crate::limits::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MIN_BODY_CHUNK_BYTES};
 use crate::validation::ValidationError;
 use crate::views::{
     ApprovalView, BodyChunk, CommittedMessage, InputReceipt, Page, ProjectSummary, QuestionView,
     RunSummary, ThreadSummary, ThreadView,
 };
-use crate::wire::ByteOffset;
+use crate::wire::{ByteOffset, InstanceEpoch, Revision};
 use serde::{Deserialize, Serialize};
 
 fn default_limit() -> u32 {
@@ -81,6 +84,10 @@ pub struct PendingQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadCommittedHistory {
+    /// Backward starts at the tail; each page remains chronological and its
+    /// next cursor addresses older messages. The direction binds the cursor.
+    #[serde(default)]
+    pub direction: HistoryDirection,
     pub thread: ThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunId>,
@@ -95,6 +102,98 @@ pub struct ReadBody {
     pub offset: ByteOffset,
     /// At most the negotiated `max_body_chunk_bytes`.
     pub max_bytes: u32,
+}
+
+/// Paging direction, independent of the chronological order within a page.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryDirection {
+    #[default]
+    Forward,
+    Backward,
+}
+
+/// Read the complete, secret-masked JSON input while this approval is pending.
+/// Each chunk revalidates the registry identity; it is not a durable body ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetApprovalInput {
+    pub approval_id: ApprovalId,
+    pub core_epoch: InstanceEpoch,
+    pub approval_revision: Revision,
+    pub offset: ByteOffset,
+    pub max_bytes: u32,
+}
+
+/// An approval input has the same UTF-8 byte-offset rules as ReadBody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalInputChunk {
+    pub approval_id: ApprovalId,
+    pub core_epoch: InstanceEpoch,
+    pub approval_revision: Revision,
+    pub offset: ByteOffset,
+    pub text: String,
+    /// Size of the complete secret-masked input (before wire JSON escaping).
+    pub total_bytes: ByteOffset,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<ByteOffset>,
+}
+
+impl ApprovalInputChunk {
+    pub fn slice(request: &GetApprovalInput, input: &str) -> Result<Self, ValidationError> {
+        if input.len() > crate::limits::MAX_APPROVAL_INPUT_BYTES {
+            return Err(ValidationError::TooLong {
+                field: "input",
+                max: crate::limits::MAX_APPROVAL_INPUT_BYTES,
+                actual: input.len(),
+            });
+        }
+        let range = crate::views::chunk_range(input, request.offset, request.max_bytes)?;
+        Ok(Self {
+            approval_id: request.approval_id.clone(),
+            core_epoch: request.core_epoch,
+            approval_revision: request.approval_revision,
+            offset: request.offset,
+            text: input[range.clone()].to_owned(),
+            total_bytes: ByteOffset(input.len() as u64),
+            next_offset: (range.end < input.len()).then_some(ByteOffset(range.end as u64)),
+        })
+    }
+    pub fn validate(&self, max_bytes: u32) -> Result<(), ValidationError> {
+        if self.total_bytes.get() > crate::limits::MAX_APPROVAL_INPUT_BYTES as u64 {
+            return Err(ValidationError::OutOfRange {
+                field: "total_bytes",
+                reason: "approval input exceeds 1 MiB",
+            });
+        }
+        crate::views::validate_text_chunk(
+            self.offset,
+            &self.text,
+            self.total_bytes,
+            self.next_offset,
+            max_bytes,
+        )
+    }
+}
+
+/// Continue a frozen subscription snapshot without a live subscription or SSE
+/// connection. An expired or epoch-invalidated snapshot requires resync.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadSnapshot {
+    pub snapshot_id: SnapshotId,
+    #[serde(default)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotPage {
+    pub snapshot_id: SnapshotId,
+    /// The original snapshot cut, not the current live event cursor.
+    pub high_water: EventCursor,
+    pub page: Page<SnapshotItem>,
 }
 
 /// Every read-only request a client may send.
@@ -120,11 +219,13 @@ pub enum Query {
     },
     ReadCommittedHistory(ReadCommittedHistory),
     ReadBody(ReadBody),
+    GetApprovalInput(GetApprovalInput),
+    ReadSnapshot(ReadSnapshot),
 }
 
 impl Query {
     /// Wire names of every variant, for rejecting unknown ones precisely.
-    pub const TYPES: [&'static str; 11] = [
+    pub const TYPES: [&'static str; 13] = [
         "get_core_status",
         "list_projects",
         "list_threads",
@@ -136,12 +237,14 @@ impl Query {
         "get_command_receipt",
         "read_committed_history",
         "read_body",
+        "get_approval_input",
+        "read_snapshot",
     ];
 
     pub fn required_capability(&self) -> Capability {
         match self {
             Self::ListQuestions(_) => Capability::Questions,
-            Self::ListApprovals(_) => Capability::Approvals,
+            Self::ListApprovals(_) | Self::GetApprovalInput(_) => Capability::Approvals,
             Self::GetInputReceipts(_) => Capability::InputReceipts,
             Self::GetCommandReceipt { .. } => Capability::Commands,
             Self::ReadCommittedHistory(_) | Self::ReadBody(_) => Capability::CommittedBodies,
@@ -157,8 +260,10 @@ impl Query {
             Self::ListRuns(q) | Self::GetInputReceipts(q) => q.page.validate(),
             Self::ListQuestions(q) | Self::ListApprovals(q) => q.page.validate(),
             Self::ReadCommittedHistory(q) => q.page.validate(),
-            Self::ReadBody(q) => {
-                if q.max_bytes < MIN_BODY_CHUNK_BYTES || q.max_bytes > limits.max_body_chunk_bytes {
+            Self::ReadSnapshot(q) => q.page.validate(),
+            Self::ReadBody(ReadBody { max_bytes, .. })
+            | Self::GetApprovalInput(GetApprovalInput { max_bytes, .. }) => {
+                if *max_bytes < MIN_BODY_CHUNK_BYTES || *max_bytes > limits.max_body_chunk_bytes {
                     return Err(ValidationError::OutOfRange {
                         field: "max_bytes",
                         reason: "outside the negotiated body chunk range",
@@ -206,6 +311,8 @@ pub enum QueryReply {
     CommandReceipt(CommandReceipt),
     CommittedHistory(Page<CommittedMessage>),
     Body(BodyChunk),
+    ApprovalInput(ApprovalInputChunk),
+    Snapshot(SnapshotPage),
 }
 
 impl CommandReceipt {
@@ -234,6 +341,8 @@ impl QueryReply {
             Self::CommandReceipt(receipt) => receipt.validate(),
             Self::CommittedHistory(page) => page.validate_with(CommittedMessage::validate),
             Self::Body(chunk) => chunk.validate(limits.max_body_chunk_bytes),
+            Self::ApprovalInput(chunk) => chunk.validate(limits.max_body_chunk_bytes),
+            Self::Snapshot(snapshot) => snapshot.page.validate_with(SnapshotItem::validate),
         }
     }
 }

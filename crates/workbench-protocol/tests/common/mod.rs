@@ -243,6 +243,7 @@ pub fn queries() -> Vec<Query> {
             request_id: request(3),
         },
         Query::ReadCommittedHistory(ReadCommittedHistory {
+            direction: Default::default(),
             thread: thread(),
             run: Some(run()),
             page: page_req(),
@@ -251,6 +252,17 @@ pub fn queries() -> Vec<Query> {
             body_id: BodyId::new("body-1").unwrap(),
             offset: ByteOffset(65_536),
             max_bytes: 65_536,
+        }),
+        Query::GetApprovalInput(GetApprovalInput {
+            approval_id: ApprovalId::new("ap-1").unwrap(),
+            core_epoch: InstanceEpoch(7),
+            approval_revision: Revision(2),
+            offset: ByteOffset(0),
+            max_bytes: 65_536,
+        }),
+        Query::ReadSnapshot(ReadSnapshot {
+            snapshot_id: SnapshotId::new("snap-1").unwrap(),
+            page: page_req(),
         }),
     ]
 }
@@ -324,6 +336,8 @@ pub fn approval() -> ApprovalView {
         run: run(),
         tool_name: "shell".into(),
         summary: "rm -rf build".into(),
+        summary_truncated: false,
+        input_bytes: ByteOffset(22),
         state: ApprovalState::Pending,
         decided_by: Some(human()),
     }
@@ -447,6 +461,20 @@ pub fn query_replies() -> Vec<QueryReply> {
             text: "héllo".into(),
             total_bytes: ByteOffset(10),
             next_offset: Some(ByteOffset(6)),
+        }),
+        QueryReply::ApprovalInput(ApprovalInputChunk {
+            approval_id: ApprovalId::new("ap-1").unwrap(),
+            core_epoch: InstanceEpoch(7),
+            approval_revision: Revision(2),
+            offset: ByteOffset(0),
+            text: "héllo".into(),
+            total_bytes: ByteOffset(10),
+            next_offset: Some(ByteOffset(6)),
+        }),
+        QueryReply::Snapshot(SnapshotPage {
+            snapshot_id: SnapshotId::new("snap-1").unwrap(),
+            high_water: cursor(7, 40),
+            page: page(vec![SnapshotItem::CoreStatus(status())]),
         }),
     ]
 }
