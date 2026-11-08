@@ -903,6 +903,16 @@ struct Driver {
     screenshots: Option<PathBuf>,
 }
 
+/// Two element positions on screen (CSS pixels) are the same place; layout
+/// may round fractional positions differently from one frame to the next.
+fn assert_same_place(actual: &Value, expected: &Value, what: &str) {
+    let (actual, expected) = (actual.as_f64().unwrap(), expected.as_f64().unwrap());
+    assert!(
+        (actual - expected).abs() <= 2.0,
+        "{what}: at {actual}, expected {expected}"
+    );
+}
+
 impl Driver {
     async fn eval(&self, expression: &str) -> Value {
         let params = EvaluateParams::builder()
@@ -1329,9 +1339,14 @@ async fn web_workbench_main_flows_in_chromium() {
         "the late input caused a re-read"
     );
     assert_eq!(
-        kept,
-        json!({"text": partial, "buttons": ["続きを読み込む"], "top": before}),
-        "the partly read body and its place on screen survive the re-read"
+        json!({"text": kept["text"], "buttons": kept["buttons"]}),
+        json!({"text": partial, "buttons": ["続きを読み込む"]}),
+        "the partly read body survives the re-read"
+    );
+    assert_same_place(
+        &kept["top"],
+        &before,
+        "the body stays where it was on screen",
     );
     ui.eval(&format!(
         r##"[...{BIG}.querySelectorAll("button")].find((b) => !b.hidden && b.textContent.startsWith("続きを読み込む")).click()"##
@@ -1377,10 +1392,10 @@ async fn web_workbench_main_flows_in_chromium() {
         ))
         .await;
     assert_eq!(
-        after,
-        json!({"top": up, "bottom": false}),
+        after["bottom"], false,
         "the view did not jump back to the bottom"
     );
+    assert_same_place(&after["top"], &up, "the place scrolled to is kept");
 
     for expected in [100, 150, 200, 235] {
         ui.click("button.older").await;
