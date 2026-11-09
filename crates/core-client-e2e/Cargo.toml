@@ -10,7 +10,6 @@ gui = { path = "../gui", default-features = false }
 evorch-core = { path = "../evorch-core" }
 core-instance = { path = "../core-instance" }
 core-launcher = { path = "../core-launcher" }
-workbench-client = { path = "../workbench-client" }
 workbench-protocol = { path = "../workbench-protocol" }
 workbench-host = { path = "../workbench-host" }
 workbench-web = { path = "../workbench-web" }
@@ -22,7 +21,7 @@ storage = { path = "../storage" }
 recorder = { path = "../recorder" }
 sandbox = { path = "../sandbox" }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "io-util"] }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }

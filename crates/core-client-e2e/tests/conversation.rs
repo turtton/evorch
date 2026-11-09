@@ -94,6 +94,73 @@ async fn web(http: &reqwest::Client, root: &str, id: &str, body: RequestBody) ->
     }
 }
 
+/// Forward real length-prefixed frames, but lose the first execution's reply
+/// only after the core has produced it (and therefore recorded its receipt).
+async fn proxy(
+    stream: tokio::net::UnixStream,
+    backend: Arc<evorch_core::backend::HostBackend>,
+    stopped: tokio::sync::watch::Receiver<bool>,
+    lose_reply: bool,
+    observed: Arc<Mutex<Vec<RequestEnvelope>>>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn packet(read: &mut (impl tokio::io::AsyncRead + Unpin)) -> std::io::Result<Vec<u8>> {
+        let len = read.read_u32().await?;
+        assert!(len <= workbench_protocol::limits::DEFAULT_FRAME_BYTES);
+        let mut bytes = vec![0; len as usize];
+        read.read_exact(&mut bytes).await?;
+        Ok(bytes)
+    }
+    let (upstream, core) = tokio::net::UnixStream::pair().unwrap();
+    let core = tokio::spawn(evorch_core::unix::connection(core, backend, stopped));
+    let target = Arc::new(Mutex::new(None::<RequestId>));
+    let lost = {
+        let (mut client_read, mut client_write) = stream.into_split();
+        let (mut core_read, mut core_write) = upstream.into_split();
+        let inbound = async {
+            while let Ok(bytes) = packet(&mut client_read).await {
+                if let Ok(request) = serde_json::from_slice::<RequestEnvelope>(&bytes) {
+                    if matches!(
+                        request.body,
+                        RequestBody::Command(Command::Conversation(
+                            ConversationCommand::CreateExecution(_)
+                        ))
+                    ) {
+                        *target.lock().unwrap() = Some(request.request_id.clone());
+                    }
+                    observed.lock().unwrap().push(request);
+                }
+                core_write.write_u32(bytes.len() as u32).await?;
+                core_write.write_all(&bytes).await?;
+            }
+            Ok::<_, std::io::Error>(false)
+        };
+        let outbound = async {
+            while let Ok(bytes) = packet(&mut core_read).await {
+                if lose_reply
+                    && let Ok(ServerFrame::Reply(reply)) = serde_json::from_slice(&bytes)
+                    && target.lock().unwrap().as_ref() == Some(&reply.request_id)
+                {
+                    return Ok::<_, std::io::Error>(true);
+                }
+                client_write.write_u32(bytes.len() as u32).await?;
+                client_write.write_all(&bytes).await?;
+            }
+            Ok(false)
+        };
+        // EOF/reset is normal when the window closes. An early close before
+        // the deliberately lost reply cannot satisfy this test's assertions.
+        tokio::select! {
+            result = inbound => result.unwrap_or(false),
+            result = outbound => result.unwrap_or(false),
+        }
+    };
+    assert_eq!(lost, lose_reply);
+    // The connection was deliberately cut; only the independent core runtime
+    // owns the run. Joining this socket handler must not stop that run.
+    let _ = core.await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive_desktop() {
     use base64::Engine;
@@ -123,6 +190,12 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     .with_run_store(runtime::RunStore::open(&config, bridge.handle()).unwrap());
     let mut projects = workbench_host::projects::StaticProjects::default();
     projects.insert(&ProjectId::new("p").unwrap(), dir.path().into());
+    let extra_projects = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
+    for n in 0..extra_projects {
+        let root = dir.path().join(format!("project-{n}"));
+        std::fs::create_dir(&root).unwrap();
+        projects.insert(&ProjectId::new(format!("q{n}")).unwrap(), root);
+    }
     let host = Arc::new(Mutex::new(
         workbench_host::CommandHost::new(
             workbench_host::commands::CommandService::new(
@@ -148,12 +221,19 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     ));
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let socket_backend = backend.clone();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let trace = observed.clone();
     let socket = tokio::spawn(async move {
-        for _ in 0..2 {
+        for connection in 0..3 {
             let (stream, _) = listener.accept().await.unwrap();
-            evorch_core::unix::connection(stream, socket_backend.clone(), stopped.clone())
-                .await
-                .unwrap();
+            proxy(
+                stream,
+                socket_backend.clone(),
+                stopped.clone(),
+                connection == 0,
+                trace.clone(),
+            )
+            .await;
         }
     });
     let launcher = core_launcher::Launcher::with_socket(
@@ -171,7 +251,17 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         shared.clone(),
         egui::Context::default(),
     ));
-    changed(&shared, |s| s.connected).await;
+    changed(&shared, |s| {
+        s.connected && s.cache.projects.len() == extra_projects + 1
+    })
+    .await;
+    assert!(
+        observed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| { matches!(request.body, RequestBody::Query(Query::ReadSnapshot(_))) })
+    );
     let web_server = workbench_web::WebServer::start(
         workbench_web::WebServerConfig {
             enabled: true,
@@ -210,10 +300,21 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         .unwrap();
     let mut initial = send("initial", "desktop initial");
     initial.images.push(image);
+    {
+        let mut state = shared.lock().unwrap();
+        state.drafts.insert(
+            "t".into(),
+            gui::core_client::Draft {
+                text: initial.text.clone(),
+                revision: 1,
+            },
+        );
+        state.sending.insert("t".into());
+    }
     actions
         .send(Action::Command {
             command: Command::Conversation(ConversationCommand::CreateExecution(initial)),
-            draft: None,
+            draft: Some(("t".into(), 1)),
         })
         .await
         .unwrap();
@@ -223,10 +324,50 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
             .unwrap()
             .contains("image/png")
     );
+    changed(&shared, |s| !s.connected && !s.outcome_unknown.is_empty()).await;
+    assert_eq!(shared.lock().unwrap().drafts["t"].text, "desktop initial");
+    let unknown = shared
+        .lock()
+        .unwrap()
+        .outcome_unknown
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
+    actions.send(Action::Reconnect).await.unwrap();
     changed(&shared, |s| {
-        s.cache.runs.values().any(|r| r.thread.as_str() == "t")
+        s.connected
+            && s.outcome_unknown.is_empty()
+            && s.drafts["t"].text.is_empty()
+            && s.cache.runs.values().any(|r| r.thread.as_str() == "t")
     })
     .await;
+    {
+        let trace = observed.lock().unwrap();
+        let creations: Vec<_> = trace
+            .iter()
+            .filter(|request| {
+                matches!(
+                    request.body,
+                    RequestBody::Command(Command::Conversation(
+                        ConversationCommand::CreateExecution(_)
+                    ))
+                )
+            })
+            .collect();
+        assert_eq!(
+            creations.len(),
+            1,
+            "an unknown command was blindly replayed"
+        );
+        let receipt = trace
+            .iter()
+            .find(|request| {
+                matches!(&request.body, RequestBody::Query(Query::GetCommandReceipt { request_id }) if request_id.as_str() == unknown)
+            })
+            .expect("desktop must query the exact lost request");
+        assert_eq!(receipt.session_id, creations[0].session_id);
+    }
     let run = runtime.list_agents()[0].run_id;
     // Two frontends reach the same queue; verify the provider's order against
     // the acceptance order, not a scheduler-dependent preferred winner.

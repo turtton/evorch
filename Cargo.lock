@@ -1499,7 +1499,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tools",
- "workbench-client",
  "workbench-host",
  "workbench-protocol",
  "workbench-web",
