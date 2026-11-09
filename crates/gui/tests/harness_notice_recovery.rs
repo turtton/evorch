@@ -30,7 +30,7 @@ fn restored(world: &World) -> WorkbenchState<DemoSource> {
     window
 }
 
-fn assert_late_sidebar_recovery(world: &World, id: &str) {
+fn late_follower(world: &World) -> (WorkbenchState<DemoSource>, std::path::PathBuf) {
     use gui::body::{BodyResolver, ResolverConfig, StorageBodies};
     let path = world.dir.path().join("late-sidebar.json");
     let mut sidebar = world.window.sidebar().clone();
@@ -51,6 +51,28 @@ fn assert_late_sidebar_recovery(world: &World, id: &str) {
     follower = follower
         .with_manual_shared_feed(world.dir.path().join("phase2.db"), "late-observer".into())
         .unwrap();
+    (follower, path)
+}
+
+fn persist_range(world: &World, range: std::ops::Range<usize>) {
+    for event in &world.history[range] {
+        if !is_announcement(event) && !matches!(event.kind, EventKind::Usage(_)) {
+            world
+                .store
+                .handle()
+                .append_event(Some("original"), event)
+                .unwrap();
+        }
+    }
+}
+
+fn persist_since(world: &World, start: usize) -> usize {
+    persist_range(world, start..world.history.len());
+    world.history.len()
+}
+
+fn assert_late_sidebar_recovery(world: &World, id: &str) {
+    let (mut follower, path) = late_follower(world);
     std::fs::write(path, serde_json::to_vec(world.window.sidebar()).unwrap()).unwrap();
     follower.poll_shared_feed();
     follower.settle_body_rows();
@@ -87,16 +109,7 @@ async fn committed_notice_without_event_is_recovered_once_in_place() {
     gate.entered.notified().await;
     // Hold the model before any response. The saved context is exactly the adoption
     // checkpoint, and the event log ends before the missing announcement.
-    for event in &world.history {
-        if !is_announcement(event) && !matches!(event.kind, EventKind::Usage(_)) {
-            world
-                .store
-                .handle()
-                .append_event(Some("original"), event)
-                .unwrap();
-        }
-    }
-    let persisted_prefix = world.history.len();
+    let persisted_prefix = persist_since(&world, 0);
     let committed = database(&world).snapshot_bundle(&world.run).unwrap();
     let crashed_display = restored(&world);
     assert_eq!(
@@ -115,15 +128,7 @@ async fn committed_notice_without_event_is_recovered_once_in_place() {
     world.show();
     let expected = HarnessCard::from_notice(&world.notices()[0]).unwrap();
     assert_eq!(world.cards(), [(id.clone(), true)]);
-    for event in world.history.iter().skip(persisted_prefix) {
-        if !is_announcement(event) && !matches!(event.kind, EventKind::Usage(_)) {
-            world
-                .store
-                .handle()
-                .append_event(Some("original"), event)
-                .unwrap();
-        }
-    }
+    persist_since(&world, persisted_prefix);
     let before = database(&world)
         .snapshot_bundle(&world.run)
         .unwrap()
@@ -264,5 +269,145 @@ async fn detection_and_notice_looking_human_text_make_no_card() {
         }
     }
     assert!(cards_of(&restored(&world)).is_empty());
+    world.shutdown();
+}
+
+// The follower's rehydrate horizon H predates a reply and an adoption already in storage.
+// Its worker must not append that newer notice at H, before folding the queued reply.
+#[tokio::test]
+async fn late_reread_holds_newer_notice_until_the_feed_reaches_its_position() {
+    let mut world = World::recorded().await;
+    let failing = world.failing('a');
+    world.link(failing).await;
+    let prefix = persist_since(&world, 0);
+    let (mut follower, path) = late_follower(&world);
+    world
+        .runtime
+        .send_message(world.run.parse().unwrap(), "before adoption".into())
+        .unwrap();
+    let run = world.run.clone();
+    world.idle().await;
+    world.until(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::TurnCompleted {run_id, ..}) if run_id == &run)).await;
+    world.show();
+    let before_adoption = world.history.len();
+    let gate = std::sync::Arc::new(phase2_world::RequestGate::default());
+    *world
+        .recorder
+        .as_ref()
+        .unwrap()
+        .next_request_gate
+        .lock()
+        .unwrap() = Some(gate.clone());
+    world.push_logs('a');
+    world.click(PullRequestAction::SendToAgent {
+        thread_id: THREAD.into(),
+    });
+    let id = world.delivered().await;
+    gate.entered.notified().await;
+    let committed = database(&world).snapshot_bundle(&world.run).unwrap();
+    persist_range(&world, prefix..before_adoption);
+    let next = before_adoption;
+    // The raw log horizon also includes a local row that the feed deliberately skips.
+    // Catch-up must account for scanned IDs, not just IDs of foreign events shown.
+    world
+        .store
+        .handle()
+        .append_event(
+            Some("late-observer"),
+            &event_bus::Event::new(LifecycleEvent::TurnCompleted {
+                run_id: "already-displayed-local-run".into(),
+                context_len: 1,
+            }),
+        )
+        .unwrap();
+    std::fs::write(path, serde_json::to_vec(world.window.sidebar()).unwrap()).unwrap();
+    follower.poll_shared_feed();
+    follower.settle_body_rows();
+    follower
+        .switch_thread(workspace_ui::ThreadId::new(THREAD))
+        .unwrap();
+    assert_eq!(
+        cards_of(&follower),
+        [(id.clone(), true)],
+        "a commit-only tail is recovered when the feed catches up"
+    );
+    let entries = follower.transcript().entries();
+    let card = entries
+        .iter()
+        .position(|entry| matches!(entry, TranscriptEntry::HarnessNotice { .. }))
+        .unwrap();
+    assert!(entries[..card].iter().any(|entry| matches!(entry, TranscriptEntry::Message {text, ..} if text.inline() == Some("reply-2"))), "the newer pre-adoption reply must precede the card even across the reread horizon");
+    assert_eq!(
+        database(&world).snapshot_bundle(&world.run).unwrap(),
+        committed
+    );
+    gate.release.notify_one();
+    world.idle().await;
+    world.until(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::TurnCompleted {run_id, ..}) if run_id == &run)).await;
+    world.show();
+    persist_since(&world, next);
+    follower.poll_shared_feed();
+    follower.settle_body_rows();
+    assert_eq!(cards_of(&follower), [(id, true)]);
+    let entries = follower.transcript().entries();
+    let card = entries
+        .iter()
+        .position(|entry| matches!(entry, TranscriptEntry::HarnessNotice { .. }))
+        .unwrap();
+    assert!(entries[card+1..].iter().any(|entry| matches!(entry, TranscriptEntry::Message {text, ..} if text.inline() == Some("reply-3"))));
+    world.shutdown();
+}
+
+// Parent and pre/post-adoption forks/rewinds become known in one sidebar import.
+// The inherited prefix cannot be seeded until the parent's worker replay reaches it.
+#[tokio::test]
+async fn late_parent_and_branches_inherit_cards_at_their_turn_boundaries() {
+    let mut world = World::recorded().await;
+    let failing = world.failing('a');
+    world.link(failing).await;
+    world.push_logs('a');
+    world.click(PullRequestAction::SendToAgent {
+        thread_id: THREAD.into(),
+    });
+    let id = world.delivered().await;
+    world.idle().await;
+    let run = world.run.clone();
+    world.until(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::TurnCompleted {run_id, ..}) if run_id == &run)).await;
+    world.show();
+    persist_since(&world, 0);
+    let mut producer = restored(&world);
+    let turns: Vec<_> = producer
+        .transcript()
+        .visible_entry_ids()
+        .filter(|entry| producer.transcript().fork_point(*entry).is_some())
+        .collect();
+    assert_eq!(turns.len(), 2);
+    let source = workspace_ui::ThreadId::new(THREAD);
+    let mut expected = Vec::new();
+    for (point, has_card) in [(turns[0], false), (turns[1], true)] {
+        producer.switch_version(source.clone()).unwrap();
+        producer.fork_at_turn(source.clone(), point).unwrap();
+        expected.push((producer.sidebar().active_thread.clone().unwrap(), has_card));
+        producer.switch_version(source.clone()).unwrap();
+        producer.rewind_to_turn(source.clone(), point).unwrap();
+        expected.push((producer.sidebar().active_thread.clone().unwrap(), has_card));
+    }
+    let (mut follower, path) = late_follower(&world);
+    std::fs::write(path, serde_json::to_vec(producer.sidebar()).unwrap()).unwrap();
+    follower.poll_shared_feed();
+    follower.settle_body_rows();
+    for (thread, has_card) in expected {
+        follower.switch_version(thread.clone()).unwrap();
+        let wanted = if has_card {
+            vec![(id.clone(), true)]
+        } else {
+            vec![]
+        };
+        assert_eq!(
+            cards_of(&follower),
+            wanted,
+            "late branch {thread} must inherit exactly its prefix"
+        );
+    }
     world.shutdown();
 }

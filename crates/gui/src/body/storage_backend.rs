@@ -84,8 +84,8 @@ impl BodyBackend for StorageBodies {
     fn read_harness_notices(
         &self,
         runs: &[String],
-    ) -> Result<Vec<storage::AdoptedHarnessNotice>, BodyError> {
-        self.with_db(|db| db.adopted_harness_notices(Some(runs)))
+    ) -> Result<storage::HarnessNoticeSnapshot, BodyError> {
+        self.with_db(|db| db.adopted_harness_notice_snapshot(Some(runs)))
     }
 
     fn read_rows(

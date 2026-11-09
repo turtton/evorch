@@ -366,6 +366,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut replayed_to = scan_through;
         let mut completed_since_request = std::collections::BTreeMap::new();
         let mut snapshot_error = None;
+        self.shared_feed.harness = super::harness_recovery::HarnessReplay::default();
         let mut harness = super::harness_recovery::HarnessReplay::load(db)?;
         let mut parts = crate::body::DeferredPartAssembler::new();
         source.scan(scan_through, &mut |row| {
@@ -378,13 +379,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     if let Some(at) = failure.wall_clock {
                         while messages.peek().is_some_and(|message| message.at <= at) {
                             if let Some(message) = messages.next() {
-                                harness.show_through(&mut self.transcripts, Some(message.at));
+                                harness.show_through(&mut self.transcripts, message.at);
                                 self.restore_user_message(message);
                             }
                         }
                     }
                     if let Some(at) = failure.wall_clock {
-                        harness.show_through(&mut self.transcripts, Some(at));
+                        harness.show_through(&mut self.transcripts, at);
                     }
                     parts.interrupt(failure.run_id.as_deref());
                     self.show_unreadable_event(&failure, &mut unreadable);
@@ -407,7 +408,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .is_some_and(|message| message.at <= event.meta.wall_clock)
                 {
                     if let Some(message) = messages.next() {
-                        harness.show_through(&mut self.transcripts, Some(message.at));
+                        harness.show_through(&mut self.transcripts, message.at);
                         self.restore_user_message(message);
                     }
                 }
@@ -421,7 +422,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     deferred.map_or(0, crate::body::BodyText::byte_len),
                 );
                 self.transcripts.select_thread(None);
-                harness.show_through(&mut self.transcripts, Some(event.meta.wall_clock));
+                harness.show_through(&mut self.transcripts, event.meta.wall_clock);
                 self.transcripts.set_source(Some((
                     assembled.first_id.unwrap_or(assembled.id),
                     assembled.id,
@@ -521,10 +522,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.apply_receipts(&db.host_input_receipts(&ids)?, true);
         self.rebuild_delivery_rows();
         for message in messages {
-            harness.show_through(&mut self.transcripts, Some(message.at));
+            harness.show_message_through(&mut self.transcripts, message.at, scan_through);
             self.restore_user_message(message);
         }
-        harness.show_through(&mut self.transcripts, None);
+        harness.show_tail_through(&mut self.transcripts, scan_through);
+        self.shared_feed.harness.extend(harness);
         self.transcripts.finish_history();
         self.seed_pending_question_notifications();
         self.telemetry.finish_history();

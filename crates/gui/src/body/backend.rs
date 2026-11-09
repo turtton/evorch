@@ -75,8 +75,8 @@ pub trait BodyBackend: Send + Sync {
     fn read_harness_notices(
         &self,
         _runs: &[String],
-    ) -> Result<Vec<storage::AdoptedHarnessNotice>, BodyError> {
-        Ok(Vec::new())
+    ) -> Result<storage::HarnessNoticeSnapshot, BodyError> {
+        Ok(storage::HarnessNoticeSnapshot::default())
     }
 
     /// Reads the events concerning `runs` with `after < id <= through` as history

@@ -950,7 +950,7 @@ impl Shared {
     }
 
     fn read_rows(&self, request: RowsRequest) {
-        let mut harness_notices = Vec::new();
+        let mut harness_notices = storage::HarnessNoticeSnapshot::default();
         let outcome = self
             .backend
             .read_rows(&request.runs, request.after, request.through, &self.meter)

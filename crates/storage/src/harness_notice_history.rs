@@ -16,7 +16,33 @@ pub struct AdoptedHarnessNotice {
     pub notice: PrNotice,
 }
 
+/// Adoption evidence and the event-log horizon observed in the same read transaction.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HarnessNoticeSnapshot {
+    pub through_event: i64,
+    pub notices: Vec<AdoptedHarnessNotice>,
+}
+
 impl Database {
+    /// Read adoption evidence with its log horizon so a bounded display replay can
+    /// defer its tail until following has caught up, including skipped local rows.
+    ///
+    /// # Errors
+    /// Returns storage read/decoding errors.
+    pub fn adopted_harness_notice_snapshot(
+        &self,
+        run_ids: Option<&[String]>,
+    ) -> Result<HarnessNoticeSnapshot, StorageError> {
+        crate::repo::run_messages::read_snapshot(&self.conn, || {
+            let through_event = self.last_event_id()?;
+            let notices = self.adopted_harness_notices(run_ids)?;
+            Ok(HarnessNoticeSnapshot {
+                through_event,
+                notices,
+            })
+        })
+    }
+
     /// Committed harness inputs, ordered as host input replay is ordered. This reads
     /// snapshots only for runs with harness receipts; ordinary histories pay no
     /// snapshot/body reads. `None` selects all receipt runs; a supplied list restricts

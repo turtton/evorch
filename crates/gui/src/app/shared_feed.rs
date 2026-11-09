@@ -27,6 +27,9 @@ pub(super) enum SharedFeed {
 
 #[derive(Default)]
 pub(super) struct SharedFeedState {
+    pub harness: super::harness_recovery::HarnessReplay,
+    /// Raw log progress, including local rows excluded from the foreign event list.
+    pub scanned_through: i64,
     pub feed: Option<SharedFeed>,
     /// Response slices may span feed batches or a restart's replay boundary.
     pub parts: event_bus::MessagePartAssembler,
@@ -154,6 +157,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     /// Sidebar first, so a thread is known before its events arrive; then the events.
     fn apply_shared_batch(&mut self, batch: FeedBatch) {
+        if let Some(through) = batch.scanned_through {
+            self.shared_feed.scanned_through = self.shared_feed.scanned_through.max(through);
+        }
         let (stamp_changed, pending) = {
             let shared = self.shared_sidebar.borrow();
             (
@@ -219,6 +225,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.shared_feed.blocked_since = None;
             self.fold_shared_failures(Some(next_id));
             if let Some(fed) = self.shared_feed.pending.pop_front() {
+                self.shared_feed
+                    .harness
+                    .show_through(&mut self.transcripts, fed.event.meta.wall_clock);
                 self.transcripts.set_source(Some((fed.id, fed.id)));
                 self.fold_shared_event(&fed.event);
                 self.transcripts.set_source(None);
@@ -227,6 +236,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         if self.shared_feed.pending.is_empty() && self.shared_feed.rehydrating.is_empty() {
             self.fold_shared_failures(None);
+            self.shared_feed.harness.show_tail_through(
+                &mut self.transcripts,
+                self.shared_feed
+                    .scanned_through
+                    .max(self.shown_through_event),
+            );
         }
         self.transcripts.set_foreign_scope(outer);
         self.publish_shown_through();
@@ -245,6 +260,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 break;
             }
             let failure = entry.remove();
+            if let Some(at) = failure.wall_clock {
+                self.shared_feed
+                    .harness
+                    .show_through(&mut self.transcripts, at);
+            }
             // What the run was streaming cannot continue across the gap, as in
             // a restart's replay: the next slice would be the rest of nothing.
             if let Some(run) = &failure.run_id {

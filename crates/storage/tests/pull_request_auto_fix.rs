@@ -1208,6 +1208,20 @@ fn harness_history_requires_verified_native_provenance_and_a_receipt() {
     assert_eq!(cards[0].notice.notice_id, notice.notice_id);
     assert_eq!(cards[0].ordinal, 0);
     assert_eq!(cards[0].adopted_at_ns, 12);
+    let horizon = db.last_event_id().unwrap();
+    f.h()
+        .append_event(
+            Some("observer"),
+            &event_bus::Event::new(event_bus::LifecycleEvent::TurnCompleted {
+                run_id: "local-row".into(),
+                context_len: 1,
+            }),
+        )
+        .unwrap();
+    let evidence = db.adopted_harness_notice_snapshot(None).unwrap();
+    assert!(evidence.through_event > horizon);
+    assert_eq!(evidence.through_event, db.last_event_id().unwrap());
+    assert_eq!(evidence.notices, cards);
     assert!(
         db.adopted_harness_notices(Some(&["other-run".into()]))
             .unwrap()
