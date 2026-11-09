@@ -94,20 +94,7 @@ impl RuntimeCommandSink {
     /// handle the runtime's recovery worker starts; without one delivery stays unbound and
     /// questions keep going to the user.
     pub fn with_lane_delivery(self) -> Self {
-        {
-            let service = self.host.service();
-            let host = Arc::new(lane_host::GuiLaneDeliveryHost::new(
-                service.runtime().downgrade(),
-                service.ownership().cloned(),
-                service.lane_bindings(),
-                service.memory_config().cloned(),
-                service.team_writer().cloned(),
-            ));
-            service.publish_lane_bindings();
-            let _guard = service.handle().enter();
-            // The worker keeps running without its handle and holds the runtime weakly.
-            drop(service.runtime().bind_lane_delivery_host(host));
-        }
+        self.host.service().bind_lane_delivery();
         self
     }
 

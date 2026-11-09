@@ -54,7 +54,7 @@ pub const WORKER_TOOLS: &[&str] = &[
     "send",
     "wait_reply",
     "inbox",
-    "escalate",
+    "handoff_to_lane",
     "run_js",
     "working_note_write",
     "working_note_read",

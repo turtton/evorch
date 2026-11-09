@@ -193,6 +193,7 @@ pub fn commands() -> Vec<Command> {
             decision: ApprovalDecision::Deny,
         }),
         Command::SetAgentWebToolsEnabled(SetAgentWebToolsEnabled { enabled: true }),
+        Command::ManageLane(workbench_protocol::lane_management::ManageLane { request: serde_json::from_value(serde_json::json!({"operation_id":"manage-1","lane_id":"lane-1","expected_management_revision":"1","action":{"type":"set_policy","payload":{"policy":"summary"}}})).unwrap(), expected_family_revision: None }),
     ]
 }
 
@@ -221,7 +222,7 @@ pub fn pending() -> PendingQuery {
 
 /// One sample per `Query` variant, in `Query::TYPES` order.
 pub fn queries() -> Vec<Query> {
-    vec![
+    let mut values = vec![
         Query::GetCoreStatus,
         Query::ListProjects(page_req()),
         Query::ListThreads(ListThreads {
@@ -264,7 +265,11 @@ pub fn queries() -> Vec<Query> {
             snapshot_id: SnapshotId::new("snap-1").unwrap(),
             page: page_req(),
         }),
-    ]
+    ];
+    values.push(Query::GetLaneManagement {
+        lane_id: workbench_protocol::lane_attention::LaneId::new("lane-1").unwrap(),
+    });
+    values
 }
 
 pub fn controls() -> Vec<Control> {
@@ -373,6 +378,7 @@ pub fn body_ref() -> BodyRef {
 
 pub fn command_reply() -> CommandReply {
     CommandReply {
+        lane_management: None,
         disposition: CommandDisposition::Accepted,
         submission_id: Some(SubmissionId::new("sub-a").unwrap()),
         run_id: Some(run()),
@@ -425,6 +431,15 @@ pub fn error() -> WorkbenchError {
 
 pub fn query_replies() -> Vec<QueryReply> {
     vec![
+        QueryReply::LaneManagement(workbench_protocol::lane_management::LaneManagementState {
+            lane_id: workbench_protocol::lane_attention::LaneId::new("lane-1").unwrap(),
+            thread_id: thread(),
+            lead_thread_id: None,
+            policy: workbench_protocol::lane_management::LaneManagementPolicy::Detached,
+            management_revision: Revision(2),
+            detached_since_management_revision: Some(Revision(2)),
+            family_revision: None,
+        }),
         QueryReply::CoreStatus(status()),
         QueryReply::Projects(page(vec![ProjectSummary {
             id: project(),

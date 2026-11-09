@@ -58,9 +58,15 @@ impl ExecutionPolicy {
                     && config.lane_scope.is_none()
                     && self.role_name == Role::Orchestrator.name()
                 {
-                    self.capabilities
-                        .allowed_tools
-                        .extend(["lane_verify", "lane_close"].map(str::to_owned));
+                    self.capabilities.allowed_tools.extend(
+                        [
+                            "lane_verify",
+                            "lane_close",
+                            "lane_set_policy",
+                            "lane_detach",
+                        ]
+                        .map(str::to_owned),
+                    );
                 }
                 if is_root && self.role_name == Role::Orchestrator.name() {
                     let lane_tools: &[&str] = if config.lane_scope.is_some() {
@@ -504,6 +510,8 @@ mod tests {
                         "lane_answer",
                         "lane_verify",
                         "lane_close",
+                        "lane_set_policy",
+                        "lane_detach",
                     ]
                     .map(str::to_owned),
                 );
@@ -762,7 +770,7 @@ mod tests {
     #[test]
     fn worker_authorizes_escalate_and_other_roles_deny_it() {
         assert_eq!(
-            ExecutionPolicy::for_role(Role::Worker).authorize("escalate"),
+            ExecutionPolicy::for_role(Role::Worker).authorize("handoff_to_lane"),
             Ok(())
         );
 
@@ -773,7 +781,7 @@ mod tests {
             Role::WebResearcher,
         ] {
             assert!(matches!(
-                ExecutionPolicy::for_role(role).authorize("escalate"),
+                ExecutionPolicy::for_role(role).authorize("handoff_to_lane"),
                 Err(RuntimeError::CapabilityDenied { .. })
             ));
         }
@@ -856,5 +864,36 @@ mod tests {
 
         assert_eq!(policy.role_name, "Reviewer");
         assert_eq!(policy.capabilities, Role::Reviewer.capabilities());
+    }
+}
+
+#[cfg(test)]
+mod lane_management_exposure_tests {
+    use super::*;
+    #[test]
+    fn management_catalog_depends_only_on_role_root_and_immutable_scope() {
+        for role in [
+            Role::Orchestrator,
+            Role::Worker,
+            Role::Reviewer,
+            Role::Planner,
+        ] {
+            for root in [false, true] {
+                for lane in [None, Some(event_bus::LaneScope::Lane)] {
+                    let config = crate::RunConfig {
+                        lane_scope: lane,
+                        ..Default::default()
+                    };
+                    let policy = ExecutionPolicy::for_role(role).for_run_config(&config, root);
+                    for name in ["lane_set_policy", "lane_detach"] {
+                        assert_eq!(
+                            policy.authorize(name).is_ok(),
+                            role == Role::Orchestrator && root && lane.is_none()
+                        );
+                    }
+                    assert!(policy.authorize("lane_reattach").is_err());
+                }
+            }
+        }
     }
 }

@@ -40,6 +40,35 @@ pub struct LaneManagementRequest {
     pub expected_management_revision: Revision,
     pub action: LaneManagementAction,
 }
+/// A human management intent. Reattach is the sidebar D&D path and requires
+/// the independent family's revision observed when the drag began.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManageLane {
+    pub request: LaneManagementRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_family_revision: Option<LaneFamilyRevision>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneFamilyRevision {
+    pub key: ThreadId,
+    pub membership_epoch: Revision,
+    pub archive_revision: Revision,
+    pub pin_revision: Revision,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneManagementState {
+    pub lane_id: LaneId,
+    pub thread_id: ThreadId,
+    pub lead_thread_id: Option<ThreadId>,
+    pub policy: LaneManagementPolicy,
+    pub management_revision: Revision,
+    pub detached_since_management_revision: Option<Revision>,
+    /// Available for a detached lane when authoritative family state is readable.
+    pub family_revision: Option<LaneFamilyRevision>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",

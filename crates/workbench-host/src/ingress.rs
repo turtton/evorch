@@ -35,6 +35,7 @@ use crate::receipts::{Receipts, SubmissionRecord};
 /// The command service together with what the host remembers about commands.
 pub struct CommandHost {
     service: CommandService,
+    pub(crate) lane_sidebar_path: Option<std::path::PathBuf>,
     receipts: Receipts,
     projects: Box<dyn ProjectDirectory>,
     projection: std::sync::Arc<crate::projection::Projection>,
@@ -97,6 +98,7 @@ impl CommandHost {
         );
         Self {
             service,
+            lane_sidebar_path: None,
             projection,
             receipts: Receipts::default(),
             projects: Box::new(StaticProjects::default()),
@@ -150,6 +152,7 @@ impl CommandHost {
         provenance.validate()?;
         command.validate()?;
         match command {
+            Command::ManageLane(input) => self.manage_lane_command(input, &provenance),
             Command::SendChat(send) => self.send_chat(&send, &provenance),
             Command::WithdrawFollowUp(withdraw) => self.withdraw_follow_up(&withdraw),
             Command::DecideToolApproval(decide) => self.decide_approval(&decide, &provenance),
@@ -228,6 +231,9 @@ impl CommandHost {
         query: &Query,
     ) -> Result<QueryReply, WorkbenchError> {
         match query {
+            Query::GetLaneManagement { lane_id } => Ok(QueryReply::LaneManagement(
+                self.lane_management_state(lane_id.as_str())?,
+            )),
             Query::GetCommandReceipt { request_id } => Ok(QueryReply::CommandReceipt(
                 self.command_receipt(session, request_id)?,
             )),
@@ -366,6 +372,7 @@ impl CommandHost {
             tracing::warn!(code = ?error.code, "approval resolved; projection refresh failed");
         }
         Ok(CommandReply {
+            lane_management: None,
             disposition: CommandDisposition::Accepted,
             submission_id: None,
             run_id: None,
@@ -726,6 +733,7 @@ impl CommandHost {
         let permit = self.service.authorize(&command).map_err(refusal_error)?;
         match self.execute(command, permit, provenance) {
             Executed::Duplicate { run_id, .. } => Ok(CommandReply {
+                lane_management: None,
                 disposition: CommandDisposition::AlreadyApplied,
                 submission_id: Some(send.submission_id.clone()),
                 run_id: run_id.and_then(|run| workbench_protocol::ids::RunId::new(run).ok()),
@@ -819,7 +827,8 @@ impl CommandHost {
             Command::SetAgentWebToolsEnabled(set) => HostCommand::SetWebToolsEnabled {
                 enabled: set.enabled,
             },
-            Command::SendChat(_)
+            Command::ManageLane(_)
+            | Command::SendChat(_)
             | Command::WithdrawFollowUp(_)
             | Command::DecideToolApproval(_) => {
                 unreachable!("handled before translation")
@@ -882,6 +891,7 @@ impl CommandHost {
             .withdraw_follow_up(thread, withdraw.submission_id.as_str())
         {
             Ok(()) => Ok(CommandReply {
+                lane_management: None,
                 disposition: CommandDisposition::Accepted,
                 submission_id: Some(withdraw.submission_id.clone()),
                 run_id: Some(withdraw.run.clone()),
@@ -948,6 +958,7 @@ fn reply_from_events(
     submission_id: Option<SubmissionId>,
 ) -> Result<CommandReply, WorkbenchError> {
     let mut reply = CommandReply {
+        lane_management: None,
         disposition: CommandDisposition::Accepted,
         submission_id,
         run_id: None,

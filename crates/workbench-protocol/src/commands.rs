@@ -211,6 +211,7 @@ pub struct SetAgentWebToolsEnabled {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum Command {
+    ManageLane(crate::lane_management::ManageLane),
     SendChat(SendChat),
     ContinueChat(ContinueChat),
     CompactChat(ThreadTarget),
@@ -228,7 +229,8 @@ pub enum Command {
 
 impl Command {
     /// Wire names of every variant, for rejecting unknown ones precisely.
-    pub const TYPES: [&'static str; 13] = [
+    pub const TYPES: [&'static str; 14] = [
+        "manage_lane",
         "send_chat",
         "continue_chat",
         "compact_chat",
@@ -257,6 +259,7 @@ impl Command {
     /// Check every string, collection and cross-field rule.
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
+            Self::ManageLane(_) => Ok(()),
             Self::SendChat(c) => c.validate(),
             Self::ContinueChat(c) => c
                 .model_preference
@@ -356,6 +359,8 @@ pub enum CommandDisposition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_management: Option<Box<crate::lane_management::LaneManagementResult>>,
     pub disposition: CommandDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submission_id: Option<SubmissionId>,

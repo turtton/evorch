@@ -1,4 +1,4 @@
-//! Real provider wire + SQLite. Management ingress is called directly (3E owns tools).
+//! Public management tools on real provider wire + SQLite; reattach stays human-only.
 use super::*;
 use event_bus::lane::QuestionResponder;
 use runtime::lane_management::*;
@@ -88,26 +88,26 @@ async fn same_run_policy_roundtrip_detach_and_reattach_preserve_brief_question_a
         original.responder,
         Some(QuestionResponder::Lead { .. })
     ));
-    let ctx = LaneManagementContext::Run(lead);
-    for (revision, policy) in [
-        (1, ManagedLanePolicy::Summary),
-        (2, ManagedLanePolicy::Attached),
-    ] {
-        let changed = h
-            .runtime
-            .set_lane_policy(
-                ctx,
-                request(
-                    &record.lane_id,
-                    revision,
-                    LaneManagementAction::SetPolicy { policy },
+    for (revision, policy) in [(1, "summary"), (2, "attached")] {
+        let call_id = format!("policy-{revision}");
+        input(
+            &mut h,
+            lead,
+            "change policy using the public tool",
+            vec![
+                call(
+                    &call_id,
+                    "lane_set_policy",
+                    json!({"operation_id":format!("policy-{revision}"),
+                "lane_id":record.lane_id,"expected_management_revision":revision,"policy":policy}),
                 ),
-            )
-            .unwrap();
-        assert_eq!(
-            changed.current_lane.unwrap().root_run_id,
-            Some(lane.to_string())
-        );
+                text_response("policy changed"),
+            ],
+            &mut events,
+        )
+        .await;
+        let changed = result(&h, &call_id);
+        assert_eq!(changed["current_lane"]["root_run_id"], lane.to_string());
         input(
             &mut h,
             lane,
@@ -123,12 +123,14 @@ async fn same_run_policy_roundtrip_detach_and_reattach_preserve_brief_question_a
     let routed = h.runtime.user_question(&qid).unwrap().unwrap();
     assert_eq!(routed.responder, Some(QuestionResponder::User));
     assert_eq!((routed.id, routed.run_id), (original.id, original.run_id));
-    h.runtime
-        .detach_lane(
-            ctx,
-            request(&record.lane_id, 3, LaneManagementAction::Detach),
-        )
-        .unwrap();
+    input(&mut h, lead, "detach using the public tool", vec![
+        call("tool-detach", "lane_detach", json!({"operation_id":"tool-detach", "lane_id":record.lane_id, "expected_management_revision":3})),
+        text_response("detached"),
+    ], &mut events).await;
+    assert_eq!(
+        result(&h, "tool-detach")["current_lane"]["policy"],
+        "detached"
+    );
     input(
         &mut h,
         lane,
@@ -299,5 +301,104 @@ async fn same_run_policy_roundtrip_detach_and_reattach_preserve_brief_question_a
                 "sent question/tool result is immutable despite rerouting"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn public_management_tools_reject_lane_worker_child_and_non_lead_actors() {
+    let mut h = harness(vec![text_response("lead idle")], 1_000_000);
+    let config = storage::StorageConfig {
+        db_path: h._directory.path().join("actors.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    h.runtime = h
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, db.handle()).unwrap());
+    let config_run = RunConfig {
+        conversation: true,
+        interactive: true,
+        keep_alive: true,
+        ..Default::default()
+    };
+    let lead = h
+        .runtime
+        .delegate_chat(
+            "actor-lead",
+            Role::Orchestrator,
+            "ACTOR-LEAD".into(),
+            config_run.clone(),
+        )
+        .unwrap();
+    let mut events = through_phase(&mut h.receiver, lead, AgentRunPhase::Waiting).await;
+    let lane = open(&mut h, lead, "actor-open", "actor lane", &mut events).await;
+    let record = db
+        .handle()
+        .lane_by_thread(&format!("lane-thread-{lane}"))
+        .unwrap()
+        .unwrap();
+    let args = |id: &str| json!({"operation_id":id,"lane_id":record.lane_id,"expected_management_revision":1,"policy":"summary"});
+    input(
+        &mut h,
+        lane,
+        "lane cannot manage itself",
+        vec![
+            call("lane-self", "lane_set_policy", args("lane-self")),
+            text_response("lane denied"),
+        ],
+        &mut events,
+    )
+    .await;
+    h.mock.enqueue([
+        call("worker", "lane_set_policy", args("worker")),
+        text_response("worker denied"),
+    ]);
+    let worker = h
+        .runtime
+        .delegate_chat(
+            "actor-worker",
+            Role::Worker,
+            "ACTOR-WORKER".into(),
+            config_run.clone(),
+        )
+        .unwrap();
+    events.extend(through_phase(&mut h.receiver, worker, AgentRunPhase::Waiting).await);
+    h.mock.enqueue([
+        call("child", "lane_set_policy", args("child")),
+        text_response("child denied"),
+    ]);
+    let child = h
+        .runtime
+        .delegate_background_as_child(lane, Role::Worker, "ACTOR-CHILD", config_run.clone())
+        .unwrap();
+    events.extend(through_phase(&mut h.receiver, child, AgentRunPhase::Waiting).await);
+    h.mock.enqueue([
+        call("other-root", "lane_set_policy", args("other-root")),
+        text_response("non-lead denied"),
+    ]);
+    let other = h
+        .runtime
+        .delegate_chat(
+            "actor-other",
+            Role::Orchestrator,
+            "ACTOR-OTHER".into(),
+            config_run,
+        )
+        .unwrap();
+    events.extend(through_phase(&mut h.receiver, other, AgentRunPhase::Waiting).await);
+    for id in ["lane-self", "worker", "child", "other-root"] {
+        assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(event_bus::ToolEvent::ToolCompleted { call_id, is_error:true, .. }) if call_id == id)), "{id} must fail at the public execution boundary");
+    }
+    assert_eq!(
+        db.handle()
+            .lane(&record.lane_id)
+            .unwrap()
+            .unwrap()
+            .management_revision,
+        1
+    );
+    for run in [child, worker, other, lane, lead] {
+        h.runtime.cancel(run).unwrap();
+        h.runtime.wait(run).await.unwrap();
     }
 }

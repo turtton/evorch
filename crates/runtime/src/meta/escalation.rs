@@ -1,4 +1,4 @@
-//! 昇格系メタ操作 (escalate) のハンドラ。
+//! 昇格系メタ操作 (handoff_to_lane) のハンドラ。
 //!
 //! Direct run が単独での解消を断念して Orchestrator root run へ昇格する
 //! ための引継ぎメモ ([`EscalationMemo`]) を凍結・記録し、run を終端指示
@@ -16,7 +16,7 @@ use crate::escalation::EscalationMemo;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct EscalateArgs {
+pub(super) struct HandoffToLaneArgs {
     original_request: String,
     escalation_reason: String,
     #[serde(default)]
@@ -31,7 +31,7 @@ pub(super) struct EscalateArgs {
     suggested_next: String,
 }
 
-/// escalate meta-op: メモを凍結・記録して run をエスカレーション終端させる。
+/// handoff_to_lane meta-op: メモを凍結・記録して run をエスカレーション終端させる。
 ///
 /// fail-closed: 未知フィールド・必須フィールド欠落・空の original_request /
 /// escalation_reason はいずれも error 結果となり run は継続する。
@@ -41,15 +41,15 @@ pub(super) struct EscalateArgs {
 /// メモの凍結順序: 終端指示を返す前に [`AgentRuntime::record_escalation_memo`]
 /// で記録を先に完了させる。run 終端後もメモが確実に観測できることを
 /// 記録時点で保証するためである。
-pub(super) async fn escalate(
+pub(super) async fn handoff_to_lane(
     state: &LoopState,
     runtime: &crate::AgentRuntime,
     input: serde_json::Value,
 ) -> DispatchResult {
-    if state.task.parent.is_some() {
-        return error("escalate is only available to root Worker runs");
+    if state.task.parent.is_some() || state.task.role != agents::Role::Worker {
+        return error("handoff_to_lane is only available to root Worker runs");
     }
-    let args = match parse::<EscalateArgs>(input) {
+    let args = match parse::<HandoffToLaneArgs>(input) {
         Ok(args) => args,
         Err(message) => return error(message),
     };

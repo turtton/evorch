@@ -409,7 +409,7 @@ async fn todo_only_escalation_moves_list_and_conversation_without_granting_sourc
             ThreadTodoStatus::InProgress,
         )]),
         Step::Tools(vec![(
-            "escalate",
+            "handoff_to_lane",
             json!({"original_request":"Research","escalation_reason":"Parallel investigation"}),
         )]),
         Step::Hold(entered.clone(), release.clone()),

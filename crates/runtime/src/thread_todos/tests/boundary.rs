@@ -480,7 +480,7 @@ async fn a_successful_escalation_moves_the_list_without_marking_or_a_second_even
     let entered = Arc::new(Notify::new());
     let (runtime, _, mut events) = harness(vec![
         write(running_item()),
-        escalation("escalate"),
+        escalation("handoff_to_lane"),
         Step::Hold(entered.clone(), Arc::new(Notify::new())),
     ]);
     let source = start(&runtime, Role::Worker, config(), true);
@@ -525,7 +525,7 @@ async fn a_failed_escalation_keeps_the_list_live_until_operator_stop() {
             entered.clone(),
             release.clone(),
             vec![(
-                "escalate",
+                "handoff_to_lane",
                 json!({"original_request":"Research","escalation_reason":"Parallel investigation"}),
             )],
         ),

@@ -404,7 +404,7 @@ async fn escalate_records_memo_and_terminates_run_done() {
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
             "esc",
-            "escalate",
+            "handoff_to_lane",
             json!({
                 "original_request": "依存関係の更新を Direct run で完了する",
                 "escalation_reason": "編集失敗が連続し単独では解消できない",
@@ -492,12 +492,12 @@ async fn escalate_with_invalid_args_is_rejected_and_run_continues() {
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
             "bad-missing",
-            "escalate",
+            "handoff_to_lane",
             json!({ "original_request": "元の依頼" }),
         )),
         Ok(tool_response(
             "bad-run-id",
-            "escalate",
+            "handoff_to_lane",
             json!({
                 "original_request": "元の依頼",
                 "escalation_reason": "理由",
@@ -506,7 +506,7 @@ async fn escalate_with_invalid_args_is_rejected_and_run_continues() {
         )),
         Ok(tool_response(
             "bad-empty",
-            "escalate",
+            "handoff_to_lane",
             json!({ "original_request": "元の依頼", "escalation_reason": "" }),
         )),
         Ok(text_response("fallback done", FinishReason::Stop)),
@@ -550,7 +550,7 @@ async fn orchestrator_cannot_escalate() {
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
             "esc-orch",
-            "escalate",
+            "handoff_to_lane",
             json!({ "original_request": "元の依頼", "escalation_reason": "理由" }),
         )),
         Ok(text_response("orchestrator done", FinishReason::Stop)),
@@ -570,7 +570,7 @@ async fn orchestrator_cannot_escalate() {
     let (content, is_error) = tool_result(&observed[1], "esc-orch").expect("escalate result");
     assert!(is_error);
     assert!(
-        content.contains("escalate"),
+        content.contains("handoff_to_lane"),
         "capability 拒否にはツール名が含まれる: {content}"
     );
 }

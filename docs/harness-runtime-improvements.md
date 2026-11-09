@@ -178,9 +178,10 @@ root startup; failed preparation prevents startup (ADR 0027).
 
 ### Escalation conversation and goal ownership
 
-A root Worker escalation starts an Orchestrator in the child conversation
-`escalation-{new_run_id}`. The source conversation retains its Worker root and
-history. The Orchestrator and its delegates belong to the child conversation;
+The public root Worker tool is `handoff_to_lane` (formerly `escalate`). It starts an
+Orchestrator in a detached, independent top-level lane conversation
+`escalation-{new_run_id}`. This origin link does not join retention families. The source conversation retains its Worker root and
+history. The Orchestrator and its delegates belong to the target conversation;
 the source project and transferred workspace remain fixed across UI project
 changes. Runtime prepares the child's ownership permit before starting work.
 History replay reconstructs the conversation without acquiring write authority.
@@ -278,3 +279,33 @@ side effects, malformed schemas, restarts, question races and ownership boundari
 
 No fixed orchestration sequence, polling scheduler, blanket model approval,
 unbounded log retention, provider retry layer, or new task execution engine is added.
+
+### Lane management public ingress (Phase 3E)
+
+- `lane_set_policy` takes `operation_id` (1–256 bytes), `lane_id`,
+  `expected_management_revision` (integer), and `policy` (`attached` or `summary`).
+  `lane_detach` takes the same identity/revision fields, without policy.
+  Only the current lane-external root Orchestrator lead may execute them; the
+  dispatcher supplies the actor. There is no `lane_reattach` tool.
+- The catalog is fixed at run start from role and immutable lane scope, never
+  rebuilt after a policy transition. Detached lane management fails at execution.
+  Older saved tool catalogs (including `escalate`) restore with the current
+  catalog; historical tool calls/results remain unchanged evidence.
+- Protocol `manage_lane` wraps the lane-management request and, for a human
+  sidebar D&D reattach, `expected_family_revision`. The `get_lane_management`
+  query returns current membership and the independent-family revision. Wire
+  revisions are decimal strings. Reattach has no policy argument and starts
+  with `summary`. Only authenticated desktop/web human ingress may reattach.
+- Both desktop and evorch-core call the delivery runtime's clone, sharing its
+  RunStore and completion gate. The ingress must own the lane, current lead,
+  and reattach target; a foreign/missing owner is refused without claiming it.
+  Sidebar pin/archive checks hold its file lock across the SQL commit. The core
+  reads only independent-family state and never rewrites GUI drafts or falsely
+  ACKs projection: pending projection is repaired by the desktop. A successful
+  command is not rolled back by projection failure; identical operation retries
+  replay the commit snapshot. Query current state rather than projecting an old
+  replay result over a newer revision.
+- Handoff parameters retain `original_request`, `escalation_reason`, findings,
+  files_touched, blockers, workspace_state and suggested_next. No destination
+  lead/policy is accepted. Sandbox permission escalation and `escalation_review`
+  are separate and unchanged.

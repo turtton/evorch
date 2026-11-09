@@ -29,7 +29,7 @@ pub struct BaseContextRequest {
     pub load_skills: Vec<String>,
     /// Root conversation worker, as started by the composer's conversation mode.
     pub conversation: bool,
-    /// Delegated by a parent run; child runs never see `escalate`.
+    /// Delegated by a parent run; child runs never see `handoff_to_lane`.
     pub child: bool,
     /// Lessons captured for the project, appended to the first user message.
     pub memory: Option<MemoryBoundary>,
@@ -345,8 +345,8 @@ fn tool_exclusion_reason(
         "Not allowed for this role"
     } else if spec.name == "skill_load" && !skills_configured {
         "No skill registry is connected"
-    } else if spec.name == "escalate" {
-        "Only root runs can escalate"
+    } else if spec.name == "handoff_to_lane" {
+        "Only root Workers can hand off to a lane"
     } else if spec.name == tools::tools::run_js::NAME {
         "run_js is off, or not scoped to this role and category, in the tools settings"
     } else if !web_tools_enabled {

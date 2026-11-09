@@ -346,8 +346,8 @@ async fn escalation_without_a_note_still_exposes_original_source_history() {
     let (_dir, config, storage, _) = storage_fixture();
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
-            "escalate",
-            "escalate",
+            "handoff_to_lane",
+            "handoff_to_lane",
             json!({"original_request":"request", "escalation_reason":"coordination needed"}),
         )),
         Ok(text_response("done", FinishReason::Stop)),

@@ -188,6 +188,7 @@ impl WorkbenchBackend for FakeBackend {
             Some(error) => ReplyResult::Error(error),
             None => ReplyResult::Success(match body {
                 RequestBody::Command(_) => ReplyPayload::Command(CommandReply {
+                    lane_management: None,
                     disposition: CommandDisposition::Accepted,
                     submission_id: None,
                     run_id: None,

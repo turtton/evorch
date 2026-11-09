@@ -110,12 +110,20 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
             "operation_id":"route-1", "action":{"kind":"route_to_user"}
         }),
     );
+    contract::<meta::lane_management::PolicyArgs>(
+        "lane_set_policy",
+        json!({"operation_id":"policy-1","lane_id":"lane","expected_management_revision":1,"policy":"summary"}),
+    );
+    contract::<meta::lane_management::DetachArgs>(
+        "lane_detach",
+        json!({"operation_id":"detach-1","lane_id":"lane","expected_management_revision":1}),
+    );
     contract::<meta::FinishArgs>(
         "finish",
         json!({"result":"Completed, files x, tested y, no open blockers."}),
     );
-    contract::<meta::escalation::EscalateArgs>(
-        "escalate",
+    contract::<meta::escalation::HandoffToLaneArgs>(
+        "handoff_to_lane",
         json!({
             "original_request":"fix bug", "escalation_reason":"requires coordinated work", "findings":["fact"],
             "files_touched":["src/x.rs"], "blockers":["decision"], "workspace_state":"dirty", "suggested_next":"inspect y"

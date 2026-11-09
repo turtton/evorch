@@ -51,5 +51,5 @@ async fn model_receives_only_registered_tools_with_real_schemas() {
     }
     assert!(!specs.iter().any(|spec| spec.name == "shell"));
     assert!(!specs.iter().any(|spec| spec.name == "skill_load"));
-    assert!(specs.iter().any(|spec| spec.name == "escalate"));
+    assert!(specs.iter().any(|spec| spec.name == "handoff_to_lane"));
 }

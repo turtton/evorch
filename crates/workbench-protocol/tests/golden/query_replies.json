@@ -136,6 +136,18 @@
     },
     "type": "input_receipts"
   },
+  "lane_management": {
+    "payload": {
+      "detached_since_management_revision": "2",
+      "family_revision": null,
+      "lane_id": "lane-1",
+      "lead_thread_id": null,
+      "management_revision": "2",
+      "policy": "detached",
+      "thread_id": "thr-1"
+    },
+    "type": "lane_management"
+  },
   "projects": {
     "payload": {
       "items": [

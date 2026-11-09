@@ -1383,7 +1383,7 @@ fn build_workbench(
             RuntimeCommandSink::new(runtime.clone(), handle.clone())
                 .with_web_tools_enabled(composition_config.sandbox.web_tools_enabled)
                 .with_event_bus(Arc::clone(&bus))
-                .with_ownership(ownership)
+                .with_ownership(ownership.clone())
                 .with_memory_storage(storage_config.clone())
                 .with_team_writer(storage.handle())
                 .with_lane_delivery(),
@@ -1429,9 +1429,10 @@ fn build_workbench(
         )
         .with_usage_ledger(storage.handle(), usage_pricing)
         .with_thread_mirror(storage.handle())
-        .with_lane_management_host(Arc::new(gui::runtime_sink::GuiLaneManagementHost::new(
-            runtime.clone(),
-        )))
+        .with_lane_management_host(Arc::new(
+            gui::runtime_sink::GuiLaneManagementHost::new(runtime.clone())
+                .with_ownership(ownership.clone()),
+        ))
         .with_lane_ledger(Arc::new(gui::app::lanes::StorageLaneReader::new(
             storage_config.db_path.clone(),
         )))

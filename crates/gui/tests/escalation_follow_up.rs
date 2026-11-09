@@ -28,7 +28,7 @@ impl AgentModel for EscalatingModel {
             (
                 ContentBlock::ToolUse {
                     id: "escalate-test".into(),
-                    name: "escalate".into(),
+                    name: "handoff_to_lane".into(),
                     input: serde_json::json!({
                         "original_request": "Implement feature", "escalation_reason": "Need coordination",
                         "findings": [], "files_touched": [], "blockers": ["Need review"],

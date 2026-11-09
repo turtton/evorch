@@ -56,6 +56,8 @@ macro_rules! define_meta_ops {
 }
 
 define_meta_ops! {
+    LaneSetPolicy => "lane_set_policy" => super::lane_management::spec => |state, runtime, input| { super::lane_management::manage(state, runtime, "lane_set_policy", input) },
+    LaneDetach => "lane_detach" => super::lane_management::spec => |state, runtime, input| { super::lane_management::manage(state, runtime, "lane_detach", input) },
     LaneVerify => "lane_verify" => lane_verification::spec => |state, runtime, input| { lane_verification::verify(state, runtime, input).await },
     LaneClose => "lane_close" => lane_verification::spec => |state, runtime, input| { lane_verification::close(state, runtime, input).await },
     SubmitLaneVerification => "submit_lane_verification" => lane_verification::spec => |state, runtime, input| { lane_verification::submit(state, runtime, input) },
@@ -119,8 +121,8 @@ define_meta_ops! {
     Inbox => "inbox" => specs::inbox => |state, runtime, input| {
         messaging::inbox(state, runtime, input)
     },
-    Escalate => "escalate" => specs::escalate => |state, runtime, input| {
-        escalation::escalate(state, runtime, input).await
+    HandoffToLane => "handoff_to_lane" => specs::handoff_to_lane => |state, runtime, input| {
+        escalation::handoff_to_lane(state, runtime, input).await
     },
     WorkingNoteWrite => "working_note_write" => specs::working_note_write => |state, runtime, input| {
         ledger::append(state, runtime, input)
