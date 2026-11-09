@@ -98,7 +98,7 @@ fn spec_editor(ui: &mut egui::Ui, id: &str, spec: &mut PreviewSpec) -> bool {
             });
     }
     ui.checkbox(&mut spec.child, "Delegated")
-        .on_hover_text("Started by a parent run; delegated runs cannot escalate");
+        .on_hover_text("Started by a parent run; delegated runs cannot hand off to a lane");
     if spec.role == Role::Worker && !spec.child {
         ui.checkbox(&mut spec.conversation, "Conversation")
             .on_hover_text("Composer conversation mode: a root worker with scoped web access");

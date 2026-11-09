@@ -22,6 +22,9 @@ rustix = { version = "1", features = ["process", "fs"] }
 
 [dev-dependencies]
 mock-openai = { path = "../mock-openai" }
+workbench-host = { path = "../workbench-host", features = ["test-support"] }
+providers = { path = "../providers" }
+async-trait = { workspace = true }
 test-support = { path = "../test-support" }
 sandbox = { path = "../sandbox" }
 tools = { path = "../tools" }
