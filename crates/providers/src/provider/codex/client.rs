@@ -57,6 +57,7 @@ fn run_derived_id(run_id: &str) -> String {
 /// A request that only names the model, for scopes of capabilities without a chat request.
 fn scope_probe(model: &str) -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: model.to_owned(),
         messages: Vec::new(),
@@ -611,6 +612,10 @@ impl CodexClient {
 /// `ProviderAuth` は使用せず、セッションの token bundle から認証します。
 #[async_trait]
 impl ProviderClient for CodexClient {
+    fn supports_tool_choice_none(&self) -> bool {
+        true
+    }
+
     async fn resolve_responses_scope(
         &self,
         _: &ProviderAuth,

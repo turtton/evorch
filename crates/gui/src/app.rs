@@ -7,6 +7,7 @@ mod attention;
 mod auto_grouping;
 pub mod auto_title;
 mod branching;
+pub mod btw;
 mod composer;
 mod composer_draft;
 mod conversation;

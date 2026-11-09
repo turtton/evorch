@@ -63,6 +63,13 @@ pub trait ProviderClient: Send + Sync {
         false
     }
 
+    /// Whether `ToolChoice::None` is honoured on the wire while the tool
+    /// definitions stay in the request. A client that cannot promise this must
+    /// not serve a request that forbids tool calls.
+    fn supports_tool_choice_none(&self) -> bool {
+        false
+    }
+
     /// transport 系失敗の bounded retry 方針 (issue #108、retry 責務は provider 層)。
     fn retry_policy(&self) -> crate::retry::RetryPolicy {
         crate::retry::RetryPolicy::default()
@@ -508,6 +515,7 @@ mod tests {
 
     fn sample_request() -> ChatRequest {
         ChatRequest {
+            tool_choice: None,
             responses_replay: None,
             model: "test-model".to_string(),
             messages: vec![Message {

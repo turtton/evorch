@@ -1294,6 +1294,9 @@ pub enum RequestPurpose {
     UserSimulation,
     /// The model grading or comparing evaluation results.
     Judging,
+    /// A one-shot `/btw` side question answered from a run's frozen context.
+    /// It shares the run's cache affinity but never joins its history.
+    Btw,
 }
 
 impl RequestPurpose {
@@ -1309,6 +1312,7 @@ impl RequestPurpose {
             Self::ImageGeneration => "image_generation",
             Self::UserSimulation => "user_simulation",
             Self::Judging => "judging",
+            Self::Btw => "btw",
         }
     }
 }
@@ -3592,6 +3596,7 @@ mod tests {
             RequestPurpose::ImageGeneration,
             RequestPurpose::UserSimulation,
             RequestPurpose::Judging,
+            RequestPurpose::Btw,
         ];
 
         for purpose in purposes {
@@ -3604,5 +3609,6 @@ mod tests {
         assert_eq!(RequestPurpose::ImageGeneration.as_str(), "image_generation");
         assert_eq!(RequestPurpose::UserSimulation.as_str(), "user_simulation");
         assert_eq!(RequestPurpose::Judging.as_str(), "judging");
+        assert_eq!(RequestPurpose::Btw.as_str(), "btw");
     }
 }

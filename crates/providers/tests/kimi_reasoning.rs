@@ -15,6 +15,7 @@ use wiremock::{
 
 fn request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "cli-proxy-api/kimi-k3".into(),
         messages: Vec::new(),

@@ -30,6 +30,8 @@ pub enum ConversationFocus {
 
 /// フレームごとにイベント・レイアウト・描画を統合する状態です。
 pub struct WorkbenchState<S> {
+    pub(super) btw: Option<super::btw::BtwWindow>,
+    pub(super) btw_next_id: u64,
     pub(super) auto_title_jobs: Vec<super::auto_title::Job>,
     pub(super) title_generator: Option<Arc<super::auto_title::TitleGenerator>>,
     pub(super) attention_acks: BTreeMap<(PanelId, String), super::attention::ack::AttentionAck>,
@@ -260,6 +262,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             draft_dirty_at: Default::default(),
             #[cfg(test)]
             sidebar_write_count: Default::default(),
+            btw: None,
+            btw_next_id: 0,
             composer_drafts: Vec::new(),
             home_dir: std::env::home_dir(),
             folder_picker: crate::model::folder_picker::FolderPickerModel::default(),

@@ -283,6 +283,7 @@ impl AgentRuntime {
                     }
             );
             let invocation = crate::AgentInvocationContext {
+                btw: None,
                 attempts: None,
                 turn: None,
                 run_id: run_id.to_string(),

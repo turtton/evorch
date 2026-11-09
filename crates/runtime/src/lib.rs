@@ -19,6 +19,7 @@ pub mod allowed_directories;
 pub mod allowed_instructions;
 pub mod artifacts;
 pub mod base_context;
+pub mod btw;
 pub mod budget_tracker;
 pub(crate) mod compaction;
 pub mod compose;

@@ -67,6 +67,7 @@ worker = [{{ profile = "live" }}]
     let response = model
         .complete(
             &AgentInvocationContext {
+                btw: None,
                 attempts: None,
                 turn: None,
                 category: None,

@@ -18,5 +18,5 @@ pub use stream::AnthropicStreamInterpreter;
 pub(crate) use types::CacheControl;
 pub use types::{
     WireContentBlock, WireMessage, WireMessagesRequest, WireMessagesResponse,
-    WireOutputTokensDetails, WireRole, WireTool, WireToolResultContent, WireUsage,
+    WireOutputTokensDetails, WireRole, WireTool, WireToolChoice, WireToolResultContent, WireUsage,
 };

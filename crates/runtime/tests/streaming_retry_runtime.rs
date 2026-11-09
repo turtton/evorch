@@ -36,6 +36,7 @@ impl AgentModel for HttpModel {
             .send_streaming(
                 &ProviderAuth::new("test"),
                 &ChatRequest {
+                    tool_choice: None,
                     responses_replay: None,
                     model: "test".into(),
                     messages: messages.to_vec(),

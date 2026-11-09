@@ -166,6 +166,10 @@ impl OpenAiClient {
 
 #[async_trait]
 impl ProviderClient for OpenAiClient {
+    fn supports_tool_choice_none(&self) -> bool {
+        true
+    }
+
     fn image_generation(&self) -> Option<&dyn crate::ImageGeneration> {
         Some(self)
     }

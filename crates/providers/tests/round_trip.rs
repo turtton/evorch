@@ -68,6 +68,7 @@ use serde_json::json;
 
 fn representative_request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "cross-provider-test".to_string(),
         messages: vec![
@@ -258,6 +259,7 @@ fn openai_response_converts_to_anthropic_request_shape() {
 
     let response = openai_wire::from_wire_response(&wire).expect("OpenAI response converts");
     let request = ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "claude-round-trip".to_string(),
         messages: vec![response.message.clone()],

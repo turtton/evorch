@@ -72,6 +72,7 @@ fn wire_request_maps_reasoning_effort_when_configured() {
 #[test]
 fn canonical_request_maps_to_chat_completions_json() {
     let request = ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "gpt-test".to_string(),
         messages: vec![
@@ -204,6 +205,7 @@ fn unsupported_compaction_blocks_do_not_leak_into_wire() {
 
 fn image_result_request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "gpt-test".to_string(),
         messages: vec![
@@ -259,4 +261,27 @@ fn tool_result_images_follow_the_text_only_tool_message() {
         messages[2]["content"][1],
         json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0K"}})
     );
+}
+
+// Given: a request with tools / When: tool calls are forbidden / Then: only
+// `tool_choice` is added; the tools and messages stay as they were
+#[test]
+fn forbidding_tools_adds_only_tool_choice() {
+    let mut request: ChatRequest = serde_json::from_value(json!({
+        "model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "tools": [{"name": "b", "description": "d", "input_schema": {"type": "object"}},
+                  {"name": "a", "description": "d", "input_schema": {"type": "object"}}]
+    }))
+    .unwrap();
+    let default = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+    assert!(default.get("tool_choice").is_none());
+    request.tool_choice = Some(crate::message::ToolChoice::None);
+    let mut forbidden = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+    assert_eq!(forbidden["tool_choice"], "none");
+    forbidden.as_object_mut().unwrap().remove("tool_choice");
+    assert_eq!(forbidden, default);
+
+    request.tools.clear();
+    let value = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+    assert!(value.get("tool_choice").is_none(), "{value}");
 }

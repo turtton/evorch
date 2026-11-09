@@ -169,6 +169,7 @@ impl AnthropicClient {
                     content: vec![text(&request.query)],
                 }],
                 tools: Vec::new(),
+                tool_choice: None,
                 temperature: None,
                 stream: false,
             },
