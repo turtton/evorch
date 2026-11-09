@@ -25,6 +25,9 @@
 #      and core-launcher are the intended way to reach the core and need no
 #      entry. An entry whose dependency is gone is reported as stale
 #      (a warning; a failure when WORKBENCH_BOUNDARY_STALE_ALLOWLIST=fail).
+#      Because those four are exempt, core-instance must reach no other workspace
+#      crate and core-launcher only core-instance, workbench-client and
+#      workbench-protocol (checked once the crates exist).
 # Each violation prints the dependency path that causes it.
 #
 # Usage: scripts/check-workbench-boundaries.sh [metadata.json]
@@ -265,8 +268,10 @@ core_reach_violations() {
 
 # Rule 7. Reads the allowlist into `A <crate> <dependency> <kind> <pr>` lines
 # (allow.tsv), reporting malformed, duplicate and out-of-scope entries, then
-# compares it with the dependencies the two crates declare. Declared edges come
-# from the manifests, so optional and target-specific dependencies are covered.
+# compares it with the workspace dependencies of the two crates. Declared edges
+# come from the manifests, so optional and target-specific dependencies are
+# covered; resolved edges cover a registry declaration that a [patch] section or
+# source replacement turned into a workspace crate.
 : > "$work/allow.tsv"
 : > "$work/stale.txt"
 ratchet_violations() {
@@ -287,11 +292,13 @@ ratchet_violations() {
   grep '^A' "$work/allow.raw" > "$work/allow.tsv" || true
   awk -F'\t' -v crates=" $RATCHET_CRATES " -v free=" $RATCHET_FREE_TARGETS " -v file="$ALLOWLIST" -v stale_file="$work/stale.txt" '
     FILENAME ~ /allow\.tsv$/ { allow[$2, $3, $4] = $5; next }
-    $1 == "E" && $5 ~ /^declared/ && index(crates, " " $2 " ") && !index(free, " " $3 " ") {
+    $1 == "W" { ws[$2] = 1; next }
+    $1 == "E" && ($3 in ws) && index(crates, " " $2 " ") && !index(free, " " $3 " ") {
       key = $2 SUBSEP $3 SUBSEP $4
-      declared[key] = 1
-      notes[key] = notes[key] ((key in noted) ? " | " : "") $5
-      noted[key] = 1
+      present[key] = 1
+      if ($5 ~ /^declared/) notes[key] = notes[key] ((key in noted) ? " | " : "") $5
+      else if (!(key in noted)) fallback[key] = $5
+      if ($5 ~ /^declared/) noted[key] = 1
       if (!(($2, $3, $4) in allow) && !(key in reported)) {
         reported[key] = 1; order[++n] = key
       }
@@ -299,11 +306,12 @@ ratchet_violations() {
     END {
       for (i = 1; i <= n; i++) {
         key = order[i]; split(key, p, SUBSEP)
-        print "VIOLATION: " p[1] " declares workspace dependency " p[2] " [" p[3] "; " notes[key] "] that is not in " file ". Reach the core through workbench-client instead of adding entries (ADR 0045 section 11)"
+        note = (key in noted) ? notes[key] : fallback[key] " (not declared as a workspace path dependency; a [patch] or source replacement points a registry dependency at a workspace crate)"
+        print "VIOLATION: " p[1] " declares workspace dependency " p[2] " [" p[3] "; " note "] that is not in " file ". Reach the core through workbench-client instead of adding entries (ADR 0045 section 11)"
       }
       for (k in allow) {
         split(k, p, SUBSEP)
-        if (!((p[1] SUBSEP p[2] SUBSEP p[3]) in declared))
+        if (!((p[1] SUBSEP p[2] SUBSEP p[3]) in present))
           print "stale allowlist entry: " p[1] " " p[2] " " p[3] " (removal PR " allow[k] ") is no longer declared; delete it from " file > stale_file
       }
     }' "$work/allow.tsv" "$work/edges.tsv"
@@ -322,6 +330,17 @@ external_violations "$CLIENT" "$CLIENT_EXTERNAL_ALLOW" >> "$violations"
 closure_violations "$WEB" "$PROTOCOL" >> "$violations"
 external_violations "$WEB" "$WEB_EXTERNAL_ALLOW" >> "$violations"
 core_reach_violations >> "$violations"
+
+# core-instance and core-launcher are exempt from the ratchet (rule 7), so what
+# they reach is checked here. They are new crates: the checks apply once a crate
+# exists in the workspace and are skipped before that.
+has_member() { awk -F'\t' -v c="$1" '$1 == "W" && $2 == c { found = 1 } END { exit !found }' "$work/edges.tsv"; }
+if has_member core-instance; then
+  closure_violations core-instance "" >> "$violations"
+fi
+if has_member core-launcher; then
+  closure_violations core-launcher "core-instance $CLIENT $PROTOCOL" >> "$violations"
+fi
 
 if [[ -s "$work/stale.txt" ]]; then
   if [[ $STALE_ALLOWLIST == fail ]]; then

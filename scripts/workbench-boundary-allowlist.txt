@@ -3,9 +3,10 @@
 #
 # Every direct dependency of the gui and evorch crates on another workspace
 # crate (normal, dev and build; optional and target-specific declarations
-# included) must be listed here, except workbench-client, workbench-protocol,
-# core-instance and core-launcher,
-# which are the intended way to reach the core. A dependency that is not listed
+# included, and those a [patch] section redirects) must be listed here, except
+# workbench-client, workbench-protocol, core-instance and core-launcher, which
+# are the client-side way to reach the core (the check keeps core-instance and
+# core-launcher from reaching anything else). A dependency that is not listed
 # fails CI. The list may only shrink: delete a line in the PR that removes the
 # dependency. The check reports a line whose dependency no longer exists as a
 # stale entry.
@@ -13,7 +14,8 @@
 # Format, one entry per line (blanks and `#` comments are ignored):
 #   <crate> <dependency> <kind> <removal-pr>
 #   crate        gui | evorch
-#   dependency   workspace crate named in the Cargo.toml dependency table
+#   dependency   package name of the workspace crate: the real name, not the
+#                alias a dependency table key gets through `package = "..."`
 #   kind         normal | dev | build
 #   removal-pr   migration PR that removes the dependency: a number with an
 #                optional letter suffix (17, 17c, 19a, 19b, 20, ...), or

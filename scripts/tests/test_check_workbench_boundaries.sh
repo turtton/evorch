@@ -50,7 +50,11 @@ fail=0
 # run_case <name> <expect: ok|fail> <expected output substring or ""> <<< spec
 run_case() {
   local name=$1 expect=$2 needle=$3
-  make_metadata > "$work/$name.json"
+  if [[ -n ${CASE_METADATA:-} ]]; then
+    cp "$CASE_METADATA" "$work/$name.json"
+  else
+    make_metadata > "$work/$name.json"
+  fi
   printf '%s\n' "$CASE_ALLOWLIST" > "$work/$name.allow"
   local status=0
   WORKBENCH_BOUNDARY_CORE_CRATES="${CASE_CORE_CRATES:-runtime storage config}" \
@@ -423,6 +427,126 @@ SPEC
 run_case ratchet_evorch_package_missing fail "workspace member 'evorch' not found" <<SPEC
 {"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","gui"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"}]}
 SPEC
+
+
+run_case ratchet_exempt_crates_absent_from_the_workspace_is_fine ok "boundary check passed" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","evorch"], $EXT, "deps": [$GOOD]}
+SPEC
+
+run_case core_instance_with_a_workspace_dependency fail "core-instance must not depend on workspace crate runtime" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"core-instance","to":"runtime","optional":true,"resolved":false}]}
+SPEC
+
+run_case core_launcher_with_an_allowed_closure ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"core-launcher","to":"core-instance"},{"from":"core-launcher","to":"workbench-client"},{"from":"core-launcher","to":"workbench-protocol","kind":"dev"}]}
+SPEC
+
+run_case core_launcher_reaching_runtime_through_a_dependency fail "core-launcher must not depend on workspace crate runtime: core-launcher -> test-support [normal; resolved] -> runtime" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"core-launcher","to":"test-support"},{"from":"test-support","to":"runtime"}]}
+SPEC
+
+# Cases built from real Cargo manifests: `cargo metadata` output for small
+# workspaces, so renames, `workspace = true` inheritance and [patch] sections go
+# through Cargo's own resolver. The registry is a local directory source, so no
+# network is used.
+write_crate() { # <dir> <crate> <dependency tables>
+  mkdir -p "$1/crates/$2/src"
+  : > "$1/crates/$2/src/lib.rs"
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n%s\n' "$2" "$3" > "$1/crates/$2/Cargo.toml"
+}
+make_workspace() { # <dir> [extra workspace tables]
+  local dir=$1
+  mkdir -p "$dir/.cargo" "$dir/vendor/runtime/src"
+  printf '[source.crates-io]\nreplace-with = "local"\n[source.local]\ndirectory = "vendor"\n' > "$dir/.cargo/config.toml"
+  printf '[package]\nname = "runtime"\nversion = "0.1.0"\nedition = "2021"\n' > "$dir/vendor/runtime/Cargo.toml"
+  : > "$dir/vendor/runtime/src/lib.rs"
+  printf '{"files":{},"package":null}\n' > "$dir/vendor/runtime/.cargo-checksum.json"
+  printf '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n%s\n' "${2:-}" > "$dir/Cargo.toml"
+  write_crate "$dir" workbench-protocol ''
+  write_crate "$dir" workbench-client 'workbench-protocol = { path = "../workbench-protocol" }'
+  write_crate "$dir" workbench-host $'workbench-protocol = { path = "../workbench-protocol" }\nruntime = { path = "../runtime" }'
+  write_crate "$dir" workbench-web 'workbench-protocol = { path = "../workbench-protocol" }'
+  write_crate "$dir" runtime ''
+  write_crate "$dir" evorch-core $'runtime = { path = "../runtime" }\nworkbench-host = { path = "../workbench-host" }'
+  write_crate "$dir" gui 'workbench-host = { path = "../workbench-host" }'
+  write_crate "$dir" evorch ''
+  write_crate "$dir" core-instance ''
+  write_crate "$dir" core-launcher $'core-instance = { path = "../core-instance" }\nworkbench-client = { path = "../workbench-client" }\nworkbench-protocol = { path = "../workbench-protocol" }'
+}
+add_to_crate() { # <dir> <crate> <toml appended to the manifest>
+  printf '%s\n' "$3" >> "$1/crates/$2/Cargo.toml"
+}
+# run_real_case <name> <expect> <needle> [crate=toml-to-append ...]; extra workspace
+# tables come from REAL_WORKSPACE_EXTRA.
+run_real_case() {
+  local name=$1 expect=$2 needle=$3
+  shift 3
+  local dir="$work/ws-$name"
+  make_workspace "$dir" "${REAL_WORKSPACE_EXTRA:-}"
+  local spec
+  for spec in "$@"; do
+    add_to_crate "$dir" "${spec%%=*}" "${spec#*=}"
+  done
+  (cd "$dir" && cargo metadata --format-version 1 --offline > "$work/$name.metadata.json" 2> "$work/$name.cargo.err") \
+    || { fail=$((fail + 1)); echo "FAIL - $name (cargo metadata failed)"; sed 's/^/       | /' "$work/$name.cargo.err"; return; }
+  CASE_METADATA="$work/$name.metadata.json" CASE_CORE_CRATES=runtime run_case "$name" "$expect" "$needle" < /dev/null
+}
+
+if command -v cargo > /dev/null; then
+  CASE_ALLOWLIST='gui workbench-host normal 19b'
+
+  run_real_case real_manifest_clean_workspace ok "boundary check passed"
+
+  run_real_case real_gui_renamed_dependency fail "gui declares workspace dependency runtime [normal; declared]" \
+    $'gui=rt = { path = "../runtime", package = "runtime" }'
+
+  REAL_WORKSPACE_EXTRA=$'[workspace.dependencies]\nrt = { path = "crates/runtime", package = "runtime" }'
+  run_real_case real_gui_workspace_inherited_dependency fail "gui declares workspace dependency runtime [normal; declared]" \
+    $'gui=rt = { workspace = true }'
+  run_real_case real_evorch_workspace_inherited_dev_dependency fail "evorch declares workspace dependency runtime [dev; declared]" \
+    $'evorch=[dev-dependencies]\nrt = { workspace = true }'
+  REAL_WORKSPACE_EXTRA=
+
+  run_real_case real_gui_optional_target_dependency fail "gui declares workspace dependency runtime [normal; declared, optional, target cfg(unix)]" \
+    $'gui=[target.\'cfg(unix)\'.dependencies]\nruntime = { path = "../runtime", optional = true }'
+
+  run_real_case real_evorch_build_dependency fail "evorch declares workspace dependency runtime [build; declared]" \
+    $'evorch=[build-dependencies]\nruntime = { path = "../runtime" }'
+
+  run_real_case real_registry_crate_with_a_workspace_name_is_not_internal ok "boundary check passed" \
+    $'gui=runtime = "0.1"'
+
+  REAL_WORKSPACE_EXTRA=$'[patch.crates-io]\nruntime = { path = "crates/runtime" }'
+  run_real_case real_gui_dependency_patched_to_a_workspace_crate fail "gui declares workspace dependency runtime [normal; resolved" \
+    $'gui=runtime = "0.1"'
+  run_real_case real_evorch_dev_dependency_patched_to_a_workspace_crate fail "evorch declares workspace dependency runtime [dev; resolved" \
+    $'evorch=[dev-dependencies]\nruntime = "0.1"'
+  run_real_case real_core_instance_dependency_patched_to_a_workspace_crate fail "core-instance must not depend on workspace crate runtime" \
+    $'core-instance=runtime = "0.1"'
+  REAL_WORKSPACE_EXTRA=
+
+  run_real_case real_gui_depends_on_the_launcher ok "boundary check passed" \
+    $'gui=core-launcher = { path = "../core-launcher" }' \
+    $'evorch=core-instance = { path = "../core-instance" }'
+
+  run_real_case real_gui_reaches_the_core_through_the_launcher fail "core-launcher must not depend on workspace crate runtime: core-launcher -> runtime" \
+    $'gui=core-launcher = { path = "../core-launcher" }' \
+    $'core-launcher=runtime = { path = "../runtime" }'
+
+  run_real_case real_launcher_optional_target_dependency fail "core-launcher must not depend on workspace crate runtime: core-launcher -> runtime [normal; declared, optional, target cfg(unix)]" \
+    $'core-launcher=[target.\'cfg(unix)\'.dependencies]\nruntime = { path = "../runtime", optional = true }'
+
+  run_real_case real_launcher_depends_on_the_host fail "core-launcher must not depend on workspace crate workbench-host" \
+    $'core-launcher=workbench-host = { path = "../workbench-host" }'
+
+  run_real_case real_core_instance_depends_on_the_protocol fail "core-instance must not depend on workspace crate workbench-protocol" \
+    $'core-instance=workbench-protocol = { path = "../workbench-protocol" }'
+
+  run_real_case real_core_instance_dev_dependency fail "core-instance must not depend on workspace crate runtime: core-instance -> runtime [dev; resolved]" \
+    $'core-instance=[dev-dependencies]\nruntime = { path = "../runtime" }'
+else
+  echo "skip - real-manifest cases (cargo not found)"
+fi
 
 echo "$pass passed, $fail failed"
 [[ $fail -eq 0 ]]
