@@ -1015,19 +1015,65 @@ impl Driver {
     }
 
     async fn click(&self, selector: &str) {
-        // Center the target first: chromiumoxide only scrolls it into view,
-        // which can leave it under the sticky top bar or composer.
+        // IntersectionObserver (used by Element::click) measures the viewport,
+        // not occlusion by the sticky bars. Center the target and let the
+        // resulting scroll/layout events run before taking its coordinates.
         self.eval(&format!(
             "document.querySelector({selector:?}).scrollIntoView({{block: 'center'}}); true"
         ))
         .await;
-        self.page
+        self.settle().await;
+        let point = self
+            .page
             .find_element(selector)
             .await
             .unwrap_or_else(|error| panic!("{selector}: {error}"))
-            .click()
+            .clickable_point()
+            .await
+            .unwrap_or_else(|error| panic!("click point {selector}: {error}"));
+        let hit = self.eval(&format!(
+            r##"(() => {{
+                const target = document.querySelector({selector:?});
+                const hit = document.elementFromPoint({x}, {y});
+                const ready = !!target && !target.disabled && !!hit && target.contains(hit);
+                window.__clickResult = null;
+                if (ready) document.addEventListener("click", (event) => {{
+                    const matched = target.contains(event.target);
+                    window.__clickResult = {{ matched, actual: event.target.outerHTML }};
+                    if (!matched) {{ event.preventDefault(); event.stopImmediatePropagation(); }}
+                }}, {{ capture: true, once: true }});
+                return {{ ready, actual: hit?.outerHTML, rect: target?.getBoundingClientRect().toJSON(),
+                          status: document.querySelector(".history-status")?.textContent }};
+            }})()"##,
+            x = point.x, y = point.y,
+        )).await;
+        assert_eq!(
+            hit["ready"], true,
+            "click {selector} is covered or moved: {hit}"
+        );
+        self.page
+            .click(point)
             .await
             .unwrap_or_else(|error| panic!("click {selector}: {error}"));
+        let clicked = self.eval("window.__clickResult").await;
+        assert_eq!(
+            clicked["matched"], true,
+            "click {selector} missed its target: {clicked}"
+        );
+    }
+
+    /// After a snapshot, the history error can arrive before the paged
+    /// questions/approvals and run queries. Those cards sit above history:
+    /// their restoration must finish before taking native click coordinates.
+    async fn thread_ready(&self) {
+        self.wait(&format!(
+            r##"() => document.querySelector('#conn[data-state="live"]')
+                && document.querySelector("#inbox-badge").textContent === "4"
+                && document.querySelector(".runs-details summary")?.textContent === "実行中の run (2)"
+                && document.querySelector(".thread .card.question")?.textContent.includes({QUESTION_TITLE:?})
+                && document.querySelector(".thread .card.approval")
+                && document.querySelector(".thread .card.lead-routed")?.textContent.includes({LANE_QUESTION_TITLE:?})"##
+        )).await;
     }
 
     /// Type like an IME commit: focus, then insert the composed text at once.
@@ -1219,8 +1265,7 @@ async fn web_workbench_main_flows_in_chromium() {
     .await;
     // Every page of the thread's runs is read before the list claims to be
     // complete; the root run also decides the composer role.
-    ui.wait(r##"() => document.querySelector(".runs-details summary")?.textContent === "実行中の run (2)""##)
-        .await;
+    ui.thread_ready().await;
     let shown = ui
         .eval(r##"document.querySelectorAll(".messages .msg").length"##)
         .await;
@@ -1573,7 +1618,11 @@ async fn web_workbench_main_flows_in_chromium() {
     backend.replace_body("body-3", "body-4");
     backend.replace_text(ASK, RENUMBERED);
     backend.world.lock().unwrap().failing_newest_reads = 1;
+    // Make the two independent completions explicit: the failed history
+    // arrives while snapshot continuation (and the cards above it) is held.
+    let held_snapshot = backend.hold("read_snapshot");
     backend.drop_streams();
+    held_snapshot.entered().await;
     eprintln!("rebuild: waiting for failed history");
     ui.wait(r##"() => { const retry = document.querySelector(".thread .history-status + button.small");
         return retry && !retry.hidden && document.querySelector(".history-status").textContent; }"##)
@@ -1592,8 +1641,12 @@ async fn web_workbench_main_flows_in_chromium() {
         r##"() => window.bigElement.querySelector(".body-status").textContent !== "読み込み中…""##,
     )
     .await;
-    eprintln!("rebuild: late body completed, retrying");
+    eprintln!("rebuild: late body completed; waiting for the snapshot cards and runs");
+    backend.unhold("read_snapshot");
+    ui.thread_ready().await;
+    eprintln!("rebuild: snapshot restored, retrying");
     ui.click(".thread .history-status + button.small").await;
+    eprintln!("rebuild: retry click reached its target");
     let rebuilt = ui
         .wait(&format!(
             r##"() => {{ if (document.querySelector(".history-status").textContent) return false;
@@ -1641,6 +1694,7 @@ async fn web_workbench_main_flows_in_chromium() {
         .await;
     ui.settle().await;
 
+    ui.thread_ready().await;
     eprintln!("rebuild: reopened body read");
     let total = backend.world.lock().unwrap().history.len();
     for expected in [100, 150, 200, total] {
