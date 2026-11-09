@@ -1,6 +1,7 @@
 use workspace_ui::{LineageKind, ProjectId, SidebarState, ThreadId, UiSettings};
 
 use super::WorkbenchState;
+use super::pull_requests::DestinationChange;
 use crate::fixture::DemoSource;
 use crate::model::commands::{PullRequestDerivation, RecordingSink, WorkbenchCommand};
 
@@ -328,37 +329,76 @@ fn moving_auto_fix_to_this_thread_is_confirmed_first_and_can_be_cancelled() {
     );
 }
 
-// Given: the limit stopped auto fix / When: the reset is clicked here, and on a thread that does
-// not have the budget / Then: only the first issues the reset
+// Given: the limit stopped auto fix / When: the reset is clicked on the thread that has the
+// budget / Then: it is issued at once, with no confirmation to name
 #[test]
-fn the_reset_acts_only_where_the_budget_is() {
+fn the_reset_where_the_budget_is_needs_no_confirmation() {
     let directory = tempfile::tempdir().unwrap();
-    let limited = |destination: &'static str| {
-        auto_state(move |s| {
-            s.used = 3;
-            s.destination_thread_id = Some(destination.into());
-            s.link_revision = Some(1);
-            s.stop_reason = Some("limit_reached".into());
-        })
-    };
-    let reset = || PullRequestAction::ResetAutoFixBudget {
-        thread_id: THREAD.into(),
-    };
     let (mut window, _) = window(directory.path(), shown(limited(THREAD), |_| {}));
     window.apply_pull_request_action(reset());
+    assert!(window.destination_dialog().is_none());
     assert_eq!(
         window.issued(),
         [WorkbenchCommand::ResetPullRequestAutoFixBudget {
             thread_id: THREAD.into(),
             link_revision: 1,
             policy_revision: 4,
+            confirmed_previous: None,
         }]
     );
+}
 
-    let other = tempfile::tempdir().unwrap();
-    let (mut window, _) = self::window(other.path(), shown(limited("other"), |_| {}));
+// Given: the limit stopped auto fix in another thread / When: the reset is clicked here / Then:
+// the same confirmation as moving auto fix opens and nothing is issued; a cancel changes nothing
+// and a confirm issues the reset naming the thread it leaves
+#[test]
+fn the_reset_from_another_thread_is_confirmed_first_and_can_be_cancelled() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut window, _) = window(directory.path(), shown(limited("other"), |_| {}));
+    let controls = window.auto_fix_controls(THREAD).unwrap();
+    assert!(controls.reset.is_some_and(|reset| reset.enabled));
+
     window.apply_pull_request_action(reset());
+    let dialog = window
+        .destination_dialog()
+        .cloned()
+        .expect("a move is asked about");
+    assert_eq!(dialog.previous_thread_id, "other");
+    assert_eq!(dialog.then, DestinationChange::ResetBudget);
     assert!(window.issued().is_empty());
+
+    window.apply_pull_request_action(PullRequestAction::CancelAutoFixDestination);
+    assert!(window.destination_dialog().is_none() && window.issued().is_empty());
+
+    window.apply_pull_request_action(reset());
+    window.apply_pull_request_action(PullRequestAction::ConfirmAutoFixDestination {
+        thread_id: THREAD.into(),
+    });
+    assert!(window.destination_dialog().is_none());
+    assert_eq!(
+        window.issued(),
+        [WorkbenchCommand::ResetPullRequestAutoFixBudget {
+            thread_id: THREAD.into(),
+            link_revision: 1,
+            policy_revision: 4,
+            confirmed_previous: Some("other".into()),
+        }]
+    );
+}
+
+fn limited(destination: &'static str) -> PrAutoFixState {
+    auto_state(move |s| {
+        s.used = 3;
+        s.destination_thread_id = Some(destination.into());
+        s.link_revision = Some(1);
+        s.stop_reason = Some("limit_reached".into());
+    })
+}
+
+fn reset() -> PullRequestAction {
+    PullRequestAction::ResetAutoFixBudget {
+        thread_id: THREAD.into(),
+    }
 }
 
 // Given: a failing head / When: send is clicked / Then: the command names the head the person

@@ -164,7 +164,8 @@ pub enum PullRequestEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "change", rename_all = "snake_case")]
 pub enum PullRequestAutoFixChange {
-    /// The switch, the destination or the budget changed on a person's operation.
+    /// The switch, the destination or the budget changed on a person's operation, or the
+    /// `[pull_requests] auto_fix_enabled` setting changed for every linked thread.
     Policy,
     /// A notice was reserved by a person's explicit request.
     Requested,

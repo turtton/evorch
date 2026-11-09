@@ -86,10 +86,32 @@ async fn bar_operations_keep_the_wire_prefix_and_one_send_appends_one_notice() {
         })
         .await;
     world.show();
+    // The global switch turned off and on announces itself to the bar and is not input either.
+    for enabled in [false, true] {
+        world.source.push_ok(
+            &pull_request_world::key(phase2_world::NUMBER),
+            world.failing('a'),
+        );
+        let mut settings = world.service.settings();
+        settings.auto_fix_enabled = enabled;
+        world.service.update_settings(settings).unwrap();
+        world
+            .until_pr(|change| {
+                matches!(
+                    change,
+                    event_bus::PullRequestEvent::AutoFixChanged {
+                        reason: event_bus::PullRequestAutoFixChange::Policy,
+                        ..
+                    }
+                )
+            })
+            .await;
+        world.show();
+    }
     assert_eq!(
         world.requests().len(),
         1,
-        "the bar's operations called no model"
+        "the bar's operations and the global switch called no model"
     );
 
     // The send: one notice, appended at the end.

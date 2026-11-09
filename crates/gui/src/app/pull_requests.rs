@@ -241,6 +241,17 @@ pub struct DestinationDialog {
     pub previous_label: String,
     pub link_revision: u64,
     pub policy_revision: u64,
+    /// What the person goes on to do once the move is confirmed.
+    pub then: DestinationChange,
+}
+
+/// The operation a [`DestinationDialog`] confirms the move for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationChange {
+    /// Turn auto fix on here.
+    TurnOn,
+    /// Start the automatic count again here, which also turns auto fix on.
+    ResetBudget,
 }
 
 /// The pull request side of the Workbench.
@@ -932,17 +943,31 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 if dialog.thread_id != thread_id {
                     return;
                 }
-                let op = IssuedOp::Policy(dialog.link_revision, dialog.policy_revision, "move");
-                self.issue_pull_request_command(
-                    &thread_id,
-                    op,
-                    WorkbenchCommand::ChangePullRequestAutoFixDestination {
-                        thread_id: thread_id.clone(),
-                        link_revision: dialog.link_revision,
-                        policy_revision: dialog.policy_revision,
-                        confirmed_previous: Some(dialog.previous_thread_id),
-                    },
-                );
+                let (link_revision, policy_revision) =
+                    (dialog.link_revision, dialog.policy_revision);
+                let confirmed_previous = Some(dialog.previous_thread_id);
+                let (label, command) = match dialog.then {
+                    DestinationChange::TurnOn => (
+                        "move",
+                        WorkbenchCommand::ChangePullRequestAutoFixDestination {
+                            thread_id: thread_id.clone(),
+                            link_revision,
+                            policy_revision,
+                            confirmed_previous,
+                        },
+                    ),
+                    DestinationChange::ResetBudget => (
+                        "reset",
+                        WorkbenchCommand::ResetPullRequestAutoFixBudget {
+                            thread_id: thread_id.clone(),
+                            link_revision,
+                            policy_revision,
+                            confirmed_previous,
+                        },
+                    ),
+                };
+                let op = IssuedOp::Policy(link_revision, policy_revision, label);
+                self.issue_pull_request_command(&thread_id, op, command);
             }
             PullRequestAction::CancelAutoFixDestination => {
                 self.pull_requests.destination_dialog = None;
@@ -951,19 +976,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let Some(controls) = self.auto_fix_controls(&thread_id) else {
                     return;
                 };
-                if controls.reset.is_some_and(|reset| reset.enabled) {
-                    let op =
-                        IssuedOp::Policy(controls.link_revision, controls.policy_revision, "reset");
-                    self.issue_pull_request_command(
-                        &thread_id,
-                        op,
-                        WorkbenchCommand::ResetPullRequestAutoFixBudget {
-                            thread_id: thread_id.clone(),
-                            link_revision: controls.link_revision,
-                            policy_revision: controls.policy_revision,
-                        },
-                    );
+                if !controls.reset.as_ref().is_some_and(|reset| reset.enabled) {
+                    return;
                 }
+                if let Some(previous) = controls.moves_from.clone() {
+                    self.ask_destination(
+                        thread_id,
+                        previous,
+                        &controls,
+                        DestinationChange::ResetBudget,
+                    );
+                    return;
+                }
+                let op =
+                    IssuedOp::Policy(controls.link_revision, controls.policy_revision, "reset");
+                self.issue_pull_request_command(
+                    &thread_id,
+                    op,
+                    WorkbenchCommand::ResetPullRequestAutoFixBudget {
+                        thread_id: thread_id.clone(),
+                        link_revision: controls.link_revision,
+                        policy_revision: controls.policy_revision,
+                        confirmed_previous: None,
+                    },
+                );
             }
             PullRequestAction::SendToAgent { thread_id } => {
                 let Some(controls) = self.auto_fix_controls(&thread_id) else {
@@ -1105,20 +1141,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         let (link_revision, policy_revision) = (controls.link_revision, controls.policy_revision);
         if let Some(previous) = controls.moves_from.clone().filter(|_| !controls.on_here) {
-            // The person confirms before another thread loses its auto fix.
-            let previous_label = self
-                .sidebar
-                .threads
-                .iter()
-                .find(|thread| thread.id.to_string() == previous)
-                .map_or_else(|| previous.clone(), |thread| thread.title.clone());
-            self.pull_requests.destination_dialog = Some(DestinationDialog {
-                thread_id,
-                previous_thread_id: previous,
-                previous_label,
-                link_revision,
-                policy_revision,
-            });
+            self.ask_destination(thread_id, previous, &controls, DestinationChange::TurnOn);
             return;
         }
         let enabled = !controls.on_here;
@@ -1137,6 +1160,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 enabled,
             },
         );
+    }
+
+    /// Opens the confirmation before another thread loses its auto fix to `thread_id`.
+    fn ask_destination(
+        &mut self,
+        thread_id: String,
+        previous: String,
+        controls: &crate::model::pull_requests::AutoFixControls,
+        then: DestinationChange,
+    ) {
+        let previous_label = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| thread.id.to_string() == previous)
+            .map_or_else(|| previous.clone(), |thread| thread.title.clone());
+        self.pull_requests.destination_dialog = Some(DestinationDialog {
+            thread_id,
+            previous_thread_id: previous,
+            previous_label,
+            link_revision: controls.link_revision,
+            policy_revision: controls.policy_revision,
+            then,
+        });
     }
 
     /// Draws the confirmation of moving auto fix and runs its answer.

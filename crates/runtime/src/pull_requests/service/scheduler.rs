@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use event_bus::PullRequestAutoFixChange;
 use storage::StorageError;
 use storage::pull_requests::{InheritanceResolution, PullRequestKey, PullRequestState};
 use tokio::time::Instant;
@@ -50,6 +51,9 @@ pub(super) async fn run(inner: Arc<Inner>) {
         // which branch of the select won.
         if config != applied {
             inner.apply_new_settings();
+            if config.auto_fix_enabled != applied.auto_fix_enabled {
+                inner.announce_global_auto_fix().await;
+            }
             applied = config;
         }
         let due = if config.enabled {
@@ -168,6 +172,40 @@ impl Inner {
         for entry in state.keys.values_mut() {
             if entry.next_due.is_some() {
                 entry.next_due = Some(now);
+            }
+        }
+    }
+
+    /// The `[pull_requests] auto_fix_enabled` switch changed: every thread with an active link
+    /// shows it (the bar's "Off by settings"), so each one is told to read its state again. The
+    /// scheduler runs this, not `update_settings`, which is synchronous and may be called from
+    /// outside the runtime. Archived and deleted threads show nothing and read it on restore.
+    async fn announce_global_auto_fix(&self) {
+        let mut after = 0;
+        loop {
+            let storage = self.storage.clone();
+            let page = match self
+                .blocking(move || storage.active_pull_request_links(after, PAGE))
+                .await
+            {
+                Ok(Ok(page)) => page,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "auto fix switch change could not be announced");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "auto fix switch change could not be announced");
+                    return;
+                }
+            };
+            let full = page.len() == PAGE;
+            for link in page {
+                after = link.link_id;
+                self.announce_auto_fix(&link.thread_id, PullRequestAutoFixChange::Policy)
+                    .await;
+            }
+            if !full {
+                return;
             }
         }
     }
