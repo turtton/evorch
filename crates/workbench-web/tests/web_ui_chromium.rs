@@ -1567,7 +1567,7 @@ async fn web_workbench_main_flows_in_chromium() {
         "(() => {{ const m = {BIG}; window.bigElement = m; {CONTINUE}.click(); }})()"
     ))
     .await;
-    eprintln!("rebuild: waiting for held read_body; state={}", ui.eval(&format!(r##"(() => {{ const m = {BIG}; return {{ status: m.querySelector(".body-status").textContent, buttons: [...m.querySelectorAll("button")].map(b => ({{text:b.textContent,hidden:b.hidden,disabled:b.disabled}})), errors: window.__problems }}; }})()"##)).await);
+    eprintln!("rebuild: waiting for held read_body");
     held_body.entered().await;
     eprintln!("rebuild: read_body entered");
     backend.replace_body("body-3", "body-4");
@@ -1611,6 +1611,7 @@ async fn web_workbench_main_flows_in_chromium() {
         "nothing from before the snapshot is reused"
     );
     eprintln!("rebuild: retry completed");
+    eprintln!("rebuild: reopening the thread");
     // Open the thread again: the late answer was not kept either.
     ui.eval(r##"location.hash = "#/""##).await;
     ui.wait(r##"() => !document.querySelector(".thread")"##)
@@ -1640,9 +1641,12 @@ async fn web_workbench_main_flows_in_chromium() {
         .await;
     ui.settle().await;
 
+    eprintln!("rebuild: reopened body read");
     let total = backend.world.lock().unwrap().history.len();
     for expected in [100, 150, 200, total] {
+        eprintln!("rebuild: loading older page to {expected} messages");
         ui.click("button.older").await;
+        eprintln!("rebuild: older clicked, waiting for {expected} messages");
         ui.wait(&format!(
             r##"() => document.querySelectorAll(".messages .msg").length === {expected}"##
         ))
