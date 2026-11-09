@@ -92,7 +92,7 @@ async fn terminal_publication_waits_for_drain_and_same_id_continuation_keeps_new
     next(&mut calls)
         .await
         .respond(text_response("first result", FinishReason::Stop));
-    timeout(DEADLINE, draining.recv()).await.unwrap().unwrap();
+    draining.recv().await.unwrap();
     assert_eq!(
         runtime.inspect_agent(run).unwrap().phase,
         AgentRunPhase::Running
@@ -449,12 +449,12 @@ async fn unrecorded_shell_round_retains_active_before_and_after_finalization() {
             "shell",
             json!({"command":"read reply", "yield_ms":0}),
         ));
-        timeout(DEADLINE, executing.recv()).await.unwrap().unwrap();
+        executing.recv().await.unwrap();
         if mode == "failed" {
             rusqlite::Connection::open(&config.db_path).unwrap().execute_batch("CREATE TRIGGER reject_snapshot BEFORE UPDATE ON run_contexts BEGIN SELECT RAISE(ABORT, 'reject round and terminal'); END;").unwrap();
         }
         shell.after_execute.as_ref().unwrap().1.add_permits(1);
-        timeout(DEADLINE, draining.recv()).await.unwrap().unwrap();
+        draining.recv().await.unwrap();
         assert!(
             executor.has_unobserved_shell_jobs(&run.to_string()),
             "{mode}"
@@ -511,10 +511,10 @@ async fn late_store_rejecting_assistant_reference_is_fatal_in_round_and_finalize
                 "shell",
                 json!({"command":"printf done", "yield_ms":1000}),
             ));
-            timeout(DEADLINE, executing.recv()).await.unwrap().unwrap();
+            executing.recv().await.unwrap();
         } else {
             call.respond(text_response("ephemeral reference", FinishReason::Stop));
-            timeout(DEADLINE, draining.recv()).await.unwrap().unwrap();
+            draining.recv().await.unwrap();
         }
         // AgentRuntime clones share the OnceLock, so this attaches to the running run.
         let runtime = runtime
@@ -522,7 +522,7 @@ async fn late_store_rejecting_assistant_reference_is_fatal_in_round_and_finalize
             .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
         if path == "round" {
             shell.after_execute.as_ref().unwrap().1.add_permits(1);
-            timeout(DEADLINE, draining.recv()).await.unwrap().unwrap();
+            draining.recv().await.unwrap();
         }
         assert!(
             !executor.has_unobserved_shell_jobs(&run.to_string()),

@@ -275,7 +275,7 @@ async fn a_web_review_reads_the_stored_facts_and_starts_nothing() {
     let world = world(model.clone(), executor, bus);
     // Fetched long ago, so the facts are older than the review's limit.
     world.link(answer('a', 1_000)).await;
-    let fetches = world.source.calls().len();
+    let fetches = world.source.fetches();
 
     let root = world
         .runtime
@@ -295,7 +295,7 @@ async fn a_web_review_reads_the_stored_facts_and_starts_nothing() {
     assert_eq!(facts["stale_reason"], "too_old");
     assert_eq!(facts["head_sha"], "a".repeat(40));
     assert_eq!(
-        world.source.calls().len(),
+        world.source.fetches(),
         fetches,
         "a web review never fetches"
     );
@@ -435,7 +435,7 @@ async fn an_upload_review_reads_the_stored_facts_and_starts_nothing() {
     ))]));
     let (world, page, _workspace) = upload_world(model.clone()).await;
     world.link(answer('a', 1_000)).await;
-    let fetches = world.source.calls().len();
+    let fetches = world.source.fetches();
 
     let root = world
         .runtime
@@ -459,7 +459,7 @@ async fn an_upload_review_reads_the_stored_facts_and_starts_nothing() {
     );
     assert!(reviews[0].0.contains("harness_facts"));
     assert_eq!(
-        world.source.calls().len(),
+        world.source.fetches(),
         fetches,
         "an upload review never fetches"
     );

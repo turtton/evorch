@@ -348,7 +348,7 @@ async fn flow(settings: PullRequestsConfig) -> Flow {
     let review_payloads = reviews(&model, SHELL_REVIEW).await;
     assert_eq!(review_payloads.len(), 1, "the merge reached the reviewer");
     Flow {
-        fetches: world.source.calls().len(),
+        fetches: world.source.fetches(),
         candidates: storage::Database::open_read_only(&world.db_path())
             .unwrap()
             .pull_request_candidates(THREAD, None)
@@ -396,14 +396,7 @@ async fn a_ci_failure_on_a_linked_thread_sends_no_notice_holds_nothing_and_wakes
     );
 
     // When: the check fails, and the change is published with its notification claimed.
-    world
-        .source
-        .push_ok(&review_world::key(), failing_answer('b', now_ns()));
-    world
-        .service
-        .refresh(THREAD, &world.permit())
-        .await
-        .unwrap();
+    world.update_facts(failing_answer('b', now_ns())).await;
     let mut seen = Vec::new();
     loop {
         let event = audit.recv().await.unwrap();

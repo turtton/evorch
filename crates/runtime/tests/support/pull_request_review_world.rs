@@ -1,12 +1,12 @@
 //! The world the pull request review tests share: a runtime with the pull request service on
-//! (or off), its scripted source, the owner registry and the storage, plus helpers to read the
+//! (or off), its mutable source, the owner registry and the storage, plus helpers to read the
 //! escalation reviews the model was asked to make.
 
 #![allow(dead_code, unused_imports)]
 
 use crate::support::{ScriptedModel, text_response, tool_response};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agents::Role;
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ use event_bus::{AgentRunPhase, EventBus, EventKind, EventReceiver};
 use providers::{ContentBlock, FinishReason, Message, Role as MessageRole};
 use runtime::ownership::OwnerHost;
 use runtime::pull_requests::{
-    FakePullRequestSource, FetchedPullRequest, OwnershipView, PullRequestService,
+    FetchError, FetchedPullRequest, OwnershipView, PullRequestService, PullRequestSource,
 };
 use runtime::{AgentRuntime, RunConfig, RunStore};
 use sandbox::DirectSandbox;
@@ -91,12 +91,54 @@ pub fn failing_answer(head: char, fetched_at_ns: i64) -> FetchedPullRequest {
     failed
 }
 
+/// Reviews issue publishing shell calls, whose completion can trigger another
+/// fetch even after a denied merge. Those fetches must see the current PR, not
+/// consume the next test update or turn an exhausted script into NotFound.
+#[derive(Clone, Default)]
+pub struct ReviewSource {
+    state: Arc<Mutex<SourceState>>,
+}
+
+#[derive(Default)]
+struct SourceState {
+    current: Option<FetchedPullRequest>,
+    fetches: usize,
+}
+
+impl ReviewSource {
+    fn set(&self, current: FetchedPullRequest) {
+        self.state.lock().unwrap().current = Some(current);
+    }
+
+    pub fn fetches(&self) -> usize {
+        self.state.lock().unwrap().fetches
+    }
+}
+
+#[async_trait]
+impl PullRequestSource for ReviewSource {
+    async fn fetch(
+        &self,
+        key: &PullRequestKey,
+        _: Duration,
+    ) -> Result<FetchedPullRequest, FetchError> {
+        let mut state = self.state.lock().unwrap();
+        state.fetches += 1;
+        let current = state
+            .current
+            .clone()
+            .ok_or_else(|| FetchError::NotFound("no pull request set".into()))?;
+        assert_eq!(key, &current.requested);
+        Ok(current)
+    }
+}
+
 /// A runtime with the pull request service on, and its fake source.
 pub struct World {
     pub bus: Arc<EventBus>,
     pub runtime: AgentRuntime,
     pub service: PullRequestService,
-    pub source: FakePullRequestSource,
+    pub source: ReviewSource,
     pub host: Arc<OwnerHost>,
     pub storage: storage::Storage,
     pub events: tokio::sync::Mutex<EventReceiver>,
@@ -149,7 +191,7 @@ pub fn world_with(
         )
         .unwrap(),
     );
-    let source = FakePullRequestSource::new();
+    let source = ReviewSource::default();
     let service = runtime
         .start_pull_requests(
             Arc::clone(&host) as Arc<dyn OwnershipView>,
@@ -191,10 +233,10 @@ impl World {
         }
     }
 
-    /// Links the thread; the service fetches once, as scripted.
+    /// Links the thread to the current PR state.
     pub async fn link(&self, first: FetchedPullRequest) {
         let head = first.facts.head_sha.chars().next().unwrap();
-        self.source.push_ok(&key(), first);
+        self.source.set(first);
         let revision = self
             .storage
             .handle()
@@ -211,7 +253,7 @@ impl World {
     /// The tracker stores newer facts, as its poll or the update button would.
     pub async fn update_facts(&self, next: FetchedPullRequest) {
         let head = next.facts.head_sha.chars().next().unwrap();
-        self.source.push_ok(&key(), next);
+        self.source.set(next);
         self.service.refresh(THREAD, &self.permit()).await.unwrap();
         self.head_is(head).await;
     }
@@ -219,7 +261,7 @@ impl World {
     /// The tracker stores a new title for the same facts, as its poll would after an edit.
     pub async fn update_title(&self, next: FetchedPullRequest) {
         let expected = next.display.title.as_ref().map(|t| t.as_str().to_owned());
-        self.source.push_ok(&key(), next);
+        self.source.set(next);
         self.service.refresh(THREAD, &self.permit()).await.unwrap();
         let mut events = self.events.lock().await;
         while self.stored_title() != expected {
