@@ -190,10 +190,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         !self.shared_feed.pending.is_empty() || !self.shared_feed.failures.is_empty()
     }
 
-    /// Folds the queued events of other processes in order, stopping at one that
-    /// waits for the sidebar. Run once per frame while events are queued.
+    /// Retries events held for the sidebar and recovered notice tails. A cursor-only
+    /// batch can reach its horizon before a reread finishes: completing that read
+    /// must release its tail without relying on another batch to wake it.
     pub fn retry_pending_shared_events(&mut self) {
-        if !self.shared_feed.pending.is_empty() || !self.shared_feed.failures.is_empty() {
+        if !self.shared_feed.pending.is_empty()
+            || !self.shared_feed.failures.is_empty()
+            || !self.shared_feed.harness.is_empty()
+        {
             self.fold_pending_shared();
         }
     }

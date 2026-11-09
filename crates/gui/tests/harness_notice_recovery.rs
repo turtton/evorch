@@ -358,6 +358,70 @@ async fn late_reread_holds_newer_notice_until_the_feed_reaches_its_position() {
     world.shutdown();
 }
 
+// No foreign event can retrigger a tail that was held while the manual worker
+// rehydrated H. A cursor-only batch arrives first; completing the read must suffice.
+#[tokio::test]
+async fn cursor_only_progress_before_reread_completion_releases_the_notice_tail() {
+    let mut world = World::recorded().await;
+    let failing = world.failing('a');
+    world.link(failing).await;
+    persist_since(&world, 0);
+    let horizon = database(&world).last_event_id().unwrap();
+    let (mut follower, path) = late_follower(&world);
+    std::fs::write(path, serde_json::to_vec(world.window.sidebar()).unwrap()).unwrap();
+    // Queue the bounded reread before adoption; the manual worker cannot finish yet.
+    assert_eq!(follower.poll_shared_feed(), 0);
+    let gate = std::sync::Arc::new(phase2_world::RequestGate::default());
+    *world
+        .recorder
+        .as_ref()
+        .unwrap()
+        .next_request_gate
+        .lock()
+        .unwrap() = Some(gate.clone());
+    world.push_logs('a');
+    world.click(PullRequestAction::SendToAgent {
+        thread_id: THREAD.into(),
+    });
+    let id = world.delivered().await;
+    gate.entered.notified().await;
+    let committed = database(&world).snapshot_bundle(&world.run).unwrap();
+    // This is the only row after H, and the follower excludes its own stream.
+    world
+        .store
+        .handle()
+        .append_event(
+            Some("late-observer"),
+            &event_bus::Event::new(LifecycleEvent::TurnCompleted {
+                run_id: "already-displayed-local-run".into(),
+                context_len: 1,
+            }),
+        )
+        .unwrap();
+    assert_eq!(database(&world).last_event_id().unwrap(), horizon + 1);
+    assert_eq!(follower.poll_shared_feed(), 0, "no foreign events arrive");
+    // The resolver is manual: no reread has finished before this cursor-only batch.
+    follower.settle_body_rows();
+    follower
+        .switch_thread(workspace_ui::ThreadId::new(THREAD))
+        .unwrap();
+    let cards = cards_of(&follower);
+    let after = database(&world).snapshot_bundle(&world.run).unwrap();
+    // No further poll or batch is allowed to make the captured card appear.
+    gate.release.notify_one();
+    world.idle().await;
+    world.shutdown();
+    assert_eq!(
+        after, committed,
+        "display recovery must not change the input"
+    );
+    assert_eq!(
+        cards,
+        [(id, true)],
+        "reread completion must release a tail whose raw cursor already caught up"
+    );
+}
+
 // Parent and pre/post-adoption forks/rewinds become known in one sidebar import.
 // The inherited prefix cannot be seeded until the parent's worker replay reaches it.
 #[tokio::test]
