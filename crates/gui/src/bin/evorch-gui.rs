@@ -22,19 +22,26 @@ use gui::pty::ShellSpawner;
 use gui::runtime_sink::{RuntimeCommandSink, derive_repo_slug, new_stream_id};
 use gui::startup::{StartupMessage, StartupPrelude};
 use recorder::pricing::SharedUsagePricing;
-use recorder::storage_bridge::{self, OwnedStorageBridge, StorageBridge};
+#[cfg(test)]
+use recorder::storage_bridge;
+use recorder::storage_bridge::OwnedStorageBridge;
 use routing::ProcessEnv;
 use routing::factory::DEFAULT_AUTH_BASE_URL;
 use runtime::thread_retention::{ExecutorConfig, ReclaimExecutor, policy_from_config};
 use runtime::{
-    AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy, ModelSource,
-    Role, RunConfig, RuntimeComposition, WorkspaceSeam, compose_runtime,
-    production_executor_with_host_tools,
+    AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ModelSource, Role, RunConfig,
+    RuntimeComposition, compose_runtime,
 };
 use sandbox::{CredentialError, CredentialStore, Secret};
 use storage::thread_retention::ThreadRetentionPolicy;
-use storage::{Database, SharedLeases, Storage, StorageConfig};
+use storage::{Database, SharedLeases, Storage};
+use workbench_host::bootstrap::components::{self, ExecutionComponents, thread_index_settings};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
+
+#[cfg(test)]
+use runtime::{ExecutionPolicy, WorkspaceSeam};
+#[cfg(test)]
+use storage::StorageConfig;
 
 const EVENT_CAPACITY: usize = 2048;
 
@@ -419,25 +426,17 @@ fn spawn_storage_bridge(
     usage_pricing: SharedUsagePricing,
     fault_spool: Option<std::path::PathBuf>,
 ) -> Result<OwnedStorageBridge, GuiError> {
-    let persistence = match diagnostics {
-        config::DiagnosticPersistence::Off => storage_bridge::DiagnosticPersistence::Off,
-        config::DiagnosticPersistence::Warnings => storage_bridge::DiagnosticPersistence::Warnings,
-        config::DiagnosticPersistence::All => storage_bridge::DiagnosticPersistence::All,
-    };
-    Ok(OwnedStorageBridge::spawn(
+    Ok(components::spawn_storage_bridge(
         bus,
         storage,
-        |handle| {
-            let bridge = StorageBridge::new(handle, session_id.into())
-                .with_diagnostic_persistence(persistence)
-                .with_metrics_enabled(metrics_enabled)
-                .with_usage_ledger(usage_pricing);
-            match fault_spool {
-                Some(dir) => bridge.with_fault_spool(dir),
-                None => bridge,
-            }
+        diagnostics,
+        metrics_enabled,
+        usage_pricing,
+        components::BridgeOptions {
+            session_id: session_id.into(),
+            flush_every: Duration::from_secs(60),
+            fault_spool,
         },
-        Duration::from_secs(60),
     )?)
 }
 
@@ -453,14 +452,6 @@ fn latest_thread_goals(
 }
 
 type Reload = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
-
-fn thread_index_settings(config: &config::Config) -> storage::thread_index::ThreadIndexSettings {
-    let settings = &config.storage.thread_index;
-    storage::thread_index::ThreadIndexSettings {
-        enabled: settings.enabled,
-        max_bytes: settings.max_bytes,
-    }
-}
 
 fn reload_index_settings(
     handle: &storage::StorageHandle,
@@ -922,13 +913,7 @@ fn build_workbench(
             Arc::new(runtime::compose::SwitchableModel::new(initial)),
         )
     });
-    let storage_config = StorageConfig {
-        db_path: storage_db_path,
-        usage_retention_days: composition_config.metrics.retention_days,
-        thread_index: thread_index_settings(&composition_config),
-        retain_terminal_task_progress: composition_config.diagnostics.retain_terminal_task_progress,
-        ..StorageConfig::default()
-    };
+    let storage_config = components::storage_config(&composition_config, storage_db_path);
     let storage = Storage::open_with_lease(storage_config.clone(), prelude.leases.db_lease()?)?;
     start_gui_index_owner(&storage.handle())?;
     // The Evaluator reads and pins threads of the same database the GUI records into.
@@ -960,11 +945,12 @@ fn build_workbench(
     let (runtime, agent_browser) = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
-            let seam = WorkspaceSeam::production(demo_repo.clone())?;
-            let executor = production_executor_with_host_tools(
+            let ExecutionComponents {
+                executor,
+                workspace: seam,
+            } = ExecutionComponents::production(
                 Arc::clone(&bus),
-                &ExecutionPolicy::for_role(Role::Orchestrator),
-                seam.project_root().to_path_buf(),
+                demo_repo,
                 &composition_config,
                 evaluator_tools(Some(directory.path().to_path_buf()), None),
             )?;
@@ -991,10 +977,11 @@ fn build_workbench(
             (runtime, agent_browser)
         }
         None => {
-            let seam = WorkspaceSeam::production(effective_project_root.clone())?;
-            let executor = production_executor_with_host_tools(
+            let ExecutionComponents {
+                executor,
+                workspace: seam,
+            } = ExecutionComponents::production(
                 Arc::clone(&bus),
-                &ExecutionPolicy::for_role(Role::Orchestrator),
                 effective_project_root.clone(),
                 &composition_config,
                 evaluator_tools(

@@ -18,7 +18,8 @@ model = { path = "../model" }
 providers = { path = "../providers" }
 runtime = { path = "../runtime" }
 tools = { path = "../tools" }
-sandbox = { path = "../sandbox" }
+sandbox = { path = "../sandbox", features = ["keychain"] }
+catalog = { path = "../catalog" }
 serde_json = { workspace = true }
 serde = { workspace = true }
 secret-guard = { path = "../secret-guard" }

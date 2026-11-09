@@ -8389,6 +8389,7 @@ name = "workbench-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "catalog",
  "config",
  "event-bus",
  "model",

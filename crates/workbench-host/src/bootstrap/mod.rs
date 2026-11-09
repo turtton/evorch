@@ -1,18 +1,29 @@
-//! GUI-free owner composition. TODO(P10/P11): migrate GUI/headless composition
-//! here; do not change their ownership model as part of P7a.
+//! GUI-free owner composition and reusable construction parts (ADR 0045 P8a).
+//! Legacy GUI wiring stays in place; background service wiring follows in P8b.
+//!
+//! Deliberate legacy GUI/core differences:
+//! - Core loads strict configuration from an explicit directory without env
+//!   overrides; GUI can recover from invalid configuration for its settings UI.
+//! - GUI wraps the same routed model in a live-reload switch; core uses Configured.
+//! - Unconfigured core exposes no tools; GUI/demo keeps production tools. GUI
+//!   evaluator tools are explicit host extensions, deferred on core until PR03.
+//! - GUI owns retention/index maintenance, fault spooling and a 60s bridge tick;
+//!   core only holds shared leases and keeps its 5s tick. Both share DB settings.
+//! - Saved project access is read-only here; live settings updates remain with
+//!   the existing GUI. No project configuration can manufacture trust.
+//! - PR03 owns lane/PR/learning/MCP service factories. Register their stop and
+//!   completion futures in `services`, never detach a storage-using task.
+pub mod components;
+pub mod models;
 mod project_models;
+pub mod services;
 #[cfg(test)]
 mod tests;
 use crate::projects::ProjectDirectory;
 use crate::{CommandHost, commands::CommandService, projects::StaticProjects};
 use event_bus::{AgentRunPhase, EventBus};
-use recorder::{
-    pricing::UsagePricing,
-    storage_bridge::{OwnedStorageBridge, StorageBridge},
-};
-use runtime::{
-    AgentRuntime, ModelSource, RunStore, RuntimeComposition, WorkspaceSeam, ownership::OwnerHost,
-};
+use recorder::{pricing::UsagePricing, storage_bridge::OwnedStorageBridge};
+use runtime::{AgentRuntime, ModelSource, RunStore, RuntimeComposition, ownership::OwnerHost};
 use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
@@ -29,7 +40,12 @@ pub struct BootstrapOptions {
     pub project_root: PathBuf,
 }
 
-fn known_projects(options: &BootstrapOptions) -> Result<StaticProjects, BootstrapError> {
+struct KnownProjects {
+    directory: StaticProjects,
+    access: Vec<(PathBuf, components::ProjectAccess)>,
+}
+
+fn known_projects(options: &BootstrapOptions) -> Result<KnownProjects, BootstrapError> {
     #[derive(serde::Deserialize)]
     struct Sidebar {
         projects: Vec<Project>,
@@ -38,15 +54,19 @@ fn known_projects(options: &BootstrapOptions) -> Result<StaticProjects, Bootstra
     struct Project {
         id: workbench_protocol::ids::ProjectId,
         repo_root: PathBuf,
+        #[serde(flatten)]
+        access: components::ProjectAccess,
     }
     let mut projects = StaticProjects::default();
+    let mut access = Vec::new();
     let path = options.config_dir.join("sidebar.json");
     match std::fs::read(path) {
         Ok(bytes) => {
-            // Read only the directory, not GUI drafts/family state. Never write
+            // Read only project declarations, not GUI drafts/family state. Never write
             // sidebar.json or infer permission to claim a thread from its presence.
             for project in serde_json::from_slice::<Sidebar>(&bytes)?.projects {
                 if project.repo_root.is_absolute() {
+                    access.push((project.repo_root.clone(), project.access));
                     projects.insert(&project.id, project.repo_root);
                 }
             }
@@ -58,12 +78,16 @@ fn known_projects(options: &BootstrapOptions) -> Result<StaticProjects, Bootstra
     if !projects.entries().iter().any(|(_, p)| p == &root) {
         use std::os::unix::ffi::OsStrExt;
         let hash = format!("{:x}", Sha256::digest(root.as_os_str().as_bytes()));
+        access.push((root.clone(), components::ProjectAccess::default()));
         projects.insert(
             &workbench_protocol::ids::ProjectId::new(format!("core-{}", &hash[..32]))?,
             root,
         );
     }
-    Ok(projects)
+    Ok(KnownProjects {
+        directory: projects,
+        access,
+    })
 }
 
 /// What a test replaces in the production composition; production passes none of it.
@@ -79,10 +103,21 @@ pub struct BootstrappedHost {
     pub runtime: AgentRuntime,
     pub owner: Arc<OwnerHost>,
     pub config: config::Config,
+    pub services: services::BackgroundServices,
+    #[cfg(any(test, feature = "test-support"))]
+    pub composition: CompositionInventory,
     bridge: Option<OwnedStorageBridge>,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
     executor: Arc<tools::ToolExecutor>,
     _leases: storage::SharedLeases,
+}
+
+/// Actual construction output, exposed only to composition contract tests.
+#[cfg(any(test, feature = "test-support"))]
+pub struct CompositionInventory {
+    pub tools: Vec<tools::executor::ToolSpec>,
+    pub storage: storage::StorageConfig,
+    pub model: runtime::compose::ModelIdentity,
 }
 
 impl BootstrappedHost {
@@ -122,16 +157,7 @@ impl BootstrappedHost {
             storage::shared_with_wait(&lease_db, &lease_root, Duration::from_secs(30))
         })
         .await??;
-        let storage_config = storage::StorageConfig {
-            db_path,
-            usage_retention_days: config.metrics.retention_days,
-            retain_terminal_task_progress: config.diagnostics.retain_terminal_task_progress,
-            thread_index: storage::thread_index::ThreadIndexSettings {
-                max_bytes: config.storage.thread_index.max_bytes,
-                enabled: config.storage.thread_index.enabled,
-            },
-            ..Default::default()
-        };
+        let storage_config = components::storage_config(&config, db_path);
         let storage =
             storage::Storage::open_with_lease(storage_config.clone(), leases.db_lease()?)?;
         let handle = storage.handle();
@@ -140,53 +166,48 @@ impl BootstrappedHost {
             config.providers.clone(),
             None,
         )));
-        let diagnostics = match config.diagnostics.persistence {
-            config::DiagnosticPersistence::Off => {
-                recorder::storage_bridge::DiagnosticPersistence::Off
-            }
-            config::DiagnosticPersistence::Warnings => {
-                recorder::storage_bridge::DiagnosticPersistence::Warnings
-            }
-            config::DiagnosticPersistence::All => {
-                recorder::storage_bridge::DiagnosticPersistence::All
-            }
-        };
-        let bridge = OwnedStorageBridge::spawn(
+        let bridge = components::spawn_storage_bridge(
             bus.clone(),
             storage,
-            |h| {
-                StorageBridge::new(h, "evorch-core")
-                    .with_diagnostic_persistence(diagnostics)
-                    .with_metrics_enabled(config.metrics.enabled)
-                    .with_usage_ledger(pricing)
+            config.diagnostics.persistence,
+            config.metrics.enabled,
+            pricing,
+            components::BridgeOptions {
+                session_id: "evorch-core".into(),
+                flush_every: Duration::from_secs(5),
+                fault_spool: None,
             },
-            Duration::from_secs(5),
         )?;
         let credential_dir = options.config_dir.join("credentials");
         let credentials =
             tokio::task::spawn_blocking(move || sandbox::credential::open_default(credential_dir))
                 .await??;
-        let (fixed_model, seam) = match seams {
-            Some(seams) => (
-                Some(seams.model),
-                WorkspaceSeam::with_factory(options.project_root.clone(), seams.sandbox)?,
-            ),
-            None => (
-                None,
-                WorkspaceSeam::production(options.project_root.clone())?,
-            ),
-        };
-        // No provider means a read-only, unconfigured host. Register NO tools in
-        // that case, rather than weakening sandbox requirements to serve health.
-        let executor = if config.providers.is_empty() {
-            Arc::new(tools::ToolExecutor::new(bus.clone()))
-        } else {
-            runtime::production_executor_with_config(
+        // Health stays available without providers, tools or a production sandbox.
+        let components::ExecutionComponents {
+            executor,
+            workspace,
+        } = if config.providers.is_empty() {
+            components::ExecutionComponents::unconfigured(
                 bus.clone(),
-                &runtime::ExecutionPolicy::for_role(runtime::Role::Orchestrator),
+                options.project_root.clone(),
+            )?
+        } else {
+            components::ExecutionComponents::production(
+                bus.clone(),
                 options.project_root.clone(),
                 &config,
+                Vec::new(),
             )?
+        };
+        let (fixed_model, workspace) = match seams {
+            Some(seams) => (
+                Some(seams.model),
+                runtime::WorkspaceSeam::with_factory(
+                    workspace.project_root().to_path_buf(),
+                    seams.sandbox,
+                )?,
+            ),
+            None => (None, workspace),
         };
         let composed = runtime::compose_runtime(RuntimeComposition {
             config: &config,
@@ -203,7 +224,7 @@ impl BootstrappedHost {
                 }
                 None => ModelSource::Configured,
             },
-            workspace: Some(seam),
+            workspace: Some(workspace),
         })?;
         let artifacts = Arc::new(runtime::artifacts::store_with_refs(
             options.config_dir.join("artifacts"),
@@ -235,11 +256,20 @@ impl BootstrappedHost {
             .with_ownership(owner.clone());
         service.bind_lane_delivery();
         let projects = known_projects(&options)?;
+        for (root, access) in projects.access {
+            access.apply(&runtime, root);
+        }
         let host = Arc::new(Mutex::new(
             CommandHost::new(service)
-                .with_projects(projects)
+                .with_projects(projects.directory)
                 .with_lane_sidebar_path(options.config_dir.join("sidebar.json")),
         ));
+        #[cfg(any(test, feature = "test-support"))]
+        let composition = CompositionInventory {
+            tools: executor.tool_specs(),
+            storage: storage_config.clone(),
+            model: composed.model_identity,
+        };
         let reclaim = runtime::thread_retention::ReclaimExecutor::spawn(
             runtime::thread_retention::ExecutorConfig::new(handle, storage_config, Some(artifacts)),
         )?;
@@ -248,6 +278,9 @@ impl BootstrappedHost {
             runtime,
             owner,
             config,
+            services: services::BackgroundServices::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            composition,
             bridge: Some(bridge),
             reclaim: Some(reclaim),
             executor,
@@ -272,6 +305,7 @@ impl BootstrappedHost {
     /// ADR 0024 drain: quiesce, await runtime checkpoints, flush, then release.
     pub async fn shutdown(&mut self) -> Result<(), BootstrapError> {
         self.owner.begin_quiesce()?;
+        self.services.request_stop();
         let tasks = self
             .host
             .lock()
@@ -296,6 +330,7 @@ impl BootstrappedHost {
         for task in tasks {
             task.await?;
         }
+        let services_result = self.services.shutdown().await;
         if let Some(reclaim) = self.reclaim.take() {
             reclaim.shutdown();
         }
@@ -308,6 +343,6 @@ impl BootstrappedHost {
         if let Some(mut bridge) = self.bridge.take() {
             bridge.shutdown();
         }
-        Ok(())
+        services_result
     }
 }
