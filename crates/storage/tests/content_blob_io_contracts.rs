@@ -95,7 +95,9 @@ const C_GC: u64 = 24;
 // forbids scans proportional to existing rows.
 // v59 adds the empty lane instruction and receipt tables, one index, four triggers and
 // replaces one outbox trigger (schema pages only, no row work); 22 frames and 4 reserved.
-const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4;
+// v60 adds the resume intent table and fences: carry its independent 32 fixed
+// schema-frame allowance. Keep VM-step scaling and collection budgets unchanged.
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -332,6 +334,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v60.sql"),
                     include_str!("../undo/undo_v59.sql"),
                     include_str!("../undo/undo_v58.sql"),
                     include_str!("../undo/undo_v57.sql"),

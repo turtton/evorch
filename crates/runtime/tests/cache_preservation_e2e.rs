@@ -4069,6 +4069,21 @@ async fn escalated_goal_moves_to_child_thread_and_preserves_each_roots_wire_cach
             .is_none()
     );
     let inherited = harness.runtime.thread_goal(&child_thread).unwrap();
+    let source_intent = harness
+        .runtime
+        .resume_intents()
+        .unwrap()
+        .into_iter()
+        .find(|intent| intent.run_id == source)
+        .unwrap();
+    assert!(
+        !source_intent.active,
+        "handoff must retire the source incarnation before continuation"
+    );
+    assert_eq!(
+        source_intent.stop_reason,
+        Some(runtime::quiesce::StopReason::Terminal)
+    );
     let original = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -5861,6 +5876,8 @@ async fn forked_threads_append_allowed_instructions_again_on_the_next_touch() {
 
 #[path = "cache_preservation/host_receipts.rs"]
 mod host_receipts;
+#[path = "cache_preservation/quiesce.rs"]
+mod quiesce;
 
 /// The Lite shape is the same on every request, the official-compaction call included:
 /// tools only in the leading `additional_tools` item (never top-level), then the developer

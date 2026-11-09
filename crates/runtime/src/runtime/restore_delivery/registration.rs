@@ -112,7 +112,18 @@ impl AgentRuntime {
             restored.turn.as_ref(),
         );
         self.bind_approval_owner(run_id, &config, &execution);
+        self.admit_intent(
+            run_id,
+            execution.publication().incarnation(),
+            parent,
+            role,
+            &trigger.content,
+            &config,
+            history_only,
+            false,
+        )?;
         let task = restored.attach_to(RunTask {
+            startup_failure: None,
             publication: execution.publication(),
             ancestry,
             turn,

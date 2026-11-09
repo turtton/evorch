@@ -67,6 +67,13 @@ pub(crate) struct AdmissionSnapshot {
 }
 
 impl Admission {
+    pub(super) fn finish_queued(&mut self, run: RunId) {
+        if let Some(completion) = self.completion.take() {
+            completion.send_replace(Some(Err(RuntimeError::RunTerminated {
+                run_id: run.to_string(),
+            })));
+        }
+    }
     pub(super) fn snapshot(&self) -> AdmissionSnapshot {
         AdmissionSnapshot {
             parent: self.parent,
@@ -339,6 +346,11 @@ impl AgentRuntime {
                 intents,
             );
         } else {
+            self.end_intent(
+                run_id,
+                &execution.publication().incarnation(),
+                crate::quiesce::StopReason::OperatorStopped,
+            );
             self.drop_unstarted_host_input(run_id, config.initial_prompt_id.as_deref());
             drop(continuation);
         }
@@ -416,7 +428,8 @@ impl AgentRuntime {
             };
             let model = runtime.shared.model_for(&config);
             let mut cancellation = execution.cancel_tx.subscribe();
-            let mut admitted = if lane_root {
+            let admission = crate::panic_capture::catch_panic(async {
+            if lane_root {
                 tokio::select! {
                     biased;
                     _ = cancellation.wait_for(|signal| matches!(signal, RunInterrupt::Stop | RunInterrupt::Cancel)) =>
@@ -425,7 +438,20 @@ impl AgentRuntime {
                 }
             } else {
                 model.admit(&invocation, role).await
-            };
+            }
+            }).await;
+            let admission_panicked = admission.is_err();
+            let mut admitted = admission.unwrap_or_else(|panic| {
+                if !runtime.shared.quiesce.running() {
+                    runtime
+                        .shared
+                        .quiesce
+                        .fail(format!("provider admission panicked: {}", panic.message));
+                }
+                Err(RuntimeError::Model {
+                    reason: format!("provider admission panicked: {}", panic.message),
+                })
+            });
             // Admission may outlive a lane handoff. Reject its old generation
             // before registration can schedule even the initial snapshot write.
             if lane_root
@@ -508,7 +534,11 @@ impl AgentRuntime {
             if admitted.is_ok() {
                 result.send_replace(Some(Ok(())));
             }
-            let failure = handoff.then(|| admitted.as_ref().err()).flatten();
+            // A task panic is not a provider refusal. Preserve that distinction
+            // for handoff recovery while still retiring its durable incarnation.
+            let failure = (handoff && !admission_panicked)
+                .then(|| admitted.as_ref().err())
+                .flatten();
             drop(admissions);
             let reviewer = if current && failure.is_some() {
                 #[cfg(test)]
@@ -523,6 +553,14 @@ impl AgentRuntime {
                 None
             };
             drop(intents);
+            if admitted.is_err() && current {
+                let reason = match execution.cancel_tx.borrow().kind() {
+                    Some(crate::InterruptKind::Stop) => crate::quiesce::StopReason::OperatorStopped,
+                    Some(crate::InterruptKind::Cancel) => crate::quiesce::StopReason::Cancelled,
+                    None => crate::quiesce::StopReason::Terminal,
+                };
+                runtime.end_intent(run_id, &execution.publication().incarnation(), reason);
+            }
             #[cfg(test)]
             if admitted.is_ok() {
                 runtime.execution_hook(cancellation::HookPoint::AdmissionRegistered, &execution);

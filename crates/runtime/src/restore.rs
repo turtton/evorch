@@ -274,6 +274,8 @@ impl RunRestoreDescriptor {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SnapshotError {
+    #[error("durable resume intent cannot be persisted: {0}")]
+    ResumeIntent(String),
     #[error("invalid replay snapshot: {0}")]
     Replay(String),
     #[error("unobserved shell effects require a durable checkpoint; ownership retained")]
@@ -297,11 +299,11 @@ pub(crate) enum SnapshotError {
 /// Persist only at a completed tool round; a failed write leaves the last snapshot intact.
 pub(crate) fn persist_checkpoint(
     state: &LoopState,
-) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+) -> Result<crate::checkpoint::SnapshotReference, SnapshotError> {
     let end = safe_context_end(&state.context.messages);
     if end == 0 || end != state.context.messages.len() {
-        return Ok(crate::ownership::SnapshotReference::none(
-            crate::ownership::SnapshotNoneReason::Skipped,
+        return Ok(crate::checkpoint::SnapshotReference::none(
+            crate::checkpoint::SnapshotNoneReason::Skipped,
         ));
     }
     write_snapshot(state, "Checkpoint", end)
@@ -310,7 +312,7 @@ pub(crate) fn persist_checkpoint(
 pub(crate) fn persist_prepared_context(
     state: &LoopState,
     context: &crate::AgentContext,
-) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+) -> Result<crate::checkpoint::SnapshotReference, SnapshotError> {
     let end = safe_context_end(&context.messages);
     write_snapshot_with_context(state, context, "Checkpoint", end, &[], None)
 }
@@ -320,11 +322,11 @@ pub(crate) fn persist_prepared_context(
 /// retain history and report missing outcomes as errors on the next turn.
 pub(crate) fn persist_tool_intent(
     state: &LoopState,
-) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+) -> Result<crate::checkpoint::SnapshotReference, SnapshotError> {
     let end = safe_context_end(&state.context.messages);
     if end == 0 || end == state.context.messages.len() {
-        return Ok(crate::ownership::SnapshotReference::none(
-            crate::ownership::SnapshotNoneReason::Skipped,
+        return Ok(crate::checkpoint::SnapshotReference::none(
+            crate::checkpoint::SnapshotNoneReason::Skipped,
         ));
     }
     write_snapshot(state, "Checkpoint", end)
@@ -335,21 +337,21 @@ pub(crate) fn persist_tool_intent(
 pub(crate) fn persist_terminal_snapshot(
     state: &LoopState,
     dropped: &[String],
-) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+) -> Result<crate::checkpoint::SnapshotReference, SnapshotError> {
     let phase = match state.run_state.phase() {
         AgentRunPhase::Done => "Done",
         AgentRunPhase::Error => "Error",
         AgentRunPhase::Stopped => "Stopped",
         AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
-            return Ok(crate::ownership::SnapshotReference::none(
-                crate::ownership::SnapshotNoneReason::Skipped,
+            return Ok(crate::checkpoint::SnapshotReference::none(
+                crate::checkpoint::SnapshotNoneReason::Skipped,
             ));
         }
     };
     let end = safe_context_end(&state.context.messages);
     if end == 0 {
-        return Ok(crate::ownership::SnapshotReference::none(
-            crate::ownership::SnapshotNoneReason::Skipped,
+        return Ok(crate::checkpoint::SnapshotReference::none(
+            crate::checkpoint::SnapshotNoneReason::Skipped,
         ));
     }
     let settled = state.terminal_host_inputs(dropped, Some(end), "outside_terminal_snapshot");
@@ -407,7 +409,7 @@ pub(crate) fn persist_lane_delivery(
     context: &crate::AgentContext,
     claim: &storage::lane_delivery::LaneDeliveryClaim,
     now: i64,
-) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+) -> Result<crate::checkpoint::SnapshotReference, SnapshotError> {
     write_snapshot_with_context(
         state,
         context,
@@ -426,7 +428,7 @@ pub(crate) fn persist_pr_delivery(
     context: &crate::AgentContext,
     claim: &storage::pull_request_auto_fix::PrDeliveryClaim,
     now: i64,
-) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+) -> Result<crate::checkpoint::SnapshotReference, SnapshotError> {
     write_snapshot_with_context(
         state,
         context,
@@ -444,7 +446,7 @@ fn write_snapshot(
     state: &LoopState,
     terminal_phase: &str,
     end: usize,
-) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+) -> Result<crate::checkpoint::SnapshotReference, SnapshotError> {
     write_snapshot_with_context(state, &state.context, terminal_phase, end, &[], None)
 }
 
@@ -457,7 +459,7 @@ fn write_snapshot_with_context(
     end: usize,
     settled: &[storage::HostInputTransition],
     lane: Option<(&crate::lane_delivery::outbox::DeliveryClaim, i64)>,
-) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+) -> Result<crate::checkpoint::SnapshotReference, SnapshotError> {
     context
         .responses_replay
         .validate(&context.messages, context.checkpoints())
@@ -466,13 +468,13 @@ fn write_snapshot_with_context(
         return Err(SnapshotError::Replay("saved end outside history".into()));
     }
     let Some(runtime) = state.runtime() else {
-        return Ok(crate::ownership::SnapshotReference::none(
-            crate::ownership::SnapshotNoneReason::NoRunStore,
+        return Ok(crate::checkpoint::SnapshotReference::none(
+            crate::checkpoint::SnapshotNoneReason::NoRunStore,
         ));
     };
     let Some(store) = runtime.shared.run_store.get() else {
-        return Ok(crate::ownership::SnapshotReference::none(
-            crate::ownership::SnapshotNoneReason::NoRunStore,
+        return Ok(crate::checkpoint::SnapshotReference::none(
+            crate::checkpoint::SnapshotNoneReason::NoRunStore,
         ));
     };
     let config = state.run_config();
@@ -706,7 +708,30 @@ fn write_snapshot_with_context(
     // Committed: later snapshots keep these IDs without delivering them again.
     state.host_inputs().committed(&host_inputs.delivered);
     runtime.emit_host_input_transitions(state.caller_run_id(), &applied);
-    Ok(crate::ownership::SnapshotReference::RunContext { receipt })
+    let reference = crate::checkpoint::SnapshotReference::RunContext { receipt };
+    runtime
+        .shared
+        .quiesce
+        .update(
+            state.task.run_id,
+            &state.task.publication.incarnation(),
+            Some(store),
+            |intent| {
+                intent.initial_input = None;
+                intent
+                    .inputs
+                    .retain(|input| !state.consumed_intent_inputs.contains(&input.id));
+                intent.snapshot = Some(reference.clone());
+                intent.tool_intent = descriptor.interrupted_tool_calls.clone();
+                intent.provider_input = state.last_provider_input.clone();
+                intent.boundary_pending = state.boundary_pending;
+                intent.responses_replay = context.responses_replay.clone();
+                intent.compactions = context.checkpoints().to_vec();
+                intent.route_pins = descriptor.route_pins.clone();
+            },
+        )
+        .map_err(SnapshotError::ResumeIntent)?;
+    Ok(reference)
 }
 
 fn interrupted_tool_calls(messages: &[providers::Message]) -> Vec<InterruptedToolCall> {

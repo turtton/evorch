@@ -2,6 +2,7 @@ use super::*;
 
 /// One execution's immutable cancellation channel and monotonic publication fence.
 pub(crate) struct ExecutionControl {
+    pub(crate) startup_failure: Mutex<Option<String>>,
     publication: PublicationToken,
     pub(super) cancel_tx: watch::Sender<RunInterrupt>,
     pub(crate) approvals: Arc<sandbox::approval::ApprovalOwner>,
@@ -23,6 +24,7 @@ impl ExecutionControl {
             approvals.close();
         }
         Arc::new(Self {
+            startup_failure: Mutex::new(None),
             approvals,
             publication: PublicationToken(Arc::new(PublicationFence {
                 gate: Mutex::new(()),
@@ -160,6 +162,20 @@ impl AgentRuntime {
                 && Arc::ptr_eq(&admission.execution, &execution)
             {
                 admission.cancelled = true;
+                let queued = self.note_intent_stop(
+                    run,
+                    &execution.publication().incarnation(),
+                    crate::quiesce::StopReason::Cancelled,
+                );
+                if queued {
+                    admission.finish_queued(run);
+                }
+            } else {
+                self.note_intent_stop(
+                    run,
+                    &execution.publication().incarnation(),
+                    crate::quiesce::StopReason::Cancelled,
+                );
             }
             execution.forbid_publication();
             drop(runs);

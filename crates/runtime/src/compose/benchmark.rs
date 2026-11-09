@@ -92,6 +92,19 @@ impl Frozen {
 
 #[async_trait]
 impl AgentModel for Frozen {
+    fn restore_checkpoint_provider_state(
+        &self,
+        run_id: &str,
+        role: Role,
+        category: Option<&str>,
+        input: &crate::quiesce::ProviderInput,
+    ) {
+        self.model
+            .restore_checkpoint_provider_state(run_id, role, category, input);
+    }
+    fn checkpoint_provider_input(&self, run_id: &str) -> Option<crate::quiesce::ProviderInput> {
+        self.model.checkpoint_provider_input(run_id)
+    }
     fn narrows_edit_tools(&self) -> bool {
         true
     }

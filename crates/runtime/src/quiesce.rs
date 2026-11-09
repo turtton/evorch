@@ -1,0 +1,290 @@
+//! Safe-point capture, not operator stop and not a restore authority (ADR 0045 §8).
+//! Restarting/restoring are subsequent transactions owned by the core host.
+use crate::{RunId, RunStore};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, MutexGuard};
+use tokio::sync::watch;
+
+#[cfg(test)]
+mod fixture;
+pub(crate) mod runtime;
+mod safe_point;
+#[cfg(test)]
+mod tests;
+
+mod schema;
+pub use schema::*;
+
+pub(crate) struct Coordinator {
+    inner: Mutex<Inner>,
+    version: watch::Sender<u64>,
+    #[cfg(test)]
+    fault: Mutex<Option<StorageStep>>,
+}
+#[derive(Default)]
+struct Inner {
+    phase: QuiesceState,
+    intents: BTreeMap<RunId, ResumeIntent>,
+    persisted: BTreeSet<RunId>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorageStep {
+    Snapshot,
+    Save,
+    Flush,
+}
+
+impl Default for Coordinator {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::default(),
+            version: watch::channel(0).0,
+            #[cfg(test)]
+            fault: Mutex::default(),
+        }
+    }
+}
+impl Coordinator {
+    pub(crate) fn storage_step(&self, step: StorageStep) -> Result<(), String> {
+        #[cfg(test)]
+        {
+            let mut fault = self.fault.lock().unwrap();
+            if *fault == Some(step) {
+                *fault = None;
+                return Err(format!("injected {step:?} failure"));
+            }
+        }
+        let _ = step;
+        Ok(())
+    }
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn changed(&self) {
+        self.version.send_modify(|n| *n = n.wrapping_add(1));
+    }
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.version.subscribe()
+    }
+    pub(crate) fn state(&self) -> QuiesceState {
+        self.lock().phase.clone()
+    }
+    pub(crate) fn queued(&self, run: RunId, incarnation: &str) -> bool {
+        self.lock().intents.get(&run).is_some_and(|intent| {
+            intent.incarnation == incarnation && intent.wait == ResumeWait::AdmissionQueued
+        })
+    }
+    pub(crate) fn provider_input(&self, run: RunId) -> Option<ProviderInput> {
+        self.lock()
+            .intents
+            .get(&run)
+            .and_then(|intent| intent.provider_input.clone())
+    }
+    pub(crate) fn active(&self, run: RunId) -> bool {
+        self.lock()
+            .intents
+            .get(&run)
+            .is_some_and(|intent| intent.active)
+    }
+    pub(crate) fn running(&self) -> bool {
+        self.state() == QuiesceState::Running
+    }
+    pub(crate) fn fail(&self, reason: impl ToString) {
+        self.lock().phase = QuiesceState::Failed {
+            reason: reason.to_string(),
+        };
+        self.changed();
+    }
+    fn save(
+        &self,
+        store: Option<&RunStore>,
+        intent: &ResumeIntent,
+        expected: Option<String>,
+    ) -> Result<(), String> {
+        let Some(store) = store else { return Ok(()) };
+        self.storage_step(StorageStep::Save)?;
+        let payload = serde_json::to_string(intent).map_err(|e| e.to_string())?;
+        store
+            .handle
+            .save_resume_intent(
+                storage::resume_intent::ResumeIntentRecord {
+                    run_id: intent.run_id.to_string(),
+                    incarnation: intent.incarnation.clone(),
+                    payload,
+                },
+                expected,
+            )
+            .map_err(|e| e.to_string())?;
+        self.storage_step(StorageStep::Flush)?;
+        store
+            .handle
+            .flush_resume_intents()
+            .map_err(|e| e.to_string())
+    }
+    /// Serialized with quiesce. Same incarnation or another live incarnation is
+    /// never admitted twice. New input during quiesce remains a durable intent.
+    pub(crate) fn admit(
+        &self,
+        mut intent: ResumeIntent,
+        store: Option<&RunStore>,
+        defer_registration: bool,
+    ) -> Result<bool, String> {
+        let mut inner = self.lock();
+        if inner
+            .intents
+            .get(&intent.run_id)
+            .is_some_and(|old| old.active)
+        {
+            return Err("run incarnation already admitted".into());
+        }
+        let start = inner.phase == QuiesceState::Running;
+        if !start && defer_registration {
+            intent.wait = ResumeWait::AdmissionQueued;
+        }
+        let previous = if let Some(old) = inner.intents.get(&intent.run_id) {
+            Some(old.clone())
+        } else if let Some(store) = store {
+            let read = store
+                .with_database(|db| db.resume_intent(&intent.run_id.to_string()))
+                .map_err(|e| e.to_string())
+                .and_then(|row| row.map(ResumeIntent::decode).transpose());
+            match read {
+                Ok(previous) => previous,
+                Err(reason) => {
+                    inner.phase = QuiesceState::Failed {
+                        reason: reason.clone(),
+                    };
+                    self.changed();
+                    return Err(reason);
+                }
+            }
+        } else {
+            None
+        };
+        let persisted =
+            !inner.intents.contains_key(&intent.run_id) || inner.persisted.contains(&intent.run_id);
+        let expected = previous
+            .as_ref()
+            .filter(|_| persisted)
+            .map(|old| old.incarnation.clone());
+        if let Some(old) = previous {
+            // Re-registration changes authority/incarnation, never the already
+            // sent prefix or an input no committed snapshot consumed. PR 06
+            // decides which pending inputs to replay; admission cannot delete them.
+            intent.inputs = old.inputs;
+            if let Some(initial) = old.initial_input
+                && intent.initial_input.as_ref() != Some(&initial)
+                && !intent.inputs.iter().any(|input| input == &initial)
+            {
+                // A history-only registration did not consume this initial input.
+                // Keep it queued until PR 06 actually delivers it to the context.
+                intent.inputs.insert(0, initial);
+            }
+            intent.provider_input = old.provider_input;
+            intent.snapshot = old.snapshot;
+            intent.tool_intent = old.tool_intent;
+            intent.boundary_pending = old.boundary_pending;
+            intent.responses_replay = old.responses_replay;
+            intent.compactions = old.compactions;
+            intent.route_pins = old.route_pins;
+        }
+        if let Err(error) = self.save(store, &intent, expected) {
+            inner.phase = QuiesceState::Failed {
+                reason: error.clone(),
+            };
+            self.changed();
+            return Err(error);
+        }
+        if store.is_some() {
+            inner.persisted.insert(intent.run_id);
+        }
+        inner.intents.insert(intent.run_id, intent);
+        self.changed();
+        Ok(start)
+    }
+    pub(crate) fn update(
+        &self,
+        run: RunId,
+        incarnation: &str,
+        store: Option<&RunStore>,
+        change: impl FnOnce(&mut ResumeIntent),
+    ) -> Result<(), String> {
+        let mut inner = self.lock();
+        let Some(old) = inner
+            .intents
+            .get(&run)
+            .filter(|old| old.incarnation == incarnation)
+        else {
+            return Ok(());
+        };
+        let mut intent = old.clone();
+        change(&mut intent);
+        if *old == intent {
+            return Ok(());
+        }
+        let expected = inner
+            .persisted
+            .contains(&run)
+            .then(|| incarnation.to_string());
+        if let Err(error) = self.save(store, &intent, expected) {
+            inner.phase = QuiesceState::Failed {
+                reason: error.clone(),
+            };
+            self.changed();
+            return Err(error);
+        }
+        if store.is_some() {
+            inner.persisted.insert(run);
+        }
+        inner.intents.insert(run, intent);
+        self.changed();
+        Ok(())
+    }
+    pub(crate) fn begin(&self) {
+        let mut inner = self.lock();
+        if inner.phase == QuiesceState::Running {
+            inner.phase = QuiesceState::Quiescing;
+            self.changed();
+            inner.phase = QuiesceState::WaitingForSafePoints;
+            self.changed();
+        }
+    }
+    fn complete(&self, store: Option<&RunStore>) -> Result<bool, String> {
+        let mut inner = self.lock();
+        match &inner.phase {
+            QuiesceState::Failed { reason } => return Err(reason.clone()),
+            QuiesceState::Checkpointed => return Ok(true),
+            QuiesceState::WaitingForSafePoints => {}
+            _ => return Ok(false),
+        }
+        if inner.intents.values().any(|intent| {
+            intent.active
+                && intent.checkpoint.is_none()
+                && intent.wait != ResumeWait::AdmissionQueued
+        }) {
+            return Ok(false);
+        }
+        let flushed = self.storage_step(StorageStep::Flush).and_then(|()| {
+            store
+                .ok_or_else(|| "safe-point quiesce requires a run store".to_string())
+                .and_then(|store| {
+                    store
+                        .handle
+                        .flush_resume_intents()
+                        .map_err(|e| e.to_string())
+                })
+        });
+        if let Err(error) = flushed {
+            inner.phase = QuiesceState::Failed {
+                reason: error.clone(),
+            };
+            self.changed();
+            return Err(error);
+        }
+        inner.phase = QuiesceState::Checkpointed;
+        self.changed();
+        Ok(true)
+    }
+}

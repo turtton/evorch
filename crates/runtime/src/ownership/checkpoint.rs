@@ -3,54 +3,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointBoundary {
-    TurnEnd,
-    Terminal,
-    Idle,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SnapshotNoneReason {
-    NoRunStore,
-    WriteFailed,
-    Skipped,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SnapshotReference {
-    RunContext {
-        #[serde(flatten)]
-        receipt: storage::RunContextReceipt,
-    },
-    None {
-        reason: SnapshotNoneReason,
-    },
-}
-
-impl SnapshotReference {
-    pub const fn none(reason: SnapshotNoneReason) -> Self {
-        Self::None { reason }
-    }
-
-    /// References are advisory. Missing/replaced snapshots never grant authority.
-    pub fn available(&self, record: Option<&storage::RunContextRecord>) -> bool {
-        match (self, record) {
-            (Self::RunContext { receipt }, Some(record)) => receipt.matches(record),
-            _ => false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunCheckpoint {
-    pub snapshot: SnapshotReference,
-    pub boundary: CheckpointBoundary,
-    pub checkpointed_at_ms: u64,
-}
+pub use crate::checkpoint::{
+    CheckpointBoundary, RunCheckpoint, SnapshotNoneReason, SnapshotReference,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerCheckpoint {

@@ -648,6 +648,33 @@ pub(super) fn run_writer_with_index(
             Ok(Command::Reconcile(reply)) => {
                 let _ = reply.send(projection::reconcile(&state.conn));
             }
+            Ok(Command::SaveResumeIntent(record, expected, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "resume intent writes suspended".into(),
+                    ))
+                } else {
+                    crate::resume_intent::save(&state.conn, &record, expected.as_deref())
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::FlushResumeIntents(reply)) => {
+                let result = flush_usage(&mut state).and_then(|()| {
+                    let (busy, frames, synced): (i64, i64, i64) =
+                        state
+                            .conn
+                            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                            })?;
+                    if busy != 0 || frames != synced {
+                        return Err(StorageError::Io(
+                            "resume intent WAL flush incomplete".into(),
+                        ));
+                    }
+                    Ok(())
+                });
+                let _ = reply.send(result);
+            }
             Ok(Command::FlushUsage(reply)) => {
                 let result = flush_usage(&mut state);
                 let _ = reply.send(result);

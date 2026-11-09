@@ -56,7 +56,7 @@ impl LoopState {
             }));
     }
 
-    pub(super) fn current_activity(&self) -> RunActivity {
+    pub(crate) fn current_activity(&self) -> RunActivity {
         *self
             .current_activity
             .lock()
@@ -68,6 +68,16 @@ impl LoopState {
             .current_activity
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = activity;
+        if let Some(runtime) = self.runtime() {
+            let _ = runtime.shared.quiesce.update(
+                self.task.run_id,
+                &self.task.publication.incarnation(),
+                runtime.shared.run_store.get(),
+                |intent| {
+                    intent.wait = crate::quiesce::ResumeWait::Activity { activity };
+                },
+            );
+        }
     }
 
     pub(super) fn publish_context(
