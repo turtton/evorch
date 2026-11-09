@@ -172,3 +172,261 @@ async fn each_kind_of_call_ends_the_other_kinds_streak() {
     assert_eq!(outcome.probe_calls, 12);
     assert!(outcome.diagnostics.is_empty());
 }
+
+// Real SQLite reports are changed at provider request boundaries, never by time.
+#[derive(Clone, Copy)]
+enum LaneScript {
+    Artifacts,
+    Noise,
+    Oscillation,
+    Pages,
+    FailThenSuccess,
+    Failures,
+    EmptyPages,
+    StorageFailures,
+    StorageThenSuccess,
+}
+struct LaneModel {
+    store: storage::StorageHandle,
+    step: Mutex<usize>,
+    script: LaneScript,
+    database: std::path::PathBuf,
+    brief_json: String,
+    seen: Mutex<Vec<Value>>,
+}
+#[async_trait::async_trait]
+impl runtime::AgentModel for LaneModel {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "lane-script".into()
+    }
+    async fn complete(
+        &self,
+        _: &runtime::AgentInvocationContext,
+        _: Role,
+        messages: &[providers::Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<ChatResponse, runtime::RuntimeError> {
+        let mut step = self.step.lock().unwrap();
+        let n = *step;
+        *step += 1;
+        for block in messages.last().into_iter().flat_map(|m| &m.content) {
+            if let providers::ContentBlock::ToolResult { content, .. } = block {
+                for part in content {
+                    if let providers::ToolResultContent::Text { text } = part
+                        && let Ok(value) = serde_json::from_str::<Value>(text)
+                    {
+                        self.seen.lock().unwrap().push(value);
+                    }
+                }
+            }
+        }
+        if n == 14 {
+            return Ok(text_response("done", FinishReason::Stop));
+        }
+        if matches!(
+            self.script,
+            LaneScript::StorageFailures | LaneScript::StorageThenSuccess
+        ) {
+            rusqlite::Connection::open(&self.database)
+                .unwrap()
+                .execute(
+                    "UPDATE lanes SET brief_json=?1 WHERE lane_id='observed-lane-0'",
+                    [&self.brief_json],
+                )
+                .unwrap();
+        }
+        if !matches!(self.script, LaneScript::Pages) {
+            let status = if matches!(self.script, LaneScript::Oscillation) && !n.is_multiple_of(2) {
+                event_bus::LaneStatus::Waiting
+            } else {
+                event_bus::LaneStatus::Working
+            };
+            self.store
+                .append_lane_report(
+                    "observed-lane-0",
+                    1,
+                    event_bus::LaneReportInput {
+                        status,
+                        summary: format!("summary {n}"),
+                        artifact_refs: vec![format!("artifact:{n}")],
+                        artifact_revision: Some(event_bus::lane::ArtifactRevision::Sha256(
+                            format!(
+                                "{:064x}",
+                                if matches!(
+                                    self.script,
+                                    LaneScript::Artifacts
+                                        | LaneScript::FailThenSuccess
+                                        | LaneScript::StorageThenSuccess
+                                ) {
+                                    n
+                                } else {
+                                    0
+                                }
+                            ),
+                        )),
+                        needs_human: false,
+                        question_refs: vec![],
+                        reason_code: None,
+                        failure_episode: None,
+                        producer: event_bus::LaneReportProducer::LaneAgent,
+                    },
+                    n as i64 + 20,
+                )
+                .unwrap();
+        }
+        if matches!(self.script, LaneScript::StorageFailures)
+            || (matches!(self.script, LaneScript::StorageThenSuccess) && n < 5)
+        {
+            // Inject a row-decoding failure, not a fake progress flag. The next
+            // request repairs the same row before deciding whether to fail again.
+            rusqlite::Connection::open(&self.database)
+                .unwrap()
+                .execute(
+                    "UPDATE lanes SET brief_json='{invalid' WHERE lane_id='observed-lane-0'",
+                    [],
+                )
+                .unwrap();
+        }
+        let input = match self.script {
+            LaneScript::Noise => {
+                if n.is_multiple_of(2) {
+                    json!({"limit": n % 18 + 3, "filter":"attached"})
+                } else {
+                    json!({"limit": n % 18 + 3})
+                }
+            }
+            LaneScript::FailThenSuccess if n < 5 => json!({"cursor":"invalid"}),
+            LaneScript::Failures => json!({"cursor":format!("invalid-{n}")}),
+            LaneScript::EmptyPages => json!({"filter":"summary","limit":n+1}),
+            LaneScript::Pages => {
+                let seen = self.seen.lock().unwrap();
+                if n == 0 {
+                    json!({"limit":1})
+                } else if n < 3 {
+                    json!({"limit":1,"cursor": seen.last().unwrap()["next_cursor"]})
+                } else {
+                    json!({"limit": if n.is_multiple_of(2) { 20 } else { 1 }})
+                }
+            }
+            _ => json!({}),
+        };
+        Ok(tool_response(&format!("lane-{n}"), "lane_list", input))
+    }
+}
+async fn lane_script(script: LaneScript) -> (AgentRunPhase, usize, Vec<Value>) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("lanes.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    let handle = db.handle();
+    for n in 0..3 {
+        handle.create_lane(storage::lanes::NewLane {
+            lane_id: format!("observed-lane-{n}"), thread_id: format!("observed-thread-{n}"),
+            origin_thread_id: "observing-lead".into(), origin_run_id: "origin-run".into(),
+            creation_key: format!("create-{n}"),
+            brief: serde_json::from_value(json!({"objective":"observe", "inputs":[],"deliverables":[],
+                "acceptance_criteria":["observe"],"constraints":[],"workspace":{},"report_policy":"attached"})).unwrap(),
+            start_seed: "seed".into(), project_id: None, project_root: None, title: None, at_ns: n,
+        }).unwrap();
+    }
+    let model = Arc::new(LaneModel {
+        store: handle.clone(),
+        step: Mutex::new(0),
+        script,
+        database: config.db_path.clone(),
+        brief_json: serde_json::to_string(&handle.lane("observed-lane-0").unwrap().unwrap().brief)
+            .unwrap(),
+        seen: Mutex::new(vec![]),
+    });
+    let bus = Arc::new(EventBus::new(1024));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(runtime::RunStore::open(&config, handle).unwrap());
+    let run = runtime
+        .delegate_chat(
+            "observing-lead",
+            Role::Orchestrator,
+            "observe".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    let phase = runtime.wait(run).await.unwrap();
+    let count = *model.step.lock().unwrap();
+    let seen = model.seen.lock().unwrap().clone();
+    (phase, count, seen)
+}
+#[tokio::test]
+async fn lane_list_new_artifacts_with_identical_arguments_continue() {
+    let (phase, count, _) = lane_script(LaneScript::Artifacts).await;
+    assert_eq!(phase, AgentRunPhase::Done);
+    assert_eq!(count, 15);
+}
+#[tokio::test]
+async fn lane_list_noise_and_argument_changes_cannot_avoid_stopping() {
+    let (phase, count, _) = lane_script(LaneScript::Noise).await;
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert_eq!(count, 11); // initial observation + ten stalls
+}
+#[tokio::test]
+async fn lane_list_previously_seen_statuses_do_not_reset_stalls() {
+    let (phase, count, _) = lane_script(LaneScript::Oscillation).await;
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert_eq!(count, 12); // two distinct states + ten stalls
+}
+#[tokio::test]
+async fn lane_list_next_pages_advance_but_repartitioning_does_not() {
+    let (phase, count, seen) = lane_script(LaneScript::Pages).await;
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert_eq!(count, 13); // three distinct lanes + ten stalls
+    let ids: Vec<_> = seen[..3]
+        .iter()
+        .map(|v| v["items"][0]["lane_id"].clone())
+        .collect();
+    assert!(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2]);
+}
+#[tokio::test]
+async fn lane_list_success_after_failures_is_reevaluated() {
+    let (phase, count, _) = lane_script(LaneScript::FailThenSuccess).await;
+    assert_eq!(phase, AgentRunPhase::Done);
+    assert_eq!(count, 15);
+}
+
+#[tokio::test]
+async fn reading_distinct_ranges_of_one_file_is_not_a_reread_loop() {
+    let script = (0..24)
+        .map(|n| {
+            tool_response(
+                &format!("range-{n}"),
+                "read",
+                json!({"path":"reread.txt","offset":n + 1,"limit":1}),
+            )
+        })
+        .chain([text_response("done", FinishReason::Stop)])
+        .collect();
+    let outcome = run(vec![Ok(Progress::Advanced); 24], script).await;
+    assert_eq!(outcome.phase, AgentRunPhase::Done);
+    assert_eq!(outcome.probe_calls, 24);
+}
+
+#[tokio::test]
+async fn lane_list_failures_and_empty_pages_stop_even_with_argument_changes() {
+    for script in [LaneScript::Failures, LaneScript::EmptyPages] {
+        let (phase, count, _) = lane_script(script).await;
+        assert_eq!(phase, AgentRunPhase::Error);
+        assert_eq!(count, 10);
+    }
+}
+
+#[tokio::test]
+async fn lane_list_storage_failures_do_not_observe_and_repair_is_reevaluated() {
+    let (phase, count, seen) = lane_script(LaneScript::StorageFailures).await;
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert_eq!(count, 10);
+    assert!(seen.iter().all(|v| v.get("items").is_none()));
+    let (phase, count, seen) = lane_script(LaneScript::StorageThenSuccess).await;
+    assert_eq!(phase, AgentRunPhase::Done);
+    assert_eq!(count, 15);
+    assert!(seen[..5].iter().all(|v| v.get("items").is_none()));
+    assert!(seen[5..].iter().all(|v| v.get("items").is_some()));
+}

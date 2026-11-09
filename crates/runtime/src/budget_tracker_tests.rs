@@ -617,3 +617,58 @@ fn lane_credit_waits_for_full_visible_presentation_and_survives_snapshot() {
             .contains("lane:compacted-away")
     );
 }
+
+#[test]
+fn rereads_are_scoped_to_content_range_and_intervening_work_progress() {
+    let bus = EventBus::new(16);
+    let settings = BudgetSettings {
+        max_file_rereads: 1,
+        ..Default::default()
+    };
+    let ctx = context(&bus, &settings);
+    for mode in ["range", "content", "work"] {
+        let mut counters = BudgetCounters::default();
+        for n in 0..24 {
+            if mode == "work" {
+                counters.mark_progress();
+            }
+            let input = serde_json::json!({"offset":if mode=="range" {n+1} else {1}});
+            let result = tools::ToolResult::success(if mode == "content" {
+                format!("revision-{n}")
+            } else {
+                "same".into()
+            });
+            counters.read_result(Path::new("file.txt"), &input, &result);
+            counters.mark_read_progress();
+            assert_eq!(
+                counters.publish(n + 1, &ctx),
+                BudgetDecision::Continue,
+                "{mode}:{n}"
+            );
+        }
+    }
+}
+#[test]
+fn read_success_and_equivalent_defaults_do_not_forgive_rereads() {
+    let bus = EventBus::new(16);
+    let settings = BudgetSettings {
+        max_file_rereads: 1,
+        ..Default::default()
+    };
+    let ctx = context(&bus, &settings);
+    let mut counters = BudgetCounters::default();
+    let result = tools::ToolResult::success("same content");
+    for input in [
+        serde_json::json!({}),
+        serde_json::json!({"offset":1,"limit":999,"byte_offset":0}),
+    ] {
+        counters.read_result(Path::new("file.txt"), &input, &result);
+        counters.mark_read_progress();
+        assert_eq!(counters.publish(1, &ctx), BudgetDecision::Continue);
+    }
+    counters.read_result(Path::new("file.txt"), &serde_json::json!({}), &result);
+    counters.mark_read_progress();
+    assert!(
+        matches!(counters.publish(1,&ctx),BudgetDecision::Exhausted(b) if b.detail.contains("max_file_rereads=1"))
+    );
+}

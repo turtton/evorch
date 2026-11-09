@@ -265,3 +265,152 @@ async fn lane_tools_pages_reports_and_restores_preserve_each_wire_prefix() {
     // Old tool results stay immutable after report updates, pagination and restore.
     assert_eq!(result(&h, "page-one"), page_one);
 }
+
+/// Both rows use the existing input-derived HTTP mock, not fixed token fixtures.
+async fn lane_list_repetition_cache(changing: bool) {
+    let mut h = harness(vec![text_response("lead idle")], 1_000_000);
+    let config = storage::StorageConfig {
+        db_path: h._directory.path().join("repetition.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    h.runtime = h
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, db.handle()).unwrap());
+    db.handle()
+        .create_lane(storage::lanes::NewLane {
+            lane_id: "cache-observed-lane".into(),
+            thread_id: "cache-observed-thread".into(),
+            origin_thread_id: "cache-observer".into(),
+            origin_run_id: "origin".into(),
+            creation_key: "create".into(),
+            brief: serde_json::from_value(brief("cache observed lane")).unwrap(),
+            start_seed: "seed".into(),
+            project_id: None,
+            project_root: None,
+            title: None,
+            at_ns: 1,
+        })
+        .unwrap();
+    let lead = h
+        .runtime
+        .delegate_chat(
+            "cache-observer",
+            Role::Orchestrator,
+            "observe cache".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = through_phase(&mut h.receiver, lead, AgentRunPhase::Waiting).await;
+    if changing {
+        for n in 0..12 {
+            db.handle()
+                .append_lane_report(
+                    "cache-observed-lane",
+                    1,
+                    event_bus::LaneReportInput {
+                        status: event_bus::LaneStatus::Working,
+                        summary: format!("milestone {n}"),
+                        artifact_revision: Some(event_bus::lane::ArtifactRevision::Sha256(
+                            format!("{n:064x}"),
+                        )),
+                        artifact_refs: vec![],
+                        needs_human: false,
+                        question_refs: vec![],
+                        reason_code: None,
+                        failure_episode: None,
+                        producer: event_bus::LaneReportProducer::LaneAgent,
+                    },
+                    n + 2,
+                )
+                .unwrap();
+            input(
+                &mut h,
+                lead,
+                "observe new information",
+                vec![
+                    call(&format!("observe-{n}"), "lane_list", json!({})),
+                    text_response("observed"),
+                ],
+                &mut events,
+            )
+            .await;
+            assert_eq!(
+                result(&h, &format!("observe-{n}"))["items"][0]["latest_report"]["summary"],
+                format!("milestone {n}")
+            );
+        }
+        h.runtime.cancel(lead).unwrap();
+        h.runtime.wait(lead).await.unwrap();
+    } else {
+        // Same information with different limits and fresh snapshots must stop.
+        h.mock.enqueue(
+            (0..11)
+                .map(|n| call(&format!("repeat-{n}"), "lane_list", json!({"limit":n+1})))
+                .collect::<Vec<_>>(),
+        );
+        h.runtime
+            .send_message(lead, "repeat the listing".into())
+            .unwrap();
+        events.extend(through_phase(&mut h.receiver, lead, AgentRunPhase::Error).await);
+        assert_eq!(h.runtime.wait(lead).await.unwrap(), AgentRunPhase::Error);
+        assert!(events.iter().any(|e|matches!(&e.kind,EventKind::Diagnostic(d) if d.code=="IdenticalToolCalls" && d.detail.contains("action=stop_run"))));
+    }
+    assert_eq!(h.mock.remaining_scripts(), 0);
+    let requests: Vec<_> = h
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|r| r.path == Wire::ChatCompletions.path())
+        .map(|r| r.body)
+        .collect();
+    assert_eq!(requests.len(), if changing { 25 } else { 12 });
+    for pair in requests.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1]).unwrap();
+    }
+    let usage: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(id),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) if id == &lead.to_string() => Some((*input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(d) if d.code == "CacheRegression" => panic!("{d:?}"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usage.len(), requests.len());
+    assert_eq!(usage[0].1, 0);
+    for pair in usage.windows(2) {
+        assert!(pair[0].0 > 0);
+        assert!(pair[1].1 >= pair[0].0);
+    }
+    // The first response remains byte-identical after later snapshots/reports.
+    let first_id = if changing { "observe-0" } else { "repeat-0" };
+    let first = result(&h, first_id);
+    for req in &requests {
+        for message in req["messages"].as_array().unwrap() {
+            if message["tool_call_id"] == first_id {
+                assert_eq!(
+                    serde_json::from_str::<Value>(message["content"].as_str().unwrap()).unwrap(),
+                    first
+                );
+            }
+        }
+    }
+}
+#[tokio::test]
+async fn changing_lane_list_results_preserve_input_derived_cache_and_wire_prefix() {
+    lane_list_repetition_cache(true).await;
+}
+#[tokio::test]
+async fn unchanged_lane_list_stops_without_rewriting_cache_prefix() {
+    lane_list_repetition_cache(false).await;
+}

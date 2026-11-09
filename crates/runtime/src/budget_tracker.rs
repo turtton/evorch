@@ -6,7 +6,7 @@ use event_bus::{
 };
 use providers::Usage;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -162,7 +162,7 @@ pub(crate) struct BudgetCounters {
     paused_total: Duration,
     cumulative_input_tokens: u64,
     cumulative_output_tokens: u64,
-    file_reads: BTreeMap<PathBuf, u32>,
+    file_reads: BTreeMap<(PathBuf, Option<[u8; 32]>), u32>,
     no_progress_rounds: u32,
     last_checkpoint_at: u32,
     warned: bool,
@@ -170,6 +170,9 @@ pub(crate) struct BudgetCounters {
     round_changed: bool,
     /// Children whose terminal result was already counted as progress.
     pub(crate) spawn_credits: SpawnCredits,
+    /// Run-local semantic read identities; restored runs start fresh, like repeat streaks.
+    /// SHA-256 entries are fixed-size; no eviction that could mint progress on a reread.
+    pub(crate) lane_observations: HashSet<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +209,7 @@ impl Default for BudgetCounters {
             exhausted: None,
             round_changed: false,
             spawn_credits: SpawnCredits::default(),
+            lane_observations: HashSet::new(),
         }
     }
 }
@@ -252,11 +256,50 @@ impl BudgetCounters {
 
     pub(crate) fn read(&mut self, path: &Path) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let count = self.file_reads.entry(path).or_default();
+        let count = self.file_reads.entry((path, None)).or_default();
         *count = count.saturating_add(1);
     }
 
-    pub(crate) const fn mark_progress(&mut self) {
+    /// Successful read content/range, separate from legacy run_js per-path accounting.
+    pub(crate) fn read_result(
+        &mut self,
+        path: &Path,
+        input: &serde_json::Value,
+        result: &tools::ToolResult,
+    ) {
+        use sha2::{Digest, Sha256};
+        use tools::tools::read::MAX_READ_LINES;
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        // Match Read's effective defaults/clamping, not arbitrary argument spelling.
+        let range = serde_json::json!([
+            input["offset"].as_u64().unwrap_or(1),
+            input["limit"]
+                .as_u64()
+                .unwrap_or(MAX_READ_LINES)
+                .min(MAX_READ_LINES),
+            input["byte_offset"].as_u64().unwrap_or(0),
+        ]);
+        let mut hash = Sha256::new();
+        hash.update(range.to_string());
+        hash.update(result.content.as_bytes());
+        for image in &result.images {
+            hash.update(image.media_type.as_bytes());
+            hash.update(image.data.as_bytes());
+        }
+        let count = self
+            .file_reads
+            .entry((path, Some(hash.finalize().into())))
+            .or_default();
+        *count = count.saturating_add(1);
+    }
+
+    pub(crate) fn mark_progress(&mut self) {
+        self.round_changed = true;
+        self.file_reads.clear();
+    }
+
+    /// A read's own success must not forgive its reread streak.
+    pub(crate) const fn mark_read_progress(&mut self) {
         self.round_changed = true;
     }
 
@@ -272,7 +315,7 @@ impl BudgetCounters {
             && self.mark_child_spawned()
     }
 
-    pub(crate) const fn mark_child_spawned(&mut self) -> bool {
+    pub(crate) fn mark_child_spawned(&mut self) -> bool {
         self.spawn_credits.unobserved = self.spawn_credits.unobserved.saturating_add(1);
         if self.spawn_credits.unobserved > MAX_UNOBSERVED_SPAWN_CREDITS {
             return false;
@@ -423,7 +466,7 @@ impl BudgetCounters {
                         diagnostic_codes::BUDGET_EXHAUSTED
                     },
                     detail: format!(
-                        "task {} exhausted {threshold}={}; tool_call_count={tool_calls}",
+                        "task {} exhausted {threshold}={}; tool_call_count={tool_calls}; action=stop_run",
                         context.task_id,
                         limit.unwrap_or_default()
                     ),
