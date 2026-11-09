@@ -36,6 +36,7 @@ pub enum Action {
         data: String,
     },
     Reconnect,
+    Shutdown,
 }
 
 fn update(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, f: impl FnOnce(&mut Shared)) {
@@ -48,6 +49,34 @@ fn update(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, f: impl FnOnce(&mut 
     };
     changed.notify_waiters();
     ctx.request_repaint();
+}
+
+#[derive(Clone)]
+enum Pending {
+    Command(Option<(String, u64)>),
+    Upload { thread: String, id: uuid::Uuid },
+}
+
+impl Pending {
+    fn rejected(&self, state: &mut Shared) {
+        match self {
+            Self::Command(Some((thread, _))) => {
+                state.sending.remove(thread);
+            }
+            Self::Upload { thread, id } => {
+                if let Some(image) = state
+                    .image_drafts
+                    .get_mut(thread)
+                    .into_iter()
+                    .flatten()
+                    .find(|i| i.id == *id)
+                {
+                    image.uploading = false;
+                }
+            }
+            _ => (),
+        }
+    }
 }
 
 const SNAPSHOT_BUFFER_EVENTS: usize = 256;
@@ -122,7 +151,7 @@ pub async fn serve(
     shared: Arc<Mutex<Shared>>,
     ctx: egui::Context,
 ) {
-    let mut uncertain = Vec::<(RequestId, Option<(String, u64)>)>::new();
+    let mut uncertain = Vec::<(RequestId, Pending)>::new();
     loop {
         update(&shared, &ctx, |s| {
             s.connected = false;
@@ -141,7 +170,7 @@ pub async fn serve(
                 continue;
             }
         };
-        for (request, draft) in std::mem::take(&mut uncertain) {
+        for (request, pending) in std::mem::take(&mut uncertain) {
             match client
                 .query(Query::GetCommandReceipt {
                     request_id: request.clone(),
@@ -153,32 +182,31 @@ pub async fn serve(
                         update(&shared, &ctx, |s| {
                             s.outcome_unknown.remove(request.as_str());
                         });
-                        accepted(&client, &shared, &ctx, reply, draft).await;
+                        accepted(&client, &shared, &ctx, reply, pending).await;
                     }
                     CommandReceiptState::Rejected { error } => update(&shared, &ctx, |s| {
                         s.outcome_unknown.remove(request.as_str());
-                        if let Some((thread, _)) = draft {
-                            s.sending.remove(&thread);
-                        }
+                        pending.rejected(s);
                         s.status = error.to_string();
                     }),
                     CommandReceiptState::Unknown => {
                         update(&shared, &ctx, |s| {
                             s.status = format!("OutcomeUnknown: {request}。再送していません。")
                         });
-                        uncertain.push((request, draft));
+                        uncertain.push((request, pending));
                     }
                 },
                 result => {
                     update(&shared, &ctx, |s| {
                         s.status = format!("receipt 照合失敗（再送なし）: {result:?}")
                     });
-                    uncertain.push((request, draft));
+                    uncertain.push((request, pending));
                 }
             }
         }
         let mut resync = true;
-        while resync {
+        let mut reconnect_requested = false;
+        'session: while resync {
             resync = false;
             let mut stream = match client
                 .subscribe(Subscribe {
@@ -220,18 +248,20 @@ pub async fn serve(
                         if !valid { resync = true; break; }
                     }
                     action = actions.recv() => {
-                        let Some(action) = action else { return };
-                        if matches!(action, Action::Reconnect) { resync = true; break; }
+                        let Some(action) = action else { discard_unused(&client, &shared).await; return };
+                        if matches!(action, Action::Reconnect) { reconnect_requested = true; break 'session; }
+                        if matches!(action, Action::Shutdown) { discard_unused(&client, &shared).await; return; }
                         match action {
                             Action::Command { command, draft } => {
+                                let pending = Pending::Command(draft);
                                 match client.command(command).await {
-                                    Ok(reply) => accepted(&client, &shared, &ctx, reply, draft).await,
+                                    Ok(reply) => accepted(&client, &shared, &ctx, reply, pending).await,
                                     Err(ClientError::Transport(TransportError::OutcomeUnknown { request_id })) => {
-                                        uncertain.push((request_id.clone(), draft));
+                                        uncertain.push((request_id.clone(), pending.clone()));
                                         update(&shared, &ctx, |s| { s.outcome_unknown.insert(request_id.to_string()); });
                                         update(&shared, &ctx, |s| s.status = format!("OutcomeUnknown: {request_id}。再接続後 receipt を照合します。"));
                                     }
-                                    Err(e) => update(&shared, &ctx, |s| { if let Some((thread, _)) = draft { s.sending.remove(&thread); } s.status = e.to_string(); }),
+                                    Err(e) => update(&shared, &ctx, |s| { pending.rejected(s); s.status = e.to_string(); }),
                                 }
                             }
                             Action::History(thread, older) => {
@@ -273,36 +303,63 @@ pub async fn serve(
                                 }
                             }
                             Action::Upload { project, thread, mime, data } => {
-                                let mut position = 0;
-                                let mut uploaded = false;
+                                let mut id = None;
                                 update(&shared, &ctx, |s| {
-                                    let images = s.image_drafts.entry(thread.to_string()).or_default();
-                                    position = if let Some(index) = images.iter().position(|i| i.mime == mime && i.data == data) { index } else {
-                                        images.push(super::ImageDraft { mime: mime.clone(), data: data.clone(), reference: None }); images.len() - 1
-                                    };
-                                    uploaded = images[position].reference.is_some();
+                                    let image = s.image_draft(thread.as_str(), mime.clone(), data.clone());
+                                    if image.reference.is_none() {
+                                        image.uploading = true;
+                                        id = Some(image.id);
+                                    }
                                 });
-                                if uploaded { continue; }
+                                let Some(id) = id else { continue; };
+                                let pending = Pending::Upload { thread: thread.to_string(), id };
                                 match client.command(Command::Conversation(ConversationCommand::UploadImage {
-                                    project, thread: thread.clone(), mime_type: mime, data,
+                                    project, thread, mime_type: mime, data,
                                 })).await {
-                                    Ok(reply) => if let Some(result) = reply.conversation
-                                        && let ConversationResult::ImageUploaded(image) = *result {
-                                            update(&shared, &ctx, |s| { s.image_drafts.get_mut(thread.as_str()).unwrap()[position].reference = Some(image); });
-                                        },
-                                    Err(e) => update(&shared, &ctx, |s| s.status = e.to_string()),
+                                    Ok(reply) => accepted(&client, &shared, &ctx, reply, pending).await,
+                                    Err(ClientError::Transport(TransportError::OutcomeUnknown { request_id })) => {
+                                        uncertain.push((request_id.clone(), pending));
+                                        update(&shared, &ctx, |s| {
+                                            s.outcome_unknown.insert(request_id.to_string());
+                                            s.status = format!("OutcomeUnknown: {request_id}。画像は再割当てせず receipt を照合します。");
+                                        });
+                                    }
+                                    Err(e) => update(&shared, &ctx, |s| { pending.rejected(s); s.status = e.to_string(); }),
                                 }
                             }
-                            Action::Reconnect => unreachable!(),
+                            Action::Reconnect | Action::Shutdown => unreachable!(),
                         }
                     }
                 }
             }
         }
         update(&shared, &ctx, |s| s.connected = false);
+        if reconnect_requested {
+            continue;
+        }
         if !wait_reconnect(&mut actions, &shared, &ctx).await {
             return;
         }
+    }
+}
+
+async fn discard_unused(client: &WorkbenchClient, shared: &Arc<Mutex<Shared>>) {
+    let images: Vec<_> = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .image_drafts
+        .values()
+        .flatten()
+        .filter_map(|image| image.reference.clone())
+        .collect();
+    for image in images {
+        let _ = client
+            .command(Command::Conversation(
+                ConversationCommand::DiscardAttachment {
+                    attachment_id: image.attachment_id,
+                },
+            ))
+            .await;
     }
 }
 
@@ -311,10 +368,32 @@ async fn accepted(
     shared: &Arc<Mutex<Shared>>,
     ctx: &egui::Context,
     reply: CommandReply,
-    draft: Option<(String, u64)>,
+    pending: Pending,
 ) {
     let mut discarded = Vec::new();
     update(shared, ctx, |s| {
+        let draft = match pending {
+            Pending::Command(draft) => draft,
+            Pending::Upload { thread, id } => {
+                if let Some(result) = reply.conversation.as_deref()
+                    && let ConversationResult::ImageUploaded(reference) = result
+                {
+                    if let Some(image) = s
+                        .image_drafts
+                        .get_mut(&thread)
+                        .into_iter()
+                        .flatten()
+                        .find(|i| i.id == id)
+                    {
+                        image.reference = Some(reference.clone());
+                        image.uploading = false;
+                    } else {
+                        discarded.push(reference.clone());
+                    }
+                }
+                None
+            }
+        };
         if let Some((thread, _)) = &draft {
             s.sending.remove(thread);
             discarded.extend(
@@ -355,6 +434,9 @@ async fn wait_reconnect(
         if matches!(action, Action::Reconnect) {
             return true;
         }
+        if matches!(action, Action::Shutdown) {
+            return false;
+        }
         update(shared, ctx, |s| {
             match action {
                 Action::Command {
@@ -366,17 +448,7 @@ async fn wait_reconnect(
                 Action::Upload {
                     thread, mime, data, ..
                 } => {
-                    let images = s.image_drafts.entry(thread.to_string()).or_default();
-                    if !images
-                        .iter()
-                        .any(|image| image.mime == mime && image.data == data)
-                    {
-                        images.push(super::ImageDraft {
-                            mime,
-                            data,
-                            reference: None,
-                        });
-                    }
+                    s.image_draft(thread.as_str(), mime, data).uploading = false;
                 }
                 _ => (),
             }

@@ -201,6 +201,8 @@ fn epoch_replacement_keeps_human_input_and_deduplicates_thread_events() {
     shared.image_drafts.insert(
         "t".into(),
         vec![gui::core_client::ImageDraft {
+            id: uuid::Uuid::new_v4(),
+            uploading: false,
             mime: "image/png".into(),
             data: "retained bytes".into(),
             reference: Some(workbench_protocol::commands::ImageRef {

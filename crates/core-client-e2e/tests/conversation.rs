@@ -94,13 +94,28 @@ async fn web(http: &reqwest::Client, root: &str, id: &str, body: RequestBody) ->
     }
 }
 
-/// Forward real length-prefixed frames, but lose the first execution's reply
+#[derive(Clone, Copy)]
+enum LostReply {
+    Upload,
+    Execution,
+}
+#[derive(Default)]
+struct ProxyFault {
+    lose: Option<LostReply>,
+    upload_barrier: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    unknown_receipt: bool,
+}
+
+/// Forward real length-prefixed frames, but lose a command's reply
 /// only after the core has produced it (and therefore recorded its receipt).
 async fn proxy(
     stream: tokio::net::UnixStream,
     backend: Arc<evorch_core::backend::HostBackend>,
     stopped: tokio::sync::watch::Receiver<bool>,
-    lose_reply: bool,
+    mut fault: ProxyFault,
     observed: Arc<Mutex<Vec<RequestEnvelope>>>,
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -111,6 +126,7 @@ async fn proxy(
         read.read_exact(&mut bytes).await?;
         Ok(bytes)
     }
+    let lose_reply = fault.lose;
     let (upstream, core) = tokio::net::UnixStream::pair().unwrap();
     let core = tokio::spawn(evorch_core::unix::connection(core, backend, stopped));
     let target = Arc::new(Mutex::new(None::<RequestId>));
@@ -121,10 +137,18 @@ async fn proxy(
             while let Ok(bytes) = packet(&mut client_read).await {
                 if let Ok(request) = serde_json::from_slice::<RequestEnvelope>(&bytes) {
                     if matches!(
-                        request.body,
-                        RequestBody::Command(Command::Conversation(
-                            ConversationCommand::CreateExecution(_)
-                        ))
+                        (&request.body, lose_reply),
+                        (
+                            RequestBody::Command(Command::Conversation(
+                                ConversationCommand::UploadImage { .. }
+                            )),
+                            Some(LostReply::Upload)
+                        ) | (
+                            RequestBody::Command(Command::Conversation(
+                                ConversationCommand::CreateExecution(_)
+                            )),
+                            Some(LostReply::Execution)
+                        )
                     ) {
                         *target.lock().unwrap() = Some(request.request_id.clone());
                     }
@@ -136,11 +160,25 @@ async fn proxy(
             Ok::<_, std::io::Error>(false)
         };
         let outbound = async {
-            while let Ok(bytes) = packet(&mut core_read).await {
-                if lose_reply
+            while let Ok(mut bytes) = packet(&mut core_read).await {
+                if fault.unknown_receipt
+                    && let Ok(ServerFrame::Reply(mut reply)) = serde_json::from_slice(&bytes)
+                    && let ReplyResult::Success(ReplyPayload::Query(QueryReply::CommandReceipt(
+                        receipt,
+                    ))) = &mut reply.result
+                {
+                    receipt.state = CommandReceiptState::Unknown;
+                    bytes = serde_json::to_vec(&ServerFrame::Reply(reply)).unwrap();
+                    fault.unknown_receipt = false;
+                }
+                if lose_reply.is_some()
                     && let Ok(ServerFrame::Reply(reply)) = serde_json::from_slice(&bytes)
                     && target.lock().unwrap().as_ref() == Some(&reply.request_id)
                 {
+                    if let Some((ready, release)) = fault.upload_barrier.take() {
+                        ready.send(()).unwrap();
+                        release.await.unwrap();
+                    }
                     return Ok::<_, std::io::Error>(true);
                 }
                 client_write.write_u32(bytes.len() as u32).await?;
@@ -155,7 +193,7 @@ async fn proxy(
             result = outbound => result.unwrap_or(false),
         }
     };
-    assert_eq!(lost, lose_reply);
+    assert_eq!(lost, lose_reply.is_some());
     // The connection was deliberately cut; only the independent core runtime
     // owns the run. Joining this socket handler must not stop that run.
     let _ = core.await.unwrap();
@@ -223,14 +261,29 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     let socket_backend = backend.clone();
     let observed = Arc::new(Mutex::new(Vec::new()));
     let trace = observed.clone();
+    let (upload_ready, held_upload) = tokio::sync::oneshot::channel();
+    let (release_upload, upload_release) = tokio::sync::oneshot::channel();
+    let mut upload_barrier = Some((upload_ready, upload_release));
     let socket = tokio::spawn(async move {
-        for connection in 0..3 {
+        for connection in 0..5 {
             let (stream, _) = listener.accept().await.unwrap();
             proxy(
                 stream,
                 socket_backend.clone(),
                 stopped.clone(),
-                connection == 0,
+                ProxyFault {
+                    lose: match connection {
+                        0 => Some(LostReply::Upload),
+                        2 => Some(LostReply::Execution),
+                        _ => None,
+                    },
+                    upload_barrier: if connection == 0 {
+                        upload_barrier.take()
+                    } else {
+                        None
+                    },
+                    unknown_receipt: connection == 1,
+                },
                 trace.clone(),
             )
             .await;
@@ -279,21 +332,83 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     image::DynamicImage::new_rgba8(1, 1)
         .write_to(&mut png, image::ImageFormat::Png)
         .unwrap();
+    let png_data = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
     actions
         .send(Action::Upload {
             project: ProjectId::new("p").unwrap(),
             thread: ThreadId::new("t").unwrap(),
             mime: "image/png".into(),
-            data: base64::engine::general_purpose::STANDARD.encode(png.into_inner()),
+            data: png_data.clone(),
         })
         .await
         .unwrap();
-    changed(&shared, |s| {
-        s.image_drafts
-            .get("t")
-            .is_some_and(|i| i[0].reference.is_some())
-    })
-    .await;
+    held_upload.await.unwrap();
+    {
+        let mut state = shared.lock().unwrap();
+        assert!(
+            state.take_image_drafts("t").is_none(),
+            "the actual delayed upload must prohibit GUI discard"
+        );
+        assert!(!state.can_send("t"));
+    }
+    release_upload.send(()).unwrap();
+    changed(&shared, |s| !s.connected).await;
+    assert!(
+        !shared.lock().unwrap().outcome_unknown.is_empty(),
+        "lost UploadImage must be retained for receipt reconciliation"
+    );
+    let upload_request = shared
+        .lock()
+        .unwrap()
+        .outcome_unknown
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
+    actions.send(Action::Reconnect).await.unwrap();
+    changed(&shared, |s| s.connected).await;
+    {
+        let mut state = shared.lock().unwrap();
+        assert!(state.outcome_unknown.contains(&upload_request));
+        assert!(state.image_drafts["t"][0].reference.is_none());
+        assert!(!state.can_discard_images("t"));
+        let image = state.image_drafts["t"][0].clone();
+        gui::core_client::enqueue(
+            &actions,
+            &mut state,
+            Action::Upload {
+                project: ProjectId::new("p").unwrap(),
+                thread: ThreadId::new("t").unwrap(),
+                mime: image.mime,
+                data: image.data,
+            },
+        );
+    }
+    actions.send(Action::Reconnect).await.unwrap();
+    changed(&shared, |s| s.connected && s.outcome_unknown.is_empty()).await;
+    assert!(
+        shared.lock().unwrap().image_drafts["t"][0]
+            .reference
+            .is_some(),
+        "Applied ImageUploaded receipt must update its original draft"
+    );
+    assert!(shared.lock().unwrap().outcome_unknown.is_empty());
+    {
+        let trace = observed.lock().unwrap();
+        let uploads: Vec<_> = trace
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.body,
+                    RequestBody::Command(Command::Conversation(
+                        ConversationCommand::UploadImage { .. }
+                    ))
+                )
+            })
+            .collect();
+        assert_eq!(uploads.len(), 1, "upload must never be replayed");
+        assert!(trace.iter().any(|r| matches!(&r.body, RequestBody::Query(Query::GetCommandReceipt { request_id }) if request_id.as_str() == upload_request) && r.session_id == uploads[0].session_id));
+    }
     let image = shared.lock().unwrap().image_drafts["t"][0]
         .reference
         .clone()
@@ -486,9 +601,40 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
             .surface,
         sandbox::approval::ApprovalSurface::Web
     );
-    // Closing only the desktop actor (like dropping the window) cannot stop run.
+    // An unused upload must be discarded during orderly desktop shutdown,
+    // without issuing lifecycle commands for the independently running agent.
+    actions
+        .send(Action::Upload {
+            project: ProjectId::new("p").unwrap(),
+            thread: ThreadId::new("unused").unwrap(),
+            mime: "image/png".into(),
+            data: png_data,
+        })
+        .await
+        .unwrap();
+    changed(&shared, |s| {
+        s.image_drafts
+            .get("unused")
+            .is_some_and(|i| i[0].reference.is_some())
+    })
+    .await;
+    let unused = shared.lock().unwrap().image_drafts["unused"][0]
+        .reference
+        .as_ref()
+        .unwrap()
+        .attachment_id
+        .clone();
+    actions.send(Action::Shutdown).await.unwrap();
     drop(actions);
     desktop.await.unwrap();
+    {
+        let trace = observed.lock().unwrap();
+        assert!(trace.iter().any(|r| matches!(&r.body, RequestBody::Command(Command::Conversation(ConversationCommand::DiscardAttachment { attachment_id })) if *attachment_id == unused)));
+        assert!(!trace.iter().any(|r| matches!(
+            r.body,
+            RequestBody::Command(Command::StopRun(_) | Command::StopChat(_))
+        )));
+    }
     assert!(matches!(
         runtime.inspect_agent(run).unwrap().phase,
         event_bus::AgentRunPhase::Running | event_bus::AgentRunPhase::Waiting

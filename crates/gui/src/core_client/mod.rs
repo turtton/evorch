@@ -27,6 +27,9 @@ pub struct Draft {
 
 #[derive(Clone)]
 pub struct ImageDraft {
+    pub id: uuid::Uuid,
+    /// Queued, in flight, or OutcomeUnknown: never reallocate until resolved.
+    pub uploading: bool,
     pub mime: String,
     pub data: String,
     pub reference: Option<ImageRef>,
@@ -45,6 +48,50 @@ pub struct Shared {
 }
 
 impl Shared {
+    pub fn take_image_drafts(&mut self, thread: &str) -> Option<Vec<ImageDraft>> {
+        if !self.can_discard_images(thread) {
+            return None;
+        }
+        self.image_drafts.remove(thread)
+    }
+    pub fn can_discard_images(&self, thread: &str) -> bool {
+        !self.sending.contains(thread)
+            && !self
+                .image_drafts
+                .get(thread)
+                .into_iter()
+                .flatten()
+                .any(|i| i.uploading)
+    }
+
+    pub fn can_send(&self, thread: &str) -> bool {
+        !self.sending.contains(thread)
+            && !self
+                .image_drafts
+                .get(thread)
+                .into_iter()
+                .flatten()
+                .any(|i| i.reference.is_none() || i.uploading)
+    }
+
+    fn image_draft(&mut self, thread: &str, mime: String, data: String) -> &mut ImageDraft {
+        let images = self.image_drafts.entry(thread.to_owned()).or_default();
+        let position = images
+            .iter()
+            .position(|i| i.mime == mime && i.data == data)
+            .unwrap_or_else(|| {
+                images.push(ImageDraft {
+                    id: uuid::Uuid::new_v4(),
+                    uploading: false,
+                    mime,
+                    data,
+                    reference: None,
+                });
+                images.len() - 1
+            });
+        &mut images[position]
+    }
+
     /// Replace a disposable cut without discarding human input or uncertainty.
     pub fn replace_projection(&mut self, cache: cache::Cache) {
         if self.cache.cursor().map(|c| c.core_epoch) != cache.cursor().map(|c| c.core_epoch) {
@@ -132,33 +179,62 @@ pub struct CoreClientApp {
 
 impl Drop for CoreClientApp {
     fn drop(&mut self) {
-        // Aborting a transport actor is not an agent stop. The independent core
-        // keeps its runtime and any already accepted inputs.
+        // Give the actor a bounded best-effort chance to discard known unused
+        // attachments. This is resource cleanup, never an agent stop command.
+        self._runtime.block_on(async {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+                let _ = self.actions.send(Action::Shutdown).await;
+                let _ = (&mut self.task).await;
+            })
+            .await;
+        });
         self.task.abort();
     }
 }
 
-fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, action: Action) {
-    if let Action::Command {
-        draft: Some((thread, _)),
-        ..
-    } = &action
-        && !shared.sending.insert(thread.clone())
-    {
-        return;
-    }
-    let draft_thread = match &action {
+/// Register local input before making it visible to the asynchronous actor.
+pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, action: Action) {
+    match &action {
         Action::Command {
             draft: Some((thread, _)),
             ..
-        } => Some(thread.clone()),
-        _ => None,
-    };
-    if tx.try_send(action).is_err() {
-        if let Some(thread) = draft_thread {
-            shared.sending.remove(&thread);
+        } => {
+            if !shared.can_send(thread) {
+                return;
+            }
+            shared.sending.insert(thread.clone());
         }
-        shared.status = "クライアントの送信キューが満杯です。入力は保持されています。".into();
+        Action::Upload {
+            thread, mime, data, ..
+        } => {
+            if shared.sending.contains(thread.as_str()) {
+                return;
+            }
+            let image = shared.image_draft(thread.as_str(), mime.clone(), data.clone());
+            if image.uploading || image.reference.is_some() {
+                return;
+            }
+            image.uploading = true;
+        }
+        _ => (),
+    }
+    if let Err(error) = tx.try_send(action) {
+        match error.into_inner() {
+            Action::Command {
+                draft: Some((thread, _)),
+                ..
+            } => {
+                shared.sending.remove(&thread);
+            }
+            Action::Upload {
+                thread, mime, data, ..
+            } => {
+                shared.image_draft(thread.as_str(), mime, data).uploading = false;
+            }
+            _ => (),
+        }
+        shared.status =
+            "クライアントの送信キューが満杯または切断中です。入力は保持されています。".into();
     }
 }
 
@@ -301,18 +377,18 @@ impl eframe::App for CoreClientApp {
                 }
             });
             ui.label(format!("添付済み: {}", shared.image_drafts.get(thread.as_str()).map_or(0, |images| images.iter().filter(|i| i.reference.is_some()).count())));
-            if ui.add_enabled(!shared.sending.contains(thread.as_str()), egui::Button::new("画像を破棄")).clicked() {
-                for image in shared.image_drafts.remove(thread.as_str()).into_iter().flatten().filter_map(|image| image.reference) {
+            if ui.add_enabled(shared.can_discard_images(thread.as_str()), egui::Button::new("画像を破棄")).clicked() {
+                for image in shared.take_image_drafts(thread.as_str()).into_iter().flatten().filter_map(|image| image.reference) {
                     enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::DiscardAttachment { attachment_id: image.attachment_id }), draft: None });
                 }
             }
             let upload_pending = shared.image_drafts.get(thread.as_str()).is_some_and(|images| images.iter().any(|i| i.reference.is_none()));
             if upload_pending && ui.button("未送信の画像を再検証").clicked() {
-                for image in shared.image_drafts.get(thread.as_str()).cloned().unwrap_or_default().into_iter().filter(|i| i.reference.is_none()) {
+                for image in shared.image_drafts.get(thread.as_str()).cloned().unwrap_or_default().into_iter().filter(|i| i.reference.is_none() && !i.uploading) {
                     enqueue(&self.actions, &mut shared, Action::Upload { project: project.clone(), thread: thread.clone(), mime: image.mime, data: image.data });
                 }
             }
-            if ui.add_enabled(!shared.sending.contains(thread.as_str()) && !upload_pending, egui::Button::new("送信 / follow-up")).clicked() {
+            if ui.add_enabled(shared.can_send(thread.as_str()), egui::Button::new("送信 / follow-up")).clicked() {
                 let draft = shared.drafts.get(thread.as_str()).unwrap();
                 let revision = draft.revision;
                 let chat = SendChat { project, thread: thread.clone(), submission_id: SubmissionId::new(uuid::Uuid::new_v4().to_string()).unwrap(), composer_role: self.composer_role, text: draft.text.clone(), skills: vec![], images: shared.image_drafts.get(thread.as_str()).into_iter().flatten().filter_map(|i| i.reference.clone()).collect(), model_preference: None, fork_seed: None };
@@ -339,4 +415,80 @@ fn read_image(path: &str) -> Result<(String, String), String> {
     }
     let format = image::guess_format(&bytes).map_err(|e| e.to_string())?;
     Ok((format.to_mime_type().into(), STANDARD.encode(bytes)))
+}
+
+#[cfg(test)]
+mod upload_regressions {
+    use super::*;
+
+    fn upload() -> Action {
+        Action::Upload {
+            project: ProjectId::new("p").unwrap(),
+            thread: ThreadId::new("t").unwrap(),
+            mime: "image/png".into(),
+            data: "local bytes".into(),
+        }
+    }
+    fn send() -> Action {
+        Action::Command {
+            command: Command::StopChat(ThreadTarget {
+                thread: ThreadId::new("t").unwrap(),
+            }),
+            draft: Some(("t".into(), 0)),
+        }
+    }
+    #[test]
+    fn attach_then_send_before_actor_runs_keeps_image_and_blocks_send() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut state = Shared::default();
+        enqueue(&tx, &mut state, upload());
+        assert!(
+            state.image_drafts.get("t").is_some_and(|i| i.len() == 1),
+            "enqueue must register the image synchronously"
+        );
+        enqueue(&tx, &mut state, send());
+        assert!(!state.sending.contains("t"));
+        assert!(matches!(rx.try_recv(), Ok(Action::Upload { .. })));
+        assert!(rx.try_recv().is_err(), "send must not overtake upload");
+    }
+    #[test]
+    fn full_queue_keeps_local_image_for_explicit_retry() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(Action::Reconnect).ok().unwrap();
+        let mut state = Shared::default();
+        enqueue(&tx, &mut state, upload());
+        assert_eq!(state.image_drafts["t"][0].data, "local bytes");
+        assert!(state.image_drafts["t"][0].reference.is_none());
+    }
+    #[tokio::test]
+    async fn discard_while_upload_reply_is_held_keeps_draft() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut state = Shared::default();
+        enqueue(&tx, &mut state, upload());
+        let Action::Upload { mime, data, .. } = rx.recv().await.unwrap() else {
+            panic!()
+        };
+        // Model the old actor registration before its network await. The reply
+        // cannot arrive until the test explicitly releases this oneshot.
+        state.image_drafts.entry("t".into()).or_insert_with(|| {
+            vec![ImageDraft {
+                id: uuid::Uuid::new_v4(),
+                uploading: true,
+                mime,
+                data,
+                reference: None,
+            }]
+        });
+        let (release, held) = tokio::sync::oneshot::channel();
+        let reply = tokio::spawn(async move {
+            held.await.unwrap();
+        });
+        assert!(
+            state.take_image_drafts("t").is_none(),
+            "discard must be refused until upload has a known outcome"
+        );
+        release.send(()).unwrap();
+        reply.await.unwrap();
+        assert_eq!(state.image_drafts["t"].len(), 1);
+    }
 }
