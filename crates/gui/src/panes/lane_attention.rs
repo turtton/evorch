@@ -95,8 +95,10 @@ pub fn kind_detail(kind: &LaneAttentionKind) -> Option<String> {
                 LaneNudgeState::Failed => "The reminder could not be delivered.",
             }
         ),
-        LaneAttentionKind::RestoreFailed { .. } => {
-            "A held notice could not bring its destination back.".to_owned()
+        LaneAttentionKind::RestoreFailed { attempts, suppressed, .. } => {
+            format!("Recovery failed {attempts} time(s). {}", if *suppressed {
+                "Automatic retries are suppressed; explicitly Resume after checking the recovery source."
+            } else { "Held notices remain pending." })
         }
         LaneAttentionKind::QuestionPending { .. }
         | LaneAttentionKind::Blocked { .. }
@@ -250,11 +252,24 @@ fn row_card(
                             AttentionOp::ContinueThread(lead.clone()),
                         ))
                     }
-                    LaneAttentionKind::RestoreFailed { .. }
-                        if allows(LaneAttentionAction::Continue) =>
-                    {
-                        held_thread("Continue lead")
-                    }
+                    LaneAttentionKind::RestoreFailed {
+                        suppressed: true, ..
+                    } if allows(LaneAttentionAction::Resume) => match &row.destination {
+                        Destination::Lead => Some((
+                            "Resume lead",
+                            "Explicitly retry held notices for this recovery destination",
+                            AttentionOp::ResumeThread(lead.clone()),
+                        )),
+                        Destination::Lane(thread) => Some((
+                            "Resume lane",
+                            "Explicitly retry held notices for this recovery destination",
+                            AttentionOp::ResumeThread(thread.to_string()),
+                        )),
+                        Destination::Unknown => None,
+                    },
+                    LaneAttentionKind::RestoreFailed {
+                        suppressed: false, ..
+                    } if allows(LaneAttentionAction::Continue) => held_thread("Continue lead"),
                     LaneAttentionKind::StopPending { .. }
                         if allows(LaneAttentionAction::Resume) =>
                     {
@@ -591,23 +606,25 @@ mod tests {
     }
 
     #[test]
-    fn a_restore_failure_offers_the_continue_of_its_own_destination() {
+    fn a_suppressed_recovery_offers_explicit_resume_of_its_own_destination() {
         let failed = item(
             "r",
             LaneAttentionKind::RestoreFailed {
                 destination_thread: WireThread::new("lane-thread").unwrap(),
                 failure_ref: "lane_delivery:lane-thread".into(),
+                attempts: 3,
+                suppressed: true,
             },
-            &[LaneAttentionAction::Inspect, LaneAttentionAction::Continue],
+            &[LaneAttentionAction::Inspect, LaneAttentionAction::Resume],
         );
         let (mut harness, captured) = draw(vec![failed], None);
         harness.run_steps(2);
-        assert!(harness.query_by_label("Continue lead").is_none());
-        harness.get_by_label("Continue lane").click();
+        assert!(harness.query_by_label("Resume lead").is_none());
+        harness.get_by_label("Resume lane").click();
         harness.run_steps(2);
         assert_eq!(
             captured.borrow().action.as_ref().unwrap().op,
-            AttentionOp::ContinueThread("lane-thread".into())
+            AttentionOp::ResumeThread("lane-thread".into())
         );
     }
 

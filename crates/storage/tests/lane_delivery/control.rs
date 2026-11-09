@@ -230,7 +230,7 @@ fn genuine_artifact_status_and_user_input_resolve_episodes_but_retry_does_not() 
     for (status, sha) in [
         (LaneStatus::Working, 'a'),
         (LaneStatus::Working, 'b'),
-        (LaneStatus::Blocked, 'b'),
+        (LaneStatus::Ready, 'b'),
     ] {
         let r = observation(&f, &owner);
         let e = f.h().observe_lane_stall(r).unwrap();
@@ -291,6 +291,8 @@ fn nudge_done_wake_receipt_is_retryable_and_consumes_no_guard() {
     let anchor = f.h().lane_progress_anchor("lane-1".into()).unwrap();
     let mut write = snapshot();
     write.record.run_id = "run-1".into();
+    f.h().upsert_run_context(&write.record).unwrap();
+    let recovery = f.h().prepare_lane_recovery(claim.clone(), 11).unwrap();
     f.h()
         .accept_lane_delivery(claim.clone(), write.clone(), 12)
         .unwrap();
@@ -302,6 +304,14 @@ fn nudge_done_wake_receipt_is_retryable_and_consumes_no_guard() {
     );
     assert_eq!(f.h().lane_wake_guard("lane-1".into()).unwrap(), before);
     assert_eq!(f.h().lane_progress_anchor("lane-1".into()).unwrap(), anchor);
+    assert_eq!(
+        f.h()
+            .lane_recovery_episode(recovery.episode.episode_id.clone())
+            .unwrap()
+            .unwrap(),
+        recovery.episode,
+        "Nudge acceptance is not ordinary input progress"
+    );
     assert_eq!(
         f.h()
             .lane_stall_episode(e.episode_id)
@@ -1414,7 +1424,7 @@ fn mixed_nudge_batch_charges_only_the_ordinary_wake_source() {
 }
 
 #[test]
-fn first_report_without_artifact_resolves_no_report_only_for_non_working_status() {
+fn first_report_without_artifact_resolves_no_report_only_for_terminal_status() {
     for status in [
         LaneStatus::Working,
         LaneStatus::Ready,
@@ -1460,7 +1470,7 @@ fn first_report_without_artifact_resolves_no_report_only_for_non_working_status(
                 .unwrap();
         }
         f.h().append_lane_report("lane-1", 1, first, 12).unwrap();
-        let resolved = status != LaneStatus::Working;
+        let resolved = matches!(status, LaneStatus::Ready | LaneStatus::Failed);
         let current = f
             .h()
             .lane_stall_episode(episode.episode_id)
@@ -1562,4 +1572,49 @@ fn inherited_question_quota_attention_uses_the_same_recipient_set_as_creation() 
         f.create(1, 101, LaneDeliveryBinding::Unbound),
         LaneQuestionCreated::Created(_)
     ));
+}
+
+#[test]
+fn working_waiting_reports_cannot_renew_the_nudge_slot() {
+    let f = Fixture::new();
+    let owner = started(&f);
+    let mut input = report(LaneStatus::Working);
+    input.artifact_revision = None;
+    f.h()
+        .append_lane_report_with_delivery("lane-1".into(), 1, input.clone(), 3)
+        .unwrap();
+    let initial = observation(&f, &owner);
+    let episode = f.h().observe_lane_stall(initial.clone()).unwrap();
+    let requested = f
+        .h()
+        .request_lane_nudge(
+            initial.clone(),
+            episode.episode_id.clone(),
+            episode.revision,
+        )
+        .unwrap();
+    for _ in 0..2 {
+        for status in [LaneStatus::Waiting, LaneStatus::Working] {
+            input.status = status;
+            input.summary.push('.');
+            input.question_refs = vec![format!("question-{}", input.summary.len())];
+            f.h()
+                .append_lane_report_with_delivery("lane-1".into(), 1, input.clone(), 4)
+                .unwrap();
+        }
+    }
+    let next = observation(&f, &owner);
+    assert_eq!(
+        next.progress_anchor, initial.progress_anchor,
+        "state/sequence/question churn is not work progress"
+    );
+    let same = f.h().observe_lane_stall(next.clone()).unwrap();
+    assert_eq!(same.episode_id, episode.episode_id);
+    assert_eq!(
+        f.h()
+            .request_lane_nudge(next, same.episode_id, same.revision)
+            .unwrap()
+            .notification_id,
+        requested.notification_id
+    );
 }

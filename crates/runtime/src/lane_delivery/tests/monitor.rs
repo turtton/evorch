@@ -1200,3 +1200,374 @@ async fn ready_after_failure_observation_wins_the_synthetic_failed_commit_cas() 
         f.runtime.wait(run).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn ordinary_restore_failures_stop_at_three_across_runtime_restart_and_explicit_resume() {
+    integration::MANUAL_SOURCES
+        .scope((), async {
+            use storage::lane_delivery::LaneRecoveryState;
+            let mut f = Fixture::new();
+            let (lead, host) = f.lead().await;
+            let lane = f.lane(lead, "restore-suppression").await;
+            f.finish(lead).await;
+            f.report(&lane, Some(1), LaneStatus::Ready);
+            host.fail.store(true, Ordering::SeqCst);
+            for _ in 0..6 {
+                assert_eq!(
+                    f.runtime
+                        .drive_lane_deliveries("delivery-lead")
+                        .await
+                        .unwrap(),
+                    LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed)
+                );
+            }
+            assert_eq!(host.restores.load(Ordering::SeqCst), 3);
+            let saved = || {
+                let db = rusqlite::Connection::open(&f.config.db_path).unwrap();
+                db.query_row(
+                    "SELECT episode_id FROM lane_recovery_episodes WHERE state='suppressed'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+            };
+            let episode_id = saved();
+            let episode = f
+                .storage
+                .handle()
+                .lane_recovery_episode(episode_id.clone())
+                .unwrap()
+                .unwrap();
+            assert_eq!(episode.attempts, 3);
+            assert_eq!(episode.state, LaneRecoveryState::Suppressed);
+            let bus = Arc::new(EventBus::new(1024));
+            let restarted = AgentRuntime::new(
+                bus.clone(),
+                Arc::new(tools::ToolExecutor::new(bus)),
+                f.model.clone(),
+            )
+            .with_run_store(crate::RunStore::open(&f.config, f.storage.handle()).unwrap());
+            *restarted.shared.lanes.delivery.host.lock().unwrap() = Some(host.clone());
+            assert_eq!(
+                restarted
+                    .drive_lane_deliveries("delivery-lead")
+                    .await
+                    .unwrap(),
+                LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed)
+            );
+            assert_eq!(host.restores.load(Ordering::SeqCst), 3);
+            let before = f.model.requests.lock().unwrap().len();
+            host.fail.store(false, Ordering::SeqCst);
+            restarted
+                .explicitly_resume_lane_delivery(lead, None)
+                .unwrap();
+            assert_eq!(
+                f.storage
+                    .handle()
+                    .lane_recovery_episode(episode_id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                LaneRecoveryState::Resolved
+            );
+            assert_eq!(
+                restarted
+                    .drive_lane_deliveries("delivery-lead")
+                    .await
+                    .unwrap(),
+                LaneDeliveryOutcome::Delivered { notifications: 1 }
+            );
+            restarted.wait(lead).await.unwrap();
+            assert_eq!(f.model.requests.lock().unwrap().len(), before + 1);
+            assert_eq!(
+                restarted
+                    .drive_lane_deliveries("delivery-lead")
+                    .await
+                    .unwrap(),
+                LaneDeliveryOutcome::Empty
+            );
+            assert_eq!(host.restores.load(Ordering::SeqCst), 4);
+            f.runtime.cancel(lane.root_run_id).unwrap();
+            f.runtime.wait(lane.root_run_id).await.unwrap();
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn temporary_restore_failure_delivers_once_and_stop_or_host_denial_does_not_count() {
+    integration::MANUAL_SOURCES
+        .scope((), async {
+            let mut f = Fixture::new();
+            let (lead, host) = f.lead().await;
+            let lane = f.lane(lead, "temporary-restore").await;
+            f.finish(lead).await;
+            f.report(&lane, Some(1), LaneStatus::Ready);
+            host.fail.store(true, Ordering::SeqCst);
+            assert_eq!(
+                f.runtime
+                    .drive_lane_deliveries("delivery-lead")
+                    .await
+                    .unwrap(),
+                LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed)
+            );
+            let before = f.model.requests.lock().unwrap().len();
+            host.fail.store(false, Ordering::SeqCst);
+            assert_eq!(
+                f.runtime
+                    .drive_lane_deliveries("delivery-lead")
+                    .await
+                    .unwrap(),
+                LaneDeliveryOutcome::Delivered { notifications: 1 }
+            );
+            f.runtime.wait(lead).await.unwrap();
+            assert_eq!(f.model.requests.lock().unwrap().len(), before + 1);
+            assert_eq!(
+                f.runtime
+                    .drive_lane_deliveries("delivery-lead")
+                    .await
+                    .unwrap(),
+                LaneDeliveryOutcome::Empty
+            );
+            let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM lane_recovery_episodes WHERE state<>'resolved'",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            f.report(&lane, Some(2), LaneStatus::Ready);
+            for reason in [
+                LaneDeliveryNack::Readonly,
+                LaneDeliveryNack::OwnershipLost,
+                LaneDeliveryNack::Stopped,
+            ] {
+                *host.deny.lock().unwrap() = Some(reason);
+                assert_eq!(
+                    f.runtime
+                        .drive_lane_deliveries("delivery-lead")
+                        .await
+                        .unwrap(),
+                    LaneDeliveryOutcome::Nacked(reason)
+                );
+            }
+            *host.deny.lock().unwrap() = None;
+            host.stop.store(true, Ordering::SeqCst);
+            assert_eq!(
+                f.runtime
+                    .drive_lane_deliveries("delivery-lead")
+                    .await
+                    .unwrap(),
+                LaneDeliveryOutcome::Nacked(LaneDeliveryNack::Stopped)
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COALESCE(SUM(attempts),0) FROM lane_recovery_episodes",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            f.runtime.cancel(lane.root_run_id).unwrap();
+            f.runtime.wait(lane.root_run_id).await.unwrap();
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn asynchronous_restore_admission_failure_counts_once_and_cannot_renew_its_source_episode() {
+    integration::MANUAL_SOURCES
+        .scope((), async {
+            let mut f = Fixture::new();
+            let (lead, host) = f.lead().await;
+            let lane = f.lane(lead, "admission-failure").await;
+            f.finish(lead).await;
+            f.report(&lane, Some(1), LaneStatus::Ready);
+            f.model.admission_required.store(true, Ordering::SeqCst);
+            for count in 1..=3 {
+                f.model.fail_admission_next.store(true, Ordering::SeqCst);
+                assert_eq!(
+                    f.runtime
+                        .drive_lane_deliveries("delivery-lead")
+                        .await
+                        .unwrap(),
+                    LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed)
+                );
+                assert!(matches!(
+                    f.runtime.wait(lead).await,
+                    Err(RuntimeError::Model { .. })
+                ));
+                let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT MAX(attempts) FROM lane_recovery_episodes WHERE state<>'resolved'",
+                        [],
+                        |r| r.get::<_, u32>(0)
+                    )
+                    .unwrap(),
+                    count
+                );
+            }
+            assert_eq!(host.restores.load(Ordering::SeqCst), 3);
+            assert_eq!(
+                f.runtime
+                    .drive_lane_deliveries("delivery-lead")
+                    .await
+                    .unwrap(),
+                LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed)
+            );
+            assert_eq!(host.restores.load(Ordering::SeqCst), 3);
+            f.runtime.cancel(lane.root_run_id).unwrap();
+            f.runtime.wait(lane.root_run_id).await.unwrap();
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn lane_restore_admission_failure_has_one_failed_report_not_one_per_execution() {
+    integration::MANUAL_SOURCES
+        .scope((), async {
+            let mut f = Fixture::new();
+            let (lead, _) = f.lead().await;
+            let lane = f.lane(lead, "lane-admission-failure").await;
+            f.finish(lane.root_run_id).await;
+            let (_owner, host) = owned(&f, &lane);
+            let root = lane.root_run_id.to_string();
+            let q = event_bus::UserQuestion {
+                id: "recover-lane-question".into(),
+                run_id: root.clone(),
+                root_run_id: root.clone(),
+                root_name: format!("chat:Orchestrator:{}", lane.thread_id),
+                recipient_run_ids: vec![],
+                title: "Recovery scope".into(),
+                options: vec![],
+                blocking: false,
+                answer: None,
+                answer_origin: None,
+                responder: None,
+                routing_revision: 0,
+                management_revision: None,
+            };
+            let created = f
+                .storage
+                .handle()
+                .create_lane_question(
+                    lane.lane_id.clone(),
+                    q.clone(),
+                    storage::lane_delivery::QuestionRequester {
+                        run_id: root.clone(),
+                        root_run_id: root,
+                        thread_id: lane.thread_id.clone(),
+                    },
+                    LaneDeliveryBinding::Bound,
+                    host.now_ns(),
+                )
+                .unwrap();
+            let storage::lane_delivery::LaneQuestionCreated::Created(q) = created else {
+                panic!()
+            };
+            f.storage
+                .handle()
+                .mutate_lane_question(storage::lane_delivery::LaneQuestionMutation {
+                    lane_id: lane.lane_id.clone(),
+                    question_id: q.id.clone(),
+                    lead_thread_id: "delivery-lead".into(),
+                    expected_management_revision: 1,
+                    expected_routing_revision: q.routing_revision,
+                    operation_id: "recover-answer".into(),
+                    action: storage::lane_delivery::LaneQuestionAction::Answer {
+                        text: "continue".into(),
+                        origin: event_bus::AnswerOrigin::LaneLead {
+                            run_id: lead.to_string(),
+                            thread_id: "delivery-lead".into(),
+                        },
+                    },
+                    at_ns: host.now_ns(),
+                })
+                .unwrap();
+            f.model.admission_required.store(true, Ordering::SeqCst);
+            for count in 1..=3 {
+                f.model.fail_admission_next.store(true, Ordering::SeqCst);
+                assert_eq!(
+                    f.runtime
+                        .drive_lane_deliveries(&lane.thread_id)
+                        .await
+                        .unwrap(),
+                    LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed)
+                );
+                assert!(matches!(
+                    f.runtime.wait(lane.root_run_id).await,
+                    Err(RuntimeError::Model { .. })
+                ));
+                let e = f
+                    .storage
+                    .handle()
+                    .active_lane_recovery(lane.thread_id.clone())
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(e.attempts, count);
+                let failed: Vec<_> = f
+                    .storage
+                    .handle()
+                    .lane_reports(&lane.lane_id, 0, 20)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|r| r.status == LaneStatus::Failed)
+                    .collect();
+                assert_eq!(failed.len(), 1);
+                assert_eq!(
+                    failed[0].failure_episode.as_deref(),
+                    Some(e.episode_id.as_str())
+                );
+            }
+            assert_eq!(host.restores.load(Ordering::SeqCst), 3);
+            assert_eq!(
+                f.runtime
+                    .drive_lane_deliveries(&lane.thread_id)
+                    .await
+                    .unwrap(),
+                LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed)
+            );
+            assert_eq!(host.restores.load(Ordering::SeqCst), 3);
+            // Simulate finalization arriving after a new Ready resolved recovery.
+            f.report(&lane, Some(99), LaneStatus::Ready);
+            let ready_seq = f
+                .storage
+                .handle()
+                .lane(&lane.lane_id)
+                .unwrap()
+                .unwrap()
+                .latest_report_seq;
+            f.runtime
+                .record_lane_harness_failure(
+                    lane.root_run_id,
+                    "late-admission-finalization",
+                    "runtime_failed",
+                    host.target.authority.ownership.as_ref(),
+                )
+                .unwrap();
+            assert_eq!(
+                f.storage
+                    .handle()
+                    .lane(&lane.lane_id)
+                    .unwrap()
+                    .unwrap()
+                    .latest_report_seq,
+                ready_seq
+            );
+            assert_eq!(
+                f.storage
+                    .handle()
+                    .lane_reports(&lane.lane_id, ready_seq - 1, 1)
+                    .unwrap()[0]
+                    .status,
+                LaneStatus::Ready
+            );
+            f.runtime.cancel(lead).unwrap();
+            f.runtime.wait(lead).await.unwrap();
+        })
+        .await;
+}

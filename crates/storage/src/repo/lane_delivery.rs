@@ -7,8 +7,10 @@ use sha2::{Digest, Sha256};
 
 mod delivery;
 mod guards;
+mod recovery;
 pub(crate) use delivery::*;
 pub(crate) use guards::*;
+pub(crate) use recovery::*;
 
 fn transaction(conn: &Connection) -> Result<Transaction<'_>, StorageError> {
     Ok(Transaction::new_unchecked(
@@ -511,6 +513,28 @@ pub(crate) fn append_report_in_transaction(
     input: crate::lanes::LaneReportInput,
     at_ns: i64,
 ) -> Result<crate::lanes::LaneReportAppended, StorageError> {
+    // A harness failure episode has one immutable Report, not one per retry.
+    let current = lane(tx, lane_id)?;
+    management(current.management_revision, expected_management_revision)?;
+    if input.producer == event_bus::LaneReportProducer::Harness
+        && input.status == event_bus::LaneStatus::Failed
+        && let Some(episode) = &input.failure_episode
+    {
+        let seq: Option<u64> = tx.query_row(
+            "SELECT report_seq FROM lane_reports WHERE lane_id=?1 AND management_revision=?2 AND failure_episode=?3 AND producer='harness' AND status='failed' ORDER BY report_seq LIMIT 1",
+            params![lane_id, expected_management_revision, episode], |r| r.get(0),
+        ).optional()?;
+        if let Some(seq) = seq {
+            let report = crate::repo::lanes::reports(tx, lane_id, seq - 1, 1)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| conflict("missing_failure_report"))?;
+            return Ok(crate::lanes::LaneReportAppended {
+                lane: current,
+                report,
+            });
+        }
+    }
     let appended = crate::repo::lanes::append_report_in_transaction(
         tx,
         lane_id,
@@ -520,10 +544,17 @@ pub(crate) fn append_report_in_transaction(
     )?;
     // A new terminal artifact must unblock delivery even if runtime crashes
     // immediately after this source commit, before scheduling its outbox.
-    if matches!(
-        input.status,
-        event_bus::LaneStatus::Ready | event_bus::LaneStatus::Failed
-    ) {
+    let recovery_diagnostic = input.status == event_bus::LaneStatus::Failed
+        && input.producer == event_bus::LaneReportProducer::Harness
+        && input.reason_code.as_deref() == Some("restore_failed");
+    // Repairing a restore source is NOT a wake-guard reset signal. The diagnostic
+    // Report must not manufacture terminal work progress for its outgoing guard.
+    if !recovery_diagnostic
+        && matches!(
+            input.status,
+            event_bus::LaneStatus::Ready | event_bus::LaneStatus::Failed
+        )
+    {
         let expected = guard(tx, lane_id)?.revision;
         guards::update_guard_in_transaction(
             tx,

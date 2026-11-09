@@ -153,6 +153,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ),
     ("lane_stall_episodes", ReclaimThread, "lane episode history"),
     (
+        "lane_recovery_episodes",
+        ReclaimThread,
+        "destination/root tombstone triggers reclaim recovery history",
+    ),
+    (
         "lane_verifications",
         ReclaimThread,
         "lane verification evidence and reviewer binding",

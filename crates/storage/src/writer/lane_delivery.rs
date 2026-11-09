@@ -213,3 +213,94 @@ impl StorageHandle {
         })
     }
 }
+
+impl StorageHandle {
+    /// Validate a live claim and snapshot, and read/create its recovery episode.
+    /// Preparing is not an attempt; callers must not restore a suppressed episode.
+    pub fn prepare_lane_recovery(
+        &self,
+        claim: LaneDeliveryClaim,
+        now_ns: i64,
+    ) -> Result<LaneRecoveryAttempt, StorageError> {
+        self.lane_job(true, move |conn| {
+            crate::repo::lane_delivery::prepare_recovery(conn, &claim, now_ns)
+        })
+    }
+    /// Only after an actual restore failed. Episode + optional Report + outbox
+    /// commit together. A claim token is counted once, never used as identity.
+    pub fn record_lane_recovery_failure(
+        &self,
+        claim: LaneDeliveryClaim,
+        attempt: LaneRecoveryAttempt,
+        now_ns: i64,
+    ) -> Result<LaneRecoveryFailure, StorageError> {
+        self.lane_job(true, move |conn| {
+            crate::repo::lane_delivery::fail_recovery(conn, &claim, attempt, now_ns)
+        })
+    }
+    pub fn resolve_lane_recovery(&self, attempt: LaneRecoveryAttempt) -> Result<(), StorageError> {
+        self.lane_job(true, move |conn| {
+            crate::repo::lane_delivery::resolve_recovery(conn, attempt)
+        })
+    }
+    pub fn lane_recovery_episode(
+        &self,
+        episode_id: String,
+    ) -> Result<Option<LaneRecoveryEpisode>, StorageError> {
+        self.lane_job(false, move |conn| {
+            crate::repo::lane_delivery::recovery_episode(conn, &episode_id)
+        })
+    }
+}
+
+impl StorageHandle {
+    pub fn prepare_lane_destination_recovery(
+        &self,
+        thread: String,
+        expected_epoch: u64,
+        owner: LaneDeliveryOwner,
+        token: String,
+    ) -> Result<LaneRecoveryAttempt, StorageError> {
+        self.lane_job(true, move |conn| {
+            crate::repo::lane_delivery::prepare_destination_recovery(
+                conn,
+                &thread,
+                expected_epoch,
+                owner,
+                token,
+            )
+        })
+    }
+    pub fn record_lane_destination_recovery_failure(
+        &self,
+        attempt: LaneRecoveryAttempt,
+        now_ns: i64,
+    ) -> Result<LaneRecoveryFailure, StorageError> {
+        self.lane_job(true, move |conn| {
+            crate::repo::lane_delivery::fail_destination_recovery(conn, attempt, now_ns)
+        })
+    }
+}
+
+impl StorageHandle {
+    pub fn active_lane_recovery(
+        &self,
+        thread: String,
+    ) -> Result<Option<LaneRecoveryEpisode>, StorageError> {
+        self.lane_job(false, move |conn| {
+            crate::repo::lane_delivery::active_recovery(conn, &thread)
+        })
+    }
+}
+
+impl StorageHandle {
+    /// Includes resolved sources so a late restore callback cannot replace Ready.
+    pub fn latest_lane_recovery(
+        &self,
+        thread: String,
+    ) -> Result<Option<LaneRecoveryEpisode>, StorageError> {
+        self.lane_job(false, move |conn| {
+            crate::repo::lane_delivery::latest_recovery(conn, &thread)
+        })
+    }
+}

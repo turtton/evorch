@@ -268,6 +268,8 @@ pub enum AttentionOp {
     /// Continue a thread's conversation (the user's own path; its held notices follow): the
     /// lead, or the lane whose delivery is held.
     ContinueThread(String),
+    /// Resume held notices for the confirmed recovery destination, not necessarily the lead.
+    ResumeThread(String),
     /// The user's explicit resume of the lead's held lane notices.
     ResumeDelivery,
     /// Read the lead's list again.

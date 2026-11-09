@@ -96,6 +96,11 @@ pub(crate) fn input_progress(
     conn.execute("UPDATE lanes SET request_revision=request_revision+?2,progress_epoch=progress_epoch+?3,current_close_id=CASE WHEN ?2 THEN NULL ELSE current_close_id END WHERE lane_id=?1",params![lane_id,invalidate,progress])?;
     if progress {
         resolve_episodes(conn, lane_id, at)?;
+        let current = lane(conn, lane_id)?;
+        crate::repo::lane_delivery::resolve_recovery_destination(conn, &current.thread_id)?;
+        if let Some(lead) = current.lead_thread_id {
+            crate::repo::lane_delivery::resolve_recovery_destination(conn, &lead)?;
+        }
     }
     Ok(())
 }
@@ -117,15 +122,21 @@ pub(crate) fn report_progress(
         .artifact_revision
         .as_ref()
         .and_then(ArtifactRevision::fingerprint);
-    // NoReport -> a terminal/waiting report resolves the old no-report episode.
-    // A first Working report alone is not progress and cannot renew a nudge slot.
-    let transition = previous.as_ref().is_none_or(|(s, _)| s == "working")
-        && input.status != LaneStatus::Working;
+    // Only a transition into a terminal status resolves a no-progress episode.
+    // Working/Waiting, report numbering and questions cannot renew a nudge slot.
+    let transition = matches!(input.status, LaneStatus::Ready | LaneStatus::Failed)
+        && previous
+            .as_ref()
+            .is_none_or(|(s, _)| s != input.status.as_str());
+    // A recovery failure is a diagnostic, not work progress or a repaired target.
+    let recovery_failure = input.status == LaneStatus::Failed
+        && input.producer == LaneReportProducer::Harness
+        && input.reason_code.as_deref() == Some("restore_failed");
     input_progress(
         conn,
         lane_id,
         true,
-        transition || previous_artifact != artifact,
+        !recovery_failure && (transition || previous_artifact != artifact),
         at,
     )
 }

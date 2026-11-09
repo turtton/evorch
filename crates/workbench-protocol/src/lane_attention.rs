@@ -199,6 +199,8 @@ pub enum LaneAttentionKind {
     RestoreFailed {
         destination_thread: ThreadId,
         failure_ref: String,
+        attempts: u32,
+        suppressed: bool,
     },
     /// The lane says it is ready; nothing independent has confirmed it.
     ReadyUnverified {

@@ -100,9 +100,13 @@ fn kind(kind: &domain::LaneAttentionKind) -> Result<wire::LaneAttentionKind, Wir
         D::RestoreFailed {
             destination_thread_id,
             failure_ref,
+            attempts,
+            suppressed,
         } => W::RestoreFailed {
             destination_thread: ThreadId::new(destination_thread_id.clone())?,
             failure_ref: failure_ref.clone(),
+            attempts: *attempts,
+            suppressed: *suppressed,
         },
         D::ReadyUnverified {
             ready_seq,
@@ -233,6 +237,8 @@ mod tests {
             D::RestoreFailed {
                 destination_thread_id: "dest".into(),
                 failure_ref: "lane_delivery:dest".into(),
+                attempts: 3,
+                suppressed: true,
             },
             D::ReadyUnverified {
                 ready_seq: 8,
@@ -277,7 +283,14 @@ mod tests {
                 episode: Some(_)
             }
         ));
-        assert!(matches!(kinds[3], W::RestoreFailed { .. }));
+        assert!(matches!(
+            kinds[3],
+            W::RestoreFailed {
+                attempts: 3,
+                suppressed: true,
+                ..
+            }
+        ));
         assert!(matches!(
             kinds[4],
             W::ReadyUnverified {

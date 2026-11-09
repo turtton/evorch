@@ -331,7 +331,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             AttentionOp::OpenLane(thread) => {
                 self.open_thread_from_attention(ctx, thread.clone());
             }
-            AttentionOp::ContinueThread(_) | AttentionOp::ResumeDelivery => {
+            AttentionOp::ContinueThread(_)
+            | AttentionOp::ResumeThread(_)
+            | AttentionOp::ResumeDelivery => {
                 let held = action.item.as_ref().is_some_and(|(id, revision)| {
                     self.attention.board.holds(&action.lead, id, *revision)
                 });
@@ -395,6 +397,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             match action.op {
                 AttentionOp::ContinueThread(thread) => {
                     self.apply_lane_action(LaneAction::ContinueLead { lead: thread });
+                }
+                AttentionOp::ResumeThread(thread) => {
+                    use workbench_protocol::lane_attention::{
+                        LaneAttentionAction, LaneAttentionKind,
+                    };
+                    // The freshly confirmed item, not arbitrary UI arguments, grants
+                    // this operation for exactly one suppressed destination.
+                    let permitted = action.item.as_ref().is_some_and(|(id, revision)| {
+                        self.attention.board.items().iter().any(|item| {
+                            item.lead_thread.as_str() == action.lead.as_str()
+                                && item.id.as_str() == id.as_str()
+                                && item.revision.0 == *revision
+                                && item.available_actions.contains(&LaneAttentionAction::Resume)
+                                && matches!(&item.kind, LaneAttentionKind::RestoreFailed { destination_thread, suppressed: true, .. }
+                                    if destination_thread.as_str() == thread.as_str())
+                        })
+                    });
+                    if permitted {
+                        self.apply_lane_action(LaneAction::ResumeDelivery { lead: thread });
+                    } else {
+                        self.push_notice(
+                            "The recovery destination or allowed action changed; nothing was done.",
+                        );
+                    }
                 }
                 AttentionOp::ResumeDelivery => {
                     self.apply_lane_action(LaneAction::ResumeDelivery { lead: action.lead });
