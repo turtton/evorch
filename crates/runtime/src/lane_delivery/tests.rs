@@ -14,6 +14,7 @@ mod lease;
 mod management;
 mod monitor;
 mod questions;
+mod renewed_lease;
 mod todo;
 
 #[tokio::test]

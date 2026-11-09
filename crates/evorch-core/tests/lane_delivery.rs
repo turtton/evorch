@@ -185,6 +185,22 @@ impl Core {
 
     async fn next_event(&mut self) -> Event {
         let event = self.events.recv().await.unwrap();
+        // Shown only when the test fails: what the runtime did up to the point it stopped.
+        match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to,
+                reason,
+                ..
+            }) => eprintln!("phase {run_id} -> {to:?} {reason:?}"),
+            EventKind::Diagnostic(d) => {
+                eprintln!(
+                    "diagnostic {} {} {} thread={:?}",
+                    d.source, d.code, d.detail, d.thread_id
+                );
+            }
+            _ => (),
+        }
         if let EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) = &event.kind {
             self.questions.push(question.clone());
         }

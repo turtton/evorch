@@ -66,8 +66,7 @@ fn known_projects(options: &BootstrapOptions) -> Result<StaticProjects, Bootstra
     Ok(projects)
 }
 
-/// What a test replaces in the production composition.
-#[cfg(any(test, feature = "test-support"))]
+/// What a test replaces in the production composition; production passes none of it.
 pub struct TestSeams {
     pub model: Arc<dyn runtime::AgentModel>,
     pub sandbox: Arc<dyn runtime::SandboxFactory>,
