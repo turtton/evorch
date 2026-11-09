@@ -22,6 +22,10 @@ struct Model {
     calls: AtomicUsize,
     hold_admission: AtomicBool,
     admission: Notify,
+    release_admission: Notify,
+    admitting: AtomicBool,
+    skip_admission: AtomicBool,
+    admissions_requested: AtomicUsize,
 }
 #[async_trait::async_trait]
 impl AgentModel for Model {
@@ -37,15 +41,17 @@ impl AgentModel for Model {
         std::future::pending().await
     }
     fn requires_admission(&self) -> bool {
-        true
+        self.admissions_requested.fetch_add(1, Ordering::SeqCst);
+        !self.skip_admission.load(Ordering::SeqCst)
     }
     async fn admit(&self, _: &AgentInvocationContext, _: Role) -> Result<(), RuntimeError> {
         if self.hold_admission.load(Ordering::SeqCst) {
+            self.admitting.store(true, Ordering::SeqCst);
+            let _active = Active(&self.admitting);
             self.admission.notify_one();
-            std::future::pending().await
-        } else {
-            Ok(())
+            self.release_admission.notified().await;
         }
+        Ok(())
     }
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "background-services".into()
@@ -146,6 +152,36 @@ impl Fixture {
     }
     fn handle(&self) -> StorageHandle {
         self.storage.handle()
+    }
+
+    fn seed_broken_after_first(&self) {
+        let lane = self
+            .handle()
+            .lane_by_thread("lane-thread")
+            .unwrap()
+            .unwrap();
+        self.handle()
+            .create_lane(storage::lanes::NewLane {
+                lane_id: "zz-broken".into(),
+                thread_id: "zz-broken-thread".into(),
+                origin_thread_id: lane.origin_thread_id,
+                origin_run_id: lane.origin_run_id,
+                creation_key: "second-before-crash".into(),
+                brief: lane.brief,
+                start_seed: "not a start seed".into(),
+                project_id: None,
+                project_root: Some(
+                    self.dir
+                        .path()
+                        .canonicalize()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                title: None,
+                at_ns: 2,
+            })
+            .unwrap();
     }
 }
 fn key() -> PullRequestKey {
@@ -301,7 +337,17 @@ async fn core_alone_recovers_before_ready_and_runs_monitor_autofix_then_drains()
     );
     assert_eq!(source.calls().len(), 1);
     assert!(logs.active.load(Ordering::SeqCst));
+    let runtime = core.runtime.clone();
+    let (terminal, drained) = tokio::sync::oneshot::channel();
+    core.services
+        .start("terminal-dependent", |stop| async move {
+            stop.await?;
+            runtime.wait(RunId::new(42)).await?;
+            terminal.send(()).unwrap();
+            Ok(())
+        });
     core.shutdown().await.unwrap();
+    drained.await.unwrap();
     assert!(!logs.active.load(Ordering::SeqCst));
     assert_eq!(core.services.names().count(), 0);
     assert!(matches!(
@@ -433,11 +479,102 @@ async fn concurrent_startup_does_not_steal_a_live_pending_lane_and_stops_retryin
         core.shutdown().await.unwrap();
         assert_eq!(other.calls.load(Ordering::SeqCst), 0);
         assert_eq!(f.handle().unstarted_lanes(10).unwrap().len(), 1);
-        embedded
-            .runtime
-            .stop(RunId::new(42), runtime::StopScope::SelfOnly)
-            .unwrap();
+        assert!(embedded.busy(), "pending admission retains the core");
+        assert!(model.admitting.load(Ordering::SeqCst));
         embedded.shutdown().await.unwrap();
+        assert!(!model.admitting.load(Ordering::SeqCst));
+        assert!(embedded.runtime.pending_lane_admissions().is_empty());
+        model.release_admission.notify_one();
+        assert!(embedded.runtime.list_agents().is_empty());
         assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn an_unowned_seed_keeps_the_handoff_fence_while_admission_is_pending() {
+    let f = Fixture::new();
+    f.seed_with_ownership(false);
+    let old_model = Arc::new(Model::default());
+    old_model.hold_admission.store(true, Ordering::SeqCst);
+    let mut old = f
+        .core(
+            old_model.clone(),
+            Arc::new(FakePullRequestSource::new()),
+            Arc::new(Logs::default()),
+        )
+        .await;
+    old_model.admission.notified().await;
+    let next_model = Arc::new(Model::default());
+    let mut next = f
+        .core(
+            next_model.clone(),
+            Arc::new(FakePullRequestSource::new()),
+            Arc::new(Logs::default()),
+        )
+        .await;
+    let permit = old.owner.owned_permit("lane-thread").unwrap();
+    old.owner.handoff(&permit, &next.owner).unwrap();
+    old_model.release_admission.notify_one();
+    assert_eq!(
+        old.runtime.wait(RunId::new(42)).await,
+        Ok(event_bus::AgentRunPhase::Error)
+    );
+    assert_eq!(old_model.calls.load(Ordering::SeqCst), 0);
+    next.runtime
+        .recover_unstarted_lanes(Some(&next.owner))
+        .unwrap();
+    next_model.entered.notified().await;
+    assert_eq!(next_model.calls.load(Ordering::SeqCst), 1);
+    old.shutdown().await.unwrap();
+    next.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn partial_recovery_failure_drains_registered_roots_and_reserved_admissions() {
+    for registered in [false, true] {
+        let f = Fixture::new();
+        f.seed();
+        f.seed_broken_after_first();
+        let model = Arc::new(Model::default());
+        model.skip_admission.store(registered, Ordering::SeqCst);
+        model.hold_admission.store(true, Ordering::SeqCst);
+        let audit = Arc::new(std::sync::Mutex::new(None));
+        let capture = audit.clone();
+        let result = BootstrappedHost::open_with_service_observer(
+            BootstrapOptions {
+                config_dir: f.root.clone(),
+                ownership_root: f.root.join("owners"),
+                project_root: f.dir.path().canonicalize().unwrap(),
+            },
+            TestSeams {
+                model: model.clone(),
+                sandbox: Arc::new(Direct),
+            },
+            PullRequestAdapters {
+                source: Arc::new(FakePullRequestSource::new()),
+                logs: Arc::new(Logs::default()),
+            },
+            move |runtime| *capture.lock().unwrap() = Some(runtime.clone()),
+        )
+        .await;
+        assert!(result.err().unwrap().to_string().contains("restore_failed"));
+        assert_eq!(model.admissions_requested.load(Ordering::SeqCst), 1);
+        let runtime = audit.lock().unwrap().take().unwrap();
+        assert!(runtime.pending_lane_admissions().is_empty());
+        assert!(!model.admitting.load(Ordering::SeqCst));
+        let runs = runtime.list_agents();
+        assert_eq!(runs.len(), usize::from(registered));
+        assert!(runs.iter().all(|run| matches!(
+            run.phase,
+            event_bus::AgentRunPhase::Stopped
+                | event_bus::AgentRunPhase::Done
+                | event_bus::AgentRunPhase::Error
+        )));
+        let weak = runtime.downgrade();
+        drop(runtime);
+        assert!(
+            weak.upgrade().is_none(),
+            "failed bootstrap retains no runtime task"
+        );
     }
 }

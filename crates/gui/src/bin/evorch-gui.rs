@@ -953,7 +953,7 @@ fn build_workbench(
             })
             .unwrap_or_default()
     };
-    let (runtime, agent_browser) = match demo_directory.as_ref() {
+    let (runtime, agent_browser, runtime_executor) = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
             let ExecutionComponents {
@@ -975,7 +975,7 @@ fn build_workbench(
                 user_config_dir: Some(directory.path().to_path_buf()),
                 config: &composition_config,
                 bus: Arc::clone(&bus),
-                executor,
+                executor: Arc::clone(&executor),
                 credential_store,
                 env: Arc::new(ProcessEnv),
                 model_source: ModelSource::Fixed(demo_model),
@@ -985,7 +985,7 @@ fn build_workbench(
                 ?model_identity,
                 "demo runtime composed via provider composition root"
             );
-            (runtime, agent_browser)
+            (runtime, agent_browser, executor)
         }
         None => {
             let ExecutionComponents {
@@ -1009,7 +1009,7 @@ fn build_workbench(
                 user_config_dir: None,
                 config: &composition_config,
                 bus: Arc::clone(&bus),
-                executor,
+                executor: Arc::clone(&executor),
                 credential_store,
                 env: Arc::new(ProcessEnv),
                 model_source: ModelSource::Fixed(match &production_model {
@@ -1022,7 +1022,7 @@ fn build_workbench(
                 ?model_identity,
                 "runtime composed via provider composition root"
             );
-            (runtime, agent_browser)
+            (runtime, agent_browser, executor)
         }
     };
     // Before anything restores or continues a conversation.
@@ -1324,7 +1324,11 @@ fn build_workbench(
             Default::default(),
         )
     };
-    storage.services = Some((handle.clone(), services));
+    storage.services = Some((
+        handle.clone(),
+        workbench_host::bootstrap::lane_pr::RuntimeDrain::new(runtime.clone(), runtime_executor),
+        services,
+    ));
     started.map_err(|error| GuiError::Startup(format!("lane/PR services: {error}")))?;
     let owner_probe: gui::app::pull_requests::OwnerProbe = {
         let host = Arc::clone(&ownership);
@@ -1669,6 +1673,7 @@ struct GuiStorageResources {
     _storage_fallback: Option<tempfile::TempDir>,
     services: Option<(
         tokio::runtime::Handle,
+        workbench_host::bootstrap::lane_pr::RuntimeDrain,
         workbench_host::bootstrap::services::BackgroundServices,
     )>,
     /// Last: the shared locks outlive every user of the database and the ownership root.
@@ -1686,8 +1691,9 @@ impl Drop for GuiStorageResources {
         if let Err(error) = self.ownership.begin_quiesce() {
             tracing::warn!(%error, "failed to quiesce ownership before storage drain");
         }
-        if let Some((handle, mut services)) = self.services.take()
-            && let Err(error) = handle.block_on(services.shutdown())
+        if let Some((handle, drain, mut services)) = self.services.take()
+            && let Err(error) =
+                handle.block_on(drain.stop_and_drain(&mut services, &self.ownership))
         {
             tracing::warn!(%error, "failed to drain lane/PR services before storage drain");
         }

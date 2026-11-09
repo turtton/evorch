@@ -100,6 +100,8 @@ pub struct TestSeams {
     pub sandbox: Arc<dyn runtime::SandboxFactory>,
 }
 
+type RuntimeObserver = Box<dyn FnOnce(&AgentRuntime) + Send>;
+
 /// Keep the bridge, owner and shared maintenance leases alive until the runtime
 /// has checkpointed. Transports must stop accepting requests before shutdown.
 pub struct BootstrappedHost {
@@ -128,7 +130,14 @@ pub struct CompositionInventory {
 
 impl BootstrappedHost {
     pub async fn open(options: BootstrapOptions) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, None, None, lane_pr::PullRequestAdapters::default()).await
+        Self::open_composed(
+            options,
+            None,
+            None,
+            lane_pr::PullRequestAdapters::default(),
+            None,
+        )
+        .await
     }
 
     /// The production composition with the model and the per-run sandbox replaced, so a test
@@ -144,6 +153,7 @@ impl BootstrappedHost {
             Some(seams),
             None,
             lane_pr::PullRequestAdapters::default(),
+            None,
         )
         .await
     }
@@ -159,6 +169,7 @@ impl BootstrappedHost {
             Some(seams),
             Some(mcp),
             lane_pr::PullRequestAdapters::default(),
+            None,
         )
         .await
     }
@@ -169,7 +180,18 @@ impl BootstrappedHost {
         seams: TestSeams,
         adapters: lane_pr::PullRequestAdapters,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, Some(seams), None, adapters).await
+        Self::open_composed(options, Some(seams), None, adapters, None).await
+    }
+
+    /// Observe resources before recovery so failed-startup tests can audit cleanup.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn open_with_service_observer(
+        options: BootstrapOptions,
+        seams: TestSeams,
+        adapters: lane_pr::PullRequestAdapters,
+        observe: impl FnOnce(&AgentRuntime) + Send + 'static,
+    ) -> Result<Self, BootstrapError> {
+        Self::open_composed(options, Some(seams), None, adapters, Some(Box::new(observe))).await
     }
 
     async fn open_composed(
@@ -177,6 +199,7 @@ impl BootstrappedHost {
         seams: Option<TestSeams>,
         mcp: Option<runtime::mcp::McpHostServices>,
         adapters: lane_pr::PullRequestAdapters,
+        observe: Option<RuntimeObserver>,
     ) -> Result<Self, BootstrapError> {
         let config = config::Config::load_strict(&config::LoadOptions {
             user_config_dir: Some(options.config_dir.clone()),
@@ -320,33 +343,12 @@ impl BootstrappedHost {
         let reclaim = runtime::thread_retention::ReclaimExecutor::spawn(
             runtime::thread_retention::ExecutorConfig::new(handle, storage_config, Some(artifacts)),
         )?;
-        let mut services = services::BackgroundServices::default();
-        host_services::start(
-            &mut services,
-            &options,
-            &config,
-            bus,
-            pricing.clone(),
-            mcp.clone(),
-        );
-        if let Err(error) = lane_pr::start(
-            &mut services,
-            &runtime,
-            &owner,
-            config.pull_requests,
-            adapters,
-        ) {
-            if let Err(drain) = services.shutdown().await {
-                tracing::warn!(%drain, "lane/PR startup cleanup failed");
-            }
-            return Err(error);
-        }
-        Ok(Self {
+        let mut bootstrap = Self {
             host,
             runtime,
             owner,
             config,
-            services,
+            services: services::BackgroundServices::default(),
             mcp,
             usage_pricing: pricing,
             #[cfg(any(test, feature = "test-support"))]
@@ -355,14 +357,39 @@ impl BootstrappedHost {
             reclaim: Some(reclaim),
             executor,
             _leases: leases,
-        })
+        };
+        host_services::start(
+            &mut bootstrap.services,
+            &options,
+            &bootstrap.config,
+            bus,
+            bootstrap.usage_pricing.clone(),
+            bootstrap.mcp.clone(),
+        );
+        if let Some(observe) = observe {
+            observe(&bootstrap.runtime);
+        }
+        if let Err(error) = lane_pr::start(
+            &mut bootstrap.services,
+            &bootstrap.runtime,
+            &bootstrap.owner,
+            bootstrap.config.pull_requests,
+            adapters,
+        ) {
+            if let Err(drain) = bootstrap.shutdown().await {
+                tracing::warn!(%drain, "lane/PR startup cleanup failed");
+            }
+            return Err(error);
+        }
+        Ok(bootstrap)
     }
 
     pub fn busy(&self) -> bool {
         // TODO(P9): once safe-point restart/auto-resume can restore an ordinary
         // chat's Waiting state, count that idle conversation as no work. Until
         // then retain all Waiting runs conservatively to avoid losing them.
-        self.host.lock().unwrap().service().has_background_work()
+        !self.runtime.pending_lane_admissions().is_empty()
+            || self.host.lock().unwrap().service().has_background_work()
             || self.runtime.list_agents().iter().any(|r| {
                 self.executor.has_running_shell_jobs(&r.run_id.to_string())
                     || matches!(
@@ -374,50 +401,44 @@ impl BootstrappedHost {
 
     /// ADR 0024 drain: quiesce, await runtime checkpoints, flush, then release.
     pub async fn shutdown(&mut self) -> Result<(), BootstrapError> {
-        self.owner.begin_quiesce()?;
-        self.services.request_stop();
-        // Stop recovery/PR producers before enumerating roots: a retry must not
-        // admit a new lane after the runtime drain has taken its snapshot.
-        let services_result = self.services.shutdown().await;
-        // A synchronous recovery scan already in progress when quiescing began
-        // may have acquired another lease. Fence the final, now-stable owner set.
-        self.owner.begin_quiesce()?;
+        let mut failure = None;
         let tasks = self
             .host
             .lock()
             .unwrap()
             .service_mut()
             .take_background_tasks();
-        for run in self.runtime.list_agents() {
-            if matches!(
-                run.phase,
-                AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
-            ) {
-                self.runtime.stop(run.run_id, runtime::StopScope::Subtree)?;
-            }
-        }
-        for run in self.runtime.list_agents() {
-            self.runtime.wait(run.run_id).await?;
-            self.executor.cancel_shell_jobs(&run.run_id.to_string());
-            self.executor
-                .drain_shell_jobs(&run.run_id.to_string())
-                .await?;
-        }
+        lane_pr::remember(
+            &mut failure,
+            lane_pr::stop_and_drain(
+                &mut self.services,
+                &self.runtime,
+                &self.owner,
+                &self.executor,
+            )
+            .await,
+        );
         for task in tasks {
-            task.await?;
+            lane_pr::remember(&mut failure, task.await.map(|_| ()));
         }
         if let Some(reclaim) = self.reclaim.take() {
             reclaim.shutdown();
         }
         if let Some(bridge) = &mut self.bridge {
-            bridge.flush()?;
+            lane_pr::remember(&mut failure, bridge.flush());
         }
-        if self.owner.release_ready()? {
-            return Err("owner still has active turns after runtime drain".into());
+        match self.owner.release_ready() {
+            Ok(true) => {
+                failure.get_or_insert_with(|| {
+                    "owner still has active turns after runtime drain".into()
+                });
+            }
+            Ok(false) => {}
+            Err(error) => lane_pr::remember(&mut failure, Err::<(), _>(error)),
         }
         if let Some(mut bridge) = self.bridge.take() {
             bridge.shutdown();
         }
-        services_result
+        failure.map_or(Ok(()), Err)
     }
 }

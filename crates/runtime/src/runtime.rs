@@ -106,6 +106,7 @@ pub(crate) struct Shared {
     pub(crate) turn_version: watch::Sender<u64>,
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
     admissions: admission::Admissions,
+    lane_admissions: admission::LaneAdmissions,
     #[cfg(test)]
     admission_registration_hook: Mutex<Option<admission::RegistrationHook>>,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
@@ -751,6 +752,7 @@ impl AgentRuntime {
                 turn_version: watch::channel(0).0,
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 admissions: Mutex::new(HashMap::new()),
+                lane_admissions: Default::default(),
                 #[cfg(test)]
                 admission_registration_hook: Mutex::new(None),
                 spawn_intents: Mutex::new(HashMap::new()),
@@ -1089,6 +1091,7 @@ impl AgentRuntime {
                 question_version: watch::channel(0).0,
                 turn_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
+                lane_admissions: Default::default(),
                 #[cfg(test)]
                 admission_registration_hook: Mutex::new(None),
                 spawn_intents: Mutex::new(HashMap::new()),

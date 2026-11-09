@@ -67,3 +67,78 @@ pub fn start(
     });
     Ok(())
 }
+
+pub(crate) fn remember(
+    failure: &mut Option<BootstrapError>,
+    result: Result<(), impl Into<BootstrapError>>,
+) {
+    if let Err(error) = result {
+        failure.get_or_insert_with(|| error.into());
+    }
+}
+
+/// Retain runtime shutdown resources without exposing tool types to GUI adapters.
+pub struct RuntimeDrain {
+    runtime: AgentRuntime,
+    executor: Arc<tools::ToolExecutor>,
+}
+
+impl RuntimeDrain {
+    pub fn new(runtime: AgentRuntime, executor: Arc<tools::ToolExecutor>) -> Self {
+        Self { runtime, executor }
+    }
+
+    pub async fn stop_and_drain(
+        &self,
+        services: &mut BackgroundServices,
+        owner: &Arc<OwnerHost>,
+    ) -> Result<(), BootstrapError> {
+        stop_and_drain(services, &self.runtime, owner, &self.executor).await
+    }
+}
+
+/// The same teardown is used for successful startup and partial recovery failure.
+/// Only lane producers join before the runtime snapshot; other services can await
+/// runtime termination without forming a shutdown dependency cycle.
+pub async fn stop_and_drain(
+    services: &mut BackgroundServices,
+    runtime: &AgentRuntime,
+    owner: &OwnerHost,
+    executor: &tools::ToolExecutor,
+) -> Result<(), BootstrapError> {
+    let mut failure = None;
+    remember(&mut failure, owner.begin_quiesce().map(|_| ()));
+    if let Some(service) = runtime.pull_requests() {
+        service.shutdown();
+    }
+    services.request_stop();
+    remember(&mut failure, services.join_named("lane-recovery").await);
+    remember(&mut failure, runtime.drain_lane_admissions().await);
+    // A recovery scan already in progress may have acquired another lease.
+    remember(&mut failure, owner.begin_quiesce().map(|_| ()));
+    let runs = runtime.list_agents();
+    for run in &runs {
+        if matches!(
+            run.phase,
+            event_bus::AgentRunPhase::Pending
+                | event_bus::AgentRunPhase::Running
+                | event_bus::AgentRunPhase::Waiting
+        ) {
+            remember(
+                &mut failure,
+                runtime.stop(run.run_id, runtime::StopScope::Subtree),
+            );
+        }
+    }
+    for run in runs {
+        remember(&mut failure, runtime.wait(run.run_id).await.map(|_| ()));
+        executor.cancel_shell_jobs(&run.run_id.to_string());
+        remember(
+            &mut failure,
+            executor.drain_shell_jobs(&run.run_id.to_string()).await,
+        );
+    }
+    remember(&mut failure, runtime.drain_lane_admissions().await);
+    remember(&mut failure, services.shutdown().await);
+    failure.map_or(Ok(()), Err)
+}

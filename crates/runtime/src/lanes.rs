@@ -563,17 +563,19 @@ impl AgentRuntime {
             }
             return Ok((seed.run_id, false));
         }
-        let ownership = if seed.requires_ownership {
-            let source = authority.ownership.as_ref().ok_or_else(|| {
-                LaneError::new("lane_creation_denied", "current ownership is required")
-            })?;
-            Some(
+        let ownership = match authority.ownership.as_ref() {
+            Some(source) => Some(
                 source
                     .prepare_lane(&lane.thread_id)
                     .map_err(|e| LaneError::new("lane_creation_denied", e))?,
-            )
-        } else {
-            None
+            ),
+            None if seed.requires_ownership => {
+                return Err(LaneError::new(
+                    "lane_creation_denied",
+                    "current ownership is required",
+                ));
+            }
+            None => None,
         };
         let config = RunConfig {
             lane_scope: Some(LaneScope::Lane),
