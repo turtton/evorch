@@ -38,14 +38,24 @@ make_metadata() {
     }'
 }
 
+# The gui/evorch dependency ratchet reads an allowlist; cases get this one unless
+# they set CASE_ALLOWLIST. It covers what the passing graph (GOOD) declares for gui.
+DEFAULT_ALLOWLIST='# comment lines and blanks are ignored
+
+gui workbench-host normal 19b   # trailing comment'
+CASE_ALLOWLIST=$DEFAULT_ALLOWLIST
+
 pass=0
 fail=0
 # run_case <name> <expect: ok|fail> <expected output substring or ""> <<< spec
 run_case() {
   local name=$1 expect=$2 needle=$3
   make_metadata > "$work/$name.json"
+  printf '%s\n' "$CASE_ALLOWLIST" > "$work/$name.allow"
   local status=0
   WORKBENCH_BOUNDARY_CORE_CRATES="${CASE_CORE_CRATES:-runtime storage config}" \
+    WORKBENCH_BOUNDARY_ALLOWLIST="${CASE_ALLOWLIST_PATH:-$work/$name.allow}" \
+    WORKBENCH_BOUNDARY_STALE_ALLOWLIST="${CASE_STALE:-warn}" \
     "$checker" "$work/$name.json" > "$work/$name.out" 2>&1 || status=$?
   local ok=1
   if [[ $expect == ok && $status -ne 0 ]]; then ok=0; fi
@@ -61,7 +71,7 @@ run_case() {
   fi
 }
 
-WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","test-support"]'
+WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","evorch","test-support"]'
 EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu","axum","http","futures-core","http-body-util","hyper","hyper-util"]'
 GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","to":"serde_json"},{"from":"workbench-protocol","to":"thiserror"},
       {"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-client","to":"tokio"},{"from":"workbench-client","to":"thiserror"},
@@ -278,6 +288,136 @@ SPEC
 
 run_case web_package_missing fail "workspace member 'workbench-web' not found" <<SPEC
 {"workspace": ["workbench-protocol","workbench-client","workbench-host","runtime"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-host","to":"workbench-protocol"}]}
+SPEC
+
+
+# gui / evorch dependency ratchet: direct workspace dependencies are frozen by an
+# allowlist. Only additions fail; the allowlisted ones may be optional, target-
+# specific or any kind that the list names.
+CASE_ALLOWLIST=$DEFAULT_ALLOWLIST
+run_case ratchet_reports_allowlist_size ok "1 allowlisted gui/evorch dependencies" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+run_case ratchet_gui_new_normal_dependency fail "gui declares workspace dependency runtime [normal; declared] that is not in" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"runtime"}]}
+SPEC
+
+run_case ratchet_gui_new_optional_dependency fail "gui declares workspace dependency storage [normal; declared, optional]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"storage","optional":true,"resolved":false}]}
+SPEC
+
+run_case ratchet_gui_new_target_specific_dependency fail "gui declares workspace dependency config [normal; declared, target cfg(unix)]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"config","target":"cfg(unix)","resolved":false}]}
+SPEC
+
+run_case ratchet_gui_new_dev_dependency fail "gui declares workspace dependency runtime [dev; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"runtime","kind":"dev"}]}
+SPEC
+
+run_case ratchet_gui_new_build_dependency fail "gui declares workspace dependency storage [build; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"storage","kind":"build"}]}
+SPEC
+
+run_case ratchet_gui_new_optional_target_specific_dev_dependency fail "gui declares workspace dependency test-support [dev; declared, optional, target cfg(unix)]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"test-support","kind":"dev","optional":true,"target":"cfg(unix)","resolved":false}]}
+SPEC
+
+run_case ratchet_allowlisted_dependency_with_another_kind fail "gui declares workspace dependency workbench-host [dev; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"workbench-host","kind":"dev"}]}
+SPEC
+
+run_case ratchet_evorch_new_normal_dependency fail "evorch declares workspace dependency runtime [normal; declared] that is not in" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"runtime"}]}
+SPEC
+
+run_case ratchet_evorch_new_optional_dependency fail "evorch declares workspace dependency storage [normal; declared, optional]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"storage","optional":true,"resolved":false}]}
+SPEC
+
+run_case ratchet_evorch_new_target_specific_dependency fail "evorch declares workspace dependency config [normal; declared, target cfg(unix)]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"config","target":"cfg(unix)","resolved":false}]}
+SPEC
+
+run_case ratchet_evorch_new_dev_dependency fail "evorch declares workspace dependency test-support [dev; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"test-support","kind":"dev"}]}
+SPEC
+
+run_case ratchet_evorch_new_build_dependency fail "evorch declares workspace dependency storage [build; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"storage","kind":"build"}]}
+SPEC
+
+run_case ratchet_client_and_protocol_need_no_entry ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"workbench-protocol"},{"from":"evorch","to":"workbench-client","kind":"dev"},{"from":"evorch","to":"workbench-protocol","optional":true,"resolved":false}]}
+SPEC
+
+run_case ratchet_third_party_dependencies_are_not_counted ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"regex"},{"from":"gui","to":"egui"}]}
+SPEC
+
+CASE_ALLOWLIST="gui workbench-host normal 19b
+gui runtime normal 19b
+gui storage normal 19b
+gui storage dev 19b
+gui config normal 20
+gui test-support dev unassigned
+evorch runtime normal 17
+evorch storage build 19b"
+run_case ratchet_allows_listed_optional_target_dev_and_build_dependencies ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"runtime","optional":true,"resolved":false},{"from":"gui","to":"storage","target":"cfg(unix)","resolved":false},{"from":"gui","to":"storage","kind":"dev"},{"from":"gui","to":"config"},{"from":"gui","to":"test-support","kind":"dev"},{"from":"evorch","to":"runtime"},{"from":"evorch","to":"storage","kind":"build"}]}
+SPEC
+
+# Shrinking passes by default, with a stale-entry warning; strict mode fails.
+run_case ratchet_removed_dependency_passes_with_a_stale_warning ok "warning: stale allowlist entry: gui runtime normal (removal PR 19b)" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_STALE=fail
+run_case ratchet_stale_entry_fails_in_strict_mode fail "stale allowlist entry: gui runtime normal" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+CASE_STALE=
+
+CASE_ALLOWLIST="gui workbench-host normal 19b
+gui workbench-host normal 19b"
+run_case ratchet_duplicate_allowlist_entry fail "duplicate entry gui workbench-host normal" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST="gui workbench-host normal soon"
+run_case ratchet_allowlist_needs_a_removal_pr fail "removal PR soon must be a PR step" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST="gui workbench-host normal"
+run_case ratchet_allowlist_missing_removal_pr fail "expected \`<crate> <dependency> <kind> <removal-pr>\`, got 3 field(s)" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST="gui workbench-host optional 19b"
+run_case ratchet_allowlist_kind_is_not_optional fail "kind optional must be normal, dev or build" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST="runtime storage normal 19b
+gui workbench-host normal 19b"
+run_case ratchet_allowlist_covers_only_gui_and_evorch fail "crate runtime is not covered by the ratchet" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST=$DEFAULT_ALLOWLIST
+CASE_ALLOWLIST_PATH="$work/no-such-allowlist.txt"
+run_case ratchet_missing_allowlist_file fail "no-such-allowlist.txt not found" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+CASE_ALLOWLIST_PATH=
+
+run_case ratchet_gui_package_missing fail "workspace member 'gui' not found" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","evorch"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"}]}
+SPEC
+
+run_case ratchet_evorch_package_missing fail "workspace member 'evorch' not found" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","gui"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"}]}
 SPEC
 
 echo "$pass passed, $fail failed"
