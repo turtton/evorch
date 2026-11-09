@@ -53,7 +53,15 @@ pub const EXCERPT: &str = "error[E0308]: mismatched types\n --> src/lib.rs:3:9";
 /// A model that answers every call with a short text and keeps what it was asked.
 #[derive(Default)]
 pub struct Recorder {
+    /// Optional test-only rendezvous after recording the next request.
+    pub next_request_gate: Mutex<Option<Arc<RequestGate>>>,
     pub requests: Mutex<Vec<(Vec<Message>, Option<RequestTurnContext>)>>,
+}
+
+#[derive(Default)]
+pub struct RequestGate {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
 }
 
 #[async_trait]
@@ -65,15 +73,21 @@ impl AgentModel for Recorder {
         messages: &[Message],
         _: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        let mut requests = self.requests.lock().unwrap();
-        requests.push((messages.to_vec(), invocation.turn.clone()));
+        let reply = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push((messages.to_vec(), invocation.turn.clone()));
+            format!("reply-{}", requests.len())
+        };
+        let gate = self.next_request_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         Ok(ChatResponse {
             usage_reported: true,
             message: Message {
                 role: MessageRole::Assistant,
-                content: vec![ContentBlock::Text {
-                    text: format!("reply-{}", requests.len()),
-                }],
+                content: vec![ContentBlock::Text { text: reply }],
             },
             finish_reason: FinishReason::Stop,
             usage: Usage::default(),

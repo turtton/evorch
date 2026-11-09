@@ -143,6 +143,33 @@ async fn bar_operations_keep_the_wire_prefix_and_one_send_appends_one_notice() {
     // A person's turn after it extends the prefix, and the card did not touch the input.
     world.show();
     assert_eq!(world.cards().len(), 1);
+    // Rebuild the display from the committed input, with its announcement missing.
+    // This is display recovery, not a provider/history-replacement boundary.
+    for event in &world.history {
+        if !matches!(
+            event.kind,
+            event_bus::EventKind::Usage(_)
+                | event_bus::EventKind::Lifecycle(
+                    event_bus::LifecycleEvent::HarnessNoticeDelivered { .. }
+                )
+        ) {
+            world
+                .store
+                .handle()
+                .append_event(Some("crashed"), event)
+                .unwrap();
+        }
+    }
+    let db = storage::Database::open_read_only(&world.dir.path().join("phase2.db")).unwrap();
+    let saved = db.snapshot_bundle(&world.run).unwrap();
+    world.window.restore_history(&db).unwrap();
+    assert_eq!(world.cards().len(), 1);
+    assert_eq!(db.snapshot_bundle(&world.run).unwrap(), saved);
+    assert_eq!(
+        world.requests(),
+        after_send,
+        "display recovery called no model"
+    );
     world
         .mock
         .as_ref()

@@ -68,7 +68,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         for outcome in resolver.take_rows_results() {
             match outcome.request.purpose {
                 RowsPurpose::Rehydrate { thread } => {
-                    self.finish_rehydrate(&thread, &outcome.request.runs, outcome.result);
+                    self.finish_rehydrate(
+                        &thread,
+                        &outcome.request.runs,
+                        outcome.result,
+                        outcome.harness_notices,
+                    );
                 }
                 RowsPurpose::Gap { run, event_id } => {
                     self.finish_gap(&run, event_id, outcome.request.through, outcome.result);
@@ -186,7 +191,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         thread: &str,
         runs: &[String],
         result: Result<Vec<HistoryRow>, BodyError>,
+        notices: Vec<storage::AdoptedHarnessNotice>,
     ) {
+        let mut harness = super::harness_recovery::HarnessReplay::from_notices(notices);
         self.shared_feed.rehydrating.remove(thread);
         let rows = match result {
             Ok(rows) => rows,
@@ -216,9 +223,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             if let Some(at) = at {
                 while messages.peek().is_some_and(|message| message.at <= at) {
                     if let Some(message) = messages.next() {
+                        harness.show_through(&mut self.transcripts, Some(message.at));
                         self.restore_user_message(message);
                     }
                 }
+            }
+            if let Some(at) = at {
+                harness.show_through(&mut self.transcripts, Some(at));
             }
             match row {
                 HistoryRow::Failure(failure) => {
@@ -233,8 +244,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         for message in messages {
+            harness.show_through(&mut self.transcripts, Some(message.at));
             self.restore_user_message(message);
         }
+        harness.show_through(&mut self.transcripts, None);
         for (id, event) in unreadable {
             self.unreadable_history_events.entry(id).or_insert(event);
         }
