@@ -240,6 +240,48 @@ fn two_connections_reserve_concurrently_with_one_sha_and_bounded_budget() {
     other.close();
 }
 #[test]
+fn two_connections_race_for_the_last_slot_and_only_one_reserves_it() {
+    let f = Fixture::new();
+    f.policy(PrPolicyAction::SetEnabled(true));
+    f.reserve(1, PrNoticeMode::Auto, 10);
+    f.reserve(2, PrNoticeMode::Auto, 10);
+    let s = f.h().pr_auto_fix_state(key()).unwrap();
+    assert_eq!(s.used + s.reserved, PR_AUTO_FIX_LIMIT - 1);
+    let other = Storage::open(f.config.clone()).unwrap();
+    let a = f.h();
+    let b = other.handle();
+    let barrier = std::sync::Barrier::new(2);
+    let r3 = f.reservation(3, PrNoticeMode::Auto, 10);
+    let r4 = f.reservation(4, PrNoticeMode::Auto, 10);
+    let (first, second) = std::thread::scope(|s| {
+        let one = s.spawn(|| {
+            barrier.wait();
+            a.reserve_pr_notice(r3)
+        });
+        let two = s.spawn(|| {
+            barrier.wait();
+            b.reserve_pr_notice(r4)
+        });
+        (one.join().unwrap(), two.join().unwrap())
+    });
+    let winners = [&first, &second].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(winners, 1, "{first:?} / {second:?}");
+    let loser = [first, second].into_iter().find_map(Result::err).unwrap();
+    assert!(
+        matches!(
+            loser,
+            storage::StorageError::PrAutoFix(PrAutoFixRejection::BudgetReserved)
+        ),
+        "{loser:?}"
+    );
+    assert_eq!(f.count("pr_notices"), 3);
+    assert_eq!(
+        f.h().pr_auto_fix_state(key()).unwrap().reserved,
+        PR_AUTO_FIX_LIMIT
+    );
+    other.close();
+}
+#[test]
 fn third_adoption_is_atomic_auto_off_and_reset_preserves_sha_and_cooldown() {
     let f = Fixture::new();
     f.policy(PrPolicyAction::SetEnabled(true));
