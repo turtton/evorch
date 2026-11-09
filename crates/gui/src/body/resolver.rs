@@ -950,10 +950,16 @@ impl Shared {
     }
 
     fn read_rows(&self, request: RowsRequest) {
+        let mut harness_notices = storage::HarnessNoticeSnapshot::default();
         let outcome = self
             .backend
             .read_rows(&request.runs, request.after, request.through, &self.meter)
-            .map(super::rows::assemble);
+            .and_then(|rows| {
+                if matches!(request.purpose, super::rows::RowsPurpose::Rehydrate { .. }) {
+                    harness_notices = self.backend.read_harness_notices(&request.runs)?;
+                }
+                Ok(super::rows::assemble(rows))
+            });
         let now = self.config.clock.now();
         let thread = std::thread::current().id();
         let mut state = self.lock();
@@ -989,6 +995,7 @@ impl Shared {
             }
         }
         state.rows_results.push(RowsOutcome {
+            harness_notices,
             request,
             result: outcome,
         });

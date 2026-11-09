@@ -139,7 +139,7 @@ pub(super) fn header(
             header
         }
         "handoff_to_lane" => {
-            let mut header = new(icons::ARROW_FAT_LINE_UP, "Escalate");
+            let mut header = new(icons::ARROW_FAT_LINE_UP, "Hand off to lane");
             header.subject = str_arg("escalation_reason")
                 .map(preview)
                 .unwrap_or_default();

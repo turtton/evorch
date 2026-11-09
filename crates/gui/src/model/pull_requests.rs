@@ -598,8 +598,6 @@ pub fn auto_fix_controls(view: &ThreadPullRequest, now_ns: i64) -> Option<AutoFi
     let reset = limit_reached.then(|| {
         if !view.tracked_here {
             Control::off("Not tracked in this window")
-        } else if moves_from.is_some() {
-            Control::off("Reset it in the thread that turned auto fix on")
         } else {
             Control::on("Start the count again and turn auto fix on")
         }

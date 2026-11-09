@@ -320,10 +320,17 @@ async fn run(work: Work) -> Result<(), PullRequestError> {
                 thread_id,
                 link_revision,
                 policy_revision,
+                confirmed_previous,
             },
             Some(permit),
         ) => service
-            .reset_auto_fix_budget(&thread_id, link_revision, policy_revision, &permit)
+            .reset_auto_fix_budget(
+                &thread_id,
+                link_revision,
+                policy_revision,
+                confirmed_previous,
+                &permit,
+            )
             .await
             .map(drop),
         (

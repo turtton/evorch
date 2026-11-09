@@ -373,8 +373,11 @@ impl AgentRuntime {
             .and_then(|run| run.config.ownership.clone());
         if let Some(current) = current
             && !target.authority.ownership.as_ref().is_some_and(|p| {
+                // The heartbeat moves `expires_at` in the registry, so a permit resolved now
+                // never equals the run's own; the owner and its generation are the identity.
                 p.thread_id == current.thread_id
-                    && p.lease == current.lease
+                    && p.lease.owner_id == current.lease.owner_id
+                    && p.lease.generation == current.lease.generation
                     && p.registry_path == current.registry_path
             })
         {

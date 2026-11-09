@@ -311,3 +311,36 @@ fn text_that_starts_with_the_escape_character_reaches_the_follower_exactly_as_wr
         .collect();
     assert_eq!(read, texts);
 }
+
+// Given: one process published a change of its global auto fix switch and a policy change through
+// the storage bridge / When: another process follows the event log / Then: it receives the policy
+// change only; the switch is read from each process's own configuration
+#[test]
+fn another_process_does_not_receive_a_change_of_the_global_auto_fix_switch() {
+    let (_dir, config, storage) = setup("settings.db");
+    let mut bridge = recorder::storage_bridge::StorageBridge::new(storage.handle(), "publisher");
+    let changed = |reason| {
+        Event::new(event_bus::PullRequestEvent::AutoFixChanged {
+            thread_id: "t1".into(),
+            link_revision: 1,
+            transition_seq: 1,
+            pull_request: event_bus::PullRequestRef {
+                provider: "github".into(),
+                host: "github.com".into(),
+                repository: "turtton/evorch".into(),
+                number: 12,
+            },
+            reason,
+        })
+    };
+    let policy = changed(event_bus::PullRequestAutoFixChange::Policy);
+    bridge
+        .handle_event(&changed(event_bus::PullRequestAutoFixChange::Settings))
+        .unwrap();
+    bridge.handle_event(&policy).unwrap();
+
+    let batch = poller(&config, "follower", 0).poll_once().expect("poll");
+
+    let received: Vec<&Event> = batch.events.iter().map(|fed| &fed.event).collect();
+    assert_eq!(received, [&policy]);
+}

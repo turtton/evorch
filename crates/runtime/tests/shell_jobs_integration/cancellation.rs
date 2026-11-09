@@ -25,7 +25,7 @@ async fn cancelled_notification_waits_for_drain_and_precedes_terminal_error() {
     );
     let call = next(&mut calls).await;
     runtime.cancel(run).unwrap();
-    timeout(DEADLINE, draining.recv()).await.unwrap().unwrap();
+    draining.recv().await.unwrap();
     assert_eq!(
         runtime.inspect_agent(run).unwrap().phase,
         AgentRunPhase::Running

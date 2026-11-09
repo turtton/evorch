@@ -188,20 +188,27 @@ impl PullRequestService {
     }
     /// Explicitly reset the budget and re-enable. Does not shorten cooldown or resume Stop.
     ///
+    /// Like [`Self::change_auto_fix_destination`], a reset from a thread other than the one
+    /// that has auto fix moves the destination here, so the UI confirms the exact previous
+    /// destination first and names it in `confirmed_previous`; it is compared with the stored
+    /// one and a mismatch is refused. `None` means no confirmation was given: only the thread
+    /// that already is the destination (or a pull request with none) may reset then.
+    ///
     /// # Errors
-    /// As set_auto_fix.
+    /// As set_auto_fix. A changed previous destination is never silently overwritten.
     pub async fn reset_auto_fix_budget(
         &self,
         thread: &str,
         link_revision: u64,
         policy_revision: u64,
+        confirmed_previous: Option<String>,
         permit: &OwnerPermit,
     ) -> Result<PrAutoFixState> {
         self.policy_change(
             thread,
             link_revision,
             policy_revision,
-            None,
+            confirmed_previous.map(Some),
             PrPolicyAction::ResetBudget,
             permit,
         )
@@ -353,7 +360,7 @@ impl PullRequestService {
 impl Inner {
     /// Tells displays that the PR-wide auto fix state changed, after the change committed.
     /// Carries identities only; a display reads the stored state.
-    async fn announce_auto_fix(&self, thread: &str, reason: PullRequestAutoFixChange) {
+    pub(super) async fn announce_auto_fix(&self, thread: &str, reason: PullRequestAutoFixChange) {
         if let Ok(state) = self.thread_state(thread).await
             && let Some(link) = state.active_link
         {

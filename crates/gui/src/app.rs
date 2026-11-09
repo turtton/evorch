@@ -25,6 +25,7 @@ mod family_state_tests;
 mod follow_ups;
 mod frame;
 mod frame_trace;
+mod harness_recovery;
 mod history;
 #[cfg(test)]
 mod history_restore_tests;

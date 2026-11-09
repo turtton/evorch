@@ -309,7 +309,7 @@ async fn cooldown_599_600_and_reset_evaluate_only_the_latest_head() {
             .is_err()
     );
     p.service
-        .reset_auto_fix_budget("t", 1, s.policy_revision, &t.permit)
+        .reset_auto_fix_budget("t", 1, s.policy_revision, None, &t.permit)
         .await
         .unwrap();
     settle().await;
@@ -749,4 +749,210 @@ async fn the_head_attribution_a_display_reads_is_the_one_eligibility_uses() {
         p.service.head_attribution("unlinked"),
         HeadAttribution::Unknown
     );
+}
+
+fn exhaust_budget(w: &World) {
+    let sql = rusqlite::Connection::open(w.dir.path().join("evorch.db")).unwrap();
+    sql.execute("UPDATE pr_auto_fix_state SET used=3,enabled=0", [])
+        .unwrap();
+}
+fn confirmation_required(error: &PullRequestError) -> bool {
+    matches!(
+        error,
+        PullRequestError::Storage(StorageError::PrAutoFix(
+            PrAutoFixRejection::DestinationConfirmationRequired
+        ))
+    )
+}
+// Given: the limit stopped auto fix in thread t / When: thread u resets the count / Then: without
+// the confirmed previous destination, or with another one, nothing changes; with t named and the
+// revisions it saw, the count starts again and u becomes the destination
+#[tokio::test(start_paused = true)]
+async fn a_reset_from_another_thread_moves_the_destination_only_when_it_names_the_previous_one() {
+    let w = World::new();
+    let p = w.process(enabled());
+    p.link_directly("t", 1);
+    let t = target(&p);
+    snapshot(&p, 'a', false);
+    enable(&p, &t).await;
+    p.link_directly("u", 1);
+    let u = p.permit("u");
+    exhaust_budget(&w);
+    let before = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
+    assert!(!before.enabled && before.used == 3);
+
+    let unconfirmed = p
+        .service
+        .reset_auto_fix_budget("u", 1, before.policy_revision, None, &u)
+        .await
+        .unwrap_err();
+    assert!(confirmation_required(&unconfirmed), "{unconfirmed:?}");
+    let wrong = p
+        .service
+        .reset_auto_fix_budget("u", 1, before.policy_revision, Some("v".into()), &u)
+        .await
+        .unwrap_err();
+    assert!(confirmation_required(&wrong), "{wrong:?}");
+    let stale_link = p
+        .service
+        .reset_auto_fix_budget("u", 2, before.policy_revision, Some("t".into()), &u)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(stale_link, PullRequestError::StaleRevision),
+        "{stale_link:?}"
+    );
+    let stale_policy = p
+        .service
+        .reset_auto_fix_budget("u", 1, before.policy_revision + 1, Some("t".into()), &u)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(stale_policy, PullRequestError::StaleRevision),
+        "{stale_policy:?}"
+    );
+    assert_eq!(
+        p.storage_handle.pr_auto_fix_state(key(1)).unwrap(),
+        before,
+        "every refusal left the state as it was"
+    );
+
+    let after = p
+        .service
+        .reset_auto_fix_budget("u", 1, before.policy_revision, Some("t".into()), &u)
+        .await
+        .unwrap();
+    assert!(after.enabled && after.used == 0);
+    assert_eq!(after.destination_thread_id.as_deref(), Some("u"));
+    assert_eq!(after.budget_epoch, before.budget_epoch + 1);
+}
+// Given: thread u already is the destination / When: it resets the count with a confirmation that
+// names another thread (the screen was stale) / Then: the reset is refused
+#[tokio::test(start_paused = true)]
+async fn a_reset_naming_a_destination_that_has_since_moved_here_is_refused() {
+    let w = World::new();
+    let p = w.process(enabled());
+    p.link_directly("t", 1);
+    let t = target(&p);
+    snapshot(&p, 'a', false);
+    enable(&p, &t).await;
+    p.link_directly("u", 1);
+    let u = p.permit("u");
+    let s = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
+    p.service
+        .change_auto_fix_destination("u", 1, s.policy_revision, Some("t".into()), &u)
+        .await
+        .unwrap();
+    exhaust_budget(&w);
+    let s = p.storage_handle.pr_auto_fix_state(key(1)).unwrap();
+    let error = p
+        .service
+        .reset_auto_fix_budget("u", 1, s.policy_revision, Some("t".into()), &u)
+        .await
+        .unwrap_err();
+    assert!(confirmation_required(&error), "{error:?}");
+    p.service
+        .reset_auto_fix_budget("u", 1, s.policy_revision, None, &u)
+        .await
+        .unwrap();
+}
+// Given: threads t and u have active links and v has none / When: the global auto fix switch is
+// turned off, an update changes nothing about it, and it is turned on / Then: t and u are each
+// told to read again, once per change, and v and a no-change update announce nothing
+#[tokio::test(start_paused = true)]
+async fn the_global_auto_fix_switch_announces_each_linked_thread_only_when_it_changes() {
+    let w = World::new();
+    let mut p = w.process(enabled());
+    p.link_directly("t", 1);
+    p.link_directly("u", 2);
+    p.permit("v");
+    let announced = |events: &[PullRequestEvent]| {
+        let mut threads: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                PullRequestEvent::AutoFixChanged {
+                    thread_id,
+                    link_revision,
+                    transition_seq,
+                    reason: PullRequestAutoFixChange::Settings,
+                    ..
+                } => Some((thread_id.clone(), *link_revision, *transition_seq)),
+                _ => None,
+            })
+            .collect();
+        threads.sort();
+        threads
+    };
+    let expected = |p: &Process| {
+        ["t", "u"]
+            .map(|thread| {
+                let state = p.state(thread);
+                (
+                    thread.to_owned(),
+                    state.active_link.unwrap().link_revision,
+                    state.transition_seq,
+                )
+            })
+            .to_vec()
+    };
+    p.quiet_events().await;
+
+    let mut off = enabled();
+    off.auto_fix_enabled = false;
+    p.service.update_settings(off).unwrap();
+    let events = p.quiet_events().await;
+    assert_eq!(announced(&events), expected(&p), "{events:?}");
+
+    off.pending_poll_seconds += 1;
+    p.service.update_settings(off).unwrap();
+    assert!(announced(&p.quiet_events().await).is_empty());
+
+    p.service.update_settings(enabled()).unwrap();
+    let events = p.quiet_events().await;
+    assert_eq!(announced(&events), expected(&p), "{events:?}");
+}
+
+fn announced_threads(events: &[PullRequestEvent]) -> Vec<String> {
+    let mut threads: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            PullRequestEvent::AutoFixChanged {
+                thread_id,
+                reason: PullRequestAutoFixChange::Settings,
+                ..
+            } => Some(thread_id.clone()),
+            _ => None,
+        })
+        .collect();
+    threads.sort();
+    threads
+}
+// Given: the switch is changed before the scheduler has run at all / Then: the change is still
+// announced, once the scheduler runs
+#[tokio::test(start_paused = true)]
+async fn a_switch_change_made_before_the_scheduler_first_runs_is_announced() {
+    let w = World::new();
+    let mut p = w.process(enabled());
+    p.link_directly("t", 1);
+    let mut off = enabled();
+    off.auto_fix_enabled = false;
+    p.service.update_settings(off).unwrap();
+    let events = p.quiet_events().await;
+    assert_eq!(announced_threads(&events), ["t"], "{events:?}");
+}
+// Given: the switch is turned off and on again before the scheduler looks / Then: the change is
+// not lost although the value is back where it was: each linked thread is told once
+#[tokio::test(start_paused = true)]
+async fn a_switch_turned_off_and_on_again_between_two_looks_is_announced_once() {
+    let w = World::new();
+    let mut p = w.process(enabled());
+    p.link_directly("t", 1);
+    p.link_directly("u", 2);
+    p.quiet_events().await;
+    let mut off = enabled();
+    off.auto_fix_enabled = false;
+    p.service.update_settings(off).unwrap();
+    p.service.update_settings(enabled()).unwrap();
+    let events = p.quiet_events().await;
+    assert_eq!(announced_threads(&events), ["t", "u"], "{events:?}");
 }

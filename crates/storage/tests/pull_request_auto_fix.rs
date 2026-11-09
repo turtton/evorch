@@ -240,6 +240,48 @@ fn two_connections_reserve_concurrently_with_one_sha_and_bounded_budget() {
     other.close();
 }
 #[test]
+fn two_connections_race_for_the_last_slot_and_only_one_reserves_it() {
+    let f = Fixture::new();
+    f.policy(PrPolicyAction::SetEnabled(true));
+    f.reserve(1, PrNoticeMode::Auto, 10);
+    f.reserve(2, PrNoticeMode::Auto, 10);
+    let s = f.h().pr_auto_fix_state(key()).unwrap();
+    assert_eq!(s.used + s.reserved, PR_AUTO_FIX_LIMIT - 1);
+    let other = Storage::open(f.config.clone()).unwrap();
+    let a = f.h();
+    let b = other.handle();
+    let barrier = std::sync::Barrier::new(2);
+    let r3 = f.reservation(3, PrNoticeMode::Auto, 10);
+    let r4 = f.reservation(4, PrNoticeMode::Auto, 10);
+    let (first, second) = std::thread::scope(|s| {
+        let one = s.spawn(|| {
+            barrier.wait();
+            a.reserve_pr_notice(r3)
+        });
+        let two = s.spawn(|| {
+            barrier.wait();
+            b.reserve_pr_notice(r4)
+        });
+        (one.join().unwrap(), two.join().unwrap())
+    });
+    let winners = [&first, &second].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(winners, 1, "{first:?} / {second:?}");
+    let loser = [first, second].into_iter().find_map(Result::err).unwrap();
+    assert!(
+        matches!(
+            loser,
+            storage::StorageError::PrAutoFix(PrAutoFixRejection::BudgetReserved)
+        ),
+        "{loser:?}"
+    );
+    assert_eq!(f.count("pr_notices"), 3);
+    assert_eq!(
+        f.h().pr_auto_fix_state(key()).unwrap().reserved,
+        PR_AUTO_FIX_LIMIT
+    );
+    other.close();
+}
+#[test]
 fn third_adoption_is_atomic_auto_off_and_reset_preserves_sha_and_cooldown() {
     let f = Fixture::new();
     f.policy(PrPolicyAction::SetEnabled(true));
@@ -1134,5 +1176,80 @@ fn v51_upgrade_preserves_a_ready_notice_and_its_outbox_with_an_initial_generatio
     assert_eq!(
         f.reserve(1, PrNoticeMode::Manual, 1).reservation_revision,
         2
+    );
+}
+
+// Display recovery is a read-only join of verified native positions and adopted receipts.
+// Neither a notice-looking body nor a copied/unknown provenance map is delivery evidence.
+#[test]
+fn harness_history_requires_verified_native_provenance_and_a_receipt() {
+    let f = Fixture::new();
+    let notice = f.ready(1, PrNoticeMode::Manual, 10);
+    let db = storage::Database::open_read_only(&f.config.db_path).unwrap();
+    let mut write = snapshot();
+    write.map.messages[0].blocks[0].origin = BlockOrigin::HarnessNotice {
+        notification_id: notice.notice_id.clone(),
+    };
+    write.map.messages[0].blocks[0].excluded_reason = Some(ExcludedReason::GeneratedBoundary);
+    let saved = f.h().save_snapshot_bundle(&write).unwrap();
+    assert!(
+        db.adopted_harness_notices(None).unwrap().is_empty(),
+        "a provenance tag without a receipt is not adoption"
+    );
+    write.expected_snapshot_revision = Some(saved.snapshot_revision);
+    let claim = f.claim(11);
+    let adopted = f
+        .h()
+        .accept_pr_delivery(claim, write.clone(), 12, true)
+        .unwrap()
+        .unwrap();
+    let cards = db.adopted_harness_notices(None).unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].notice.notice_id, notice.notice_id);
+    assert_eq!(cards[0].ordinal, 0);
+    assert_eq!(cards[0].adopted_at_ns, 12);
+    let horizon = db.last_event_id().unwrap();
+    f.h()
+        .append_event(
+            Some("observer"),
+            &event_bus::Event::new(event_bus::LifecycleEvent::TurnCompleted {
+                run_id: "local-row".into(),
+                context_len: 1,
+            }),
+        )
+        .unwrap();
+    let evidence = db.adopted_harness_notice_snapshot(None).unwrap();
+    assert!(evidence.through_event > horizon);
+    assert_eq!(evidence.through_event, db.last_event_id().unwrap());
+    assert_eq!(evidence.notices, cards);
+    assert!(
+        db.adopted_harness_notices(Some(&["other-run".into()]))
+            .unwrap()
+            .is_empty()
+    );
+    // Raw-preserving compaction changes checkpoints, not the input's provenance/position.
+    write.expected_snapshot_revision = Some(adopted.snapshot_revision);
+    write.record.checkpoints_json = r#"[{"id":"compact","summary":{"role":"user","content":[{"type":"text","text":"summary"}]},"range":[0,1]}]"#.into();
+    write.map.checkpoint_count = 1;
+    let compacted = f.h().save_snapshot_bundle(&write).unwrap();
+    assert_eq!(db.adopted_harness_notices(None).unwrap(), cards);
+    write.expected_snapshot_revision = Some(compacted.snapshot_revision);
+    write.map.messages[0].blocks[0].origin = BlockOrigin::Native;
+    let native = f.h().save_snapshot_bundle(&write).unwrap();
+    assert!(
+        db.adopted_harness_notices(None).unwrap().is_empty(),
+        "text is never used to infer a notice"
+    );
+    write.expected_snapshot_revision = Some(native.snapshot_revision);
+    write.map.messages[0].blocks[0].origin = BlockOrigin::HarnessNotice {
+        notification_id: notice.notice_id,
+    };
+    write.status = ProvenanceStatus::Unknown {
+        reason: ProvenanceUnknownReason::LegacyUnproven,
+    };
+    f.h().save_snapshot_bundle(&write).unwrap();
+    assert!(
+        db.adopted_harness_notices(None).unwrap().is_empty(),
+        "unknown provenance never becomes delivery evidence"
     );
 }

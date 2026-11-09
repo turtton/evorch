@@ -30,6 +30,7 @@ pub struct RowsRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowsOutcome {
     pub request: RowsRequest,
+    pub harness_notices: storage::HarnessNoticeSnapshot,
     pub result: Result<Vec<HistoryRow>, super::types::BodyError>,
 }
 

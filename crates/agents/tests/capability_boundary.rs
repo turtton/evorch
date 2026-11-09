@@ -181,7 +181,7 @@ fn worker_denies_delegation_tools() {
 #[test]
 fn worker_allows_escalate() {
     // Given: Worker ロール
-    // When: escalate の使用可否を問い合わせる
+    // When: handoff_to_lane の使用可否を問い合わせる
     // Then: Allowed になる
     let caps = Role::Worker.capabilities();
 
@@ -194,7 +194,7 @@ fn worker_allows_escalate() {
 #[test]
 fn orchestrator_denies_escalate() {
     // Given: Orchestrator ロール
-    // When: escalate の使用可否を問い合わせる
+    // When: handoff_to_lane の使用可否を問い合わせる
     // Then: Denied になる
     let caps = Role::Orchestrator.capabilities();
 
