@@ -544,6 +544,54 @@ if command -v cargo > /dev/null; then
 
   run_real_case real_core_instance_dev_dependency fail "core-instance must not depend on workspace crate runtime: core-instance -> runtime [dev; resolved]" \
     $'core-instance=[dev-dependencies]\nruntime = { path = "../runtime" }'
+
+  # The script's own `cargo metadata` call: it must resolve every feature, or an
+  # optional dependency that a [patch] section redirects to a workspace crate
+  # would have no resolved edge. run_case cannot be used because it passes a
+  # metadata file; the script gets the fixture workspace through its manifest
+  # override.
+  run_real_script_case() { # <name> <expect> <needle> [crate=toml-to-append ...]
+    local name=$1 expect=$2 needle=$3
+    shift 3
+    local dir="$work/ws-$name"
+    make_workspace "$dir" "${REAL_WORKSPACE_EXTRA:-}"
+    local spec
+    for spec in "$@"; do
+      add_to_crate "$dir" "${spec%%=*}" "${spec#*=}"
+    done
+    (cd "$dir" && cargo generate-lockfile --offline > /dev/null 2> "$work/$name.cargo.err") \
+      || { fail=$((fail + 1)); echo "FAIL - $name (cargo generate-lockfile failed)"; sed 's/^/       | /' "$work/$name.cargo.err"; return; }
+    printf '%s\n' "$CASE_ALLOWLIST" > "$work/$name.allow"
+    local status=0
+    WORKBENCH_BOUNDARY_MANIFEST_PATH="$dir/Cargo.toml" WORKBENCH_BOUNDARY_CORE_CRATES=runtime \
+      WORKBENCH_BOUNDARY_ALLOWLIST="$work/$name.allow" \
+      "$checker" > "$work/$name.out" 2>&1 || status=$?
+    local ok=1
+    if [[ $expect == ok && $status -ne 0 ]]; then ok=0; fi
+    if [[ $expect == fail && $status -ne 1 ]]; then ok=0; fi
+    if [[ -n $needle ]] && ! grep -qF -- "$needle" "$work/$name.out"; then ok=0; fi
+    if [[ $ok -eq 1 ]]; then
+      pass=$((pass + 1))
+      echo "ok   - $name"
+    else
+      fail=$((fail + 1))
+      echo "FAIL - $name (expected $expect${needle:+ containing '$needle'}, exit $status)"
+      sed 's/^/       | /' "$work/$name.out"
+    fi
+  }
+
+  run_real_script_case real_script_runs_cargo_metadata_itself ok "boundary check passed"
+
+  REAL_WORKSPACE_EXTRA=$'[patch.crates-io]\nruntime = { path = "crates/runtime" }'
+  run_real_script_case real_gui_unselected_optional_dependency_patched_to_a_workspace_crate fail "gui declares workspace dependency runtime [normal; resolved" \
+    $'gui=runtime = { version = "0.1", optional = true }'
+  run_real_script_case real_evorch_unselected_optional_build_dependency_patched fail "evorch declares workspace dependency runtime [build; resolved" \
+    $'evorch=[build-dependencies]\nruntime = { version = "0.1", optional = true }'
+  run_real_script_case real_core_instance_unselected_optional_dependency_patched fail "core-instance must not depend on workspace crate runtime" \
+    $'core-instance=runtime = { version = "0.1", optional = true }'
+  run_real_script_case real_core_launcher_unselected_optional_target_dependency_patched fail "core-launcher must not depend on workspace crate runtime" \
+    $'core-launcher=[target.\'cfg(unix)\'.dependencies]\nruntime = { version = "0.1", optional = true }'
+  REAL_WORKSPACE_EXTRA=
 else
   echo "skip - real-manifest cases (cargo not found)"
 fi

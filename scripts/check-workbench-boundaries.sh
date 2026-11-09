@@ -77,7 +77,11 @@ trap 'rm -rf "$work"' EXIT
 if [[ $# -ge 1 ]]; then
   cp "$1" "$work/metadata.json"
 else
-  cargo metadata --format-version 1 --locked > "$work/metadata.json"
+  # --all-features: an optional dependency that no default feature enables has
+  # no resolved edge, so only the all-features graph shows where a [patch]
+  # section sends it. The manifest override exists for the fixture tests.
+  cargo metadata --format-version 1 --locked --all-features \
+    --manifest-path "${WORKBENCH_BOUNDARY_MANIFEST_PATH:-Cargo.toml}" > "$work/metadata.json"
 fi
 
 # Edge list. Lines:  W <workspace crate>
