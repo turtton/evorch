@@ -532,6 +532,7 @@ fn absent_or_stale_endpoint_record_does_not_replace_a_live_standard_endpoint() {
         .unwrap();
     assert_eq!(client.server_hello().instance_epoch.0, record.epoch);
     drop(client);
+    let live_epoch = record.epoch;
     let mut record = record;
     record.epoch = record.epoch.wrapping_add(1).max(1);
     fs::write(
@@ -544,10 +545,146 @@ fn absent_or_stale_endpoint_record_does_not_replace_a_live_standard_endpoint() {
         fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    assert!(matches!(
-        rt.block_on(local_launcher(&r).connect_or_start()),
-        Err(LaunchError::Readiness(_))
-    ));
+    let (mut b, mut pb) = r.client(&r.config);
+    pb.next("lifetime-busy");
+    // A stale hint must not authorize another spawn or attachment to an
+    // unchecked epoch. Refresh the record only after the guarded recheck.
+    record.epoch = live_epoch;
+    fs::write(
+        r.identity().record_path(),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    pb.ack();
+    pb.next("connected");
+    pb.ack();
+    assert!(b.0.wait().unwrap().success());
+}
+
+#[test]
+fn disconnect_before_hello_rechecks_launch_and_takes_over_after_lifetime_closes() {
+    let r = Rig::new();
+    fs::write(r.config.join("disconnect-before-hello"), "").unwrap();
+    let mut old = ChildGuard(
+        Command::new(binary())
+            .arg("--config-dir")
+            .arg(&r.config)
+            .spawn()
+            .unwrap(),
+    );
+    let mut old_core = r.accept("inherited");
+    old_core.ack();
+    old_core.next("adopted");
+    r.ready(&mut old_core);
+    let (mut client, mut parent) = r.client(&r.config);
+    old_core.next("before-hello");
+    old_core.ack();
+    old_core.next("hello-disconnected");
+    parent.next("lifetime-busy");
+    // Lifetime becomes free only AFTER the failed handshake and guarded probe.
+    fs::remove_file(r.config.join("disconnect-before-hello")).unwrap();
+    old_core.ack();
+    assert!(old.0.wait().unwrap().success());
+    old_core.core = false;
+    parent.ack();
+    let mut replacement = r.spawn(&mut parent);
+    r.ready(&mut replacement);
+    parent.ack();
+    parent.next("connected");
+    parent.ack();
+    assert!(client.0.wait().unwrap().success());
+}
+
+#[test]
+fn unrelated_exec_during_launch_spawn_does_not_inherit_lock_fds() {
+    use std::{io::Read, os::unix::process::CommandExt};
+    // Release even on assertion failure, before scoped-thread joining. Otherwise
+    // a failing leak check would leave Command::spawn blocked in pre_exec.
+    struct Release(UnixStream);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = self.0.write_all(b"go");
+        }
+    }
+    let r = Rig::new();
+    let identity = r.identity();
+    let launch = LaunchGuard::acquire(&identity).unwrap();
+    let (controller, forked) = UnixStream::pair().unwrap();
+    let mut core_process = std::thread::scope(|scope| {
+        let launch = &launch;
+        let config = &r.config;
+        let spawning = scope.spawn(move || {
+            let mut command = Command::new(binary());
+            command.arg("--config-dir").arg(config);
+            // SAFETY: only async-signal-safe socket syscalls in the forked
+            // child. This barrier keeps spawn's exec handshake outstanding
+            // while an unrelated thread actually execs the scanner.
+            unsafe {
+                command.pre_exec(move || {
+                    rustix::io::write(&forked, b"x")?;
+                    rustix::io::read(&forked, &mut [0; 2])?;
+                    Ok(())
+                });
+            }
+            ChildGuard(launch.spawn(command).unwrap())
+        });
+        let mut release = Release(controller);
+        release.0.read_exact(&mut [0; 1]).unwrap();
+        let mut scanner = ChildGuard(
+            Command::new(binary())
+                .arg("--scan")
+                .arg("--config-dir")
+                .arg(&r.config)
+                .spawn()
+                .unwrap(),
+        );
+        let mut scan = r.accept("scan-clean");
+        scan.ack();
+        assert!(scanner.0.wait().unwrap().success());
+        drop(release);
+        spawning.join().unwrap()
+    });
+    let mut core = r.accept("inherited");
+    core.ack();
+    core.next("adopted");
+    r.ready(&mut core);
+    drop(launch);
+    core.kill();
+    let _ = core_process.0.wait();
+}
+
+#[test]
+fn hardlinked_launch_lifetime_and_endpoint_record_are_refused_without_modification() {
+    for name in [
+        ".evorch-core.launch",
+        ".evorch-core.lock",
+        ".evorch-core.endpoint",
+    ] {
+        let r = Rig::new();
+        let identity = r.identity();
+        let launch = LaunchGuard::acquire(&identity).unwrap();
+        let instance = Instance::acquire(&launch, &r.runtime).unwrap();
+        let listener = instance.bind().unwrap();
+        instance.publish(7).unwrap();
+        drop(listener);
+        drop(instance);
+        drop(launch);
+        let path = r.config.join(name);
+        let victim = r.root.path().join("victim");
+        fs::hard_link(&path, &victim).unwrap();
+        let inode = fs::metadata(&victim).unwrap().ino();
+        let contents = fs::read(&victim).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().nlink(), 2);
+        // The client-start IPC barrier releases the process only after the
+        // unsafe layout is fully installed; no scheduler timing is involved.
+        let (mut process, _peer) = r.client(&r.config);
+        assert_eq!(process.0.wait().unwrap().code(), Some(1), "{name}");
+        for p in [&path, &victim] {
+            assert_eq!(fs::metadata(p).unwrap().ino(), inode);
+            assert_eq!(fs::metadata(p).unwrap().nlink(), 2);
+            assert_eq!(fs::read(p).unwrap(), contents);
+        }
+    }
 }
 
 #[test]

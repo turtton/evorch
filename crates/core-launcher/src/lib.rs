@@ -8,7 +8,7 @@ use std::{
     process::{Child, Command, Stdio},
     time::Duration,
 };
-use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
+use workbench_client::{ClientConfig, ClientError, TransportError, UnixTransport, WorkbenchClient};
 use workbench_protocol::{handshake::CoreState, ids::CoreIdentity};
 
 #[derive(Debug, thiserror::Error)]
@@ -145,22 +145,28 @@ impl Launcher {
             }
             let transport = match UnixTransport::connect(&socket).await {
                 Ok(t) => t,
-                Err(workbench_client::TransportError::Disconnected) => continue,
+                Err(TransportError::Disconnected) => continue,
                 Err(e) => return Err(LaunchError::Readiness(e.to_string())),
             };
-            let client = WorkbenchClient::connect(transport, self.client.clone())
-                .await
-                .map_err(|e| LaunchError::Readiness(e.to_string()))?;
+            let client = match WorkbenchClient::connect(transport, self.client.clone()).await {
+                Ok(client) => client,
+                // The owner can exit after accept, before replying to hello.
+                // Reenter launch arbitration and reread discovery under it.
+                Err(ClientError::Transport(TransportError::Disconnected)) => return Ok(None),
+                Err(e) => return Err(LaunchError::Readiness(e.to_string())),
+            };
             // Version, identity and required capabilities are checked by the wire
             // client. A saved epoch must also agree with the live hello.
             let hello = client.server_hello();
-            if hello.instance_epoch.0 == 0
-                || epoch.is_some_and(|e| e != hello.instance_epoch.0)
-                || hello.status.state != CoreState::Ready
-            {
+            if hello.instance_epoch.0 == 0 || hello.status.state != CoreState::Ready {
                 return Err(LaunchError::Readiness(
                     "epoch or core state mismatch".into(),
                 ));
+            }
+            if epoch.is_some_and(|e| e != hello.instance_epoch.0) {
+                // The record may predate this connection. Never attach using a
+                // mismatched hint; reread it after acquiring launch instead.
+                return Ok(None);
             }
             return Ok(Some(client));
         }
@@ -185,31 +191,34 @@ impl Launcher {
             }
             tick.tick().await;
         };
-        if let Some(client) = self.connect().await? {
-            return Ok(client);
-        }
-        let mut child = if launch.lifetime_available()? {
-            observe(LaunchStage::BeforeSpawn);
-            // Revalidate immediately before spawn, including directory permissions.
-            let binary = CoreBinary::explicit(&self.binary.0)?;
-            let mut command = Command::new(binary.0);
-            command
-                .arg("--config-dir")
-                .arg(self.config.config_dir())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit());
-            let child = launch.spawn(command)?;
-            observe(LaunchStage::Spawned(child.id()));
-            Some(Reap(Some(child)))
-        } else {
-            observe(LaunchStage::LifetimeBusy);
-            None
-        };
+        let mut child = None;
+        let mut attempted_spawn = false;
         loop {
             if let Some(client) = self.connect().await? {
                 drop(launch); // close only; child independently holds the same OFD
                 return Ok(client);
+            }
+            if !attempted_spawn {
+                if launch.lifetime_available()? {
+                    observe(LaunchStage::BeforeSpawn);
+                    // Revalidate immediately before spawn, including directory permissions.
+                    let binary = CoreBinary::explicit(&self.binary.0)?;
+                    let mut command = Command::new(binary.0);
+                    command
+                        .arg("--config-dir")
+                        .arg(self.config.config_dir())
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::inherit());
+                    let spawned = launch.spawn(command)?;
+                    observe(LaunchStage::Spawned(spawned.id()));
+                    child = Some(Reap(Some(spawned)));
+                    attempted_spawn = true;
+                } else {
+                    // A disconnected owner may release lifetime later. Probe
+                    // again under this same launch guard, never while unlocked.
+                    observe(LaunchStage::LifetimeBusy);
+                }
             }
             if let Some(c) = child.as_mut()
                 && let Some(status) = c.0.as_mut().expect("owned child").try_wait()?

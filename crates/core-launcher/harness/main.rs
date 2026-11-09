@@ -166,6 +166,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         drop(launch);
         loop {
             let (mut socket, _) = listener.accept().await?;
+            if config.config_dir().join("disconnect-before-hello").exists() {
+                // The old owner stays alive after closing just this transport.
+                // The controller releases lifetime only after the new client
+                // has observed it busy, reproducing an idle-exit race.
+                let len = socket.read_u32().await?;
+                assert!(len <= 1024 * 1024);
+                let mut bytes = vec![0; len as usize];
+                socket.read_exact(&mut bytes).await?;
+                let _: ClientHello = serde_json::from_slice(&bytes)?;
+                control.point("before-hello", 0);
+                drop(listener);
+                drop(socket);
+                control.point("hello-disconnected", 0);
+                return Ok(());
+            }
             let hello = hello.clone();
             tokio::spawn(async move {
                 let len = socket.read_u32().await.unwrap();

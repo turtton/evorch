@@ -11,7 +11,7 @@
 1. `ConfigIdentity::new` でconfigをcanonicalizeする。
 2. `CoreBinary::sibling` または `CoreBinary::explicit` で起動対象を検証する。PATH / CWD探索はしない。
 3. `Launcher::new(...).connect_or_start().await` が、保存endpointと標準endpointに接続し、config identity・version・必要capability・epoch・Ready状態を検証する。
-4. 接続不能の場合のみ `.evorch-core.launch` を取得して再接続する。launch保持中のみlifetimeをprobeし、probe FDはspawn前にcloseする。
+4. 接続不能・hello前のtransport切断・保存epoch不一致の場合は `.evorch-core.launch` を取得し、recordを最新から読み直して再接続する。identity / version / capability拒否や不正なwire応答は恒久エラーとして返す。launch保持中のみlifetimeをprobeし、切断した旧ownerが後から解放する場合も再probeする。probe FDはspawn前にcloseする。
 5. 親はlaunch FDをCLOEXECのまま保持し、fork後の子だけCLOEXECを解除する。子は `--launch-fd` をentryで採用し、CLOEXECを戻す。同じファイルをopen/flockし直さない。
 6. 子は `Instance::acquire(&launch, ...)` でlifetime取得後、検証済みstale socketを掃除する。listenerをbindし、handshakeと同じepochのrecordをpublishしてlaunchをcloseする。親も実際のreadiness検証後にcloseする。LOCK_UNやlock file unlinkは禁止。
 7. exit 2は再spawnせず既存コアへの再接続へ移る。
