@@ -167,7 +167,7 @@ max_bytes = 2097152
     // The GUI adds live reload via a fixed switchable model; core uses Configured.
     let gui = compose_runtime(RuntimeComposition {
         config: &config,
-        user_config_dir: Some(user_dir),
+        user_config_dir: Some(user_dir.clone()),
         model_catalog_dir: Some(test_support::model_catalog_dir()),
         bus,
         executor: execution.executor,
@@ -215,6 +215,61 @@ max_bytes = 2097152
             .is_empty()
     );
     core.shutdown().await.unwrap();
+
+    // Exercise real GUI approval and its serialized sidebar, not a hand-written
+    // projection. Both paths must grant the same access and project rules.
+    let allowed = tempfile::tempdir().unwrap();
+    let allowed_path = allowed.path().canonicalize().unwrap();
+    let marker = "p8a-approved-project-rule";
+    std::fs::write(root.join("AGENTS.md"), marker).unwrap();
+    let project = workspace_ui::ProjectId::new("approved-project");
+    let mut sidebar = workspace_ui::SidebarState::default();
+    sidebar
+        .add_project(project.clone(), "Approved project", &root)
+        .unwrap();
+    let sink = gui::runtime_sink::RuntimeCommandSink::new(
+        gui.runtime.clone(),
+        tokio::runtime::Handle::current(),
+    );
+    let mut state = gui::app::WorkbenchState::new(
+        gui::fixture::DemoSource(Vec::new()),
+        &workspace_ui::UiSettings::default(),
+    )
+    .unwrap()
+    .with_sidebar(sidebar)
+    .with_command_sink(Box::new(sink));
+    state
+        .add_allowed_directory(&project, &allowed_path)
+        .unwrap();
+    state
+        .set_project_trust(&project, workspace_ui::TrustState::Approved)
+        .unwrap();
+    std::fs::write(
+        user_dir.join("sidebar.json"),
+        serde_json::to_vec(state.sidebar()).unwrap(),
+    )
+    .unwrap();
+    let mut approved_core = BootstrappedHost::open(BootstrapOptions {
+        config_dir: user_dir,
+        project_root: root.clone(),
+        ownership_root: root.join("owners"),
+    })
+    .await
+    .unwrap();
+    for runtime in [&approved_core.runtime, &gui.runtime] {
+        assert_eq!(
+            runtime.project_allowed_directories(&root).get().as_ref(),
+            std::slice::from_ref(&allowed_path)
+        );
+        let mut request = runtime::base_context::BaseContextRequest::new(Role::Worker);
+        request.project_root = Some(root.clone());
+        let report = runtime.preview_base_context(request).await.unwrap();
+        assert!(report.sections.iter().any(|section| {
+            section.kind == runtime::base_context::ContextSectionKind::Rules
+                && section.text.contains(marker)
+        }));
+    }
+    approved_core.shutdown().await.unwrap();
     drop(gui);
     drop(eval_storage);
 }
