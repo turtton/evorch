@@ -1,6 +1,7 @@
 //! One fetch of a pull request for everyone in this process who tracks it: start, the result,
 //! the commit, and the delivery to the threads that are still entitled to it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -78,6 +79,7 @@ pub(crate) enum FlightOutcome {
 pub(crate) struct Flight {
     interests: Mutex<Vec<Interest>>,
     outcome: watch::Sender<Option<FlightOutcome>>,
+    refresh_requested: AtomicBool,
 }
 
 impl Flight {
@@ -85,7 +87,13 @@ impl Flight {
         Self {
             interests: Mutex::new(interests),
             outcome: watch::channel(None).0,
+            refresh_requested: AtomicBool::new(false),
         }
+    }
+
+    /// Called under the service state lock, as is completion: neither can miss the other.
+    pub(crate) fn request_refresh(&self) {
+        self.refresh_requested.store(true, Ordering::Relaxed);
     }
 
     pub(crate) fn join(&self, more: Vec<Interest>) {
@@ -637,6 +645,11 @@ impl Inner {
                     // try again later, not in a tight loop against a busy registry.
                     entry.next_due = (!entry.terminal).then_some(now + pending);
                 }
+            }
+            // A registered refresh must not be consumed by joining this flight in the scheduler
+            // and then overwritten by its polling/backoff deadline, even if its result failed.
+            if flight.refresh_requested.load(Ordering::Relaxed) {
+                entry.next_due = Some(now);
             }
         }
         flight.outcome.send_replace(Some(outcome));
