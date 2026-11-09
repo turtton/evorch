@@ -187,3 +187,102 @@ async fn safe_point_checkpoint_reuses_exact_prefix_after_reconnection() {
         }
     }
 }
+
+#[tokio::test]
+async fn tools_applied_checkpoint_reuses_exact_prefix_after_reconnection() {
+    for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
+        let tool = Arc::new(GatedRead {
+            started: Notify::new(),
+            release: Notify::new(),
+            child_started: Notify::new(),
+        });
+        let mut harness = harness_with_wire(
+            wire,
+            vec![
+                read_response(0),
+                text_response("after tools"),
+                text_response("second"),
+                text_response("third"),
+            ],
+            1_000_000,
+            tool.clone(),
+            vec![],
+            None,
+            0.5,
+            |_| {},
+        );
+        let config = storage::StorageConfig {
+            db_path: harness._directory.path().join("tools-applied.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        harness.runtime = harness
+            .runtime
+            .clone()
+            .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        let run_config = RunConfig {
+            conversation: true,
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        };
+        let run = harness
+            .runtime
+            .delegate_chat(
+                "tools-applied",
+                Role::Worker,
+                "start".into(),
+                run_config.clone(),
+            )
+            .unwrap();
+        tool.started.notified().await;
+        harness.runtime.request_quiesce();
+        tool.release.notify_one();
+        harness.runtime.wait_quiesced().await.unwrap();
+        let intent = harness
+            .runtime
+            .resume_intents()
+            .unwrap()
+            .into_iter()
+            .find(|intent| intent.run_id == run)
+            .unwrap();
+        assert_eq!(
+            intent.checkpoint.as_ref().unwrap().boundary,
+            runtime::checkpoint::CheckpointBoundary::ToolsApplied
+        );
+        assert!(intent.tool_intent.is_empty());
+        // The quiesced acknowledgement precedes collection of the completed
+        // first request. No timing-based guess about tool completion is used.
+        let mut events = Vec::new();
+        loop {
+            let event = harness.receiver.recv().await.unwrap();
+            let completed = matches!(&event.kind, EventKind::Provider(ProviderEvent::RequestCompleted { run_id: Some(id), .. }) if id == &run.to_string());
+            events.push(event);
+            if completed {
+                break;
+            }
+        }
+        let old = harness.runtime.clone();
+        restart_runtime(&mut harness, &config, &storage);
+        harness.runtime.resume_chat(run, run_config).unwrap();
+        events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+        for input in ["next input", "another input"] {
+            harness.runtime.send_message(run, input.into()).unwrap();
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+        }
+        verify_trace(&harness, run, &events, 0);
+        assert_eq!(
+            harness
+                .mock
+                .recorded_requests()
+                .iter()
+                .filter(|request| request.path == wire.path())
+                .count(),
+            4
+        );
+        harness.runtime.cancel(run).unwrap();
+        harness.runtime.wait(run).await.unwrap();
+        old.cancel(run).unwrap();
+        old.wait(run).await.unwrap();
+    }
+}

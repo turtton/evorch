@@ -61,41 +61,66 @@ impl AgentRuntime {
         history_only: bool,
         defer_registration: bool,
     ) -> Result<bool, RuntimeError> {
-        self.shared
-            .quiesce
-            .admit(
-                ResumeIntent {
-                    version: 1,
-                    run_id: run,
-                    incarnation,
-                    parent_run_id: parent,
-                    role: role.name().into(),
-                    wait: ResumeWait::Admission,
-                    initial_input: (!history_only).then(|| DurableInput {
-                        id: config
-                            .initial_prompt_id
-                            .clone()
-                            .unwrap_or_else(|| "initial".into()),
-                        text: prompt.into(),
-                        images: config.images.clone(),
-                        trusted_user: config.initial_prompt_id.is_some(),
-                    }),
-                    inputs: Vec::new(),
-                    active: true,
-                    stop_reason: None,
-                    checkpoint: None,
-                    snapshot: None,
-                    tool_intent: Vec::new(),
-                    provider_input: None,
-                    boundary_pending: false,
-                    responses_replay: Default::default(),
-                    compactions: Vec::new(),
-                    route_pins: Vec::new(),
-                },
-                self.shared.run_store.get(),
-                defer_registration,
-            )
-            .map_err(error)
+        self.admit_intent_with_snapshot(
+            run,
+            incarnation,
+            parent,
+            role,
+            prompt,
+            config,
+            history_only,
+            defer_registration,
+            None,
+        )
+        .map(|(start, _)| start)
+        .map_err(error)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn admit_intent_with_snapshot(
+        &self,
+        run: RunId,
+        incarnation: String,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: &str,
+        config: &RunConfig,
+        history_only: bool,
+        defer_registration: bool,
+        snapshot: Option<&storage::thread_index::SnapshotWrite>,
+    ) -> Result<(bool, Option<storage::thread_index::SnapshotReceipt>), AdmissionError> {
+        self.shared.quiesce.admit(
+            ResumeIntent {
+                version: 1,
+                run_id: run,
+                incarnation,
+                parent_run_id: parent,
+                role: role.name().into(),
+                wait: ResumeWait::Admission,
+                initial_input: (!history_only).then(|| DurableInput {
+                    id: config
+                        .initial_prompt_id
+                        .clone()
+                        .unwrap_or_else(|| "initial".into()),
+                    text: prompt.into(),
+                    images: config.images.clone(),
+                    trusted_user: config.initial_prompt_id.is_some(),
+                }),
+                inputs: Vec::new(),
+                active: true,
+                stop_reason: None,
+                checkpoint: None,
+                snapshot: None,
+                tool_intent: Vec::new(),
+                provider_input: None,
+                boundary_pending: false,
+                responses_replay: Default::default(),
+                compactions: Vec::new(),
+                route_pins: Vec::new(),
+            },
+            self.shared.run_store.get(),
+            defer_registration,
+            snapshot,
+        )
     }
     pub(crate) fn queue_intent_input(
         &self,

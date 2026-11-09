@@ -349,7 +349,11 @@ impl AgentRuntime {
             self.end_intent(
                 run_id,
                 &execution.publication().incarnation(),
-                crate::quiesce::StopReason::OperatorStopped,
+                if matches!(*execution.cancel_tx.borrow(), RunInterrupt::Cancel) {
+                    crate::quiesce::StopReason::Cancelled
+                } else {
+                    crate::quiesce::StopReason::OperatorStopped
+                },
             );
             self.drop_unstarted_host_input(run_id, config.initial_prompt_id.as_deref());
             drop(continuation);

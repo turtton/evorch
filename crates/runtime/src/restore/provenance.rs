@@ -217,12 +217,18 @@ mod tests;
 /// A save failure for callers that report a string. A lost compare-and-swap
 /// says so, instead of the debug form of the raw storage error or the
 /// owner-generation wording of `StaleMutation`.
-pub(crate) fn save_failure_reason(error: storage::thread_index::SnapshotApiError) -> String {
-    match storage_error(error) {
-        storage::StorageError::StaleMutation => {
+pub(crate) fn save_failure_reason(
+    error: impl std::borrow::Borrow<storage::thread_index::SnapshotApiError>,
+) -> String {
+    use storage::thread_index::SnapshotApiError as E;
+    match error.borrow() {
+        E::RevisionConflict | E::Storage(storage::StorageError::StaleMutation) => {
             "the saved snapshot was replaced by a newer save after it was read".into()
         }
-        other => other.to_string(),
+        E::Storage(error) => error.to_string(),
+        other => {
+            storage::StorageError::Serialization(format!("snapshot bundle: {other:?}")).to_string()
+        }
     }
 }
 

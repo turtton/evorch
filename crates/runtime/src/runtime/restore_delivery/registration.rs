@@ -14,6 +14,7 @@ impl AgentRuntime {
         restored: RestoredState,
         trigger: &AgentMessage,
         durable_parent: Option<(RunId, bool)>,
+        intent_admitted: bool,
     ) -> Result<(), RuntimeError> {
         let (run_id, parent, role, mut config, sender) = identity;
         if execution.cancelled()
@@ -112,16 +113,18 @@ impl AgentRuntime {
             restored.turn.as_ref(),
         );
         self.bind_approval_owner(run_id, &config, &execution);
-        self.admit_intent(
-            run_id,
-            execution.publication().incarnation(),
-            parent,
-            role,
-            &trigger.content,
-            &config,
-            history_only,
-            false,
-        )?;
+        if !intent_admitted {
+            self.admit_intent(
+                run_id,
+                execution.publication().incarnation(),
+                parent,
+                role,
+                &trigger.content,
+                &config,
+                history_only,
+                false,
+            )?;
+        }
         let task = restored.attach_to(RunTask {
             startup_failure: None,
             publication: execution.publication(),
@@ -284,6 +287,7 @@ mod review_tests {
                     },
                     &trigger,
                     None,
+                    false,
                 )
                 .unwrap();
             drop(admissions);

@@ -24,6 +24,8 @@ pub(crate) struct Coordinator {
 #[derive(Default)]
 struct Inner {
     phase: QuiesceState,
+    // Storage health is sticky, but only an explicit request gates normal turns.
+    requested: bool,
     intents: BTreeMap<RunId, ResumeIntent>,
     persisted: BTreeSet<RunId>,
 }
@@ -34,6 +36,39 @@ pub(crate) enum StorageStep {
     Flush,
 }
 
+/// Keep storage failure classes intact for answered-child retry policy.
+#[derive(Debug)]
+pub(crate) enum AdmissionError {
+    Storage(storage::StorageError),
+    Snapshot(storage::thread_index::SnapshotApiError),
+    Invalid(String),
+}
+impl std::fmt::Display for AdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => write!(f, "{error}"),
+            Self::Snapshot(error) => {
+                f.write_str(&crate::restore::provenance::save_failure_reason(error))
+            }
+            Self::Invalid(reason) => f.write_str(reason),
+        }
+    }
+}
+impl From<&str> for AdmissionError {
+    fn from(reason: &str) -> Self {
+        Self::Invalid(reason.into())
+    }
+}
+impl From<String> for AdmissionError {
+    fn from(reason: String) -> Self {
+        Self::Invalid(reason)
+    }
+}
+impl From<storage::StorageError> for AdmissionError {
+    fn from(error: storage::StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
 impl Default for Coordinator {
     fn default() -> Self {
         Self {
@@ -89,7 +124,7 @@ impl Coordinator {
             .is_some_and(|intent| intent.active)
     }
     pub(crate) fn running(&self) -> bool {
-        self.state() == QuiesceState::Running
+        !self.lock().requested
     }
     pub(crate) fn fail(&self, reason: impl ToString) {
         self.lock().phase = QuiesceState::Failed {
@@ -102,26 +137,45 @@ impl Coordinator {
         store: Option<&RunStore>,
         intent: &ResumeIntent,
         expected: Option<String>,
-    ) -> Result<(), String> {
-        let Some(store) = store else { return Ok(()) };
-        self.storage_step(StorageStep::Save)?;
-        let payload = serde_json::to_string(intent).map_err(|e| e.to_string())?;
-        store
-            .handle
-            .save_resume_intent(
-                storage::resume_intent::ResumeIntentRecord {
-                    run_id: intent.run_id.to_string(),
-                    incarnation: intent.incarnation.clone(),
-                    payload,
-                },
-                expected,
-            )
-            .map_err(|e| e.to_string())?;
-        self.storage_step(StorageStep::Flush)?;
+        snapshot: Option<&storage::thread_index::SnapshotWrite>,
+    ) -> Result<Option<storage::thread_index::SnapshotReceipt>, AdmissionError> {
+        let Some(store) = store else {
+            return if snapshot.is_some() {
+                Err("restore storage is unavailable".into())
+            } else {
+                Ok(None)
+            };
+        };
+        let step = |step| {
+            self.storage_step(step)
+                .map_err(|reason| AdmissionError::Storage(storage::StorageError::Io(reason)))
+        };
+        step(StorageStep::Save)?;
+        let record = storage::resume_intent::ResumeIntentRecord {
+            run_id: intent.run_id.to_string(),
+            incarnation: intent.incarnation.clone(),
+            payload: serde_json::to_string(intent)
+                .map_err(|e| AdmissionError::Invalid(e.to_string()))?,
+        };
+        if let Some(snapshot) = snapshot {
+            // All fallible flush work precedes consumption. The following writer
+            // transaction durably commits both records, or neither of them.
+            step(StorageStep::Flush)?;
+            store.handle.flush_resume_intents()?;
+            step(StorageStep::Snapshot)?;
+            return store
+                .handle
+                .save_snapshot_bundle_with_resume_intent(snapshot, record, expected)
+                .map(Some)
+                .map_err(AdmissionError::Snapshot);
+        }
+        store.handle.save_resume_intent(record, expected)?;
+        step(StorageStep::Flush)?;
         store
             .handle
             .flush_resume_intents()
-            .map_err(|e| e.to_string())
+            .map(|()| None)
+            .map_err(AdmissionError::Storage)
     }
     /// Serialized with quiesce. Same incarnation or another live incarnation is
     /// never admitted twice. New input during quiesce remains a durable intent.
@@ -130,7 +184,8 @@ impl Coordinator {
         mut intent: ResumeIntent,
         store: Option<&RunStore>,
         defer_registration: bool,
-    ) -> Result<bool, String> {
+        snapshot: Option<&storage::thread_index::SnapshotWrite>,
+    ) -> Result<(bool, Option<storage::thread_index::SnapshotReceipt>), AdmissionError> {
         let mut inner = self.lock();
         if inner
             .intents
@@ -139,7 +194,7 @@ impl Coordinator {
         {
             return Err("run incarnation already admitted".into());
         }
-        let start = inner.phase == QuiesceState::Running;
+        let start = !inner.requested;
         if !start && defer_registration {
             intent.wait = ResumeWait::AdmissionQueued;
         }
@@ -148,13 +203,17 @@ impl Coordinator {
         } else if let Some(store) = store {
             let read = store
                 .with_database(|db| db.resume_intent(&intent.run_id.to_string()))
-                .map_err(|e| e.to_string())
-                .and_then(|row| row.map(ResumeIntent::decode).transpose());
+                .map_err(AdmissionError::Storage)
+                .and_then(|row| {
+                    row.map(ResumeIntent::decode)
+                        .transpose()
+                        .map_err(AdmissionError::Invalid)
+                });
             match read {
                 Ok(previous) => previous,
                 Err(reason) => {
                     inner.phase = QuiesceState::Failed {
-                        reason: reason.clone(),
+                        reason: reason.to_string(),
                     };
                     self.changed();
                     return Err(reason);
@@ -190,19 +249,22 @@ impl Coordinator {
             intent.compactions = old.compactions;
             intent.route_pins = old.route_pins;
         }
-        if let Err(error) = self.save(store, &intent, expected) {
-            inner.phase = QuiesceState::Failed {
-                reason: error.clone(),
-            };
-            self.changed();
-            return Err(error);
-        }
+        let receipt = match self.save(store, &intent, expected, snapshot) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                inner.phase = QuiesceState::Failed {
+                    reason: error.to_string(),
+                };
+                self.changed();
+                return Err(error);
+            }
+        };
         if store.is_some() {
             inner.persisted.insert(intent.run_id);
         }
         inner.intents.insert(intent.run_id, intent);
         self.changed();
-        Ok(start)
+        Ok((start, receipt))
     }
     pub(crate) fn update(
         &self,
@@ -228,12 +290,12 @@ impl Coordinator {
             .persisted
             .contains(&run)
             .then(|| incarnation.to_string());
-        if let Err(error) = self.save(store, &intent, expected) {
+        if let Err(error) = self.save(store, &intent, expected, None) {
             inner.phase = QuiesceState::Failed {
-                reason: error.clone(),
+                reason: error.to_string(),
             };
             self.changed();
-            return Err(error);
+            return Err(error.to_string());
         }
         if store.is_some() {
             inner.persisted.insert(run);
@@ -244,6 +306,7 @@ impl Coordinator {
     }
     pub(crate) fn begin(&self) {
         let mut inner = self.lock();
+        inner.requested = true;
         if inner.phase == QuiesceState::Running {
             inner.phase = QuiesceState::Quiescing;
             self.changed();
@@ -278,7 +341,7 @@ impl Coordinator {
         });
         if let Err(error) = flushed {
             inner.phase = QuiesceState::Failed {
-                reason: error.clone(),
+                reason: error.to_string(),
             };
             self.changed();
             return Err(error);

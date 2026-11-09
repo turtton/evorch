@@ -228,7 +228,7 @@ async fn history_only_readmission_keeps_an_initial_input_it_did_not_consume() {
         .runtime
         .shared
         .quiesce
-        .admit(next, fixture.runtime.shared.run_store.get(), false)
+        .admit(next, fixture.runtime.shared.run_store.get(), false, None)
         .unwrap();
     let next = fixture.intent(run);
     assert!(next.initial_input.is_none());
@@ -282,4 +282,62 @@ async fn terminal_snapshot_failure_during_quiesce_never_allows_exit() {
         fixture.runtime.quiesce_state(),
         QuiesceState::Failed { .. }
     ));
+}
+
+#[tokio::test]
+async fn normal_persistence_failure_does_not_quiesce_other_runs() {
+    let mut fixture = Fixture::new(1);
+    let first = fixture.start();
+    fixture.model.entered.notified().await;
+    *fixture.runtime.shared.quiesce.fault.lock().unwrap() = Some(StorageStep::Save);
+    assert!(
+        fixture
+            .runtime
+            .send_message_with_images(
+                first,
+                "save fails".into(),
+                vec![],
+                Some("failed-input".into())
+            )
+            .is_err()
+    );
+    assert!(matches!(
+        fixture.runtime.quiesce_state(),
+        QuiesceState::Failed { .. }
+    ));
+    let other = fixture.start();
+    // Admission is an observable durable gate: only an explicit restart request
+    // may queue this unrelated run. No timeout is needed to detect the regression.
+    assert_ne!(fixture.intent(other).wait, ResumeWait::AdmissionQueued);
+    fixture.model.entered.notified().await;
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 2);
+    // Already-running turns also pass their next post-tool/model safe point.
+    fixture.model.release.add_permits(2);
+    fixture.entered.recv().await.unwrap();
+    fixture.entered.recv().await.unwrap();
+    fixture.release[0].add_permits(2);
+    fixture.completed.recv().await.unwrap();
+    fixture.completed.recv().await.unwrap();
+    while fixture.model.calls.load(Ordering::SeqCst) < 4 {
+        fixture.model.entered.notified().await;
+    }
+    fixture.runtime.request_quiesce();
+    assert!(fixture.runtime.wait_quiesced().await.is_err());
+    fixture.cleanup(first).await;
+    fixture.cleanup(other).await;
+}
+
+#[tokio::test]
+async fn cancel_before_registration_is_durably_cancelled() {
+    let fixture = Fixture::new(1);
+    let run = fixture.runtime.reserve_run_id();
+    fixture.runtime.reserve_admission(run, None, None);
+    fixture.runtime.cancel(run).unwrap();
+    fixture
+        .runtime
+        .spawn_reserved(run, None, Role::Worker, "never start", RunConfig::default());
+    assert_eq!(fixture.intent(run).stop_reason, Some(StopReason::Cancelled));
+    assert!(!fixture.intent(run).active);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 0);
+    assert!(fixture.runtime.wait(run).await.is_err());
 }

@@ -107,6 +107,12 @@ enum Command {
     FlushResumeIntents(ReplyTx),
     AppendIndexedNote(String, String, ReplyTx<crate::thread_index::NoteReceipt>),
     SaveSnapshotBundle(Box<crate::thread_index::SnapshotWrite>, SnapshotReplyTx),
+    SaveSnapshotBundleWithResumeIntent(
+        Box<crate::thread_index::SnapshotWrite>,
+        crate::resume_intent::ResumeIntentRecord,
+        Option<String>,
+        SnapshotReplyTx,
+    ),
     SaveSnapshotBundleWithEvidence(
         Box<crate::thread_index::SnapshotWrite>,
         Vec<crate::ReviewEvidenceRow>,
