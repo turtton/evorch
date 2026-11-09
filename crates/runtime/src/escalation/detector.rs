@@ -52,6 +52,7 @@ mod tests {
             detail,
             concat!(
                 "consecutive edit failures reached threshold (tool=edit)\n",
+                "action=warn_and_propose_escalation\n",
                 "trigger=consecutive_edit_failures\n",
                 "count=2\n",
                 "tool=edit\n",
@@ -837,6 +838,7 @@ pub(crate) fn no_progress_detail(
     let tool = tool.replace('\r', "\\r").replace('\n', "\\n");
     let mut lines = vec![
         format!("{summary} (tool={tool})"),
+        "action=warn_and_propose_escalation".into(),
         format!("trigger={trigger_name}"),
         format!("count={count}"),
         format!("tool={tool}"),

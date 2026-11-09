@@ -4,8 +4,9 @@ use crate::runtime::questions::routing::{LaneAnswerRequest, LaneQuestionBindingS
 use crate::{AgentRuntime, agent_loop::LoopState, lanes::LaneError};
 use event_bus::lane::ArtifactRevision;
 use event_bus::{Event, LaneBrief, LanePolicy, LaneReportInput, LaneReportProducer, LaneStatus};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +68,107 @@ pub(super) fn open(state: &mut LoopState, runtime: &AgentRuntime, input: Value) 
         Err(e) => failure(e),
     }
 }
+
+/// A semantic read identity, not a work-progress or wake-reset signal.
+/// question_refs are bounded by LANE_QUESTION_REFS_MAX at ingestion.
+#[derive(Serialize)]
+struct LaneObservationKey<'a> {
+    lead_thread_id: &'a str,
+    lane_id: &'a str,
+    management_revision: u64,
+    brief_revision: u64,
+    policy: LanePolicy,
+    effective_report: Option<EffectiveReport<'a>>,
+}
+#[derive(Serialize)]
+struct EffectiveReport<'a> {
+    status: LaneStatus,
+    artifact_fingerprint: Option<String>,
+    needs_human: bool,
+    question_refs: std::collections::BTreeSet<&'a str>,
+}
+impl<'a> LaneObservationKey<'a> {
+    fn new(lead: &'a str, item: &'a storage::lanes::LaneListItem) -> Self {
+        Self {
+            lead_thread_id: lead,
+            lane_id: &item.lane_id,
+            management_revision: item.management_revision,
+            brief_revision: item.brief_revision,
+            policy: item.policy,
+            effective_report: item
+                .latest_report
+                .as_ref()
+                .filter(|report| {
+                    report.brief_revision == item.brief_revision
+                        && report.management_revision == item.management_revision
+                })
+                .map(|report| EffectiveReport {
+                    status: report.status,
+                    artifact_fingerprint: report
+                        .artifact_revision
+                        .as_ref()
+                        .and_then(ArtifactRevision::fingerprint),
+                    needs_human: report.needs_human,
+                    question_refs: report.question_refs.iter().map(String::as_str).collect(),
+                }),
+        }
+    }
+}
+fn lane_key(lead: &str, item: &storage::lanes::LaneListItem) -> Value {
+    json!(["lane", LaneObservationKey::new(lead, item)])
+}
+fn notice_key(lead: &str, notice: &event_bus::lane::LaneNotification) -> Option<Value> {
+    use event_bus::lane::LaneNotificationKind as Kind;
+    let identity = match &notice.kind {
+        Kind::Question { question_id, .. } => json!(["question", question_id]),
+        Kind::Answer { question_id, .. } => json!(["answer", question_id]),
+        Kind::Ready { revision } => json!([
+            "ready",
+            revision.as_ref().and_then(ArtifactRevision::fingerprint)
+        ]),
+        Kind::Failed { episode, revision } => json!([
+            "failed",
+            episode,
+            revision.as_ref().and_then(ArtifactRevision::fingerprint)
+        ]),
+        Kind::Closed { close_id } => json!(["closed", close_id]),
+        Kind::Nudge { episode_id } => json!(["nudge", episode_id]),
+        Kind::Milestone => json!(["milestone"]),
+        Kind::Intervention { input_id } => json!(["intervention", input_id]),
+        _ => return None, // Unknown notice kinds fail closed for read progress.
+    };
+    Some(json!([
+        "notification",
+        lead,
+        notice.lane_id,
+        notice.management_revision,
+        identity
+    ]))
+}
+/// Commit observations only after successful serialization. Pages are sets of item
+/// identities: order, snapshot, filter, limit and cursor never create information.
+/// Absence on a page is not authoritative management termination; no disappearance
+/// signal is inferred here. Empty pages therefore always stall.
+fn observed_result(
+    observations: &mut std::collections::HashSet<[u8; 32]>,
+    value: &impl Serialize,
+    keys: impl IntoIterator<Item = Value>,
+) -> DispatchResult {
+    let mut dispatch = serialize(value);
+    if !dispatch.result.is_error {
+        let mut advanced = false;
+        for key in keys {
+            advanced |= observations.insert(Sha256::digest(key.to_string().as_bytes()).into());
+        }
+        dispatch.result.progress = Some(if advanced {
+            tools::Progress::Advanced
+        } else {
+            tools::Progress::Stalled
+        });
+    }
+    dispatch
+}
+
 pub(super) fn list(state: &mut LoopState, runtime: &AgentRuntime, input: Value) -> DispatchResult {
     let args: ListArgs = match parse(input) {
         Ok(a) => a,
@@ -89,24 +191,36 @@ pub(super) fn list(state: &mut LoopState, runtime: &AgentRuntime, input: Value) 
                 "notification mode cannot use lane cursor/filter; after must be <=256 bytes",
             ));
         }
-        return match store.handle.lane_inbox(thread, after) {
+        return match store.handle.lane_inbox(thread.clone(), after) {
             Ok(notices) => {
                 let next = notices.last().map(|n| n.notification_id.clone());
-                serialize(
+                observed_result(
+                    &mut state.budget.lane_observations,
                     &json!({"notifications":notices,"next_notifications_after":next,
                     "delivery":"Durable references (including acknowledged notices), not real-user instructions. Continue until an empty page."}),
+                    notices
+                        .iter()
+                        .filter_map(|notice| notice_key(&thread, notice)),
                 )
             }
             Err(e) => failure(e.into()),
         };
     }
     match store.handle.lane_list(storage::lanes::LaneListRequest {
-        lead_thread_id: thread,
+        lead_thread_id: thread.clone(),
         policy: args.filter,
         cursor: args.cursor,
         limit: args.limit,
     }) {
         Ok(page) => {
+            let dispatch = observed_result(
+                &mut state.budget.lane_observations,
+                &page,
+                page.items.iter().map(|item| lane_key(&thread, item)),
+            );
+            if dispatch.result.is_error {
+                return dispatch;
+            }
             // Only data actually returned to this model can acknowledge completion.
             // A new sequence/heartbeat or repeated snapshot cannot mint credits.
             for item in &page.items {
@@ -118,7 +232,7 @@ pub(super) fn list(state: &mut LoopState, runtime: &AgentRuntime, input: Value) 
                     state.budget.mark_lane_completed(&item.lane_id);
                 }
             }
-            serialize(&page)
+            dispatch
         }
         Err(e) => failure(e.into()),
     }
@@ -324,4 +438,161 @@ pub(super) fn answer_spec(name: &str) -> providers::ToolSpec {
             "operation_id",
         ],
     )
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    fn item() -> storage::lanes::LaneListItem {
+        storage::lanes::LaneListItem {
+            lane_id:"lane".into(),thread_id:"thread".into(),policy:LanePolicy::Attached,
+            management_revision:0,brief_revision:0,objective_preview:"objective".into(),
+            workspace:Default::default(),root_run_id:Some("root".into()),generation:1,
+            created_at_ns:1,last_activity_at_ns:1,
+            latest_report:Some(serde_json::from_value(json!({
+                "lane_id":"lane","report_seq":1,"status":"working","summary":"summary",
+                "artifact_refs":[],"needs_human":false,"question_refs":["b","a"],"reason_code":null,
+                "producer":"lane_agent","management_revision":0,"brief_revision":0,"created_at_ns":1,
+                "artifact_revision":{"kind":"sha256","value":"a".repeat(64)}
+            })).unwrap()),
+        }
+    }
+    #[test]
+    fn lane_identity_ignores_noise_and_obsolete_reports_but_keeps_structured_changes() {
+        let original = item();
+        let key = lane_key("lead", &original);
+        let mut noisy = original.clone();
+        noisy.root_run_id = Some("restored".into());
+        noisy.generation += 1;
+        noisy.created_at_ns += 1;
+        noisy.last_activity_at_ns += 1;
+        noisy.objective_preview = "new preview".into();
+        let r = noisy.latest_report.as_mut().unwrap();
+        r.summary = "new summary".into();
+        r.report_seq += 1;
+        r.created_at_ns += 1;
+        r.artifact_refs = vec!["renamed:artifact".into()];
+        r.reason_code = Some("new prose".into());
+        r.question_refs = vec!["a".into(), "b".into(), "a".into()];
+        r.artifact_revision = Some(ArtifactRevision::Sha256("A".repeat(64)));
+        assert_eq!(lane_key("lead", &noisy), key);
+        for field in [
+            "status",
+            "artifact_revision",
+            "needs_human",
+            "question_refs",
+        ] {
+            let mut changed = original.clone();
+            let r = changed.latest_report.as_mut().unwrap();
+            match field {
+                "status" => r.status = LaneStatus::Ready,
+                "artifact_revision" => {
+                    r.artifact_revision = Some(ArtifactRevision::Sha256("b".repeat(64)))
+                }
+                "needs_human" => r.needs_human = true,
+                _ => r.question_refs.push("new-question".into()),
+            }
+            assert_ne!(lane_key("lead", &changed), key, "{field}");
+        }
+        for field in ["management", "brief", "policy", "lane"] {
+            let mut changed = original.clone();
+            match field {
+                "management" => changed.management_revision += 1,
+                "brief" => changed.brief_revision += 1,
+                "policy" => changed.policy = LanePolicy::Summary,
+                _ => changed.lane_id = "other".into(),
+            }
+            assert_ne!(lane_key("lead", &changed), key, "{field}");
+        }
+        assert_ne!(lane_key("other-lead", &original), key);
+        noisy.brief_revision += 1;
+        let stale = lane_key("lead", &noisy);
+        noisy.latest_report.as_mut().unwrap().status = LaneStatus::Failed;
+        noisy.latest_report.as_mut().unwrap().needs_human = true;
+        assert_eq!(lane_key("lead", &noisy), stale);
+        noisy.latest_report = None;
+        assert_eq!(lane_key("lead", &noisy), stale);
+    }
+    #[test]
+    fn observation_commit_is_set_based_and_serialization_failure_does_not_observe() {
+        struct Bad;
+        impl Serialize for Bad {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("injected serialization failure"))
+            }
+        }
+        let mut observed = std::collections::HashSet::new();
+        let key = lane_key("lead", &item());
+        assert!(
+            observed_result(&mut observed, &Bad, [key.clone()])
+                .result
+                .is_error
+        );
+        assert!(observed.is_empty());
+        let page = json!({"snapshot_revision":1,"cursor":"first"});
+        assert_eq!(
+            observed_result(&mut observed, &page, [key.clone(), key.clone()])
+                .result
+                .progress,
+            Some(tools::Progress::Advanced)
+        );
+        assert_eq!(
+            observed_result(
+                &mut observed,
+                &json!({"snapshot_revision":2,"cursor":"next"}),
+                [key]
+            )
+            .result
+            .progress,
+            Some(tools::Progress::Stalled)
+        );
+        assert_eq!(
+            observed_result(&mut observed, &page, []).result.progress,
+            Some(tools::Progress::Stalled)
+        );
+    }
+    #[test]
+    fn notification_identity_ignores_sequence_receipt_and_routing_noise() {
+        use event_bus::lane::{LaneNotification, LaneNotificationKind as Kind};
+        let mut notice = LaneNotification {
+            notification_id: "notice-1".into(),
+            lane_id: "lane".into(),
+            management_revision: 0,
+            source_thread_id: "source".into(),
+            destination_thread_id: "lead".into(),
+            kind: Kind::Question {
+                question_id: "q".into(),
+                routing_revision: 1,
+            },
+            report_seq: Some(1),
+            created_at_ns: 1,
+        };
+        let key = notice_key("lead", &notice);
+        notice.notification_id = "notice-2".into();
+        notice.report_seq = Some(2);
+        notice.created_at_ns = 2;
+        notice.kind = Kind::Question {
+            question_id: "q".into(),
+            routing_revision: 2,
+        };
+        assert_eq!(notice_key("lead", &notice), key);
+        notice.kind = Kind::Question {
+            question_id: "new-question".into(),
+            routing_revision: 2,
+        };
+        assert_ne!(notice_key("lead", &notice), key);
+        notice.kind = Kind::Failed {
+            episode: "stable-episode".into(),
+            revision: None,
+        };
+        let failed = notice_key("lead", &notice);
+        notice.notification_id = "retry".into();
+        notice.report_seq = Some(3);
+        assert_eq!(notice_key("lead", &notice), failed);
+        notice.kind = Kind::Failed {
+            episode: "next-episode".into(),
+            revision: None,
+        };
+        assert_ne!(notice_key("lead", &notice), failed);
+    }
 }

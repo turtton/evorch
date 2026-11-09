@@ -1292,7 +1292,11 @@ impl LoopState {
                             {
                                 self.budget.read(path);
                             }
-                            self.budget.mark_progress();
+                            if child.name == "read" {
+                                self.budget.mark_read_progress();
+                            } else {
+                                self.budget.mark_progress();
+                            }
                             if matches!(child.name.as_str(), "read" | "edit" | "write") {
                                 rule_targets.extend(child.paths.iter().cloned());
                             }
@@ -1302,9 +1306,11 @@ impl LoopState {
                         if name == "read"
                             && let Some(path) = rule_targets_for_call.first()
                         {
-                            self.budget.read(path);
+                            self.budget.read_result(path, &input, &result);
                         }
-                        if !is_meta_op(&name) {
+                        if name == "read" {
+                            self.budget.mark_read_progress();
+                        } else if !is_meta_op(&name) && children.is_empty() {
                             self.budget.mark_progress();
                         }
                     }
