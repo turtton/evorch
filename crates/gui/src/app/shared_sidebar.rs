@@ -161,6 +161,9 @@ fn merge_three_way(
 
 /// The outcome of one transaction on the shared sidebar.
 struct Commit {
+    // Keep the family fence through adoption and the synchronous mirror/ACK,
+    // not merely until the file write returns.
+    _lock: Option<SidebarLock>,
     /// This process's state when the transaction began.
     local: HistorySidebar,
     /// The newest state with the edit applied.
@@ -372,6 +375,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             shared.base = Some(bytes);
         }
         self.force_thread_mirror();
+        drop(commit._lock);
         Ok(output)
     }
 
@@ -395,6 +399,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             super::thread_retention::prune_tombstoned(&mut latest, &self.tombstones);
             let own = all_thread_ids(&latest);
             let commit = Commit {
+                _lock: None,
                 local,
                 latest,
                 own,
@@ -446,6 +451,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 || merged.user_messages != local.user_messages
                 || merged.composer_drafts != local.composer_drafts;
             let commit = stale.then(|| Commit {
+                _lock: Some(_lock),
                 local,
                 latest: merged,
                 own: BTreeSet::new(),
@@ -474,6 +480,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok((
             output,
             Some(Commit {
+                _lock: Some(_lock),
                 local,
                 latest,
                 own,
@@ -637,5 +644,35 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.rebuild_delivery_rows();
         self.refresh_draft_banner();
         self.sync_project_trust();
+    }
+}
+
+#[cfg(test)]
+mod lock_scope_tests {
+    #[test]
+    fn saved_commit_keeps_the_family_lock_until_projection_is_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidebar.json");
+        let ui = crate::app::delivery_tests::state(&path);
+        ui.save_sidebar();
+        let (_, commit) = ui
+            .commit_shared_sidebar(|latest| {
+                latest
+                    .sidebar
+                    .set_family_pinned(&workspace_ui::ThreadId::new("thread"), true)?;
+                Ok(())
+            })
+            .unwrap();
+        let commit = commit.expect("pin changed the durable sidebar");
+        let contender = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path.with_extension("json.lock"))
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(commit);
+        contender.try_lock().unwrap();
     }
 }

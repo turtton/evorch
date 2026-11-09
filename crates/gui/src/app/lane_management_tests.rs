@@ -1,4 +1,7 @@
 //! Actual SQLite + locked sidebar host. Boundary ordering is explicit and synchronous.
+#[path = "lane_management_tests/runtime.rs"]
+mod runtime;
+
 use super::*;
 use crate::{app::delivery_tests::state, fixture::DemoSource};
 use std::{
@@ -51,7 +54,7 @@ fn setup(dir: &Path) -> (WorkbenchState<DemoSource>, Storage, PathBuf) {
     .unwrap();
     let h = storage.handle();
     h.upsert_run_context(&storage::RunContextRecord {
-        run_id: "lead-root".into(),
+        run_id: "run-1".into(),
         role: "Orchestrator".into(),
         name: "chat:Orchestrator:thread".into(),
         parent_run_id: None,
@@ -68,7 +71,7 @@ fn setup(dir: &Path) -> (WorkbenchState<DemoSource>, Storage, PathBuf) {
         thread_id: "thread".into(),
         project_id: Some("test".into()),
         project_root: Some(dir.to_string_lossy().into_owned()),
-        root_run_id: Some("lead-root".into()),
+        root_run_id: Some("run-1".into()),
         chat_role: Some("Orchestrator".into()),
         ..Default::default()
     }])
@@ -78,7 +81,7 @@ fn setup(dir: &Path) -> (WorkbenchState<DemoSource>, Storage, PathBuf) {
             lane_id: "lane".into(),
             thread_id: "lane-thread".into(),
             origin_thread_id: "thread".into(),
-            origin_run_id: "lead-root".into(),
+            origin_run_id: "run-1".into(),
             creation_key: "open".into(),
             brief: LaneBrief {
                 verification_requirements: Default::default(),
@@ -104,7 +107,7 @@ fn setup(dir: &Path) -> (WorkbenchState<DemoSource>, Storage, PathBuf) {
             handle: h,
             obstruct: None,
         }));
-    ui.sidebar.threads[0].root_run_id = Some("lead-root".into());
+    ui.sidebar.threads[0].root_run_id = Some("run-1".into());
     ui.sidebar.threads[0].chat_role = Some(ThreadChatRole::Orchestrator);
     ui.sidebar
         .create_thread(
@@ -202,7 +205,7 @@ fn two_drops_and_a_stale_pin_have_one_membership_winner() {
     let intent = workspace_ui::lane_management::LaneDropIntent {
         source: a.sidebar.lane_drag_intent(&lane).unwrap(),
         target_thread_id: ThreadId::new("thread"),
-        expected_lead_root_run_id: Some("lead-root".into()),
+        expected_lead_root_run_id: Some("run-1".into()),
     };
     a.reattach_lane_drop(intent.clone()).unwrap();
     assert!(b.reattach_lane_drop(intent).is_err());
@@ -270,7 +273,7 @@ fn new_detach_discards_obsolete_high_revisions_before_raising_sql_floors() {
     let intent = workspace_ui::lane_management::LaneDropIntent {
         source: ui.sidebar.lane_drag_intent(&lane).unwrap(),
         target_thread_id: ThreadId::new("thread"),
-        expected_lead_root_run_id: Some("lead-root".into()),
+        expected_lead_root_run_id: Some("run-1".into()),
     };
     ui.reattach_lane_drop(intent).unwrap();
     ui.toggle_pin(ThreadId::new("thread")).unwrap();

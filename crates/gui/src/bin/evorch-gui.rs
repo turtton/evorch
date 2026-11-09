@@ -1429,6 +1429,9 @@ fn build_workbench(
         )
         .with_usage_ledger(storage.handle(), usage_pricing)
         .with_thread_mirror(storage.handle())
+        .with_lane_management_host(Arc::new(gui::runtime_sink::GuiLaneManagementHost::new(
+            runtime.clone(),
+        )))
         .with_lane_ledger(Arc::new(gui::app::lanes::StorageLaneReader::new(
             storage_config.db_path.clone(),
         )))
