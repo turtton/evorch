@@ -18,7 +18,7 @@ pub enum ShellAccess {
 
 macro_rules! denial_guidance {
     () => {
-        "Do not pursue the same goal through a workaround, a reworded request, or indirect execution. If no safer alternative exists, consult instead: ask_user (a root run asks the user; a subagent asks its parent), escalate when available, or report the blocker in your result."
+        "Do not pursue the same goal through a workaround, a reworded request, or indirect execution. If no safer alternative exists, consult instead: ask_user (a root run asks the user; a subagent asks its parent), handoff_to_lane when available, or report the blocker in your result."
     };
 }
 
