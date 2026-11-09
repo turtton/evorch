@@ -174,7 +174,7 @@ pub(super) fn finish(name: &str) -> ToolSpec {
     )
 }
 
-pub(super) fn escalate(name: &str) -> ToolSpec {
+pub(super) fn handoff_to_lane(name: &str) -> ToolSpec {
     object_spec(
         name,
         crate::escalation::prompt::TOOL_DESCRIPTION,
@@ -404,7 +404,7 @@ fn strings() -> Value {
     json!({"type":"array", "items":{"type":"string"}})
 }
 
-fn object_spec(
+pub(super) fn object_spec(
     name: &str,
     description: &str,
     properties: Value,

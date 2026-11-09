@@ -205,6 +205,9 @@ pub struct SnapshotPage {
     deny_unknown_fields
 )]
 pub enum Query {
+    GetLaneManagement {
+        lane_id: crate::lane_attention::LaneId,
+    },
     GetCoreStatus,
     ListProjects(PageRequest),
     ListThreads(ListThreads),
@@ -225,7 +228,8 @@ pub enum Query {
 
 impl Query {
     /// Wire names of every variant, for rejecting unknown ones precisely.
-    pub const TYPES: [&'static str; 13] = [
+    pub const TYPES: [&'static str; 14] = [
+        "get_lane_management",
         "get_core_status",
         "list_projects",
         "list_threads",
@@ -254,6 +258,7 @@ impl Query {
 
     pub fn validate(&self, limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
+            Self::GetLaneManagement { .. } => Ok(()),
             Self::GetCoreStatus | Self::GetThread(_) | Self::GetCommandReceipt { .. } => Ok(()),
             Self::ListProjects(page) => page.validate(),
             Self::ListThreads(q) => q.page.validate(),
@@ -300,6 +305,7 @@ pub struct CommandReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum QueryReply {
+    LaneManagement(crate::lane_management::LaneManagementState),
     CoreStatus(CoreStatus),
     Projects(Page<ProjectSummary>),
     Threads(Page<ThreadSummary>),
@@ -330,6 +336,7 @@ impl QueryReply {
     /// is never handed to application code.
     pub fn validate(&self, limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
+            Self::LaneManagement(_) => Ok(()),
             Self::CoreStatus(status) => status.validate(),
             Self::Projects(page) => page.validate_with(ProjectSummary::validate),
             Self::Threads(page) => page.validate_with(ThreadSummary::validate),

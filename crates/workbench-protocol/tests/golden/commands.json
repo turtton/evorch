@@ -37,6 +37,22 @@
     },
     "type": "deliver_follow_ups_next_turn"
   },
+  "manage_lane": {
+    "payload": {
+      "request": {
+        "action": {
+          "payload": {
+            "policy": "summary"
+          },
+          "type": "set_policy"
+        },
+        "expected_management_revision": "1",
+        "lane_id": "lane-1",
+        "operation_id": "manage-1"
+      }
+    },
+    "type": "manage_lane"
+  },
   "send_chat": {
     "payload": {
       "composer_role": "orchestrator",

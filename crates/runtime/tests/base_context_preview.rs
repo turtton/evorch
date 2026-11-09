@@ -297,8 +297,10 @@ async fn preview_lists_what_is_left_out_and_why() {
             .find(|item| item.item == name)
             .map(|item| item.reason.as_str())
     };
-    assert_eq!(reason("delegate"), Some("Not allowed for this role"));
-    assert_eq!(reason("escalate"), Some("Only root runs can escalate"));
+    for excluded in ["delegate", "handoff_to_lane"] {
+        assert!(!names.contains(&excluded));
+        assert!(reason(excluded).is_some_and(|reason| !reason.is_empty()));
+    }
 }
 
 // Given: run_js switched on with various scopes

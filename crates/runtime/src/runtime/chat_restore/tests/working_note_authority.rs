@@ -109,8 +109,8 @@ async fn working_notes_and_frozen_history_never_change_reviewer_authority_across
                 json!({}),
             )),
             Ok(tool_response(
-                "escalate",
-                "escalate",
+                "handoff_to_lane",
+                "handoff_to_lane",
                 json!({
                     "original_request": ORIGINAL,
                     "escalation_reason":"A coordinator should continue the investigation"

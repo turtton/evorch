@@ -771,7 +771,7 @@ impl LoopState {
                     usize::try_from(left).unwrap_or(usize::MAX)
                 });
             for call in remaining.by_ref().take(capacity) {
-                let terminal = matches!(call.1.as_str(), "finish" | "escalate");
+                let terminal = matches!(call.1.as_str(), "finish" | "handoff_to_lane");
                 segment.push(call);
                 if terminal {
                     break;
@@ -1775,7 +1775,7 @@ pub(crate) fn visible_tool_specs(
         .filter_tool_specs(specs)
         .into_iter()
         .filter(|spec| skills_configured || spec.name != "skill_load")
-        .filter(|spec| !is_child || spec.name != "escalate")
+        .filter(|spec| !is_child || spec.name != "handoff_to_lane")
         .filter(|spec| {
             web_tools_enabled || !matches!(spec.name.as_str(), "web_search" | "web_fetch")
         })
@@ -1931,7 +1931,7 @@ mod tests {
 
         let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false, true);
 
-        assert!(names(&specs).contains(&"escalate"));
+        assert!(names(&specs).contains(&"handoff_to_lane"));
     }
 
     // A child Worker cannot hand off into another Orchestrator root.
@@ -1941,7 +1941,7 @@ mod tests {
 
         let specs = visible_tool_specs(standard_tool_specs(), &policy, false, true, true);
 
-        assert!(!names(&specs).contains(&"escalate"));
+        assert!(!names(&specs).contains(&"handoff_to_lane"));
         assert!(names(&specs).contains(&"shell"));
     }
 

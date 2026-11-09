@@ -64,7 +64,9 @@ fn chat_requests(mock: &StreamingMockOpenAi) -> Vec<Value> {
 async fn switch_preserves_current_note_and_new_prefix(compacts: bool) {
     let review_storage = support::ReviewStorage::new();
     // Given: a worker chain whose primary answers two turns and then fails, and a
-    // fallback whose 40K window cannot hold the accumulated history.
+    // fallback whose 48K window triggers compaction of the accumulated history.
+    // Keep headroom for provider-estimated input (including tool descriptions)
+    // after that boundary: this tests prefix reuse, not a near-threshold retrigger.
     let old_reply = "old analysis that can be summarized ".repeat(3_000);
     let primary = StreamingMockOpenAi::spawn_with_prompt_cache_models(
         vec![
@@ -126,7 +128,7 @@ summarizer = "structural"
 "#,
             primary = primary.base_url(),
             small = small.base_url(),
-            target_window = if compacts { 40_000 } else { 1_000_000 },
+            target_window = if compacts { 48_000 } else { 1_000_000 },
         ),
     )
     .unwrap();
@@ -207,7 +209,34 @@ summarizer = "structural"
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(checkpoints.len(), usize::from(compacts), "{checkpoints:?}");
+    let token_estimates: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Compaction(CompactionEvent::Compacted {
+                reason,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                context_window_tokens,
+                ..
+            }) => Some((
+                reason,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                context_window_tokens,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        checkpoints.len(),
+        usize::from(compacts),
+        "{token_estimates:?}"
+    );
+    if compacts {
+        let (_, before, after, window) = token_estimates[0];
+        assert!(*before > window / 2, "fixture must trigger the boundary");
+        assert!(*after < window / 2, "fixture must leave room for reuse");
+    }
     let before = chat_requests(&primary);
     let after = chat_requests(&small);
     assert_eq!(after.len(), 2);

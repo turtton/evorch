@@ -9,6 +9,7 @@ mod delegation;
 pub(crate) use delegation::{cleanup_delegates, spawn_delegate, wait_delegates};
 mod escalation;
 mod history;
+mod lane_management;
 mod lane_verification;
 mod lanes;
 mod ledger;
@@ -42,7 +43,7 @@ pub(crate) enum Terminal {
     Continue,
     /// 最終テキストを公開して run を正常終端させる (finish meta-op)。
     Finish(String),
-    /// メモ記録済みのまま run をエスカレーション終端させる (escalate meta-op)。
+    /// メモ記録済みのまま run をエスカレーション終端させる (handoff_to_lane meta-op)。
     Escalate(Box<EscalationMemo>),
 }
 

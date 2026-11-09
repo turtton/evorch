@@ -437,8 +437,8 @@ async fn approval_explanation_keeps_source_provenance_after_compaction_handoff_a
             FinishReason::Stop,
         )),
         Ok(tool_response(
-            "escalate",
-            "escalate",
+            "handoff_to_lane",
+            "handoff_to_lane",
             serde_json::json!({"original_request":"investigate", "escalation_reason":"coordinate"}),
         )),
         Err(crate::RuntimeError::Model {

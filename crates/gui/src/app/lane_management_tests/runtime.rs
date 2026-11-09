@@ -52,8 +52,20 @@ fn actual_host(dir: &Path) -> (WorkbenchState<DemoSource>, Storage, AgentRuntime
         )
         .unwrap(),
     );
+    let owner = Arc::new(
+        ::runtime::ownership::OwnerHost::open(
+            &dir.join("owners"),
+            Default::default(),
+            runtime.event_bus(),
+        )
+        .unwrap(),
+    );
+    owner.start("thread").unwrap();
+    owner.start("lane-thread").unwrap();
     (
-        ui.with_lane_management_host(Arc::new(GuiLaneManagementHost::new(runtime.clone()))),
+        ui.with_lane_management_host(Arc::new(
+            GuiLaneManagementHost::new(runtime.clone()).with_ownership(owner),
+        )),
         storage,
         runtime,
     )

@@ -87,7 +87,7 @@ async fn escalation_without_goal_resumes_thread_tools_after_restart() {
 async fn restored_thread_tools(resume_first: bool) {
     let initial_model = ScriptedModel::new(vec![
         Step::Tool(
-            "escalate",
+            "handoff_to_lane",
             json!({"original_request":"Research the options","escalation_reason":"Needs orchestration"}),
         ),
         Step::Stop,
@@ -282,5 +282,102 @@ async fn restored_thread_tools(resume_first: bool) {
     for pair in requests.windows(2) {
         assert_eq!(pair[0].1, pair[1].1);
         assert_eq!(&pair[1].0[..pair[0].0.len()], &pair[0].0);
+    }
+}
+
+#[tokio::test]
+async fn legacy_escalate_toolset_restores_with_current_schema_and_unchanged_history() {
+    let fixture = Fixture::new();
+    let source = fixture
+        .runtime
+        .delegate_chat(
+            "legacy-worker",
+            Role::Worker,
+            "old request".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    fixture.runtime.wait(source).await.unwrap();
+    let store = fixture.runtime.shared.run_store.get().unwrap();
+    let mut record = store.restore_record(source).unwrap().unwrap();
+    let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
+    assert!(descriptor.tool_names.iter().any(|n| n == "handoff_to_lane"));
+    for name in &mut descriptor.tool_names {
+        if name == "handoff_to_lane" {
+            *name = "escalate".into();
+        }
+    }
+    record.config_json = serde_json::to_string(&descriptor).unwrap();
+    let mut history: Vec<Message> = serde_json::from_str(&record.messages_json).unwrap();
+    let legacy = vec![
+        Message {
+            role: providers::Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "legacy-handoff".into(),
+                name: "escalate".into(),
+                input: json!({"original_request":"old request","escalation_reason":"previous attempt"}),
+            }],
+        },
+        Message {
+            role: providers::Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "legacy-handoff".into(),
+                content: vec![ToolResultContent::Text {
+                    text: "preparation failed; Worker continued".into(),
+                }],
+                is_error: true,
+            }],
+        },
+    ];
+    history.extend(legacy.clone());
+    record.messages_json = serde_json::to_string(&history).unwrap();
+    fixture
+        .storage
+        .handle()
+        .upsert_run_context(&record)
+        .unwrap();
+    drop(fixture.runtime);
+    let entered = Arc::new(Notify::new());
+    let model = ScriptedModel::new(vec![
+        Step::Tool(
+            "working_note_write",
+            json!({"body":"continued after upgrade"}),
+        ),
+        Step::Hold(entered.clone()),
+    ]);
+    let bus = Arc::new(EventBus::new(64));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(
+            crate::RunStore::open(
+                &storage::StorageConfig {
+                    db_path: fixture._dir.path().join("goal.sqlite3"),
+                    ..Default::default()
+                },
+                fixture.storage.handle(),
+            )
+            .unwrap(),
+        );
+    runtime
+        .continue_goal(
+            source,
+            "continue the old thread".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    // continue_goal restores a keep-alive conversation. Its next provider
+    // request, not terminal completion, signals that the new tool executed.
+    entered.notified().await;
+    runtime.cancel_subtree(source).unwrap();
+    runtime.wait(source).await.unwrap();
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let (messages, tools) = &requests[0];
+    assert!(tools.iter().any(|tool| tool.name == "handoff_to_lane"));
+    assert!(!tools.iter().any(|tool| tool.name == "escalate"));
+    for message in legacy {
+        assert!(
+            messages.contains(&message),
+            "old tool history is evidence, not an execution gate"
+        );
     }
 }

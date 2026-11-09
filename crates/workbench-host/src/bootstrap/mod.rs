@@ -198,9 +198,12 @@ impl BootstrappedHost {
             .with_memory_storage(storage_config.clone())
             .with_team_writer(handle.clone())
             .with_ownership(owner.clone());
+        service.bind_lane_delivery();
         let projects = known_projects(&options)?;
         let host = Arc::new(Mutex::new(
-            CommandHost::new(service).with_projects(projects),
+            CommandHost::new(service)
+                .with_projects(projects)
+                .with_lane_sidebar_path(options.config_dir.join("sidebar.json")),
         ));
         let reclaim = runtime::thread_retention::ReclaimExecutor::spawn(
             runtime::thread_retention::ExecutorConfig::new(handle, storage_config, Some(artifacts)),

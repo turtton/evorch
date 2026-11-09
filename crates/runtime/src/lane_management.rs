@@ -1,6 +1,13 @@
 //! Runtime management ingress. These trusted contexts are never decoded from JSON.
 //! Hosts authenticate human input and hold their sidebar/family lock across reattach
 //! and projection save. Management does not change execution authority or wake runs.
+//!
+//! Human ingress MUST use the delivery runtime's clone (the same RunStore and
+//! restore gate), and must own the lane, its current lead and any new lead.
+//! Never route a request to a second runtime merely because it opens the same
+//! SQLite file. A host without that ownership rejects it rather than claiming
+//! execution authority. `manage_lane_from_host` fences the supplied permits
+//! under the completion gate, in the same lock order as delivery and restore.
 use crate::{AgentRuntime, RunId, lanes::LaneError};
 use event_bus::{Event, ToolEvent};
 use storage::lane_management::LaneManagementActor;
@@ -88,6 +95,33 @@ impl AgentRuntime {
         request: LaneManagementRequest,
         attach_guard: Option<LaneAttachGuard>,
     ) -> Result<LaneManagementOutcome, LaneError> {
+        self.manage_lane_with_permits(context, request, attach_guard, &[])
+    }
+
+    /// Trusted human ingress only. Permits are resolved by the host for the
+    /// lane, current lead and reattach target; never decoded from client JSON.
+    pub fn manage_lane_from_host(
+        &self,
+        _: LaneHumanContext,
+        request: LaneManagementRequest,
+        attach_guard: Option<LaneAttachGuard>,
+        permits: &[crate::ownership::OwnerPermit],
+    ) -> Result<LaneManagementOutcome, LaneError> {
+        self.manage_lane_with_permits(
+            LaneManagementContext::User(LaneHumanContext),
+            request,
+            attach_guard,
+            permits,
+        )
+    }
+
+    fn manage_lane_with_permits(
+        &self,
+        context: LaneManagementContext,
+        request: LaneManagementRequest,
+        attach_guard: Option<LaneAttachGuard>,
+        permits: &[crate::ownership::OwnerPermit],
+    ) -> Result<LaneManagementOutcome, LaneError> {
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;
@@ -139,6 +173,11 @@ impl AgentRuntime {
             .map(|p| p.mutation_guard())
             .transpose()
             .map_err(|e| LaneError::new("ownership_lost", e))?;
+        let host_authority = permits
+            .iter()
+            .map(|permit| permit.mutation_guard())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| LaneError::new("ownership_lost", e))?;
         let operation = store
             .handle
             .apply_lane_management_transition(
@@ -148,6 +187,7 @@ impl AgentRuntime {
                 crate::run_store::review_time_ns(),
             )
             .map_err(management_error)?;
+        drop(host_authority);
         drop(authority);
         // Do not turn a committed mutation into a retryable write failure. Pending
         // projections are durable; a lost event is repaired by re-reading the ledger.

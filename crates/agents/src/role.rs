@@ -196,7 +196,7 @@ impl Role {
                     "send",
                     "wait_reply",
                     "inbox",
-                    "escalate",
+                    "handoff_to_lane",
                     "run_js",
                 ],
                 false,

@@ -93,7 +93,7 @@ impl AgentModel for Model {
         let checks = json!([{"criterion":0,"met":true,"evidence":"Observed result in the requested research report"}]);
         let tool = match step {
             Step::Escalate => Some((
-                "escalate",
+                "handoff_to_lane",
                 json!({"original_request":"Compare the requested options", "escalation_reason":"Need coordinated verification"}),
             )),
             Step::Todo(clear) => Some((

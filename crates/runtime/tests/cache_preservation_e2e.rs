@@ -983,7 +983,7 @@ async fn inherited_question_answer_preserves_each_runs_wire_prefix_after_escalat
             call("ask", "ask_user", json!({"title":"Required scope"})),
             call(
                 "handoff",
-                "escalate",
+                "handoff_to_lane",
                 json!({"original_request":"Complete work", "escalation_reason":"Need coordination"}),
             ),
             call("early", "finish", json!({"result":"premature"})),
@@ -3351,7 +3351,7 @@ async fn procedure_and_note_handoff_present_current_state_then_reuse_each_roots_
                 MODEL,
                 0,
                 "handoff",
-                "escalate",
+                "handoff_to_lane",
                 [json!({"original_request":"Inspect the requested changes","escalation_reason":"Need coordinated verification"}).to_string()],
             ),
             read_response(0),
@@ -4013,7 +4013,7 @@ async fn escalated_goal_moves_to_child_thread_and_preserves_each_roots_wire_cach
             ),
             call(
                 "handoff",
-                "escalate",
+                "handoff_to_lane",
                 json!({"original_request":"Research the requested options","escalation_reason":"Need coordinated research"}),
             ),
             text_response("The coordinated comparison is ready"),

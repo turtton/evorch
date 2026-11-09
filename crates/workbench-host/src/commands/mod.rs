@@ -110,6 +110,20 @@ impl CommandService {
         }
     }
 
+    /// Bind delivery to this exact runtime and its authoritative host bindings.
+    pub fn bind_lane_delivery(&self) {
+        self.publish_lane_bindings();
+        let host = Arc::new(crate::lane_delivery::HostLaneDeliveryHost::new(
+            self.runtime.downgrade(),
+            self.ownership.clone(),
+            self.lane_bindings(),
+            self.memory_config.clone(),
+            self.team_writer.clone(),
+        ));
+        let _guard = self.handle.enter();
+        drop(self.runtime.bind_lane_delivery_host(host));
+    }
+
     pub fn with_web_tools_enabled(mut self, enabled: bool) -> Self {
         self.set_web_tools_enabled(enabled);
         self

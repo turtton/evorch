@@ -46,7 +46,7 @@ async fn handoff_and_inherited_answer_preserve_source_target_and_unrelated_lead_
         .unwrap()
         .to_owned();
     h.mock.enqueue([
-        call("handoff", "escalate", json!({"original_request":"SOURCE-CACHE","escalation_reason":"coordinate the original request"})),
+        call("handoff", "handoff_to_lane", json!({"original_request":"SOURCE-CACHE","escalation_reason":"coordinate the original request"})),
         text_response("target idle"),
     ]);
     h.runtime
@@ -231,7 +231,7 @@ async fn failed_target_admission_recovers_its_seed_once_then_reuses_its_own_wire
             ),
             call(
                 "recover-handoff",
-                "escalate",
+                "handoff_to_lane",
                 json!({"original_request":"recover the same target","escalation_reason":"coordination"}),
             ),
         ],

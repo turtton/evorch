@@ -20,7 +20,7 @@ use support::{
 fn escalation_response() -> providers::ChatResponse {
     tool_response(
         "escalate-1",
-        "escalate",
+        "handoff_to_lane",
         json!({
             "original_request": "依存関係の更新を完了する",
             "escalation_reason": "編集失敗が連続した",
@@ -482,7 +482,7 @@ async fn batch_edit_then_escalate_skips_remaining_tools_and_orders_terminal_befo
             ),
             (
                 "esc",
-                "escalate",
+                "handoff_to_lane",
                 json!({
                     "original_request": "複数ツールの実行を引き継ぐ",
                     "escalation_reason": "追加の調整が必要",

@@ -33,7 +33,7 @@ impl AgentModel for QuestionHandoffModel {
                 serde_json::json!({"title":"Which output format?", "options":["JSON"]}),
             ),
             2 => (
-                "escalate",
+                "handoff_to_lane",
                 serde_json::json!({"original_request":"Implement feature", "escalation_reason":"Need coordination"}),
             ),
             3 => ("finish", serde_json::json!({"result":"premature"})),

@@ -443,7 +443,7 @@ impl crate::AgentModel for RepeatedHandoffModel {
                 (
                     providers::ContentBlock::ToolUse {
                         id: format!("handoff-{call}"),
-                        name: "escalate".into(),
+                        name: "handoff_to_lane".into(),
                         input: serde_json::json!({"original_request":"current work","escalation_reason":"coordinate"}),
                     },
                     providers::FinishReason::ToolUse,

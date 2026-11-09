@@ -186,7 +186,7 @@ fn worker_allows_escalate() {
     let caps = Role::Worker.capabilities();
 
     assert_eq!(
-        caps.check_tool(Role::Worker.name(), "escalate"),
+        caps.check_tool(Role::Worker.name(), "handoff_to_lane"),
         CapabilityDecision::Allowed
     );
 }
@@ -199,9 +199,9 @@ fn orchestrator_denies_escalate() {
     let caps = Role::Orchestrator.capabilities();
 
     assert_denied(
-        caps.check_tool(Role::Orchestrator.name(), "escalate"),
+        caps.check_tool(Role::Orchestrator.name(), "handoff_to_lane"),
         Role::Orchestrator.name(),
-        "escalate",
+        "handoff_to_lane",
     );
 }
 

@@ -405,8 +405,8 @@ async fn restored_subagent_does_not_republish_its_task_prompt() {
 async fn escalation_publishes_no_terminal_text_or_duplicate_source_prompt() {
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
-            "escalate",
-            "escalate",
+            "handoff_to_lane",
+            "handoff_to_lane",
             json!({
                 "original_request": "source task",
                 "escalation_reason": "requires coordination",

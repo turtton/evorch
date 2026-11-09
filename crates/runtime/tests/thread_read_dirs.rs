@@ -594,8 +594,8 @@ async fn withdrawing_a_system_directory_changes_nothing_workers_are_told_or_read
 
 fn escalation_response() -> providers::ChatResponse {
     tool_response(
-        "escalate",
-        "escalate",
+        "handoff_to_lane",
+        "handoff_to_lane",
         json!({
             "original_request": "Triage the drafts",
             "escalation_reason": "needs coordination",

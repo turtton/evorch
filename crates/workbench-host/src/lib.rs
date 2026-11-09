@@ -15,6 +15,8 @@ pub mod bootstrap;
 pub mod commands;
 pub mod ingress;
 pub mod lane;
+pub mod lane_delivery;
+pub mod lane_management;
 pub mod projection;
 pub mod projects;
 pub mod provenance;

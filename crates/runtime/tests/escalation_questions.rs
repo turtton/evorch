@@ -20,8 +20,8 @@ fn ask() -> providers::ChatResponse {
 }
 fn escalate() -> providers::ChatResponse {
     tool_response(
-        "escalate",
-        "escalate",
+        "handoff_to_lane",
+        "handoff_to_lane",
         serde_json::json!({
             "original_request":"Complete work", "escalation_reason":"Need coordination"
         }),
@@ -230,7 +230,7 @@ async fn failed_question_inheritance_reports_error_without_spawning_an_escalated
     )));
     let observed = model.script.observed().await;
     assert!(observed.last().unwrap().iter().flat_map(|m| &m.content).any(|b| matches!(b,
-        providers::ContentBlock::ToolResult { tool_call_id, is_error: true, .. } if tool_call_id == "escalate")));
+        providers::ContentBlock::ToolResult { tool_call_id, is_error: true, .. } if tool_call_id == "handoff_to_lane")));
     assert_eq!(runtime.list_agents().len(), 1);
     assert_eq!(model.calls.load(Ordering::SeqCst), 3);
     *model.runtime.lock().unwrap() = None;

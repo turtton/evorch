@@ -146,14 +146,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .get(&workspace_ui::ThreadId::new(&lane.thread_id))
                     .is_some_and(ResolvedState::is_resolved)
             });
-        if (!changed.is_empty() || (can_ack && snapshot.projection_pending))
-            && link
+        if !changed.is_empty() || (can_ack && snapshot.projection_pending) {
+            match link
                 .handle
                 .project_sidebar_threads(changed.clone(), snapshot.fence, can_ack)
-                .is_ok()
-        {
-            for upsert in changed {
-                link.mirrored.insert(upsert.thread_id.clone(), upsert);
+            {
+                Ok(_) => {
+                    for upsert in changed {
+                        link.mirrored.insert(upsert.thread_id.clone(), upsert);
+                    }
+                }
+                Err(storage::StorageError::LaneManagement(
+                    storage::lane_management::LaneManagementError::StaleManagementRevision,
+                )) => {
+                    tracing::debug!("sidebar membership changed before mirror CAS; retry next tick")
+                }
+                Err(error) => tracing::warn!(%error, "sidebar projection failed; retry next tick"),
             }
         }
     }

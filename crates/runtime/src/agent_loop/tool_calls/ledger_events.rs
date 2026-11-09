@@ -60,7 +60,7 @@ mod tests {
         for name in [
             "delegate",
             "send_message",
-            "escalate",
+            "handoff_to_lane",
             "todo_write",
             "get_goal",
         ] {

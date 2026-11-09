@@ -28,6 +28,12 @@
     },
     "type": "get_input_receipts"
   },
+  "get_lane_management": {
+    "payload": {
+      "lane_id": "lane-1"
+    },
+    "type": "get_lane_management"
+  },
   "get_thread": {
     "payload": {
       "thread": "thr-1"
