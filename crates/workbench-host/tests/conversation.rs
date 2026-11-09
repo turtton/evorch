@@ -218,3 +218,47 @@ fn released_offline_legacy_thread_claims_canonically_and_restores_on_continue() 
         ErrorCode::PermissionDenied
     );
 }
+
+#[test]
+fn new_team_goal_uses_the_desktop_delegation_meaning_without_a_synthetic_chat() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("team.db"),
+        ..Default::default()
+    };
+    let store = storage::Storage::open(config.clone()).unwrap();
+    let model = Arc::new(HeldModel::default());
+    let bus = Arc::new(event_bus::EventBus::new(64));
+    let runtime = runtime::AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        model.clone(),
+    )
+    .with_run_store(runtime::RunStore::open(&config, store.handle()).unwrap());
+    let mut host = host_with_project(&rt, runtime.clone(), dir.path());
+    host.service_mut().set_memory_storage(config);
+    host.service_mut().set_team_writer(store.handle());
+    let reply = host
+        .handle_command(
+            Command::Conversation(Conversation::CreateGoal(
+                workbench_protocol::commands::SubmitGoal {
+                    project: project(),
+                    thread: thread("team"),
+                    objective: "implement independent tasks".into(),
+                    references: vec![],
+                    constraints: vec![],
+                    delegation: Some(workbench_protocol::commands::Delegation::Team {
+                        value: "independent paths".into(),
+                    }),
+                },
+            )),
+            local_desktop(),
+        )
+        .unwrap();
+    rt.block_on(model.reached.notified());
+    assert_eq!(runtime.team_tasks().len(), 1);
+    let run = reply.run_id.unwrap().as_str().parse().unwrap();
+    runtime.cancel(run).unwrap();
+    rt.block_on(runtime.wait(run)).unwrap();
+}

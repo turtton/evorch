@@ -25,6 +25,8 @@ pub enum ConversationCommand {
     },
     /// Client-generated ids make the first human input correlatable by receipt.
     CreateExecution(SendChat),
+    /// Start the desktop team/goal entry point without a synthetic chat prompt.
+    CreateGoal(crate::commands::SubmitGoal),
     /// Opt-in legacy import. Does not itself start/resume an agent. Only a
     /// released, demonstrably offline owner may be claimed; never force a lease.
     PrepareExistingThread {
@@ -50,6 +52,7 @@ impl ConversationCommand {
                 check_line("root", root, MAX_PROJECT_ROOT_BYTES, false)
             }
             Self::CreateExecution(chat) => chat.validate(),
+            Self::CreateGoal(goal) => goal.validate(),
             Self::UploadImage {
                 mime_type, data, ..
             } => {

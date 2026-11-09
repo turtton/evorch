@@ -182,6 +182,14 @@ impl CommandHost {
                 self.reserve_new_chat_thread(&chat)?;
                 return self.send_chat(&chat, provenance);
             }
+            ConversationCommand::CreateGoal(goal) => {
+                self.goal_input(&goal)?;
+                self.reserve_new_thread(&goal.project, &goal.thread)?;
+                return self.handle_command(
+                    workbench_protocol::commands::Command::SubmitGoal(goal),
+                    provenance.clone(),
+                );
+            }
             ConversationCommand::PrepareExistingThread { project, thread } => {
                 self.prepare_existing(&project, &thread)?;
                 ConversationResult::ExistingThreadPrepared { thread }
