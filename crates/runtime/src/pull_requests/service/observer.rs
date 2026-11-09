@@ -45,6 +45,9 @@ pub(super) async fn run(inner: Arc<Inner>, mut receiver: event_bus::EventReceive
     let mut shutdown = inner.shutdown.subscribe();
     let mut observer = Observer::default();
     loop {
+        if *shutdown.borrow() {
+            break;
+        }
         tokio::select! {
             event = receiver.recv() => match event {
                 Ok(event) => observer.handle(&inner, &event).await,
@@ -469,6 +472,13 @@ impl Inner {
         run_id: &str,
         source_call: &str,
     ) -> Result<(), PullRequestError> {
+        let (ownership, thread) = (Arc::clone(&self.ownership), thread_id.to_owned());
+        let Some(permit) = self
+            .blocking(move || ownership.owned_permit(&thread))
+            .await?
+        else {
+            return Ok(());
+        };
         let state = self.thread_state(thread_id).await?;
         if state
             .active_link
@@ -493,19 +503,22 @@ impl Inner {
                 at_ns: self.clock.now_ns(),
             },
         );
-        let presented = self
-            .blocking(move || storage.present_pull_request_candidate(new))
-            .await??;
-        if presented.created {
-            self.emit(PullRequestEvent::CandidateChanged {
-                thread_id: thread_id.to_owned(),
-                link_revision: state.lifecycle_revision,
-                transition_seq: state.transition_seq,
-                pull_request: Self::reference(&presented.candidate.key),
-                candidate_id: presented.candidate.candidate_id,
-                state: event_bus::PullRequestCandidateState::Presented,
-            });
-        }
+        let (bus, thread) = (Arc::clone(&self.bus), thread_id.to_owned());
+        self.guarded(&permit, move || -> Result<(), StorageError> {
+            let presented = storage.present_pull_request_candidate(new)?;
+            if presented.created {
+                bus.emit(Event::new(PullRequestEvent::CandidateChanged {
+                    thread_id: thread,
+                    link_revision: state.lifecycle_revision,
+                    transition_seq: state.transition_seq,
+                    pull_request: Self::reference(&presented.candidate.key),
+                    candidate_id: presented.candidate.candidate_id,
+                    state: event_bus::PullRequestCandidateState::Presented,
+                }));
+            }
+            Ok(())
+        })
+        .await??;
         Ok(())
     }
 

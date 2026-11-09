@@ -1,5 +1,6 @@
 //! GUI-free owner composition and reusable construction parts (ADR 0045 P8a).
-//! Legacy GUI wiring stays in place during the single-core transition.
+//! Lane/PR startup is shared with the transitional embedded GUI; MCP and
+//! metadata services have their own host factory.
 //!
 //! Deliberate legacy GUI/core differences:
 //! - Core loads strict configuration from an explicit directory without env
@@ -16,6 +17,7 @@
 //!   completion futures in `services`, never detach a storage-using task.
 pub mod components;
 mod host_services;
+pub mod lane_pr;
 pub mod models;
 mod project_models;
 pub mod services;
@@ -126,7 +128,7 @@ pub struct CompositionInventory {
 
 impl BootstrappedHost {
     pub async fn open(options: BootstrapOptions) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, None, None).await
+        Self::open_composed(options, None, None, lane_pr::PullRequestAdapters::default()).await
     }
 
     /// The production composition with the model and the per-run sandbox replaced, so a test
@@ -137,7 +139,13 @@ impl BootstrappedHost {
         options: BootstrapOptions,
         seams: TestSeams,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, Some(seams), None).await
+        Self::open_composed(
+            options,
+            Some(seams),
+            None,
+            lane_pr::PullRequestAdapters::default(),
+        )
+        .await
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -146,13 +154,29 @@ impl BootstrappedHost {
         seams: TestSeams,
         mcp: runtime::mcp::McpHostServices,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, Some(seams), Some(mcp)).await
+        Self::open_composed(
+            options,
+            Some(seams),
+            Some(mcp),
+            lane_pr::PullRequestAdapters::default(),
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn open_with_service_seams(
+        options: BootstrapOptions,
+        seams: TestSeams,
+        adapters: lane_pr::PullRequestAdapters,
+    ) -> Result<Self, BootstrapError> {
+        Self::open_composed(options, Some(seams), None, adapters).await
     }
 
     async fn open_composed(
         options: BootstrapOptions,
         seams: Option<TestSeams>,
         mcp: Option<runtime::mcp::McpHostServices>,
+        adapters: lane_pr::PullRequestAdapters,
     ) -> Result<Self, BootstrapError> {
         let config = config::Config::load_strict(&config::LoadOptions {
             user_config_dir: Some(options.config_dir.clone()),
@@ -305,6 +329,18 @@ impl BootstrappedHost {
             pricing.clone(),
             mcp.clone(),
         );
+        if let Err(error) = lane_pr::start(
+            &mut services,
+            &runtime,
+            &owner,
+            config.pull_requests,
+            adapters,
+        ) {
+            if let Err(drain) = services.shutdown().await {
+                tracing::warn!(%drain, "lane/PR startup cleanup failed");
+            }
+            return Err(error);
+        }
         Ok(Self {
             host,
             runtime,
@@ -340,6 +376,12 @@ impl BootstrappedHost {
     pub async fn shutdown(&mut self) -> Result<(), BootstrapError> {
         self.owner.begin_quiesce()?;
         self.services.request_stop();
+        // Stop recovery/PR producers before enumerating roots: a retry must not
+        // admit a new lane after the runtime drain has taken its snapshot.
+        let services_result = self.services.shutdown().await;
+        // A synchronous recovery scan already in progress when quiescing began
+        // may have acquired another lease. Fence the final, now-stable owner set.
+        self.owner.begin_quiesce()?;
         let tasks = self
             .host
             .lock()
@@ -364,7 +406,6 @@ impl BootstrappedHost {
         for task in tasks {
             task.await?;
         }
-        let services_result = self.services.shutdown().await;
         if let Some(reclaim) = self.reclaim.take() {
             reclaim.shutdown();
         }

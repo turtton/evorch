@@ -259,10 +259,19 @@ impl AgentRuntime {
         &self,
         host: &std::sync::Arc<crate::ownership::OwnerHost>,
     ) -> Result<tokio::task::JoinHandle<()>, LaneError> {
+        Ok(tokio::spawn(self.prepare_lane_recovery(host)?))
+    }
+
+    /// Initial synchronous recovery followed by an owned retry future. Hosts register
+    /// this future with their service lifecycle instead of detaching a retry task.
+    pub fn prepare_lane_recovery(
+        &self,
+        host: &std::sync::Arc<crate::ownership::OwnerHost>,
+    ) -> Result<impl std::future::Future<Output = ()> + Send + use<>, LaneError> {
         self.recover_unstarted_lanes(Some(host))?;
         let runtime = self.downgrade();
         let host = std::sync::Arc::downgrade(host);
-        Ok(tokio::spawn(async move {
+        Ok(async move {
             // External host death/lease expiry has no in-process notification.
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -286,7 +295,7 @@ impl AgentRuntime {
                     return;
                 }
             }
-        }))
+        })
     }
 
     /// Recover durable intents after a crash before registration. Authority is current
@@ -428,7 +437,11 @@ impl AgentRuntime {
         seed: &StartSeed,
         host: Option<&crate::ownership::OwnerHost>,
     ) -> Result<Option<Option<crate::ownership::OwnerPermit>>, LaneError> {
-        if !seed.requires_ownership {
+        // A host startup always participates in ADR 0024, including intents
+        // created by an unowned/demo runtime. The persisted seed is not authority
+        // to bypass another live host or its quiescing fence. Standalone runtimes
+        // without a host keep their explicit unowned recovery path.
+        if !seed.requires_ownership && host.is_none() {
             return Ok(Some(None));
         }
         let host = host.ok_or_else(|| {
