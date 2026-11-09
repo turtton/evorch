@@ -1,12 +1,30 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">
+<meta name="referrer" content="no-referrer">
 <title>evorch</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/js/app.js"></script>
 </head>
 <body>
-<h1>evorch</h1>
-<p>The web workbench is not installed in this build.</p>
+<div class="chrome">
+<header class="topbar">
+  <button id="back" class="icon-button" type="button" aria-label="戻る" hidden><span aria-hidden="true">‹</span></button>
+  <h1 id="title" class="topbar-title">evorch</h1>
+  <span id="conn" class="conn" data-state="connecting" role="status" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span id="conn-label" class="conn-label">接続中…</span></span>
+  <a id="inbox-link" class="inbox-link" href="#/inbox" aria-label="要対応"><span aria-hidden="true">要対応</span><span id="inbox-badge" class="badge count-badge" hidden>0</span></a>
+</header>
+<div id="banner" class="banner" role="alert" hidden></div>
+</div>
+<main id="view" class="view" tabindex="-1"></main>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<noscript><p class="noscript">この画面を使うには JavaScript を有効にしてください。</p></noscript>
 </body>
 </html>
