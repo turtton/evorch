@@ -403,6 +403,12 @@ pub fn render_ci_log_data(bundle: &CiLogBundle, max_bytes: usize) -> Option<Stri
 }
 
 /// The smallest text [`render_ci_log_data`] can return for `bundle`: no run, no skip.
+///
+/// It is the text the reduction in [`render_ci_log_data`] ends with, so `truncated` is the
+/// bundle's own flag; leaving a run or a skip out sets it when [`render_once`] writes it.
+/// (Forcing it to `true` made this text one byte shorter than the whole text of an empty,
+/// untruncated bundle, which the limit check then refused although a budget of this size
+/// fits.)
 #[must_use]
 pub fn minimal_ci_log_data(bundle: &CiLogBundle) -> String {
     render_once(&View {
@@ -410,7 +416,7 @@ pub fn minimal_ci_log_data(bundle: &CiLogBundle) -> String {
             head_sha: bundle.head_sha.clone(),
             runs: Vec::new(),
             skipped: bundle.skipped.clone(),
-            truncated: true,
+            truncated: bundle.truncated,
         },
         skips_shown: 0,
         runs_hidden: bundle.runs.len(),

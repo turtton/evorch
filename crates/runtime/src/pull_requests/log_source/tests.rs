@@ -4,7 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
+use storage::lane_delivery::LANE_DELIVERY_PAGE_BYTES;
+use storage::pull_request_auto_fix::{PrNotice, PrNoticeMode, PrNoticePhase};
+
 use super::*;
+use crate::lane_delivery::prepare_pr_notice_payload;
 use crate::pull_requests::fake::FakeProcessRunner;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -1153,4 +1157,462 @@ fn the_wrapper_fits_its_budget_even_when_only_metadata_is_left() {
     assert_eq!(render_ci_log_data(&bundle, minimal.len()).unwrap(), minimal);
     assert_eq!(render_ci_log_data(&bundle, minimal.len() - 1), None);
     assert_eq!(render_ci_log_data(&bundle, 0), None);
+}
+
+fn plain_run(run_id: u64, excerpt: &str) -> CiLogRun {
+    CiLogRun {
+        run_id,
+        checks: vec!["build".to_owned()],
+        excerpt: excerpt.to_owned(),
+        lines_omitted: 0,
+        raw_truncated: false,
+        line_cut: false,
+        lossy_utf8: false,
+        redactions: 0,
+    }
+}
+
+fn bundle_with(runs: Vec<CiLogRun>, skipped: Vec<CiLogSkip>, truncated: bool) -> CiLogBundle {
+    CiLogBundle {
+        head_sha: SHA.to_owned(),
+        runs,
+        skipped,
+        truncated,
+    }
+}
+
+fn parsed_body(text: &str) -> Value {
+    serde_json::from_str(&text[CI_LOG_DATA_OPEN.len() + 1..text.len() - CLOSING.len() - 1]).unwrap()
+}
+
+// Given: a bundle with nothing in it and `truncated` unset / When: wrapped with exactly the
+// size of the smallest text, one byte less, and no limit / Then: the smallest text is what is
+// returned each time it fits (it is the text itself, `truncated` still false), and one byte
+// less leaves nothing to send. The limit check and the smallest text agree to the byte.
+#[test]
+fn an_empty_bundle_fits_exactly_its_minimal_text() {
+    let bundle = bundle_with(Vec::new(), Vec::new(), false);
+    let minimal = minimal_ci_log_data(&bundle);
+
+    assert_eq!(parsed_body(&minimal)["truncated"], false);
+    assert_eq!(
+        render_ci_log_data(&bundle, usize::MAX).as_deref(),
+        Some(minimal.as_str())
+    );
+    assert_eq!(
+        render_ci_log_data(&bundle, minimal.len()).as_deref(),
+        Some(minimal.as_str())
+    );
+    assert_eq!(render_ci_log_data(&bundle, minimal.len() - 1), None);
+}
+
+// Given: a bundle that the earlier steps already called truncated and has no run / When:
+// wrapped at its smallest size / Then: the flag is kept, so the same byte count decides
+#[test]
+fn a_truncated_empty_bundle_keeps_its_flag_in_the_minimal_text() {
+    let bundle = bundle_with(Vec::new(), Vec::new(), true);
+    let minimal = minimal_ci_log_data(&bundle);
+
+    assert_eq!(parsed_body(&minimal)["truncated"], true);
+    assert_eq!(
+        render_ci_log_data(&bundle, minimal.len()).as_deref(),
+        Some(minimal.as_str())
+    );
+    assert_eq!(render_ci_log_data(&bundle, minimal.len() - 1), None);
+}
+
+// Given: a bundle with a run, with and without the pre-set flag / When: wrapped with exactly
+// its full size, with one byte less, and at its smallest size / Then: the full size returns
+// the text unchanged; one byte less shrinks it and says so; the smallest size is reached with
+// `truncated` set (a run was left out) and one byte below it nothing is returned
+#[test]
+fn the_limit_decides_to_the_byte_between_whole_shrunk_and_minimal() {
+    for preset in [false, true] {
+        let skip = CiLogSkip {
+            check: Some("lint".to_owned()),
+            run_id: Some(2),
+            reason: LogSkipReason::HeadMismatch,
+        };
+        let bundle = bundle_with(
+            vec![plain_run(1, "line one\nline two\nline three")],
+            vec![skip],
+            preset,
+        );
+        let full = render_ci_log_data(&bundle, usize::MAX).unwrap();
+        let minimal = minimal_ci_log_data(&bundle);
+        assert!(minimal.len() < full.len());
+
+        // Exactly the limit: nothing is taken out.
+        let exact = render_ci_log_data(&bundle, full.len()).unwrap();
+        assert_eq!(exact, full);
+        assert_eq!(parsed_body(&exact)["truncated"], preset);
+
+        // One byte over: something is taken out, the text fits and says it was cut.
+        let shrunk = render_ci_log_data(&bundle, full.len() - 1).unwrap();
+        assert!(
+            shrunk.len() < full.len(),
+            "{} vs {}",
+            shrunk.len(),
+            full.len()
+        );
+        assert_eq!(parsed_body(&shrunk)["truncated"], true);
+
+        // The smallest text: every run and skip is counted as left out.
+        let smallest = render_ci_log_data(&bundle, minimal.len()).unwrap();
+        assert_eq!(smallest, minimal);
+        let body = parsed_body(&smallest);
+        assert_eq!(body["truncated"], true);
+        assert_eq!(body["runs_not_shown"], 1);
+        assert_eq!(body["skipped_not_shown"], 1);
+        assert_eq!(render_ci_log_data(&bundle, minimal.len() - 1), None);
+    }
+}
+
+/// What `gh run view --log-failed` puts before every line: job, step and time.
+const GH_PREFIX: &str = "build\tTest\t2026-11-06T00:00:00.0000000Z ";
+const PEM_MASK: &str = "[REDACTED:private-key-block]";
+
+/// One line as `gh` prints it.
+fn gh_line(content: &str) -> String {
+    format!("{GH_PREFIX}{content}\n")
+}
+
+/// The body lines of a private key, each unique and none of them shaped like another kind of
+/// credential, so only the PEM rule can hide them.
+fn pem_body(lines: usize) -> Vec<String> {
+    (0..lines)
+        .map(|n| format!("MIIE{n:05}Zm9vYmFyYmF6cXV4{n:05}cXV1eGNvcmdl{n:05}Z3JhdWx0"))
+        .collect()
+}
+
+/// A private key as `gh` prints it: `BEGIN`, `body`, and `END` unless `with_end` is false.
+fn pem_key(body: &[String], with_end: bool) -> String {
+    let mut text = gh_line("-----BEGIN RSA PRIVATE KEY-----");
+    for line in body {
+        text.push_str(&gh_line(line));
+    }
+    if with_end {
+        text.push_str(&gh_line("-----END RSA PRIVATE KEY-----"));
+    }
+    text
+}
+
+/// Exactly `len` bytes of ordinary log lines (`len` is at least 64).
+fn noise_of(len: usize) -> String {
+    let mut text = String::with_capacity(len);
+    let mut n = 0;
+    while len - text.len() >= 128 {
+        text.push_str(&format!("noise {n:06} {}\n", "p".repeat(49)));
+        n += 1;
+    }
+    let rest = len - text.len();
+    text.push_str(&"q".repeat(rest - 1));
+    text.push('\n');
+    assert_eq!(text.len(), len);
+    text
+}
+
+/// Nothing of a key may be in `text`: not a line of its body, not a marker of its block.
+#[track_caller]
+fn assert_no_key(text: &str, body: &[String]) {
+    for marker in ["-----BEGIN", "-----END", "PRIVATE KEY"] {
+        assert!(!text.contains(marker), "`{marker}` left in {text:.300}");
+    }
+    for line in body {
+        // Also every piece of a line, so a cut in the middle of one cannot hide it.
+        for piece in [&line[..8], &line[line.len() - 8..], &line[10..22]] {
+            assert!(!text.contains(piece), "`{piece}` left in {text:.300}");
+        }
+    }
+}
+
+async fn fetch_logs(logs: Vec<ProcessOutput>, request: &LogRequest) -> CiLogBundle {
+    let runner = FakeProcessRunner::new();
+    // The metadata of every run is asked for first, then the logs, in order.
+    for index in 0..logs.len() {
+        runner.push_exit(0, &good_run(index as u64 + 1), "");
+    }
+    for log in logs {
+        runner.push_output(log);
+    }
+    fetch(&runner, request).await
+}
+
+fn log_of(text: &str, truncated: bool) -> ProcessOutput {
+    ProcessOutput {
+        exit_code: if truncated { None } else { Some(0) },
+        stdout: text.as_bytes().to_vec(),
+        stdout_truncated: truncated,
+        stderr: Vec::new(),
+        stderr_truncated: false,
+    }
+}
+
+fn runs_request(count: u64) -> LogRequest {
+    request(
+        (1..=count)
+            .map(|id| check(&format!("run:{id}"), &format!("job {id}")))
+            .collect(),
+    )
+}
+
+/// The notice the agent is sent, built the way the harness builds it: a header, the facts and
+/// the log, with the page as the limit.
+fn pr_notice() -> PrNotice {
+    PrNotice {
+        notice_id: "prn-test".to_owned(),
+        reservation_revision: 0,
+        key: key(),
+        head_sha: SHA.to_owned(),
+        mode: PrNoticeMode::Auto,
+        destination_thread_id: Some("lead".to_owned()),
+        link_revision: 1,
+        policy_revision: 1,
+        budget_epoch: 0,
+        success_seq: 1,
+        phase: PrNoticePhase::Reserved,
+        payload: None,
+    }
+}
+
+/// The header the harness puts before a stored payload; `prepare_pr_notice_payload` keeps room
+/// for it.
+fn notice_header(notice: &PrNotice) -> String {
+    format!(
+        "[harness-notice kind=pr_checks_failed pr=#{} head={}]\nrepo: {}/{}\n",
+        notice.key.number, notice.head_sha, notice.key.host, notice.key.repository
+    )
+}
+
+/// The whole notice for `bundle`, with the facts made long enough that exactly `log_budget`
+/// bytes are left for the log.
+fn whole_notice(bundle: &CiLogBundle, log_budget: usize) -> String {
+    let notice = pr_notice();
+    let header = notice_header(&notice);
+    let budget = LANE_DELIVERY_PAGE_BYTES - header.len();
+    let bare = prepare_pr_notice_payload(&notice, &[String::new()], "now", None).len();
+    // The log gets what is left after the facts and one separator.
+    let name = "c".repeat(budget - 1 - log_budget - bare);
+    let payload = prepare_pr_notice_payload(&notice, &[name], "now", Some(bundle));
+    format!("{header}{payload}")
+}
+
+/// Builds the whole notice with the log given every budget that matters (whole, one byte
+/// short, half, the smallest, one byte below it), and checks that nothing of the key is in any
+/// of them, that none is over the page, and that the log was shrunk when it had to be.
+#[track_caller]
+fn assert_no_key_in_whole_notice(bundle: &CiLogBundle, body: &[String]) {
+    let full = render_ci_log_data(bundle, usize::MAX).unwrap();
+    let minimal = minimal_ci_log_data(bundle);
+    let budgets = [
+        full.len(),
+        full.len() - 1,
+        full.len() / 2,
+        minimal.len(),
+        minimal.len() - 1,
+    ];
+    for log_budget in budgets {
+        let notice = whole_notice(bundle, log_budget);
+        assert!(notice.len() <= LANE_DELIVERY_PAGE_BYTES, "{log_budget}");
+        assert!(notice.starts_with("[harness-notice kind=pr_checks_failed"));
+        assert_no_key(&notice, body);
+        let has_log = notice.contains(CI_LOG_DATA_OPEN);
+        assert_eq!(has_log, log_budget >= minimal.len(), "budget {log_budget}");
+        if has_log {
+            let log = &notice[notice.find(CI_LOG_DATA_OPEN).unwrap()..];
+            assert!(log.len() <= log_budget, "{} > {log_budget}", log.len());
+            assert_eq!(log.matches(CLOSING).count(), 1);
+            assert_eq!(log == full, log_budget >= full.len(), "budget {log_budget}");
+            if log_budget < full.len() {
+                assert_eq!(parsed_body(log)["truncated"], true, "budget {log_budget}");
+            }
+        }
+    }
+}
+
+/// Wraps `bundle` with every budget from its full size down to the smallest, and checks that
+/// nothing of the key is in any of the texts, then does the same for the whole notice.
+#[track_caller]
+fn assert_no_key_at_any_wrapper_size(bundle: &CiLogBundle, body: &[String]) {
+    assert_no_key_in_whole_notice(bundle, body);
+    let full = render_ci_log_data(bundle, usize::MAX).unwrap();
+    assert_no_key(&full, body);
+    let minimal = minimal_ci_log_data(bundle);
+    let mut budget = full.len();
+    while budget > minimal.len() {
+        let text = render_ci_log_data(bundle, budget).unwrap();
+        assert!(text.len() <= budget);
+        assert_no_key(&text, body);
+        budget = budget.saturating_sub(97);
+    }
+    assert_no_key(&minimal, body);
+}
+
+// Given: a private key that the 1 MiB raw limit cuts: inside its BEGIN line, in the first
+// body line, in the middle, and inside its END line / When: the log is read and wrapped /
+// Then: no line of the key and no marker of its block is in the excerpt or in the wrapper, at
+// any wrapper size; the masked block is there whenever its BEGIN line was whole
+#[tokio::test(start_paused = true)]
+async fn a_private_key_cut_by_the_raw_limit_leaves_no_piece() {
+    let body = pem_body(40);
+    let key = pem_key(&body, true);
+    let begin_line = gh_line("-----BEGIN RSA PRIVATE KEY-----");
+    let cuts = [
+        ("begin line", begin_line.len() - 10, false),
+        (
+            "first body line",
+            begin_line.len() + GH_PREFIX.len() + 25,
+            true,
+        ),
+        ("middle", key.len() / 2, true),
+        ("end line", key.len() - 12, true),
+    ];
+    for (name, key_offset, begin_whole) in cuts {
+        let mut log = noise_of(CI_LOG_RAW_BYTES_MAX - key_offset);
+        log.push_str(&key);
+        log.push_str(&noise_of(500));
+        assert!(log.len() > CI_LOG_RAW_BYTES_MAX);
+        let cut = &log.as_bytes()[..CI_LOG_RAW_BYTES_MAX];
+        let output = ProcessOutput {
+            exit_code: None,
+            stdout: cut.to_vec(),
+            stdout_truncated: true,
+            stderr: Vec::new(),
+            stderr_truncated: false,
+        };
+
+        let bundle = fetch_logs(vec![output], &runs_request(1)).await;
+
+        let run = &bundle.runs[0];
+        assert!(run.raw_truncated && bundle.truncated, "{name}");
+        assert_no_key(&run.excerpt, &body);
+        assert_eq!(run.excerpt.contains(PEM_MASK), begin_whole, "{name}");
+        assert_eq!(run.redactions, usize::from(begin_whole), "{name}");
+        assert_no_key_at_any_wrapper_size(&bundle, &body);
+    }
+}
+
+// Given: a private key whose lines pass the 200-line limit, the 8 KiB limit, and the end of the
+// excerpt, with ordinary lines before and after / When: read / Then: the key was masked before
+// anything was cut, so the whole block is one masked line: no piece of it is in the excerpt,
+// whether it is shown, partly in the window of the last lines, or cut out of it
+#[tokio::test(start_paused = true)]
+async fn a_private_key_across_the_excerpt_limits_leaves_no_piece() {
+    // (lines of key body, ordinary lines before, ordinary lines after, expected omitted)
+    let cases = [
+        // 20 + 152 + 100 lines: the last 200 would begin inside the key. Masked, it is one
+        // line and everything fits.
+        ("200 lines", 150, 20, 100, 0),
+        // The key alone is about 14 KiB: the last 8 KiB would begin inside it.
+        ("8 KiB", 200, 20, 40, 0),
+        // Far more after the key than the excerpt holds: the masked line itself is cut out.
+        ("cut out", 100, 30, CI_LOG_EXCERPT_LINES_MAX * 2, 1),
+    ];
+    for (name, body_lines, before, after, omitted_at_least) in cases {
+        let body = pem_body(body_lines);
+        let mut log = noise_of(before * 64);
+        log.push_str(&pem_key(&body, true));
+        for n in 0..after {
+            log.push_str(&gh_line(&format!("after the key {n}")));
+        }
+
+        let bundle = fetch_logs(vec![log_of(&log, false)], &runs_request(1)).await;
+
+        let run = &bundle.runs[0];
+        assert!(
+            run.excerpt.len() <= CI_LOG_EXCERPT_BYTES_MAX
+                && run.excerpt.split('\n').count() <= CI_LOG_EXCERPT_LINES_MAX,
+            "{name}"
+        );
+        assert_no_key(&run.excerpt, &body);
+        assert_eq!(run.redactions, 1, "{name}");
+        if omitted_at_least == 0 {
+            assert_eq!(run.lines_omitted, 0, "{name}: the masked block is one line");
+            assert!(run.excerpt.contains(PEM_MASK), "{name}");
+        } else {
+            assert!(run.lines_omitted > 0, "{name}");
+            assert!(!run.excerpt.contains(PEM_MASK), "{name}");
+        }
+        assert_no_key_at_any_wrapper_size(&bundle, &body);
+    }
+
+    // A budget so small that only the start of the last line is kept: that line is the masked
+    // block, so what is cut is the mask, not the key.
+    let body = pem_body(30);
+    let log = format!("{}{}", noise_of(200), pem_key(&body, true));
+    let mut request = runs_request(1);
+    request.limits.excerpt_bytes = GH_PREFIX.len() + 6;
+    let bundle = fetch_logs(vec![log_of(&log, false)], &request).await;
+    assert_no_key(&bundle.runs[0].excerpt, &body);
+    assert_no_key_at_any_wrapper_size(&bundle, &body);
+}
+
+// Given: keys in several runs, so the excerpt budget is shared / When: read and wrapped / Then:
+// no run shows a piece of its key
+#[tokio::test(start_paused = true)]
+async fn private_keys_in_several_runs_leave_no_piece_under_a_shared_budget() {
+    let body = pem_body(120);
+    // The default budget holds every run whole; 400 bytes shared by three runs cut each one.
+    for (excerpt_bytes, cut) in [(CI_LOG_EXCERPT_BYTES_MAX, false), (400, true)] {
+        let logs = (0..3)
+            .map(|index| {
+                let mut log = noise_of(300);
+                log.push_str(&pem_key(&body, true));
+                log.push_str(&gh_line(&format!("tail of run {index}")));
+                log_of(&log, false)
+            })
+            .collect();
+        let mut request = runs_request(3);
+        request.limits.excerpt_bytes = excerpt_bytes;
+
+        let bundle = fetch_logs(logs, &request).await;
+
+        assert_eq!(bundle.runs.len(), 3, "{excerpt_bytes}");
+        assert_eq!(
+            bundle.runs.iter().all(|run| run.lines_omitted == 0),
+            !cut,
+            "{excerpt_bytes}"
+        );
+        assert_eq!(bundle.truncated, cut, "{excerpt_bytes}");
+        assert!(
+            bundle
+                .runs
+                .iter()
+                .map(|run| run.excerpt.len())
+                .sum::<usize>()
+                <= excerpt_bytes
+        );
+        for run in &bundle.runs {
+            assert_no_key(&run.excerpt, &body);
+        }
+        assert_no_key_at_any_wrapper_size(&bundle, &body);
+    }
+}
+
+// Given: a private key with no END line, in a log that ended by itself and in one that the raw
+// limit cut / When: read and wrapped / Then: everything from the BEGIN line on is masked, so no
+// line of the key is shown, while the lines before it are kept
+#[tokio::test(start_paused = true)]
+async fn a_private_key_without_an_end_line_is_masked_to_the_end_of_the_log() {
+    let body = pem_body(60);
+    for raw_truncated in [false, true] {
+        let mut log = String::new();
+        log.push_str(&gh_line("before the key"));
+        log.push_str(&pem_key(&body, false));
+        log.push_str(&gh_line("after the key: this may be part of it"));
+        if raw_truncated {
+            // Cut in the middle of a body line: its beginning is a piece of the key as well.
+            log.push_str(&format!("{GH_PREFIX}MIIE9999"));
+        }
+
+        let bundle = fetch_logs(vec![log_of(&log, raw_truncated)], &runs_request(1)).await;
+
+        let run = &bundle.runs[0];
+        assert_no_key(&run.excerpt, &body);
+        assert!(!run.excerpt.contains("MIIE9999"), "{raw_truncated}");
+        assert!(run.excerpt.contains("before the key"), "{raw_truncated}");
+        assert!(run.excerpt.ends_with(PEM_MASK), "{}", run.excerpt);
+        assert_eq!(run.redactions, 1);
+        assert_no_key_at_any_wrapper_size(&bundle, &body);
+    }
 }
