@@ -1,0 +1,13 @@
+[package]
+name = "core-instance"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+rustix = { version = "1", features = ["process", "fs"] }
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true

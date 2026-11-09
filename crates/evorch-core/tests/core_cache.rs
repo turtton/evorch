@@ -158,8 +158,17 @@ context_window_tokens = 1000000
     let host = Arc::new(Mutex::new(
         CommandHost::new(service).with_projects(projects),
     ));
-    let instance = Instance::acquire(&dir.path().join("config"), dir.path()).unwrap();
+    let instance = Instance::acquire(
+        &evorch_core::instance::LaunchGuard::acquire(
+            &evorch_core::instance::ConfigIdentity::new(&dir.path().join("config")).unwrap(),
+        )
+        .unwrap(),
+        dir.path(),
+    )
+    .unwrap();
     let listener = instance.bind().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
     let backend = Arc::new(HostBackend::new(host, instance.identity.clone()));
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let socket_backend = backend.clone();
