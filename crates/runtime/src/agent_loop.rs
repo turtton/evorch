@@ -1013,6 +1013,7 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            self.inject_question_notices();
             for notice in self
                 .shared
                 .executor
@@ -1702,7 +1703,7 @@ impl LoopState {
                     if self.task.mailbox.is_empty() {
                         continue;
                     }
-                    let messages = self.task.mailbox.drain_where(|_| true);
+                    let messages = self.task.mailbox.drain_queued_where(|_| true);
                     if messages.is_empty() {
                         continue;
                     }

@@ -5,6 +5,7 @@ mod apply_patch_cache;
 #[path = "approval_cache/mod.rs"]
 mod approval_cache;
 mod codex_run_identity_cache;
+mod delegation_question_cache;
 #[path = "encrypted_reasoning_cache/mod.rs"]
 mod encrypted_reasoning_cache;
 #[path = "hosted_search_cache/mod.rs"]

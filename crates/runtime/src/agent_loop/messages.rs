@@ -81,10 +81,13 @@ impl LoopState {
 
     pub(super) fn flush_aside(&mut self) -> bool {
         let received = self.flush_user_messages();
+        if let Some(runtime) = self.runtime() {
+            runtime.refill_question_mailbox(self.task.run_id);
+        }
         if self.task.mailbox.is_empty() {
             return received;
         }
-        let messages = self.task.mailbox.drain_where(|_| true);
+        let messages = self.task.mailbox.drain_queued_where(|_| true);
         if messages.is_empty() {
             return received;
         }
@@ -92,6 +95,14 @@ impl LoopState {
         // Aside は turn 境界で新しい入力となり、次の clean Stop で完了する。
         self.resumed = true;
         true
+    }
+
+    /// Only question receipts interrupt a running turn, after its closed tool batch.
+    pub(super) fn inject_question_notices(&mut self) {
+        if let Some(runtime) = self.runtime() {
+            runtime.refill_question_mailbox(self.task.run_id);
+        }
+        self.inject_messages(self.task.mailbox.drain_question_notices());
     }
 
     pub(super) fn inject_parent_messages(&mut self) {
@@ -102,16 +113,20 @@ impl LoopState {
         let messages = self
             .task
             .mailbox
-            .drain_where(|message| message.sender_run_id == parent);
+            .drain_queued_where(|message| message.sender_run_id == parent);
         self.inject_messages(messages);
     }
 
-    pub(super) fn inject_messages(&mut self, messages: Vec<AgentMessage>) {
+    pub(super) fn inject_messages(&mut self, messages: Vec<crate::mailbox::QueuedMessage>) {
         if messages.is_empty() {
             return;
         }
         self.begin_internal_input();
-        for message in messages {
+        for queued in messages {
+            if let Some(notice) = queued.question_notice() {
+                self.reported_questions.insert(notice.id.clone());
+            }
+            let message = queued.into_message();
             self.context.push_user(&format_agent_message(&message));
         }
         self.publish_message_count();
@@ -122,6 +137,12 @@ pub(super) fn format_agent_message(message: &AgentMessage) -> String {
     let kind = match message.kind {
         AgentMessageKind::Send => "send",
         AgentMessageKind::Reply => "reply",
+        AgentMessageKind::Steering
+            if message.sender_run_id == "runtime"
+                && message.message_id.starts_with("question-notice-") =>
+        {
+            "question_notice"
+        }
         AgentMessageKind::Steering => "steering",
     };
     format!(

@@ -68,6 +68,7 @@ impl Deref for Snapshots {
 struct WaitResult {
     value: Value,
     notices: Vec<Arc<CompletionNotice>>,
+    question_ids: Vec<String>,
 }
 
 impl Deref for WaitResult {
@@ -195,8 +196,17 @@ async fn wait_with(
         if state.has_pending_user_messages() {
             result["user_input_ready"] = Value::Bool(true);
         }
+        // Consume only the IDs in the returned snapshot, before draining the
+        // mailbox so attention and a queued notice cannot report the same ID.
+        runtime.observe_questions(result.question_ids.clone());
         if deliver_messages {
             deliver(runtime, caller, result);
+        } else {
+            result["inbox_ready"] = Value::Bool(
+                runtime
+                    .run_mailbox(caller)
+                    .is_ok_and(|mailbox| mailbox.has_interrupting_message()),
+            );
         }
     }
     if state.transition(AgentRunPhase::Running, None).is_err() {
@@ -258,9 +268,9 @@ fn deliver(runtime: &AgentRuntime, caller: RunId, result: &mut Value) {
 /// wait that keeps returning the same finished child is still detected.
 fn record_observations(
     state: &mut LoopState,
-    runtime: &AgentRuntime,
+    _runtime: &AgentRuntime,
     request: &WaitRequest,
-    result: &Value,
+    result: &WaitResult,
 ) -> bool {
     let mut advanced = false;
     for run_id in result["completed_run_ids"]
@@ -279,9 +289,13 @@ fn record_observations(
         );
         advanced |= state.budget.mark_child_completed(&key);
     }
-    let questions = unanswered_questions(runtime, &request.runs);
-    let asked = questions.iter().any(|id| !request.reported.contains(id));
-    state.reported_questions.extend(questions);
+    let asked = result
+        .question_ids
+        .iter()
+        .any(|id| !request.reported.contains(id));
+    state
+        .reported_questions
+        .extend(result.question_ids.iter().cloned());
     let received = result["messages"].as_array().is_some_and(|m| !m.is_empty())
         || result["inbox_ready"] == true
         || result["user_input_ready"] == true
@@ -317,6 +331,7 @@ async fn observe(
     if cancel.borrow().is_interrupted() {
         return Err("wait cancelled".into());
     }
+    runtime.observe_questions(request.reported.iter().cloned());
     let mut questions = runtime.shared.question_version.subscribe();
     let mut turns = runtime.shared.turn_version.subscribe();
     let initial = snapshots(runtime, caller, &request.runs)?;
@@ -445,32 +460,41 @@ fn satisfied(runs: &Snapshots, mode: WaitMode) -> bool {
     }
 }
 
-/// IDs of the targets' unanswered questions, blocking or not.
-fn unanswered_questions(runtime: &AgentRuntime, runs: &[RunId]) -> Vec<String> {
-    runs.iter()
-        .filter_map(|run| runtime.user_answers(*run).ok())
-        .flatten()
-        .filter(|question| question.answer.is_none())
-        .map(|question| question.id)
-        .collect()
+/// One storage snapshot owns both attention runs and the IDs actually reported.
+struct QuestionAttention {
+    runs: Vec<RunId>,
+    ids: Vec<String>,
 }
-
-/// Targets with an unanswered question that was not yet reported to the caller.
+impl QuestionAttention {
+    fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
 fn new_question_runs(
     runtime: &AgentRuntime,
     runs: &[RunId],
     reported: &HashSet<String>,
-) -> Vec<RunId> {
-    runs.iter()
-        .copied()
-        .filter(|run| {
-            runtime.user_answers(*run).is_ok_and(|questions| {
-                questions
-                    .iter()
-                    .any(|question| question.answer.is_none() && !reported.contains(&question.id))
+) -> QuestionAttention {
+    let mut attention = QuestionAttention {
+        runs: Vec::new(),
+        ids: Vec::new(),
+    };
+    for run in runs {
+        let ids: Vec<_> = runtime
+            .user_answers(*run)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|q| {
+                q.answer.is_none() && !reported.contains(&q.id) && !runtime.question_reported(&q.id)
             })
-        })
-        .collect()
+            .map(|q| q.id)
+            .collect();
+        if !ids.is_empty() {
+            attention.runs.push(*run);
+            attention.ids.extend(ids);
+        }
+    }
+    attention
 }
 
 /// Marks a result that carries answers to the caller's own questions that are
@@ -486,7 +510,7 @@ fn with_answers(mut result: WaitResult, question_ids: Vec<String>) -> WaitResult
 
 fn response(
     runs: Snapshots,
-    attention: Vec<RunId>,
+    attention: QuestionAttention,
     inbox_ready: bool,
     timed_out: Option<bool>,
 ) -> WaitResult {
@@ -498,7 +522,8 @@ fn response(
     let mut result = json!({
         "inbox_ready": inbox_ready,
         "user_input_ready": false,
-        "attention_run_ids": attention.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "attention_run_ids": attention.runs.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "attention_question_ids": attention.ids,
         "completed_run_ids": runs.iter().filter(|run| terminal(run) || run["run_id"].as_str().is_some_and(|id| ready_turns.contains(id))).map(|run| &run["run_id"]).collect::<Vec<_>>(),
         "runs": runs,
     });
@@ -506,6 +531,7 @@ fn response(
         result["timed_out"] = Value::Bool(timed_out);
     }
     WaitResult {
+        question_ids: attention.ids,
         value: result,
         notices,
     }

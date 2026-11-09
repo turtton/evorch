@@ -39,6 +39,7 @@ impl CompletionNotice {
 pub(crate) enum MessageOrigin {
     Explicit,
     CompletionNotice(Arc<CompletionNotice>),
+    QuestionNotice(Arc<super::QuestionNotice>),
 }
 
 #[derive(Debug, Clone)]
@@ -67,14 +68,37 @@ impl QueuedMessage {
         }
     }
 
+    pub(crate) fn question(message: AgentMessage, notice: Arc<super::QuestionNotice>) -> Self {
+        Self {
+            message,
+            origin: MessageOrigin::QuestionNotice(notice),
+        }
+    }
+
+    pub(crate) fn question_notice(&self) -> Option<&Arc<super::QuestionNotice>> {
+        if let MessageOrigin::QuestionNotice(notice) = &self.origin {
+            Some(notice)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn into_message(self) -> AgentMessage {
+        if let Some(notice) = self.question_notice() {
+            notice.observe();
+        }
+        self.message
+    }
+
     pub(crate) fn observed(&self) -> bool {
         match &self.origin {
             MessageOrigin::Explicit => false,
+            MessageOrigin::QuestionNotice(notice) => notice.observed(),
             MessageOrigin::CompletionNotice(notice) => notice.observed(),
         }
     }
 
     pub(crate) fn interrupts_wait(&self) -> bool {
-        matches!(self.origin, MessageOrigin::Explicit)
+        !matches!(self.origin, MessageOrigin::CompletionNotice(_))
     }
 }

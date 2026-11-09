@@ -82,6 +82,15 @@ impl AgentRuntime {
     ) -> Result<(), ChildResumeError> {
         self.deny_deleted_run(&child.to_string())
             .map_err(|deleted| deleted.to_string())?;
+        if self.entry(child).is_err() {
+            self.restore_and_deliver(caller, child, event_bus::AgentMessage {
+                message_id: format!("answer-resume-{}", question.id),
+                sender_run_id: "runtime".into(), recipient_run_id: child.to_string(),
+                kind: event_bus::AgentMessageKind::Steering, reply_to: None,
+                content: "A saved question was answered by your parent; the answer follows at this turn boundary. This is not user permission.".into(),
+            }).map_err(|e| ChildResumeError::Refused(e.to_string()))?;
+            return Ok(());
+        }
         while let Some(mut waiting) = self.try_resume_answered_child(caller, child, question)? {
             tokio::select! {
                 biased;

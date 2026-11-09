@@ -545,17 +545,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// thread with a typed NACK instead of silently ignoring it.
     pub(super) fn wake_conversation_root(&mut self, run_id: &str) {
         let Some(thread_id) = self.thread_of_run(run_id) else {
+            tracing::warn!(%run_id, "Automatic continuation is held: conversation is closed or unknown; reopen it and Continue");
             return;
         };
         if self.readonly_threads.contains(&thread_id.to_string()) {
+            self.apply_loop_event(LoopEvent::ChatNotice { thread_id: thread_id.to_string(), text: "Automatic continuation is held: this conversation is read-only. Acquire ownership and Continue to receive pending subagent questions/reports.".into() });
             return;
         }
         let command = WorkbenchCommand::ContinueChat(self.chat_continuation(&thread_id, true));
         self.issued.push(command.clone());
         for event in self.sink.submit(command) {
-            if !matches!(event, LoopEvent::ChatNotice { .. }) {
-                self.apply_loop_event(event);
-            }
+            self.apply_loop_event(event);
         }
     }
 
@@ -566,7 +566,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.apply_loop_event(LoopEvent::ChatNotice {
             thread_id: thread_id.to_string(),
             text: format!(
-                "Paused automatic continuation after {limit} subagent reports without your input. Send a message to deliver the remaining reports and continue."
+                "Paused automatic continuation after {limit} subagent reports or question wake batches without your input. Send a message or Continue to deliver pending questions/reports."
             ),
         });
     }

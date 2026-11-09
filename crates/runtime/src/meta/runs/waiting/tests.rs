@@ -856,3 +856,87 @@ async fn all_waits_for_interactive_turns_and_reports_each_generation_once() {
     );
     cleanup(&runtime).await;
 }
+
+/// The queued receipt and the attention snapshot are one model-facing report,
+/// including synchronous delegate waits that deliberately leave messages queued.
+#[tokio::test]
+async fn question_attention_consumes_notice_for_wait_and_synchronous_delegate() {
+    for synchronous in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: directory.path().join("dedup.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+        let (runtime, mut state) =
+            crate::agent_loop::delegate_cleanup_tests::started_fixture(receiver).await;
+        let runtime =
+            runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let parent = state.caller_run_id();
+        let child = runtime
+            .delegate_background_as_child(
+                parent,
+                Role::Worker,
+                "waiting child",
+                RunConfig::default(),
+            )
+            .unwrap();
+        let q = runtime
+            .request_user_question(child, "One question".into(), vec![], false)
+            .unwrap();
+        state.transition(AgentRunPhase::Running, None).unwrap();
+        let result = wait_with(
+            &mut state,
+            &runtime,
+            json!({"run_ids":[child.to_string()]}),
+            !synchronous,
+        )
+        .await;
+        let result: Value = serde_json::from_str(&result.result.content).unwrap();
+        assert_eq!(result["attention_question_ids"], json!([q.id.clone()]));
+        assert!(state.reported_questions.contains(&q.id));
+        assert!(runtime.question_reported(&q.id));
+        assert!(
+            runtime.take_inbox(parent).unwrap().is_empty(),
+            "attention must consume the duplicate queued notice even for synchronous delegate"
+        );
+        cleanup(&runtime).await;
+    }
+}
+
+#[tokio::test]
+async fn recording_a_wait_snapshot_does_not_consume_a_later_saved_question() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("snapshot.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) =
+        crate::agent_loop::delegate_cleanup_tests::started_fixture(receiver.clone()).await;
+    let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let parent = state.caller_run_id();
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "waiting child", RunConfig::default())
+        .unwrap();
+    let first = runtime
+        .request_user_question(child, "In the snapshot".into(), vec![], false)
+        .unwrap();
+    let request = request(vec![child], WaitMode::Any, 0);
+    let result = observe(&runtime, parent, &request, receiver).await.unwrap();
+    let later = runtime
+        .request_user_question(child, "After the snapshot".into(), vec![], false)
+        .unwrap();
+    assert!(record_observations(&mut state, &runtime, &request, &result));
+    runtime.observe_questions(result.question_ids);
+    assert!(state.reported_questions.contains(&first.id));
+    assert!(!state.reported_questions.contains(&later.id));
+    assert!(runtime.question_reported(&first.id));
+    assert!(!runtime.question_reported(&later.id));
+    let messages = runtime.take_inbox(parent).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].content.contains(&later.id));
+    cleanup(&runtime).await;
+}

@@ -67,6 +67,12 @@ impl AgentRuntime {
     /// caller holds the runs lock and subscribed to the mailbox version first,
     /// so a waiting run observes them.
     pub(super) fn release_held_messages(&self, run_id: RunId, mailbox: &RunMailbox) {
+        self.shared
+            .question_delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .root_requests
+            .remove(&run_id);
         let held = self
             .shared
             .held_messages
@@ -79,10 +85,18 @@ impl AgentRuntime {
             .sent
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut retry = Vec::new();
         for queued in held.into_iter().filter(|message| !message.observed()) {
+            if queued
+                .question_notice()
+                .is_some_and(|n| n.paused.load(Ordering::Acquire))
+            {
+                retry.push(queued);
+                continue;
+            }
             let message = queued.message.clone();
             let sender = message.sender_run_id.parse::<RunId>().ok();
-            match mailbox.try_push_queued(queued) {
+            match mailbox.try_push_queued(queued.clone()) {
                 Ok(()) => {
                     if let Some(sender) = sender {
                         sent.insert(
@@ -95,14 +109,28 @@ impl AgentRuntime {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(%run_id, ?error, "held message could not be released")
+                    tracing::warn!(%run_id, ?error, "held message could not be released");
+                    if queued.question_notice().is_some() {
+                        retry.push(queued);
+                    }
                 }
             }
+        }
+        if !retry.is_empty() {
+            self.shared
+                .held_messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(run_id)
+                .or_default()
+                .splice(0..0, retry);
         }
     }
 
     /// The user spoke to this conversation: automatic wakes may continue.
     pub(crate) fn reset_auto_wakes(&self, root: RunId) {
+        self.reset_question_wakes(root);
+        self.schedule_question_recovery(root);
         self.shared
             .auto_wakes
             .lock()
@@ -123,7 +151,7 @@ impl AgentRuntime {
         handle.spawn(async move { runtime.wake(run).await });
     }
 
-    async fn wake(&self, run: RunId) {
+    pub(in crate::runtime) async fn wake(&self, run: RunId) {
         // A parent still finishing closed its mailbox; wake it once it settles.
         loop {
             let finishing = {
@@ -165,31 +193,73 @@ impl AgentRuntime {
         // the empty-queue check and emit a spurious host continuation request.
         let runs = lock_runs(&self.shared.runs);
         let Some(entry) = runs.get(&run) else { return };
-        let pending = {
+        if self
+            .shared
+            .question_delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .root_requests
+            .contains(&run)
+        {
+            return;
+        }
+        let (ordinary, notices) = {
             let mut held = self
                 .shared
                 .held_messages
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            held.get_mut(&run).is_some_and(|queue| {
-                queue.retain(|message| !message.observed());
-                !queue.is_empty()
-            })
+            let Some(queue) = held.get_mut(&run) else {
+                return;
+            };
+            queue.retain(|message| !message.observed());
+            (
+                queue.iter().any(|q| q.question_notice().is_none()),
+                queue
+                    .iter()
+                    .filter_map(|q| q.question_notice().cloned())
+                    .collect::<Vec<_>>(),
+            )
         };
-        if !pending {
+        if !ordinary && notices.is_empty() {
             return;
         }
         let parent = entry.parent;
-        let mut root = run;
-        let mut visited = HashSet::from([run]);
-        while let Some(parent) = runs.get(&root).and_then(|entry| entry.parent) {
-            if !visited.insert(parent) {
-                break;
-            }
-            root = parent;
-        }
-        if !self.take_auto_wake(root) {
+        // Do not spend a guard attempting an unauthorized recursive ancestor wake.
+        if parent.is_some_and(|p| runs.get(&p).is_none_or(|e| !is_live(e))) {
             return;
+        }
+        // Stop may have latched between the fast check and acquiring runs.
+        if self.operator_stopped(run) {
+            return;
+        }
+        let root = questions::delivery::conversation_root(&runs, run);
+        let auto_available = self
+            .shared
+            .auto_wakes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&root)
+            .is_none_or(|count| *count < AUTO_WAKE_LIMIT);
+        if ordinary && auto_available && self.take_auto_wake(root) {
+            for notice in &notices {
+                notice.paused.store(false, Ordering::Release);
+            }
+        } else if !self.admit_question_batch(root, run, &notices, true) {
+            // Ordinary-only exhausted batches keep the existing one-shot pause.
+            // A question fallback does not debit (even the pause sentinel of) AUTO_WAKE.
+            if ordinary {
+                self.take_auto_wake(root);
+            }
+            return;
+        }
+        if parent.is_none() {
+            self.shared
+                .question_delivery
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .root_requests
+                .insert(run);
         }
         match parent {
             None => {
@@ -244,7 +314,13 @@ impl AgentRuntime {
                 queue.retain(|message| !message.observed());
             }
             match held.get_mut(&run) {
-                Some(queue) if !queue.is_empty() => queue.remove(0),
+                Some(queue) => match queue.iter().position(|q| {
+                    q.question_notice()
+                        .is_none_or(|n| !n.paused.load(Ordering::Acquire))
+                }) {
+                    Some(index) => queue.remove(index),
+                    None => return,
+                },
                 _ => return,
             }
         };

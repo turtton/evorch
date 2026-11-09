@@ -79,6 +79,39 @@ impl Drop for ReleaseOnDrop {
         self.0.release();
     }
 }
+async fn through_lane_requests(
+    receiver: &mut EventReceiver,
+    events: &mut Vec<Event>,
+    start: usize,
+    lane: RunId,
+    expected: usize,
+) {
+    loop {
+        let completed = events[start..].iter().filter(|e| matches!(&e.kind,
+            EventKind::Provider(ProviderEvent::RequestCompleted { run_id:Some(id), .. }) if id == &lane.to_string())).count();
+        assert!(completed <= expected, "unexpected extra lane request");
+        let phase =
+            events[start..].iter().rev().find_map(|e| match &e.kind {
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    run_id, to, ..
+                }) if run_id == &lane.to_string() => Some(*to),
+                _ => None,
+            });
+        if completed == expected && phase == Some(AgentRunPhase::Waiting) {
+            break;
+        }
+        let event = receiver.recv().await.unwrap();
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            run_id,
+            to: AgentRunPhase::Error,
+            ..
+        }) = &event.kind
+        {
+            assert_ne!(run_id, &lane.to_string(), "lane failed: {event:?}");
+        }
+        events.push(event);
+    }
+}
 #[tokio::test]
 async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
     let (read_tx, mut reads) = tokio::sync::mpsc::unbounded_channel();
@@ -125,13 +158,19 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
         .as_str()
         .unwrap()
         .to_owned();
+    // The question notice wakes the idle lane before child completion. Freeze
+    // both final requests so completion always requires a separate followup.
+    let (initial_gate, initial_arrivals) = mock_openai::ResponseGate::new();
+    let _initial_release = ReleaseOnDrop(initial_gate.clone());
+    let initial_start = events.len();
     h.mock.enqueue([
         call(
             "child-ask",
             "ask_user",
             json!({"title":"scope decision?","blocking":false}),
         ),
-        text_response("independent child work complete"),
+        text_response("independent work observed").with_gate(initial_gate.clone()),
+        text_response("independent work observed").with_gate(initial_gate.clone()),
         text_response("lane observed child completion"),
     ]);
     let child = h
@@ -144,9 +183,16 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
             RunConfig::default(),
         )
         .unwrap();
+    tokio::task::spawn_blocking(move || {
+        initial_arrivals.recv().unwrap();
+        initial_arrivals.recv().unwrap();
+    })
+    .await
+    .unwrap();
+    initial_gate.release();
     events.extend(through_phase(&mut h.receiver, child, AgentRunPhase::Done).await);
     h.runtime.wait(child).await.unwrap();
-    events.extend(through_phase(&mut h.receiver, lane, AgentRunPhase::Waiting).await);
+    through_lane_requests(&mut h.receiver, &mut events, initial_start, lane, 2).await;
     let asked = result(&h, "child-ask");
     let id = asked["question_id"].as_str().unwrap().to_owned();
     let before = h.runtime.user_question(&id).unwrap().unwrap();
@@ -251,30 +297,7 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
     final_gate.release();
     events.extend(through_phase(&mut h.receiver, child, AgentRunPhase::Done).await);
     h.runtime.wait(child).await.unwrap();
-    loop {
-        let completed = events[start..].iter().filter(|e| matches!(&e.kind,
-            EventKind::Provider(ProviderEvent::RequestCompleted { run_id:Some(id), .. }) if id == &lane.to_string())).count();
-        let phase =
-            events[start..].iter().rev().find_map(|e| match &e.kind {
-                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                    run_id, to, ..
-                }) if run_id == &lane.to_string() => Some(*to),
-                _ => None,
-            });
-        if completed == 3 && phase == Some(AgentRunPhase::Waiting) {
-            break;
-        }
-        let event = h.receiver.recv().await.unwrap();
-        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-            run_id,
-            to: AgentRunPhase::Error,
-            ..
-        }) = &event.kind
-        {
-            assert_ne!(run_id, &lane.to_string(), "lane failed: {event:?}");
-        }
-        events.push(event);
-    }
+    through_lane_requests(&mut h.receiver, &mut events, start, lane, 3).await;
     let answered = h.runtime.user_answers(child).unwrap().remove(0);
     assert_eq!(answered.id, id);
     assert_eq!(answered.answer.as_deref(), Some("lead decision"));
@@ -443,6 +466,20 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
         .filter(|r| r.path == Wire::ChatCompletions.path())
         .map(|r| r.body)
         .collect::<Vec<_>>();
+    let lane_history = requests
+        .iter()
+        .filter(|r| actor(r) == 1)
+        .next_back()
+        .unwrap()["messages"]
+        .to_string();
+    assert_eq!(lane_history.matches("[subagent-question").count(), 1);
+    assert!(
+        requests
+            .iter()
+            .filter(|r| actor(r) == 0)
+            .all(|r| !r["messages"].to_string().contains("[subagent-question")),
+        "ordinary child notice must not be delivered to the lead"
+    );
     let child_requests = requests
         .iter()
         .filter(|r| actor(r) == 2)
