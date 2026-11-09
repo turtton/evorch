@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+core-instance = { path = "../core-instance" }
 workbench-host = { path = "../workbench-host" }
 workbench-protocol = { path = "../workbench-protocol" }
 workbench-web = { path = "../workbench-web" }
@@ -14,11 +15,9 @@ runtime = { path = "../runtime" }
 secret-guard = { path = "../secret-guard" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time"] }
 uuid = { workspace = true }
-rustix = { version = "1", features = ["process", "fs"] }
+rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 mock-openai = { path = "../mock-openai" }

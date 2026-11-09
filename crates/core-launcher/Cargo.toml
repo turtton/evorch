@@ -1,0 +1,24 @@
+[package]
+name = "core-launcher"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "core-launch-harness"
+path = "harness/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+uuid.workspace = true
+core-instance = { path = "../core-instance" }
+workbench-client = { path = "../workbench-client" }
+workbench-protocol = { path = "../workbench-protocol" }
+rustix = { version = "1", features = ["process"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time", "rt", "net", "io-util", "macros"] }
+
+[dev-dependencies]
+rustix = { version = "1", features = ["event"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "process", "test-util"] }

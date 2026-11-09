@@ -261,7 +261,88 @@ async fn foreground_web_health_handshake_rejection_and_sigterm_release_the_lock(
     client.closed().await;
     assert!(!std::path::Path::new(socket).exists());
     // Runtime directory selection must not change the database's lifetime lock.
-    let released =
-        evorch_core::instance::Instance::acquire(dir.path(), std::path::Path::new("/tmp")).unwrap();
+    let released = evorch_core::instance::Instance::acquire(
+        &evorch_core::instance::LaunchGuard::acquire(
+            &evorch_core::instance::ConfigIdentity::new(dir.path()).unwrap(),
+        )
+        .unwrap(),
+        std::path::Path::new("/tmp"),
+    )
+    .unwrap();
     drop(released);
+}
+
+#[test]
+fn cold_spawned_real_core_adopts_launch_and_publishes_handshake_epoch() {
+    use evorch_core::instance::{ConfigIdentity, LaunchGuard};
+    use std::io::BufRead;
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("p10-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "[web]\nport = 0\n[core]\nidle_grace_secs = 3600\n",
+    )
+    .unwrap();
+    let id = ConfigIdentity::new(dir.path()).unwrap();
+    let launch = LaunchGuard::acquire(&id).unwrap();
+    assert!(launch.lifetime_available().unwrap());
+    let mut command =
+        std::process::Command::new(std::env::var_os("CARGO_BIN_EXE_evorch-core").unwrap());
+    command
+        .arg("--config-dir")
+        .arg(dir.path())
+        .arg("--web")
+        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .env("XDG_RUNTIME_DIR", dir.path())
+        .current_dir(dir.path())
+        .stdout(Stdio::piped());
+    let mut child = Child(launch.spawn(command).unwrap());
+    let mut line = String::new();
+    std::io::BufReader::new(child.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(ready["status"], "ready");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let record = id.read_record().unwrap().unwrap();
+    let client = rt.block_on(async {
+        WorkbenchClient::connect(
+            UnixTransport::connect(&record.socket).await.unwrap(),
+            ClientConfig::new(
+                ClientId::new("cold-real-core").unwrap(),
+                BuildInfo {
+                    name: "test".into(),
+                    version: "1".into(),
+                    revision: None,
+                },
+            ),
+        )
+        .await
+        .unwrap()
+    });
+    assert_eq!(client.server_hello().instance_epoch.0, record.epoch);
+    assert_eq!(client.server_hello().core.as_str(), id.identity());
+    drop(launch);
+    let launch = LaunchGuard::acquire(&id).unwrap();
+    assert!(!launch.lifetime_available().unwrap());
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(child.0.id() as i32).unwrap(),
+        rustix::process::Signal::TERM,
+    )
+    .unwrap();
+    assert!(child.0.wait().unwrap().success());
+    assert!(launch.lifetime_available().unwrap());
 }

@@ -68,7 +68,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         for outcome in resolver.take_rows_results() {
             match outcome.request.purpose {
                 RowsPurpose::Rehydrate { thread } => {
-                    self.finish_rehydrate(&thread, &outcome.request.runs, outcome.result);
+                    self.finish_rehydrate(
+                        &thread,
+                        &outcome.request.runs,
+                        outcome.request.through,
+                        outcome.result,
+                        outcome.harness_notices,
+                    );
                 }
                 RowsPurpose::Gap { run, event_id } => {
                     self.finish_gap(&run, event_id, outcome.request.through, outcome.result);
@@ -185,8 +191,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         &mut self,
         thread: &str,
         runs: &[String],
+        through: i64,
         result: Result<Vec<HistoryRow>, BodyError>,
+        notices: storage::HarnessNoticeSnapshot,
     ) {
+        let mut harness = super::harness_recovery::HarnessReplay::from_snapshot(notices);
         self.shared_feed.rehydrating.remove(thread);
         let rows = match result {
             Ok(rows) => rows,
@@ -216,9 +225,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             if let Some(at) = at {
                 while messages.peek().is_some_and(|message| message.at <= at) {
                     if let Some(message) = messages.next() {
+                        harness.show_through(&mut self.transcripts, message.at);
                         self.restore_user_message(message);
                     }
                 }
+            }
+            if let Some(at) = at {
+                harness.show_through(&mut self.transcripts, at);
             }
             match row {
                 HistoryRow::Failure(failure) => {
@@ -229,12 +242,28 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         .set_source(Some((row.first_id.unwrap_or(row.id), row.id)));
                     self.apply_conversation_event_with_body(&row.event, row.body.as_ref());
                     self.transcripts.set_source(None);
+                    if let event_bus::EventKind::Lifecycle(
+                        event_bus::LifecycleEvent::TurnCompleted {
+                            run_id,
+                            context_len,
+                        },
+                    ) = &row.event.kind
+                    {
+                        // The parent has now reached the point an imported branch inherits.
+                        self.seed_branches(Some(&workspace_ui::ForkPoint {
+                            run_id: run_id.clone(),
+                            context_len: *context_len,
+                        }));
+                    }
                 }
             }
         }
         for message in messages {
+            harness.show_message_through(&mut self.transcripts, message.at, through);
             self.restore_user_message(message);
         }
+        harness.show_tail_through(&mut self.transcripts, through);
+        self.shared_feed.harness.extend(harness);
         for (id, event) in unreadable {
             self.unreadable_history_events.entry(id).or_insert(event);
         }

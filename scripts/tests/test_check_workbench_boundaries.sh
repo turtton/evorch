@@ -38,14 +38,28 @@ make_metadata() {
     }'
 }
 
+# The gui/evorch dependency ratchet reads an allowlist; cases get this one unless
+# they set CASE_ALLOWLIST. It covers what the passing graph (GOOD) declares for gui.
+DEFAULT_ALLOWLIST='# comment lines and blanks are ignored
+
+gui workbench-host normal 19b   # trailing comment'
+CASE_ALLOWLIST=$DEFAULT_ALLOWLIST
+
 pass=0
 fail=0
 # run_case <name> <expect: ok|fail> <expected output substring or ""> <<< spec
 run_case() {
   local name=$1 expect=$2 needle=$3
-  make_metadata > "$work/$name.json"
+  if [[ -n ${CASE_METADATA:-} ]]; then
+    cp "$CASE_METADATA" "$work/$name.json"
+  else
+    make_metadata > "$work/$name.json"
+  fi
+  printf '%s\n' "$CASE_ALLOWLIST" > "$work/$name.allow"
   local status=0
   WORKBENCH_BOUNDARY_CORE_CRATES="${CASE_CORE_CRATES:-runtime storage config}" \
+    WORKBENCH_BOUNDARY_ALLOWLIST="${CASE_ALLOWLIST_PATH:-$work/$name.allow}" \
+    WORKBENCH_BOUNDARY_STALE_ALLOWLIST="${CASE_STALE:-warn}" \
     "$checker" "$work/$name.json" > "$work/$name.out" 2>&1 || status=$?
   local ok=1
   if [[ $expect == ok && $status -ne 0 ]]; then ok=0; fi
@@ -61,7 +75,7 @@ run_case() {
   fi
 }
 
-WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","test-support"]'
+WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","evorch","core-instance","core-launcher","test-support"]'
 EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu","axum","http","futures-core","http-body-util","hyper","hyper-util"]'
 GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","to":"serde_json"},{"from":"workbench-protocol","to":"thiserror"},
       {"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-client","to":"tokio"},{"from":"workbench-client","to":"thiserror"},
@@ -279,6 +293,308 @@ SPEC
 run_case web_package_missing fail "workspace member 'workbench-web' not found" <<SPEC
 {"workspace": ["workbench-protocol","workbench-client","workbench-host","runtime"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-host","to":"workbench-protocol"}]}
 SPEC
+
+
+# gui / evorch dependency ratchet: direct workspace dependencies are frozen by an
+# allowlist. Only additions fail; the allowlisted ones may be optional, target-
+# specific or any kind that the list names.
+CASE_ALLOWLIST=$DEFAULT_ALLOWLIST
+run_case ratchet_reports_allowlist_size ok "1 allowlisted gui/evorch dependencies" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+run_case ratchet_gui_new_normal_dependency fail "gui declares workspace dependency runtime [normal; declared] that is not in" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"runtime"}]}
+SPEC
+
+run_case ratchet_gui_new_optional_dependency fail "gui declares workspace dependency storage [normal; declared, optional]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"storage","optional":true,"resolved":false}]}
+SPEC
+
+run_case ratchet_gui_new_target_specific_dependency fail "gui declares workspace dependency config [normal; declared, target cfg(unix)]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"config","target":"cfg(unix)","resolved":false}]}
+SPEC
+
+run_case ratchet_gui_new_dev_dependency fail "gui declares workspace dependency runtime [dev; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"runtime","kind":"dev"}]}
+SPEC
+
+run_case ratchet_gui_new_build_dependency fail "gui declares workspace dependency storage [build; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"storage","kind":"build"}]}
+SPEC
+
+run_case ratchet_gui_new_optional_target_specific_dev_dependency fail "gui declares workspace dependency test-support [dev; declared, optional, target cfg(unix)]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"test-support","kind":"dev","optional":true,"target":"cfg(unix)","resolved":false}]}
+SPEC
+
+run_case ratchet_allowlisted_dependency_with_another_kind fail "gui declares workspace dependency workbench-host [dev; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"workbench-host","kind":"dev"}]}
+SPEC
+
+run_case ratchet_evorch_new_normal_dependency fail "evorch declares workspace dependency runtime [normal; declared] that is not in" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"runtime"}]}
+SPEC
+
+run_case ratchet_evorch_new_optional_dependency fail "evorch declares workspace dependency storage [normal; declared, optional]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"storage","optional":true,"resolved":false}]}
+SPEC
+
+run_case ratchet_evorch_new_target_specific_dependency fail "evorch declares workspace dependency config [normal; declared, target cfg(unix)]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"config","target":"cfg(unix)","resolved":false}]}
+SPEC
+
+run_case ratchet_evorch_new_dev_dependency fail "evorch declares workspace dependency test-support [dev; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"test-support","kind":"dev"}]}
+SPEC
+
+run_case ratchet_evorch_new_build_dependency fail "evorch declares workspace dependency storage [build; declared]" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"storage","kind":"build"}]}
+SPEC
+
+run_case ratchet_client_and_protocol_need_no_entry ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"workbench-protocol"},{"from":"evorch","to":"workbench-client","kind":"dev"},{"from":"evorch","to":"workbench-protocol","optional":true,"resolved":false}]}
+SPEC
+
+run_case ratchet_core_instance_and_launcher_need_no_entry ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"core-launcher"},{"from":"gui","to":"core-instance","kind":"dev"},{"from":"evorch","to":"core-launcher"},{"from":"evorch","to":"core-instance","optional":true,"resolved":false},{"from":"core-launcher","to":"core-instance"},{"from":"core-launcher","to":"workbench-client"},{"from":"core-launcher","to":"workbench-protocol"}]}
+SPEC
+
+run_case ratchet_third_party_dependencies_are_not_counted ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch","to":"regex"},{"from":"gui","to":"egui"}]}
+SPEC
+
+CASE_ALLOWLIST="gui workbench-host normal 19b
+gui runtime normal 19b
+gui storage normal 19b
+gui storage dev 19b
+gui config normal 20
+gui test-support dev unassigned
+evorch runtime normal 17
+evorch storage build 19b"
+run_case ratchet_allows_listed_optional_target_dev_and_build_dependencies ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"runtime","optional":true,"resolved":false},{"from":"gui","to":"storage","target":"cfg(unix)","resolved":false},{"from":"gui","to":"storage","kind":"dev"},{"from":"gui","to":"config"},{"from":"gui","to":"test-support","kind":"dev"},{"from":"evorch","to":"runtime"},{"from":"evorch","to":"storage","kind":"build"}]}
+SPEC
+
+# Shrinking passes by default, with a stale-entry warning; strict mode fails.
+run_case ratchet_removed_dependency_passes_with_a_stale_warning ok "warning: stale allowlist entry: gui runtime normal (removal PR 19b)" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_STALE=fail
+run_case ratchet_stale_entry_fails_in_strict_mode fail "stale allowlist entry: gui runtime normal" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+CASE_STALE=
+
+CASE_ALLOWLIST="gui workbench-host normal 19b
+gui workbench-host normal 19b"
+run_case ratchet_duplicate_allowlist_entry fail "duplicate entry gui workbench-host normal" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST="gui workbench-host normal soon"
+run_case ratchet_allowlist_needs_a_removal_pr fail "removal PR soon must be a PR step" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST="gui workbench-host normal"
+run_case ratchet_allowlist_missing_removal_pr fail "expected \`<crate> <dependency> <kind> <removal-pr>\`, got 3 field(s)" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST="gui workbench-host optional 19b"
+run_case ratchet_allowlist_kind_is_not_optional fail "kind optional must be normal, dev or build" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST="runtime storage normal 19b
+gui workbench-host normal 19b"
+run_case ratchet_allowlist_covers_only_gui_and_evorch fail "crate runtime is not covered by the ratchet" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_ALLOWLIST=$DEFAULT_ALLOWLIST
+CASE_ALLOWLIST_PATH="$work/no-such-allowlist.txt"
+run_case ratchet_missing_allowlist_file fail "no-such-allowlist.txt not found" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
+SPEC
+CASE_ALLOWLIST_PATH=
+
+run_case ratchet_gui_package_missing fail "workspace member 'gui' not found" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","evorch"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"}]}
+SPEC
+
+run_case ratchet_evorch_package_missing fail "workspace member 'evorch' not found" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","gui"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"}]}
+SPEC
+
+
+run_case ratchet_exempt_crates_absent_from_the_workspace_is_fine ok "boundary check passed" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","evorch"], $EXT, "deps": [$GOOD]}
+SPEC
+
+run_case core_instance_with_a_workspace_dependency fail "core-instance must not depend on workspace crate runtime" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"core-instance","to":"runtime","optional":true,"resolved":false}]}
+SPEC
+
+run_case core_launcher_with_an_allowed_closure ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"core-launcher","to":"core-instance"},{"from":"core-launcher","to":"workbench-client"},{"from":"core-launcher","to":"workbench-protocol","kind":"dev"}]}
+SPEC
+
+run_case core_launcher_reaching_runtime_through_a_dependency fail "core-launcher must not depend on workspace crate runtime: core-launcher -> test-support [normal; resolved] -> runtime" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"core-launcher","to":"test-support"},{"from":"test-support","to":"runtime"}]}
+SPEC
+
+# Cases built from real Cargo manifests: `cargo metadata` output for small
+# workspaces, so renames, `workspace = true` inheritance and [patch] sections go
+# through Cargo's own resolver. The registry is a local directory source, so no
+# network is used.
+write_crate() { # <dir> <crate> <dependency tables>
+  mkdir -p "$1/crates/$2/src"
+  : > "$1/crates/$2/src/lib.rs"
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n%s\n' "$2" "$3" > "$1/crates/$2/Cargo.toml"
+}
+make_workspace() { # <dir> [extra workspace tables]
+  local dir=$1
+  mkdir -p "$dir/.cargo" "$dir/vendor/runtime/src"
+  printf '[source.crates-io]\nreplace-with = "local"\n[source.local]\ndirectory = "vendor"\n' > "$dir/.cargo/config.toml"
+  printf '[package]\nname = "runtime"\nversion = "0.1.0"\nedition = "2021"\n' > "$dir/vendor/runtime/Cargo.toml"
+  : > "$dir/vendor/runtime/src/lib.rs"
+  printf '{"files":{},"package":null}\n' > "$dir/vendor/runtime/.cargo-checksum.json"
+  printf '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n%s\n' "${2:-}" > "$dir/Cargo.toml"
+  write_crate "$dir" workbench-protocol ''
+  write_crate "$dir" workbench-client 'workbench-protocol = { path = "../workbench-protocol" }'
+  write_crate "$dir" workbench-host $'workbench-protocol = { path = "../workbench-protocol" }\nruntime = { path = "../runtime" }'
+  write_crate "$dir" workbench-web 'workbench-protocol = { path = "../workbench-protocol" }'
+  write_crate "$dir" runtime ''
+  write_crate "$dir" evorch-core $'runtime = { path = "../runtime" }\nworkbench-host = { path = "../workbench-host" }'
+  write_crate "$dir" gui 'workbench-host = { path = "../workbench-host" }'
+  write_crate "$dir" evorch ''
+  write_crate "$dir" core-instance ''
+  write_crate "$dir" core-launcher $'core-instance = { path = "../core-instance" }\nworkbench-client = { path = "../workbench-client" }\nworkbench-protocol = { path = "../workbench-protocol" }'
+}
+add_to_crate() { # <dir> <crate> <toml appended to the manifest>
+  printf '%s\n' "$3" >> "$1/crates/$2/Cargo.toml"
+}
+# run_real_case <name> <expect> <needle> [crate=toml-to-append ...]; extra workspace
+# tables come from REAL_WORKSPACE_EXTRA.
+run_real_case() {
+  local name=$1 expect=$2 needle=$3
+  shift 3
+  local dir="$work/ws-$name"
+  make_workspace "$dir" "${REAL_WORKSPACE_EXTRA:-}"
+  local spec
+  for spec in "$@"; do
+    add_to_crate "$dir" "${spec%%=*}" "${spec#*=}"
+  done
+  (cd "$dir" && cargo metadata --format-version 1 --offline > "$work/$name.metadata.json" 2> "$work/$name.cargo.err") \
+    || { fail=$((fail + 1)); echo "FAIL - $name (cargo metadata failed)"; sed 's/^/       | /' "$work/$name.cargo.err"; return; }
+  CASE_METADATA="$work/$name.metadata.json" CASE_CORE_CRATES=runtime run_case "$name" "$expect" "$needle" < /dev/null
+}
+
+if command -v cargo > /dev/null; then
+  CASE_ALLOWLIST='gui workbench-host normal 19b'
+
+  run_real_case real_manifest_clean_workspace ok "boundary check passed"
+
+  run_real_case real_gui_renamed_dependency fail "gui declares workspace dependency runtime [normal; declared]" \
+    $'gui=rt = { path = "../runtime", package = "runtime" }'
+
+  REAL_WORKSPACE_EXTRA=$'[workspace.dependencies]\nrt = { path = "crates/runtime", package = "runtime" }'
+  run_real_case real_gui_workspace_inherited_dependency fail "gui declares workspace dependency runtime [normal; declared]" \
+    $'gui=rt = { workspace = true }'
+  run_real_case real_evorch_workspace_inherited_dev_dependency fail "evorch declares workspace dependency runtime [dev; declared]" \
+    $'evorch=[dev-dependencies]\nrt = { workspace = true }'
+  REAL_WORKSPACE_EXTRA=
+
+  run_real_case real_gui_optional_target_dependency fail "gui declares workspace dependency runtime [normal; declared, optional, target cfg(unix)]" \
+    $'gui=[target.\'cfg(unix)\'.dependencies]\nruntime = { path = "../runtime", optional = true }'
+
+  run_real_case real_evorch_build_dependency fail "evorch declares workspace dependency runtime [build; declared]" \
+    $'evorch=[build-dependencies]\nruntime = { path = "../runtime" }'
+
+  run_real_case real_registry_crate_with_a_workspace_name_is_not_internal ok "boundary check passed" \
+    $'gui=runtime = "0.1"'
+
+  REAL_WORKSPACE_EXTRA=$'[patch.crates-io]\nruntime = { path = "crates/runtime" }'
+  run_real_case real_gui_dependency_patched_to_a_workspace_crate fail "gui declares workspace dependency runtime [normal; resolved" \
+    $'gui=runtime = "0.1"'
+  run_real_case real_evorch_dev_dependency_patched_to_a_workspace_crate fail "evorch declares workspace dependency runtime [dev; resolved" \
+    $'evorch=[dev-dependencies]\nruntime = "0.1"'
+  run_real_case real_core_instance_dependency_patched_to_a_workspace_crate fail "core-instance must not depend on workspace crate runtime" \
+    $'core-instance=runtime = "0.1"'
+  REAL_WORKSPACE_EXTRA=
+
+  run_real_case real_gui_depends_on_the_launcher ok "boundary check passed" \
+    $'gui=core-launcher = { path = "../core-launcher" }' \
+    $'evorch=core-instance = { path = "../core-instance" }'
+
+  run_real_case real_gui_reaches_the_core_through_the_launcher fail "core-launcher must not depend on workspace crate runtime: core-launcher -> runtime" \
+    $'gui=core-launcher = { path = "../core-launcher" }' \
+    $'core-launcher=runtime = { path = "../runtime" }'
+
+  run_real_case real_launcher_optional_target_dependency fail "core-launcher must not depend on workspace crate runtime: core-launcher -> runtime [normal; declared, optional, target cfg(unix)]" \
+    $'core-launcher=[target.\'cfg(unix)\'.dependencies]\nruntime = { path = "../runtime", optional = true }'
+
+  run_real_case real_launcher_depends_on_the_host fail "core-launcher must not depend on workspace crate workbench-host" \
+    $'core-launcher=workbench-host = { path = "../workbench-host" }'
+
+  run_real_case real_core_instance_depends_on_the_protocol fail "core-instance must not depend on workspace crate workbench-protocol" \
+    $'core-instance=workbench-protocol = { path = "../workbench-protocol" }'
+
+  run_real_case real_core_instance_dev_dependency fail "core-instance must not depend on workspace crate runtime: core-instance -> runtime [dev; resolved]" \
+    $'core-instance=[dev-dependencies]\nruntime = { path = "../runtime" }'
+
+  # The script's own `cargo metadata` call: it must resolve every feature, or an
+  # optional dependency that a [patch] section redirects to a workspace crate
+  # would have no resolved edge. run_case cannot be used because it passes a
+  # metadata file; the script gets the fixture workspace through its manifest
+  # override.
+  run_real_script_case() { # <name> <expect> <needle> [crate=toml-to-append ...]
+    local name=$1 expect=$2 needle=$3
+    shift 3
+    local dir="$work/ws-$name"
+    make_workspace "$dir" "${REAL_WORKSPACE_EXTRA:-}"
+    local spec
+    for spec in "$@"; do
+      add_to_crate "$dir" "${spec%%=*}" "${spec#*=}"
+    done
+    (cd "$dir" && cargo generate-lockfile --offline > /dev/null 2> "$work/$name.cargo.err") \
+      || { fail=$((fail + 1)); echo "FAIL - $name (cargo generate-lockfile failed)"; sed 's/^/       | /' "$work/$name.cargo.err"; return; }
+    printf '%s\n' "$CASE_ALLOWLIST" > "$work/$name.allow"
+    local status=0
+    WORKBENCH_BOUNDARY_MANIFEST_PATH="$dir/Cargo.toml" WORKBENCH_BOUNDARY_CORE_CRATES=runtime \
+      WORKBENCH_BOUNDARY_ALLOWLIST="$work/$name.allow" \
+      "$checker" > "$work/$name.out" 2>&1 || status=$?
+    local ok=1
+    if [[ $expect == ok && $status -ne 0 ]]; then ok=0; fi
+    if [[ $expect == fail && $status -ne 1 ]]; then ok=0; fi
+    if [[ -n $needle ]] && ! grep -qF -- "$needle" "$work/$name.out"; then ok=0; fi
+    if [[ $ok -eq 1 ]]; then
+      pass=$((pass + 1))
+      echo "ok   - $name"
+    else
+      fail=$((fail + 1))
+      echo "FAIL - $name (expected $expect${needle:+ containing '$needle'}, exit $status)"
+      sed 's/^/       | /' "$work/$name.out"
+    fi
+  }
+
+  run_real_script_case real_script_runs_cargo_metadata_itself ok "boundary check passed"
+
+  REAL_WORKSPACE_EXTRA=$'[patch.crates-io]\nruntime = { path = "crates/runtime" }'
+  run_real_script_case real_gui_unselected_optional_dependency_patched_to_a_workspace_crate fail "gui declares workspace dependency runtime [normal; resolved" \
+    $'gui=runtime = { version = "0.1", optional = true }'
+  run_real_script_case real_evorch_unselected_optional_build_dependency_patched fail "evorch declares workspace dependency runtime [build; resolved" \
+    $'evorch=[build-dependencies]\nruntime = { version = "0.1", optional = true }'
+  run_real_script_case real_core_instance_unselected_optional_dependency_patched fail "core-instance must not depend on workspace crate runtime" \
+    $'core-instance=runtime = { version = "0.1", optional = true }'
+  run_real_script_case real_core_launcher_unselected_optional_target_dependency_patched fail "core-launcher must not depend on workspace crate runtime" \
+    $'core-launcher=[target.\'cfg(unix)\'.dependencies]\nruntime = { version = "0.1", optional = true }'
+  REAL_WORKSPACE_EXTRA=
+else
+  echo "skip - real-manifest cases (cargo not found)"
+fi
 
 echo "$pass passed, $fail failed"
 [[ $fail -eq 0 ]]

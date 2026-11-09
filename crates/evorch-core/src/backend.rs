@@ -83,7 +83,7 @@ impl HostBackend {
                     revision: None,
                 },
                 core: CoreIdentity::new(identity).expect("sha256 identity"),
-                instance_epoch: InstanceEpoch(uuid::Uuid::new_v4().as_u128() as u64),
+                instance_epoch: InstanceEpoch((uuid::Uuid::new_v4().as_u128() as u64).max(1)),
                 limits: WireLimits::default(),
                 status: CoreStatus {
                     state: CoreState::Ready,
