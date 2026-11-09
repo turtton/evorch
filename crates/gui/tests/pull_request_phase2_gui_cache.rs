@@ -47,6 +47,8 @@ fn messages(request: &Value) -> &Vec<Value> {
 #[tokio::test]
 async fn bar_operations_keep_the_wire_prefix_and_one_send_appends_one_notice() {
     let mut world = World::mocked().await;
+    // New settings make the scheduler fetch again, and a fixture that answers once would run out.
+    world.source.repeat_last();
     let failing = world.failing('a');
     world.link(failing).await;
     let first = world.requests();
@@ -88,10 +90,6 @@ async fn bar_operations_keep_the_wire_prefix_and_one_send_appends_one_notice() {
     world.show();
     // The global switch turned off and on announces itself to the bar and is not input either.
     for enabled in [false, true] {
-        world.source.push_ok(
-            &pull_request_world::key(phase2_world::NUMBER),
-            world.failing('a'),
-        );
         let mut settings = world.service.settings();
         settings.auto_fix_enabled = enabled;
         world.service.update_settings(settings).unwrap();
@@ -100,7 +98,7 @@ async fn bar_operations_keep_the_wire_prefix_and_one_send_appends_one_notice() {
                 matches!(
                     change,
                     event_bus::PullRequestEvent::AutoFixChanged {
-                        reason: event_bus::PullRequestAutoFixChange::Policy,
+                        reason: event_bus::PullRequestAutoFixChange::Settings,
                         ..
                     }
                 )

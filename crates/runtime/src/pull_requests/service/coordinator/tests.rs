@@ -874,7 +874,7 @@ async fn the_global_auto_fix_switch_announces_each_linked_thread_only_when_it_ch
                     thread_id,
                     link_revision,
                     transition_seq,
-                    reason: PullRequestAutoFixChange::Policy,
+                    reason: PullRequestAutoFixChange::Settings,
                     ..
                 } => Some((thread_id.clone(), *link_revision, *transition_seq)),
                 _ => None,
@@ -910,4 +910,49 @@ async fn the_global_auto_fix_switch_announces_each_linked_thread_only_when_it_ch
     p.service.update_settings(enabled()).unwrap();
     let events = p.quiet_events().await;
     assert_eq!(announced(&events), expected(&p), "{events:?}");
+}
+
+fn announced_threads(events: &[PullRequestEvent]) -> Vec<String> {
+    let mut threads: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            PullRequestEvent::AutoFixChanged {
+                thread_id,
+                reason: PullRequestAutoFixChange::Settings,
+                ..
+            } => Some(thread_id.clone()),
+            _ => None,
+        })
+        .collect();
+    threads.sort();
+    threads
+}
+// Given: the switch is changed before the scheduler has run at all / Then: the change is still
+// announced, once the scheduler runs
+#[tokio::test(start_paused = true)]
+async fn a_switch_change_made_before_the_scheduler_first_runs_is_announced() {
+    let w = World::new();
+    let mut p = w.process(enabled());
+    p.link_directly("t", 1);
+    let mut off = enabled();
+    off.auto_fix_enabled = false;
+    p.service.update_settings(off).unwrap();
+    let events = p.quiet_events().await;
+    assert_eq!(announced_threads(&events), ["t"], "{events:?}");
+}
+// Given: the switch is turned off and on again before the scheduler looks / Then: the change is
+// not lost although the value is back where it was: each linked thread is told once
+#[tokio::test(start_paused = true)]
+async fn a_switch_turned_off_and_on_again_between_two_looks_is_announced_once() {
+    let w = World::new();
+    let mut p = w.process(enabled());
+    p.link_directly("t", 1);
+    p.link_directly("u", 2);
+    p.quiet_events().await;
+    let mut off = enabled();
+    off.auto_fix_enabled = false;
+    p.service.update_settings(off).unwrap();
+    p.service.update_settings(enabled()).unwrap();
+    let events = p.quiet_events().await;
+    assert_eq!(announced_threads(&events), ["t", "u"], "{events:?}");
 }

@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use event_bus::PullRequestAutoFixChange;
@@ -42,6 +43,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
     let mut settings = inner.settings.subscribe();
     let mut shutdown = inner.shutdown.subscribe();
     let mut applied = *settings.borrow();
+    let mut announced = 0;
     loop {
         if *shutdown.borrow() {
             break;
@@ -51,10 +53,12 @@ pub(super) async fn run(inner: Arc<Inner>) {
         // which branch of the select won.
         if config != applied {
             inner.apply_new_settings();
-            if config.auto_fix_enabled != applied.auto_fix_enabled {
-                inner.announce_global_auto_fix().await;
-            }
             applied = config;
+        }
+        let changes = inner.auto_fix_switch_changes.load(Ordering::SeqCst);
+        if changes != announced {
+            announced = changes;
+            inner.announce_global_auto_fix().await;
         }
         let due = if config.enabled {
             inner.round().await
@@ -177,9 +181,10 @@ impl Inner {
     }
 
     /// The `[pull_requests] auto_fix_enabled` switch changed: every thread with an active link
-    /// shows it (the bar's "Off by settings"), so each one is told to read its state again. The
-    /// scheduler runs this, not `update_settings`, which is synchronous and may be called from
-    /// outside the runtime. Archived and deleted threads show nothing and read it on restore.
+    /// shows it (the bar's "Off by settings"), so each one is told to read its state again.
+    /// The scheduler runs this, not `update_settings`, which is synchronous and may be called
+    /// from outside the runtime; `update_settings` only counts the change, so none is lost.
+    /// Archived and deleted threads show nothing and read it on restore.
     async fn announce_global_auto_fix(&self) {
         let mut after = 0;
         loop {
@@ -201,7 +206,7 @@ impl Inner {
             let full = page.len() == PAGE;
             for link in page {
                 after = link.link_id;
-                self.announce_auto_fix(&link.thread_id, PullRequestAutoFixChange::Policy)
+                self.announce_auto_fix(&link.thread_id, PullRequestAutoFixChange::Settings)
                     .await;
             }
             if !full {

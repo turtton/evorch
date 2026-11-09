@@ -650,10 +650,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ..
         } = change
         {
-            // The answer to what this window issued has arrived (the read it started follows).
-            self.pull_requests
-                .issued
-                .retain(|(thread, _)| thread != thread_id);
+            // The answer to what this window issued has arrived (the read it started follows). A
+            // change of the global switch answers nothing this window issued.
+            if *reason != PullRequestAutoFixChange::Settings {
+                self.pull_requests
+                    .issued
+                    .retain(|(thread, _)| thread != thread_id);
+            }
             if let PullRequestAutoFixChange::Adopted {
                 automatic,
                 limit_epoch,

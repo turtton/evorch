@@ -79,6 +79,13 @@ impl PersistencePolicy {
                 monitor.skipped_run_progress();
                 true
             }
+            // Each process reads its own configuration: a change of the global auto fix switch
+            // concerns this process's displays only. Storing it would hand it, through the
+            // event log, to the shared feed of every other process.
+            EventKind::PullRequest(event_bus::PullRequestEvent::AutoFixChanged {
+                reason: event_bus::PullRequestAutoFixChange::Settings,
+                ..
+            }) => true,
             // The bus already logs each lag episode and live subscribers still
             // see the fault. Persisting it let a saturated subscriber write one
             // row per episode, and nothing reads those rows back.

@@ -394,6 +394,8 @@ async fn a_stop_and_a_resume_reach_the_bar_without_any_other_event() {
 #[tokio::test]
 async fn the_bar_shows_the_coordinators_unknown_head_and_the_global_switch() {
     let mut world = World::recorded().await;
+    // New settings make the scheduler fetch again, and a fixture that answers once would run out.
+    world.source.repeat_last();
     let failing = world.failing('a');
     world.link(failing).await;
     world.click(toggle());
@@ -428,17 +430,14 @@ async fn the_bar_shows_the_coordinators_unknown_head_and_the_global_switch() {
             change,
             event_bus::PullRequestEvent::AutoFixChanged {
                 thread_id,
-                reason: event_bus::PullRequestAutoFixChange::Policy,
+                reason: event_bus::PullRequestAutoFixChange::Settings,
                 ..
             } if thread_id == THREAD
         )
     };
-    // New settings make the scheduler fetch again at once: the pull request stays as it was.
-    let key = pull_request_world::key(phase2_world::NUMBER);
     for _ in 0..2 {
         let mut settings = world.service.settings();
         settings.auto_fix_enabled = false;
-        world.source.push_ok(&key, world.failing('a'));
         world.service.update_settings(settings).unwrap();
         world.until_pr(policy).await;
         world.show();
@@ -456,7 +455,6 @@ async fn the_bar_shows_the_coordinators_unknown_head_and_the_global_switch() {
         );
 
         settings.auto_fix_enabled = true;
-        world.source.push_ok(&key, world.failing('a'));
         world.service.update_settings(settings).unwrap();
         world.until_pr(policy).await;
         world.show();
