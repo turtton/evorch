@@ -477,3 +477,192 @@ fn recovery_failure_diagnostics_do_not_release_the_outgoing_wake_guard() {
     assert!(!progressed.suppressed);
     assert_eq!(progressed.no_progress_batches, 0);
 }
+
+#[test]
+fn accepted_ordinary_delivery_resolves_recovery_atomically_without_restore() {
+    for case in ["stop", "stale", "receive-failure", "accepted"] {
+        let f = setup();
+        let mut episode = failure(&f, 10);
+        for at in [20, 30] {
+            episode = failure(&f, at);
+        }
+        assert_eq!(episode.state, LaneRecoveryState::Suppressed);
+        let c = claim(&f.h(), 40);
+        match case {
+            "stop" | "stale" => {
+                f.h()
+                    .bind_lane_delivery_destination(
+                        "lead".into(),
+                        0,
+                        owner(),
+                        if case == "stop" {
+                            LaneDestinationAction::Stop
+                        } else {
+                            LaneDestinationAction::Bind
+                        },
+                    )
+                    .unwrap();
+            }
+            "receive-failure" => {
+                // The first notice has already been adopted when the second
+                // receipt fails: episode resolution must roll back with it.
+                f.sql()
+                    .execute_batch(
+                        "CREATE TRIGGER fail_second_receipt BEFORE INSERT ON host_input_receipts
+                     WHEN (SELECT COUNT(*) FROM host_input_receipts)=1
+                     BEGIN SELECT RAISE(ABORT,'injected accept failure'); END;",
+                    )
+                    .unwrap();
+            }
+            _ => (),
+        }
+        let mut write = snapshot();
+        write.record.messages_json = write
+            .record
+            .messages_json
+            .replace("notification reference", "accepted batch after recovery");
+        let result = f.h().accept_lane_delivery(c.clone(), write.clone(), 41);
+        if case == "accepted" {
+            assert!(result.unwrap().is_some());
+            let resolved = f
+                .h()
+                .lane_recovery_episode(episode.episode_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(resolved.state, LaneRecoveryState::Resolved);
+            assert_eq!(resolved.attempts, 3, "retain the failure history");
+            assert_eq!(
+                resolved.revision,
+                episode.revision + 1,
+                "one batch transition"
+            );
+            assert_eq!(
+                f.h().accept_lane_delivery(c.clone(), write, 42).unwrap(),
+                None
+            );
+            f.h().ack_lane_delivery(c, 43).unwrap();
+            let page = f
+                .db()
+                .lane_attention(
+                    storage::lane_control::LaneAttentionFilter {
+                        lead_thread_id: "lead".into(),
+                        project_id: None,
+                    },
+                    None,
+                    20,
+                )
+                .unwrap();
+            assert!(!page.items.iter().any(|i| matches!(
+                i.kind,
+                storage::lane_control::LaneAttentionKind::RestoreFailed { .. }
+            )));
+        } else {
+            assert!(result.is_err(), "{case}");
+            assert_eq!(
+                f.h()
+                    .lane_recovery_episode(episode.episode_id.clone())
+                    .unwrap()
+                    .unwrap(),
+                episode,
+                "{case}"
+            );
+            assert_eq!(f.count("host_input_receipts"), 0, "{case}");
+            if case == "stop" {
+                assert!(
+                    f.h()
+                        .lane_delivery_destination("lead".into())
+                        .unwrap()
+                        .unwrap()
+                        .stopped
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn restore_attention_identity_does_not_reuse_revision_across_episodes() {
+    let f = setup();
+    for at in [10, 20, 30] {
+        failure(&f, at);
+    }
+    let current_item = || {
+        f.db()
+            .lane_attention(
+                storage::lane_control::LaneAttentionFilter {
+                    lead_thread_id: "lead".into(),
+                    project_id: None,
+                },
+                None,
+                20,
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|i| {
+                matches!(
+                    i.kind,
+                    storage::lane_control::LaneAttentionKind::RestoreFailed {
+                        suppressed: true,
+                        ..
+                    }
+                )
+            })
+            .unwrap()
+    };
+    let old = current_item();
+    f.h()
+        .bind_lane_delivery_destination(
+            "lead".into(),
+            0,
+            owner(),
+            LaneDestinationAction::ExplicitUserResume,
+        )
+        .unwrap();
+    for at in [50, 60, 70] {
+        let req = LaneClaimRequest {
+            expected_destination_epoch: 1,
+            ..request(at)
+        };
+        let LaneClaimResult::Claimed(c) = f.h().claim_lane_deliveries(req).unwrap() else {
+            panic!()
+        };
+        let attempt = f.h().prepare_lane_recovery(c.clone(), at).unwrap();
+        f.h()
+            .record_lane_recovery_failure(c.clone(), attempt, at + 1)
+            .unwrap();
+        f.h()
+            .nack_lane_delivery(c, LaneDeliveryNack::RestoreFailed, at + 2)
+            .unwrap();
+    }
+    let new = current_item();
+    assert_eq!(old.revision, 4);
+    assert_eq!(old.revision, new.revision);
+    match (&old.kind, &new.kind) {
+        (
+            storage::lane_control::LaneAttentionKind::RestoreFailed {
+                destination_thread_id: old_dest,
+                failure_ref: old_episode,
+                ..
+            },
+            storage::lane_control::LaneAttentionKind::RestoreFailed {
+                destination_thread_id: new_dest,
+                failure_ref: new_episode,
+                ..
+            },
+        ) => {
+            assert_eq!(old_dest, new_dest);
+            assert_ne!(old_episode, new_episode);
+        }
+        _ => unreachable!(),
+    }
+    assert_ne!(
+        old.id, new.id,
+        "a fresh episode cannot confirm an old Resume"
+    );
+    assert_eq!(
+        new.id,
+        current_item().id,
+        "identity is stable within an episode"
+    );
+}

@@ -518,3 +518,28 @@ fn recovery_resume_cannot_redirect_or_bypass_fresh_item_permission() {
         assert!(workbench.issued().is_empty(), "{case}");
     }
 }
+
+#[test]
+fn old_recovery_resume_cannot_confirm_a_new_episode_at_the_same_revision() {
+    let (mut workbench, reader, _dir) = workbench();
+    let mut old = recovery_item("lane-thread-1");
+    old.revision = Revision(4);
+    reader.set(vec![old.clone()]);
+    settle(&mut workbench);
+    let mut new = old;
+    // Storage gives distinct episodes distinct item IDs, even when their
+    // destination and within-episode revision coincide.
+    new.id = LaneAttentionItemId::new("second-recovery-item").unwrap();
+    if let LaneAttentionKind::RestoreFailed { failure_ref, .. } = &mut new.kind {
+        *failure_ref = "second-recovery-episode".into();
+    }
+    reader.set(vec![new]);
+    let action = AttentionAction {
+        item: Some(("item".into(), 4)),
+        ..resume_recovery("lane-thread-1")
+    };
+    workbench.apply_attention_action(&egui::Context::default(), action);
+    assert!(workbench.issued().is_empty());
+    settle(&mut workbench);
+    assert!(workbench.issued().is_empty());
+}

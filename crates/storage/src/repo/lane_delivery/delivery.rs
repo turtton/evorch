@@ -437,6 +437,11 @@ impl OutboxNotice for LaneNotification {
         wake_sources: &mut std::collections::HashSet<String>,
     ) -> Result<(), StorageError> {
         crate::repo::lane_control::accept_nudge(conn, self)?;
+        // Another source may already have revived this destination. Actual
+        // ordinary input acceptance is progress even without a new restore.
+        if !matches!(self.kind, LaneNotificationKind::Nudge { .. }) {
+            resolve_recovery_destination(conn, &self.destination_thread_id)?;
+        }
         let source = lane(conn, &self.lane_id)?;
         if source.thread_id == self.destination_thread_id {
             crate::repo::lane_control::input_progress(

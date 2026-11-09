@@ -245,7 +245,11 @@ fn items(
                 });
                 result.push(item(
                     &l,
-                    &("restore", &destination),
+                    &(
+                        "restore",
+                        &destination,
+                        recovery.as_ref().map(|e| &e.episode_id),
+                    ),
                     recovery.as_ref().map_or(count, |e| e.revision),
                     recovery
                         .as_ref()

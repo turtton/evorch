@@ -291,6 +291,8 @@ fn nudge_done_wake_receipt_is_retryable_and_consumes_no_guard() {
     let anchor = f.h().lane_progress_anchor("lane-1".into()).unwrap();
     let mut write = snapshot();
     write.record.run_id = "run-1".into();
+    f.h().upsert_run_context(&write.record).unwrap();
+    let recovery = f.h().prepare_lane_recovery(claim.clone(), 11).unwrap();
     f.h()
         .accept_lane_delivery(claim.clone(), write.clone(), 12)
         .unwrap();
@@ -302,6 +304,14 @@ fn nudge_done_wake_receipt_is_retryable_and_consumes_no_guard() {
     );
     assert_eq!(f.h().lane_wake_guard("lane-1".into()).unwrap(), before);
     assert_eq!(f.h().lane_progress_anchor("lane-1".into()).unwrap(), anchor);
+    assert_eq!(
+        f.h()
+            .lane_recovery_episode(recovery.episode.episode_id.clone())
+            .unwrap()
+            .unwrap(),
+        recovery.episode,
+        "Nudge acceptance is not ordinary input progress"
+    );
     assert_eq!(
         f.h()
             .lane_stall_episode(e.episode_id)
