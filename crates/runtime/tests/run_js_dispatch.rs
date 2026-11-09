@@ -5,6 +5,8 @@
 //! The worker is a `sh` script that speaks the JSON Lines protocol, so the tests
 //! need neither the evorch binary nor bubblewrap.
 
+#[path = "support/paused_process_clock.rs"]
+mod paused_process_clock;
 mod support;
 
 use std::path::{Path, PathBuf};
@@ -95,12 +97,25 @@ fn run_js_call(id: &str) -> providers::ChatResponse {
 }
 
 async fn run(fixture: &Fixture, role: Role) -> Vec<Event> {
-    let mut events = fixture.bus.subscribe();
+    let mut receiver = fixture.bus.subscribe();
     let run = fixture
         .runtime
         .delegate_background(role, "task".into(), RunConfig::default());
     assert_eq!(fixture.runtime.wait(run).await, Ok(AgentRunPhase::Done));
-    drain_events(&mut events).await
+    let mut events = Vec::new();
+    loop {
+        let event = receiver.recv().await.unwrap();
+        let terminal = matches!(
+            &event.kind,
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id, to: AgentRunPhase::Done, ..
+            }) if run_id == &run.to_string()
+        );
+        events.push(event);
+        if terminal {
+            return events;
+        }
+    }
 }
 
 fn started<'a>(events: &'a [Event], name: &str) -> Vec<(&'a str, Option<&'a str>)> {
@@ -459,12 +474,26 @@ read -r reply
     assert_eq!(detail["run_js"]["limit_hit"], "tool_calls");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_timed_out_call_leaves_no_worker_process() {
+    let _clock = paused_process_clock::hold();
     let directory = tempfile::tempdir().unwrap();
     let pid_file = directory.path().join("worker.pid");
-    // The worker records its pid and then ignores the run: only the host can end it.
-    let script = format!("echo $$ > {}\nexec sleep 600", pid_file.display());
+    let ready = directory.path().join("ready");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&ready)
+            .status()
+            .unwrap()
+            .success()
+    );
+    // A slow worker start cannot consume its virtual deadline. The signal comes
+    // after it read the run and recorded its PID; then it blocks until killed.
+    let script = format!(
+        "echo $$ > {}\nprintf ready > {}\nread -r never",
+        pid_file.display(),
+        ready.display(),
+    );
     let fixture = fixture(
         worker(&script),
         None,
@@ -475,7 +504,15 @@ async fn a_timed_out_call_leaves_no_worker_process() {
         ],
     );
 
-    let events = run(&fixture, Role::Worker).await;
+    let (events, ()) = tokio::join!(run(&fixture, Role::Worker), async {
+        let signal = tokio::task::spawn_blocking(move || std::fs::read_to_string(ready))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(signal, "ready");
+        // Cross both the requested 500 ms and the host's worker-kill grace.
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+    });
 
     let text = result_text(&fixture.model, "js-1").await;
     assert!(text.contains("timed out after 500 ms"), "{text}");
