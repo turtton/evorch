@@ -136,6 +136,13 @@ impl AgentRuntime {
         let _stop_guard = stop_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Management commits share restore_gate. Validate inside that gate, and
+        // retain it through registration/admission: a pre-restore read alone
+        // lets detach commit between checking a claim and scheduling its root.
+        if !operator_resume {
+            self.validate_pending_lane_wake(run_id)
+                .map_err(|reason| fail(RunRestoreFailure::LaneDeliveryFenced(reason)))?;
+        }
         if prompt.is_none()
             && let Some(store) = store
             && let Some(receipt) = store

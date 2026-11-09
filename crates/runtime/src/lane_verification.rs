@@ -22,6 +22,8 @@ thread_local! {
     /// verification target is read, to model a concurrent brief + ready update.
     static AFTER_LANE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    static BEFORE_CLOSE_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 fn after_lane_read() {
     #[cfg(test)]
@@ -37,7 +39,9 @@ fn same_brief_revision(
     target: &LaneVerificationTarget,
     error: LaneOperationError,
 ) -> Result<(), LaneError> {
-    if lane.brief_revision == target.brief_revision {
+    if lane.brief_revision == target.brief_revision
+        && lane.management_revision == target.management_revision
+    {
         Ok(())
     } else {
         Err(operation(error))
@@ -225,6 +229,10 @@ impl AgentRuntime {
             .map_err(|_| operation(LaneOperationError::OwnershipLost))?;
         // Recheck live termination after external observation as well.
         self.reconcile_lane_reviewer(&v)?;
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_CLOSE_COMMIT.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
         let result = store
             .handle
             .close_lane(CloseLane {

@@ -2,6 +2,7 @@ use super::*;
 mod delivery;
 mod forwarding;
 mod handoff;
+mod management;
 mod questions;
 mod verification;
 fn call(id: &str, name: &str, input: Value) -> ScriptedResponse {

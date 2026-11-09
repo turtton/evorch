@@ -179,6 +179,18 @@ pub(crate) fn claim<N: OutboxNotice>(
         notifications,
     }))
 }
+/// Read one consistent snapshot; unlike accept/ACK, this creates no receipt or
+/// delivery progress. The runtime holds its restore gate across wake admission.
+pub(crate) fn validate_claim(
+    conn: &Connection,
+    claim: &LaneDeliveryClaim,
+    now_ns: i64,
+) -> Result<(), StorageError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+    check_claim(&tx, claim, now_ns)?;
+    tx.commit()?;
+    Ok(())
+}
 fn check_claim<N: OutboxNotice>(
     conn: &Connection,
     claim: &LaneDeliveryClaim<N>,

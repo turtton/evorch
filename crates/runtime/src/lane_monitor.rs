@@ -9,6 +9,10 @@ use storage::{
     lane_delivery::{LaneDeliveryClaim, LaneDeliveryNack, LaneDestinationAction},
 };
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_FAILURE_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 #[derive(Clone, Copy)]
 pub(crate) struct MonitorSettings {
     no_report: i64,
@@ -452,22 +456,80 @@ impl AgentRuntime {
             let Ok(Some(episode)) = store.handle.lane_stall_episode(episode_id.clone()) else {
                 continue;
             };
-            if episode.resolved_at_ns.is_some() || episode.nudge_state != LaneNudgeState::Pending {
+            if episode.resolved_at_ns.is_some()
+                || !matches!(
+                    episode.nudge_state,
+                    LaneNudgeState::Pending | LaneNudgeState::Failed
+                )
+            {
                 continue;
             }
             let observation = ObserveLaneStall {
-                lane_id: episode.lane_id,
+                lane_id: episode.lane_id.clone(),
                 management_revision: episode.management_revision,
                 owner: target.owner(),
-                progress_anchor: episode.progress_anchor,
+                progress_anchor: episode.progress_anchor.clone(),
                 classification: Class::RestoreUnavailable,
                 at_ns,
             };
-            if let Err(error) = store.handle.reclassify_lane_stall(
-                observation,
-                episode.episode_id,
-                episode.revision,
-            ) {
+            let result = (|| -> Result<(), LaneError> {
+                let Some(lane) = store.handle.lane(&episode.lane_id)? else {
+                    return Ok(());
+                };
+                if lane.policy == LanePolicy::Detached
+                    || lane.management_revision != episode.management_revision
+                    || lane.root_run_id.as_deref() != Some(&target.root_run_id.to_string())
+                {
+                    return Ok(());
+                }
+                let failed = if episode.nudge_state == LaneNudgeState::Pending {
+                    store.handle.reclassify_lane_stall(
+                        observation.clone(),
+                        episode.episode_id.clone(),
+                        episode.revision,
+                    )?
+                } else {
+                    episode
+                };
+                // The final write must compare episode, latest report AND progress
+                // in one transaction. An earlier obsolete check is not a fence.
+                #[cfg(test)]
+                if let Some(hook) = BEFORE_FAILURE_COMMIT.with(|h| h.borrow_mut().take()) {
+                    hook();
+                }
+                if let Some(appended) = store.handle.append_lane_monitor_failure(
+                    storage::lane_management::LaneMonitorFailure {
+                        observation,
+                        episode_id: failed.episode_id.clone(),
+                        expected_episode_revision: failed.revision,
+                        expected_report_seq: lane.latest_report_seq,
+                        report: event_bus::LaneReportInput {
+                            status: LaneStatus::Failed,
+                            summary: "Runtime recovery failed; inspect the run diagnostic.".into(),
+                            artifact_refs: vec![],
+                            artifact_revision: None,
+                            failure_episode: Some(failed.episode_id),
+                            needs_human: false,
+                            question_refs: vec![],
+                            reason_code: Some("restore_failed".into()),
+                            producer: event_bus::LaneReportProducer::Harness,
+                        },
+                    },
+                )? {
+                    self.record_lane_report_progress(&appended.report)?;
+                    self.shared.bus.emit(event_bus::Event::new(
+                        appended.lane.report_appended_event(
+                            &appended.report,
+                            Some(target.root_run_id.to_string()),
+                        ),
+                    ));
+                    if let Some(lead) = appended.lane.lead_thread_id {
+                        self.schedule_lane_deliveries(&lead);
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
                 self.lane_delivery_diagnostic(
                     Some(target.root_run_id),
                     "lane_nudge_failure_record_failed",

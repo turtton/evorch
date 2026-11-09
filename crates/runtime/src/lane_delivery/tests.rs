@@ -11,6 +11,7 @@ tokio::task_local! {
 mod harness;
 pub(super) mod integration;
 mod lease;
+mod management;
 mod monitor;
 mod questions;
 mod todo;

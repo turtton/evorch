@@ -57,7 +57,13 @@ pub trait LaneDeliveryHost: Send + Sync {
         runtime
             .wake_chat(target.root_run_id, target.authority.clone())
             .map(|_| ())
-            .map_err(|_| LaneDeliveryNack::RestoreFailed)
+            .map_err(|error| match error {
+                crate::RuntimeError::RunRestoreFailed {
+                    reason: crate::RunRestoreFailure::LaneDeliveryFenced(reason),
+                    ..
+                } => reason,
+                _ => LaneDeliveryNack::RestoreFailed,
+            })
     }
     fn now_ns(&self) -> i64 {
         crate::run_store::review_time_ns()
@@ -675,6 +681,15 @@ impl AgentRuntime {
         match execute {
             Ok(notifications) => {
                 if let Err(error) = claim.ack(&store.handle, host.now_ns()) {
+                    // A management commit may release the whole batch after input
+                    // acceptance. The receipt/prefix remain durable; retry uses that
+                    // same receipt. This is a superseded claim, not storage failure.
+                    if matches!(
+                        &error,
+                        storage::StorageError::LaneDeliveryConflict("stale_claim")
+                    ) {
+                        return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost));
+                    }
                     if let Err(nack) = claim.nack(
                         &store.handle,
                         LaneDeliveryNack::StorageFailed,
@@ -722,6 +737,7 @@ impl AgentRuntime {
                     self.fail_lane_nudges(&target, lane, host.now_ns());
                 }
                 if reason == LaneDeliveryNack::RestoreFailed
+                    && !failing_nudge
                     && claim.lane().is_some()
                     && let Err(error) = self.record_lane_harness_failure(
                         target.root_run_id,
@@ -800,10 +816,17 @@ impl AgentRuntime {
             );
         // Queue before restoring: the prepared loop must save receipts before
         // any provider request, including an unfinished restored turn.
-        if !active {
-            claim.check_nudge(self, &current, false)?;
-        }
-        if !active && let Err(reason) = host.restore_root(self, &current) {
+        // This early rejection avoids calling a host for an already-fenced
+        // claim. wake_chat repeats it under restore_gate, the authoritative
+        // linearization point shared with management (the host may interleave).
+        let restore = if active {
+            Ok(())
+        } else {
+            self.validate_pending_lane_wake(target.root_run_id)
+                .and_then(|()| claim.check_nudge(self, &current, false))
+                .and_then(|()| host.restore_root(self, &current))
+        };
+        if let Err(reason) = restore {
             delivery
                 .pending
                 .lock()
@@ -828,6 +851,34 @@ impl AgentRuntime {
         } else {
             rx.await.unwrap_or(Err(LaneDeliveryNack::RestoreFailed))
         }
+    }
+    /// Caller in wake_chat holds restore_gate until restore registration. This
+    /// is not a receipt acceptance: stale claims must not wake an unfinished turn.
+    pub(crate) fn validate_pending_lane_wake(&self, run_id: RunId) -> Result<(), LaneDeliveryNack> {
+        let claim = self
+            .shared
+            .lanes
+            .delivery
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .and_then(|pending| pending.claim.lane().cloned());
+        let Some(claim) = claim else {
+            return Ok(());
+        };
+        let host = self
+            .lane_monitor_host()
+            .ok_or(LaneDeliveryNack::UnknownThread)?;
+        self.delivery_store()
+            .map_err(|_| LaneDeliveryNack::StorageFailed)?
+            .handle
+            .validate_lane_delivery_claim(claim, host.now_ns())
+            .map_err(|error| match error {
+                storage::StorageError::LaneDeliveryConflict(_)
+                | storage::StorageError::Tombstoned { .. } => LaneDeliveryNack::OwnershipLost,
+                _ => LaneDeliveryNack::StorageFailed,
+            })
     }
     /// The source report/outbox transaction already applied terminal progress.
     /// Keep B's port hook inert: a delayed older report must not rewind the
@@ -1176,7 +1227,9 @@ impl AgentRuntime {
         let Some(lane) = store.handle.lane_by_thread(&thread)? else {
             return Ok(());
         };
-        if lane.root_run_id.as_deref() != Some(&run.to_string()) {
+        if lane.root_run_id.as_deref() != Some(&run.to_string())
+            || lane.policy == event_bus::LanePolicy::Detached
+        {
             return Ok(());
         }
         let appended = store.handle.append_lane_report_with_delivery(
