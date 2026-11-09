@@ -14,6 +14,8 @@
 //! service's execution entry points are crate-private, so this type is the only
 //! way to run a command and none of the steps can be skipped.
 
+mod conversation;
+
 use workbench_protocol::commands::{
     AnswerUserQuestion, Command, CommandDisposition, CommandReply, ComposerRole as WireRole,
     ContinueChat, Delegation, ModelPreference, ReferenceKind as WireReferenceKind, SendChat,
@@ -35,6 +37,7 @@ use crate::receipts::{Receipts, SubmissionRecord};
 /// The command service together with what the host remembers about commands.
 pub struct CommandHost {
     service: CommandService,
+    conversation: conversation::ConversationState,
     pub(crate) lane_sidebar_path: Option<std::path::PathBuf>,
     receipts: Receipts,
     projects: Box<dyn ProjectDirectory>,
@@ -98,6 +101,7 @@ impl CommandHost {
         );
         Self {
             service,
+            conversation: Default::default(),
             lane_sidebar_path: None,
             projection,
             receipts: Receipts::default(),
@@ -152,6 +156,7 @@ impl CommandHost {
         provenance.validate()?;
         command.validate()?;
         match command {
+            Command::Conversation(input) => self.conversation_command(input, &provenance),
             Command::ManageLane(input) => self.manage_lane_command(input, &provenance),
             Command::SendChat(send) => self.send_chat(&send, &provenance),
             Command::WithdrawFollowUp(withdraw) => self.withdraw_follow_up(&withdraw),
@@ -372,6 +377,7 @@ impl CommandHost {
             tracing::warn!(code = ?error.code, "approval resolved; projection refresh failed");
         }
         Ok(CommandReply {
+            conversation: None,
             lane_management: None,
             disposition: CommandDisposition::Accepted,
             submission_id: None,
@@ -733,6 +739,7 @@ impl CommandHost {
         let permit = self.service.authorize(&command).map_err(refusal_error)?;
         match self.execute(command, permit, provenance) {
             Executed::Duplicate { run_id, .. } => Ok(CommandReply {
+                conversation: None,
                 lane_management: None,
                 disposition: CommandDisposition::AlreadyApplied,
                 submission_id: Some(send.submission_id.clone()),
@@ -754,16 +761,12 @@ impl CommandHost {
     }
 
     fn chat_input(&self, send: &SendChat) -> Result<ChatInput, WorkbenchError> {
-        if !send.images.is_empty() {
-            return Err(unsupported(
-                "image attachments are not available through the protocol yet",
-            ));
-        }
+        let images = self.conversation.images(send)?;
         Ok(ChatInput {
             submission_id: send.submission_id.as_str().to_owned(),
             project_root: Some(self.project_root(&send.project)?),
             composer_role: composer_role(send.composer_role),
-            images: Vec::new(),
+            images,
             thread_id: send.thread.as_str().to_owned(),
             text: send.text.clone(),
             skills: send.skills.clone(),
@@ -827,7 +830,8 @@ impl CommandHost {
             Command::SetAgentWebToolsEnabled(set) => HostCommand::SetWebToolsEnabled {
                 enabled: set.enabled,
             },
-            Command::ManageLane(_)
+            Command::Conversation(_)
+            | Command::ManageLane(_)
             | Command::SendChat(_)
             | Command::WithdrawFollowUp(_)
             | Command::DecideToolApproval(_) => {
@@ -838,7 +842,7 @@ impl CommandHost {
 
     fn goal_input(&self, goal: &SubmitGoal) -> Result<GoalInput, WorkbenchError> {
         match &goal.delegation {
-            None | Some(Delegation::Direct) => {}
+            None | Some(Delegation::Direct) | Some(Delegation::Team { .. }) => {}
             // The desktop's delegation value starts a team; the protocol's
             // reference names a packet or issue to resolve. Mapping one onto the
             // other would start something the client did not ask for.
@@ -850,7 +854,10 @@ impl CommandHost {
         }
         Ok(GoalInput {
             project_root: Some(self.project_root(&goal.project)?),
-            delegation_value: None,
+            delegation_value: match &goal.delegation {
+                Some(Delegation::Team { value }) => Some(value.clone()),
+                _ => None,
+            },
             project_id: goal.project.as_str().to_owned(),
             thread_id: goal.thread.as_str().to_owned(),
             goal: goal.objective.clone(),
@@ -891,6 +898,7 @@ impl CommandHost {
             .withdraw_follow_up(thread, withdraw.submission_id.as_str())
         {
             Ok(()) => Ok(CommandReply {
+                conversation: None,
                 lane_management: None,
                 disposition: CommandDisposition::Accepted,
                 submission_id: Some(withdraw.submission_id.clone()),
@@ -958,6 +966,7 @@ fn reply_from_events(
     submission_id: Option<SubmissionId>,
 ) -> Result<CommandReply, WorkbenchError> {
     let mut reply = CommandReply {
+        conversation: None,
         lane_management: None,
         disposition: CommandDisposition::Accepted,
         submission_id,

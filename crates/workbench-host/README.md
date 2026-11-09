@@ -149,3 +149,34 @@ Payload examples (wire u64 values are decimal strings):
 {"type":"read_committed_history","payload":{"thread":"thread-1","direction":"backward","page":{"limit":25}}}
 {"id":"approval-1","core_epoch":"7","revision":"1","thread":"thread-1","run":"run-1","tool_name":"shell","summary":"null","summary_truncated":false,"input_bytes":"4","state":"pending"}
 ```
+
+## PR08-1: conversation bootstrap
+
+- Negotiate `conversation.v1`. The single new top-level command is
+  `Conversation`; its operations resolve an already registered absolute project
+  root, create an execution with client-generated thread/submission IDs, prepare
+  a legacy thread, upload an image, and discard an unused image. Project lookup
+  never adds settings or asserts trust. Existing `SendChat` / `ContinueChat`
+  remain the common continuation/queue path.
+- `PrepareExistingThread` is deliberately narrower than general recovery: the
+  persisted project root must match a currently approved host sidebar declaration,
+  the old owner must be Released **and** its IPC endpoint demonstrably offline,
+  and canonical ADR0024 claim must pass. Live/uncertain/stale owners are not
+  forcibly acquired. Tombstones are checked before and after claim. Preparation
+  binds the saved root; actual resume still uses the runtime's canonical restore
+  through SendChat/ContinueChat. This is not PR05 checkpoint recovery.
+- Uploads accept base64 bytes, never paths. PNG/JPEG/GIF/WebP must decode, match
+  their MIME, fit 4096x4096 / 64 MiB decode limits and 512 KiB base64 per upload.
+  Opaque IDs are scoped to project/thread and the core epoch. The bounded pending
+  table holds at most 32 images / 8 MiB base64; explicitly discard unused IDs.
+  Sent images enter the existing durable runtime input path; clients retain
+  unsent bytes and re-upload after an epoch change. No streaming body is added.
+- `Delegation::Team { value }` has the desktop team-objective meaning;
+  `Reference` remains distinct and unsupported rather than silently starting a team.
+- Keep one ClientConfig across reconnects: it preserves both request numbering
+  and the logical receipt session. OutcomeUnknown requires GetCommandReceipt;
+  Unknown is not proof that a command never ran (bounded receipts/core restart),
+  so do not automatically resend. No disconnect means StopRun.
+- PR08-2 wires the GUI adapter/cache; PR08s may namespace the existing top-level
+  protocol. PR09–16 still own settings and other management surfaces; PR17 should
+  reuse these bootstrap/attachment operations rather than reading client files.

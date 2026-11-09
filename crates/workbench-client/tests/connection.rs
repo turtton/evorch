@@ -121,6 +121,61 @@ async fn a_command_round_trips_and_carries_the_session() {
 }
 
 #[tokio::test]
+async fn reconnect_keeps_the_receipt_namespace_without_resending_a_lost_command() {
+    let config = config();
+    let hello = server_hello(WireLimits::default());
+    let (transport, mut server) = FakeTransport::pair();
+    let (client, _) = tokio::join!(
+        WorkbenchClient::connect(transport, config.clone()),
+        server.handshake(&hello),
+    );
+    let client = client.unwrap();
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.command(stop_chat("thr-9")).await }
+    });
+    let original = server.recv_request().await.unwrap();
+    server.close();
+    assert_eq!(
+        call.await.unwrap(),
+        Err(ClientError::Transport(TransportError::OutcomeUnknown {
+            request_id: original.request_id.clone()
+        }))
+    );
+    let (transport, mut server) = FakeTransport::pair();
+    let (reconnected, _) = tokio::join!(
+        WorkbenchClient::connect(transport, config),
+        server.handshake(&hello),
+    );
+    let reconnected = reconnected.unwrap();
+    assert_eq!(client.session_id(), reconnected.session_id());
+    let query = Query::GetCommandReceipt {
+        request_id: original.request_id.clone(),
+    };
+    let lookup = tokio::spawn({
+        let client = reconnected.clone();
+        let query = query.clone();
+        async move { client.query(query).await }
+    });
+    // The first post-reconnect frame is a query, not a resend of StopChat.
+    let request = server.recv_request().await.unwrap();
+    assert_eq!(request.session_id, original.session_id);
+    assert_ne!(request.request_id, original.request_id);
+    assert_eq!(request.body, RequestBody::Query(query));
+    let receipt = QueryReply::CommandReceipt(CommandReceipt {
+        request_id: original.request_id,
+        state: CommandReceiptState::Applied {
+            reply: command_reply(),
+        },
+    });
+    server.reply(
+        &request.request_id,
+        ok(ReplyPayload::Query(receipt.clone())),
+    );
+    assert_eq!(lookup.await.unwrap().unwrap(), receipt);
+}
+
+#[tokio::test]
 async fn replies_may_arrive_in_any_order() {
     let (client, mut server) = connected().await;
     let calls: Vec<_> = (0..3)

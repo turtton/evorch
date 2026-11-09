@@ -262,6 +262,10 @@ impl BootstrappedHost {
         let host = Arc::new(Mutex::new(
             CommandHost::new(service)
                 .with_projects(projects.directory)
+                .with_legacy_import(
+                    options.ownership_root.clone(),
+                    options.config_dir.join("sidebar.json"),
+                )
                 .with_lane_sidebar_path(options.config_dir.join("sidebar.json")),
         ));
         #[cfg(any(test, feature = "test-support"))]

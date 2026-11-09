@@ -284,7 +284,8 @@ impl Query {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum CommandReceiptState {
-    /// The core has no record, so the command did not take effect and may be sent again.
+    /// The core has no retained record. Eviction or restart can lose a receipt,
+    /// so this is not proof of non-execution and must not trigger a blind resend.
     Unknown,
     Applied {
         reply: CommandReply,
