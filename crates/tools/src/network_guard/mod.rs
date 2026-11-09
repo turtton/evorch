@@ -13,7 +13,9 @@ mod dns;
 mod error;
 mod https;
 mod ip_policy;
+pub mod mcp;
 mod size;
+pub mod stream;
 
 pub use dns::DnsResolver;
 use dns::{HickoryResolver, PinningResolver};

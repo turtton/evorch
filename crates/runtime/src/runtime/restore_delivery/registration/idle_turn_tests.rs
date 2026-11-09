@@ -61,6 +61,7 @@ impl Fixture {
             .unwrap()
             .map_or(0, |bundle| bundle.snapshot_revision);
         let restored = RestoredState {
+            mcp_snapshot: None,
             harness_notice_pending: false,
             provenance: Default::default(),
             snapshot_revision: crate::restore::revision::SnapshotRevision::known(revision),

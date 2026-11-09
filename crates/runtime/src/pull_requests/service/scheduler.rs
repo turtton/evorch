@@ -19,6 +19,9 @@ use super::flight::{Flight, Interest, Target};
 use super::{Inner, KeyState, Stage};
 use crate::ownership::OwnerPermit;
 
+#[cfg(test)]
+mod tests;
+
 /// Rows read per page of a listing.
 const PAGE: usize = 200;
 

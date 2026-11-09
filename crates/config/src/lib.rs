@@ -9,6 +9,7 @@ pub mod agent_categories;
 mod env;
 pub mod error;
 pub mod load;
+pub mod mcp;
 mod merge;
 mod migrate;
 pub mod presets;

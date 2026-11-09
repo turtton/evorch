@@ -48,9 +48,9 @@ async fn mcp_scope_emits_diagnostic_when_call_succeeds() {
 #[tokio::test]
 async fn mcp_scope_emits_diagnostic_when_communication_fails() {
     for (index, method, id) in [
-        (0, "initialize", 1),
-        (2, "tools/list", 2),
-        (3, "tools/call", 3),
+        (0, "server/discover", 1),
+        (1, "tools/list", 2),
+        (2, "tools/call", 3),
     ] {
         // Given/When: the server fails a different stage of the allowed call.
         let (_, events, run) = scenario(Role::WebResearcher, Failure::Http(index), None).await;

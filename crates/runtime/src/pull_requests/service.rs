@@ -793,7 +793,9 @@ impl PullRequestService {
     }
 
     /// Asks for a fetch of the thread's pull request now (the "update" operation). Returns once
-    /// the request is registered; the result arrives as stored facts and an event. A thread
+    /// the request is registered; the result arrives as stored facts and an event. Requests
+    /// during an existing fetch coalesce into one follow-up after it, never into its old result.
+    /// A thread
     /// whose owner is gone becomes owned by the process that got `permit` (the caller starts
     /// or claims the lease first, as it does for chat), which resumes the polling.
     ///
@@ -807,10 +809,18 @@ impl PullRequestService {
         let inner = &self.inner;
         inner.enabled()?;
         inner.check_permit(thread_id, permit).await?;
-        if inner.thread_state(thread_id).await?.active_link.is_none() {
+        let Some(link) = inner.thread_state(thread_id).await?.active_link else {
             return Err(PullRequestError::NotLinked);
+        };
+        {
+            let mut state = inner.lock();
+            if let Some(flight) = state.flights.get(&link.key) {
+                flight.request_refresh();
+            } else {
+                state.forced.insert(thread_id.to_owned());
+            }
         }
-        inner.force(thread_id);
+        inner.wake.notify_one();
         Ok(())
     }
 

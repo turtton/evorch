@@ -23,6 +23,12 @@ pub enum CredentialError {
     /// OS の資格情報サービスを利用できない。
     #[error("資格情報サービスを利用できません: {detail}")]
     KeychainUnavailable { detail: String },
+    /// OS keychain is locked (keychain-only callers).
+    #[error("資格情報サービスがロックされています")]
+    KeychainLocked,
+    /// OS authorization prompt was cancelled or denied (keychain-only callers).
+    #[error("資格情報サービスの承認が取り消されました")]
+    KeychainCancelled,
 }
 
 #[cfg(test)]

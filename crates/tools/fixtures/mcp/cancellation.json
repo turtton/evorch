@@ -1,0 +1,103 @@
+[
+  {
+    "name": "modern_stdio_sends_cancelled",
+    "era": "Modern",
+    "transport": "stdio",
+    "phase": "request",
+    "issued": true,
+    "in_flight": true,
+    "expected": "notify_and_flush_then_close",
+    "notification": {
+      "jsonrpc": "2.0",
+      "method": "notifications/cancelled",
+      "params": {
+        "requestId": 7
+      }
+    }
+  },
+  {
+    "name": "modern_http_closes_without_cancel_notification",
+    "era": "Modern",
+    "transport": "http",
+    "phase": "request",
+    "issued": true,
+    "in_flight": true,
+    "expected": "close",
+    "notification": null
+  },
+  {
+    "name": "legacy_stdio_sends_cancelled",
+    "era": "Legacy",
+    "transport": "stdio",
+    "phase": "request",
+    "issued": true,
+    "in_flight": true,
+    "expected": "notify_and_flush_then_close",
+    "notification": {
+      "jsonrpc": "2.0",
+      "method": "notifications/cancelled",
+      "params": {
+        "requestId": 7
+      }
+    }
+  },
+  {
+    "name": "legacy_http_cancels_same_session",
+    "era": "Legacy",
+    "transport": "http",
+    "phase": "request",
+    "issued": true,
+    "in_flight": true,
+    "expected": "notify_best_effort",
+    "headers": {
+      "Mcp-Session-Id": "fixture-session"
+    },
+    "notification": {
+      "jsonrpc": "2.0",
+      "method": "notifications/cancelled",
+      "params": {
+        "requestId": 7
+      }
+    }
+  },
+  {
+    "name": "legacy_initialize_is_not_cancelled",
+    "era": "Legacy",
+    "transport": "stdio",
+    "phase": "initialize",
+    "issued": true,
+    "in_flight": true,
+    "expected": "close",
+    "notification": null
+  },
+  {
+    "name": "legacy_http_initialize_is_not_cancelled",
+    "era": "Legacy",
+    "transport": "http",
+    "phase": "initialize",
+    "issued": true,
+    "in_flight": true,
+    "expected": "close",
+    "notification": null
+  },
+  {
+    "name": "completed_id_is_not_cancelled",
+    "era": "Modern",
+    "transport": "stdio",
+    "phase": "request",
+    "issued": true,
+    "in_flight": false,
+    "expected": "none",
+    "notification": null
+  },
+  {
+    "name": "unissued_id_is_not_cancelled",
+    "era": "Legacy",
+    "transport": "stdio",
+    "phase": "request",
+    "issued": false,
+    "in_flight": true,
+    "expected": "none",
+    "notification": null
+  }
+]

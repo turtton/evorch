@@ -36,6 +36,7 @@ pub mod lane_verification;
 pub mod lanes;
 pub mod learning;
 pub mod mailbox;
+pub mod mcp;
 pub mod memory;
 mod memory_lifecycle;
 pub mod memory_queue;

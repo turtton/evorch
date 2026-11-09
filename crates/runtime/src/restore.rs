@@ -21,6 +21,7 @@ pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
+    pub(crate) mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     pub(crate) harness_notice_pending: bool,
     pub(crate) provenance: provenance::ConversationProvenance,
     /// Revision of the snapshot this state was read from, or last saved. A
@@ -98,6 +99,7 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            mcp_snapshot: descriptor.mcp_snapshot,
             harness_notice_pending: descriptor.harness_notice_pending,
             provenance: provenance::ConversationProvenance::unknown(),
             snapshot_revision: revision::SnapshotRevision::unknown(),
@@ -155,6 +157,9 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    /// Frozen definitions/order/bindings/permission class, never live sessions or secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub responses_replay: Option<crate::ResponsesReplayState>,
     /// Identifies one unregistered chat attempt for conditional consumption release.
@@ -567,6 +572,7 @@ fn write_snapshot_with_context(
         }
     };
     let descriptor = RunRestoreDescriptor {
+        mcp_snapshot: state.frozen_mcp_snapshot().cloned(),
         responses_replay: Some(context.responses_replay.for_saved_end(end)),
         admission_reservation_id: None,
         thread_id: state.thread_id.clone(),
@@ -600,7 +606,9 @@ fn write_snapshot_with_context(
             .iter()
             .map(|spec| spec.name.clone())
             .collect(),
-        project_root: config.project_root.clone(),
+        project_root: state
+            .mcp_project_root()
+            .or_else(|| config.project_root.clone()),
         pending_escalation: None,
         completed_turn_end: state
             .completed_turn_end
@@ -785,6 +793,43 @@ fn cancelled_tool_calls(messages: &[providers::Message]) -> Vec<InterruptedToolC
 mod tests {
     use super::safe_context_end;
     use providers::{ContentBlock, Message, Role, ToolResultContent};
+
+    #[test]
+    fn restored_state_preserves_mcp_snapshot_and_pending_harness_notice() {
+        let snapshot = tools::mcp::types::FrozenMcpSnapshot::default();
+        let config = serde_json::json!({
+            "role": "worker", "name": null, "parent_run_id": null,
+            "interactive": false, "keep_alive": false, "category": null,
+            "load_skills": [], "model_preference": null,
+            "restorable": true, "non_restorable_reason": null,
+            "mcp_snapshot": snapshot, "harness_notice_pending": true,
+        });
+        let messages = [Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "continue".into(),
+            }],
+        }];
+        let record = storage::RunContextRecord {
+            run_id: "mixed-restore".into(),
+            role: "worker".into(),
+            name: "worker".into(),
+            parent_run_id: None,
+            config_json: config.to_string(),
+            messages_json: serde_json::to_string(&messages).unwrap(),
+            checkpoints_json: "[]".into(),
+            terminal_phase: "Running".into(),
+            restorable: true,
+            updated_at_ns: 1,
+            host_inputs_json: "[]".into(),
+        };
+        let restored = super::RestoredState::from_record(&record).unwrap();
+        assert_eq!(
+            restored.mcp_snapshot,
+            Some(tools::mcp::types::FrozenMcpSnapshot::default())
+        );
+        assert!(restored.harness_notice_pending);
+    }
 
     #[test]
     fn incomplete_tool_batches_are_not_checkpoint_boundaries() {
