@@ -289,11 +289,16 @@ impl BudgetCounters {
         let mut hash = Sha256::new();
         if result.images.is_empty() {
             let detail = result.detail.as_ref();
-            let content = detail
+            let Some(content) = detail
                 .and_then(|d| d["bytes_returned"].as_u64())
                 .and_then(|n| usize::try_from(n).ok())
                 .and_then(|n| result.content.get(..n))
-                .unwrap_or(&result.content);
+            else {
+                // The limiter can replace metadata with a fresh artifact ID.
+                // Display text is not evidence of new file contents.
+                self.read(&path);
+                return;
+            };
             let range = (!content.is_empty()).then(|| {
                 [
                     detail

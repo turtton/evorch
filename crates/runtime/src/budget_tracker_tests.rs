@@ -618,6 +618,12 @@ fn lane_credit_waits_for_full_visible_presentation_and_survives_snapshot() {
     );
 }
 
+fn text_read_result(content: impl Into<String>) -> tools::ToolResult {
+    let mut result = tools::ToolResult::success(content);
+    result.detail = Some(serde_json::json!({"bytes_returned":result.content.len()}));
+    result
+}
+
 #[test]
 fn rereads_are_scoped_to_content_and_effective_range() {
     let bus = EventBus::new(16);
@@ -630,7 +636,7 @@ fn rereads_are_scoped_to_content_and_effective_range() {
         let mut counters = BudgetCounters::default();
         for n in 0..24 {
             let input = serde_json::json!({"offset":if mode=="range" {n+1} else {1}});
-            let result = tools::ToolResult::success(if mode == "content" {
+            let result = text_read_result(if mode == "content" {
                 format!("revision-{n}")
             } else {
                 "same".into()
@@ -654,7 +660,7 @@ fn read_success_and_equivalent_defaults_do_not_forgive_rereads() {
     };
     let ctx = context(&bus, &settings);
     let mut counters = BudgetCounters::default();
-    let result = tools::ToolResult::success("same content");
+    let result = text_read_result("same content");
     for input in [
         serde_json::json!({}),
         serde_json::json!({"offset":1,"limit":999,"byte_offset":0}),
@@ -685,7 +691,7 @@ fn unrelated_progress_and_interface_switching_do_not_forgive_rereads() {
                 counters.read_result(
                     Path::new("file.txt"),
                     &serde_json::json!({}),
-                    &tools::ToolResult::success("same content"),
+                    &text_read_result("same content"),
                 );
             } else {
                 counters.read(Path::new("file.txt"));
@@ -697,6 +703,49 @@ fn unrelated_progress_and_interface_switching_do_not_forgive_rereads() {
             } else {
                 assert!(matches!(decision, BudgetDecision::Exhausted(b)
                     if b.detail.contains("max_file_rereads=1")));
+            }
+        }
+    }
+}
+
+#[test]
+fn unclassified_reads_do_not_trust_changing_display_text() {
+    let bus = EventBus::new(16);
+    let settings = BudgetSettings {
+        max_file_rereads: 1,
+        ..Default::default()
+    };
+    let ctx = context(&bus, &settings);
+    for metadata in ["missing", "artifact", "invalid-length", "invalid-boundary"] {
+        let mut counters = BudgetCounters::default();
+        for n in 0..3 {
+            let mut result = tools::ToolResult::success(format!("é-{n}"));
+            result.detail = match metadata {
+                "missing" => None,
+                "artifact" => {
+                    Some(serde_json::json!({"output_artifact":{"path":format!("out-{n}")}}))
+                }
+                "invalid-length" => {
+                    Some(serde_json::json!({"bytes_returned":result.content.len()+1}))
+                }
+                "invalid-boundary" => Some(serde_json::json!({"bytes_returned":1})),
+                _ => unreachable!(),
+            };
+            counters.read_result(
+                Path::new("file.txt"),
+                &serde_json::json!({"offset":n+1,"limit":n+1}),
+                &result,
+            );
+            counters.mark_read_progress();
+            let decision = counters.publish(1, &ctx);
+            if n < 2 {
+                assert_eq!(decision, BudgetDecision::Continue, "{metadata}:{n}");
+            } else {
+                assert!(
+                    matches!(decision, BudgetDecision::Exhausted(b)
+                    if b.detail.contains("max_file_rereads=1")),
+                    "{metadata}"
+                );
             }
         }
     }

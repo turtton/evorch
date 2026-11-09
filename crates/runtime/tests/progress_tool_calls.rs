@@ -393,23 +393,6 @@ async fn lane_list_success_after_failures_is_reevaluated() {
 }
 
 #[tokio::test]
-async fn reading_distinct_ranges_of_one_file_is_not_a_reread_loop() {
-    let script = (0..24)
-        .map(|n| {
-            tool_response(
-                &format!("range-{n}"),
-                "read",
-                json!({"path":"reread.txt","offset":n + 1,"limit":1}),
-            )
-        })
-        .chain([text_response("done", FinishReason::Stop)])
-        .collect();
-    let outcome = run(vec![Ok(Progress::Advanced); 24], script).await;
-    assert_eq!(outcome.phase, AgentRunPhase::Done);
-    assert_eq!(outcome.probe_calls, 24);
-}
-
-#[tokio::test]
 async fn lane_list_failures_and_empty_pages_stop_even_with_argument_changes() {
     for script in [LaneScript::Failures, LaneScript::EmptyPages] {
         let (phase, count, _) = lane_script(script).await;
@@ -523,6 +506,49 @@ async fn real_truncated_reads_ignore_limits_that_return_the_same_bytes() {
     let script = read_script(&path, |n| json!({"limit":n+1}));
     let (phase, events) = real_reads(script, None).await;
     reread_stopped(phase, &events);
+}
+
+#[tokio::test]
+async fn limited_read_artifacts_do_not_create_new_observations() {
+    // A valid long path makes the read footer exceed the generic output ceiling.
+    // The limiter replaces the read metadata and generates a new artifact per call.
+    let dir = tempfile::tempdir().unwrap();
+    let mut path = dir.path().to_path_buf();
+    for _ in 0..21 {
+        path.push("p".repeat(120));
+    }
+    std::fs::create_dir_all(&path).unwrap();
+    path.push("long.txt");
+    assert!((2500..3000).contains(&path.as_os_str().len()));
+    std::fs::write(&path, "x".repeat(20_000)).unwrap();
+    let script = read_script(&path, |n| json!({"limit":n+1}));
+    let (phase, events) = real_reads(script, None).await;
+    let artifacts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
+                tool_name,
+                detail: Some(detail),
+                is_error: false,
+                ..
+            }) if tool_name == "read" => {
+                assert!(detail.get("bytes_returned").is_none());
+                Some(detail["output_artifact"]["path"].as_str().unwrap())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(artifacts.len() > 20);
+    assert_eq!(
+        artifacts
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        artifacts.len(),
+        "limiter artifacts must be distinct for this regression"
+    );
+    reread_stopped(phase, &events);
+    assert_eq!(artifacts.len(), 22); // first read + 20 permitted rereads + breach
 }
 
 #[tokio::test]
