@@ -430,3 +430,156 @@ async fn lane_list_storage_failures_do_not_observe_and_repair_is_reevaluated() {
     assert!(seen[..5].iter().all(|v| v.get("items").is_none()));
     assert!(seen[5..].iter().all(|v| v.get("items").is_some()));
 }
+
+/// Real file tools; the injected run_js worker only speaks the host protocol.
+async fn real_reads(
+    script: Vec<ChatResponse>,
+    child_calls: Option<Vec<(&str, Value)>>,
+) -> (AgentRunPhase, Vec<event_bus::Event>) {
+    let bus = Arc::new(EventBus::new(4096));
+    let mut receiver = bus.subscribe();
+    let mut executor = ToolExecutor::with_standard_tools(
+        bus.clone(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+    );
+    if let Some(calls) = child_calls {
+        let mut program = "IFS= read -r run\n".to_owned();
+        for (index, (name, args)) in calls.into_iter().enumerate() {
+            let packet = json!({"type":"tool_call", "id":index+1, "name":name, "args":args});
+            program.push_str(&format!(
+                "printf '%s\\n' '{}'; IFS= read -r reply\n",
+                packet.to_string().replace('\'', "'\\''"),
+            ));
+        }
+        program.push_str("printf '%s\\n' '{\"type\":\"done\",\"value\":\"done\"}'\n");
+        let launcher = tools::tools::run_js::WorkerLauncher::injected(
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            "sh".into(),
+            vec!["-c".into(), program],
+        );
+        executor
+            .register(Arc::new(tools::RunJs::with_launcher(launcher)))
+            .unwrap();
+    }
+    let model = Arc::new(ScriptedModel::new(script.into_iter().map(Ok)));
+    let runtime = AgentRuntime::new(bus, Arc::new(executor), model);
+    runtime.set_run_js_settings(config::RunJsConfig {
+        enabled: true,
+        scopes: vec!["worker".into()],
+        ..Default::default()
+    });
+    let run = runtime.delegate_background(Role::Worker, "read files".into(), RunConfig::default());
+    let phase = runtime.wait(run).await.unwrap();
+    (phase, drain_events(&mut receiver).await)
+}
+
+fn reread_stopped(phase: AgentRunPhase, events: &[event_bus::Event]) {
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::Diagnostic(d)
+        if d.detail.contains("max_file_rereads=20") && d.detail.contains("action=stop_run"))),
+        "missing reread diagnostic: {events:?}"
+    );
+}
+
+fn read_script(path: &std::path::Path, args: impl Fn(u64) -> Value) -> Vec<ChatResponse> {
+    (0..24)
+        .map(|n| {
+            let mut input = args(n);
+            input["path"] = json!(path);
+            tool_response(&format!("read-{n}"), "read", input)
+        })
+        .chain([text_response("done", FinishReason::Stop)])
+        .collect()
+}
+
+#[tokio::test]
+async fn real_image_reads_ignore_ineffective_range_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pixel.png");
+    image::RgbaImage::new(1, 1).save(&path).unwrap();
+    let script = read_script(&path, |n| json!({"offset":n+1,"limit":n+1,"byte_offset":n}));
+    let (phase, events) = real_reads(script, None).await;
+    reread_stopped(phase, &events);
+}
+
+#[tokio::test]
+async fn real_empty_eof_reads_ignore_ineffective_offsets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("small.txt");
+    std::fs::write(&path, "row\n").unwrap();
+    let script = read_script(&path, |n| json!({"offset":n+100,"limit":n+1}));
+    let (phase, events) = real_reads(script, None).await;
+    reread_stopped(phase, &events);
+}
+
+#[tokio::test]
+async fn real_truncated_reads_ignore_limits_that_return_the_same_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long.txt");
+    std::fs::write(&path, "x".repeat(20_000)).unwrap();
+    let script = read_script(&path, |n| json!({"limit":n+1}));
+    let (phase, events) = real_reads(script, None).await;
+    reread_stopped(phase, &events);
+}
+
+#[tokio::test]
+async fn real_distinct_file_ranges_are_not_rereads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rows.txt");
+    std::fs::write(&path, "row\n".repeat(24)).unwrap();
+    let script = read_script(&path, |n| json!({"offset":n+1,"limit":1}));
+    let (phase, _) = real_reads(script, None).await;
+    assert_eq!(phase, AgentRunPhase::Done);
+}
+
+#[tokio::test]
+async fn run_js_read_grep_alternation_does_not_forgive_rereads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unchanged.txt");
+    std::fs::write(&path, "row\n").unwrap();
+    let children = (0..24)
+        .flat_map(|_| {
+            [
+                ("read", json!({"path":path})),
+                ("grep", json!({"path":path,"pattern":"row"})),
+            ]
+        })
+        .collect();
+    let (phase, events) = real_reads(
+        vec![
+            tool_response("program", "run_js", json!({"code":"/* injected worker */"})),
+            text_response("done", FinishReason::Stop),
+        ],
+        Some(children),
+    )
+    .await;
+    reread_stopped(phase, &events);
+}
+
+#[tokio::test]
+async fn direct_and_run_js_reads_share_the_reread_allowance() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mixed.txt");
+    std::fs::write(&path, "row\n").unwrap();
+    let script = (0..24)
+        .map(|n| {
+            if n % 2 == 0 {
+                tool_response(&format!("direct-{n}"), "read", json!({"path":path}))
+            } else {
+                tool_response(
+                    &format!("program-{n}"),
+                    "run_js",
+                    json!({"code":"/* injected worker */"}),
+                )
+            }
+        })
+        .chain([text_response("done", FinishReason::Stop)])
+        .collect();
+    let (phase, events) = real_reads(script, Some(vec![("read", json!({"path":path}))])).await;
+    reread_stopped(phase, &events);
+    let reads = events.iter().filter(|e| matches!(&e.kind, EventKind::Tool(event_bus::ToolEvent::ToolStarted{tool_name,..}) if tool_name=="read")).count();
+    assert_eq!(reads, 22); // first observation + 20 permitted rereads + breach
+}

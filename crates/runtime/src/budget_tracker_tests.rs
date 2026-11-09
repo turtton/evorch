@@ -619,19 +619,16 @@ fn lane_credit_waits_for_full_visible_presentation_and_survives_snapshot() {
 }
 
 #[test]
-fn rereads_are_scoped_to_content_range_and_intervening_work_progress() {
+fn rereads_are_scoped_to_content_and_effective_range() {
     let bus = EventBus::new(16);
     let settings = BudgetSettings {
         max_file_rereads: 1,
         ..Default::default()
     };
     let ctx = context(&bus, &settings);
-    for mode in ["range", "content", "work"] {
+    for mode in ["range", "content"] {
         let mut counters = BudgetCounters::default();
         for n in 0..24 {
-            if mode == "work" {
-                counters.mark_progress();
-            }
             let input = serde_json::json!({"offset":if mode=="range" {n+1} else {1}});
             let result = tools::ToolResult::success(if mode == "content" {
                 format!("revision-{n}")
@@ -671,4 +668,36 @@ fn read_success_and_equivalent_defaults_do_not_forgive_rereads() {
     assert!(
         matches!(counters.publish(1,&ctx),BudgetDecision::Exhausted(b) if b.detail.contains("max_file_rereads=1"))
     );
+}
+
+#[test]
+fn unrelated_progress_and_interface_switching_do_not_forgive_rereads() {
+    let bus = EventBus::new(16);
+    let settings = BudgetSettings {
+        max_file_rereads: 1,
+        ..Default::default()
+    };
+    let ctx = context(&bus, &settings);
+    for first_direct in [false, true] {
+        let mut counters = BudgetCounters::default();
+        for n in 0..3 {
+            if (n % 2 == 0) == first_direct {
+                counters.read_result(
+                    Path::new("file.txt"),
+                    &serde_json::json!({}),
+                    &tools::ToolResult::success("same content"),
+                );
+            } else {
+                counters.read(Path::new("file.txt"));
+            }
+            counters.mark_progress(); // e.g. a successful grep; changed no file.
+            let decision = counters.publish(1, &ctx);
+            if n < 2 {
+                assert_eq!(decision, BudgetDecision::Continue);
+            } else {
+                assert!(matches!(decision, BudgetDecision::Exhausted(b)
+                    if b.detail.contains("max_file_rereads=1")));
+            }
+        }
+    }
 }

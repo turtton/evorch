@@ -79,7 +79,8 @@ pub struct BudgetSettings {
     pub max_tool_calls: ResourceLimit<u32>,
     pub max_elapsed: ResourceLimit<Duration>,
     pub max_tokens: ResourceLimit<u64>,
-    /// Reads after the first read of the same path.
+    /// Repetitions after the first observation of the same path, content and effective range.
+    /// Unclassified run_js reads share that allowance conservatively; unrelated success does not reset it.
     pub max_file_rereads: u32,
     pub max_no_progress_rounds: u32,
     pub max_identical_tool_call_repeats: u32,
@@ -162,7 +163,7 @@ pub(crate) struct BudgetCounters {
     paused_total: Duration,
     cumulative_input_tokens: u64,
     cumulative_output_tokens: u64,
-    file_reads: BTreeMap<(PathBuf, Option<[u8; 32]>), u32>,
+    file_reads: BTreeMap<PathBuf, FileReads>,
     no_progress_rounds: u32,
     last_checkpoint_at: u32,
     warned: bool,
@@ -192,6 +193,20 @@ pub(crate) struct BudgetContext<'a> {
     pub run_id: &'a str,
     pub task_id: &'a str,
     pub settings: &'a BudgetSettings,
+}
+
+/// run_js records paths, not result content. Charge those reads against every
+/// direct observation so switching interfaces cannot double the allowance.
+#[derive(Debug, Clone, Default)]
+struct FileReads {
+    unclassified: u32,
+    observations: BTreeMap<[u8; 32], u32>,
+}
+impl FileReads {
+    fn count(&self) -> u32 {
+        self.unclassified
+            .saturating_add(self.observations.values().copied().max().unwrap_or(0))
+    }
 }
 
 impl Default for BudgetCounters {
@@ -256,11 +271,13 @@ impl BudgetCounters {
 
     pub(crate) fn read(&mut self, path: &Path) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let count = self.file_reads.entry((path, None)).or_default();
+        let count = &mut self.file_reads.entry(path).or_default().unclassified;
         *count = count.saturating_add(1);
     }
 
-    /// Successful read content/range, separate from legacy run_js per-path accounting.
+    /// Key the returned bytes and their effective position, not ignored arguments
+    /// or the read tool's pagination footer. Image ranges and empty EOF ranges
+    /// carry no position information. Never rewrite the result sent to the model.
     pub(crate) fn read_result(
         &mut self,
         path: &Path,
@@ -268,34 +285,51 @@ impl BudgetCounters {
         result: &tools::ToolResult,
     ) {
         use sha2::{Digest, Sha256};
-        use tools::tools::read::MAX_READ_LINES;
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        // Match Read's effective defaults/clamping, not arbitrary argument spelling.
-        let range = serde_json::json!([
-            input["offset"].as_u64().unwrap_or(1),
-            input["limit"]
-                .as_u64()
-                .unwrap_or(MAX_READ_LINES)
-                .min(MAX_READ_LINES),
-            input["byte_offset"].as_u64().unwrap_or(0),
-        ]);
         let mut hash = Sha256::new();
-        hash.update(range.to_string());
-        hash.update(result.content.as_bytes());
-        for image in &result.images {
-            hash.update(image.media_type.as_bytes());
-            hash.update(image.data.as_bytes());
+        if result.images.is_empty() {
+            let detail = result.detail.as_ref();
+            let content = detail
+                .and_then(|d| d["bytes_returned"].as_u64())
+                .and_then(|n| usize::try_from(n).ok())
+                .and_then(|n| result.content.get(..n))
+                .unwrap_or(&result.content);
+            let range = (!content.is_empty()).then(|| {
+                [
+                    detail
+                        .and_then(|d| d["offset"].as_u64())
+                        .or_else(|| input["offset"].as_u64())
+                        .unwrap_or(1),
+                    detail
+                        .and_then(|d| d["byte_offset"].as_u64())
+                        .or_else(|| input["byte_offset"].as_u64())
+                        .unwrap_or(0),
+                ]
+            });
+            hash.update(b"text");
+            hash.update(serde_json::json!(range).to_string());
+            hash.update(content.as_bytes());
+        } else {
+            hash.update(b"images");
+            for image in &result.images {
+                for bytes in [image.media_type.as_bytes(), image.data.as_bytes()] {
+                    hash.update((bytes.len() as u64).to_be_bytes());
+                    hash.update(bytes);
+                }
+            }
         }
         let count = self
             .file_reads
-            .entry((path, Some(hash.finalize().into())))
+            .entry(path)
+            .or_default()
+            .observations
+            .entry(hash.finalize().into())
             .or_default();
         *count = count.saturating_add(1);
     }
 
-    pub(crate) fn mark_progress(&mut self) {
+    pub(crate) const fn mark_progress(&mut self) {
         self.round_changed = true;
-        self.file_reads.clear();
     }
 
     /// A read's own success must not forgive its reread streak.
@@ -315,7 +349,7 @@ impl BudgetCounters {
             && self.mark_child_spawned()
     }
 
-    pub(crate) fn mark_child_spawned(&mut self) -> bool {
+    pub(crate) const fn mark_child_spawned(&mut self) -> bool {
         self.spawn_credits.unobserved = self.spawn_credits.unobserved.saturating_add(1);
         if self.spawn_credits.unobserved > MAX_UNOBSERVED_SPAWN_CREDITS {
             return false;
@@ -418,7 +452,7 @@ impl BudgetCounters {
         let rereads = self
             .file_reads
             .values()
-            .copied()
+            .map(FileReads::count)
             .max()
             .unwrap_or(0)
             .saturating_sub(1);
