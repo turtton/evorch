@@ -487,3 +487,34 @@ fn a_closed_writer_spools_one_halt_per_episode() {
         spooled[0].message
     );
 }
+
+fn auto_fix_changed(reason: event_bus::PullRequestAutoFixChange) -> Event {
+    Event::new(event_bus::PullRequestEvent::AutoFixChanged {
+        thread_id: "thread".into(),
+        link_revision: 1,
+        transition_seq: 1,
+        pull_request: event_bus::PullRequestRef {
+            provider: "github".into(),
+            host: "github.com".into(),
+            repository: "turtton/evorch".into(),
+            number: 12,
+        },
+        reason,
+    })
+}
+
+#[test]
+fn a_change_of_this_process_s_auto_fix_setting_is_not_persisted_but_a_policy_change_is() {
+    // Given: a change of the global switch next to a person's policy change.
+    let (_dir, storage, db) = fixture();
+    let mut bridge = StorageBridge::new(storage.handle(), "session");
+    let setting = auto_fix_changed(event_bus::PullRequestAutoFixChange::Settings);
+    let policy = auto_fix_changed(event_bus::PullRequestAutoFixChange::Policy);
+    // When: both reach the bridge.
+    bridge.handle_event(&setting).unwrap();
+    bridge.handle_event(&policy).unwrap();
+    // Then: only the policy change reaches the event log, which other processes follow.
+    let stored = db.events_all_ordered().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].event, policy);
+}

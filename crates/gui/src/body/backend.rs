@@ -70,6 +70,15 @@ pub trait BodyBackend: Send + Sync {
     /// connection, not one body) is the outer error and applies to all of them.
     fn resolve(&self, refs: &[BodyRef]) -> Result<Vec<BodyResult>, BodyError>;
 
+    /// Display-only recovery evidence for a full conversation reread. Fake/non-storage
+    /// backends can omit it; this never delivers an input or publishes an event.
+    fn read_harness_notices(
+        &self,
+        _runs: &[String],
+    ) -> Result<storage::HarnessNoticeSnapshot, BodyError> {
+        Ok(storage::HarnessNoticeSnapshot::default())
+    }
+
     /// Reads the events concerning `runs` with `after < id <= through` as history
     /// rows (a row that cannot be read in its place), in id order. Nested
     /// bodies are read here, on the worker; display bodies stay references.

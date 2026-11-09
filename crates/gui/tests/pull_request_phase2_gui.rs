@@ -389,11 +389,13 @@ async fn a_stop_and_a_resume_reach_the_bar_without_any_other_event() {
 
 // Given: a failing head nobody attributed to the agent, although the pull request's head is the
 // one shown / When: auto fix is on / Then: the bar says the commit is external, from the
-// coordinator's classification; and the global switch being off is shown, without taking the
-// manual send away
+// coordinator's classification; and the global switch being turned off and on shows at once, without
+// taking the manual send away
 #[tokio::test]
 async fn the_bar_shows_the_coordinators_unknown_head_and_the_global_switch() {
     let mut world = World::recorded().await;
+    // New settings make the scheduler fetch again, and a fixture that answers once would run out.
+    world.source.repeat_last();
     let failing = world.failing('a');
     world.link(failing).await;
     world.click(toggle());
@@ -422,35 +424,221 @@ async fn the_bar_shows_the_coordinators_unknown_head_and_the_global_switch() {
     let shown = chips(&world);
     assert!(!shown.contains(&"Off by settings".to_owned()), "{shown:?}");
 
-    // The global switch changes no event; the read after the next operation shows it.
+    // The global switch announces itself: no other operation is needed for the bar to show it.
     let policy = |change: &event_bus::PullRequestEvent| {
         matches!(
             change,
             event_bus::PullRequestEvent::AutoFixChanged {
-                reason: event_bus::PullRequestAutoFixChange::Policy,
+                thread_id,
+                reason: event_bus::PullRequestAutoFixChange::Settings,
                 ..
-            }
+            } if thread_id == THREAD
         )
     };
-    world.click(toggle());
-    world.until_pr(policy).await;
-    world.show();
-    let mut settings = world.service.settings();
-    settings.auto_fix_enabled = false;
-    world.service.update_settings(settings).unwrap();
-    world.click(toggle());
-    world.until_pr(policy).await;
-    world.show();
-    let shown = chips(&world);
-    assert!(shown.contains(&"Off by settings".to_owned()), "{shown:?}");
+    for _ in 0..2 {
+        let mut settings = world.service.settings();
+        settings.auto_fix_enabled = false;
+        world.service.update_settings(settings).unwrap();
+        world.until_pr(policy).await;
+        world.show();
+        let shown = chips(&world);
+        assert!(shown.contains(&"Off by settings".to_owned()), "{shown:?}");
+        let controls = auto_fix_controls(
+            world.window.pull_request_model().linked(THREAD).unwrap(),
+            gui::model::pull_requests::now_ns(),
+        )
+        .unwrap();
+        assert!(
+            controls.send.enabled,
+            "the manual send does not depend on the global switch: {:?}",
+            controls.send
+        );
+
+        settings.auto_fix_enabled = true;
+        world.service.update_settings(settings).unwrap();
+        world.until_pr(policy).await;
+        world.show();
+        let shown = chips(&world);
+        assert!(!shown.contains(&"Off by settings".to_owned()), "{shown:?}");
+    }
+    world.shutdown();
+}
+
+/// Links a second thread `t2` to the same pull request, turns auto fix on there and shows the
+/// window the result: this window's thread now sees auto fix on in another thread.
+async fn second_thread_has_auto_fix(world: &mut World) -> runtime::ownership::OwnerPermit {
+    let other = world.owner.start("t2").unwrap();
+    world.source.push_ok(
+        &pull_request_world::key(phase2_world::NUMBER),
+        world.failing('a'),
+    );
+    world
+        .service
+        .link(
+            "t2",
+            &format!(
+                "https://github.com/turtton/evorch/pull/{}",
+                phase2_world::NUMBER
+            ),
+            0,
+            &other,
+        )
+        .await
+        .unwrap();
+    let state = world.service.auto_fix_state("t2").await.unwrap();
+    world
+        .service
+        .set_auto_fix("t2", 1, state.policy_revision, true, &other)
+        .await
+        .unwrap();
+    world.until_pr(|change| {
+        matches!(change, event_bus::PullRequestEvent::AutoFixChanged { thread_id, .. } if thread_id == "t2")
+    })
+    .await;
+    other
+}
+
+/// The automatic sends are used up: auto fix is off and the count is at its limit.
+fn exhaust_budget(world: &World) {
+    rusqlite::Connection::open(world.dir.path().join("phase2.db"))
+        .unwrap()
+        .execute("UPDATE pr_auto_fix_state SET used=3,enabled=0", [])
+        .unwrap();
+}
+
+fn reset() -> PullRequestAction {
+    PullRequestAction::ResetAutoFixBudget {
+        thread_id: THREAD.into(),
+    }
+}
+
+fn policy_of_this_thread(change: &event_bus::PullRequestEvent) -> bool {
+    matches!(
+        change,
+        event_bus::PullRequestEvent::AutoFixChanged { thread_id, reason: event_bus::PullRequestAutoFixChange::Policy, .. } if thread_id == THREAD
+    )
+}
+
+// Given: the limit stopped auto fix in another thread / When: this thread's Reset is clicked /
+// Then: the move is asked about first and a cancel changes nothing; a confirm resets the count
+// and moves the destination here through the real service
+#[tokio::test]
+async fn a_reset_from_another_thread_is_confirmed_and_can_be_cancelled() {
+    let mut world = World::recorded().await;
+    let failing = world.failing('a');
+    world.link(failing).await;
+    second_thread_has_auto_fix(&mut world).await;
+    exhaust_budget(&world);
+    world.window.apply_events(std::mem::take(&mut world.seen));
+    world.click(PullRequestAction::Refresh {
+        thread_id: THREAD.into(),
+    });
+    world.settle();
     let controls = auto_fix_controls(
         world.window.pull_request_model().linked(THREAD).unwrap(),
         gui::model::pull_requests::now_ns(),
     )
     .unwrap();
+    assert!(controls.reset.is_some_and(|reset| reset.enabled));
+    let issued = world.issued_commands();
+
+    world.click(reset());
+    let dialog = world
+        .window
+        .destination_dialog()
+        .cloned()
+        .expect("the move is asked about");
+    assert_eq!(dialog.previous_thread_id, "t2");
+    assert_eq!(world.issued_commands(), issued, "nothing is issued yet");
+    world.click(PullRequestAction::CancelAutoFixDestination);
+    world.settle();
+    assert!(world.window.destination_dialog().is_none());
+    assert_eq!(world.issued_commands(), issued);
+    let state = world.service.auto_fix_state(THREAD).await.unwrap();
+    assert_eq!(state.destination_thread_id.as_deref(), Some("t2"));
+    assert!(!state.enabled && state.used == 3);
+
+    world.click(reset());
+    world.click(PullRequestAction::ConfirmAutoFixDestination {
+        thread_id: THREAD.into(),
+    });
+    world.until_pr(policy_of_this_thread).await;
+    world.show();
+    let state = world.service.auto_fix_state(THREAD).await.unwrap();
+    assert!(state.enabled && state.used == 0);
+    assert_eq!(state.destination_thread_id.as_deref(), Some(THREAD));
+    let shown = chips(&world);
+    assert!(shown.contains(&"3 left".to_owned()), "{shown:?}");
+    world.shutdown();
+}
+
+// Given: the confirmation of a reset is open on a screen that is out of date / When: the
+// destination's own thread resets meanwhile and the person confirms / Then: the reset is refused,
+// the person is told to look again, the state is the other thread's, and the screen reloads
+#[tokio::test]
+async fn a_confirmed_reset_on_an_old_screen_is_refused() {
+    let mut world = World::recorded().await;
+    let failing = world.failing('a');
+    world.link(failing).await;
+    let other = second_thread_has_auto_fix(&mut world).await;
+    exhaust_budget(&world);
+    world.window.apply_events(std::mem::take(&mut world.seen));
+    world.click(PullRequestAction::Refresh {
+        thread_id: THREAD.into(),
+    });
+    world.settle();
+    world.click(reset());
+    assert!(world.window.destination_dialog().is_some());
+
+    let state = world.service.auto_fix_state("t2").await.unwrap();
+    world
+        .service
+        .reset_auto_fix_budget("t2", 1, state.policy_revision, None, &other)
+        .await
+        .unwrap();
+    let before = world.service.auto_fix_state("t2").await.unwrap();
+    world.click(PullRequestAction::ConfirmAutoFixDestination {
+        thread_id: THREAD.into(),
+    });
+    // The refusal comes back through the command queue; the runner's slow-test limit, not a
+    // timeout here, ends a refusal that never comes.
+    while pull_request_world::notices(&world.window).is_empty() {
+        world.window.poll_command_sink();
+        tokio::task::yield_now().await;
+    }
+    let told = pull_request_world::notices(&world.window);
     assert!(
-        controls.send.enabled,
-        "the manual send does not depend on the global switch"
+        told.iter().any(|text| text.contains("changed")),
+        "the person is told the pull request changed: {told:?}"
     );
+    let after = world.service.auto_fix_state(THREAD).await.unwrap();
+    assert_eq!(after, before, "the refused reset changed nothing");
+    assert_eq!(after.destination_thread_id.as_deref(), Some("t2"));
+    world.shutdown();
+}
+
+// Given: this thread has auto fix and the limit stopped it / When: its Reset is clicked / Then:
+// there is nothing to confirm: the reset is issued at once and the count starts again here
+#[tokio::test]
+async fn a_reset_in_the_thread_that_has_auto_fix_needs_no_confirmation() {
+    let mut world = World::recorded().await;
+    let failing = world.failing('a');
+    world.link(failing).await;
+    world.click(toggle());
+    world.until_pr(policy_of_this_thread).await;
+    exhaust_budget(&world);
+    world.show();
+    world.click(PullRequestAction::Refresh {
+        thread_id: THREAD.into(),
+    });
+    world.settle();
+
+    world.click(reset());
+    assert!(world.window.destination_dialog().is_none());
+    world.until_pr(policy_of_this_thread).await;
+    world.show();
+    let state = world.service.auto_fix_state(THREAD).await.unwrap();
+    assert!(state.enabled && state.used == 0);
+    assert_eq!(state.destination_thread_id.as_deref(), Some(THREAD));
     world.shutdown();
 }

@@ -9,8 +9,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use event_bus::PullRequestAutoFixChange;
 use storage::StorageError;
 use storage::pull_requests::{InheritanceResolution, PullRequestKey, PullRequestState};
 use tokio::time::Instant;
@@ -41,6 +43,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
     let mut settings = inner.settings.subscribe();
     let mut shutdown = inner.shutdown.subscribe();
     let mut applied = *settings.borrow();
+    let mut announced = 0;
     loop {
         if *shutdown.borrow() {
             break;
@@ -51,6 +54,11 @@ pub(super) async fn run(inner: Arc<Inner>) {
         if config != applied {
             inner.apply_new_settings();
             applied = config;
+        }
+        let changes = inner.auto_fix_switch_changes.load(Ordering::SeqCst);
+        if changes != announced {
+            announced = changes;
+            inner.announce_global_auto_fix().await;
         }
         let due = if config.enabled {
             inner.round().await
@@ -168,6 +176,41 @@ impl Inner {
         for entry in state.keys.values_mut() {
             if entry.next_due.is_some() {
                 entry.next_due = Some(now);
+            }
+        }
+    }
+
+    /// The `[pull_requests] auto_fix_enabled` switch changed: every thread with an active link
+    /// shows it (the bar's "Off by settings"), so each one is told to read its state again.
+    /// The scheduler runs this, not `update_settings`, which is synchronous and may be called
+    /// from outside the runtime; `update_settings` only counts the change, so none is lost.
+    /// Archived and deleted threads show nothing and read it on restore.
+    async fn announce_global_auto_fix(&self) {
+        let mut after = 0;
+        loop {
+            let storage = self.storage.clone();
+            let page = match self
+                .blocking(move || storage.active_pull_request_links(after, PAGE))
+                .await
+            {
+                Ok(Ok(page)) => page,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "auto fix switch change could not be announced");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "auto fix switch change could not be announced");
+                    return;
+                }
+            };
+            let full = page.len() == PAGE;
+            for link in page {
+                after = link.link_id;
+                self.announce_auto_fix(&link.thread_id, PullRequestAutoFixChange::Settings)
+                    .await;
+            }
+            if !full {
+                return;
             }
         }
     }

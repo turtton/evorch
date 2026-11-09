@@ -142,8 +142,8 @@ pub fn destination_dialog(
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
             ui.label(h3("Move auto fix here?"));
             ui.label(format!(
-                "Auto fix is on in \u{201c}{}\u{201d}. Turning it on here sends this pull \
-                 request's CI failures to this thread instead.",
+                "This pull request's CI failures go to \u{201c}{}\u{201d}. Turning auto fix on \
+                 here sends them to this thread instead.",
                 dialog.previous_label
             ));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

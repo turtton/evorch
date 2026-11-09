@@ -1,6 +1,10 @@
 //! Runtime regression tests using the real shell and storage.
+#[path = "shell_jobs_integration/elapsed_budget.rs"]
+mod elapsed_budget;
 #[path = "shell_jobs_integration/finalization.rs"]
 mod finalization;
+#[path = "support/paused_process_clock.rs"]
+mod paused_process_clock;
 mod support;
 
 use std::path::{Path, PathBuf};
@@ -18,10 +22,8 @@ use serde_json::json;
 use storage::{Storage, StorageConfig};
 use support::{init_git_repo, text_response, tool_response};
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use tools::ToolExecutor;
-
-const DEADLINE: Duration = Duration::from_secs(10);
 
 struct Invocation {
     messages: Vec<Message>,
@@ -95,10 +97,7 @@ fn model() -> (Arc<ExchangeModel>, mpsc::UnboundedReceiver<Invocation>) {
     (Arc::new(ExchangeModel(sender)), receiver)
 }
 async fn next(receiver: &mut mpsc::UnboundedReceiver<Invocation>) -> Invocation {
-    timeout(DEADLINE, receiver.recv())
-        .await
-        .expect("runtime must advance without deadlock")
-        .expect("model call")
+    receiver.recv().await.expect("model call")
 }
 fn executor(bus: &Arc<EventBus>, root: &Path) -> Arc<ToolExecutor> {
     Arc::new(ToolExecutor::with_standard_tools_in(
@@ -108,10 +107,7 @@ fn executor(bus: &Arc<EventBus>, root: &Path) -> Arc<ToolExecutor> {
     ))
 }
 async fn wait(runtime: &AgentRuntime, run: RunId) -> AgentRunPhase {
-    timeout(DEADLINE, runtime.wait(run))
-        .await
-        .expect("terminal deadline")
-        .unwrap()
+    runtime.wait(run).await.unwrap()
 }
 fn assert_pid_reaped(pid: &str) {
     assert!(
@@ -157,23 +153,17 @@ async fn yielded_job_allows_reads_and_same_run_mutation_while_it_runs() {
         "shell",
         json!({"action":"stdin", "job_id":job, "input":"answer\n", "yield_ms":0}),
     ));
-    let mut call = next(&mut calls).await;
-    let mut cursor: u64 = field(&call.result("input").0, "cursor: ").parse().unwrap();
-    for attempt in 0..4 {
-        let id = format!("poll-{attempt}");
-        call.respond(tool_response(
-            &id,
-            "shell",
-            json!({"action":"poll", "job_id":job, "cursor":cursor, "yield_ms":1000}),
-        ));
-        call = next(&mut calls).await;
-        let (result, error) = call.result(&id);
-        assert!(!error, "{result}");
-        if field(&result, "status: ") == "completed" {
-            break;
-        }
-        cursor = field(&result, "cursor: ").parse().unwrap();
-    }
+    let call = next(&mut calls).await;
+    let cursor: u64 = field(&call.result("input").0, "cursor: ").parse().unwrap();
+    call.respond(tool_response(
+        "poll",
+        "shell",
+        json!({"action":"poll", "job_id":job, "cursor":cursor}),
+    ));
+    let call = next(&mut calls).await;
+    let (result, error) = call.result("poll");
+    assert!(!error, "{result}");
+    assert_eq!(field(&result, "status: "), "completed");
     assert!(!executor.has_unobserved_shell_jobs(&run.to_string()));
     assert_eq!(
         std::fs::read_to_string(root.join("result.txt")).unwrap(),
@@ -379,26 +369,26 @@ async fn cancelling_start_before_job_id_delivery_reaps_real_process() {
         "cancel pending start".into(),
         RunConfig::default(),
     );
-    next(&mut calls).await.respond(tool_response("pending-start", "shell", json!({"command":"printf '%s\\n' \"$$\" > process.pid; printf partial > partial.txt; read value", "yield_ms":60000})));
-    // The command deliberately emits no live output, so the starting tool is
-    // still waiting and no job ID has been delivered when cancellation arrives.
-    let pid = timeout(DEADLINE, async {
-        loop {
-            if let Ok(pid) = tokio::fs::read_to_string(root.join("process.pid")).await
-                && !pid.trim().is_empty()
-                && root.join("partial.txt").exists()
-            {
-                break pid.trim().to_owned();
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("real child started and wrote partial effects");
+    let started = root.join("started");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&started)
+            .status()
+            .unwrap()
+            .success()
+    );
+    next(&mut calls).await.respond(tool_response("pending-start", "shell", json!({"command":"printf partial > partial.txt; printf '%s\\n' \"$$\" > started; read value", "yield_ms":60000})));
+    // The FIFO carries the PID after the partial effect, without live output:
+    // cancellation still precedes delivery of the job ID.
+    let pid = tokio::task::spawn_blocking(move || std::fs::read_to_string(started))
+        .await
+        .unwrap()
+        .unwrap();
+    let pid = pid.trim();
     assert!(executor.has_running_shell_jobs(&run.to_string()));
     runtime.cancel(run).unwrap();
     assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
-    assert_pid_reaped(&pid);
+    assert_pid_reaped(pid);
     assert!(
         executor.has_unobserved_shell_jobs(&run.to_string()),
         "without a run store, uncertain effects cannot be persisted; retain the handle"
@@ -564,42 +554,6 @@ async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop()
     assert_eq!(text.matches("Shell job completed:").count(), 1);
     observed.respond(text_response("done", FinishReason::Stop));
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_poll_waits_for_a_long_job_without_spending_the_elapsed_budget() {
-    test_support::isolated_state_dir();
-    let (_temp, root) = init_git_repo();
-    let bus = Arc::new(EventBus::new(256));
-    let executor = executor(&bus, &root);
-    let (model, mut calls) = model();
-    let runtime = AgentRuntime::new(bus, executor, model);
-    // The job outlasts the whole elapsed budget by a margin that tolerates a
-    // loaded test host; only the poll waits for it.
-    let mut config = RunConfig::default();
-    config.budget.max_elapsed =
-        runtime::budget_tracker::ResourceLimit::Bounded(Duration::from_secs(2));
-    let run = runtime.delegate_background(Role::Worker, "long build".into(), config);
-    next(&mut calls).await.respond(tool_response(
-        "start",
-        "shell",
-        json!({"command":"sleep 4; printf built", "yield_ms":0}),
-    ));
-    let call = next(&mut calls).await;
-    let job = call.job("start");
-    call.respond(tool_response(
-        "poll",
-        "shell",
-        json!({"action":"poll", "job_id":job, "yield_ms":100}),
-    ));
-    // One poll covers the job however long it runs, ignoring yield_ms.
-    let call = next(&mut calls).await;
-    let (result, error) = call.result("poll");
-    assert!(!error, "{result}");
-    assert_eq!(field(&result, "status: "), "completed");
-    assert!(result.contains("built"));
-    call.respond(text_response("built", FinishReason::Stop));
-    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

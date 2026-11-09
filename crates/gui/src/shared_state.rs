@@ -93,6 +93,9 @@ pub struct FedEvent {
 /// What one poll found.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct FeedBatch {
+    /// Newly scanned log horizon, including rows skipped for this window's own stream.
+    /// Absent on an unchanged poll, so idle following still produces no repaint.
+    pub scanned_through: Option<i64>,
     /// Events other processes persisted, in log order.
     pub events: Vec<FedEvent>,
     /// Rows other processes persisted that cannot be shown: an event that does
@@ -109,7 +112,10 @@ pub struct FeedBatch {
 
 impl FeedBatch {
     fn is_empty(&self) -> bool {
-        self.events.is_empty() && self.failures.is_empty() && self.sidebar_stamp.is_none()
+        self.events.is_empty()
+            && self.failures.is_empty()
+            && self.sidebar_stamp.is_none()
+            && self.scanned_through.is_none()
     }
 }
 
@@ -184,6 +190,7 @@ impl FeedPoller {
     /// Fails when the first query of the poll fails.
     pub fn poll_once(&mut self) -> Result<FeedBatch, StorageError> {
         let mut batch = FeedBatch::default();
+        let before = self.cursor;
         let version = self.db.data_version()?;
         if self.data_version != Some(version) {
             let mut scanned = 0;
@@ -235,6 +242,7 @@ impl FeedPoller {
                 batch.sidebar_stamp = stamp;
             }
         }
+        batch.scanned_through = (self.cursor > before).then_some(self.cursor);
         Ok(batch)
     }
 

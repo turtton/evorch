@@ -1763,7 +1763,7 @@ pub(crate) fn append_subagent_context_note(specs: &mut [ToolSpec], family: crate
 /// ランタイムからは `skill_load` を除く。`skill_load` は capability 上
 /// Orchestrator/Worker に許可されているが、レジストリなしでは呼び出しが
 /// 必ず失敗するため、失敗前提の定義をモデルに見せない (model only sees
-/// tools that can work)。子 run では Direct 専用の escalate も除く。
+/// tools that can work)。子 run では Direct 専用の handoff_to_lane も除く。
 pub(crate) fn visible_tool_specs(
     specs: Vec<ToolSpec>,
     policy: &ExecutionPolicy,
@@ -1924,7 +1924,7 @@ mod tests {
 
     // Given: Worker のポリシー
     // When: visible_tool_specs を呼ぶ
-    // Then: escalate がモデルに見える
+    // Then: handoff_to_lane がモデルに見える
     #[test]
     fn visible_tool_specs_exposes_escalate_for_worker() {
         let policy = ExecutionPolicy::for_role(Role::Worker);

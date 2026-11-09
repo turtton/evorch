@@ -765,7 +765,7 @@ mod tests {
     }
 
     // Given: Worker と各非 Worker ロールのポリシー
-    // When: escalate を authorize する
+    // When: handoff_to_lane を authorize する
     // Then: Worker のみ許可され、他ロールは CapabilityDenied になる
     #[test]
     fn worker_authorizes_escalate_and_other_roles_deny_it() {

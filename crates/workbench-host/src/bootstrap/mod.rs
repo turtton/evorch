@@ -90,6 +90,12 @@ fn known_projects(options: &BootstrapOptions) -> Result<KnownProjects, Bootstrap
     })
 }
 
+/// What a test replaces in the production composition; production passes none of it.
+pub struct TestSeams {
+    pub model: Arc<dyn runtime::AgentModel>,
+    pub sandbox: Arc<dyn runtime::SandboxFactory>,
+}
+
 /// Keep the bridge, owner and shared maintenance leases alive until the runtime
 /// has checkpointed. Transports must stop accepting requests before shutdown.
 pub struct BootstrappedHost {
@@ -116,6 +122,24 @@ pub struct CompositionInventory {
 
 impl BootstrappedHost {
     pub async fn open(options: BootstrapOptions) -> Result<Self, BootstrapError> {
+        Self::open_composed(options, None).await
+    }
+
+    /// The production composition with the model and the per-run sandbox replaced, so a test
+    /// can drive the real owner, storage, command service and lane delivery wiring on a
+    /// machine with neither a provider nor bwrap.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn open_with_test_seams(
+        options: BootstrapOptions,
+        seams: TestSeams,
+    ) -> Result<Self, BootstrapError> {
+        Self::open_composed(options, Some(seams)).await
+    }
+
+    async fn open_composed(
+        options: BootstrapOptions,
+        seams: Option<TestSeams>,
+    ) -> Result<Self, BootstrapError> {
         let config = config::Config::load_strict(&config::LoadOptions {
             user_config_dir: Some(options.config_dir.clone()),
             project_dir: Some(options.project_root.clone()),
@@ -175,6 +199,16 @@ impl BootstrappedHost {
                 Vec::new(),
             )?
         };
+        let (fixed_model, workspace) = match seams {
+            Some(seams) => (
+                Some(seams.model),
+                runtime::WorkspaceSeam::with_factory(
+                    workspace.project_root().to_path_buf(),
+                    seams.sandbox,
+                )?,
+            ),
+            None => (None, workspace),
+        };
         let composed = runtime::compose_runtime(RuntimeComposition {
             config: &config,
             user_config_dir: Some(options.config_dir.clone()),
@@ -183,10 +217,12 @@ impl BootstrappedHost {
             executor: executor.clone(),
             credential_store: credentials.clone(),
             env: Arc::new(routing::ProcessEnv),
-            model_source: if config.providers.is_empty() {
-                ModelSource::Fixed(Arc::new(runtime::compose::UnconfiguredModel))
-            } else {
-                ModelSource::Configured
+            model_source: match fixed_model {
+                Some(model) => ModelSource::Fixed(model),
+                None if config.providers.is_empty() => {
+                    ModelSource::Fixed(Arc::new(runtime::compose::UnconfiguredModel))
+                }
+                None => ModelSource::Configured,
             },
             workspace: Some(workspace),
         })?;

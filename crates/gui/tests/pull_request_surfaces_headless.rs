@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egui_kittest::{Harness, kittest::NodeT, kittest::Queryable};
-use gui::app::pull_requests::LinkDialog;
+use gui::app::pull_requests::{DestinationChange, DestinationDialog, LinkDialog};
 use gui::model::notifications::{NotificationKind, NotificationsModel};
 use gui::model::pull_requests::{
     CandidateChip, ChipState, PrGlyph, PullRequestAction, PullRequestBadge,
@@ -12,7 +12,9 @@ use gui::model::pull_requests::{
 use gui::model::transcript::{ToolStatus, TranscriptEntry};
 use gui::panes::notifications::{NotificationsAction, notifications_pane};
 use gui::panes::pull_request_chip::{ChipsByCall, PullRequestChips, show as show_chips};
-use gui::panes::pull_request_dialog::{LinkDialogAction, link_dialog};
+use gui::panes::pull_request_dialog::{
+    DestinationDialogAction, LinkDialogAction, destination_dialog, link_dialog,
+};
 use gui::panes::sidebar::{PullRequestsView, SidebarAction, sidebar_pane_with_pull_requests};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, ThreadRunPhase};
 
@@ -329,4 +331,66 @@ fn pull_request_notifications_use_the_existing_rows() {
         h.state().1,
         Some(NotificationsAction::OpenThread(ThreadId::new("t1")))
     );
+}
+
+fn destination_harness(
+    then: DestinationChange,
+) -> Harness<'static, (DestinationDialog, Option<DestinationDialogAction>)> {
+    let dialog = DestinationDialog {
+        thread_id: "t1".into(),
+        previous_thread_id: "t2".into(),
+        previous_label: "Fix the flaky CI".into(),
+        link_revision: 1,
+        policy_revision: 4,
+        then,
+    };
+    Harness::builder()
+        .with_size(egui::vec2(700.0, 400.0))
+        .build_ui_state(
+        move |ui, (dialog, answer): &mut (DestinationDialog, Option<DestinationDialogAction>)| {
+            let ctx = ui.ctx().clone();
+            gui::theme::install(&ctx);
+            if let Some(action) = destination_dialog(&ctx, dialog) {
+                *answer = Some(action);
+            }
+        },
+        (dialog, None),
+    )
+}
+
+// Given: a Reset from a thread other than the one that has auto fix, and a turn-on from one /
+// Then: both open the same confirmation naming the thread that loses auto fix, and Move here and
+// Cancel answer it. With EVORCH_PR_DIALOG_CAPTURE_DIR set, the reset's dialog is saved as a PNG.
+#[test]
+fn a_reset_from_another_thread_asks_the_same_question_as_turning_auto_fix_on() {
+    for then in [DestinationChange::TurnOn, DestinationChange::ResetBudget] {
+        let mut h = destination_harness(then);
+        h.run_steps(3);
+        h.get_by_label("Move auto fix here?");
+        assert!(
+            labels(&h)
+                .iter()
+                .any(|label| label.contains("Fix the flaky CI")),
+            "{:?}",
+            labels(&h)
+        );
+        if then == DestinationChange::ResetBudget
+            && let Some(directory) = std::env::var_os("EVORCH_PR_DIALOG_CAPTURE_DIR")
+        {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            h.render()
+                .unwrap()
+                .save(directory.join("pull-request-reset-from-another-thread.png"))
+                .unwrap();
+        }
+        h.get_by_label("Move here").click();
+        h.run_steps(2);
+        assert_eq!(h.state().1, Some(DestinationDialogAction::Move));
+    }
+    let mut h = destination_harness(DestinationChange::ResetBudget);
+    h.run_steps(3);
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert_eq!(h.state().1, Some(DestinationDialogAction::Cancel));
 }

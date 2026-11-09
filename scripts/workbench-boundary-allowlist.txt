@@ -1,0 +1,63 @@
+# Allowlist for the gui / evorch dependency ratchet in
+# scripts/check-workbench-boundaries.sh (ADR 0045 §11).
+#
+# Every direct dependency of the gui and evorch crates on another workspace
+# crate (normal, dev and build; optional and target-specific declarations
+# included, and those a [patch] section redirects) must be listed here, except
+# workbench-client, workbench-protocol, core-instance and core-launcher, which
+# are the client-side way to reach the core (the check keeps core-instance and
+# core-launcher from reaching anything else). A dependency that is not listed
+# fails CI. The list may only shrink: delete a line in the PR that removes the
+# dependency. The check reports a line whose dependency no longer exists as a
+# stale entry.
+#
+# Format, one entry per line (blanks and `#` comments are ignored):
+#   <crate> <dependency> <kind> <removal-pr>
+#   crate        gui | evorch
+#   dependency   package name of the workspace crate: the real name, not the
+#                alias a dependency table key gets through `package = "..."`
+#   kind         normal | dev | build
+#   removal-pr   migration PR that removes the dependency: a number with an
+#                optional letter suffix (17, 17c, 19a, 19b, 20, ...), or
+#                `unassigned` when no PR owns it yet
+#
+# Assignment: a dependency is removed in the PR that removes its last remaining
+# use. evorch keeps the benchmark tool until 19b, so crates it uses go to 19b.
+# This table is a plan, not a contract; reassign it as the plan changes.
+
+evorch agents           normal  19b
+evorch catalog          normal  19b
+evorch config           normal  19b
+evorch eval             normal  17c
+evorch event-bus        normal  19b
+evorch js-engine        normal  19b
+evorch mock-openai      dev     unassigned
+evorch recorder         normal  17
+evorch routing          normal  19b
+evorch runtime          normal  19b
+evorch sandbox          normal  19b
+evorch storage          normal  19b
+evorch test-support     dev     unassigned
+evorch tools            normal  19b
+gui    agents           normal  19b
+gui    browser          normal  19b
+gui    browser-cef      normal  19b
+gui    catalog          normal  19b
+gui    config           normal  19b
+gui    eval             normal  19b
+gui    event-bus        normal  19b
+gui    mock-openai      dev     unassigned
+gui    model            normal  19b
+gui    providers        normal  19b
+gui    recorder         normal  19b
+gui    routing          normal  19b
+gui    runtime          normal  19b
+gui    sandbox          normal  19b
+gui    secret-guard     normal  19b
+gui    storage          dev     19b
+gui    storage          normal  19b
+gui    test-support     dev     unassigned
+gui    tools            dev     19b
+gui    workbench-host   dev     19b
+gui    workbench-host   normal  19b
+gui    workspace-ui     normal  unassigned
