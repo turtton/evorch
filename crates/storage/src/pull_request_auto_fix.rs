@@ -161,6 +161,8 @@ pub struct PrAutoFixLimitEvent {
     pub budget_epoch: u64,
     pub notice_id: String,
     pub at_ns: i64,
+    /// When a window told the person; `None` while nobody has.
+    pub notified_at_ns: Option<i64>,
 }
 
 /// Read-only access for a display that follows the shared database. The writes (policy,

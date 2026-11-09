@@ -327,11 +327,21 @@ fn third_adoption_is_atomic_auto_off_and_reset_preserves_sha_and_cooldown() {
     let events = f.h().pr_auto_fix_limit_events(key(), None).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].budget_epoch, 0);
+    assert_eq!(events[0].notified_at_ns, None);
     assert!(
         f.h()
             .pr_auto_fix_limit_events(key(), Some(0))
             .unwrap()
             .is_empty()
+    );
+    // One window takes the notification of the stop; no other claim, and no stop that never
+    // happened, can.
+    assert!(!f.h().claim_pr_limit_notification(key(), 1, 500).unwrap());
+    assert!(f.h().claim_pr_limit_notification(key(), 0, 500).unwrap());
+    assert!(!f.h().claim_pr_limit_notification(key(), 0, 501).unwrap());
+    assert_eq!(
+        f.h().pr_auto_fix_limit_events(key(), None).unwrap()[0].notified_at_ns,
+        Some(500)
     );
     let reset = f.policy(PrPolicyAction::ResetBudget);
     assert_eq!(
@@ -847,7 +857,8 @@ fn v50_outbox_upgrade_preserves_lane_wire_ids_and_title() {
     let undo = std::fs::read_to_string(root.join("undo/undo_v51.sql")).unwrap();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.pragma_update(None, "foreign_keys", true).unwrap();
-    let management_undo = std::fs::read_to_string(root.join("undo/undo_v55.sql")).unwrap()
+    let management_undo = std::fs::read_to_string(root.join("undo/undo_v56.sql")).unwrap()
+        + &std::fs::read_to_string(root.join("undo/undo_v55.sql")).unwrap()
         + &std::fs::read_to_string(root.join("undo/undo_v54.sql")).unwrap()
         + &std::fs::read_to_string(root.join("undo/undo_v53.sql")).unwrap();
     conn.execute_batch(&management_undo).unwrap();
@@ -1153,6 +1164,7 @@ fn v51_upgrade_preserves_a_ready_notice_and_its_outbox_with_an_initial_generatio
         .unwrap();
     f.sql()
         .execute_batch(concat!(
+            include_str!("../undo/undo_v56.sql"),
             include_str!("../undo/undo_v55.sql"),
             include_str!("../undo/undo_v54.sql"),
             include_str!("../undo/undo_v53.sql"),

@@ -128,4 +128,16 @@ impl StorageHandle {
     ) -> Result<Vec<PrAutoFixLimitEvent>, StorageError> {
         self.lane_job(false, move |c| pr::limit_events(c, &key, after))
     }
+    /// Takes the one notification of the exhaustion at `budget_epoch` (compare and set; a
+    /// stop that is not recorded is never claimed).
+    pub fn claim_pr_limit_notification(
+        &self,
+        key: PullRequestKey,
+        budget_epoch: u64,
+        now_ns: i64,
+    ) -> Result<bool, StorageError> {
+        self.lane_job(true, move |c| {
+            pr::claim_limit_notification(c, &key, budget_epoch, now_ns)
+        })
+    }
 }

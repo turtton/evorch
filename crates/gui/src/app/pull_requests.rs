@@ -57,12 +57,24 @@ pub trait PullRequestReader: Send + Sync + 'static {
     /// # Errors
     /// A message when the database cannot be read.
     fn harness_card(&self, notice_id: &str) -> Result<Option<HarnessCard>, String>;
+
+    /// Takes the one notification of the stop at `budget_epoch`, durably: true for the first
+    /// claim of any window or process, false for every later one.
+    ///
+    /// # Errors
+    /// A message when the claim cannot be written.
+    fn claim_limit_notification(
+        &self,
+        key: &PullRequestKey,
+        budget_epoch: u64,
+    ) -> Result<bool, String>;
 }
 
 /// Reads through a read-only connection to the shared database.
 pub struct StoragePullRequestReader {
     db_path: PathBuf,
     probe: Option<AutoFixProbe>,
+    claims: Option<storage::StorageHandle>,
 }
 
 /// What only the process that owns a thread's pull request knows, read for display: where the
@@ -82,7 +94,16 @@ impl StoragePullRequestReader {
         Self {
             db_path,
             probe: None,
+            claims: None,
         }
+    }
+
+    /// Writes the claims of limit notifications through `handle`. Without one no limit
+    /// notification is raised, since nothing could keep it from repeating.
+    #[must_use]
+    pub fn with_limit_claims(mut self, handle: storage::StorageHandle) -> Self {
+        self.claims = Some(handle);
+        self
     }
 
     /// Reads the coordinator's classification of the head and the global switch through
@@ -146,6 +167,25 @@ impl PullRequestReader for StoragePullRequestReader {
             .pr_notice(notice_id)
             .map_err(|error| error.to_string())?;
         Ok(notice.as_ref().and_then(HarnessCard::from_notice))
+    }
+
+    fn claim_limit_notification(
+        &self,
+        key: &PullRequestKey,
+        budget_epoch: u64,
+    ) -> Result<bool, String> {
+        let handle = self
+            .claims
+            .as_ref()
+            .ok_or("no writer to claim the limit notification")?;
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)
+            });
+        handle
+            .claim_pr_limit_notification(key.clone(), budget_epoch, now_ns)
+            .map_err(|error| error.to_string())
     }
 
     fn linked_threads(&self) -> Result<Vec<String>, String> {
@@ -212,6 +252,9 @@ enum Loaded {
     Slug(String, Option<String>),
     /// The card of a harness notice the transcript shows without it.
     Card(String, Result<Option<Box<HarnessCard>>, String>),
+    /// The claim of a limit notification: the thread and pull request it is about, the budget
+    /// epoch, and whether this window took it.
+    LimitClaim(String, PullRequestKey, u64, Result<bool, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -285,12 +328,12 @@ pub(super) struct PullRequestState {
     /// Operations issued and not yet answered by an event or a refusal, so a second click on
     /// the same state does not issue a second operation.
     issued: BTreeSet<(String, IssuedOp)>,
-    /// The automatic-limit notifications the runtime claimed, held like `pending_notices`.
-    pending_limits: Vec<PendingLimit>,
     /// Threads whose bar folds once a read made after an automatic adoption was shown: the
     /// read may itself expand the bar (a move into failure), and the fold must come after.
     pending_collapses: Vec<(String, u64)>,
-    /// `(pull request, budget epoch)` already notified.
+    /// `(pull request, budget epoch)` this process already claimed, so a read does not claim
+    /// again. The claim in the database is what keeps other windows and restarts from telling
+    /// it twice.
     limit_notified: std::collections::VecDeque<(String, u64)>,
     /// A transcript may show a notice whose card is not read yet.
     cards_dirty: bool,
@@ -302,15 +345,6 @@ pub(super) struct PullRequestState {
 enum IssuedOp {
     Policy(u64, u64, &'static str),
     Send(u64, String),
-}
-
-/// An automatic-limit notification waiting for the database to confirm it.
-struct PendingLimit {
-    thread_id: String,
-    link_revision: u64,
-    reference: PullRequestRef,
-    epoch: u64,
-    arrived: u64,
 }
 
 impl Default for PullRequestState {
@@ -337,7 +371,6 @@ impl Default for PullRequestState {
             dialog: None,
             destination_dialog: None,
             issued: BTreeSet::new(),
-            pending_limits: Vec::new(),
             pending_collapses: Vec::new(),
             limit_notified: std::collections::VecDeque::new(),
             cards_dirty: false,
@@ -390,6 +423,14 @@ impl PullRequestState {
         for thread in others {
             self.request(&thread);
         }
+    }
+
+    fn forget_limit_notified(&mut self, key: &PullRequestKey, epoch: u64) {
+        let seen = (
+            format!("{}/{}#{}", key.host, key.repository, key.number),
+            epoch,
+        );
+        self.limit_notified.retain(|entry| *entry != seen);
     }
 
     fn remember_limit_notified(&mut self, key: (String, u64)) -> bool {
@@ -613,6 +654,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }
                 }
             }
+            Loaded::LimitClaim(thread, key, epoch, claimed) => match claimed {
+                Ok(true) => self.raise_auto_fix_limit_notification(&thread, &key),
+                Ok(false) => {}
+                Err(error) => {
+                    // Not told, not claimed: a later read tries again.
+                    self.pull_requests.forget_limit_notified(&key, epoch);
+                    tracing::warn!(%thread, %error, "limit notification claim failed");
+                }
+            },
             Loaded::Slug(thread, slug) => {
                 if let Some(dialog) = &mut self.pull_requests.dialog
                     && dialog.thread_id == thread
@@ -643,11 +693,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.pull_requests.invalidate(change);
         if let PullRequestEvent::AutoFixChanged {
-            thread_id,
-            link_revision,
-            pull_request,
-            reason,
-            ..
+            thread_id, reason, ..
         } = change
         {
             // The answer to what this window issued has arrived (the read it started follows). A
@@ -657,27 +703,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .issued
                     .retain(|(thread, _)| thread != thread_id);
             }
-            if let PullRequestAutoFixChange::Adopted {
-                automatic,
-                limit_epoch,
-            } = reason
+            if let PullRequestAutoFixChange::Adopted { automatic } = reason
+                && *automatic
             {
-                if *automatic {
-                    // The notice is working on the failure now: the bar gets out of the way,
-                    // once the read that follows is shown (see `pending_collapses`).
-                    self.pull_requests
-                        .pending_collapses
-                        .push((thread_id.clone(), self.pull_requests.epoch));
-                }
-                if let Some(epoch) = limit_epoch {
-                    self.pull_requests.pending_limits.push(PendingLimit {
-                        thread_id: thread_id.clone(),
-                        link_revision: *link_revision,
-                        reference: pull_request.clone(),
-                        epoch: *epoch,
-                        arrived: self.pull_requests.epoch,
-                    });
-                }
+                // The notice is working on the failure now: the bar gets out of the way,
+                // once the read that follows is shown (see `pending_collapses`).
+                self.pull_requests
+                    .pending_collapses
+                    .push((thread_id.clone(), self.pull_requests.epoch));
             }
         }
         if let PullRequestEvent::Changed {
@@ -722,7 +755,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// any window, a relink, or a lost lease while it waited drops it. One transition notifies
     /// once.
     fn settle_pending_notices(&mut self, view: &ThreadPullRequest, started: u64) {
-        self.settle_pending_limits(view, started);
+        self.claim_limit_stop(view);
         let (due, waiting): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.pull_requests.pending_notices)
                 .into_iter()
@@ -767,42 +800,51 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    /// The limit notifications that waited for `view`: raised once per pull request and
-    /// budget epoch, only while a read made after the adoption shows that auto fix did stop
-    /// at that epoch, the thread still linked to the same link and this process holding it.
-    fn settle_pending_limits(&mut self, view: &ThreadPullRequest, started: u64) {
-        let (due, waiting): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.pull_requests.pending_limits)
-                .into_iter()
-                .partition(|limit| limit.thread_id == view.thread_id && limit.arrived <= started);
-        self.pull_requests.pending_limits = waiting;
-        let linked = view.link.as_ref().map(|link| link.link_revision);
-        for limit in due {
-            let stopped = view
-                .auto_fix
-                .as_ref()
-                .is_some_and(|auto| auto.state.limit_reached_epoch == Some(limit.epoch));
-            let still_wanted = view.tracked_here
-                && stopped
-                && linked == Some(limit.link_revision)
-                && !self
-                    .pull_requests
-                    .ended
-                    .contains(&(limit.thread_id.clone(), limit.link_revision));
-            let key = (
-                format!(
-                    "{}/{}#{}",
-                    limit.reference.host, limit.reference.repository, limit.reference.number
-                ),
-                limit.epoch,
-            );
-            if still_wanted && self.pull_requests.remember_limit_notified(key) {
-                self.raise_auto_fix_limit_notification(&limit.thread_id, &limit.reference);
-            }
+    /// Starts the claim of the notification for a stop at the limit that `view` shows, once per
+    /// pull request and budget epoch. Whether the runtime's event for the adoption ever came is
+    /// no condition: the database shows the stop, and the claim in it tells whether any window
+    /// already told. Only the window that holds the destination thread claims.
+    fn claim_limit_stop(&mut self, view: &ThreadPullRequest) {
+        let (Some(link), Some(auto)) = (&view.link, &view.auto_fix) else {
+            return;
+        };
+        let state = &auto.state;
+        let stopped = state.stop_reason.as_deref() == Some("limit_reached")
+            && state.limit_reached_epoch == Some(state.budget_epoch)
+            && state.destination_thread_id.as_deref() == Some(view.thread_id.as_str())
+            && state.link_revision == Some(link.link_revision);
+        if !view.tracked_here
+            || !stopped
+            || self
+                .pull_requests
+                .ended
+                .contains(&(view.thread_id.clone(), link.link_revision))
+        {
+            return;
         }
+        let Some(reader) = self.pull_requests.reader.clone() else {
+            return;
+        };
+        let epoch = state.budget_epoch;
+        let key = link.key.clone();
+        let seen = (
+            format!("{}/{}#{}", key.host, key.repository, key.number),
+            epoch,
+        );
+        if !self.pull_requests.remember_limit_notified(seen) {
+            return;
+        }
+        let thread = view.thread_id.clone();
+        let sender = self.pull_requests.sender.clone();
+        let waker = Arc::clone(&self.pull_requests.waker);
+        (self.pull_requests.spawner)(Box::new(move || {
+            let claimed = reader.claim_limit_notification(&key, epoch);
+            let _ = sender.send(Loaded::LimitClaim(thread, key, epoch, claimed));
+            waker();
+        }));
     }
 
-    fn raise_auto_fix_limit_notification(&mut self, thread_id: &str, reference: &PullRequestRef) {
+    fn raise_auto_fix_limit_notification(&mut self, thread_id: &str, key: &PullRequestKey) {
         let title = self
             .sidebar
             .threads
@@ -810,9 +852,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .find(|thread| thread.id.to_string() == thread_id)
             .map(|thread| thread.title.clone());
         let summary = format!(
-            "Auto fix stopped on {}#{} after {} sends",
-            reference.repository,
-            reference.number,
+            "Auto fix stopped on {} after {} sends",
+            crate::model::pull_requests::key_label(key),
             storage::pull_request_auto_fix::PR_AUTO_FIX_LIMIT
         );
         let summary = match title {

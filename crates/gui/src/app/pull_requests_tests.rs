@@ -124,13 +124,14 @@ fn a_thread_attached_read_only_refuses_every_operation() {
 
 // --- auto fix operations (ADR 0043 Phase 2, PR E) ---
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use event_bus::{
     Event, LifecycleEvent, PullRequestAutoFixChange, PullRequestEvent, PullRequestRef,
 };
 use storage::pull_request_auto_fix::{PrAutoFixState, PrNoticeMode, PrNoticePhase};
+use storage::pull_requests::PullRequestKey;
 
 use super::pull_requests::PullRequestReader;
 use crate::model::commands::LoopEvent;
@@ -146,6 +147,9 @@ const THREAD: &str = "parent";
 
 #[derive(Default)]
 struct Reader {
+    /// The limit claims of the database, shared by every window of a test.
+    claims: Arc<Mutex<BTreeSet<u64>>>,
+    claim_failures: Mutex<usize>,
     view: Mutex<Option<ThreadPullRequest>>,
     cards: Mutex<BTreeMap<String, HarnessCard>>,
     card_reads: Mutex<Vec<String>>,
@@ -162,6 +166,15 @@ impl PullRequestReader for Reader {
 
     fn linked_threads(&self) -> Result<Vec<String>, String> {
         Ok(vec![THREAD.into()])
+    }
+
+    fn claim_limit_notification(&self, _: &PullRequestKey, epoch: u64) -> Result<bool, String> {
+        let mut failures = self.claim_failures.lock().unwrap();
+        if *failures > 0 {
+            *failures -= 1;
+            return Err("busy".into());
+        }
+        Ok(self.claims.lock().unwrap().insert(epoch))
     }
 
     fn harness_card(&self, notice_id: &str) -> Result<Option<HarnessCard>, String> {
@@ -203,7 +216,7 @@ fn toggle() -> PullRequestAction {
     }
 }
 
-fn adopted(automatic: bool, limit_epoch: Option<u64>) -> Event {
+fn adopted(automatic: bool) -> Event {
     Event::new(PullRequestEvent::AutoFixChanged {
         thread_id: THREAD.into(),
         link_revision: 1,
@@ -214,10 +227,7 @@ fn adopted(automatic: bool, limit_epoch: Option<u64>) -> Event {
             repository: "turtton/evorch".into(),
             number: 12,
         },
-        reason: PullRequestAutoFixChange::Adopted {
-            automatic,
-            limit_epoch,
-        },
+        reason: PullRequestAutoFixChange::Adopted { automatic },
     })
 }
 
@@ -501,76 +511,161 @@ fn a_refusal_reads_the_thread_again_and_allows_a_new_attempt() {
     ));
 }
 
-// Given: the third automatic send stopped auto fix / When: the runtime's event arrives twice, and
-// the next budget epoch stops again / Then: Notifications gets one entry per epoch, and none
-// when the database does not show the stop or the window does not hold the thread
-#[test]
-fn the_limit_is_notified_once_per_budget_epoch_and_only_when_the_database_agrees() {
-    let directory = tempfile::tempdir().unwrap();
-    let stopped = |epoch: u64| {
+fn stopped(epoch: u64) -> ThreadPullRequest {
+    shown(
         auto_state(move |s| {
             s.used = 3;
             s.destination_thread_id = Some(THREAD.into());
+            s.link_revision = Some(1);
+            s.budget_epoch = epoch;
             s.limit_reached_epoch = Some(epoch);
             s.stop_reason = Some("limit_reached".into());
-        })
-    };
-    let (mut window, reader) = window(directory.path(), shown(stopped(0), |_| {}));
+        }),
+        |_| {},
+    )
+}
 
-    window.apply_events([adopted(true, Some(0))]);
-    for _ in 0..3 {
+fn pump(window: &mut WorkbenchState<DemoSource>) {
+    for _ in 0..4 {
         window.pump_pull_requests();
     }
+}
+
+/// A window of a process that starts on `claims`, the database's limit claims, and `view`.
+fn window_on(
+    directory: &std::path::Path,
+    claims: &Arc<Mutex<BTreeSet<u64>>>,
+    view: ThreadPullRequest,
+    holds_thread: bool,
+) -> (WorkbenchState<DemoSource>, Arc<Reader>) {
+    let reader = Arc::new(Reader {
+        claims: Arc::clone(claims),
+        ..Reader::default()
+    });
+    *reader.view.lock().unwrap() = Some(view);
+    let mut window = state(directory)
+        .with_pull_requests(reader.clone(), Some(Arc::new(move |_: &str| holds_thread)))
+        .with_pull_request_spawner(Arc::new(|job| job()));
+    pump(&mut window);
+    (window, reader)
+}
+
+// Given: auto fix stopped at the limit and the process ended before its event reached the
+// window / When: a window starts on that database / Then: Notifications gets the stop once, however
+// often the thread is read again
+#[test]
+fn a_stop_whose_event_was_lost_is_notified_when_the_database_is_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let claims = Arc::default();
+    let (mut window, _) = window_on(directory.path(), &claims, stopped(0), true);
     assert_eq!(limit_notifications(&window), 1);
 
-    window.apply_events([adopted(true, Some(0))]);
-    for _ in 0..3 {
-        window.pump_pull_requests();
-    }
-    assert_eq!(
-        limit_notifications(&window),
-        1,
-        "the same epoch is told once"
+    window.apply_events([adopted(true)]);
+    pump(&mut window);
+    assert_eq!(limit_notifications(&window), 1);
+}
+
+// Given: a stop the runtime's event already notified / When: the app restarts, and a second window
+// opens / Then: neither tells it again
+#[test]
+fn a_stop_already_notified_is_not_told_again_after_a_restart_or_in_another_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let claims = Arc::default();
+    let (mut first, reader) = window_on(
+        directory.path(),
+        &claims,
+        shown(auto_state(|_| {}), |_| {}),
+        true,
     );
+    *reader.view.lock().unwrap() = Some(stopped(0));
+    first.apply_events([adopted(true)]);
+    pump(&mut first);
+    assert_eq!(limit_notifications(&first), 1);
 
-    *reader.view.lock().unwrap() = Some(shown(stopped(1), |_| {}));
-    window.apply_events([adopted(true, Some(1))]);
-    for _ in 0..3 {
-        window.pump_pull_requests();
-    }
+    let (restarted, _) = window_on(directory.path(), &claims, stopped(0), true);
+    assert_eq!(limit_notifications(&restarted), 0);
+    let (other_window, _) = window_on(directory.path(), &claims, stopped(0), true);
+    assert_eq!(limit_notifications(&other_window), 0);
+}
+
+// Given: a stop shown to a window that does not hold the thread / Then: it raises nothing and
+// leaves the notification to the owner
+#[test]
+fn a_window_that_does_not_hold_the_thread_leaves_the_stop_to_the_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let claims: Arc<Mutex<BTreeSet<u64>>> = Arc::default();
+    let (mut other, _) = window_on(directory.path(), &claims, stopped(0), false);
+    other.apply_shared_pull_request_event(&adopted(true));
+    pump(&mut other);
+    assert_eq!(limit_notifications(&other), 0);
+    assert!(claims.lock().unwrap().is_empty());
+
+    let (owner, _) = window_on(directory.path(), &claims, stopped(0), true);
+    assert_eq!(limit_notifications(&owner), 1);
+}
+
+// Given: a stop that was told / When: the budget is reset and the next epoch stops again / Then:
+// that stop is told once more, and neither the reset state nor a manual off tells anything
+#[test]
+fn a_reset_budget_notifies_its_next_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let claims = Arc::default();
+    let (mut window, reader) = window_on(directory.path(), &claims, stopped(0), true);
+    assert_eq!(limit_notifications(&window), 1);
+
+    let reset = shown(
+        auto_state(|s| {
+            on_here_state(s);
+            s.budget_epoch = 1;
+            s.limit_reached_epoch = Some(0);
+        }),
+        |_| {},
+    );
+    *reader.view.lock().unwrap() = Some(reset);
+    window.apply_events([adopted_policy()]);
+    pump(&mut window);
+    assert_eq!(limit_notifications(&window), 1);
+
+    *reader.view.lock().unwrap() = Some(stopped(1));
+    window.apply_events([adopted(true)]);
+    pump(&mut window);
     assert_eq!(limit_notifications(&window), 2);
 
-    // The database does not show a stop at epoch 2: nothing is told.
-    window.apply_events([adopted(true, Some(2))]);
-    for _ in 0..3 {
-        window.pump_pull_requests();
-    }
-    assert_eq!(limit_notifications(&window), 2);
-    // An ordinary adoption is no reason to notify.
-    window.apply_events([adopted(true, None)]);
+    let disabled = shown(
+        auto_state(|s| {
+            s.budget_epoch = 1;
+            s.limit_reached_epoch = Some(1);
+            s.stop_reason = Some("disabled".into());
+        }),
+        |_| {},
+    );
+    *reader.view.lock().unwrap() = Some(disabled);
+    window.apply_events([adopted_policy()]);
+    pump(&mut window);
     assert_eq!(limit_notifications(&window), 2);
 }
 
-// Given: another window's event for the same stop / Then: a shared event only reads again and
-// raises nothing
+// Given: a claim that could not be written / When: the thread is read again / Then: the stop is
+// told once, when the claim succeeds
 #[test]
-fn a_limit_another_process_reached_notifies_nobody_here() {
+fn a_failed_claim_is_tried_again_by_the_next_read() {
     let directory = tempfile::tempdir().unwrap();
-    let (mut window, _) = window(
-        directory.path(),
-        shown(
-            auto_state(|s| {
-                s.used = 3;
-                s.limit_reached_epoch = Some(0);
-            }),
-            |_| {},
-        ),
-    );
-    window.apply_shared_pull_request_event(&adopted(true, Some(0)));
-    for _ in 0..3 {
-        window.pump_pull_requests();
-    }
+    let claims = Arc::default();
+    let reader = Arc::new(Reader {
+        claims: Arc::clone(&claims),
+        ..Reader::default()
+    });
+    *reader.claim_failures.lock().unwrap() = 1;
+    *reader.view.lock().unwrap() = Some(stopped(0));
+    let mut window = state(directory.path())
+        .with_pull_requests(reader, None)
+        .with_pull_request_spawner(Arc::new(|job| job()));
+    pump(&mut window);
     assert_eq!(limit_notifications(&window), 0);
+
+    window.apply_events([adopted(true)]);
+    pump(&mut window);
+    assert_eq!(limit_notifications(&window), 1);
 }
 
 // Given: an expanded bar / When: an automatic notice is adopted / Then: the bar folds; a manual
@@ -584,12 +679,12 @@ fn an_automatic_adoption_folds_the_bar_and_a_manual_one_does_not() {
     });
     assert!(window.pull_request_model().bar(THREAD).unwrap().expanded);
 
-    window.apply_events([adopted(false, None)]);
+    window.apply_events([adopted(false)]);
     for _ in 0..3 {
         window.pump_pull_requests();
     }
     assert!(window.pull_request_model().bar(THREAD).unwrap().expanded);
-    window.apply_events([adopted(true, None)]);
+    window.apply_events([adopted(true)]);
     for _ in 0..3 {
         window.pump_pull_requests();
     }
@@ -612,7 +707,7 @@ fn the_fold_of_an_adoption_survives_the_read_that_shows_the_failure() {
     assert!(!bar(&window));
 
     *reader.view.lock().unwrap() = Some(shown_with(failing(), auto_state(on_here_state)));
-    window.apply_events([adopted(true, None)]);
+    window.apply_events([adopted(true)]);
     for _ in 0..4 {
         window.pump_pull_requests();
     }

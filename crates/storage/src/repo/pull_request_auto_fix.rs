@@ -472,14 +472,31 @@ pub(crate) fn limit_events(
     after: Option<u64>,
 ) -> Result<Vec<PrAutoFixLimitEvent>, StorageError> {
     let key = key.normalized()?;
-    let mut q=c.prepare("SELECT budget_epoch,notice_id,at_ns FROM pr_auto_fix_limit_events WHERE pr_key=?1 AND (?2 IS NULL OR budget_epoch>?2) ORDER BY budget_epoch LIMIT 20")?;
+    let mut q=c.prepare("SELECT budget_epoch,notice_id,at_ns,notified_at_ns FROM pr_auto_fix_limit_events WHERE pr_key=?1 AND (?2 IS NULL OR budget_epoch>?2) ORDER BY budget_epoch LIMIT 20")?;
     Ok(q.query_map(params![key_id(&key)?, after], |r| {
         Ok(PrAutoFixLimitEvent {
             key: key.clone(),
             budget_epoch: r.get(0)?,
             notice_id: r.get(1)?,
             at_ns: r.get(2)?,
+            notified_at_ns: r.get(3)?,
         })
     })?
     .collect::<Result<_, _>>()?)
+}
+
+/// Takes the one notification of the stop at `budget_epoch`: true for the first caller of any
+/// window, false for every later one and for an epoch that never stopped.
+pub(crate) fn claim_limit_notification(
+    c: &Connection,
+    key: &PullRequestKey,
+    budget_epoch: u64,
+    now_ns: i64,
+) -> Result<bool, StorageError> {
+    let key = key.normalized()?;
+    let claimed = c.execute(
+        "UPDATE pr_auto_fix_limit_events SET notified_at_ns=?3 WHERE pr_key=?1 AND budget_epoch=?2 AND notified_at_ns IS NULL",
+        params![key_id(&key)?, budget_epoch, now_ns],
+    )?;
+    Ok(claimed == 1)
 }

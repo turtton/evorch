@@ -1432,7 +1432,8 @@ fn build_workbench(
             Arc::new({
                 let reader = gui::app::pull_requests::StoragePullRequestReader::new(
                     storage_config.db_path.clone(),
-                );
+                )
+                .with_limit_claims(storage.handle());
                 match runtime.pull_requests() {
                     Some(service) => reader.with_auto_fix_probe(Arc::new(move |thread: &str| {
                         gui::app::pull_requests::AutoFixFacts {
