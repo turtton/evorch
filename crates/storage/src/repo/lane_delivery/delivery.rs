@@ -59,13 +59,16 @@ pub(crate) fn bind_destination(
         "INSERT OR IGNORE INTO lane_delivery_destinations(thread_id) VALUES (?1)",
         [thread],
     )?;
-    let changed=tx.execute("UPDATE lane_delivery_destinations SET epoch=epoch+1,owner_json=?3,stopped=CASE ?4 WHEN 'stop' THEN 1 WHEN 'resume' THEN 0 ELSE stopped END,lease_token=NULL,lease_until_ns=NULL WHERE thread_id=?1 AND epoch=?2",params![thread,expected,json(&owner)?,match action { LaneDestinationAction::Bind=>"bind",LaneDestinationAction::Stop=>"stop",LaneDestinationAction::ExplicitUserResume=>"resume" }])?;
+    let changed=tx.execute("UPDATE lane_delivery_destinations SET epoch=epoch+1,owner_json=?3,stopped=CASE ?4 WHEN 'stop' THEN 1 WHEN 'resume' THEN 0 ELSE stopped END,lease_token=NULL,lease_until_ns=NULL,last_nack=CASE ?4 WHEN 'resume' THEN NULL ELSE last_nack END WHERE thread_id=?1 AND epoch=?2",params![thread,expected,json(&owner)?,match action { LaneDestinationAction::Bind=>"bind",LaneDestinationAction::Stop=>"stop",LaneDestinationAction::ExplicitUserResume=>"resume" }])?;
     if changed != 1 {
         return Err(conflict("stale_destination_epoch"));
     }
     let epoch = expected
         .checked_add(1)
         .ok_or(StorageError::OutOfRange("destination epoch"))?;
+    if action == LaneDestinationAction::ExplicitUserResume {
+        resolve_recovery_destination(&tx, thread)?;
+    }
     tx.commit()?;
     Ok(epoch)
 }
@@ -191,7 +194,7 @@ pub(crate) fn validate_claim(
     tx.commit()?;
     Ok(())
 }
-fn check_claim<N: OutboxNotice>(
+pub(super) fn check_claim<N: OutboxNotice>(
     conn: &Connection,
     claim: &LaneDeliveryClaim<N>,
     now_ns: i64,

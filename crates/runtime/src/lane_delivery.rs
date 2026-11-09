@@ -541,18 +541,46 @@ impl AgentRuntime {
                 if let Err(reason) = self.check_delivery_target(thread, &current) {
                     return Ok(LaneDeliveryOutcome::Nacked(reason));
                 }
+                let prepared = {
+                    let _guard = current
+                        .authority
+                        .ownership
+                        .as_ref()
+                        .map(|p| p.mutation_guard())
+                        .transpose()
+                        .map_err(|e| LaneError::new("ownership_lost", e.to_string()))?;
+                    let destination = destination.as_ref().ok_or_else(|| {
+                        LaneError::new("unknown_thread", "destination disappeared")
+                    })?;
+                    store.handle.prepare_lane_destination_recovery(
+                        thread.to_owned(),
+                        destination.epoch,
+                        current.owner(),
+                        format!("recovery-attempt:{}", self.shared.run_ids.next()),
+                    )?
+                };
+                if prepared.episode.state == storage::lane_delivery::LaneRecoveryState::Suppressed {
+                    return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));
+                }
                 if let Err(reason) = host.restore_root(self, &current) {
+                    if reason == LaneDeliveryNack::RestoreFailed {
+                        self.persist_restore_failure(&current, host, None, prepared);
+                    }
                     return Ok(LaneDeliveryOutcome::Nacked(reason));
                 }
                 tokio::select! {
                     result = self.wait_admission(target.root_run_id) => {
                         if result.is_err() {
+                            self.persist_restore_failure(&current, host, None, prepared);
                             return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));
                         }
                     }
                     _ = tokio::time::sleep(Duration::from_nanos(LEASE_NS.cast_unsigned())) => {
                         return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));
                     }
+                }
+                if let Err(reason) = self.resolve_restored_recovery(&current, host, prepared) {
+                    return Ok(LaneDeliveryOutcome::Nacked(reason));
                 }
                 if let Err(reason) = self.check_delivery_target(thread, &target) {
                     return Ok(LaneDeliveryOutcome::Nacked(reason));
@@ -624,9 +652,10 @@ impl AgentRuntime {
             }
         };
         let remaining = claim.lease_until_ns().saturating_sub(host.now_ns()).max(0) as u64;
+        let mut recovery_failure = None;
         let execute = tokio::select! {
             biased;
-            result = self.deliver_lane_claim(thread, &target, host, &claim, active) => result,
+            result = self.deliver_lane_claim(thread, &target, host, &claim, active, &mut recovery_failure) => result,
             _ = tokio::time::sleep(Duration::from_nanos(remaining)) => {
                 self.lane_delivery_diagnostic(
                     Some(target.root_run_id),
@@ -729,6 +758,12 @@ impl AgentRuntime {
                             )
                         })
                     });
+                if reason == LaneDeliveryNack::RestoreFailed
+                    && let (Some(attempt), Some(batch)) = (recovery_failure, claim.lane())
+                {
+                    // Active-loop, ACK/storage and suppressed outcomes are not attempts.
+                    self.persist_restore_failure(&target, host, Some(batch.clone()), attempt);
+                }
                 // Release the claim and retain the restore diagnostic before making
                 // the failed episode's unreceived outbox entries obsolete.
                 if failing_nudge {
@@ -738,22 +773,6 @@ impl AgentRuntime {
                     && let Some(lane) = claim.lane()
                 {
                     self.fail_lane_nudges(&target, lane, host.now_ns());
-                }
-                if reason == LaneDeliveryNack::RestoreFailed
-                    && !failing_nudge
-                    && claim.lane().is_some()
-                    && let Err(error) = self.record_lane_harness_failure(
-                        target.root_run_id,
-                        &format!("restore:{}", claim.token()),
-                        "restore_failed",
-                        target.authority.ownership.as_ref(),
-                    )
-                {
-                    self.lane_delivery_diagnostic(
-                        Some(target.root_run_id),
-                        "lane_failure_report_failed",
-                        &error.to_string(),
-                    );
                 }
                 delivery
                     .pending
@@ -767,6 +786,95 @@ impl AgentRuntime {
             }
         }
     }
+    fn resolve_restored_recovery(
+        &self,
+        target: &LaneDeliveryTarget,
+        host: &dyn LaneDeliveryHost,
+        attempt: storage::lane_delivery::LaneRecoveryAttempt,
+    ) -> Result<(), LaneDeliveryNack> {
+        let _guard = target
+            .authority
+            .ownership
+            .as_ref()
+            .map(|p| p.mutation_guard())
+            .transpose()
+            .map_err(|_| LaneDeliveryNack::OwnershipLost)?;
+        let thread = &attempt.episode.destination_thread_id;
+        let current = host.resolve(thread)?;
+        if current.owner() != target.owner() {
+            return Err(LaneDeliveryNack::OwnershipLost);
+        }
+        self.check_delivery_target(thread, &current)?;
+        self.delivery_store()
+            .map_err(|_| LaneDeliveryNack::StorageFailed)?
+            .handle
+            .resolve_lane_recovery(attempt)
+            .map_err(|_| LaneDeliveryNack::StorageFailed)
+    }
+    /// Both fresh notification delivery and already-accepted receipt recovery use
+    /// the same stable source episode; neither a claim nor a new owner resets it.
+    fn persist_restore_failure(
+        &self,
+        target: &LaneDeliveryTarget,
+        host: &dyn LaneDeliveryHost,
+        claim: Option<LaneDeliveryClaim>,
+        attempt: storage::lane_delivery::LaneRecoveryAttempt,
+    ) {
+        let thread = attempt.episode.destination_thread_id.clone();
+        let recorded = (|| {
+            let _guard = target
+                .authority
+                .ownership
+                .as_ref()
+                .map(|p| p.mutation_guard())
+                .transpose()
+                .map_err(|_| LaneDeliveryNack::OwnershipLost)?;
+            let current = host.resolve(&thread)?;
+            if current.owner() != target.owner() {
+                return Err(LaneDeliveryNack::OwnershipLost);
+            }
+            self.check_delivery_target(&thread, &current)?;
+            let store = self
+                .delivery_store()
+                .map_err(|_| LaneDeliveryNack::StorageFailed)?;
+            let result = if let Some(batch) = claim {
+                store
+                    .handle
+                    .record_lane_recovery_failure(batch, attempt, host.now_ns())
+            } else {
+                store
+                    .handle
+                    .record_lane_destination_recovery_failure(attempt, host.now_ns())
+            };
+            result.map_err(|error| {
+                self.lane_delivery_diagnostic(
+                    Some(target.root_run_id),
+                    "lane_failure_report_failed",
+                    &error.to_string(),
+                );
+                LaneDeliveryNack::StorageFailed
+            })
+        })();
+        if let Ok(failure) = recorded {
+            if let Some(appended) = failure.report {
+                self.shared
+                    .bus
+                    .emit(event_bus::Event::new(appended.lane.report_appended_event(
+                        &appended.report,
+                        Some(target.root_run_id.to_string()),
+                    )));
+                if let Some(lead) = appended.lane.lead_thread_id {
+                    self.schedule_lane_deliveries(&lead);
+                }
+            }
+            self.lane_state_changed(
+                &thread,
+                event_bus::DiagnosticSeverity::Warning,
+                "lane_delivery_nacked",
+                &failure.episode.episode_id,
+            );
+        }
+    }
     async fn deliver_lane_claim(
         &self,
         thread: &str,
@@ -774,6 +882,7 @@ impl AgentRuntime {
         host: &dyn LaneDeliveryHost,
         claim: &DeliveryClaim,
         active: bool,
+        recovery_failure: &mut Option<storage::lane_delivery::LaneRecoveryAttempt>,
     ) -> Result<usize, LaneDeliveryNack> {
         let delivery = &self.shared.lanes.delivery;
         let store = self
@@ -822,12 +931,52 @@ impl AgentRuntime {
         // This early rejection avoids calling a host for an already-fenced
         // claim. wake_chat repeats it under restore_gate, the authoritative
         // linearization point shared with management (the host may interleave).
+        let mut admission_recovery = None;
         let restore = if active {
             Ok(())
         } else {
-            self.validate_pending_lane_wake(target.root_run_id)
-                .and_then(|()| claim.check_nudge(self, &current, false))
-                .and_then(|()| host.restore_root(self, &current))
+            (|| {
+                self.validate_pending_lane_wake(target.root_run_id)?;
+                claim.check_nudge(self, &current, false)?;
+                let prepared = if let Some(batch) = claim.lane().filter(|batch| {
+                    batch
+                        .notifications
+                        .iter()
+                        .any(|n| !matches!(n.kind, LaneNotificationKind::Nudge { .. }))
+                }) {
+                    let _guard = current
+                        .authority
+                        .ownership
+                        .as_ref()
+                        .map(|p| p.mutation_guard())
+                        .transpose()
+                        .map_err(|_| LaneDeliveryNack::OwnershipLost)?;
+                    let prepared = store
+                        .handle
+                        .prepare_lane_recovery(batch.clone(), host.now_ns())
+                        .map_err(|_| LaneDeliveryNack::StorageFailed)?;
+                    if prepared.episode.state
+                        == storage::lane_delivery::LaneRecoveryState::Suppressed
+                    {
+                        delivery
+                            .pending
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&target.root_run_id);
+                        return Err(LaneDeliveryNack::RestoreFailed);
+                    }
+                    Some(prepared)
+                } else {
+                    None
+                };
+                let restored = host.restore_root(self, &current);
+                if restored == Err(LaneDeliveryNack::RestoreFailed) {
+                    *recovery_failure = prepared;
+                } else if restored.is_ok() {
+                    admission_recovery = prepared;
+                }
+                restored
+            })()
         };
         if let Err(reason) = restore {
             delivery
@@ -838,9 +987,18 @@ impl AgentRuntime {
             return Err(reason);
         }
         delivery.version.send_modify(|v| *v = v.wrapping_add(1));
-        self.wait_admission(target.root_run_id)
-            .await
-            .map_err(|_| LaneDeliveryNack::RestoreFailed)?;
+        if self.wait_admission(target.root_run_id).await.is_err() {
+            *recovery_failure = admission_recovery;
+            delivery
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&target.root_run_id);
+            return Err(LaneDeliveryNack::RestoreFailed);
+        }
+        if let Some(attempt) = admission_recovery {
+            self.resolve_restored_recovery(&current, host, attempt)?;
+        }
         let phase = self.lane_delivery_phase(target.root_run_id);
         if let Some(mut phase) = phase {
             tokio::select! {
@@ -1232,6 +1390,20 @@ impl AgentRuntime {
         };
         if lane.root_run_id.as_deref() != Some(&run.to_string())
             || lane.policy == event_bus::LanePolicy::Detached
+        {
+            return Ok(());
+        }
+        // A failed restore admission belongs to the durable recovery transaction.
+        // Finalization has an attempt-local execution ID; appending that here would
+        // multiply Reports and falsely mark each restore as terminal work progress.
+        // Include resolved episodes: Ready may have won before this callback.
+        if self
+            .admission_snapshot(run)
+            .is_some_and(|a| matches!(a.result, Some(Err(_))))
+            && store
+                .handle
+                .latest_lane_recovery(thread.clone())?
+                .is_some_and(|e| e.saved_root_run_id == run.to_string())
         {
             return Ok(());
         }

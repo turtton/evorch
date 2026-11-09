@@ -323,6 +323,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v55.sql"),
                     include_str!("../undo/undo_v54.sql"),
                     include_str!("../undo/undo_v53.sql"),
                     include_str!("../undo/undo_v52.sql"),

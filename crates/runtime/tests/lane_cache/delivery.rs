@@ -9,6 +9,7 @@ fn chat_authority() -> RunConfig {
     }
 }
 mod nudge;
+mod recovery;
 struct Host {
     thread: String,
     target: LaneDeliveryTarget,

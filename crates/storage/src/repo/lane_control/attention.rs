@@ -201,15 +201,26 @@ fn items(
                 vec![LaneAttentionAction::Resume],
             )?);
         }
-        let mut s=conn.prepare("SELECT n.destination_thread_id,COUNT(*),d.stopped,d.last_nack FROM lane_notifications n JOIN lane_delivery_destinations d ON d.thread_id=n.destination_thread_id WHERE n.lane_id=?1 AND n.management_revision=?2 AND n.state='pending' AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) GROUP BY n.destination_thread_id ORDER BY n.destination_thread_id")?;
-        for row in s.query_map(params![lane_id, l.management_revision], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, u64>(1)?,
-                r.get::<_, bool>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        })? {
+        // A suppressed accepted-input recovery can outlive its last outbox row.
+        // Union durable episodes with pending destinations; NACK is only a legacy
+        // nudge hint and claiming another batch must not hide the episode.
+        let mut s=conn.prepare("SELECT d.thread_id,(SELECT COUNT(*) FROM lane_notifications n WHERE n.lane_id=?1 AND n.management_revision=?2 AND n.destination_thread_id=d.thread_id AND n.state='pending'),d.stopped,d.last_nack FROM lane_delivery_destinations d WHERE d.thread_id IN (SELECT destination_thread_id FROM lane_notifications WHERE lane_id=?1 AND management_revision=?2 AND state='pending' UNION SELECT destination_thread_id FROM lane_recovery_episodes WHERE state<>'resolved' AND attempts>0 AND destination_thread_id IN (?3,?4)) AND d.thread_id NOT IN (SELECT thread_id FROM thread_tombstones) ORDER BY d.thread_id")?;
+        for row in s.query_map(
+            params![
+                lane_id,
+                l.management_revision,
+                l.thread_id,
+                l.lead_thread_id
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, u64>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )? {
             let (destination, count, stopped, nack) = row?;
             if stopped {
                 result.push(item(
@@ -225,18 +236,43 @@ fn items(
                     vec![LaneAttentionAction::Resume],
                 )?);
             }
-            if nack.as_deref() == Some("\"restore_failed\"") {
+            let recovery = crate::repo::lane_delivery::active_recovery(conn, &destination)?;
+            if recovery.as_ref().is_some_and(|e| e.attempts > 0)
+                || nack.as_deref() == Some("\"restore_failed\"")
+            {
+                let suppressed = recovery.as_ref().is_some_and(|e| {
+                    e.state == crate::lane_delivery::LaneRecoveryState::Suppressed
+                });
                 result.push(item(
                     &l,
                     &("restore", &destination),
-                    count,
-                    l.updated_at_ns,
+                    recovery.as_ref().map_or(count, |e| e.revision),
+                    recovery
+                        .as_ref()
+                        .and_then(|e| e.last_attempt_at_ns)
+                        .unwrap_or(l.updated_at_ns),
                     LaneAttentionKind::RestoreFailed {
                         destination_thread_id: destination.clone(),
-                        failure_ref: format!("lane_delivery:{destination}"),
+                        failure_ref: recovery.as_ref().map_or_else(
+                            || format!("lane_delivery:{destination}"),
+                            |e| e.episode_id.clone(),
+                        ),
+                        attempts: recovery.as_ref().map_or(0, |e| e.attempts),
+                        suppressed,
                     },
-                    "restore_failed",
-                    vec![LaneAttentionAction::Inspect, LaneAttentionAction::Continue],
+                    if suppressed {
+                        "restore_retry_suppressed"
+                    } else {
+                        "restore_failed"
+                    },
+                    vec![
+                        LaneAttentionAction::Inspect,
+                        if suppressed {
+                            LaneAttentionAction::Resume
+                        } else {
+                            LaneAttentionAction::Continue
+                        },
+                    ],
                 )?);
             }
         }
