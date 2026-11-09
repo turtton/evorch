@@ -123,8 +123,31 @@ impl AgentRuntime {
             if tasks.is_empty() {
                 break;
             }
-            for (_, execution) in executions.into_values() {
-                self.cancel_execution(&execution);
+            for (run, execution) in executions.into_values() {
+                let unregistered = {
+                    // Registration holds A -> R too. Mark cancellation under
+                    // that fence; never acquire a publication gate under A/R.
+                    let mut admissions = self
+                        .shared
+                        .admissions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let runs = lock_runs(&self.shared.runs);
+                    let registered = runs
+                        .get(&run)
+                        .is_some_and(|entry| Arc::ptr_eq(&entry.execution, &execution));
+                    if !registered
+                        && let Some(admission) = admissions.get_mut(&run)
+                        && Arc::ptr_eq(&admission.execution, &execution)
+                    {
+                        admission.cancelled = true;
+                    }
+                    !registered
+                };
+                // Registered roots belong to the host's ordinary Stop/drain.
+                if unregistered {
+                    self.cancel_execution(&execution);
+                }
             }
             while let Some(result) = tasks.join_next().await {
                 if let Err(error) = result {

@@ -193,6 +193,43 @@ impl AgentModel for AdmissionModel {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lane_admission_drain_preserves_stop_after_registration() {
+    let bus = Arc::new(EventBus::new(128));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(ToolExecutor::new(bus)),
+        Arc::new(AdmissionModel),
+    );
+    let run = runtime.reserve_run_id();
+    runtime.reserve_admission(run, None, None);
+    let execution = runtime.execution_snapshot(run).unwrap();
+    let (reached, release) = pause(&runtime, HookPoint::AdmissionRegistered, &execution);
+    runtime.spawn_reserved(
+        run,
+        None,
+        Role::Worker,
+        "lane",
+        RunConfig {
+            lane_scope: Some(event_bus::LaneScope::Lane),
+            ..Default::default()
+        },
+    );
+    reached.recv().unwrap();
+    assert!(runtime.inspect_agent(run).is_ok());
+    let mut drain = Box::pin(runtime.drain_lane_admissions());
+    let first = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(drain.as_mut(), cx))
+    })
+    .await;
+    assert!(first.is_pending(), "drain joins the paused admission task");
+    assert_eq!(*execution.cancel_tx.borrow(), RunInterrupt::None);
+    release.send(()).unwrap();
+    drain.await.unwrap();
+    runtime.stop(run, StopScope::SelfOnly).unwrap();
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Stopped);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ac15_cancel_after_registration_notifies_same_execution() {
     let bus = Arc::new(EventBus::new(128));
     let runtime = AgentRuntime::new(
