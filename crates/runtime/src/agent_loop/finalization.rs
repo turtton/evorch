@@ -186,6 +186,7 @@ impl LoopState {
         if released && let Some(memo) = self.take_pending_escalation() {
             let shared = self.shared.runtime.clone();
             crate::escalation::handoff::complete(&shared, self, memo).await;
+            return;
         }
         // The work period is over, whatever ended it. After a completed
         // escalation the source root no longer owns a list, so this is a no-op.

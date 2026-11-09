@@ -425,16 +425,17 @@ impl AgentRuntime {
                 channel: Default::default(),
             };
         let question = self.user_question(id)?.ok_or("unknown question")?;
-        self.deny_deleted_run(&question.run_id)
-            .map_err(|deleted| deleted.to_string())?;
         let store = self
             .shared
             .run_store
             .get()
             .ok_or("question storage is not configured")?;
-        let recipients = store
-            .user_question_recipients(id)
-            .map_err(|e| e.to_string())?;
+        let recipients = self.handoff_answer_recipients(
+            &question,
+            store
+                .user_question_recipients(id)
+                .map_err(|e| e.to_string())?,
+        )?;
         let mut permits = Vec::new();
         for recipient in &recipients {
             let run = crate::meta::parse_run_id(recipient)?;
@@ -468,7 +469,7 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut targets: Vec<(String, crate::escalation_review::ReviewRunContext)> = Vec::new();
         if trusted_user {
-            for recipient in std::iter::once(&question.run_id).chain(recipients.iter()) {
+            for recipient in &recipients {
                 let run = crate::meta::parse_run_id(recipient)?;
                 let Some(review) = reviews.get(&run) else {
                     continue;
@@ -542,10 +543,6 @@ impl AgentRuntime {
             return Ok(AnswerOutcome::Recorded(Box::new(question)));
         }
         if trusted_user {
-            let mut recipients = recipients;
-            recipients.push(question.run_id.clone());
-            recipients.sort();
-            recipients.dedup();
             let evidence = recipients
                 .iter()
                 .map(|recipient| {
@@ -665,7 +662,10 @@ impl AgentRuntime {
         let Some(store) = self.shared.run_store.get() else {
             return Ok(());
         };
-        let questions = store.user_questions(source).map_err(|e| e.to_string())?;
+        let questions = self.filter_handoff_questions(
+            source,
+            store.user_questions(source).map_err(|e| e.to_string())?,
+        )?;
         let ids = questions
             .iter()
             .filter(|question| {
@@ -726,7 +726,10 @@ impl AgentRuntime {
     pub fn user_answers(&self, run: RunId) -> Result<Vec<UserQuestion>, String> {
         self.entry(run).map_err(|e| e.to_string())?;
         match self.shared.run_store.get() {
-            Some(store) => store.user_questions(run).map_err(|e| e.to_string()),
+            Some(store) => self.filter_handoff_questions(
+                run,
+                store.user_questions(run).map_err(|e| e.to_string())?,
+            ),
             None => Ok(Vec::new()),
         }
     }

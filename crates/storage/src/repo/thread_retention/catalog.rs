@@ -122,6 +122,16 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ),
     ("lane_state", Keep, "ledger/topology revision singleton"),
     (
+        "lane_handoff_questions",
+        ReclaimRun,
+        "follows its question through ON DELETE CASCADE; ownership does not return to a later source incarnation",
+    ),
+    (
+        "lane_handoffs",
+        ReclaimThread,
+        "retained while source or target survives; source tombstone and target lane delete triggers collect it only after both are gone",
+    ),
+    (
         "lane_management_receipts",
         ReclaimThread,
         "bounded management operation receipts of the deleted lane",

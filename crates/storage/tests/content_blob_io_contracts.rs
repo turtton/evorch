@@ -83,7 +83,10 @@ const C_GC: u64 = 24;
 // v52 adds the management receipt table/indexes, four header columns and
 // authority fences. These fixed schema objects add 24 frames (332 total with
 // 100,000 rows); reserve 32 frames without relaxing the VM-step scaling check.
-const MIGRATION_FRAMES: u64 = 280 + 40 + 32;
+// v53 replaces provenance fences; v54 adds the empty handoff receipt table,
+// indexes and lane-delete trigger. The full upgrade measured 354 frames with
+// 100,000 rows (22 above v52), so budget 24 fixed schema frames.
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -320,6 +323,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v54.sql"),
                     include_str!("../undo/undo_v53.sql"),
                     include_str!("../undo/undo_v52.sql"),
                     include_str!("../undo/undo_v51.sql"),
@@ -346,7 +350,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     drop(Database::open_unchecked(&config(&path)).unwrap());
     let frames = (wal_bytes(&path) - before) / (page + PAGE_OVERHEAD);
     let scanned = VM_STEPS.load(Ordering::Relaxed);
-    println!("migrations v39 to v52 with {rows} rows: {frames} frames, {scanned} VM steps");
+    println!("migrations v39 to v54 with {rows} rows: {frames} frames, {scanned} VM steps");
     observer.execute_batch("COMMIT").unwrap();
     let version: i64 = observer
         .pragma_query_value(None, "user_version", |row| row.get(0))

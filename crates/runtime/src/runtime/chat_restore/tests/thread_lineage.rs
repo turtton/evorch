@@ -144,9 +144,9 @@ async fn escalation_records_parent_before_goal_binding_is_handed_off() {
         .unwrap();
     let id = event_bus::escalation_thread_id(&escalated.to_string());
     let row = store(&fixture).thread(&id).unwrap().unwrap();
-    assert_eq!(row.parent_thread_id.as_deref(), Some("source"));
+    assert_eq!(row.parent_thread_id, None);
     assert_eq!(row.escalation_source_run_id, Some(source.to_string()));
-    assert_eq!(row.lineage_kind, Some(ThreadLineageKind::Escalation));
+    assert_eq!(row.lineage_kind, Some(ThreadLineageKind::Lane));
     assert_eq!(row.chat_role.as_deref(), Some("Orchestrator"));
     assert_eq!(fixture.runtime.goal_thread(source), None);
     fixture.runtime.wait(escalated).await.unwrap();

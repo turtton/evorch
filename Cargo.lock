@@ -5804,6 +5804,7 @@ dependencies = [
  "model",
  "providers",
  "rcgen",
+ "recorder",
  "regex",
  "reqwest 0.12.28",
  "routing",

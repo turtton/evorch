@@ -336,7 +336,7 @@ fn rewound_and_switched_versions_follow_into_storage() {
 }
 
 #[test]
-fn escalated_conversation_is_mirrored_as_a_child_of_its_source() {
+fn escalated_conversation_is_mirrored_independently_with_source_provenance() {
     // Given: a mirrored worker thread.
     let directory = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -371,7 +371,7 @@ fn escalated_conversation_is_mirrored_as_a_child_of_its_source() {
     // in the source's project, and the source keeps its own root run.
     let escalated = event_bus::escalation_thread_id("run-2");
     let row = step_until_row(&mut harness, &config.db_path, &escalated, |_| true);
-    assert_eq!(row.parent_thread_id.as_deref(), Some("parent"));
+    assert_eq!(row.parent_thread_id.as_deref(), None);
     assert_eq!(row.lineage_kind, Some(ThreadLineageKind::Escalation));
     assert_eq!(row.escalation_source_run_id.as_deref(), Some("run-1"));
     assert_eq!(row.fork_point_run_id, None);

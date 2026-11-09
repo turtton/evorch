@@ -26,6 +26,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if created {
             self.create_escalation_thread(&id, &parent, source_run_id, at);
         }
+        if let Some(thread) = self
+            .sidebar
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == id)
+        {
+            thread.parent_thread_id = None;
+            // LaneCreated may precede this event. Copy declarations once when
+            // binding its provenance, never over a later host edit on replay.
+            if thread.escalation_source_run_id.is_none() {
+                thread.extra_read_dirs.clone_from(&parent.extra_read_dirs);
+            }
+            thread.escalation_source_run_id = Some(source_run_id.into());
+        }
         let thread_id = id.to_string();
         let adopted = !self.transcripts.is_thread_root(new_run_id);
         let has_output = self.transcripts.run(new_run_id).is_some_and(|run| {
@@ -76,12 +90,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         created || bound
     }
 
-    /// Creates the escalated conversation as a child of `parent`. It only joins the
-    /// family of `parent`: archive and pin state belong to the family, so there is
-    /// nothing to copy, settle or retry, and the child reads the family's state as soon
-    /// as it is a member. A history event cannot fail, and adding a member needs no
-    /// lock; the next save merges it into the shared sidebar. `at` is the time of the
-    /// escalation event, so replaying history dates the child by the event, not by the replay.
+    /// The source is provenance, not a display/family parent. A new detached
+    /// thread starts with independent, unpinned and unarchived family state.
     fn create_escalation_thread(
         &mut self,
         id: &ThreadId,
@@ -99,7 +109,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // The runtime copies the declaration at handoff; the record keeps it
         // across restarts (ADR 0037).
         child.extra_read_dirs.clone_from(&parent.extra_read_dirs);
-        child.parent_thread_id = Some(parent.id.clone());
+        child.parent_thread_id = None;
         child.escalation_source_run_id = Some(source_run_id.into());
         self.sidebar.threads.push(child);
         self.sidebar.refresh_derived();

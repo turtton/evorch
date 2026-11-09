@@ -55,6 +55,25 @@ pub fn append_event(
     limits: &HardLimits,
     accounting: &mut EventAccounting,
 ) -> Result<StoredEvent, StorageError> {
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let mut next = accounting.clone();
+    let stored = append_event_in_transaction(&transaction, session_id, event, limits, &mut next)?;
+    transaction.commit()?;
+    *accounting = next;
+    Ok(stored)
+}
+
+/// The caller owns an IMMEDIATE transaction and commits accounting only after
+/// that transaction commits. Used by handoff to commit its initial control state
+/// atomically with responsibility, rather than depending on the async recorder.
+pub(crate) fn append_event_in_transaction(
+    transaction: &Transaction<'_>,
+    session_id: Option<&str>,
+    event: &Event,
+    limits: &HardLimits,
+    accounting: &mut EventAccounting,
+) -> Result<StoredEvent, StorageError> {
+    let conn: &Connection = transaction;
     if matches!(event.kind, EventKind::Usage(_)) {
         return Err(StorageError::RawUsageEventNotPersisted);
     }
@@ -76,9 +95,7 @@ pub fn append_event(
 
     // 他ウィンドウの writer がシードと INSERT の間に割り込まないよう、
     // 容量検査から commit まで同じ write transaction で保護します。
-    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let data_version: i64 =
-        transaction.pragma_query_value(None, "data_version", |row| row.get(0))?;
+    let data_version: i64 = conn.pragma_query_value(None, "data_version", |row| row.get(0))?;
     // data_version は同じ接続自身の commit では変化しません。別接続の
     // commit を検出したときだけ再シードし、共有 DB の容量制限を維持します。
     let mut next_accounting = if accounting.data_version == Some(data_version) {
@@ -89,7 +106,7 @@ pub fn append_event(
     next_accounting.data_version = Some(data_version);
     let tombstones = match &next_accounting.tombstones {
         Some(tombstones) => Arc::clone(tombstones),
-        None => Arc::new(crate::thread_retention::TombstoneSet::load(&transaction)?),
+        None => Arc::new(crate::thread_retention::TombstoneSet::load(conn)?),
     };
     // A deleted family accepts nothing new; refuse before any accounting moves.
     if let Some(error) = tombstones.rejects(&event.kind) {
@@ -100,7 +117,7 @@ pub fn append_event(
         next_accounting.session_bytes = match session_id {
             Some(id) => match next_accounting.sessions.iter().find(|(key, _)| key == id) {
                 Some((_, bytes)) => *bytes,
-                None => accounting::session_event_bytes(&transaction, id)?,
+                None => accounting::session_event_bytes(conn, id)?,
             },
             None => 0,
         };
@@ -108,7 +125,7 @@ pub fn append_event(
     }
     let day_start = day_start_ns(event.meta.wall_clock)?;
     if next_accounting.seeded_day_start_ns != Some(day_start) {
-        next_accounting.day_bytes = accounting::day_event_bytes(&transaction, day_start)?;
+        next_accounting.day_bytes = accounting::day_event_bytes(conn, day_start)?;
         next_accounting.seeded_day_start_ns = Some(day_start);
     }
 
@@ -187,7 +204,7 @@ pub fn append_event(
     let id = match tokenized.as_mut() {
         Some(containers) => {
             crate::body_store::put_owner_keyed(
-                &transaction,
+                conn,
                 &crate::body_store::EVENT_OWNER,
                 containers,
                 |conn, containers, created| {
@@ -202,10 +219,9 @@ pub fn append_event(
         }
         None => {
             let encoded = encode_payload(kind, subkind, &payload);
-            write(&transaction, &encoded, 0, 0)?
+            write(conn, &encoded, 0, 0)?
         }
     };
-    transaction.commit()?;
 
     let next_session_bytes = next_accounting.session_bytes + event_len;
     let next_day_bytes = next_accounting.day_bytes + event_len;

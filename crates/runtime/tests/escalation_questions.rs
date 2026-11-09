@@ -155,7 +155,7 @@ impl AgentModel for BeforeEscalation {
             if let Some(path) = self.drop_links.lock().unwrap().take() {
                 rusqlite::Connection::open(path)
                     .unwrap()
-                    .execute_batch("DROP TABLE user_question_links")
+                    .execute_batch(&format!("CREATE TRIGGER fail_handoff_question BEFORE INSERT ON user_question_links WHEN NEW.run_id!='{}' BEGIN SELECT RAISE(ABORT, 'injected handoff question failure'); END;", invocation.run_id))
                     .unwrap();
             } else {
                 let runtime = self.runtime.lock().unwrap().as_ref().unwrap().clone();
@@ -214,32 +214,24 @@ async fn answer_saved_before_escalation_is_injected_into_the_new_roots_fresh_con
 async fn failed_question_inheritance_reports_error_without_spawning_an_escalated_root() {
     let model = hook_model();
     let (_dir, _storage, config, runtime, mut events) = setup(model.clone());
+    *model.runtime.lock().unwrap() = Some(runtime.clone());
     *model.drop_links.lock().unwrap() = Some(config.db_path);
     let source = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
-    assert_eq!(runtime.wait(source).await.unwrap(), AgentRunPhase::Done);
-    let mut failure = None;
-    for event in events.drain_pending_snapshot() {
-        match event.kind {
-            EventKind::Diagnostic(event) if event.code == "EscalationHandoffFailed" => {
-                assert_eq!(event.run_id.as_deref(), Some(source.to_string().as_str()));
-                assert!(event.detail.contains("no such table"), "{}", event.detail);
-                assert!(
-                    event.detail.contains("user_question_links"),
-                    "{}",
-                    event.detail
-                );
-                assert!(
-                    failure.replace(event).is_none(),
-                    "duplicate handoff failure"
-                );
-            }
-            EventKind::Lifecycle(LifecycleEvent::EscalationRequested { .. }) => {
-                panic!("failed inheritance must not start a root")
-            }
-            _ => {}
-        }
-    }
-    assert!(failure.is_some(), "missing handoff failure diagnostic");
+    model.script.wait_for_request(2).await;
+    assert!(matches!(
+        runtime.inspect_agent(source).unwrap().phase,
+        AgentRunPhase::Running | AgentRunPhase::Waiting
+    ));
+    runtime.stop(source, runtime::StopScope::SelfOnly).unwrap();
+    assert_eq!(runtime.wait(source).await.unwrap(), AgentRunPhase::Stopped);
+    assert!(!events.drain_pending_snapshot().iter().any(|e| matches!(
+        e.kind,
+        EventKind::Lifecycle(LifecycleEvent::EscalationRequested { .. })
+    )));
+    let observed = model.script.observed().await;
+    assert!(observed.last().unwrap().iter().flat_map(|m| &m.content).any(|b| matches!(b,
+        providers::ContentBlock::ToolResult { tool_call_id, is_error: true, .. } if tool_call_id == "escalate")));
     assert_eq!(runtime.list_agents().len(), 1);
-    assert_eq!(model.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(model.calls.load(Ordering::SeqCst), 3);
+    *model.runtime.lock().unwrap() = None;
 }

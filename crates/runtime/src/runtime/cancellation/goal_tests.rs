@@ -38,18 +38,35 @@ async fn ac15_handoff_failure_completes_only_reserved_execution_and_allows_retry
     assert!(Arc::ptr_eq(&execution, &expected));
     let thread = event_bus::escalation_thread_id(&target.to_string());
     runtime.bind_thread_root(&thread, target).unwrap();
-    let result = runtime.spawn_escalated_root(
-        memo(source),
+    let publication = ExecutionControl::new(false).publication();
+    let result = runtime.prepare_handoff_to_lane(
+        &memo(source),
         &RunConfig::default(),
         Default::default(),
-        || panic!("preparation failure must precede terminal publication"),
+        &publication,
     );
     assert!(result.unwrap_err().contains("already exists"));
     assert!(runtime.wait_admission(target).await.is_err());
     assert!(!lock_runs(&runtime.shared.runs).contains_key(&target));
+    // Prepared is deliberately not a resumable target. Retry the source's
+    // operation after removing the conflicting goal binding, keeping its ID.
+    assert!(
+        runtime
+            .continue_goal(target, "retry".into(), RunConfig::default())
+            .is_err()
+    );
+    runtime.goal_lock().roots.remove(&target);
+    let mut retry_memo = memo(source);
+    retry_memo.original_request = "same operation, reworded request".into();
     let retry = runtime
-        .continue_goal(target, "retry".into(), RunConfig::default())
+        .prepare_handoff_to_lane(
+            &retry_memo,
+            &RunConfig::default(),
+            Default::default(),
+            &publication,
+        )
         .unwrap();
+    assert_eq!(retry, target);
     let b = runtime.execution_snapshot(retry).unwrap();
     assert!(!Arc::ptr_eq(&execution, &b));
     runtime.fail_reserved_admission(target, &execution, "late old failure".into());

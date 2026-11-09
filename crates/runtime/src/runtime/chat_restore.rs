@@ -143,6 +143,27 @@ impl AgentRuntime {
             self.validate_pending_lane_wake(run_id)
                 .map_err(|reason| fail(RunRestoreFailure::LaneDeliveryFenced(reason)))?;
         }
+        if prompt.is_none()
+            && let Some(store) = store
+            && let Some(receipt) = store
+                .handle
+                .handoff_for_source(run_id.to_string())
+                .map_err(|e| fail(RunRestoreFailure::CorruptContext(e.to_string())))?
+            && receipt.state.is_committed()
+            && !(self.inspect_agent(run_id).is_ok_and(|entry| {
+                matches!(
+                    entry.phase,
+                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+                )
+            }) && self.execution_snapshot(run_id).is_ok_and(|execution| {
+                execution.publication().incarnation() != receipt.source_incarnation
+            }))
+        {
+            return Err(fail(RunRestoreFailure::UnsupportedConfig(format!(
+                "responsibility handed off to {}",
+                receipt.target_run_id
+            ))));
+        }
         self.ensure_no_saved_compaction(run_id)?;
         // Stop shares the run-local gate through registration/admission reservation:
         // a delayed automatic wake cannot replace an operator-stopped entry.
@@ -252,6 +273,8 @@ impl AgentRuntime {
         self.shared
             .model
             .restore_route_pins(&run_id.to_string(), &descriptor.route_pins);
+        self.restore_committed_handoff(run_id)
+            .map_err(|reason| fail(RunRestoreFailure::UnsupportedConfig(reason)))?;
         let pending_handoff = descriptor.pending_escalation.clone();
         let pending_request = pending_handoff.as_ref().and_then(|pending| {
             let original = pending
@@ -445,10 +468,28 @@ impl AgentRuntime {
                 .as_ref()
                 .map(|thread| format!("chat:{}:{thread}", role.name()))
                 .or(descriptor.name),
-            interactive: true,
-            keep_alive: true,
+            interactive: if descriptor.lane_scope.is_some()
+                && pending_handoff.is_some()
+                && prompt.is_none()
+            {
+                descriptor.interactive
+            } else {
+                true
+            },
+            keep_alive: if descriptor.lane_scope.is_some()
+                && pending_handoff.is_some()
+                && prompt.is_none()
+            {
+                descriptor.keep_alive
+            } else {
+                true
+            },
             lane_scope: descriptor.lane_scope,
             spawn_credits: descriptor.spawn_credits.clone(),
+            budget: pending_handoff
+                .as_ref()
+                .map(|pending| pending.budget.clone())
+                .unwrap_or_else(|| authority.budget.clone()),
             project_root,
             initial_prompt_id: prompt_id,
             ..authority
@@ -507,6 +548,21 @@ impl AgentRuntime {
         // Resuming the root is the operator's go-ahead for the tree they
         // stopped. A wake requested by the runtime is not.
         if operator_resume {
+            let _authority = config
+                .ownership
+                .as_ref()
+                .map(|p| p.mutation_guard())
+                .transpose()
+                .map_err(|e| fail(RunRestoreFailure::UnsupportedConfig(e.to_string())))?;
+            // Recovery also uses resume_chat. Only a new trusted human prompt
+            // may lift a handoff's durable pre-start cancellation here; the
+            // dedicated stopped-lane API lifts a stop before scheduling a resume.
+            if prompt.is_some() {
+                store
+                    .handle
+                    .resume_handoff_start(run_id.to_string())
+                    .map_err(|e| fail(RunRestoreFailure::CorruptContext(e.to_string())))?;
+            }
             self.lift_operator_stops(run_id);
         }
         Ok(self.spawn_run_with_handoff(
@@ -957,7 +1013,7 @@ impl AgentRuntime {
         ))
     }
 
-    fn chat_review_context(
+    pub(super) fn chat_review_context(
         &self,
         store: &crate::RunStore,
         run_id: RunId,

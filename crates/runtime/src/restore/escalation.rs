@@ -11,6 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct PendingEscalation {
     pub source_run_id: RunId,
     pub requires_ownership: bool,
+    /// Preserve source resource caps through committed admission recovery.
+    #[serde(default)]
+    pub budget: crate::budget_tracker::BudgetSettings,
     /// Host-authored text, kept separate from the worker's escalation memo.
     pub trusted_request: Option<String>,
     /// Only writers retaining complete human input set this. Legacy snapshots
@@ -69,6 +72,7 @@ pub(crate) fn persist_escalation_seed(
         pending_escalation: Some(PendingEscalation {
             source_run_id,
             requires_ownership,
+            budget: config.budget.clone(),
             trusted_request: runtime.trusted_thread_request(source_run_id),
             trusted_request_complete: true,
         }),
@@ -108,12 +112,44 @@ pub(crate) fn persist_escalation_seed(
         updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
         host_inputs_json: "[]".into(),
     };
-    // The run ID is new: the seed is its first snapshot. The caller hands the
-    // committed revision to the run it starts, which continues from the seed.
-    let write = provenance.write(record, 0)?;
+    // An uncommitted preparation retry refreshes this seed under its current
+    // snapshot CAS. Once responsibility commits the coordinator never rewrites it.
+    let expected = store
+        .restore_bundle(run_id)?
+        .map_or(0, |bundle| bundle.snapshot_revision);
+    if expected != 0
+        && !store
+            .handle
+            .handoff_for_target(run_id.to_string())?
+            .is_some_and(|receipt| !receipt.state.is_committed())
+    {
+        return Err(SnapshotError::Storage(storage::StorageError::StaleMutation));
+    }
+    let write = provenance.write(record, expected)?;
     let saved = store
         .handle
         .save_snapshot_bundle(&write)
         .map_err(super::provenance::storage_error)?;
+    // Materialize authentic inputs, not old review decisions or a shared Arc.
+    // Keep answer/reference context and ordering, but make every row belong to
+    // the target so source retention cannot remove its authority evidence.
+    let source = source_run_id.to_string();
+    let target = run_id.to_string();
+    let mut lineage = store.review_lineage_ancestors(&source)?;
+    lineage.push(source);
+    let copied = store
+        .handle
+        .copy_handoff_evidence(lineage, target.clone())?;
+    // Legacy host seeds may predate the durable evidence ledger entirely.
+    if !copied && let Some(request) = runtime.trusted_thread_request(source_run_id) {
+        store
+            .handle
+            .record_review_evidence(&[crate::run_store::evidence_row(
+                &target,
+                &target,
+                "host_chat",
+                &request,
+            )])?;
+    }
     Ok(saved.snapshot_revision)
 }

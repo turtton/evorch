@@ -70,6 +70,27 @@ pub(super) async fn escalate(
         escalation_reason: args.escalation_reason,
         suggested_next: args.suggested_next,
     };
+    if state
+        .shared
+        .executor
+        .has_unobserved_shell_jobs(&source_run_id.to_string())
+    {
+        return error("Observe or stop shell jobs before handing off");
+    }
+    let prepared = state
+        .continuity
+        .freeze(runtime, source_run_id, &state.context.messages)
+        .and_then(|continuity| {
+            runtime.prepare_handoff_to_lane(
+                &memo,
+                state.run_config(),
+                continuity,
+                &state.task.publication,
+            )
+        });
+    if let Err(reason) = prepared {
+        return error(format!("handoff preparation failed: {reason}"));
+    }
     runtime.record_escalation_memo(source_run_id, memo.clone());
     DispatchResult {
         result: ToolResult::success(
