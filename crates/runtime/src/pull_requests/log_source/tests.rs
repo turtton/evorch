@@ -4,7 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
+use storage::lane_delivery::LANE_DELIVERY_PAGE_BYTES;
+use storage::pull_request_auto_fix::{PrNotice, PrNoticeMode, PrNoticePhase};
+
 use super::*;
+use crate::lane_delivery::prepare_pr_notice_payload;
 use crate::pull_requests::fake::FakeProcessRunner;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -1352,10 +1356,85 @@ fn runs_request(count: u64) -> LogRequest {
     )
 }
 
+/// The notice the agent is sent, built the way the harness builds it: a header, the facts and
+/// the log, with the page as the limit.
+fn pr_notice() -> PrNotice {
+    PrNotice {
+        notice_id: "prn-test".to_owned(),
+        reservation_revision: 0,
+        key: key(),
+        head_sha: SHA.to_owned(),
+        mode: PrNoticeMode::Auto,
+        destination_thread_id: Some("lead".to_owned()),
+        link_revision: 1,
+        policy_revision: 1,
+        budget_epoch: 0,
+        success_seq: 1,
+        phase: PrNoticePhase::Reserved,
+        payload: None,
+    }
+}
+
+/// The header the harness puts before a stored payload; `prepare_pr_notice_payload` keeps room
+/// for it.
+fn notice_header(notice: &PrNotice) -> String {
+    format!(
+        "[harness-notice kind=pr_checks_failed pr=#{} head={}]\nrepo: {}/{}\n",
+        notice.key.number, notice.head_sha, notice.key.host, notice.key.repository
+    )
+}
+
+/// The whole notice for `bundle`, with the facts made long enough that exactly `log_budget`
+/// bytes are left for the log.
+fn whole_notice(bundle: &CiLogBundle, log_budget: usize) -> String {
+    let notice = pr_notice();
+    let header = notice_header(&notice);
+    let budget = LANE_DELIVERY_PAGE_BYTES - header.len();
+    let bare = prepare_pr_notice_payload(&notice, &[String::new()], "now", None).len();
+    // The log gets what is left after the facts and one separator.
+    let name = "c".repeat(budget - 1 - log_budget - bare);
+    let payload = prepare_pr_notice_payload(&notice, &[name], "now", Some(bundle));
+    format!("{header}{payload}")
+}
+
+/// Builds the whole notice with the log given every budget that matters (whole, one byte
+/// short, half, the smallest, one byte below it), and checks that nothing of the key is in any
+/// of them, that none is over the page, and that the log was shrunk when it had to be.
+#[track_caller]
+fn assert_no_key_in_whole_notice(bundle: &CiLogBundle, body: &[String]) {
+    let full = render_ci_log_data(bundle, usize::MAX).unwrap();
+    let minimal = minimal_ci_log_data(bundle);
+    let budgets = [
+        full.len(),
+        full.len() - 1,
+        full.len() / 2,
+        minimal.len(),
+        minimal.len() - 1,
+    ];
+    for log_budget in budgets {
+        let notice = whole_notice(bundle, log_budget);
+        assert!(notice.len() <= LANE_DELIVERY_PAGE_BYTES, "{log_budget}");
+        assert!(notice.starts_with("[harness-notice kind=pr_checks_failed"));
+        assert_no_key(&notice, body);
+        let has_log = notice.contains(CI_LOG_DATA_OPEN);
+        assert_eq!(has_log, log_budget >= minimal.len(), "budget {log_budget}");
+        if has_log {
+            let log = &notice[notice.find(CI_LOG_DATA_OPEN).unwrap()..];
+            assert!(log.len() <= log_budget, "{} > {log_budget}", log.len());
+            assert_eq!(log.matches(CLOSING).count(), 1);
+            assert_eq!(log == full, log_budget >= full.len(), "budget {log_budget}");
+            if log_budget < full.len() {
+                assert_eq!(parsed_body(log)["truncated"], true, "budget {log_budget}");
+            }
+        }
+    }
+}
+
 /// Wraps `bundle` with every budget from its full size down to the smallest, and checks that
-/// nothing of the key is in any of the texts.
+/// nothing of the key is in any of the texts, then does the same for the whole notice.
 #[track_caller]
 fn assert_no_key_at_any_wrapper_size(bundle: &CiLogBundle, body: &[String]) {
+    assert_no_key_in_whole_notice(bundle, body);
     let full = render_ci_log_data(bundle, usize::MAX).unwrap();
     assert_no_key(&full, body);
     let minimal = minimal_ci_log_data(bundle);
@@ -1380,7 +1459,11 @@ async fn a_private_key_cut_by_the_raw_limit_leaves_no_piece() {
     let begin_line = gh_line("-----BEGIN RSA PRIVATE KEY-----");
     let cuts = [
         ("begin line", begin_line.len() - 10, false),
-        ("first body line", begin_line.len() + 25, true),
+        (
+            "first body line",
+            begin_line.len() + GH_PREFIX.len() + 25,
+            true,
+        ),
         ("middle", key.len() / 2, true),
         ("end line", key.len() - 12, true),
     ];
@@ -1469,22 +1552,41 @@ async fn a_private_key_across_the_excerpt_limits_leaves_no_piece() {
 #[tokio::test(start_paused = true)]
 async fn private_keys_in_several_runs_leave_no_piece_under_a_shared_budget() {
     let body = pem_body(120);
-    let logs = (0..3)
-        .map(|index| {
-            let mut log = noise_of(300);
-            log.push_str(&pem_key(&body, true));
-            log.push_str(&gh_line(&format!("tail of run {index}")));
-            log_of(&log, false)
-        })
-        .collect();
+    // The default budget holds every run whole; 400 bytes shared by three runs cut each one.
+    for (excerpt_bytes, cut) in [(CI_LOG_EXCERPT_BYTES_MAX, false), (400, true)] {
+        let logs = (0..3)
+            .map(|index| {
+                let mut log = noise_of(300);
+                log.push_str(&pem_key(&body, true));
+                log.push_str(&gh_line(&format!("tail of run {index}")));
+                log_of(&log, false)
+            })
+            .collect();
+        let mut request = runs_request(3);
+        request.limits.excerpt_bytes = excerpt_bytes;
 
-    let bundle = fetch_logs(logs, &runs_request(3)).await;
+        let bundle = fetch_logs(logs, &request).await;
 
-    assert_eq!(bundle.runs.len(), 3);
-    for run in &bundle.runs {
-        assert_no_key(&run.excerpt, &body);
+        assert_eq!(bundle.runs.len(), 3, "{excerpt_bytes}");
+        assert_eq!(
+            bundle.runs.iter().all(|run| run.lines_omitted == 0),
+            !cut,
+            "{excerpt_bytes}"
+        );
+        assert_eq!(bundle.truncated, cut, "{excerpt_bytes}");
+        assert!(
+            bundle
+                .runs
+                .iter()
+                .map(|run| run.excerpt.len())
+                .sum::<usize>()
+                <= excerpt_bytes
+        );
+        for run in &bundle.runs {
+            assert_no_key(&run.excerpt, &body);
+        }
+        assert_no_key_at_any_wrapper_size(&bundle, &body);
     }
-    assert_no_key_at_any_wrapper_size(&bundle, &body);
 }
 
 // Given: a private key with no END line, in a log that ended by itself and in one that the raw
