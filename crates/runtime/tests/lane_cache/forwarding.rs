@@ -466,12 +466,7 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
         .filter(|r| r.path == Wire::ChatCompletions.path())
         .map(|r| r.body)
         .collect::<Vec<_>>();
-    let lane_history = requests
-        .iter()
-        .filter(|r| actor(r) == 1)
-        .next_back()
-        .unwrap()["messages"]
-        .to_string();
+    let lane_history = requests.iter().rfind(|r| actor(r) == 1).unwrap()["messages"].to_string();
     assert_eq!(lane_history.matches("[subagent-question").count(), 1);
     assert!(
         requests
