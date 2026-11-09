@@ -153,14 +153,25 @@ pub(crate) fn upsert(
     if threads.is_empty() {
         return Ok(0);
     }
+    let transaction = conn.unchecked_transaction()?;
+    let skipped = upsert_in(&transaction, writer, threads)?;
+    transaction.commit()?;
+    Ok(skipped)
+}
+
+/// The caller owns the transaction, including any membership fence.
+pub(crate) fn upsert_in(
+    transaction: &Connection,
+    writer: ThreadWriter,
+    threads: &[ThreadUpsert],
+) -> Result<usize, StorageError> {
     threads.iter().try_for_each(ThreadUpsert::validate)?;
     let redactor = secret_guard::SecretRedactor::from_env();
-    let transaction = conn.unchecked_transaction()?;
     let mut skipped = 0;
     {
         let mut statement = transaction.prepare(&upsert_sql(writer))?;
         for thread in threads {
-            if let Some(error) = tombstoned_identity(&transaction, thread)? {
+            if let Some(error) = tombstoned_identity(transaction, thread)? {
                 match writer {
                     ThreadWriter::Host => {
                         skipped += 1;
@@ -180,7 +191,7 @@ pub(crate) fn upsert(
                 })
                 .transpose()?;
             let archived_before = match writer {
-                ThreadWriter::Host => archived_flag(&transaction, &thread.thread_id)?,
+                ThreadWriter::Host => archived_flag(transaction, &thread.thread_id)?,
                 ThreadWriter::Runtime => false,
             };
             let base = params![
@@ -216,8 +227,8 @@ pub(crate) fn upsert(
             };
             // Only the host writes the archive series, so only it can flip the flag.
             if writer == ThreadWriter::Host {
-                let archived_after = archived_flag(&transaction, &thread.thread_id)?;
-                let index = crate::repo::thread_index::SqliteThreadIndex::new(&transaction);
+                let archived_after = archived_flag(transaction, &thread.thread_id)?;
+                let index = crate::repo::thread_index::SqliteThreadIndex::new(transaction);
                 if !archived_before && archived_after {
                     index.archive_runs(&thread.thread_id)?;
                 } else if archived_before && !archived_after {
@@ -226,7 +237,6 @@ pub(crate) fn upsert(
             }
         }
     }
-    transaction.commit()?;
     Ok(skipped)
 }
 

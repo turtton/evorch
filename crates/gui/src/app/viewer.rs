@@ -385,6 +385,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::SwitchThread(thread_id) => self.switch_thread(thread_id),
                 SidebarAction::TogglePin(thread_id) => self.toggle_pin(thread_id),
                 SidebarAction::ToggleArchive(thread_id) => self.toggle_archive(thread_id),
+                SidebarAction::ManageLane(request) => self.manage_lane(request, None),
+                SidebarAction::ReattachLane(intent) => self.reattach_lane_drop(intent),
                 SidebarAction::LinkPullRequest(thread_id) => {
                     self.open_link_dialog(thread_id.to_string());
                     Ok(())

@@ -388,6 +388,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return Ok(());
         }
         // The target is what the user asked for on the thread this window shows.
+        let expected_family = self
+            .sidebar
+            .lane_family_revision(&thread_id)
+            .map_err(|_| ThreadError::UnknownThread)?;
         let pinned = !self
             .sidebar
             .threads
@@ -399,6 +403,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // newest state under the save lock: a stale view of the archive series cannot
         // undo another window's archive.
         self.shared_sidebar_transact(|latest| {
+            super::lane_management::check_family_membership(
+                &latest.sidebar,
+                &thread_id,
+                &expected_family,
+            )?;
             if workspace_ui::display_parent(&latest.sidebar.threads, &thread_id).is_some() {
                 return Ok(());
             }

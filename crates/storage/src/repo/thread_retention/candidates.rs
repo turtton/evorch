@@ -104,7 +104,8 @@ pub(crate) fn schedule(
             };
             // Nothing can be confirmed while the event backfill is unfinished: the start
             // is still preparing, which is not the same as "due".
-            let preparing = own == RetentionStatus::DueNextStartup && backfill_pending(conn)?;
+            let preparing = own == RetentionStatus::DueNextStartup
+                && (backfill_pending(conn)? || management_projection_pending(conn)?);
             // A thread is deleted with its family, so the family's state decides.
             if preparing {
                 RetentionStatus::Blocked(BlockReason::Exploring)
@@ -187,6 +188,12 @@ pub(super) fn family_blocked(
     policy: &ThreadRetentionPolicy,
     owners: &BTreeMap<String, String>,
 ) -> Result<Option<BlockReason>, StorageError> {
+    // Until the sidebar/mirror ACKs a management change, the old and new
+    // family are not both knowable from the current relation. Conservatively
+    // hold confirmation globally; exploration remains bounded and resumable.
+    if management_projection_pending(conn)? {
+        return Ok(Some(BlockReason::Exploring));
+    }
     let sidebar: HashMap<&str, &SidebarThread> = input
         .threads
         .iter()
@@ -221,4 +228,11 @@ pub(super) fn family_blocked(
         }
     }
     Ok(None)
+}
+
+fn management_projection_pending(conn: &Connection) -> Result<bool, StorageError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM lanes WHERE management_revision > 1 AND management_projection_revision < management_revision)",
+        [], |row| row.get(0),
+    )?)
 }

@@ -161,6 +161,9 @@ fn merge_three_way(
 
 /// The outcome of one transaction on the shared sidebar.
 struct Commit {
+    // Keep the family fence through adoption and the synchronous mirror/ACK,
+    // not merely until the file write returns.
+    _lock: Option<SidebarLock>,
     /// This process's state when the transaction began.
     local: HistorySidebar,
     /// The newest state with the edit applied.
@@ -310,6 +313,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
+        let mut repaired = parse(output.as_deref().unwrap_or(&local))?;
+        self.repair_sidebar_membership(&mut repaired.sidebar)?;
+        let repaired = serde_json::to_vec_pretty(&repaired)?;
+        output = (repaired != local).then_some(repaired);
         write_atomically(path, output.as_deref().unwrap_or(&local))?;
         // What the file holds now is the committed state, merged-in changes included.
         if let Ok(written) = parse(output.as_deref().unwrap_or(&local)) {
@@ -339,6 +346,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         &mut self,
         op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
     ) -> Result<T, Box<dyn std::error::Error>> {
+        self.shared_sidebar_transact_host(|latest| op(latest).map_err(Into::into))
+    }
+
+    /// Host operations may commit SQL before the projection is saved. Callers
+    /// distinguish that outcome from validation failures and repair on retry.
+    pub(super) fn shared_sidebar_transact_host<T>(
+        &mut self,
+        op: impl FnOnce(&mut HistorySidebar) -> Result<T, Box<dyn std::error::Error>>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
         let (output, commit) = self.commit_shared_sidebar(op)?;
         let Some(commit) = commit else {
             return Ok(output);
@@ -359,6 +375,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             shared.base = Some(bytes);
         }
         self.force_thread_mirror();
+        drop(commit._lock);
         Ok(output)
     }
 
@@ -366,7 +383,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// nothing; `Commit::written` is `None` without a shared file.
     fn commit_shared_sidebar<T>(
         &self,
-        op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
+        op: impl FnOnce(&mut HistorySidebar) -> Result<T, Box<dyn std::error::Error>>,
     ) -> Result<(T, Option<Commit>), Box<dyn std::error::Error>> {
         let local = HistorySidebar {
             sidebar: self.sidebar.clone(),
@@ -376,10 +393,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(path) = self.sidebar_path.clone() else {
             // No shared file (a test or a temporary state): there is nothing to merge.
             let mut latest = local.clone();
+            self.repair_sidebar_membership(&mut latest.sidebar)?;
             let output = op(&mut latest)?;
+            self.repair_sidebar_membership(&mut latest.sidebar)?;
             super::thread_retention::prune_tombstoned(&mut latest, &self.tombstones);
             let own = all_thread_ids(&latest);
             let commit = Commit {
+                _lock: None,
                 local,
                 latest,
                 own,
@@ -417,7 +437,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .collect();
         }
         let merged = latest.clone();
+        self.repair_sidebar_membership(&mut latest.sidebar)?;
         let output = op(&mut latest)?;
+        self.repair_sidebar_membership(&mut latest.sidebar)?;
         if latest.sidebar == merged.sidebar
             && latest.user_messages == merged.user_messages
             && latest.composer_drafts == merged.composer_drafts
@@ -429,6 +451,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 || merged.user_messages != local.user_messages
                 || merged.composer_drafts != local.composer_drafts;
             let commit = stale.then(|| Commit {
+                _lock: Some(_lock),
                 local,
                 latest: merged,
                 own: BTreeSet::new(),
@@ -457,6 +480,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok((
             output,
             Some(Commit {
+                _lock: Some(_lock),
                 local,
                 latest,
                 own,
@@ -620,5 +644,35 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.rebuild_delivery_rows();
         self.refresh_draft_banner();
         self.sync_project_trust();
+    }
+}
+
+#[cfg(test)]
+mod lock_scope_tests {
+    #[test]
+    fn saved_commit_keeps_the_family_lock_until_projection_is_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidebar.json");
+        let ui = crate::app::delivery_tests::state(&path);
+        ui.save_sidebar();
+        let (_, commit) = ui
+            .commit_shared_sidebar(|latest| {
+                latest
+                    .sidebar
+                    .set_family_pinned(&workspace_ui::ThreadId::new("thread"), true)?;
+                Ok(())
+            })
+            .unwrap();
+        let commit = commit.expect("pin changed the durable sidebar");
+        let contender = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path.with_extension("json.lock"))
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(commit);
+        contender.try_lock().unwrap();
     }
 }

@@ -373,6 +373,7 @@ mod tests {
             "Lane one",
         )];
         threads[0].lane = Some(workspace_ui::LaneLink {
+            detached_since_management_revision: None,
             lane_id: "lane-1".into(),
             origin_thread_id: ThreadId::new("lead"),
             lead_thread_id: Some(ThreadId::new("lead")),

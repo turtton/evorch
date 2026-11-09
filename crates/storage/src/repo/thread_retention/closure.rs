@@ -569,6 +569,12 @@ fn explore_in(
             })
             .collect());
     }
+    let topology_revision = crate::repo::lane_management::topology_revision(conn)?;
+    // Management can remove edges: union-only exploration cannot shrink a closure.
+    conn.execute(
+        "DELETE FROM retention_staging_state WHERE family_topology_revision <> ?1",
+        [topology_revision],
+    )?;
     let hash = candidate_hash(&candidates);
     let mut results: BTreeMap<String, FamilyState> = BTreeMap::new();
     // Seed a family for every candidate that is not a member of one yet.
@@ -583,9 +589,9 @@ fn explore_in(
             continue;
         }
         conn.execute(
-            "INSERT INTO retention_staging_state(family_key, started_at_ns, input_hash) \
-             VALUES (?1, ?2, ?3)",
-            params![id, input.now_ns, hash],
+            "INSERT INTO retention_staging_state(family_key, started_at_ns, input_hash, family_topology_revision) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, input.now_ns, hash, topology_revision],
         )?;
         add_member(conn, id, "thread", id)?;
     }

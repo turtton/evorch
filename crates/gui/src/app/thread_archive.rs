@@ -27,6 +27,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // The user acts on what this window shows; another window may have
         // changed the family since, and the target stays what the user asked for.
         let archived = !thread.archived;
+        let expected_family = self
+            .sidebar
+            .lane_family_revision(&thread_id)
+            .map_err(|_| ThreadError::UnknownThread)?;
         let phases = self.phases.clone();
         let now = now_unix_seconds();
         // The same guards run again on the newest state: a family is archived from
@@ -36,6 +40,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let change = self
             .shared_sidebar_transact(|latest| {
                 let sidebar = &mut latest.sidebar;
+                super::lane_management::check_family_membership(
+                    sidebar,
+                    &thread_id,
+                    &expected_family,
+                )?;
                 if !sidebar.threads.iter().any(|thread| thread.id == thread_id) {
                     return Err(ThreadError::UnknownThread);
                 }

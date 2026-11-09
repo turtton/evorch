@@ -20,13 +20,12 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
-/// Writer link for the mirror. Definitions are sent without waiting for the
-/// writer, so the render thread never blocks on SQLite.
+/// Writer link for the mirror. Lane projections synchronously fence membership,
+/// mirror flags and ACK in one transaction after the durable sidebar save.
 pub(crate) struct ThreadMirrorLink {
-    handle: storage::StorageHandle,
-    /// The definition last handed to the writer, by thread ID. A definition
-    /// the writer later failed to store is sent again only when it changes or
-    /// the GUI restarts, as with the usage ledger.
+    pub(super) handle: storage::StorageHandle,
+    /// The last successfully mirrored definition, by thread ID. Failed fenced
+    /// writes are retried on the next sync.
     mirrored: HashMap<String, ThreadUpsert>,
     canonical_roots: CanonicalRoots,
     next_sync: Option<Instant>,
@@ -100,6 +99,32 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 Some((&project.id, link.canonical_roots.get(&project.repo_root)?))
             })
             .collect();
+        // A save checked membership under the file lock. Recheck it at mirror time:
+        // a management commit may have happened after the file write. Never send
+        // flags from that stale file, even if its pin/archive revisions are higher.
+        let snapshot = match link
+            .handle
+            .sidebar_projection_snapshot(sidebar.threads.iter().map(|t| t.id.to_string()).collect())
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(%error, "sidebar membership read failed");
+                return;
+            }
+        };
+        if snapshot.lanes.iter().any(|lane| {
+            sidebar
+                .threads
+                .iter()
+                .find(|t| t.id.to_string() == lane.thread_id)
+                .and_then(|t| t.lane.as_ref())
+                != Some(&super::lanes::link_of(lane))
+        }) {
+            // Event loss cannot leave the fence pending forever: a normal tick
+            // repairs the durable file from the ledger, then retries the mirror.
+            self.save_sidebar();
+            return;
+        }
         // The one resolution of archive and pin state, shared with the retention input.
         let states = sidebar.resolve_states();
         let changed: Vec<ThreadUpsert> = sidebar
@@ -114,8 +139,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             })
             .filter(|upsert| link.mirrored.get(&upsert.thread_id) != Some(upsert))
             .collect();
-        // A full queue sends nothing; the same changes are found again next time.
-        if !changed.is_empty() && link.handle.try_upsert_threads(changed.clone()) {
+        // A failed fence sends nothing; repair/retry occurs on the next tick.
+        let can_ack = self.sidebar_path.is_some()
+            && snapshot.lanes.iter().all(|lane| {
+                states
+                    .get(&workspace_ui::ThreadId::new(&lane.thread_id))
+                    .is_some_and(ResolvedState::is_resolved)
+            });
+        if (!changed.is_empty() || (can_ack && snapshot.projection_pending))
+            && link
+                .handle
+                .project_sidebar_threads(changed.clone(), snapshot.fence, can_ack)
+                .is_ok()
+        {
             for upsert in changed {
                 link.mirrored.insert(upsert.thread_id.clone(), upsert);
             }
@@ -270,6 +306,7 @@ mod tests {
         };
         let untimed = |sidebar: &mut workspace_ui::SidebarState| {
             sidebar.families.push(workspace_ui::FamilyState {
+                membership_epoch: 0,
                 key: ThreadId::new("root"),
                 archived: true,
                 archived_at: None,
@@ -368,6 +405,7 @@ mod tests {
             (&mut detached, None, workspace_ui::LanePolicy::Detached, "d"),
         ] {
             thread.lane = Some(workspace_ui::LaneLink {
+                detached_since_management_revision: None,
                 lane_id: id.into(),
                 origin_thread_id: lead.id.clone(),
                 lead_thread_id: lead_thread.map(ThreadId::new),

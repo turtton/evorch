@@ -37,6 +37,9 @@ const fn is_zero(value: &u64) -> bool {
 pub struct FamilyState {
     /// The family's top ancestor.
     pub key: ThreadId,
+    /// Independent membership period. Revisions below are comparable only within it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub membership_epoch: u64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
     /// UNIX seconds the family was archived at; `None` when it is not archived or was
@@ -58,6 +61,7 @@ impl FamilyState {
     fn new(key: ThreadId) -> Self {
         Self {
             key,
+            membership_epoch: 0,
             archived: false,
             archived_at: None,
             archive_revision: 0,
@@ -200,6 +204,17 @@ impl SidebarState {
             .iter()
             .map(|state| (&state.key, state))
             .collect();
+        let epochs: BTreeMap<_, _> = self
+            .threads
+            .iter()
+            .filter_map(|thread| {
+                let lane = thread.lane.as_ref()?;
+                (!lane.policy.is_managed()).then_some((
+                    &thread.id,
+                    lane.detached_since_management_revision.unwrap_or(0),
+                ))
+            })
+            .collect();
         self.family_keys()
             .into_iter()
             .map(|(id, family)| {
@@ -207,7 +222,14 @@ impl SidebarState {
                     Err(reason) => ResolvedState::unresolved(reason),
                     Ok(key) => {
                         let state = states.get(&key).copied().cloned();
-                        let state = state.unwrap_or_else(|| FamilyState::new(key.clone()));
+                        let epoch = epochs.get(&key).copied().unwrap_or(0);
+                        let state = state
+                            .filter(|state| state.membership_epoch == epoch)
+                            .unwrap_or_else(|| {
+                                let mut state = FamilyState::new(key.clone());
+                                state.membership_epoch = epoch;
+                                state
+                            });
                         ResolvedState {
                             family: Ok(key),
                             archived: state.archived,
@@ -258,6 +280,18 @@ impl SidebarState {
     /// Recomputes the derived `archived`, `archived_at` and `pinned` of every record
     /// (and clears the legacy revisions of an older file). The only writer of them.
     pub fn refresh_derived(&mut self) {
+        let independent: Vec<_> = self
+            .threads
+            .iter()
+            .filter_map(|thread| {
+                let lane = thread.lane.as_ref()?;
+                (!lane.policy.is_managed() && lane.detached_since_management_revision.is_some())
+                    .then(|| thread.id.clone())
+            })
+            .collect();
+        for key in independent {
+            self.family_entry(&key);
+        }
         let states = self.resolve_states();
         for thread in &mut self.threads {
             let state = states.get(&thread.id);
@@ -269,11 +303,28 @@ impl SidebarState {
         }
     }
 
+    pub(crate) fn membership_epoch(&self, key: &ThreadId) -> u64 {
+        self.threads
+            .iter()
+            .find(|thread| &thread.id == key)
+            .and_then(|thread| thread.lane.as_ref())
+            .filter(|lane| !lane.policy.is_managed())
+            .and_then(|lane| lane.detached_since_management_revision)
+            .unwrap_or(0)
+    }
+
     fn family_entry(&mut self, key: &ThreadId) -> &mut FamilyState {
+        let epoch = self.membership_epoch(key);
         if let Some(position) = self.families.iter().position(|state| &state.key == key) {
+            if self.families[position].membership_epoch != epoch {
+                self.families[position] = FamilyState::new(key.clone());
+                self.families[position].membership_epoch = epoch;
+            }
             return &mut self.families[position];
         }
-        self.families.push(FamilyState::new(key.clone()));
+        let mut state = FamilyState::new(key.clone());
+        state.membership_epoch = epoch;
+        self.families.push(state);
         let last = self.families.len() - 1;
         &mut self.families[last]
     }
@@ -428,6 +479,7 @@ impl SidebarState {
             report.archived += usize::from(archived);
             report.pinned += usize::from(pinned);
             states.push(FamilyState {
+                membership_epoch: self.membership_epoch(&key),
                 archived_at: archived
                     .then(|| records.iter().filter_map(|thread| thread.archived_at).max())
                     .flatten(),
@@ -466,6 +518,11 @@ pub(crate) fn merge_families(local: &[FamilyState], disk: &[FamilyState]) -> Vec
 }
 
 fn merge_family(local: &FamilyState, disk: &FamilyState) -> FamilyState {
+    match local.membership_epoch.cmp(&disk.membership_epoch) {
+        std::cmp::Ordering::Greater => return local.clone(),
+        std::cmp::Ordering::Less => return disk.clone(),
+        std::cmp::Ordering::Equal => {}
+    }
     // A higher revision replaces the series. At an equal revision the sides were made
     // independently from the same base; the result must not depend on which side is
     // "local", and keeps the protective side: archived wins, and of two archive times
@@ -493,6 +550,7 @@ fn merge_family(local: &FamilyState, disk: &FamilyState) -> FamilyState {
     };
     FamilyState {
         key: local.key.clone(),
+        membership_epoch: local.membership_epoch,
         archived,
         archived_at,
         archive_revision,

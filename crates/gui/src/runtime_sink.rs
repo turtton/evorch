@@ -21,8 +21,10 @@ use crate::model::commands::{CommandSink, GoalSubmission, LoopEvent, WorkbenchCo
 
 mod host_adapter;
 mod lane_host;
+mod lane_management;
 mod pull_requests;
 pub use lane_host::GuiLaneDeliveryHost;
+pub use lane_management::GuiLaneManagementHost;
 
 /// Prefix of the stream ids GUI processes persist their events under.
 pub const STORAGE_SESSION_ID: &str = "evorch-gui";
