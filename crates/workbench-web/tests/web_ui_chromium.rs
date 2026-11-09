@@ -1567,11 +1567,14 @@ async fn web_workbench_main_flows_in_chromium() {
         "(() => {{ const m = {BIG}; window.bigElement = m; {CONTINUE}.click(); }})()"
     ))
     .await;
+    eprintln!("rebuild: waiting for held read_body; state={}", ui.eval(&format!(r##"(() => {{ const m = {BIG}; return {{ status: m.querySelector(".body-status").textContent, buttons: [...m.querySelectorAll("button")].map(b => ({{text:b.textContent,hidden:b.hidden,disabled:b.disabled}})), errors: window.__problems }}; }})()"##)).await);
     held_body.entered().await;
+    eprintln!("rebuild: read_body entered");
     backend.replace_body("body-3", "body-4");
     backend.replace_text(ASK, RENUMBERED);
     backend.world.lock().unwrap().failing_newest_reads = 1;
     backend.drop_streams();
+    eprintln!("rebuild: waiting for failed history");
     ui.wait(r##"() => { const retry = document.querySelector(".thread .history-status + button.small");
         return retry && !retry.hidden && document.querySelector(".history-status").textContent; }"##)
         .await;
@@ -1583,11 +1586,13 @@ async fn web_workbench_main_flows_in_chromium() {
         true,
         "the failed rebuild leaves the old list on screen"
     );
+    eprintln!("rebuild: releasing body");
     backend.unhold("read_body");
     ui.wait(
         r##"() => window.bigElement.querySelector(".body-status").textContent !== "読み込み中…""##,
     )
     .await;
+    eprintln!("rebuild: late body completed, retrying");
     ui.click(".thread .history-status + button.small").await;
     let rebuilt = ui
         .wait(&format!(
@@ -1605,6 +1610,7 @@ async fn web_workbench_main_flows_in_chromium() {
         json!({"new_text": true, "old_text": false, "old_body": false, "same": false, "body": "", "buttons": ["本文を読み込む"]}),
         "nothing from before the snapshot is reused"
     );
+    eprintln!("rebuild: retry completed");
     // Open the thread again: the late answer was not kept either.
     ui.eval(r##"location.hash = "#/""##).await;
     ui.wait(r##"() => !document.querySelector(".thread")"##)
