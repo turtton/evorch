@@ -3,7 +3,8 @@
 #
 # Every direct dependency of the gui and evorch crates on another workspace
 # crate (normal, dev and build; optional and target-specific declarations
-# included) must be listed here, except workbench-client and workbench-protocol,
+# included) must be listed here, except workbench-client, workbench-protocol,
+# core-instance and core-launcher,
 # which are the intended way to reach the core. A dependency that is not listed
 # fails CI. The list may only shrink: delete a line in the PR that removes the
 # dependency. The check reports a line whose dependency no longer exists as a

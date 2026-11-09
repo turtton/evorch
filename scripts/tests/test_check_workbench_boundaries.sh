@@ -71,7 +71,7 @@ run_case() {
   fi
 }
 
-WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","evorch","test-support"]'
+WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","evorch","core-instance","core-launcher","test-support"]'
 EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu","axum","http","futures-core","http-body-util","hyper","hyper-util"]'
 GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","to":"serde_json"},{"from":"workbench-protocol","to":"thiserror"},
       {"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-client","to":"tokio"},{"from":"workbench-client","to":"thiserror"},
@@ -349,6 +349,10 @@ SPEC
 
 run_case ratchet_client_and_protocol_need_no_entry ok "boundary check passed" <<SPEC
 {$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"workbench-protocol"},{"from":"evorch","to":"workbench-client","kind":"dev"},{"from":"evorch","to":"workbench-protocol","optional":true,"resolved":false}]}
+SPEC
+
+run_case ratchet_core_instance_and_launcher_need_no_entry ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"core-launcher"},{"from":"gui","to":"core-instance","kind":"dev"},{"from":"evorch","to":"core-launcher"},{"from":"evorch","to":"core-instance","optional":true,"resolved":false},{"from":"core-launcher","to":"core-instance"},{"from":"core-launcher","to":"workbench-client"},{"from":"core-launcher","to":"workbench-protocol"}]}
 SPEC
 
 run_case ratchet_third_party_dependencies_are_not_counted ok "boundary check passed" <<SPEC

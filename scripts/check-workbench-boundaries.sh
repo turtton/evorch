@@ -20,9 +20,10 @@
 #      crate that is not in scripts/workbench-boundary-allowlist.txt. That list
 #      is a ratchet: it freezes the dependencies the two crates have today
 #      (normal, dev, build, optional and target-specific alike), may only
-#      shrink, and records the migration PR that removes each entry. workbench-
-#      client and workbench-protocol are the intended way to reach the core and
-#      need no entry. An entry whose dependency is gone is reported as stale
+#      shrink, and records the migration PR that removes each entry. The
+#      client-side crates workbench-client, workbench-protocol, core-instance
+#      and core-launcher are the intended way to reach the core and need no
+#      entry. An entry whose dependency is gone is reported as stale
 #      (a warning; a failure when WORKBENCH_BOUNDARY_STALE_ALLOWLIST=fail).
 # Each violation prints the dependency path that causes it.
 #
@@ -57,7 +58,10 @@ CORE_CRATES="${WORKBENCH_BOUNDARY_CORE_CRATES:-agents apply-patch browser browse
 
 # Dependency ratchet for the front-end crates (rule 7).
 RATCHET_CRATES="gui evorch"
-RATCHET_FREE_TARGETS="workbench-client workbench-protocol"
+# core-instance (a leaf) and core-launcher (client launcher over core-instance,
+# workbench-client and workbench-protocol) are client-side crates added by PR 04;
+# listing them here keeps the ratchet independent of which PR merges first.
+RATCHET_FREE_TARGETS="workbench-client workbench-protocol core-instance core-launcher"
 ALLOWLIST="${WORKBENCH_BOUNDARY_ALLOWLIST:-scripts/workbench-boundary-allowlist.txt}"
 # WORKBENCH_BOUNDARY_ALLOWLIST lets the fixture tests supply their own list.
 STALE_ALLOWLIST="${WORKBENCH_BOUNDARY_STALE_ALLOWLIST:-warn}"
