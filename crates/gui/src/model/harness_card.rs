@@ -1,7 +1,8 @@
 //! The card that shows a harness notice in the transcript (ADR 0043 Phase 2).
 //!
 //! A notice is a durable record the harness appended to the conversation; the transcript
-//! holds only its identity (the notice ID, from the delivery event) and the card is filled in
+//! holds only its identity (the notice ID, from a delivery event or verified input provenance)
+//! and the card is filled in
 //! from the stored notice. What the card shows is the `harness` tag, the pull request and
 //! commit, the facts and the log excerpts, never the wrapper the agent reads and never a
 //! caution about the data.

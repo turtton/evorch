@@ -1178,3 +1178,78 @@ fn v51_upgrade_preserves_a_ready_notice_and_its_outbox_with_an_initial_generatio
         2
     );
 }
+
+// Display recovery is a read-only join of verified native positions and adopted receipts.
+// Neither a notice-looking body nor a copied/unknown provenance map is delivery evidence.
+#[test]
+fn harness_history_requires_verified_native_provenance_and_a_receipt() {
+    let f = Fixture::new();
+    let notice = f.ready(1, PrNoticeMode::Manual, 10);
+    let db = storage::Database::open_read_only(&f.config.db_path).unwrap();
+    let mut write = snapshot();
+    write.map.messages[0].blocks[0].origin = BlockOrigin::HarnessNotice {
+        notification_id: notice.notice_id.clone(),
+    };
+    write.map.messages[0].blocks[0].excluded_reason = Some(ExcludedReason::GeneratedBoundary);
+    let saved = f.h().save_snapshot_bundle(&write).unwrap();
+    assert!(
+        db.adopted_harness_notices(None).unwrap().is_empty(),
+        "a provenance tag without a receipt is not adoption"
+    );
+    write.expected_snapshot_revision = Some(saved.snapshot_revision);
+    let claim = f.claim(11);
+    let adopted = f
+        .h()
+        .accept_pr_delivery(claim, write.clone(), 12, true)
+        .unwrap()
+        .unwrap();
+    let cards = db.adopted_harness_notices(None).unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].notice.notice_id, notice.notice_id);
+    assert_eq!(cards[0].ordinal, 0);
+    assert_eq!(cards[0].adopted_at_ns, 12);
+    let horizon = db.last_event_id().unwrap();
+    f.h()
+        .append_event(
+            Some("observer"),
+            &event_bus::Event::new(event_bus::LifecycleEvent::TurnCompleted {
+                run_id: "local-row".into(),
+                context_len: 1,
+            }),
+        )
+        .unwrap();
+    let evidence = db.adopted_harness_notice_snapshot(None).unwrap();
+    assert!(evidence.through_event > horizon);
+    assert_eq!(evidence.through_event, db.last_event_id().unwrap());
+    assert_eq!(evidence.notices, cards);
+    assert!(
+        db.adopted_harness_notices(Some(&["other-run".into()]))
+            .unwrap()
+            .is_empty()
+    );
+    // Raw-preserving compaction changes checkpoints, not the input's provenance/position.
+    write.expected_snapshot_revision = Some(adopted.snapshot_revision);
+    write.record.checkpoints_json = r#"[{"id":"compact","summary":{"role":"user","content":[{"type":"text","text":"summary"}]},"range":[0,1]}]"#.into();
+    write.map.checkpoint_count = 1;
+    let compacted = f.h().save_snapshot_bundle(&write).unwrap();
+    assert_eq!(db.adopted_harness_notices(None).unwrap(), cards);
+    write.expected_snapshot_revision = Some(compacted.snapshot_revision);
+    write.map.messages[0].blocks[0].origin = BlockOrigin::Native;
+    let native = f.h().save_snapshot_bundle(&write).unwrap();
+    assert!(
+        db.adopted_harness_notices(None).unwrap().is_empty(),
+        "text is never used to infer a notice"
+    );
+    write.expected_snapshot_revision = Some(native.snapshot_revision);
+    write.map.messages[0].blocks[0].origin = BlockOrigin::HarnessNotice {
+        notification_id: notice.notice_id,
+    };
+    write.status = ProvenanceStatus::Unknown {
+        reason: ProvenanceUnknownReason::LegacyUnproven,
+    };
+    f.h().save_snapshot_bundle(&write).unwrap();
+    assert!(
+        db.adopted_harness_notices(None).unwrap().is_empty(),
+        "unknown provenance never becomes delivery evidence"
+    );
+}
