@@ -166,6 +166,10 @@ pub enum PullRequestEvent {
 pub enum PullRequestAutoFixChange {
     /// The switch, the destination or the budget changed on a person's operation.
     Policy,
+    /// This process's `[pull_requests] auto_fix_enabled` setting changed. Each process reads its
+    /// own configuration, so this is neither stored nor shared with another process: only the
+    /// displays of this process read the pull request again.
+    Settings,
     /// A notice was reserved by a person's explicit request.
     Requested,
     /// The delivery state of the thread changed: a durable Stop or an explicit Resume, or the

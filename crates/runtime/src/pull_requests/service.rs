@@ -34,6 +34,7 @@ mod policy;
 mod scheduler;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -270,6 +271,10 @@ pub(crate) struct Inner {
     pub(crate) clock: Arc<dyn WallClock>,
     pub(crate) settings: watch::Sender<PullRequestsConfig>,
     pub(crate) wake: Notify,
+    /// How many times the global auto fix switch changed. The scheduler announces a change it
+    /// has not announced yet, so one that happens before its first round, or that is undone
+    /// while it works, is not lost.
+    pub(crate) auto_fix_switch_changes: AtomicU64,
     pub(crate) state: Mutex<State>,
     pub(crate) shutdown: watch::Sender<bool>,
     #[cfg(test)]
@@ -685,6 +690,7 @@ impl PullRequestService {
             clock: parts.clock,
             settings,
             wake: Notify::new(),
+            auto_fix_switch_changes: AtomicU64::new(0),
             state: Mutex::new(State::default()),
             shutdown,
             #[cfg(test)]
@@ -714,7 +720,17 @@ impl PullRequestService {
         {
             self.inner.lock().attempted.clear();
         }
-        self.inner.settings.send_replace(settings);
+        let mut switch_changed = false;
+        self.inner.settings.send_if_modified(|current| {
+            switch_changed = current.auto_fix_enabled != settings.auto_fix_enabled;
+            *current = settings;
+            true
+        });
+        if switch_changed {
+            self.inner
+                .auto_fix_switch_changes
+                .fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.wake.notify_one();
         Ok(())
     }

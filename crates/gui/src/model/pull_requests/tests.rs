@@ -437,9 +437,10 @@ fn reserved_sends_count_against_what_is_left() {
 }
 
 // Given: the third automatic send turned auto fix off / Then: the limit shows, the toggle is
-// off with its reason, and only the thread that has the budget can reset it
+// off with its reason, and the reset is offered here and in another thread (which then moves
+// auto fix, after a confirmation)
 #[test]
-fn the_limit_stops_the_toggle_and_offers_a_reset_to_the_owner_of_the_budget() {
+fn the_limit_stops_the_toggle_and_offers_a_reset_in_every_tracking_thread() {
     let limited = |destination: &str| {
         auto_state(|s| {
             s.enabled = false;
@@ -458,7 +459,12 @@ fn the_limit_stops_the_toggle_and_offers_a_reset_to_the_owner_of_the_budget() {
     assert!(reset.enabled);
 
     let elsewhere = auto_fix_controls(&with_auto(failing(), limited("other"), |_| {}), 0).unwrap();
-    let reset = elsewhere.reset.unwrap();
+    assert_eq!(elsewhere.moves_from.as_deref(), Some("other"));
+    assert!(elsewhere.reset.unwrap().enabled);
+
+    let mut untracked = with_auto(failing(), limited("other"), |_| {});
+    untracked.tracked_here = false;
+    let reset = auto_fix_controls(&untracked, 0).unwrap().reset.unwrap();
     assert!(!reset.enabled && !reset.hover.is_empty());
 }
 

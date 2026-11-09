@@ -151,11 +151,14 @@ pub enum WorkbenchCommand {
         policy_revision: u64,
         enabled: bool,
     },
-    /// Start the automatic count again and turn auto fix on.
+    /// Start the automatic count again and turn auto fix on. From a thread other than the one
+    /// that has auto fix this moves it, so `confirmed_previous` names the thread the person
+    /// confirmed leaving; `None` is a reset that needs no confirmation.
     ResetPullRequestAutoFixBudget {
         thread_id: String,
         link_revision: u64,
         policy_revision: u64,
+        confirmed_previous: Option<String>,
     },
     /// Turn auto fix on here after the person confirmed which thread had it.
     ChangePullRequestAutoFixDestination {
