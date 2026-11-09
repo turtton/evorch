@@ -15,6 +15,7 @@ import { composerRoleFor, createStore } from "../../assets/js/store.js";
 import { fetchAllPages } from "../../assets/js/paging.js";
 import { RereadScheduler } from "../../assets/js/reread.js";
 import { coreChanged } from "../../assets/js/format.js";
+import { threadView } from "../../assets/js/views.js";
 import {
   classifyCursor,
   command,
@@ -555,6 +556,127 @@ test(
     assert(!approve.disabled, "approving is on once unfolded");
     toggle.click();
     assert(approve.disabled, "folding again turns it off");
+  },
+  { dom: true },
+);
+
+test(
+  "loading older history after destroying its thread view does not move the scroll position",
+  async () => {
+    let finishOlderRead;
+    let signalOlderReadStarted;
+    const olderReadStarted = new Promise((resolve) => {
+      signalOlderReadStarted = resolve;
+    });
+    let historyReads = 0;
+    const store = createStore();
+    const ctx = {
+      store,
+      api: {
+        query: async (kind) => {
+          if (kind === "get_thread") return new Promise(() => {});
+          if (kind !== "read_committed_history") throw new Error(`unexpected query: ${kind}`);
+          historyReads += 1;
+          if (historyReads === 1) {
+            return {
+              ok: true,
+              value: {
+                items: [{
+                  thread: "t1",
+                  run: "r1",
+                  index: "1",
+                  role: "assistant",
+                  content: { type: "inline", payload: { text: "newest" } },
+                }],
+                next_cursor: "older",
+                snapshot_revision: "1",
+              },
+            };
+          }
+          signalOlderReadStarted();
+          return new Promise((resolve) => {
+            finishOlderRead = resolve;
+          });
+        },
+      },
+      queryInto: async () => ({ ok: true, value: { items: [] } }),
+      setTitle() {},
+      setBack() {},
+      maxBodyChunk: () => 65536,
+    };
+
+    const view = threadView(ctx, "t1");
+    document.body.append(view.el);
+    const older = view.el.querySelector("button.older");
+    const loaded = () =>
+      new Promise((resolve) => {
+        if (!older.hidden) {
+          resolve();
+          return;
+        }
+        const observer = new MutationObserver(() => {
+          if (older.hidden) return;
+          observer.disconnect();
+          resolve();
+        });
+        observer.observe(older, { attributes: true, attributeFilter: ["hidden"] });
+      });
+    let scroller;
+    try {
+      await loaded();
+
+      scroller = document.scrollingElement;
+      let prototype = Object.getPrototypeOf(scroller);
+      let nativeScrollTop;
+      while (prototype && !nativeScrollTop) {
+        nativeScrollTop = Object.getOwnPropertyDescriptor(prototype, "scrollTop");
+        prototype = Object.getPrototypeOf(prototype);
+      }
+      assert(nativeScrollTop?.get && nativeScrollTop?.set, "document scroller exposes scrollTop");
+      const scrollWrites = [];
+      Object.defineProperty(scroller, "scrollTop", {
+        configurable: true,
+        get: () => nativeScrollTop.get.call(scroller),
+        set: (value) => {
+          scrollWrites.push(value);
+          nativeScrollTop.set.call(scroller, value);
+        },
+      });
+
+      older.click();
+      await olderReadStarted;
+      view.destroy();
+      view.el.remove();
+      // A replacement screen can now set its own scroll position while the
+      // detached thread view's history request is still in flight.
+      nativeScrollTop.set.call(scroller, 137);
+      scrollWrites.length = 0;
+      finishOlderRead({
+        ok: true,
+        value: {
+          items: [{
+            thread: "t1",
+            run: "r1",
+            index: "0",
+            role: "assistant",
+            content: { type: "inline", payload: { text: "older" } },
+          }],
+          snapshot_revision: "1",
+        },
+      });
+      // Promise continuations run before the next browser frame; this waits
+      // for the resumed click handler without a wall-clock timeout.
+      await new Promise(requestAnimationFrame);
+      eq(scrollWrites, [], "the destroyed view must not write the document scroll position");
+    } finally {
+      view.destroy();
+      view.el.remove();
+      if (scroller) delete scroller.scrollTop;
+      finishOlderRead?.({
+        ok: true,
+        value: { items: [], snapshot_revision: "1" },
+      });
+    }
   },
   { dom: true },
 );
