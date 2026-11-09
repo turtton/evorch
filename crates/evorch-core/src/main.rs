@@ -1,6 +1,6 @@
 use evorch_core::{
     backend::HostBackend,
-    instance::{Instance, InstanceError},
+    instance::{ConfigIdentity, Instance, InstanceError, LaunchGuard},
     lifecycle::IdleGrace,
     unix,
 };
@@ -9,9 +9,8 @@ use workbench_host::bootstrap::{BootstrapError, BootstrapOptions, BootstrappedHo
 use workbench_web::{WebServer, WebServerConfig};
 
 const USAGE: &str = "usage: evorch-core [--config-dir <dir>] [--web] [--foreground]";
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
-    match run().await {
+fn main() -> std::process::ExitCode {
+    match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             let code = if e
@@ -32,14 +31,18 @@ async fn main() -> std::process::ExitCode {
         }
     }
 }
-async fn run() -> Result<(), BootstrapError> {
+fn run() -> Result<(), BootstrapError> {
     let mut config_dir = config::user_config_dir();
     let mut web = false;
+    let mut launch_fd = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config-dir" => config_dir = Some(PathBuf::from(args.next().ok_or(USAGE)?)),
             "--web" => web = true,
+            "--launch-fd" if launch_fd.is_none() => {
+                launch_fd = Some(args.next().ok_or(USAGE)?.parse::<i32>()?)
+            }
             "--foreground" => (), // P7a always foreground; no daemonisation or GUI autostart.
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -49,8 +52,20 @@ async fn run() -> Result<(), BootstrapError> {
         }
     }
     let config_dir = config_dir.ok_or("cannot resolve config directory; pass --config-dir")?;
-    let instance = Instance::acquire_default(&config_dir)?;
-    let config_dir = std::fs::canonicalize(config_dir)?;
+    let identity = ConfigIdentity::new(&config_dir)?;
+    let launch = match launch_fd {
+        // SAFETY: parsed once at entry, before the Tokio runtime/other threads;
+        // inherited descriptor ownership is transferred and validated by adopt.
+        Some(fd) => unsafe { LaunchGuard::adopt(&identity, fd)? },
+        None => LaunchGuard::acquire(&identity)?,
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve(identity.config_dir().to_path_buf(), web, launch))
+}
+async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<(), BootstrapError> {
+    let instance = Instance::acquire_default(&launch)?;
     let state_dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::home_dir().map(|p| p.join(".local/state")))
@@ -85,7 +100,10 @@ async fn run() -> Result<(), BootstrapError> {
             return Err(e.into());
         }
     };
-    let listener = match instance.bind() {
+    let listener = match instance.bind().and_then(|l| {
+        l.set_nonblocking(true)?;
+        tokio::net::UnixListener::from_std(l)
+    }) {
         Ok(l) => l,
         Err(e) => {
             if let Some(s) = server {
@@ -95,6 +113,14 @@ async fn run() -> Result<(), BootstrapError> {
             return Err(e.into());
         }
     };
+    if let Err(e) = instance.publish(backend.hello().instance_epoch.0) {
+        if let Some(s) = server {
+            s.shutdown().await?;
+        }
+        host.shutdown().await?;
+        return Err(e.into());
+    }
+    drop(launch); // close only; never unlock the parent/child shared OFD
     // Explicit readiness AFTER both listeners bind. stdout is machine-readable.
     println!(
         "{}",

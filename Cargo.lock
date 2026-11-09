@@ -1526,6 +1526,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-instance"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "core-launcher"
+version = "0.1.0"
+dependencies = [
+ "core-instance",
+ "rustix 1.1.4",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "workbench-client",
+ "workbench-protocol",
+]
+
+[[package]]
 name = "core_detect"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2408,6 +2435,7 @@ name = "evorch-core"
 version = "0.1.0"
 dependencies = [
  "config",
+ "core-instance",
  "event-bus",
  "mock-openai",
  "recorder",
@@ -2419,11 +2447,9 @@ dependencies = [
  "secret-guard",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "storage",
  "tempfile",
  "test-support",
- "thiserror 2.0.18",
  "tokio",
  "tools",
  "uuid",

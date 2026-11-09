@@ -1,4 +1,18 @@
-use evorch_core::instance::{Instance, InstanceError};
+use evorch_core::instance::{ConfigIdentity, Instance, InstanceError, LaunchGuard};
+fn acquire(config: &std::path::Path, ipc: &std::path::Path) -> Result<Instance, InstanceError> {
+    let identity = ConfigIdentity::new(config)?;
+    let launch = LaunchGuard::acquire(&identity)?;
+    Instance::acquire(&launch, ipc)
+}
+fn acquire_runtime(
+    config: &std::path::Path,
+    runtime: Option<&std::path::Path>,
+    fallback: &std::path::Path,
+) -> Result<Instance, InstanceError> {
+    let identity = ConfigIdentity::new(config)?;
+    let launch = LaunchGuard::acquire(&identity)?;
+    Instance::acquire_with_runtime_dir(&launch, runtime, fallback)
+}
 use std::{
     os::unix::fs::{PermissionsExt, symlink},
     sync::{Arc, Barrier},
@@ -19,7 +33,7 @@ fn simultaneous_starts_have_one_lifetime_owner_even_without_a_socket() {
     std::thread::scope(|s| {
         let attempt = || {
             barrier.wait();
-            let instance = Instance::acquire(&dir.path().join("config"), dir.path());
+            let instance = acquire(&dir.path().join("config"), dir.path());
             acquired.wait();
             instance
         };
@@ -35,20 +49,20 @@ fn simultaneous_starts_have_one_lifetime_owner_even_without_a_socket() {
             Some(InstanceError::AlreadyRunning)
         ));
     });
-    assert!(Instance::acquire(&dir.path().join("config"), dir.path()).is_ok());
+    assert!(acquire(&dir.path().join("config"), dir.path()).is_ok());
 }
 
 #[tokio::test]
 async fn stale_socket_is_reaped_but_symlinks_are_refused() {
     let dir = dir();
     let config = dir.path().join("config");
-    let first = Instance::acquire(&config, dir.path()).unwrap();
+    let first = acquire(&config, dir.path()).unwrap();
     let path = first.socket.clone();
     drop(first);
     let stale = std::os::unix::net::UnixListener::bind(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     drop(stale);
-    let next = Instance::acquire(&config, dir.path()).unwrap();
+    let next = acquire(&config, dir.path()).unwrap();
     let listener = next.bind().unwrap();
     assert_eq!(
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -57,7 +71,7 @@ async fn stale_socket_is_reaped_but_symlinks_are_refused() {
     drop(listener);
     drop(next);
     symlink(dir.path().join("victim"), &path).unwrap();
-    assert!(Instance::acquire(&config, dir.path()).is_err());
+    assert!(acquire(&config, dir.path()).is_err());
     assert!(path.is_symlink());
 }
 
@@ -65,10 +79,10 @@ async fn stale_socket_is_reaped_but_symlinks_are_refused() {
 fn canonical_aliases_share_the_lock() {
     let dir = dir();
     let config = dir.path().join("config");
-    let first = Instance::acquire(&config, dir.path()).unwrap();
+    let first = acquire(&config, dir.path()).unwrap();
     symlink(&config, dir.path().join("alias")).unwrap();
     assert!(matches!(
-        Instance::acquire(&dir.path().join("alias"), dir.path()),
+        acquire(&dir.path().join("alias"), dir.path()),
         Err(InstanceError::AlreadyRunning)
     ));
     drop(first);
@@ -81,18 +95,18 @@ fn runtime_directory_is_validated_and_does_not_change_database_lock_identity() {
     let runtime = dir.path().join("runtime");
     std::fs::create_dir(&runtime).unwrap();
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let first = Instance::acquire_with_runtime_dir(&config, Some(&runtime), dir.path()).unwrap();
+    let first = acquire_runtime(&config, Some(&runtime), dir.path()).unwrap();
     assert!(first.socket.starts_with(&runtime));
     assert!(matches!(
-        Instance::acquire_with_runtime_dir(&config, None, dir.path()),
+        acquire_runtime(&config, None, dir.path()),
         Err(InstanceError::AlreadyRunning)
     ));
     drop(first);
-    let fallback = Instance::acquire_with_runtime_dir(&config, None, dir.path()).unwrap();
+    let fallback = acquire_runtime(&config, None, dir.path()).unwrap();
     assert!(!fallback.socket.starts_with(&runtime));
     drop(fallback);
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(Instance::acquire_with_runtime_dir(&config, Some(&runtime), dir.path()).is_err());
+    assert!(acquire_runtime(&config, Some(&runtime), dir.path()).is_err());
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
     let alias = dir.path().join("runtime-link");
     symlink(&runtime, &alias).unwrap();
@@ -102,6 +116,6 @@ fn runtime_directory_is_validated_and_does_not_change_database_lock_identity() {
         std::path::Path::new("relative"),
         missing.as_path(),
     ] {
-        assert!(Instance::acquire_with_runtime_dir(&config, Some(path), dir.path()).is_err());
+        assert!(acquire_runtime(&config, Some(path), dir.path()).is_err());
     }
 }
