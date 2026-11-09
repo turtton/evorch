@@ -1062,3 +1062,141 @@ async fn lag_with_a_child_completion_suffix_keeps_the_child_wait_healthy_until_a
         f.runtime.wait(run).await.unwrap();
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn management_does_not_reset_stall_horizon_and_detached_is_excluded() {
+    use crate::lane_management::*;
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "management-monitor").await;
+    let (_owner, host) = owned(&f, &lane);
+    let base = host.now_ns();
+    f.runtime.monitor_lanes().unwrap();
+    let request = |revision, action| LaneManagementRequest {
+        operation_id: format!("monitor-management-{revision}"),
+        lane_id: lane.lane_id.clone(),
+        expected_management_revision: revision,
+        action,
+    };
+    host.now.store(base + 29 * MINUTE, Ordering::SeqCst);
+    f.runtime
+        .set_lane_policy(
+            LaneManagementContext::Run(lead),
+            request(
+                1,
+                LaneManagementAction::SetPolicy {
+                    policy: ManagedLanePolicy::Summary,
+                },
+            ),
+        )
+        .unwrap();
+    f.runtime
+        .set_lane_policy(
+            LaneManagementContext::Run(lead),
+            request(
+                2,
+                LaneManagementAction::SetPolicy {
+                    policy: ManagedLanePolicy::Attached,
+                },
+            ),
+        )
+        .unwrap();
+    host.now.store(base + 30 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    let e = episodes(&f);
+    assert_eq!(e.len(), 1);
+    assert_eq!(e[0].nudge_state, LaneNudgeState::Pending);
+    f.runtime
+        .detach_lane(
+            LaneManagementContext::Run(lead),
+            request(3, LaneManagementAction::Detach),
+        )
+        .unwrap();
+    host.now.store(base + 200 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    let e = episodes(&f);
+    assert_eq!(e.len(), 1);
+    assert!(e[0].resolved_at_ns.is_some());
+    assert!(matches!(
+        f.runtime
+            .drive_lane_deliveries(&lane.thread_id)
+            .await
+            .unwrap(),
+        LaneDeliveryOutcome::Empty
+    ));
+    assert_eq!(host.restores.load(Ordering::SeqCst), 0);
+    for run in [lead, lane.root_run_id] {
+        f.runtime.cancel(run).unwrap();
+        f.runtime.wait(run).await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ready_after_failure_observation_wins_the_synthetic_failed_commit_cas() {
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "failed-cas").await;
+    let (_owner, host) = owned(&f, &lane);
+    f.runtime.monitor_lanes().unwrap();
+    host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    let destination = f
+        .storage
+        .handle()
+        .lane_delivery_destination(lane.thread_id.clone())
+        .unwrap()
+        .unwrap();
+    let claimed = f
+        .storage
+        .handle()
+        .claim_lane_deliveries(storage::lane_delivery::LaneClaimRequest {
+            destination_thread_id: lane.thread_id.clone(),
+            expected_destination_epoch: destination.epoch,
+            owner: host.target.owner(),
+            token: "failed-cas".into(),
+            now_ns: host.now_ns(),
+            lease_until_ns: host.now_ns() + MINUTE,
+            allow_non_waking: true,
+        })
+        .unwrap();
+    let storage::lane_delivery::LaneClaimResult::Claimed(claim) = claimed else {
+        panic!("expected nudge");
+    };
+    let store = f.storage.handle();
+    let lane_id = lane.lane_id.clone();
+    crate::lane_monitor::BEFORE_FAILURE_COMMIT.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            store
+                .append_lane_report_with_delivery(
+                    lane_id,
+                    1,
+                    event_bus::LaneReportInput {
+                        status: LaneStatus::Ready,
+                        summary: "Ready wins".into(),
+                        artifact_refs: vec![],
+                        artifact_revision: None,
+                        failure_episode: None,
+                        needs_human: false,
+                        question_refs: vec![],
+                        reason_code: None,
+                        producer: event_bus::LaneReportProducer::LaneAgent,
+                    },
+                    100,
+                )
+                .unwrap();
+        }))
+    });
+    f.runtime
+        .fail_lane_nudges(&host.target, &claim, host.now_ns());
+    let reports = f
+        .storage
+        .handle()
+        .lane_reports(&lane.lane_id, 0, 20)
+        .unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].status, LaneStatus::Ready);
+    for run in [lead, lane.root_run_id] {
+        f.runtime.cancel(run).unwrap();
+        f.runtime.wait(run).await.unwrap();
+    }
+}

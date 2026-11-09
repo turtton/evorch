@@ -132,51 +132,6 @@ pub(super) fn report(
         Ok(a) => a,
         Err(e) => return error(e),
     };
-    if state.task.parent.is_some()
-        || state.run_role() != agents::Role::Orchestrator
-        || state.task.config.lane_scope.is_none()
-    {
-        return failure(LaneError::new(
-            "lane_unavailable",
-            "only a lane root may report",
-        ));
-    }
-    if let Err(e) = runtime.validate_run_mutation(state.caller_run_id()) {
-        return failure(LaneError::new("lane_unavailable", e));
-    }
-    let _authority = match state
-        .task
-        .config
-        .ownership
-        .as_ref()
-        .map(|p| p.mutation_guard())
-        .transpose()
-    {
-        Ok(guard) => guard,
-        Err(e) => return failure(LaneError::new("ownership_lost", e)),
-    };
-    let Some(store) = runtime.shared.run_store.get() else {
-        return failure(LaneError::new(
-            "storage_unavailable",
-            "lane ledger is not configured",
-        ));
-    };
-    let Some(thread) = state.thread_id.as_deref() else {
-        return failure(LaneError::new("lane_unavailable", "no lane thread"));
-    };
-    let lane = match store.handle.lane_by_thread(thread) {
-        Ok(Some(lane)) => lane,
-        Ok(None) => return failure(LaneError::new("lane_unavailable", "lane record is missing")),
-        Err(e) => return failure(e.into()),
-    };
-    if lane.root_run_id.as_deref() != Some(&state.caller_run_id().to_string())
-        || lane.policy == LanePolicy::Detached
-    {
-        return failure(LaneError::new(
-            "lane_unavailable",
-            "not the current managed lane root",
-        ));
-    }
     let report = LaneReportInput {
         artifact_revision: args.artifact_revision,
         // Stable across failed reports from this execution; never model-supplied.
@@ -193,14 +148,12 @@ pub(super) fn report(
     if let Err(e) = report.validate() {
         return failure(LaneError::new("invalid_report", e));
     }
-    match store.handle.append_lane_report_with_delivery(
-        lane.lane_id,
-        lane.management_revision,
+    match runtime.append_lane_agent_report(
+        state.caller_run_id(),
+        state.task.config.ownership.as_ref(),
         report,
-        crate::run_store::review_time_ns(),
     ) {
         Ok(appended) => {
-            drop(_authority);
             runtime
                 .shared
                 .bus
@@ -225,7 +178,7 @@ pub(super) fn report(
                 serialize(&appended.report)
             }
         }
-        Err(e) => failure(e.into()),
+        Err(e) => failure(e),
     }
 }
 

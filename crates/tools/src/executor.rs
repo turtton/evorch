@@ -129,11 +129,12 @@ impl PartialEq for ToolExecutionContext {
 impl Eq for ToolExecutionContext {}
 
 /// ツールとコンパイル済みスキーマ検証器の登録エントリ。
+#[derive(Clone)]
 struct RegisteredTool {
     /// 登録されたツール。
     tool: Arc<dyn Tool>,
     /// [`Tool::schema`] をコンパイルした検証器。
-    validator: jsonschema::Validator,
+    validator: Arc<jsonschema::Validator>,
     /// 検証器の元のスキーマ。検証前に任意の欄の `null` を取り除くために使う。
     schema: serde_json::Value,
 }
@@ -158,7 +159,7 @@ pub struct ToolExecutor {
     /// ツール能力を実行操作へ分類する方針。
     policy: ApprovalPolicy,
     /// 利用者の承認応答を待つ任意のゲート。
-    gate: Option<ApprovalGate>,
+    gate: Option<Arc<ApprovalGate>>,
     default_cwd: RwLock<Option<std::path::PathBuf>>,
     post_edit_hook: Option<Arc<dyn PostEditHook>>,
     workspace_boundary: RwLock<Option<std::path::PathBuf>>,
@@ -221,11 +222,63 @@ impl ToolExecutor {
             tool.name().to_owned(),
             RegisteredTool {
                 tool,
-                validator,
+                validator: Arc::new(validator),
                 schema,
             },
         );
         Ok(())
+    }
+
+    /// Fork configuration and registered tools without mutating the shared base.
+    /// Additional run-local tools are deliberately NOT inherited as host tools.
+    pub fn fork_with_run_tools(
+        &self,
+        additions: impl IntoIterator<Item = Arc<dyn Tool>>,
+    ) -> Result<Self, ToolError> {
+        let mut fork = Self {
+            event_bus: self.event_bus.clone(),
+            tools: self.tools.clone(),
+            policy: self.policy.clone(),
+            gate: self.gate.clone(),
+            default_cwd: RwLock::new(
+                self.default_cwd
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
+            post_edit_hook: self.post_edit_hook.clone(),
+            workspace_boundary: RwLock::new(
+                self.workspace_boundary
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
+            file_boundary: RwLock::new(
+                self.file_boundary
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
+            file_escalation: RwLock::new(
+                self.file_escalation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
+            agent_browser: self.agent_browser.clone(),
+            browser_provider: self.browser_provider.clone(),
+            host_tools: self.host_tools.clone(),
+        };
+        for tool in additions {
+            if fork.tools.contains_key(tool.name()) {
+                return Err(ToolError::InvalidSchema {
+                    tool_name: tool.name().to_owned(),
+                    detail: "run-local tool name collision".into(),
+                });
+            }
+            fork.register(tool)?;
+        }
+        Ok(fork)
     }
 
     /// read / write / edit / apply_patch / grep / shell / git_diff の 7 標準ツールを登録した
@@ -764,7 +817,7 @@ impl ToolExecutor {
 
     /// 利用者承認を待つゲートを設定する。
     pub fn set_approval_gate(&mut self, gate: ApprovalGate) -> &mut Self {
-        self.gate = Some(gate);
+        self.gate = Some(Arc::new(gate));
         self
     }
 

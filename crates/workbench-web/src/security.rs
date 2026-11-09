@@ -25,10 +25,14 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use workbench_protocol::errors::ErrorCode;
 
+/// The policy every answer carries. Scripts, styles and connections come from
+/// this origin only and never from inline code (the embedded front end has
+/// none). Trusted Types are required with no policy allowed, so in browsers
+/// that enforce them no string can reach an HTML or script sink at all.
 pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; \
 style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; \
 manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; \
-object-src 'none'";
+object-src 'none'; require-trusted-types-for 'script'; trusted-types 'none'";
 
 const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
 const X_FRAME_OPTIONS: HeaderName = HeaderName::from_static("x-frame-options");

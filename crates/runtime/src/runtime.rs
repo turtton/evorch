@@ -134,6 +134,7 @@ pub(crate) struct Shared {
     pub(crate) artifact_pages: OnceLock<Arc<dyn crate::artifacts::ArtifactPages>>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
+    pub(crate) mcp_service: OnceLock<Arc<dyn crate::mcp::McpRunService>>,
     /// Text that opens every run's system message, ahead of the catalog.
     pub(crate) system_prompt_preamble: OnceLock<String>,
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
@@ -772,6 +773,7 @@ impl AgentRuntime {
                 artifact_pages: OnceLock::new(),
                 model,
                 system_prompts: OnceLock::new(),
+                mcp_service: OnceLock::new(),
                 system_prompt_preamble: OnceLock::new(),
                 skills: OnceLock::new(),
                 skill_source: OnceLock::new(),
@@ -1056,6 +1058,17 @@ impl AgentRuntime {
         ))
     }
 
+    /// Inject a privileged host-owned service before starting runs. This does not
+    /// resolve credentials, load MCP config or perform discovery. Benchmark paths
+    /// never call it. Runtime/tools do not select a native keychain backend.
+    pub fn with_mcp_service(self, service: Arc<dyn crate::mcp::McpRunService>) -> Self {
+        assert!(
+            self.shared.mcp_service.set(service).is_ok(),
+            "MCP service already configured"
+        );
+        self
+    }
+
     /// run ごとの sandbox を明示的な factory で構築するランタイムを生成する。
     ///
     /// production は [`AgentRuntime::production_with_project`] を使用する。隔離なし sandbox
@@ -1092,6 +1105,7 @@ impl AgentRuntime {
                 model,
                 topology: OnceLock::new(),
                 system_prompts: OnceLock::new(),
+                mcp_service: OnceLock::new(),
                 system_prompt_preamble: OnceLock::new(),
                 skills: OnceLock::new(),
                 skill_source: OnceLock::new(),

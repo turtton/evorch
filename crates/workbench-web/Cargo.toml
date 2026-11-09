@@ -24,3 +24,7 @@ tokio = { workspace = true, features = ["sync", "rt", "net", "io-util", "macros"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
+# Browser end-to-end test of the embedded front end (tests/web_ui_chromium.rs).
+chromiumoxide = { version = "0.9", default-features = false }
+futures-util = { workspace = true }
+tempfile = { workspace = true }

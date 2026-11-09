@@ -3,6 +3,8 @@ mod common;
 #[path = "mcp_scope_diagnostics/mod.rs"]
 mod diagnostics;
 use diagnostics::Failure;
+#[path = "mcp_scope_diagnostics/service.rs"]
+mod service;
 
 use agents::Role;
 use common::{FixtureServer, response_with_status};
@@ -46,7 +48,7 @@ impl AgentModel for Model {
                 content: vec![if first {
                     ContentBlock::ToolUse {
                         id: "mcp-call".into(),
-                        name: "read".into(),
+                        name: "mcp__fixture__read".into(),
                         input: json!({}),
                     }
                 } else {
@@ -87,11 +89,10 @@ async fn scenario_with_policy(
             return response_with_status("503 Service Unavailable", &[], b"secret-body-token");
         }
         let body = match index {
-            0 => json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}}),
-            1 => return response_with_status("202 Accepted", &[], b""),
-            2 => json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}}),
+            0 => json!({"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"}}),
+            1 => json!({"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"read","inputSchema":{"type":"object"}}]}}),
             _ if failure == Failure::Server => json!({"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"secret-body-token"}}),
-            _ => json!({"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"mcp-ok"}]}}),
+            _ => json!({"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","content":[{"type":"text","text":"mcp-ok"}]}}),
         };
         response_with_status("200 OK", &["Content-Type: application/json".into()], body.to_string().as_bytes())
     }).await.expect("fixture");
@@ -99,21 +100,8 @@ async fn scenario_with_policy(
         Arc::new(Resolver(server.resolver_addr())),
         server.certificate(),
     ));
-    let registry = Arc::new(tools::mcp::McpToolRegistry::new(
-        guard,
-        tools::mcp::McpClientConfig {
-            server_label: "fixture".into(),
-            endpoint: server.url("/mcp"),
-            extra_headers: Default::default(),
-            timeout: Duration::from_secs(2),
-        },
-        tools::mcp::McpClientInfo {
-            name: "test".into(),
-            version: "1".into(),
-        },
-    ));
-    let definition = serde_json::from_value(json!({"name":"read","inputSchema":{"type":"object"}}))
-        .expect("definition");
+    let service = Arc::new(service::Service::new(guard, server.url("/mcp")).await);
+    let root = service.root.clone();
     let bus = Arc::new(EventBus::new(128));
     let mut approvals = bus.subscribe();
     let approval_bus = bus.clone();
@@ -139,14 +127,9 @@ async fn scenario_with_policy(
     }
     let mut receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
-    executor
-        .register(Arc::new(
-            registry.tool(definition).with_event_bus(bus.clone()),
-        ))
-        .expect("register");
     executor.set_policy(
         sandbox::ApprovalPolicy::standard(sandbox::ApprovalMode::OnRequest).with_override(
-            "read",
+            "mcp__fixture__read",
             if approval.is_some() {
                 sandbox::PolicyDecision::Ask
             } else {
@@ -158,22 +141,23 @@ async fn scenario_with_policy(
         bus,
         Arc::new(executor),
         Arc::new(Model(AtomicUsize::new(0))),
-    );
+    )
+    .with_mcp_service(service);
     // When: the actual runtime dispatches the model's MCP call.
-    let run = runtime.delegate_background(role, "test".into(), RunConfig::default());
-    tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
-        .await
-        .expect("bounded run")
-        .expect("run");
+    let run = runtime.delegate_background(
+        role,
+        "test".into(),
+        RunConfig {
+            project_root: Some(root),
+            ..RunConfig::default()
+        },
+    );
+    runtime.wait(run).await.expect("run");
     while let Some(result) = tasks.join_next().await {
         result.expect("approval task");
     }
-    let mut events = Vec::new();
-    // Runtime termination is the synchronization barrier; no tool task remains.
-    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(10), receiver.recv()).await
-    {
-        events.push(event);
-    }
+    // Terminal lifecycle is the synchronization barrier, never a timeout.
+    let events = receiver.drain_pending_snapshot();
     (server, events, run.to_string())
 }
 
@@ -198,8 +182,8 @@ async fn denies_without_communication_when_tool_policy_denies() {
 #[tokio::test]
 async fn worker_mcp_network_call_completes_when_tool_policy_allows() -> common::TestResult {
     let (server, events, run) = scenario(Role::Worker, Failure::None, None).await;
-    // Then: initialize, initialized, list and call all happen, with one lifecycle pair.
-    assert_eq!(server.captured_requests().len(), 4);
+    // Then: discover, list and call happen, with one lifecycle pair.
+    assert_eq!(server.captured_requests().len(), 3);
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { call_id, run_id, .. }) if call_id == "mcp-call" && run_id.as_deref() == Some(&run))));
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolCompleted { call_id, run_id, is_error: false, output, .. }) if call_id == "mcp-call" && run_id.as_deref() == Some(&run) && output.as_deref() == Some("mcp-ok"))));
     Ok(())
@@ -243,7 +227,7 @@ async fn executes_once_when_scope_approval_is_granted() {
     // Given/When: a per-tool Ask is approved through the real event bus.
     let (server, events, _) = scenario(Role::WebResearcher, Failure::None, Some(true)).await;
     // Then: one approval, one successful MCP call, no second executor approval.
-    assert_eq!(server.captured_requests().len(), 4);
+    assert_eq!(server.captured_requests().len(), 3);
     assert_eq!(
         events
             .iter()

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{ProjectId, ProjectRecord, SidebarState, TrustState};
 
+use crate::mcp_settings::MCP_SERVERS_BUTTON_LABEL;
 use crate::model::project_dialog::{ProjectDialog, ProjectOverrides};
 use crate::theme::icons;
 use crate::theme::text::{h3, muted, section};
@@ -55,6 +56,8 @@ pub enum ProjectDialogAction {
         project: ProjectId,
         path: PathBuf,
     },
+    /// Opens the project's MCP servers dialog on top of the settings.
+    OpenMcpServers(ProjectId),
     Close,
 }
 
@@ -374,9 +377,16 @@ fn project_settings(
         crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
     ui.add_space(SP_2);
-    if ui.button("Close").clicked() {
-        *action = Some(ProjectDialogAction::Close);
-    }
+    ui.horizontal(|ui| {
+        if ui.button("Close").clicked() {
+            *action = Some(ProjectDialogAction::Close);
+        }
+        let mcp = ui.button(icons::with_icon(icons::PLUGS, MCP_SERVERS_BUTTON_LABEL));
+        crate::theme::widgets::accessible(&mcp, MCP_SERVERS_BUTTON_LABEL);
+        if mcp.clicked() {
+            *action = Some(ProjectDialogAction::OpenMcpServers(project.id.clone()));
+        }
+    });
 }
 
 fn copyable_path(ui: &mut Ui, path: &str) {

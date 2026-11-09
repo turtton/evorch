@@ -1,0 +1,7 @@
+{"event":"send","value":{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"evorch","version":"0.1.0"}}}}}
+{"event":"receive","value":{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"fixture","version":"1.0.0"}},"ttlMs":0,"cacheScope":"private"}}}
+{"event":"send","value":{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"evorch","version":"0.1.0"}}}}}
+{"event":"receive","value":{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"echo","description":"Echo the input","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],"ttlMs":0,"cacheScope":"private"}}}
+{"event":"send","value":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hello"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"evorch","version":"0.1.0"}}}}}
+{"event":"receive","value":{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","content":[{"type":"text","text":"hello"}],"isError":false}}}
+{"event":"close"}

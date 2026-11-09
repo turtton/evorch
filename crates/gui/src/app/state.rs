@@ -110,6 +110,7 @@ pub struct WorkbenchState<S> {
     pub(super) folder_picker: crate::model::folder_picker::FolderPickerModel,
     pub(super) artifact_opener: Option<Arc<dyn crate::model::artifact_opener::ArtifactOpener>>,
     pub(super) project_dialog: crate::model::project_dialog::ProjectDialog,
+    pub(super) mcp_settings: crate::mcp_settings::McpSettingsModel,
     pub(super) thread_search: crate::model::thread_search::ThreadSearchModal,
     pub(super) focus: ConversationFocus,
     pub(super) theme_installed: bool,
@@ -264,6 +265,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             folder_picker: crate::model::folder_picker::FolderPickerModel::default(),
             artifact_opener: None,
             project_dialog: crate::model::project_dialog::ProjectDialog::default(),
+            mcp_settings: crate::mcp_settings::McpSettingsModel::default(),
             thread_search: crate::model::thread_search::ThreadSearchModal::default(),
             focus: ConversationFocus::Thread,
             theme_installed: false,
@@ -476,6 +478,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         picker: Arc<dyn crate::model::folder_picker::FolderPicker>,
     ) -> Self {
         self.folder_picker = crate::model::folder_picker::FolderPickerModel::new(picker);
+        self
+    }
+
+    /// Project MCP settings load and save through `service` on `runtime`
+    /// (a dedicated thread per call without one), never on the render thread.
+    pub fn with_mcp_settings_service(
+        mut self,
+        service: Arc<dyn crate::mcp::McpGuiService>,
+        runtime: Option<tokio::runtime::Handle>,
+    ) -> Self {
+        self.mcp_settings = crate::mcp_settings::McpSettingsModel::new(service, runtime);
         self
     }
 

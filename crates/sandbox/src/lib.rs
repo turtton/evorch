@@ -24,7 +24,9 @@ pub use boundary::{
 };
 pub use bwrap::{BwrapConfig, BwrapSandbox};
 pub use composition::production_sandbox;
-pub use credential::{CredentialStore, FileCredentialStore, Secret, open_default};
+pub use credential::{
+    CredentialStore, FileCredentialStore, Secret, open_default, open_keychain_only,
+};
 pub use error::{CredentialError, SandboxError};
 pub use exec::{CommandSpec, DirectSandbox, Sandbox, WrappedCommand};
 #[cfg(feature = "keychain")]

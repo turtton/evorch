@@ -3,6 +3,9 @@
 //! ツール実行の窓口として、開始・完了イベントの発行、引数スキーマ検証、
 //! 制御マーカのエスケープ（ADR 0008）を検証する。
 
+#[path = "support/mcp_registry.rs"]
+mod mcp_registry;
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -37,6 +40,65 @@ fn test_ctx(run_id: &str) -> ToolExecutionContext {
         call_id: None,
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn run_js_cannot_invoke_external_mcp() {
+    use tools::tools::run_js::{ChildCall, ChildOutcome, RunJs, RunJsHost, WorkerLauncher};
+    #[derive(Debug)]
+    struct Host(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl RunJsHost for Host {
+        // Deliberately advertise an external name: the fixed dispatcher must
+        // reject it even if a host implementation mistakenly offers one.
+        fn tool_names(&self) -> Vec<String> {
+            vec!["mcp__fixture__read".into()]
+        }
+        fn settings(&self) -> config::RunJsConfig {
+            config::RunJsConfig::default()
+        }
+        fn shares_wave(&self, _: &str) -> bool {
+            true
+        }
+        async fn call(&self, _: ChildCall) -> ChildOutcome {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("external MCP must not reach the run_js host")
+        }
+    }
+    let host = Arc::new(Host(std::sync::atomic::AtomicUsize::new(0)));
+    let launcher = WorkerLauncher::injected(
+        Arc::new(DirectSandbox::new_unchecked()),
+        "sh".into(),
+        vec![
+            "-c".into(),
+            // The worker protocol, not a real JS engine, makes the forbidden call.
+            r#"read -r run
+printf '%s\n' '{"type":"tool_call","id":1,"name":"mcp__fixture__read","args":{}}'
+read -r result
+printf '%s\n' '{"type":"done","value":null}'
+"#
+            .into(),
+        ],
+    );
+    let ctx = ToolExecutionContext {
+        run_id: "run".into(),
+        call_id: Some("parent".into()),
+        run_js_host: Some(host.clone()),
+        ..Default::default()
+    };
+    let result = RunJs::with_launcher(launcher)
+        .execute_with_context(&ctx, serde_json::json!({"code":"return await tools.mcp__fixture__read({});", "timeout_ms": 60000}))
+        .await
+        .unwrap();
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("the JS worker called a tool that run_js does not provide"),
+        "{}",
+        result.content
+    );
 }
 
 /// イベントから [`ToolEvent`] を取り出す。
@@ -1121,19 +1183,6 @@ async fn executor_reads_null_in_optional_typed_fields_as_omitted() {
 // what null means there (such as clearing a value), and dropping it would change the call.
 #[tokio::test]
 async fn executor_leaves_null_in_mcp_tool_fields_to_validation() {
-    let registry = Arc::new(tools::mcp::McpToolRegistry::new(
-        Arc::new(tools::NetworkGuard::new().expect("guard")),
-        tools::mcp::McpClientConfig {
-            server_label: "fixture".into(),
-            endpoint: "https://mcp.invalid/mcp".into(),
-            extra_headers: Default::default(),
-            timeout: std::time::Duration::from_secs(1),
-        },
-        tools::mcp::McpClientInfo {
-            name: "test".into(),
-            version: "1".into(),
-        },
-    ));
     let definition = serde_json::from_value(serde_json::json!({
         "name": "update_issue",
         "inputSchema": {
@@ -1143,16 +1192,17 @@ async fn executor_leaves_null_in_mcp_tool_fields_to_validation() {
         }
     }))
     .expect("definition");
+    let fixture = mcp_registry::DormantMcp::new(definition);
+    let tool = fixture.tool();
+    let public_name = tool.name().to_owned();
     let mut executor = ToolExecutor::new(Arc::new(EventBus::new(16)));
-    executor
-        .register(Arc::new(registry.tool(definition)))
-        .expect("register");
+    executor.register(tool).expect("register");
     let executor = Arc::new(executor);
     let validate = |args: serde_json::Value| {
         executor
             .validate_call(
                 test_ctx("run-1"),
-                "update_issue".into(),
+                public_name.clone(),
                 "call-1".into(),
                 args,
             )
@@ -1164,4 +1214,5 @@ async fn executor_leaves_null_in_mcp_tool_fields_to_validation() {
     let error = validate(serde_json::json!({"title": "t", "assignee": null}))
         .expect("null in an MCP tool field is not read as omitted");
     assert!(matches!(error, ToolError::InvalidArgs { .. }), "{error:?}");
+    fixture.connector.assert_unused();
 }

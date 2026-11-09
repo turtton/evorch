@@ -142,6 +142,13 @@ impl ProcessGroup {
         }
     }
 
+    /// Send SIGTERM to the whole group while the leader still reserves its id.
+    pub fn terminate(&self) {
+        if let Some(leader) = *self.lock() {
+            let _ = rustix::process::kill_process_group(leader, Signal::TERM);
+        }
+    }
+
     /// Kill what is left of the group, then run `reap` on its exited leader.
     ///
     /// Unless `reap` reports the leader still running (`Ok(None)`), the handle
@@ -275,13 +282,17 @@ impl GroupChild {
         let exit = match watch(&group) {
             Ok(exit) => exit,
             Err(error) => {
-                // Nothing else holds the group yet; the unreaped child keeps
-                // its id reserved, and Tokio reaps it after the drop.
-                group.kill_and_release();
-                let _ = child.start_kill();
+                // A caller may hold admission until spawn returns. Reap even
+                // this failed launch before returning, not later in Tokio's
+                // orphan queue. The unreaped leader reserves the group id.
                 let pid = child
                     .id()
                     .map_or_else(|| "?".to_owned(), |pid| pid.to_string());
+                group.kill();
+                if let Some(leader) = group.leader() {
+                    wait_for_exit(leader)?;
+                    group.kill_and_reap(|| child.try_wait())?;
+                }
                 return Err(io::Error::new(
                     error.kind(),
                     format!(
@@ -365,6 +376,23 @@ impl GroupChild {
             // Readiness without an exit is not expected; do not spin on it.
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    /// Last-resort cleanup outside a Tokio runtime (for supervisor unwinding).
+    /// Blocks until the killed leader is reaped; do not call on an async worker.
+    ///
+    /// # Errors
+    /// Returns an error if the leader cannot be observed or reaped.
+    pub fn kill_and_reap_blocking(&mut self) -> io::Result<()> {
+        self.kill();
+        if let Some(leader) = self.group.leader() {
+            wait_for_exit(leader)?;
+            // Reap through Tokio's synchronous try_wait so its Child also knows
+            // the id is retired (including its kill_on_drop bookkeeping).
+            let child = &mut self.child;
+            self.group.kill_and_reap(|| child.try_wait())?;
+        }
+        Ok(())
     }
 
     /// Kill the whole group, then reap the leader. Cancel-safe.

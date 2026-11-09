@@ -8,7 +8,7 @@ publish = false
 name = "sandbox"
 
 [features]
-keychain = ["dep:keyring"]
+keychain = ["dep:keyring", "dep:secret-service", "dep:security-framework"]
 
 [dependencies]
 event-bus = { path = "../event-bus" }
@@ -25,6 +25,10 @@ uuid = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 # close_range(2), which rustix 1 does not wrap, for the child launch policy.
 libc = "0.2"
+secret-service = { version = "5.2", default-features = false, features = ["rt-tokio-crypto-rust"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7", optional = true }
 
 [dev-dependencies]
 # The launch policy tests run themselves on a pseudo-terminal.

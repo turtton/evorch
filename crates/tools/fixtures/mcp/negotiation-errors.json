@@ -1,0 +1,83 @@
+[
+  {
+    "name": "modern_400_error_does_not_fall_back",
+    "status": 400,
+    "frame": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32022,
+        "message": "Unsupported protocol version",
+        "data": {
+          "requested": "1900-01-01",
+          "supported": [
+            "2026-07-28"
+          ]
+        }
+      }
+    },
+    "expected": "modern"
+  },
+  {
+    "name": "discover_unknown_error_falls_back",
+    "status": 400,
+    "frame": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32603,
+        "message": "Not initialized"
+      }
+    },
+    "expected": "legacy"
+  },
+  {
+    "name": "auth_failure_never_falls_back",
+    "status": 401,
+    "frame": null,
+    "expected": "http_status"
+  },
+  {
+    "name": "no_compatible_version",
+    "status": 400,
+    "frame": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32022,
+        "message": "Unsupported protocol version",
+        "data": {
+          "requested": "2026-07-28",
+          "supported": [
+            "1900-01-01"
+          ]
+        }
+      }
+    },
+    "expected": "incompatible"
+  },
+  {
+    "name": "input_required_is_not_replayed",
+    "status": 200,
+    "frame": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "resultType": "input_required",
+        "inputRequests": {
+          "login": {
+            "method": "elicitation/create",
+            "params": {
+              "mode": "url",
+              "message": "Login required",
+              "url": "https://example.com/login",
+              "elicitationId": "login-1"
+            }
+          }
+        },
+        "requestState": "opaque"
+      }
+    },
+    "expected": "mrtr_unsupported"
+  }
+]

@@ -30,6 +30,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Claude compatibility skill offline tools
         run: node --test .agents/skills/claude-code-compatibility/scripts/inspect-client-hello.test.mjs
+      # The DOM-free half of the web workbench unit tests; the browser-e2e job
+      # runs all of them in Chromium. The assets are plain .js ES modules, which
+      # Node before 22.7 only detects as modules with this flag.
+      - name: Web workbench JavaScript unit tests
+        run: node --experimental-detect-module crates/workbench-web/tests/web/run-node.mjs
       # 2026-10-09 時点の runner は root の空きが約 86G あり、削除 (android だけで
       # 71s) は不要になった。空きが少ない runner でだけ従来どおり削除する。
       - name: Free runner disk space
@@ -295,6 +300,16 @@ jobs:
           tool: cargo-nextest
       - name: Run agent browser test
         run: cargo nextest run -p browser --test agent_chromium --run-ignored only --success-output immediate --no-tests fail
+      - name: Run web workbench browser test
+        env:
+          WORKBENCH_WEB_SCREENSHOT_DIR: ${{ github.workspace }}/target/web-ui-screenshots
+        run: cargo nextest run -p workbench-web --test web_ui_chromium --run-ignored only --success-output immediate --no-tests fail
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: web-ui-screenshots
+          if-no-files-found: warn
+          path: target/web-ui-screenshots
 
   # ADR 0034 B: the opt-in CEF HTML preview. cef-dll-sys downloads the CEF
   # build cef-rs pins into CEF_PATH; it is not cached because the extracted

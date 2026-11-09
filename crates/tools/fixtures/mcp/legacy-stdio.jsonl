@@ -1,0 +1,10 @@
+{"event":"send","value":{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"evorch","version":"0.1.0"}}}}}
+{"event":"receive","value":{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Not initialized"}}}
+{"event":"send","value":{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"evorch","version":"0.1.0"}}}}
+{"event":"receive","value":{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1.0.0"}}}}
+{"event":"send","value":{"jsonrpc":"2.0","method":"notifications/initialized"}}
+{"event":"send","value":{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}}
+{"event":"receive","value":{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"echo","description":"Echo the input","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}}}
+{"event":"send","value":{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hello"}}}}
+{"event":"receive","value":{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"hello"}],"isError":false}}}
+{"event":"close"}

@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use workspace_ui::ProjectId;
 
 use super::{WorkbenchError, WorkbenchState};
+use crate::mcp_settings::{
+    McpNoticeAction, McpSettingsAction, McpSettingsModel, mcp_approval_notices, mcp_settings_modal,
+};
 use crate::model::project_dialog::ProjectDialog;
 use crate::model::tasks::AgentRunSource;
 use crate::panes::project_dialog::{ProjectDialogAction, project_dialog_modal};
@@ -68,15 +71,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn render_project_dialog(&mut self, ctx: &egui::Context) {
+        self.render_mcp_notices(ctx);
+        if !matches!(self.project_dialog, ProjectDialog::Settings { .. }) {
+            self.mcp_settings.close();
+        }
         if !self.project_dialog.is_open() {
             return;
         }
-        let Some(action) = project_dialog_modal(
+        let action = project_dialog_modal(
             ctx,
             &mut self.project_dialog,
             &self.sidebar,
             self.folder_picker.is_busy(),
-        ) else {
+        );
+        // Shown after the settings so it stacks on top of them.
+        self.render_mcp_settings(ctx);
+        let Some(action) = action else {
             return;
         };
         let result = match action {
@@ -126,8 +136,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ProjectDialogAction::RemoveDirectory { project, path } => self
                 .remove_allowed_directory(&project, path)
                 .map_err(error_text),
+            ProjectDialogAction::OpenMcpServers(project) => {
+                self.open_mcp_settings(ctx, &project);
+                Ok(())
+            }
             ProjectDialogAction::Close => {
                 self.project_dialog = ProjectDialog::Closed;
+                self.mcp_settings.close();
                 Ok(())
             }
         };
@@ -136,6 +151,90 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub fn mcp_settings(&self) -> &McpSettingsModel {
+        &self.mcp_settings
+    }
+
+    pub fn mcp_settings_mut(&mut self) -> &mut McpSettingsModel {
+        &mut self.mcp_settings
+    }
+
+    /// Opens the MCP servers dialog for `project`; its servers load in the background.
+    fn open_mcp_settings(&mut self, ctx: &egui::Context, project: &ProjectId) {
+        let Some(root) = self
+            .sidebar
+            .projects
+            .iter()
+            .find(|record| &record.id == project)
+            .map(|record| record.repo_root.clone())
+        else {
+            return;
+        };
+        let ctx = ctx.clone();
+        self.mcp_settings
+            .set_waker(std::sync::Arc::new(move || ctx.request_repaint()));
+        self.mcp_settings.ensure_open(&root);
+    }
+
+    /// Applies finished background results and draws the MCP dialog over the
+    /// project settings. Never does I/O itself.
+    fn render_mcp_settings(&mut self, ctx: &egui::Context) {
+        self.mcp_settings.poll();
+        if self.mcp_settings.root().is_none() {
+            return;
+        }
+        if let Some(action) = mcp_settings_modal(ctx, &mut self.mcp_settings) {
+            self.mcp_settings.apply_action(action);
+        }
+    }
+
+    /// Follows every project's MCP status and shows a non-blocking notice when
+    /// a new run skipped an unapproved server. Subscriptions start off-thread.
+    fn render_mcp_notices(&mut self, ctx: &egui::Context) {
+        if !self.mcp_settings.is_available() {
+            return;
+        }
+        if !self.mcp_settings.has_waker() {
+            let ctx = ctx.clone();
+            self.mcp_settings
+                .set_waker(std::sync::Arc::new(move || ctx.request_repaint()));
+        }
+        self.mcp_settings.watch_projects(
+            self.sidebar
+                .projects
+                .iter()
+                .map(|project| project.repo_root.as_path()),
+        );
+        self.mcp_settings.poll();
+        let projects = &self.sidebar.projects;
+        let action = mcp_approval_notices(ctx, self.mcp_settings.approval_notices(), |root| {
+            projects
+                .iter()
+                .find(|project| project.repo_root == root)
+                .map(|project| project.name.clone())
+        });
+        match action {
+            None => {}
+            Some(McpNoticeAction::Dismiss(notice)) => self.mcp_settings.dismiss_notice(&notice),
+            Some(McpNoticeAction::Review(notice)) => {
+                self.mcp_settings.dismiss_notice(&notice);
+                let project = self
+                    .sidebar
+                    .projects
+                    .iter()
+                    .find(|project| project.repo_root == notice.project_root)
+                    .map(|project| project.id.clone());
+                let Some(project) = project else {
+                    return;
+                };
+                self.open_project_settings(project.clone());
+                self.open_mcp_settings(ctx, &project);
+                self.mcp_settings
+                    .apply_action(McpSettingsAction::ReviewApproval(notice.server_id));
+            }
+        }
+    }
+
     /// Shows what a project at `path` overrides before registering it.
     fn review_project(&mut self, path: &std::path::Path) -> Result<(), String> {
         let path = crate::model::project_path::expand_tilde(path, self.home_dir.as_deref())

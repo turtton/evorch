@@ -284,6 +284,28 @@ fn mcp_failure(class: &str, status: Option<u64>) -> Option<String> {
         "server_rejected" => "the server rejected the request".to_owned(),
         "tool_rejected" => "the tool reported an error".to_owned(),
         "configuration" => "the server is misconfigured".to_owned(),
+        "config_conflict" => "the configuration changed on disk".to_owned(),
+        "needs_approval" => "startup approval is required".to_owned(),
+        "approval_revoked" => "startup approval was revoked".to_owned(),
+        "role_not_allowed" => "the server is not shared with this role".to_owned(),
+        "stale_preview" => "the approval preview is stale".to_owned(),
+        "secret_unavailable" => "a required secret is unavailable".to_owned(),
+        "secret_locked" => "the secret backend is locked".to_owned(),
+        "secret_denied" => "access to a required secret was denied".to_owned(),
+        "secret_missing" => "a required secret was not found".to_owned(),
+        class if class.starts_with("missing_environment_") => {
+            "a required environment variable is missing".to_owned()
+        }
+        "process_limit_reached" => "the project process limit was reached".to_owned(),
+        "preparation_limit_reached" => {
+            "the project connection preparation limit was reached".to_owned()
+        }
+        "unavailable" => "the MCP service is unavailable".to_owned(),
+        "cancelled" => "the request was cancelled".to_owned(),
+        "outcome_unknown" => "the call outcome is unknown".to_owned(),
+        "mrtr_unsupported" => "interactive continuation is unsupported".to_owned(),
+        "limit_exceeded" => "a safety limit was exceeded".to_owned(),
+        "definition_changed" => "the tool definition changed".to_owned(),
         _ => return None,
     })
 }
@@ -433,7 +455,7 @@ mod tests {
     // class breaks this test) / When: shown / Then: natural English, never the raw class
     #[test]
     fn every_mcp_failure_class_reads_as_english() {
-        use tools::mcp::{McpError, McpErrorKind};
+        use tools::mcp::{McpError, McpErrorKind, McpValueField};
         let kinds = [
             McpErrorKind::Timeout,
             McpErrorKind::Transport,
@@ -442,6 +464,24 @@ mod tests {
             McpErrorKind::ServerRejected,
             McpErrorKind::ToolRejected,
             McpErrorKind::Configuration,
+            McpErrorKind::ConfigConflict,
+            McpErrorKind::NeedsApproval,
+            McpErrorKind::ApprovalRevoked,
+            McpErrorKind::RoleNotAllowed,
+            McpErrorKind::StalePreview,
+            McpErrorKind::SecretUnavailable,
+            McpErrorKind::SecretLocked,
+            McpErrorKind::SecretDenied,
+            McpErrorKind::SecretMissing,
+            McpErrorKind::MissingEnvironment(McpValueField::Env),
+            McpErrorKind::ProcessLimitReached,
+            McpErrorKind::PreparationLimitReached,
+            McpErrorKind::Unavailable,
+            McpErrorKind::Cancelled,
+            McpErrorKind::OutcomeUnknown,
+            McpErrorKind::InputRequired,
+            McpErrorKind::LimitExceeded,
+            McpErrorKind::DefinitionChanged,
         ];
         for kind in kinds {
             let expected = match kind {
@@ -452,6 +492,26 @@ mod tests {
                 McpErrorKind::ServerRejected => "the server rejected the request",
                 McpErrorKind::ToolRejected => "the tool reported an error",
                 McpErrorKind::Configuration => "the server is misconfigured",
+                McpErrorKind::ConfigConflict => "the configuration changed on disk",
+                McpErrorKind::NeedsApproval => "startup approval is required",
+                McpErrorKind::ApprovalRevoked => "startup approval was revoked",
+                McpErrorKind::RoleNotAllowed => "the server is not shared with this role",
+                McpErrorKind::StalePreview => "the approval preview is stale",
+                McpErrorKind::SecretUnavailable => "a required secret is unavailable",
+                McpErrorKind::SecretLocked => "the secret backend is locked",
+                McpErrorKind::SecretDenied => "access to a required secret was denied",
+                McpErrorKind::SecretMissing => "a required secret was not found",
+                McpErrorKind::MissingEnvironment(_) => "a required environment variable is missing",
+                McpErrorKind::ProcessLimitReached => "the project process limit was reached",
+                McpErrorKind::PreparationLimitReached => {
+                    "the project connection preparation limit was reached"
+                }
+                McpErrorKind::Unavailable => "the MCP service is unavailable",
+                McpErrorKind::Cancelled => "the request was cancelled",
+                McpErrorKind::OutcomeUnknown => "the call outcome is unknown",
+                McpErrorKind::InputRequired => "interactive continuation is unsupported",
+                McpErrorKind::LimitExceeded => "a safety limit was exceeded",
+                McpErrorKind::DefinitionChanged => "the tool definition changed",
             };
             let detail = McpError {
                 server: "docs".into(),

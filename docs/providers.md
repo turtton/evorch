@@ -48,6 +48,22 @@ fit Anthropic's tool-name constraints use a deterministic hashed MCP name.
 Responses and saved tool-call history are translated at the provider boundary,
 so internal names, execution, and approval checks use the original tools.
 Claude API-key profiles retain their original tool names and argument schemas.
+
+Tools from [external MCP servers](mcp.md) are named `mcp__<server>__<tool>`, or
+`mcp_h__<base64url SHA-256>` when the server ID or tool name has characters
+outside `A-Za-z0-9_-`, the name would exceed 64 characters, or two tools would
+collide (the name is never sanitized). Claude API-key profiles send these names
+unchanged. Claude subscription requests wrap them in the same provider prefix as
+other custom tools, so the wire names are `_mcp__evorch__mcp__<server>__<tool>`
+and `_mcp__evorch__mcp_h__<hash>`. This is separate from the
+`_mcp__evorch_h__<sha256 hex>` hash namespace above, which only the provider
+layer uses for evorch's own tools whose names do not fit. The provider prefix is
+removed from responses and saved history before execution; evorch then resolves
+the external name through its server/tool binding table and never parses it. The
+`_mcp__evorch__` and `mcp__<server>__` prefixes are therefore different things:
+the first is a presentation prefix, the second is the evorch-internal name of an
+external tool.
+
 The subscription transport uses a pinned Claude Code compatibility profile for
 headers, identity, billing checksums, and one-hour cache markers. See
 [Claude compatibility maintenance](claude-compatibility.md) for the reference

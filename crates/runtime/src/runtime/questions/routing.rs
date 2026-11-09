@@ -64,6 +64,18 @@ impl AgentRuntime {
         }
         drop(entry);
         if let Some(store) = self.shared.run_store.get()
+            && store
+                .thread(&thread)?
+                .and_then(|t| t.root_run_id)
+                .as_deref()
+                != Some(&caller.to_string())
+        {
+            return Err(LaneError::new(
+                "not_current_lead",
+                "caller is not the current lead root",
+            ));
+        }
+        if let Some(store) = self.shared.run_store.get()
             && let Some(destination) = store.handle.lane_delivery_destination(thread.clone())?
             && let Some(owner) = destination.owner
             && owner.root_run_id != caller.to_string()
