@@ -16,6 +16,18 @@
 #      than workbench-protocol, reaches a GUI or rendering crate, or declares a
 #      third-party dependency outside its small allowlist. It is a protocol
 #      adapter: the core binary connects it to workbench-host.
+#   7. gui or evorch (the CLI) declares a direct dependency on a workspace
+#      crate that is not in scripts/workbench-boundary-allowlist.txt. That list
+#      is a ratchet: it freezes the dependencies the two crates have today
+#      (normal, dev, build, optional and target-specific alike), may only
+#      shrink, and records the migration PR that removes each entry. The
+#      client-side crates workbench-client, workbench-protocol, core-instance
+#      and core-launcher are the intended way to reach the core and need no
+#      entry. An entry whose dependency is gone is reported as stale
+#      (a warning; a failure when WORKBENCH_BOUNDARY_STALE_ALLOWLIST=fail).
+#      Because those four are exempt, core-instance must reach no other workspace
+#      crate and core-launcher only core-instance, workbench-client and
+#      workbench-protocol (checked once the crates exist).
 # Each violation prints the dependency path that causes it.
 #
 # Usage: scripts/check-workbench-boundaries.sh [metadata.json]
@@ -47,6 +59,16 @@ CORE_CRATES="${WORKBENCH_BOUNDARY_CORE_CRATES:-agents apply-patch browser browse
 # WORKBENCH_BOUNDARY_CORE_CRATES exists only so the fixture tests can use small
 # graphs; CI runs the script with the built-in list.
 
+# Dependency ratchet for the front-end crates (rule 7).
+RATCHET_CRATES="gui evorch"
+# core-instance (a leaf) and core-launcher (client launcher over core-instance,
+# workbench-client and workbench-protocol) are client-side crates added by PR 04;
+# listing them here keeps the ratchet independent of which PR merges first.
+RATCHET_FREE_TARGETS="workbench-client workbench-protocol core-instance core-launcher"
+ALLOWLIST="${WORKBENCH_BOUNDARY_ALLOWLIST:-scripts/workbench-boundary-allowlist.txt}"
+# WORKBENCH_BOUNDARY_ALLOWLIST lets the fixture tests supply their own list.
+STALE_ALLOWLIST="${WORKBENCH_BOUNDARY_STALE_ALLOWLIST:-warn}"
+
 command -v jq >/dev/null || { echo "check-workbench-boundaries: jq is required" >&2; exit 2; }
 
 work=$(mktemp -d)
@@ -55,7 +77,11 @@ trap 'rm -rf "$work"' EXIT
 if [[ $# -ge 1 ]]; then
   cp "$1" "$work/metadata.json"
 else
-  cargo metadata --format-version 1 --locked > "$work/metadata.json"
+  # --all-features: an optional dependency that no default feature enables has
+  # no resolved edge, so only the all-features graph shows where a [patch]
+  # section sends it. The manifest override exists for the fixture tests.
+  cargo metadata --format-version 1 --locked --all-features \
+    --manifest-path "${WORKBENCH_BOUNDARY_MANIFEST_PATH:-Cargo.toml}" > "$work/metadata.json"
 fi
 
 # Edge list. Lines:  W <workspace crate>
@@ -92,7 +118,7 @@ jq -r -f "$work/edges.jq" "$work/metadata.json" > "$work/edges.tsv"
 violations="$work/violations.txt"
 : > "$violations"
 
-for crate in "$PROTOCOL" "$CLIENT" "$HOST" "$WEB" evorch-core; do
+for crate in "$PROTOCOL" "$CLIENT" "$HOST" "$WEB" evorch-core $RATCHET_CRATES; do
   if ! awk -F'\t' -v c="$crate" '$1 == "W" && $2 == c { found = 1 } END { exit !found }' "$work/edges.tsv"; then
     echo "boundary check: workspace member '$crate' not found; the check would pass vacuously" >> "$violations"
   fi
@@ -244,6 +270,58 @@ core_reach_violations() {
     }' "$work/edges.tsv"
 }
 
+# Rule 7. Reads the allowlist into `A <crate> <dependency> <kind> <pr>` lines
+# (allow.tsv), reporting malformed, duplicate and out-of-scope entries, then
+# compares it with the workspace dependencies of the two crates. Declared edges
+# come from the manifests, so optional and target-specific dependencies are
+# covered; resolved edges cover a registry declaration that a [patch] section or
+# source replacement turned into a workspace crate.
+: > "$work/allow.tsv"
+: > "$work/stale.txt"
+ratchet_violations() {
+  if [[ ! -f $ALLOWLIST ]]; then
+    echo "VIOLATION: dependency allowlist $ALLOWLIST not found; the ratchet cannot run without it"
+    return
+  fi
+  awk -v crates=" $RATCHET_CRATES " -v file="$ALLOWLIST" '
+    { sub(/#.*/, "") }
+    NF == 0 { next }
+    NF != 4 { print "VIOLATION: " file ":" NR ": expected `<crate> <dependency> <kind> <removal-pr>`, got " NF " field(s)"; next }
+    !index(crates, " " $1 " ") { print "VIOLATION: " file ":" NR ": crate " $1 " is not covered by the ratchet (" crates ")"; next }
+    $3 !~ /^(normal|dev|build)$/ { print "VIOLATION: " file ":" NR ": kind " $3 " must be normal, dev or build"; next }
+    $4 !~ /^(unassigned|[0-9]+[a-z]?)$/ { print "VIOLATION: " file ":" NR ": removal PR " $4 " must be a PR step such as 19b, or unassigned"; next }
+    (($1 SUBSEP $2 SUBSEP $3) in seen) { print "VIOLATION: " file ":" NR ": duplicate entry " $1 " " $2 " " $3; next }
+    { seen[$1, $2, $3] = 1; print "A\t" $1 "\t" $2 "\t" $3 "\t" $4 }' "$ALLOWLIST" > "$work/allow.raw"
+  grep -v '^A' "$work/allow.raw" || true
+  grep '^A' "$work/allow.raw" > "$work/allow.tsv" || true
+  awk -F'\t' -v crates=" $RATCHET_CRATES " -v free=" $RATCHET_FREE_TARGETS " -v file="$ALLOWLIST" -v stale_file="$work/stale.txt" '
+    FILENAME ~ /allow\.tsv$/ { allow[$2, $3, $4] = $5; next }
+    $1 == "W" { ws[$2] = 1; next }
+    $1 == "E" && ($3 in ws) && index(crates, " " $2 " ") && !index(free, " " $3 " ") {
+      key = $2 SUBSEP $3 SUBSEP $4
+      present[key] = 1
+      if ($5 ~ /^declared/) notes[key] = notes[key] ((key in noted) ? " | " : "") $5
+      else if (!(key in noted)) fallback[key] = $5
+      if ($5 ~ /^declared/) noted[key] = 1
+      if (!(($2, $3, $4) in allow) && !(key in reported)) {
+        reported[key] = 1; order[++n] = key
+      }
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        key = order[i]; split(key, p, SUBSEP)
+        note = (key in noted) ? notes[key] : fallback[key] " (not declared as a workspace path dependency; a [patch] or source replacement points a registry dependency at a workspace crate)"
+        print "VIOLATION: " p[1] " declares workspace dependency " p[2] " [" p[3] "; " note "] that is not in " file ". Reach the core through workbench-client instead of adding entries (ADR 0045 section 11)"
+      }
+      for (k in allow) {
+        split(k, p, SUBSEP)
+        if (!((p[1] SUBSEP p[2] SUBSEP p[3]) in present))
+          print "stale allowlist entry: " p[1] " " p[2] " " p[3] " (removal PR " allow[k] ") is no longer declared; delete it from " file > stale_file
+      }
+    }' "$work/allow.tsv" "$work/edges.tsv"
+}
+ratchet_violations >> "$violations"
+
 closure_violations "$PROTOCOL" "" >> "$violations"
 closure_violations "$CLIENT" "$PROTOCOL" >> "$violations"
 gui_free_violations "$HOST" "$HOST_FORBIDDEN_WORKSPACE" >> "$violations"
@@ -257,10 +335,30 @@ closure_violations "$WEB" "$PROTOCOL" >> "$violations"
 external_violations "$WEB" "$WEB_EXTERNAL_ALLOW" >> "$violations"
 core_reach_violations >> "$violations"
 
+# core-instance and core-launcher are exempt from the ratchet (rule 7), so what
+# they reach is checked here. They are new crates: the checks apply once a crate
+# exists in the workspace and are skipped before that.
+has_member() { awk -F'\t' -v c="$1" '$1 == "W" && $2 == c { found = 1 } END { exit !found }' "$work/edges.tsv"; }
+if has_member core-instance; then
+  closure_violations core-instance "" >> "$violations"
+fi
+if has_member core-launcher; then
+  closure_violations core-launcher "core-instance $CLIENT $PROTOCOL" >> "$violations"
+fi
+
+if [[ -s "$work/stale.txt" ]]; then
+  if [[ $STALE_ALLOWLIST == fail ]]; then
+    sed 's/^/VIOLATION: /' "$work/stale.txt" >> "$violations"
+  else
+    sort -u "$work/stale.txt" | sed 's/^/warning: /' >&2
+  fi
+fi
+
 if [[ -s "$violations" ]]; then
   sort -u "$violations" >&2
   echo "workbench boundary check failed: $(sort -u "$violations" | wc -l) violation(s)" >&2
   exit 1
 fi
 edges=$(grep -c '^E' "$work/edges.tsv" || true)
-echo "workbench boundary check passed ($edges dependency edges inspected)"
+allowed=$(grep -c '^A' "$work/allow.tsv" || true)
+echo "workbench boundary check passed ($edges dependency edges inspected, $allowed allowlisted gui/evorch dependencies)"
