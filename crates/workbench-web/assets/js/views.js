@@ -963,6 +963,7 @@ export function threadView(ctx, threadId) {
     const before = s.scrollHeight - s.scrollTop;
     older.disabled = true;
     const result = await history.loadOlder();
+    if (destroyed) return;
     older.disabled = false;
     if (!result.ok) {
       if (result.error.code === "conflict") {
