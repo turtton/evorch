@@ -659,3 +659,5 @@ mod tests {
 
 #[cfg(test)]
 mod redaction_tests;
+
+// verification only: harmless Rust source change (temporary PR, will be closed).
