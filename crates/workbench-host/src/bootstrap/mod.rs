@@ -191,7 +191,14 @@ impl BootstrappedHost {
         adapters: lane_pr::PullRequestAdapters,
         observe: impl FnOnce(&AgentRuntime) + Send + 'static,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, Some(seams), None, adapters, Some(Box::new(observe))).await
+        Self::open_composed(
+            options,
+            Some(seams),
+            None,
+            adapters,
+            Some(Box::new(observe)),
+        )
+        .await
     }
 
     async fn open_composed(
