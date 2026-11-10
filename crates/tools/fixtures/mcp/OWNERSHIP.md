@@ -7,7 +7,7 @@ with explicit paths. Shared API/Cargo/module changes must be requested from E.
 
 | Owner | Files | Start / handoff |
 | --- | --- | --- |
-| E (shared, permanently) | all Cargo.toml/Cargo.lock; crate module/export declarations; crates/config/src/mcp/{mod,types}.rs; crates/tools/src/mcp/{mod,types,error,wire}.rs; tools/src/mcp/transport/{mod,api}.rs; crates/runtime/src/mcp/**; crates/gui/src/mcp.rs; crates/gui/src/model/transcript/diagnostics.rs (shared safe diagnostic rendering); tools/src/mcp/contracts_tests.rs; crates/tools/tests/mcp_contracts.rs; crates/runtime/tests/mcp_contracts.rs; crates/tools/fixtures/mcp/** | T0; fixtures or API edits via E |
+| E (shared, permanently) | all Cargo.toml/Cargo.lock; crate module/export declarations; crates/config/src/mcp/{mod,types}.rs; crates/tools/src/mcp/{mod,types,error,wire}.rs; tools/src/mcp/transport/{mod,api}.rs; crates/runtime/src/mcp/**; crates/gui/src/mcp.rs; crates/gui/src/model/transcript/diagnostics.rs (shared safe diagnostic rendering); tools/src/mcp/contracts_tests.rs; crates/tools/tests/mcp_contracts.rs; crates/runtime/tests/web_mcp/mcp_contracts.rs; crates/tools/fixtures/mcp/** | T0; fixtures or API edits via E |
 | A | crates/config/src/mcp/{load,expand,validate,save}.rs; crates/config/tests/mcp_config.rs | T0 committed, then F1 |
 | B | crates/tools/src/mcp/{approval,secrets}.rs; crates/sandbox/src/{credential,keychain}.rs; crates/tools/tests/{mcp_approval,mcp_secrets}.rs | T0 committed; factory/export changes via E |
 | C | crates/tools/src/mcp/{client,protocol,codec,headers}.rs; crates/tools/src/mcp/transport/http.rs; crates/tools/src/network_guard/{mcp,stream}.rs; crates/tools/tests/{mcp_client,mcp_session,mcp_protocol,mcp_http}.rs | T0 committed; no wire/search/mod.rs edits |
