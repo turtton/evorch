@@ -1,0 +1,620 @@
+//! Runtime regression tests using the real shell and storage.
+#[path = "shell_jobs_integration/elapsed_budget.rs"]
+mod elapsed_budget;
+#[path = "shell_jobs_integration/finalization.rs"]
+mod finalization;
+use crate::paused_process_clock;
+use crate::support;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use event_bus::{AgentRunPhase, EventBus};
+use futures_util::FutureExt;
+use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolResultContent, ToolSpec};
+use runtime::{
+    AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RunId, RunStore,
+    RuntimeError,
+};
+use serde_json::json;
+use storage::{Storage, StorageConfig};
+use support::{init_git_repo, text_response, tool_response};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::Duration;
+use tools::ToolExecutor;
+
+struct Invocation {
+    messages: Vec<Message>,
+    reply: oneshot::Sender<ChatResponse>,
+}
+impl Invocation {
+    fn respond(self, response: ChatResponse) {
+        self.reply.send(response).expect("model call remains live");
+    }
+    fn result(&self, id: &str) -> (String, bool) {
+        self.messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error,
+                } if tool_call_id == id => Some((
+                    content
+                        .iter()
+                        .map(|part| match part {
+                            ToolResultContent::Text { text } => text.as_str(),
+                            ToolResultContent::Image { .. } => panic!("unexpected image result"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    *is_error,
+                )),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing result {id}: {:?}", self.messages))
+    }
+    fn job(&self, id: &str) -> String {
+        field(&self.result(id).0, "shell job: ").into()
+    }
+}
+fn field<'a>(text: &'a str, prefix: &str) -> &'a str {
+    text.lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("missing {prefix} in {text}"))
+}
+
+struct ExchangeModel(mpsc::UnboundedSender<Invocation>);
+#[async_trait]
+impl AgentModel for ExchangeModel {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "shell-integration-test".into()
+    }
+    async fn complete(
+        &self,
+        _: &AgentInvocationContext,
+        _: Role,
+        messages: &[Message],
+        _: &[ToolSpec],
+    ) -> Result<ChatResponse, RuntimeError> {
+        let (reply, receiver) = oneshot::channel();
+        self.0
+            .send(Invocation {
+                messages: messages.to_vec(),
+                reply,
+            })
+            .expect("test receiver remains live");
+        receiver.await.map_err(|_| RuntimeError::Model {
+            reason: "test response channel closed".into(),
+        })
+    }
+}
+fn model() -> (Arc<ExchangeModel>, mpsc::UnboundedReceiver<Invocation>) {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    (Arc::new(ExchangeModel(sender)), receiver)
+}
+async fn next(receiver: &mut mpsc::UnboundedReceiver<Invocation>) -> Invocation {
+    receiver.recv().await.expect("model call")
+}
+fn executor(bus: &Arc<EventBus>, root: &Path) -> Arc<ToolExecutor> {
+    Arc::new(ToolExecutor::with_standard_tools_in(
+        bus.clone(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        Some(root.into()),
+    ))
+}
+async fn wait(runtime: &AgentRuntime, run: RunId) -> AgentRunPhase {
+    runtime.wait(run).await.unwrap()
+}
+fn assert_pid_reaped(pid: &str) {
+    assert!(
+        !PathBuf::from(format!("/proc/{pid}")).exists(),
+        "process {pid} must be reaped after cancellation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yielded_job_allows_reads_and_same_run_mutation_while_it_runs() {
+    test_support::isolated_state_dir();
+    let (_temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let run =
+        runtime.delegate_background(Role::Worker, "exercise shell".into(), RunConfig::default());
+    next(&mut calls).await.respond(tool_response("start", "shell", json!({"command":"printf 'ready\\n'; IFS= read -r reply; printf '%s' \"$reply\" > result.txt; printf 'done\\n'", "yield_ms":1000})));
+    let call = next(&mut calls).await;
+    let job = call.job("start");
+    assert!(job.strip_prefix("job-").unwrap().parse::<u64>().is_ok());
+    assert!(executor.has_running_shell_jobs(&run.to_string()));
+    call.respond(tool_response("read", "read", json!({"path":"README.md"})));
+    let call = next(&mut calls).await;
+    assert!(!call.result("read").1);
+    assert!(call.result("read").0.contains("# test"));
+    call.respond(tool_response(
+        "write-during",
+        "write",
+        json!({"path":"README.md", "content":"written while the job runs"}),
+    ));
+    let call = next(&mut calls).await;
+    let (result, error) = call.result("write-during");
+    assert!(!error, "{result}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("README.md")).unwrap(),
+        "written while the job runs"
+    );
+    assert!(executor.has_running_shell_jobs(&run.to_string()));
+    call.respond(tool_response(
+        "input",
+        "shell",
+        json!({"action":"stdin", "job_id":job, "input":"answer\n", "yield_ms":0}),
+    ));
+    let call = next(&mut calls).await;
+    let cursor: u64 = field(&call.result("input").0, "cursor: ").parse().unwrap();
+    call.respond(tool_response(
+        "poll",
+        "shell",
+        json!({"action":"poll", "job_id":job, "cursor":cursor}),
+    ));
+    let call = next(&mut calls).await;
+    let (result, error) = call.result("poll");
+    assert!(!error, "{result}");
+    assert_eq!(field(&result, "status: "), "completed");
+    assert!(!executor.has_unobserved_shell_jobs(&run.to_string()));
+    assert_eq!(
+        std::fs::read_to_string(root.join("result.txt")).unwrap(),
+        "answer"
+    );
+    call.respond(tool_response(
+        "write-after",
+        "write",
+        json!({"path":"README.md", "content":"after completion"}),
+    ));
+    let call = next(&mut calls).await;
+    assert!(!call.result("write-after").1);
+    call.respond(text_response("all observed", FinishReason::Stop));
+    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
+    assert_eq!(
+        runtime.run_result(run).unwrap().as_deref(),
+        Some("all observed")
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("README.md")).unwrap(),
+        "after completion"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_job_does_not_block_mutations_of_another_run_in_the_same_workspace() {
+    test_support::isolated_state_dir();
+    let (_temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let owner = runtime.delegate_background(Role::Worker, "owner".into(), RunConfig::default());
+    calls.recv().await.unwrap().respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"read value", "yield_ms":0}),
+    ));
+    let owner_call = calls.recv().await.unwrap();
+    assert!(!owner_call.result("start").1);
+    assert!(executor.has_running_shell_jobs(&owner.to_string()));
+
+    let other = runtime.delegate_background(Role::Worker, "other".into(), RunConfig::default());
+    calls.recv().await.unwrap().respond(tool_response(
+        "write",
+        "write",
+        json!({"path":"other.txt", "content":"written"}),
+    ));
+    let call = calls.recv().await.unwrap();
+    assert!(!call.result("write").1);
+    assert_eq!(
+        std::fs::read_to_string(root.join("other.txt")).unwrap(),
+        "written"
+    );
+    call.respond(tool_response(
+        "shell",
+        "shell",
+        json!({"command":"cat other.txt"}),
+    ));
+    let call = calls.recv().await.unwrap();
+    let (output, error) = call.result("shell");
+    assert!(!error && output.contains("written"), "{output}");
+    call.respond(text_response("done", FinishReason::Stop));
+    assert_eq!(runtime.wait(other).await.unwrap(), AgentRunPhase::Done);
+    // The owner's job was live throughout, so neither call waited for it.
+    assert!(executor.has_running_shell_jobs(&owner.to_string()));
+
+    runtime.cancel(owner).unwrap();
+    assert_eq!(runtime.wait(owner).await.unwrap(), AgentRunPhase::Error);
+    drop(owner_call);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn natural_stop_rejects_running_and_drained_but_unobserved_jobs() {
+    test_support::isolated_state_dir();
+    let (_temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let run =
+        runtime.delegate_background(Role::Worker, "completion gate".into(), RunConfig::default());
+    next(&mut calls).await.respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"read value", "yield_ms":0}),
+    ));
+    let call = next(&mut calls).await;
+    let job = call.job("start");
+    call.respond(text_response("premature natural stop", FinishReason::Stop));
+    let call = next(&mut calls).await;
+    assert_ne!(
+        runtime.inspect_agent(run).unwrap().phase,
+        AgentRunPhase::Done
+    );
+    assert_eq!(runtime.run_result(run).unwrap(), None);
+    executor.drain_shell_jobs(&run.to_string()).await.unwrap();
+    assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
+    call.respond(text_response("drained is not observed", FinishReason::Stop));
+    let call = next(&mut calls).await;
+    assert_ne!(
+        runtime.inspect_agent(run).unwrap().phase,
+        AgentRunPhase::Done
+    );
+    assert_eq!(runtime.run_result(run).unwrap(), None);
+    call.respond(tool_response(
+        "observe",
+        "shell",
+        json!({"action":"poll", "job_id":job}),
+    ));
+    let call = next(&mut calls).await;
+    assert_eq!(field(&call.result("observe").0, "status: "), "cancelled");
+    call.respond(text_response("observed cancellation", FinishReason::Stop));
+    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
+    assert_eq!(
+        runtime.run_result(run).unwrap().as_deref(),
+        Some("observed cancellation")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_reaps_job_and_preserves_uncertain_effects_in_storage() {
+    test_support::isolated_state_dir();
+    let (temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let config = StorageConfig {
+        db_path: temp.path().join("history.sqlite3"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model)
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "cancel with effects".into(),
+        RunConfig {
+            name: Some("chat:Worker:cancel-thread".into()),
+            ..RunConfig::default()
+        },
+    );
+    next(&mut calls).await.respond(tool_response("start", "shell", json!({"command":"printf partial > partial.txt; printf 'pid:%s\\n' \"$$\"; read value", "yield_ms":1000})));
+    let call = next(&mut calls).await;
+    let pid = field(&call.result("start").0, "pid:").to_owned();
+    assert_eq!(
+        std::fs::read_to_string(root.join("partial.txt")).unwrap(),
+        "partial"
+    );
+    runtime.cancel(run).unwrap();
+    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
+    assert_pid_reaped(&pid);
+    assert_eq!(runtime.run_result(run).unwrap(), None);
+    assert!(
+        !executor.has_unobserved_shell_jobs(&run.to_string()),
+        "terminal handles are released only after persisting the uncertainty"
+    );
+    let diagnostics = runtime.restore_diagnostics(run).unwrap().unwrap();
+    assert!(!diagnostics.disk_restorable);
+    assert!(
+        diagnostics
+            .interrupted_tool_calls
+            .iter()
+            .any(|call| call.tool_name == "shell"
+                && call.may_have_side_effects
+                && !call.result_observed)
+    );
+    let restore = runtime.delegate_chat(
+        "cancel-thread",
+        Role::Worker,
+        "continue".into(),
+        RunConfig::default(),
+    );
+    let restored = restore.unwrap();
+    let resumed = next(&mut calls).await;
+    let text = serde_json::to_string(&resumed.messages).unwrap();
+    assert!(text.contains("ToolExecutionOutcomeUnknown"));
+    assert!(text.contains("unobserved-shell-jobs"));
+    // No replay: the existing partial effect and dead PID remain unchanged.
+    assert_eq!(
+        std::fs::read_to_string(root.join("partial.txt")).unwrap(),
+        "partial"
+    );
+    assert_pid_reaped(&pid);
+    resumed.respond(text_response(
+        "continued with unknown outcome",
+        FinishReason::Stop,
+    ));
+    assert_eq!(wait(&runtime, restored).await, AgentRunPhase::Done);
+    drop(call);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_start_before_job_id_delivery_reaps_real_process() {
+    test_support::isolated_state_dir();
+    let (_temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "cancel pending start".into(),
+        RunConfig::default(),
+    );
+    let started = root.join("started");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&started)
+            .status()
+            .unwrap()
+            .success()
+    );
+    next(&mut calls).await.respond(tool_response("pending-start", "shell", json!({"command":"printf partial > partial.txt; printf '%s\\n' \"$$\" > started; read value", "yield_ms":60000})));
+    // The FIFO carries the PID after the partial effect, without live output:
+    // cancellation still precedes delivery of the job ID.
+    let pid = tokio::task::spawn_blocking(move || std::fs::read_to_string(started))
+        .await
+        .unwrap()
+        .unwrap();
+    let pid = pid.trim();
+    assert!(executor.has_running_shell_jobs(&run.to_string()));
+    runtime.cancel(run).unwrap();
+    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
+    assert_pid_reaped(pid);
+    assert!(
+        executor.has_unobserved_shell_jobs(&run.to_string()),
+        "without a run store, uncertain effects cannot be persisted; retain the handle"
+    );
+    assert_eq!(runtime.run_result(run).unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finish_checks_unobserved_job_effects_before_accepting_completion() {
+    test_support::isolated_state_dir();
+    let (_temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let run = runtime.delegate_background(
+        Role::Orchestrator,
+        "finish gate".into(),
+        RunConfig::default(),
+    );
+    let call = next(&mut calls).await;
+    // Only Orchestrator exposes finish, and its model cannot spawn shell jobs.
+    // Seed a real owner-scoped job through the public executor to exercise the
+    // defensive finish gate without granting the model forbidden capabilities.
+    let ctx = tools::ToolExecutionContext {
+        run_id: run.to_string(),
+        thread_id: None,
+        call_id: None,
+        ..Default::default()
+    };
+    let started = executor
+        .execute(
+            &ctx,
+            "shell",
+            "external-start",
+            json!({"command":"read value", "yield_ms":0}),
+        )
+        .await
+        .unwrap();
+    let job = started.detail.unwrap()["shell_job"]["job_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    call.respond(tool_response(
+        "premature-finish",
+        "finish",
+        json!({"result":"unobserved result"}),
+    ));
+    let call = next(&mut calls).await;
+    let (result, error) = call.result("premature-finish");
+    assert!(error && result.contains("Shell jobs"), "{result}");
+    assert_eq!(runtime.run_result(run).unwrap(), None);
+    executor.drain_shell_jobs(&run.to_string()).await.unwrap();
+    call.respond(tool_response(
+        "drained-finish",
+        "finish",
+        json!({"result":"still unobserved"}),
+    ));
+    let call = next(&mut calls).await;
+    let (result, error) = call.result("drained-finish");
+    assert!(error && result.contains("Shell jobs"), "{result}");
+    executor
+        .execute(
+            &ctx,
+            "shell",
+            "external-poll",
+            json!({"action":"poll", "job_id":job}),
+        )
+        .await
+        .unwrap();
+    call.respond(tool_response(
+        "safe-finish",
+        "finish",
+        json!({"result":"effects observed"}),
+    ));
+    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
+    assert_eq!(
+        runtime.run_result(run).unwrap().as_deref(),
+        Some("effects observed")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop() {
+    test_support::isolated_state_dir();
+    let (_temp, root) = init_git_repo();
+    // A FIFO releases the real child without polling the filesystem or relying
+    // on elapsed time. Job completion itself is awaited through its watch.
+    let release = root.join("release");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let bus = Arc::new(EventBus::new(256));
+    let shell = Arc::new(tools::tools::shell::Shell::new(Arc::new(
+        sandbox::DirectSandbox::new_unchecked(),
+    )));
+    let mut executor = ToolExecutor::with_standard_tools_in(
+        bus.clone(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        Some(root.clone()),
+    );
+    executor.register(shell.clone()).unwrap();
+    let executor = Arc::new(executor);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "notify before next turn".into(),
+        RunConfig::default(),
+    );
+    calls.recv().await.unwrap().respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"read value < release; printf finished", "yield_ms":0}),
+    ));
+    let active = calls.recv().await.unwrap();
+    let job = active.job("start");
+    assert!(job.strip_prefix("job-").unwrap().parse::<u64>().is_ok());
+    let previous_input = serde_json::to_value(&active.messages).unwrap();
+    tokio::task::spawn_blocking(move || std::fs::write(release, "go\n"))
+        .await
+        .unwrap()
+        .unwrap();
+    shell
+        .wait_for_job(
+            &tools::ToolExecutionContext {
+                run_id: run.to_string(),
+                thread_id: None,
+                call_id: None,
+                ..Default::default()
+            },
+            &job,
+        )
+        .await
+        .unwrap();
+    // Continue with ToolUse, not Stop: the completion must reach the next request.
+    active.respond(tool_response("read", "read", json!({"path":"README.md"})));
+    let notified = calls.recv().await.unwrap();
+    let next_input = serde_json::to_value(&notified.messages).unwrap();
+    let prefix_len = previous_input.as_array().unwrap().len();
+    assert_eq!(
+        &next_input.as_array().unwrap()[..prefix_len],
+        previous_input.as_array().unwrap().as_slice()
+    );
+    let text = serde_json::to_string(&notified.messages).unwrap();
+    assert!(text.contains(&format!("Shell job completed: {job}")));
+    assert!(text.contains("exit_code: 0"));
+    assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
+    notified.respond(tool_response(
+        "poll",
+        "shell",
+        json!({"action":"poll", "job_id":job}),
+    ));
+    let observed = calls.recv().await.unwrap();
+    assert_eq!(field(&observed.result("poll").0, "status: "), "completed");
+    assert!(observed.result("poll").0.contains("finished"));
+    assert!(!executor.has_unobserved_shell_jobs(&run.to_string()));
+    let text = serde_json::to_string(&observed.messages).unwrap();
+    assert_eq!(text.matches("Shell job completed:").count(), 1);
+    observed.respond(text_response("done", FinishReason::Stop));
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_message_ends_a_child_poll_without_stopping_the_job() {
+    test_support::isolated_state_dir();
+    let (_temp, root) = init_git_repo();
+    let release = root.join("release");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let parent_call = next(&mut calls).await;
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    next(&mut calls).await.respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"read value < release; printf finished", "yield_ms":0}),
+    ));
+    let call = next(&mut calls).await;
+    let job = call.job("start");
+    call.respond(tool_response(
+        "poll",
+        "shell",
+        json!({"action":"poll", "job_id":job}),
+    ));
+    runtime
+        .send_agent_message(
+            parent,
+            child,
+            event_bus::AgentMessageKind::Send,
+            "Stop and report what you have",
+            None,
+        )
+        .unwrap();
+    // The poll returns while the job keeps running, and the message reaches the
+    // child's next request.
+    let call = next(&mut calls).await;
+    let (result, error) = call.result("poll");
+    assert!(!error, "{result}");
+    assert_eq!(field(&result, "status: "), "running");
+    assert!(result.contains("New input arrived"), "{result}");
+    assert!(executor.has_running_shell_jobs(&child.to_string()));
+    let text = serde_json::to_string(&call.messages).unwrap();
+    assert!(text.contains("Stop and report what you have"), "{text}");
+    // Cancellation stops both runs and reaps the job still reading the FIFO.
+    for run in [child, parent] {
+        runtime.cancel(run).unwrap();
+    }
+    drop((call, parent_call, release));
+    for run in [child, parent] {
+        assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
+    }
+    assert!(!executor.has_running_shell_jobs(&child.to_string()));
+}
