@@ -15,11 +15,21 @@ pub struct WireMessagesRequest {
     /// 呼び出し可能なツール定義。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<WireTool>,
+    /// Present only to forbid tool calls; unset leaves the wire unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<WireToolChoice>,
     /// 生成温度。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     /// ストリーミングを要求するか。
     pub stream: bool,
+}
+
+/// Anthropic `tool_choice` values this adapter can send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum WireToolChoice {
+    None,
 }
 
 /// Anthropic Messages API のメッセージ。

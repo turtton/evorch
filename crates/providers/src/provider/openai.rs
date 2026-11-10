@@ -166,6 +166,10 @@ impl OpenAiClient {
 
 #[async_trait]
 impl ProviderClient for OpenAiClient {
+    async fn supports_tool_choice_none(&self, _request: &ChatRequest) -> bool {
+        true
+    }
+
     fn image_generation(&self) -> Option<&dyn crate::ImageGeneration> {
         Some(self)
     }

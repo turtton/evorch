@@ -61,6 +61,7 @@ async fn tools_reach_wire_when_preferred_model_is_absent_from_catalog() {
     model
         .complete(
             &AgentInvocationContext {
+                btw: None,
                 attempts: None,
                 turn: None,
                 category: None,

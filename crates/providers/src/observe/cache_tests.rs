@@ -347,3 +347,46 @@ async fn an_expired_baseline_is_reported_as_expired() {
         })
     );
 }
+
+fn purposed_observer(
+    bus: &Arc<EventBus>,
+    purpose: event_bus::RequestPurpose,
+    request: &Value,
+) -> AttemptObserver {
+    AttemptObserver::new(
+        Some(bus.clone()),
+        "test",
+        None,
+        "test",
+        "test",
+        false,
+        Some(ObservationContext {
+            attempts: None,
+            turn: None,
+            run_id: "run".into(),
+            purpose,
+        }),
+    )
+    .with_cache_observation(request)
+}
+
+// Given: a warm main request and a side request of the same run with a different
+// wire / When: the side request completes cold and the main one is repeated / Then: the
+// side request neither regresses against the main baseline nor replaces it
+#[test]
+fn a_purpose_keeps_its_own_cache_baseline_within_one_run() {
+    use event_bus::RequestPurpose::{Agent, Btw};
+    let bus = Arc::new(EventBus::new(16));
+    let mut receiver = bus.subscribe();
+    purposed_observer(&bus, Agent, &wire()).emit_completed(&usage(100), FinishReason::Stop);
+    let side = json!({"model": "test", "tool_choice": "none",
+        "messages": [{"role": "user", "content": "prefix"}, {"role": "user", "content": "side"}]});
+    purposed_observer(&bus, Btw, &side).emit_completed(&usage(0), FinishReason::Stop);
+    assert_eq!(diagnostics(&mut receiver), 0);
+    purposed_observer(&bus, Agent, &wire()).emit_completed(&usage(20), FinishReason::Stop);
+    assert_eq!(
+        diagnostics(&mut receiver),
+        1,
+        "main still compares with main"
+    );
+}

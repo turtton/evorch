@@ -6,6 +6,7 @@ pub mod app;
 pub mod body;
 #[cfg(feature = "browser")]
 pub mod browser;
+pub mod core_client;
 pub mod diff;
 pub mod dock;
 pub mod events;

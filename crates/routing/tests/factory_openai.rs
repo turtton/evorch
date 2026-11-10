@@ -62,6 +62,7 @@ fn credential_store() -> (tempfile::TempDir, Arc<dyn CredentialStore>) {
 
 fn request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: MODEL.to_string(),
         messages: vec![Message {

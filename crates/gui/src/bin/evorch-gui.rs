@@ -141,6 +141,8 @@ enum GuiError {
 #[derive(Debug, Default)]
 struct Arguments {
     demo: bool,
+    core_client: bool,
+    config_dir: Option<PathBuf>,
     settings: Option<PathBuf>,
     layout: Option<PathBuf>,
     save_layout: Option<PathBuf>,
@@ -160,6 +162,8 @@ fn parse_arguments_from(mut values: impl Iterator<Item = String>) -> Result<Argu
     while let Some(argument) = values.next() {
         match argument.as_str() {
             "--demo" => arguments.demo = true,
+            "--core-client" => arguments.core_client = true,
+            "--config-dir" => arguments.config_dir = Some(next_path(&mut values, "--config-dir")?),
             "--settings" => arguments.settings = Some(next_path(&mut values, "--settings")?),
             "--layout" => arguments.layout = Some(next_path(&mut values, "--layout")?),
             "--save-layout" => {
@@ -183,7 +187,7 @@ fn parse_arguments_from(mut values: impl Iterator<Item = String>) -> Result<Argu
 
 fn print_help() {
     println!(
-        r#"Usage: evorch-gui [--demo] [--settings PATH] [--layout PATH] [--save-layout PATH] [--state PATH] [--window-title <text>]
+        r#"Usage: evorch-gui [--core-client [--config-dir PATH]] [--demo] [--settings PATH] [--layout PATH] [--save-layout PATH] [--state PATH] [--window-title <text>]
 
 --window-title <text>  Set the window title (default: evorch).
 
@@ -799,6 +803,28 @@ fn prepare() -> Result<Prepared, GuiError> {
 
 fn run() -> Result<(), GuiError> {
     gui::logging::init();
+    let arguments = parse_arguments()?;
+    if arguments.core_client {
+        if arguments.demo
+            || arguments.state.is_some()
+            || arguments.settings.is_some()
+            || arguments.layout.is_some()
+            || arguments.save_layout.is_some()
+        {
+            return Err(GuiError::Arguments("--core-client does not support legacy --demo/--state/--settings/--layout/--save-layout".into()));
+        }
+        let directory = arguments
+            .config_dir
+            .or_else(|| std::env::var_os("EVORCH_CONFIG_DIR").map(PathBuf::from))
+            .or_else(config::user_config_dir)
+            .ok_or_else(|| GuiError::Startup("user config directory is unavailable".into()))?;
+        return gui::core_client::run(directory, arguments.window_title).map_err(GuiError::Startup);
+    }
+    if arguments.config_dir.is_some() {
+        return Err(GuiError::Arguments(
+            "--config-dir requires --core-client".into(),
+        ));
+    }
     // Panicking runs then report where they panicked; the crash spool wraps this later.
     runtime::panic_capture::install();
     let prepared = prepare()?;
@@ -1741,6 +1767,32 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn core_client_is_explicit_and_keeps_legacy_argument_defaults() {
+        let legacy = super::parse_arguments_from(std::iter::empty()).unwrap();
+        assert!(!legacy.core_client);
+        assert!(legacy.config_dir.is_none());
+        let client = super::parse_arguments_from(
+            [
+                "--core-client",
+                "--config-dir",
+                "/tmp/core-config",
+                "--window-title",
+                "client",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(client.core_client);
+        assert_eq!(
+            client.config_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/core-config"))
+        );
+        assert_eq!(client.window_title, "client");
+        assert!(super::parse_arguments_from(["--config-dir".into()].into_iter()).is_err());
+    }
+
     // Given: the fail-closed credential store of the Fixed model source
     // When: its error reaches a provider / run failure reason
     // Then: the wording the model reads is unchanged; only the GUI translates it

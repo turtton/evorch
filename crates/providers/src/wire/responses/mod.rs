@@ -237,6 +237,7 @@ struct FunctionTool {
 #[serde(rename_all = "lowercase")]
 enum ToolChoice {
     Auto,
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -531,7 +532,10 @@ fn convert_request(
         .into_iter()
         .map(|tool| to_wire_tool(tool, dialect))
         .collect();
-    let (tool_choice, parallel_tool_calls) = dialect.tool_selection(!tools.is_empty(), lite);
+    let (mut tool_choice, parallel_tool_calls) = dialect.tool_selection(!tools.is_empty(), lite);
+    if tool_choice.is_some() && request.tool_choice == Some(crate::message::ToolChoice::None) {
+        tool_choice = Some(ToolChoice::None);
+    }
     // 現在の tools でなく履歴全体から判定し、不正な call も output と同じ種別に保つ。
     let custom_call_ids: BTreeSet<_> = request
         .messages

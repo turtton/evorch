@@ -82,9 +82,8 @@ jobs:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
-          # `cef` (and so `browser`) is a default GUI feature; keep the builds without them compiling.
+          # `cef` (and so `browser`) is a default GUI feature; keep the remaining non-CEF code paths compiling.
           cargo clippy -p gui --all-targets --no-default-features -- -D warnings
-          cargo clippy -p gui --all-targets --no-default-features --features browser -- -D warnings
           cargo clippy -p event-bus --all-targets --features otel-exporter -- -D warnings
           mkdir -p "$EVORCH_CI_METADATA_DIR"
           cargo metadata --format-version 1 --locked > "$EVORCH_CI_METADATA_DIR/cargo.json"
@@ -147,42 +146,98 @@ jobs:
 
   # nix run / nix build が cargo test では拾えない sandbox 固有の失敗
   # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。
+  #
+  # フルビルド (Nix package build) は main への push と、Nix に影響する変更を含む
+  # PR だけで走らせる。判定は scripts/nix-build-scope.sh (対象パスと根拠はその
+  # 冒頭コメント)。それ以外の PR は、Nix の cargoArgs と同じ -p/--bin 指定の
+  # 非テスト構成 cargo check で代替する。ci job は workspace 全体を --all-targets
+  # で見るため、dev-dependency が有効化する feature (test-support 等) が混ざり、
+  # -p 単位のビルドでだけ出る不具合 (2026-11-09 の TestSeams 事象) を見逃す。
+  # この job は PR でも常に走り、成功/失敗を返す (job 自体は skip しない)。
   nix-build:
     runs-on: ubuntu-latest
     # A cold deps build takes ~35-45 min and the attic push step is capped at 60.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The scope check diffs the PR's test merge commit against its first parent.
+          fetch-depth: 2
+      - name: Decide whether the Nix package build is needed
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        # Only an explicit full=false skips the package build: a script failure
+        # fails the step, and a missing output keeps the Nix steps.
+        run: |
+          set -o pipefail
+          scripts/tests/test_nix_build_scope.sh
+          scripts/nix-build-scope.sh | tee -a "$GITHUB_OUTPUT"
+      # Pull requests without Nix-affecting changes run this instead of the
+      # package build. The toolchain comes from the rust-toolchain action (the
+      # nix dev shell would need tailscale, nix and an attic fetch first) and
+      # the dependencies from a rust-cache that pushes to main save. main runs
+      # it too, ahead of the package build, to keep that cache current.
+      - name: Install linker and Claude transport build dependencies
+        if: steps.scope.outputs.full == 'false' || github.ref == 'refs/heads/main'
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        if: steps.scope.outputs.full == 'false' || github.ref == 'refs/heads/main'
+        with:
+          toolchain: 1.99.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.scope.outputs.full == 'false' || github.ref == 'refs/heads/main'
+        with:
+          shared-key: ${{ runner.os }}-nix-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The packages and binaries of shippedCargoArgs in flake.nix (x86_64-linux),
+      # release profile, no tests: the Nix package's build minus code generation.
+      # Keep the two in step.
+      - name: Check the shipped binaries without test configuration
+        if: steps.scope.outputs.full == 'false' || github.ref == 'refs/heads/main'
+        timeout-minutes: 30
+        env:
+          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+        run: cargo check --locked --release -p evorch -p evorch-core --bin evorch --bin evorch-core
       - name: Connect to Tailscale
         uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        if: steps.scope.outputs.full != 'false'
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:nix
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        if: steps.scope.outputs.full != 'false'
       - name: Setup attic client
+        if: steps.scope.outputs.full != 'false'
         run: |
           nix run --inputs-from . nixpkgs#attic-client -- login --set-default home https://attic.taile2777.ts.net "$ATTIC_TOKEN"
           nix run --inputs-from . nixpkgs#attic-client -- use home
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
       - name: Build patched attic client
+        if: steps.scope.outputs.full != 'false'
         run: |
           # Build on PRs too so changes to the upload timeout patch are checked.
           nix build -L .#attic-client --out-link ./result-attic
       - name: Build CLI dependencies
+        if: steps.scope.outputs.full != 'false'
         run: nix build -L .#evorch-deps --out-link ./result-deps
       - name: Cache PR CLI dependencies in attic
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: steps.scope.outputs.full != 'false' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         run: |
           # Cache completed deps before later builds can fail or be cancelled.
           if ! ATTIC_PUSH_ATTEMPTS=1 ATTIC_PUSH_TIMEOUT=290s scripts/push-attic.sh ./result-deps; then
             echo "::warning::PR CLI dependency upload failed or timed out; continuing the build"
           fi
       - name: Build CEF dependencies
+        if: steps.scope.outputs.full != 'false'
         run: nix build -L .#evorch-gui-cef-deps --out-link ./result-cef-deps
       - name: Cache PR CEF dependencies in attic
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: steps.scope.outputs.full != 'false' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         run: |
           if ! ATTIC_PUSH_ATTEMPTS=1 ATTIC_PUSH_TIMEOUT=290s scripts/push-attic.sh ./result-cef-deps; then
             echo "::warning::PR CEF dependency upload failed or timed out; continuing the build"
@@ -193,9 +248,10 @@ jobs:
       # builds no non-CEF GUI there, and its closure is part of the default
       # package's, so the attic push below covers it.
       - name: Build and smoke-test flake package in the Nix sandbox
+        if: steps.scope.outputs.full != 'false'
         run: nix build -L .#default --out-link ./result-default
       - name: Push to attic
-        if: success() && github.ref == 'refs/heads/main'
+        if: steps.scope.outputs.full != 'false' && success() && github.ref == 'refs/heads/main'
         timeout-minutes: 60
         run: |
           # How the runner reaches attic (direct or DERP relay) bounds throughput.

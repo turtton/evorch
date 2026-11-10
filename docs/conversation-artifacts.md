@@ -118,10 +118,9 @@ images.
   preview's or the viewer's context menu passes the file to the desktop's
   default application through the XDG Desktop Portal (`OpenFile`).
 - HTML mocks: an **Open** button opens them in an in-app CEF preview, and their
-  cards show a snapshot, in builds with the `cef` feature, which is on by
-  default ([browser.md](browser.md)). Builds without it
-  (`--no-default-features`) pass HTML to the Portal, so it opens in the browser rather than the in-app file viewer,
-  and the card shows no preview.
+  cards show a snapshot ([browser.md](browser.md)). If CEF cannot start, HTML
+  goes to the Portal, so it opens in the browser rather than the in-app file
+  viewer, and the card shows no preview.
 
 A card whose stored file is missing shows "Artifact unavailable".
 
@@ -131,7 +130,6 @@ authority.
 
 ## Not yet supported
 
-Multiple viewports, self-review of HTML in builds without CEF, and attaching
-artifacts to `ask_user` choices are later phases of ADR 0029. With the `cef`
-feature, cards already show HTML snapshots and open in-app
-([browser.md](browser.md)).
+Multiple viewports, self-review of HTML when CEF cannot start, and attaching
+artifacts to `ask_user` choices are later phases of ADR 0029. Cards already show
+HTML snapshots and open in-app ([browser.md](browser.md)).

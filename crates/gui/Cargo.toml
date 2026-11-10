@@ -10,10 +10,10 @@ publish = false
 name = "gui"
 
 [features]
-# The CEF GUI is the supported GUI build, so `cef` is a default feature: cargo
-# builds need the CEF distribution (cef-dll-sys downloads it into `CEF_PATH` on
-# the first build; docs/browser.md). `--no-default-features` builds the GUI
-# without CEF, and adding `--features browser` keeps the agent browser tab.
+# The CEF GUI is the only supported GUI build, so `cef` is a default feature:
+# cargo builds need the CEF distribution (cef-dll-sys downloads it into
+# `CEF_PATH` on the first build; docs/browser.md). The non-CEF code paths stay
+# compilable with `--no-default-features` but are not shipped.
 default = ["cef"]
 # The agent browser tab. Runtime and tools link `browser` regardless, so
 # enabling it costs no extra dependency.
@@ -69,6 +69,9 @@ uuid = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
 workbench-host = { path = "../workbench-host" }
 workbench-protocol = { path = "../workbench-protocol" }
+workbench-client = { path = "../workbench-client" }
+core-instance = { path = "../core-instance" }
+core-launcher = { path = "../core-launcher" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notify-rust = "4"

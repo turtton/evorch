@@ -4,8 +4,7 @@ The agent browser (launch, CDP, network guard) lives in `crates/browser` so
 runtime and tools can use it. The GUI tab that watches it is behind the
 `browser` feature of `gui`. `gui`'s default feature is `cef`, which includes
 `browser`, so a plain `cargo build` is the CEF GUI and needs the CEF distribution
-(see Building). `--no-default-features` leaves both out and `--no-default-features
---features browser` keeps only the tab; those builds need no CEF.
+(see Building). The CEF GUI is the only supported GUI build.
 Install Chromium separately. No browser is downloaded or opened automatically.
 
 The GUI used to have a manual **Browser** window (navigate a URL, click a CSS
@@ -274,8 +273,7 @@ popups are listed in the next outline. Nobody sees the page's JS dialogs:
 - Frame rates: off-screen rendering is capped at 30 fps for the preview window
   and 10 fps for agent pages. Card snapshots stay at 60 fps: a lower rate
   exposed a blank-frame capture in the isolation test when it was tried.
-- Builds without the `cef` feature (`--no-default-features`), and runtimes
-  without the GUI, do not offer the tool.
+- Runtimes without the GUI do not offer the tool.
 - Why it is separate from `browser_*`:
   - It reaches different agents.
   - It needs no network permission.
@@ -292,9 +290,10 @@ writes a verbose CEF log.
 
 - Nix: on x86_64-linux, `nix build` (`packages.default`, also `.#evorch-gui`)
   is the CLI and tools from `.#evorch` with `bin/evorch-gui` starting
-  `evorch-gui-cef`. `.#evorch` holds the CLI and `evorch-core` only on this
-  system: it builds no non-CEF GUI. Other systems get `.#evorch`, which has no
-  CEF but keeps the non-CEF `evorch-gui` as their only GUI.
+  `evorch-gui-cef`. `.#evorch` holds the CLI and `evorch-core` only, on every
+  system: Nix builds no non-CEF GUI. Other systems get `.#evorch` as
+  `packages.default` and `apps.default` and have no `.#evorch-gui`: the GUI
+  needs CEF, which Nix builds on x86_64-linux only.
   `nix build .#evorch-gui-cef` builds the CEF GUI alone. It fetches the CEF
   build cef-rs pins with a fixed hash, strips `libcef.so`, keeps the `en-US`
   and `ja` locales, and installs `evorch-gui-cef` with the helper and CEF files
@@ -323,9 +322,6 @@ writes a verbose CEF log.
 cargo build --locked -p gui -p browser-cef --bin evorch-gui --bin evorch-cef-helper
 cargo run -p gui --bin evorch-gui
 ```
-
-Hosts that cannot build CEF use `cargo build -p gui --no-default-features
---features browser` (the Nix packages on other systems do).
 
 ### Tests
 

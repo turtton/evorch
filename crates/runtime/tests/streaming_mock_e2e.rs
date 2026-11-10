@@ -56,6 +56,7 @@ async fn streaming_deltas_reach_bus_before_completion() {
     )
     .expect("model");
     let invocation = AgentInvocationContext {
+        btw: None,
         attempts: None,
         turn: None,
         category: None,

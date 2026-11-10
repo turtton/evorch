@@ -189,6 +189,7 @@ fn chat_completions_renderings_carry_no_reasoning_item() {
 
 fn request(messages: Vec<Message>, replay: Option<ResponsesReplayContext>) -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: replay,
         model: "m".into(),
         messages,

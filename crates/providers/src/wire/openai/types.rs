@@ -1,6 +1,13 @@
 use crate::message::ServiceTier;
 use serde::{Deserialize, Serialize};
 
+/// Chat Completions `tool_choice` values this adapter can send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WireToolChoice {
+    None,
+}
+
 /// Chat Completions リクエスト本文。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WireChatRequest {
@@ -29,6 +36,9 @@ pub struct WireChatRequest {
     /// サービス階層。未指定なら送信しない。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
+    /// Present only to forbid tool calls; unset leaves the wire unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<WireToolChoice>,
     /// 最終回答の JSON Schema 制約。未指定なら送信しない。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<WireResponseFormat>,

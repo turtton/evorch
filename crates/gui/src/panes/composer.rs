@@ -135,7 +135,11 @@ pub fn composer_strip_within(
                 let can_stop = (phase == Some(ThreadRunPhase::Running) && items.is_empty())
                     || (phase == Some(ThreadRunPhase::Stopped) && model.running_children > 0);
                 let queued_send = if can_stop && can_send && phase == Some(ThreadRunPhase::Running) {
-                    Some(primary_button(ui, "Queue").on_hover_text("Queue (Enter)"))
+                    Some(if model.is_side_question() {
+                        primary_button(ui, "Ask separately").on_hover_text("Ask separately (Enter)")
+                    } else {
+                        primary_button(ui, "Queue").on_hover_text("Queue (Enter)")
+                    })
                 } else { None };
                 let send = if can_stop {
                     stop_button(ui, phase == Some(ThreadRunPhase::Stopped), model.running_children)
@@ -733,13 +737,13 @@ mod tests {
         h.key_press(egui::Key::Enter);
         h.run();
         accept(&mut h);
-        assert_eq!(h.state().model.input, "/run ");
+        assert_eq!(h.state().model.input, "/btw ");
         assert!(h.query_by_label("/team").is_none());
         // Without candidates Tab is a no-op that keeps the draft.
         h.state_mut().model.tab_presses = vec![false];
         h.run();
         assert_eq!(h.state().action, None);
-        assert_eq!(h.state().model.input, "/run ");
+        assert_eq!(h.state().model.input, "/btw ");
     }
 
     #[test]

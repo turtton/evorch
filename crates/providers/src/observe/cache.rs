@@ -27,6 +27,7 @@ static RECENT_REQUESTS: LazyLock<Mutex<VecDeque<CachedRequest>>> =
 #[derive(Clone, PartialEq, Eq)]
 struct CacheScope {
     run: String,
+    purpose: event_bus::RequestPurpose,
     provider: String,
     profile: Option<String>,
     protocol: &'static str,
@@ -59,6 +60,7 @@ impl AttemptObserver {
     fn cache_scope(&self) -> Option<CacheScope> {
         Some(CacheScope {
             run: self.observation.as_ref()?.run_id.clone(),
+            purpose: self.observation.as_ref()?.purpose,
             provider: self.provider.clone(),
             profile: self.profile.clone(),
             protocol: self.protocol,

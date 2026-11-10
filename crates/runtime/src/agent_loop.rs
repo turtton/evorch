@@ -161,7 +161,7 @@ pub(crate) struct LoopState {
     benchmark: Option<crate::benchmark::BenchmarkCheckpoint>,
     benchmark_checked: bool,
     benchmark_replay: bool,
-    mcp_lease: Option<crate::mcp::RunMcpLease>,
+    mcp_lease: Option<Arc<crate::mcp::RunMcpLease>>,
     inherited_mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     mcp_cancellation: Option<mcp_setup::RunMcpCancellation>,
     pub(crate) task: RunTask,
@@ -1031,6 +1031,7 @@ impl LoopState {
             // Resolve D3 and scope before manual/automatic/window compaction so
             // no preparation request can see the previous route's reasoning.
             let preparation_invocation = AgentInvocationContext {
+                btw: None,
                 attempts: None,
                 turn: Some(self.turn.clone()),
                 category: self.task.config.category.clone(),
@@ -1152,6 +1153,9 @@ impl LoopState {
                 run_id: self.task.run_id.to_string(),
                 model_preference: self.channels.model_preference_rx.borrow().clone(),
                 purpose: event_bus::RequestPurpose::Agent,
+                btw: self
+                    .runtime()
+                    .map(|runtime| runtime.btw_publisher(self.task.run_id)),
             };
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}
@@ -1381,6 +1385,12 @@ impl LoopState {
                     _ => None,
                 })
                 .collect::<String>();
+            if !has_tool_uses
+                && finish_reason == FinishReason::Stop
+                && let Some(btw) = &invocation.btw
+            {
+                btw.settle(response.message.clone());
+            }
             self.context.push_assistant(response.message);
             self.completed_turn_end = (!has_tool_uses && finish_reason == FinishReason::Stop)
                 .then_some(self.context.messages.len());

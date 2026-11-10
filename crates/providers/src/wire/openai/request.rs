@@ -1,5 +1,7 @@
 use crate::error::ProviderError;
-use crate::message::{ChatRequest, ContentBlock, Message, Role, ToolResultContent, ToolSpec};
+use crate::message::{
+    ChatRequest, ContentBlock, Message, Role, ToolChoice, ToolResultContent, ToolSpec,
+};
 
 #[path = "request_content.rs"]
 mod content;
@@ -11,6 +13,7 @@ use reasoning::ReasoningReplay;
 use super::types::{
     WireChatRequest, WireContent, WireFunction, WireFunctionDefinition, WireJsonSchema,
     WireMessage, WireResponseFormat, WireStreamOptions, WireTextPart, WireTool, WireToolCall,
+    WireToolChoice,
 };
 
 /// canonical リクエストを OpenAI Chat Completions リクエストへ変換します。
@@ -32,6 +35,8 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireChatRequest {
             .iter()
             .flat_map(|message| to_wire_messages(message, reasoning))
             .collect(),
+        tool_choice: (!tools.is_empty() && request.tool_choice == Some(ToolChoice::None))
+            .then_some(WireToolChoice::None),
         tools,
         temperature: request.temperature,
         max_tokens: request.max_tokens,

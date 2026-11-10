@@ -52,6 +52,7 @@ fn apply_patch_history_keeps_anthropic_tool_use_and_result_pair() {
 #[test]
 fn canonical_request_converts_to_anthropic_wire_shape() {
     let request = ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "claude-test".to_string(),
         messages: vec![
@@ -124,6 +125,7 @@ fn canonical_request_converts_to_anthropic_wire_shape() {
 #[test]
 fn user_only_blocks_follow_anthropic_role_constraints() {
     let request = ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "claude-test".to_string(),
         messages: vec![
@@ -167,6 +169,7 @@ fn user_only_blocks_follow_anthropic_role_constraints() {
 fn top_level_schema_combinators_are_omitted_for_anthropic() {
     let nested = json!({"anyOf": [{"type": "string"}, {"type": "integer"}]});
     let request = ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "claude-test".to_string(),
         messages: vec![],
@@ -327,6 +330,7 @@ fn unsupported_compaction_blocks_do_not_leak_into_wire() {
 #[test]
 fn tool_result_images_are_native_image_blocks() {
     let request = ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "claude-test".to_string(),
         messages: vec![Message {
@@ -372,4 +376,27 @@ fn usage_reports_thinking_tokens_only_when_the_breakdown_is_present() {
 
     assert_eq!(from_wire_usage(reported).reasoning_tokens, Some(40));
     assert_eq!(from_wire_usage(absent).reasoning_tokens, None);
+}
+
+// Given: a request with tools / When: tool calls are forbidden / Then: only
+// `tool_choice` is added; tools, their cache breakpoint and messages are unchanged
+#[test]
+fn forbidding_tools_adds_only_tool_choice() {
+    let mut request: ChatRequest = serde_json::from_value(json!({
+        "model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "tools": [{"name": "b", "description": "d", "input_schema": {"type": "object"}},
+                  {"name": "a", "description": "d", "input_schema": {"type": "object"}}]
+    }))
+    .unwrap();
+    let default = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+    assert!(default.get("tool_choice").is_none());
+    request.tool_choice = Some(crate::message::ToolChoice::None);
+    let mut forbidden = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+    assert_eq!(forbidden["tool_choice"], json!({"type": "none"}));
+    forbidden.as_object_mut().unwrap().remove("tool_choice");
+    assert_eq!(forbidden, default);
+
+    request.tools.clear();
+    let value = serde_json::to_value(to_wire_request(&request, false)).unwrap();
+    assert!(value.get("tool_choice").is_none(), "{value}");
 }

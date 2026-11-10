@@ -114,6 +114,10 @@ impl ClaudeClient {
 
 #[async_trait]
 impl ProviderClient for ClaudeClient {
+    async fn supports_tool_choice_none(&self, request: &ChatRequest) -> bool {
+        self.inner.supports_tool_choice_none(request).await
+    }
+
     fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
         Some(self)
     }

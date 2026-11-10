@@ -765,6 +765,7 @@ impl QuickModelReviewer {
             },
         ];
         let invocation = AgentInvocationContext {
+            btw: None,
             attempts: Some(audit.attempt_log()),
             turn: None,
             run_id: run_id.to_owned(),
