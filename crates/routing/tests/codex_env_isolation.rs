@@ -35,6 +35,7 @@ fn dummy_jwt(exp: u64) -> String {
 
 fn request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: MODEL.to_owned(),
         messages: vec![Message {

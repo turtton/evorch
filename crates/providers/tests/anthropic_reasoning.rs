@@ -14,6 +14,7 @@ use wiremock::{Mock, MockServer};
 
 fn request(model: &str, effort: Option<&str>) -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: model.to_owned(),
         messages: vec![Message {

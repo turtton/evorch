@@ -95,6 +95,7 @@ fn client_at(
 
 fn request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "gpt-5.1-codex".to_string(),
         messages: vec![Message {

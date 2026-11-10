@@ -34,7 +34,7 @@ pub use image_generation::{
 pub use message::{
     AttemptLog, AttemptOutcome, AttemptRecord, ChatRequest, ChatResponse, ContentBlock,
     FinishReason, JsonSchema, Message, ObservationContext, ProviderCapabilities,
-    RequestTurnContext, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,
+    RequestTurnContext, Role, ServiceTier, ToolChoice, ToolResultContent, ToolSpec, Usage,
 };
 pub use models::{
     CODEX_CLIENT_VERSION, CodexModelCapabilities, CodexModelInfo, list_codex_models, list_models,

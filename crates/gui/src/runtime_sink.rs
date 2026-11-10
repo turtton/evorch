@@ -263,6 +263,40 @@ impl CommandSink for RuntimeCommandSink {
         Some(receiver)
     }
 
+    fn start_btw(
+        &self,
+        thread: &str,
+        question: String,
+    ) -> Result<crate::model::commands::BtwJob, crate::model::commands::BtwStartError> {
+        use crate::model::commands::{BtwCancel, BtwJob, BtwStartError};
+        let service = self.host.service();
+        let run = service
+            .bindings
+            .root_of(thread)
+            .ok_or(BtwStartError::Refused(
+                runtime::btw::BtwError::NoLocalContext,
+            ))?;
+        // The context outlives a handoff, so ownership is checked now, as every command does.
+        service
+            .permit_for_thread(Some(thread))
+            .map_err(|_| BtwStartError::Refused(runtime::btw::BtwError::OwnedElsewhere))?;
+        let snapshot = service
+            .runtime()
+            .btw_snapshot(run)
+            .map_err(BtwStartError::Refused)?;
+        let source = snapshot.source();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let task = service.handle().spawn(async move {
+            let _ = sender.send(snapshot.ask(&question).await);
+        });
+        let abort = task.abort_handle();
+        Ok(BtwJob {
+            source,
+            receiver,
+            cancel: BtwCancel::new(move || abort.abort()),
+        })
+    }
+
     fn search_threads(
         &self,
         project: PathBuf,

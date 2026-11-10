@@ -31,6 +31,7 @@ const CODEX_MODEL: &str = "gpt-codex-contract";
 
 fn request(model: &str) -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: model.to_string(),
         messages: vec![Message {

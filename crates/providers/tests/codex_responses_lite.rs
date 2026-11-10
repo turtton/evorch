@@ -426,3 +426,36 @@ async fn catalog_and_responses_share_the_normalized_base_url() {
     assert_eq!(sent[0].headers[LITE_HEADER], "true");
     server.verify().await;
 }
+
+// Given: a catalog with a Lite and a regular model / When: asked whether a request may
+// forbid tool calls / Then: only the regular model can promise it, and a failed catalog
+// read keeps the legacy shape and so the promise
+#[tokio::test]
+async fn only_a_regular_model_can_forbid_tool_calls() {
+    let server = MockServer::start().await;
+    mount_catalog(
+        &server,
+        ResponseTemplate::new(200).set_body_raw(CATALOG, "application/json"),
+    )
+    .await;
+    let client = client(&server, seeded_store(), None);
+    assert!(
+        !client
+            .supports_tool_choice_none(&chat("gpt-6-astra", "hi"))
+            .await
+    );
+    assert!(
+        client
+            .supports_tool_choice_none(&chat("gpt-5.5", "hi"))
+            .await
+    );
+
+    let failing = MockServer::start().await;
+    mount_catalog(&failing, ResponseTemplate::new(500).set_body_string("down")).await;
+    let failed = self::client(&failing, seeded_store(), None);
+    assert!(
+        failed
+            .supports_tool_choice_none(&chat("gpt-6-astra", "hi"))
+            .await
+    );
+}

@@ -28,6 +28,7 @@ fn cache_tools_are_byte_stable_when_registration_order_changes() {
 
 fn request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "gpt-5-codex".to_string(),
         messages: vec![

@@ -149,6 +149,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let ownership_started = Instant::now();
         self.ownership_ui(ui);
         let ownership_time = ownership_started.elapsed();
+        self.poll_btw();
+        self.consume_btw_escape(&ctx);
         let render_started = Instant::now();
         self.render(ui);
         self.bodies_end_frame();
@@ -159,6 +161,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.persist_composer_draft();
         let draft_time = draft_started.elapsed();
         self.render_restore_diagnostics(&ctx);
+        self.render_btw_window(&ctx);
         // After every poll above and the render, so work started or finished this pass counts.
         ctx.request_repaint_after(self.poll_repaint_delay());
         let frame_time = frame_started.elapsed();

@@ -45,6 +45,7 @@ data: {"id":"chatcmpl_nosignal","choices":[],"usage":{"prompt_tokens":11,"comple
 
 fn request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: MODEL.to_string(),
         messages: vec![Message {

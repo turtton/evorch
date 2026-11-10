@@ -3,6 +3,7 @@ use serde_json::json;
 
 fn request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "vision".into(),
         messages: vec![Message {
