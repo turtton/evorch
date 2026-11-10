@@ -32,6 +32,7 @@ if [[ "$mode" == full ]]; then
     run workspace cargo test --workspace --no-fail-fast
     run lint cargo clippy --workspace --all-targets -- -D warnings
     run gui-no-default cargo clippy -p gui --all-targets --no-default-features -- -D warnings
+    run gui-browser-only cargo clippy -p gui --all-targets --no-default-features --features browser -- -D warnings
     run otel cargo test -p event-bus --features otel-exporter
 fi
 printf 'Passed. Logs are temporary files in %s; remove this directory when no longer needed.\n' "$out"

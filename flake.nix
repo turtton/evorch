@@ -121,18 +121,41 @@
             printf '%s\n' "''${cargoVendorDir:?}" > "$out/cargo-vendor-dir"
           '';
         };
-        shippedCargoArgs = "-p evorch -p gui -p evorch-core --bin evorch --bin evorch-gui --bin evorch-core";
+        # `gui` enables CEF by default, which the crane sandbox cannot download;
+        # this package is the GUI without CEF (the CEF build is evorch-gui-cef).
+        # No other member has default features, so --no-default-features only
+        # affects gui.
+        nonCefFeatures = "--no-default-features --features gui/browser";
+        shippedCargoArgs = "-p evorch -p gui -p evorch-core --bin evorch --bin evorch-gui --bin evorch-core ${nonCefFeatures}";
         cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // {
           cargoExtraArgs = shippedCargoArgs;
           doCheck = false;
         });
-        testCargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs);
-        tests = craneLib.cargoTest (commonArgs // {
+        # The workspace builds gui with its default `cef` feature, so the test
+        # builds read the fixed CEF distribution (cefDist, below) through CEF_PATH
+        # and link its runtime libraries. Systems without a CEF build leave the
+        # feature out, as the packages do.
+        workspaceCefArgs =
+          if isCefSystem then
+            {
+              cargoExtraArgs = "--workspace";
+              CEF_PATH = cefDist;
+              buildInputs = commonArgs.buildInputs ++ cefRuntimeLibraries;
+            }
+          else
+            { cargoExtraArgs = "--workspace ${nonCefFeatures}"; };
+        # Only libcef.so, so the test binaries load: the distribution's own
+        # Vulkan loader would shadow the system one. No test starts CEF.
+        cefLibcefOnly = pkgs.runCommand "libcef-only" { } ''
+          mkdir -p $out/lib
+          ln -s ${cefDist}/libcef.so $out/lib/libcef.so
+        '';
+        testCargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // workspaceCefArgs);
+        tests = craneLib.cargoTest (commonArgs // workspaceCefArgs // {
           cargoArtifacts = testCargoArtifacts;
-          cargoExtraArgs = "--workspace";
           nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
           preCheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath runtimeLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (runtimeLibraries ++ pkgs.lib.optionals isCefSystem [ cefLibcefOnly ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           '';
           # These PTY tests hard-code /bin/sh, which is absent in the Linux sandbox.
           cargoTestExtraArgs = pkgs.lib.concatStringsSep " " ([ "--" ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -429,7 +452,7 @@
             };
         # Dev shell with the fenix toolchain's own cargo; the fork shell is built from it.
         # `rustcWrapperDefault` is RUSTC_WRAPPER when the caller leaves it unset.
-        mkCargoDevShell = rustcWrapperDefault: pkgs.mkShell {
+        mkCargoDevShell = rustcWrapperDefault: pkgs.mkShell ({
           nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
           packages = [
             pkgs.bashInteractive
@@ -451,6 +474,12 @@
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (devShellGuiLibraries ++ runtimeLibraries)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            ${pkgs.lib.optionalString isCefSystem ''
+              # CEF finds its resources beside the libcef.so it loads. The
+              # distribution goes last so the Nix Vulkan loader above wins over
+              # the one it bundles.
+              export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${cefDist}"
+            ''}
             # devShell 内だけ mold でリンクする(nix 外のビルドには影響しない)。
             # 呼び出し元の既存 RUSTFLAGS(sanitizer 等)は保持して追記する。
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "export RUSTFLAGS=\"\${RUSTFLAGS:+$RUSTFLAGS }-C link-args=-fuse-ld=mold\""}
@@ -464,7 +493,10 @@
               lefthook install >/dev/null 2>&1 || echo "evorch: lefthook install failed (non-fatal)" >&2
             fi
           '';
-        };
+          # `gui` enables CEF by default, so cargo reads the fixed distribution
+          # instead of downloading one. Other systems build with
+          # `--no-default-features --features gui/browser` (docs/browser.md).
+        } // pkgs.lib.optionalAttrs isCefSystem { CEF_PATH = cefDist; });
         upstreamCargoDevShell = mkCargoDevShell "sccache";
         # The fork goes first in PATH, ahead of the fenix toolchain's cargo. Its
         # self-update would try to replace binaries outside the Nix store, so
@@ -518,14 +550,9 @@
           default = devShell;
           upstream-cargo = upstreamCargoDevShell;
         } // pkgs.lib.optionalAttrs isCefSystem {
-          # `nix develop .#cef`: CEF builds and the ignored browser-cef tests
-          # without downloading CEF. cef-dll-sys copies libcef.so into target/<profile>.
-          cef = devShell.overrideAttrs (old: {
-            CEF_PATH = cefDist;
-            shellHook = old.shellHook + ''
-              export LD_LIBRARY_PATH=$PWD/target/debug''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-            '';
-          });
+          # The default shell builds CEF too now; this name stays for scripts
+          # that entered `nix develop .#cef`.
+          cef = devShell;
         };
       }
     );

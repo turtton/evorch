@@ -10,13 +10,15 @@ publish = false
 name = "gui"
 
 [features]
-# The agent browser tab. Runtime and tools link `browser`
-# regardless, so enabling them by default costs no extra dependency.
-default = ["browser"]
+# The CEF GUI is the supported GUI build, so `cef` is a default feature: cargo
+# builds need the CEF distribution (cef-dll-sys downloads it into `CEF_PATH` on
+# the first build; docs/browser.md). `--no-default-features` builds the GUI
+# without CEF, and adding `--features browser` keeps the agent browser tab.
+default = ["cef"]
+# The agent browser tab. Runtime and tools link `browser` regardless, so
+# enabling it costs no extra dependency.
 browser = ["dep:browser"]
-# In-app HTML artifact preview on CEF; needs the CEF distribution (docs/browser.md).
-# Off by default so cargo builds never download CEF; the Nix default package
-# enables it on x86_64-linux.
+# In-app HTML artifact preview on CEF (docs/browser.md).
 cef = ["browser", "dep:browser-cef", "browser-cef/cef"]
 
 [dependencies]
