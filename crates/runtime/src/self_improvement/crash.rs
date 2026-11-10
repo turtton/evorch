@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{bound_text, drafts::atomic_write};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SpooledCrash {
     pub file_name: String,
     pub message: String,
@@ -229,11 +229,11 @@ pub fn spool_fault(spool_dir: &Path, code: &str, site: &str, message: &str) -> s
     atomic_write(&path, &bytes).map_err(|error| std::io::Error::other(error.to_string()))
 }
 
-/// Best-effort, deterministic read-and-delete of crash-*.json only. Missing dirs
-/// return empty; unreadable/corrupt/oversized entries become explicit evidence.
-/// Symlinks are not followed. Failed deletion is ignored (re-intake folds into the
-/// same candidate as another occurrence).
-pub fn drain_crash_spool(spool_dir: &Path) -> Vec<SpooledCrash> {
+/// Non-destructive, deterministic read of crash-*.json only. Missing dirs return
+/// empty; unreadable/corrupt/oversized entries become explicit evidence. Symlinks
+/// are not followed. The intake owner must persist and acknowledge each entry
+/// before removing its file; failures must leave it available for a later host.
+pub fn read_crash_spool(spool_dir: &Path) -> Vec<SpooledCrash> {
     let Ok(entries) = fs::read_dir(spool_dir) else {
         return Vec::new();
     };
@@ -263,7 +263,6 @@ pub fn drain_crash_spool(spool_dir: &Path) -> Vec<SpooledCrash> {
             } else {
                 None
             };
-            let _ = fs::remove_file(entry.path());
             let parsed = parsed.unwrap_or(CrashEntry {
                 message: "<unreadable spool entry>".into(),
                 location: None,

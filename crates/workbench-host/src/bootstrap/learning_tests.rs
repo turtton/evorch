@@ -422,17 +422,26 @@ fn gui_factory(
     Arc<OwnerHost>,
     services::BackgroundServices,
 ) {
+    let db = components::storage_config(&core.config, root.join("evorch-events.db"));
+    learning_factory(root, &core.config, model, db)
+}
+
+fn learning_factory(
+    root: &std::path::Path,
+    config: &config::Config,
+    model: Arc<Model>,
+    db: storage::StorageConfig,
+) -> (
+    storage::Storage,
+    AgentRuntime,
+    Arc<OwnerHost>,
+    services::BackgroundServices,
+) {
     // Construct precisely the factory the legacy GUI calls, on a second runtime.
     let bus = Arc::new(EventBus::new(64));
-    let db = components::storage_config(&core.config, root.join("evorch-events.db"));
     let store = storage::Storage::open(db.clone()).unwrap();
     let gui_owner = Arc::new(
-        OwnerHost::open(
-            &root.join("owners"),
-            core.config.ownership.clone(),
-            bus.clone(),
-        )
-        .unwrap(),
+        OwnerHost::open(&root.join("owners"), config.ownership.clone(), bus.clone()).unwrap(),
     );
     let gui = learning::configure(
         AgentRuntime::new(
@@ -440,7 +449,7 @@ fn gui_factory(
             Arc::new(tools::ToolExecutor::new(bus.clone())),
             model.clone(),
         ),
-        &core.config,
+        config,
         db.clone(),
         store.handle(),
         root,
@@ -459,12 +468,54 @@ fn gui_factory(
         &mut services,
         &gui,
         gui_owner.clone(),
-        &core.config,
+        config,
         &db,
         evaluation,
     )
     .unwrap();
     (store, gui, gui_owner, services)
+}
+
+#[tokio::test]
+async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_config(root);
+    let mut config = config::Config::default();
+    config.self_improvement.enabled = true;
+    let mut db = components::storage_config(&config, root.join("evorch-events.db"));
+    // The actual writer starts suspended, not a mock persistence failure.
+    db.hard_limits.max_db_bytes = 0;
+    let model = Arc::new(Model::default());
+    let (store, runtime, owner, mut services) = learning_factory(root, &config, model.clone(), db);
+    let spool = root.join("self-improvement/drafts/crash-spool");
+    runtime::self_improvement::spool_fault(
+        &spool,
+        "StorageWriterHalted",
+        "storage:db_size_limit",
+        "event writes halted by storage limit",
+    )
+    .unwrap();
+    let file = std::fs::read_dir(&spool)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    services.shutdown().await.unwrap();
+    assert!(
+        file.exists(),
+        "unacknowledged spool must survive the final drain"
+    );
+    assert!(candidates(root).is_empty());
+    drop((services, runtime, owner, store));
+    let mut next = open(root, model).await;
+    next.shutdown().await.unwrap();
+    assert!(!file.exists(), "acknowledged spool must be removed");
+    let rows = candidates(root);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].code, "StorageWriterHalted");
+    assert_eq!(rows[0].occurrences, 1);
 }
 
 #[tokio::test]

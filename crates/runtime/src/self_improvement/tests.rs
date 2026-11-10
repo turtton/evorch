@@ -339,21 +339,33 @@ fn draft_failure_does_not_undo_persistence_or_panic() {
 }
 
 #[test]
-fn spool_drain_and_bounded_crash_intake() {
+fn non_destructive_spool_read_and_acknowledged_bounded_crash_intake() {
     let f = Fixture::new();
-    let spool = f.dir.path().join("spool");
-    fs::create_dir(&spool).unwrap();
+    let spool = f
+        .settings
+        .policy
+        .draft_dir
+        .as_ref()
+        .unwrap()
+        .join("crash-spool");
+    fs::create_dir_all(&spool).unwrap();
     fs::write(spool.join("crash-12.json"), json!({
         "message": "x".repeat(100 * 1024), "location": "test.rs:4", "thread": "test", "timestamp": 12,
     }).to_string()).unwrap();
     fs::write(spool.join("crash-broken.json"), "broken").unwrap();
     fs::write(spool.join("unrelated.json"), "leave alone").unwrap();
-    let crashes = drain_crash_spool(&spool);
+    let crashes = read_crash_spool(&spool);
     assert_eq!(crashes.len(), 2);
     assert_eq!(crashes[1].message, "<unreadable spool entry>");
-    assert!(drain_crash_spool(&spool).is_empty());
+    assert_eq!(
+        read_crash_spool(&spool),
+        crashes,
+        "reads must not delete evidence"
+    );
+    let runtime = runtime(Arc::new(EventBus::new(16))).with_self_improvement(f.settings.clone());
+    assert_eq!(runtime.ingest_spooled_crashes(), 2);
+    assert!(read_crash_spool(&spool).is_empty());
     assert!(spool.join("unrelated.json").exists());
-    f.collector().ingest_crashes(crashes);
     let rows = f.candidates();
     assert_eq!(rows.len(), 2);
     for c in rows {
@@ -389,7 +401,7 @@ fn panic_hook_spools_in_an_isolated_process() {
     assert!(output.status.success());
     // The previous (default) hook still reports to stderr.
     assert!(String::from_utf8_lossy(&output.stderr).contains("panicked at"));
-    let crashes = drain_crash_spool(&spool);
+    let crashes = read_crash_spool(&spool);
     assert_eq!(crashes.len(), 1);
     assert!(crashes[0].message.len() <= 4096);
     assert!(crashes[0].message.ends_with("…[truncated]"));
@@ -430,7 +442,7 @@ fn caught_panics_are_left_to_their_catcher_not_spooled() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    let crashes = drain_crash_spool(&spool);
+    let crashes = read_crash_spool(&spool);
     assert_eq!(crashes.len(), 1);
     assert_eq!(crashes[0].message, "outside any run");
 }
@@ -450,7 +462,7 @@ fn spooled_harness_faults_become_candidates_and_others_are_dropped() {
     }
     // Not a harness code: a spooled fault must not bypass the allowlist.
     spool_fault(&spool, "CompactionFailed", "compaction", "summary failed").unwrap();
-    let spooled = drain_crash_spool(&spool);
+    let spooled = read_crash_spool(&spool);
     assert_eq!(spooled.len(), 3);
     f.collector().ingest_crashes(spooled);
     let rows = f.candidates();
@@ -1147,6 +1159,88 @@ fn runtime_crash_recovery_uses_resolved_directory_and_respects_gate() {
 }
 
 #[test]
+fn spool_replay_after_commit_before_unlink_is_not_another_occurrence() {
+    let f = Fixture::new();
+    let spool = f
+        .settings
+        .policy
+        .draft_dir
+        .as_ref()
+        .unwrap()
+        .join("crash-spool");
+    spool_fault(
+        &spool,
+        "StorageWriterHalted",
+        "storage:writer_closed",
+        "writer closed",
+    )
+    .unwrap();
+    let crash = read_crash_spool(&spool).remove(0);
+    let file = spool.join(&crash.file_name);
+    // Model a host exit after the DB acknowledgement but before unlink.
+    f.collector().ingest_crash(crash).unwrap();
+    assert!(file.exists());
+    assert_eq!(f.candidates()[0].occurrences, 1);
+    let runtime = runtime(Arc::new(EventBus::new(16))).with_self_improvement(f.settings.clone());
+    assert_eq!(runtime.ingest_spooled_crashes(), 1);
+    assert!(!file.exists());
+    assert_eq!(
+        f.candidates()[0].occurrences,
+        1,
+        "replay must not count twice"
+    );
+    // A genuinely separate spool observation of the same fault still counts.
+    spool_fault(
+        &spool,
+        "StorageWriterHalted",
+        "storage:writer_closed",
+        "writer closed",
+    )
+    .unwrap();
+    assert_eq!(runtime.ingest_spooled_crashes(), 1);
+    assert_eq!(f.candidates()[0].occurrences, 2);
+}
+
+#[test]
+fn closed_writer_leaves_spool_for_reopened_writer() {
+    let Fixture {
+        _storage: store,
+        config,
+        mut settings,
+        dir,
+    } = Fixture::new();
+    let spool = settings
+        .policy
+        .draft_dir
+        .as_ref()
+        .unwrap()
+        .join("crash-spool");
+    spool_fault(
+        &spool,
+        "StorageWriterHalted",
+        "storage:writer_closed",
+        "writer closed",
+    )
+    .unwrap();
+    drop(store);
+    let stopped = runtime(Arc::new(EventBus::new(16))).with_self_improvement(settings.clone());
+    assert_eq!(stopped.ingest_spooled_crashes(), 0);
+    assert_eq!(read_crash_spool(&spool).len(), 1);
+    let reopened = Storage::open(config.clone()).unwrap();
+    settings.writer = reopened.handle();
+    let healthy = runtime(Arc::new(EventBus::new(16))).with_self_improvement(settings);
+    assert_eq!(healthy.ingest_spooled_crashes(), 1);
+    assert!(read_crash_spool(&spool).is_empty());
+    let rows = Database::open(&config)
+        .unwrap()
+        .improvement_candidates("test-project", None, 10)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].occurrences, 1);
+    drop((stopped, healthy, reopened, dir));
+}
+
+#[test]
 fn unresolved_drafts_and_closed_writer_fail_without_panicking() {
     let mut f = Fixture::new();
     f.settings.policy.draft_dir = None;
@@ -1257,12 +1351,13 @@ fn managed_crash_hook_remains_until_last_owner_and_then_stops_spooling() {
         let second = register_crash_spool(spool.clone());
         drop(first);
         let _ = std::panic::catch_unwind(|| panic!("active managed hook"));
-        let crashes = drain_crash_spool(&spool);
+        let crashes = read_crash_spool(&spool);
         assert_eq!(crashes.len(), 1);
         assert_eq!(crashes[0].message, "active managed hook");
+        fs::remove_file(spool.join(&crashes[0].file_name)).unwrap();
         drop(second);
         let _ = std::panic::catch_unwind(|| panic!("disabled managed hook"));
-        assert!(drain_crash_spool(&spool).is_empty());
+        assert!(read_crash_spool(&spool).is_empty());
         return;
     }
     let directory = tempfile::tempdir().unwrap();

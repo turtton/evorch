@@ -474,7 +474,7 @@ fn a_closed_writer_spools_one_halt_per_episode() {
         ));
     }
     // Then: one spooled StorageWriterHalted fault, ingestible on the next start.
-    let spooled = runtime::self_improvement::drain_crash_spool(&spool);
+    let spooled = runtime::self_improvement::read_crash_spool(&spool);
     assert_eq!(spooled.len(), 1);
     assert_eq!(spooled[0].code.as_deref(), Some("StorageWriterHalted"));
     assert_eq!(
