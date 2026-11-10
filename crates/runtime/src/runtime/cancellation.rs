@@ -1,7 +1,13 @@
 use super::*;
 
+pub(super) struct PendingChatResume {
+    pub authority: Option<RunConfig>,
+    pub valid: Arc<AtomicBool>,
+}
+
 /// One execution's immutable cancellation channel and monotonic publication fence.
 pub(crate) struct ExecutionControl {
+    pub(super) pending_resume: Mutex<Option<PendingChatResume>>,
     pub(crate) startup_failure: Mutex<Option<String>>,
     publication: PublicationToken,
     pub(super) cancel_tx: watch::Sender<RunInterrupt>,
@@ -25,6 +31,7 @@ impl ExecutionControl {
         }
         Arc::new(Self {
             startup_failure: Mutex::new(None),
+            pending_resume: Mutex::new(None),
             approvals,
             publication: PublicationToken(Arc::new(PublicationFence {
                 gate: Mutex::new(()),
@@ -47,7 +54,19 @@ impl ExecutionControl {
         self.publication.0.cancelled.load(Ordering::Acquire)
     }
 
+    pub(super) fn clear_deferred_resume(&self) {
+        if let Some(pending) = self
+            .pending_resume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            pending.valid.store(false, Ordering::Release);
+        }
+    }
+
     fn forbid_publication(&self) {
+        self.clear_deferred_resume();
         self.publication.0.cancelled.store(true, Ordering::Release);
         self.cancel_tx.send_replace(RunInterrupt::Cancel);
         self.approvals.close();

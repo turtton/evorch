@@ -342,7 +342,10 @@ async fn observing_old_snapshot_keeps_explicit_messages_and_same_id_new_completi
     let child = runtime
         .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
         .unwrap();
-    publish(&runtime, child, AgentRunPhase::Done);
+    // A terminal notification alone does not retire an executing incarnation.
+    // Wait for the real lifecycle before trying to replace the same run ID.
+    runtime.stop(child, StopScope::SelfOnly).unwrap();
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Stopped);
     let old = runtime
         .run_output(parent, child)
         .unwrap()

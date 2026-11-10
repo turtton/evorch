@@ -3,6 +3,8 @@ use crate::RunRestoreFailure;
 use crate::restore::{RestoredState, RunRestoreDescriptor};
 pub(crate) use reservation::SnapshotReservation;
 
+mod deferred_resume;
+pub(super) use deferred_resume::ResumeFence;
 mod renewal;
 mod reservation;
 #[cfg(test)]
@@ -21,6 +23,7 @@ pub(super) enum RunContinuation {
     Resume {
         restored: Box<RestoredState>,
         handoff: Option<RunHandoff>,
+        after_stop: Option<ResumeFence>,
     },
 }
 
@@ -54,13 +57,44 @@ impl ChatContinuation {
 impl AgentRuntime {
     /// Restore a stopped chat using only its saved history and current authority.
     /// A completed turn returns to input waiting; an unfinished turn continues.
-    /// Already live runs are unchanged. Images and goal creation belong to a new
+    /// A Continue during graceful Stop is durably queued for the terminal snapshot.
+    /// Other live runs are unchanged. Images and goal creation belong to a new
     /// human submission through `continue_goal`, not to this scheduling operation.
     pub fn resume_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
+        self.deny_deleted_run(&run_id.to_string())
+            .map_err(|deleted| RuntimeError::RunRestoreFailed {
+                run_id: run_id.to_string(),
+                reason: RunRestoreFailure::ThreadDeleted(deleted),
+            })?;
+        if self.defer_chat_resume(run_id, &authority)? {
+            return Ok(run_id);
+        }
+        self.resume_chat_fenced(run_id, authority, None)
+    }
+
+    fn resume_chat_fenced(
+        &self,
+        run_id: RunId,
+        mut authority: RunConfig,
+        after_stop: Option<ResumeFence>,
+    ) -> Result<RunId, RuntimeError> {
         // An explicit continue renews the automatic-wake budget.
         self.reset_auto_wakes(run_id);
         let ownership = authority.ownership.clone();
-        let resumed = self.resume(run_id, ChatContinuation::Resume, authority)?;
+        authority.images.clear();
+        authority.initial_thread_goal = None;
+        let expected = after_stop.as_ref().map(ResumeFence::execution);
+        let resumed =
+            self.continue_chat_fenced(run_id, ChatContinuation::Resume, authority, after_stop)?;
+        // Cancellation can win after validation but before the I-lock check.
+        // Refused dispatch must not announce that lane delivery resumed.
+        if let Some(expected) = expected
+            && Arc::ptr_eq(&expected, &self.execution_snapshot(run_id)?)
+        {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            });
+        }
         self.explicitly_resume_lane_delivery(run_id, ownership.as_ref())?;
         Ok(resumed)
     }
@@ -104,7 +138,17 @@ impl AgentRuntime {
         &self,
         run_id: RunId,
         continuation: ChatContinuation,
+        authority: RunConfig,
+    ) -> Result<RunId, RuntimeError> {
+        self.continue_chat_fenced(run_id, continuation, authority, None)
+    }
+
+    fn continue_chat_fenced(
+        &self,
+        run_id: RunId,
+        continuation: ChatContinuation,
         mut authority: RunConfig,
+        after_stop: Option<ResumeFence>,
     ) -> Result<RunId, RuntimeError> {
         let prompt = continuation.prompt();
         // Only a new prompt takes mentions; a resume attaches nothing.
@@ -136,6 +180,14 @@ impl AgentRuntime {
         let _stop_guard = stop_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(fence) = &after_stop {
+            let execution = self.execution_snapshot(run_id)?;
+            if !fence.is_current(Some(&execution), execution.cancelled()) {
+                return Err(RuntimeError::RunTerminated {
+                    run_id: run_id.to_string(),
+                });
+            }
+        }
         // Management commits share restore_gate. Validate inside that gate, and
         // retain it through registration/admission: a pre-restore read alone
         // lets detach commit between checking a claim and scheduling its root.
@@ -506,6 +558,7 @@ impl AgentRuntime {
             RunContinuation::Resume {
                 restored: Box::new(restored),
                 handoff,
+                after_stop,
             }
         } else if let Some(mut handoff) = handoff {
             handoff.restored = Some(restored);

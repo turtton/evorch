@@ -107,6 +107,7 @@ impl AgentRuntime {
                 }),
                 inputs: Vec::new(),
                 active: true,
+                resume_requested: false,
                 stop_reason: None,
                 checkpoint: None,
                 snapshot: None,
@@ -158,6 +159,7 @@ impl AgentRuntime {
                     {
                         intent.stop_reason = Some(reason);
                     }
+                    intent.resume_requested = false;
                     if queued {
                         intent.active = false;
                     }
@@ -173,6 +175,9 @@ impl AgentRuntime {
                 .quiesce
                 .update(run, incarnation, self.shared.run_store.get(), |intent| {
                     intent.active = false;
+                    if reason == StopReason::Cancelled {
+                        intent.resume_requested = false;
+                    }
                     if intent.stop_reason.is_none() || reason == StopReason::Cancelled {
                         intent.stop_reason = Some(reason);
                     }

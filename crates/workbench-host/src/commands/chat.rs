@@ -7,6 +7,9 @@ use crate::lane::TeamSource;
 
 use super::{ChatInput, CommandService, ComposerRole, HostEvent, NoticeOutcome, RejectKind};
 
+#[cfg(test)]
+mod tests;
+
 impl CommandService {
     /// A user `/continue` renews the automatic-wake budget; a runtime-requested
     /// resume only delivers the reports/questions held for the root.
@@ -122,7 +125,15 @@ impl CommandService {
                 .or_else(|| self.bindings.goal_runs.get(&thread_id))
                 .copied()
                 .expect("resolved conversation root");
-            let phase = self.runtime.inspect_agent(run).ok().map(|run| run.phase);
+            // A graceful Stop can still publish a live phase while its terminal
+            // snapshot commits. Only an explicit user Continue bypasses this
+            // live-run guard; runtime owns deferring it until that snapshot.
+            let phase = self
+                .runtime
+                .inspect_agent(run)
+                .ok()
+                .filter(|_| self.automatic_resume || !self.runtime.graceful_stop_requested(run))
+                .map(|run| run.phase);
             if phase == Some(event_bus::AgentRunPhase::Waiting) {
                 return vec![HostEvent::ChatNotice {
                     outcome: NoticeOutcome::NotApplied,

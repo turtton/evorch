@@ -74,22 +74,17 @@ fn table() -> BTreeMap<&'static str, Guard> {
             "thread_read_dirs.rs::set_thread_read_only_directories",
             Guarded { via: &[] },
         ),
-        (
-            "runtime/chat_restore.rs::resume_chat",
-            Guarded {
-                via: &["resume", "continue_chat"],
-            },
-        ),
+        ("runtime/chat_restore.rs::resume_chat", Guarded { via: &[] }),
         (
             "runtime/chat_restore.rs::wake_chat",
             Guarded {
-                via: &["resume", "continue_chat"],
+                via: &["resume", "continue_chat", "continue_chat_fenced"],
             },
         ),
         (
             "runtime/chat_restore.rs::continue_goal",
             Guarded {
-                via: &["continue_chat"],
+                via: &["continue_chat", "continue_chat_fenced"],
             },
         ),
         (

@@ -457,6 +457,8 @@ pub mod diagnostic_codes {
     /// Host input delivery receipts could not be settled; they stay accepted
     /// and the host shows them as of unknown delivery.
     pub const HOST_INPUT_RECEIPT_FAILED: &str = "HostInputReceiptFailed";
+    /// A deferred user Continue was revoked or could not be scheduled.
+    pub const CHAT_RESUME_FAILED: &str = "chat_resume_failed";
     /// Direct -> orchestrator ownership or question transfer failed.
     pub const ESCALATION_HANDOFF_FAILED: &str = "EscalationHandoffFailed";
     /// The orchestrator run for an escalation handoff was not admitted.
@@ -527,6 +529,7 @@ pub mod diagnostic_codes {
         CONTEXT_CHECKPOINT_SAVED,
         CONTEXT_SNAPSHOT_FAILED,
         HOST_INPUT_RECEIPT_FAILED,
+        CHAT_RESUME_FAILED,
         ESCALATION_HANDOFF_FAILED,
         ESCALATION_ADMISSION_FAILED,
         CRASH_RECOVERED,

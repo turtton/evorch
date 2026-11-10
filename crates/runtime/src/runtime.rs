@@ -1356,6 +1356,24 @@ impl AgentRuntime {
             .spawn_intents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let RunContinuation::Resume {
+            after_stop: Some(fence),
+            ..
+        } = &continuation
+        {
+            let current = intents.get(&run_id);
+            if !fence.is_current(
+                current.and_then(|intent| intent.execution.as_ref()),
+                current.is_some_and(|intent| intent.cancelled),
+            ) {
+                drop(intents);
+                self.deferred_resume_diagnostic(
+                    run_id,
+                    "deferred Continue was superseded or cancelled",
+                );
+                return run_id;
+            }
+        }
         // An explicitly validated conversation restore starts a new generation of
         // this root. Keep old descendants fenced, but preserve discard-then-resume
         // in place; fresh/in-flight spawns must still inherit cancellation.
@@ -1508,7 +1526,9 @@ impl AgentRuntime {
                 (Some(handoff), restored)
             }
             RunContinuation::Restored(restored) => (None, Some(restored)),
-            RunContinuation::Resume { restored, handoff } => (handoff, Some(*restored)),
+            RunContinuation::Resume {
+                restored, handoff, ..
+            } => (handoff, Some(*restored)),
         };
         let ancestry = crate::request_turn::RequestAncestry::new(
             parent,
@@ -2752,6 +2772,7 @@ impl AgentRuntime {
                     admission.finish_queued(target);
                 }
             } else if let Some(entry) = runs.get(&target) {
+                entry.execution.clear_deferred_resume();
                 self.note_intent_stop(
                     target,
                     &entry.execution.publication().incarnation(),
@@ -2805,6 +2826,13 @@ impl AgentRuntime {
         let gate = Arc::new(Mutex::new(()));
         gates.insert(run, Arc::downgrade(&gate));
         gate
+    }
+
+    /// Whether the current execution carries a graceful Stop request.
+    /// Remains true after it stops, until a new execution replaces it.
+    pub fn graceful_stop_requested(&self, run_id: RunId) -> bool {
+        self.execution_snapshot(run_id)
+            .is_ok_and(|execution| matches!(*execution.cancel_tx.borrow(), RunInterrupt::Stop))
     }
 
     /// Whether the operator stopped this run and has not resumed its thread root since.

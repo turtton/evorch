@@ -66,6 +66,8 @@ pub struct ResumeIntent {
     pub initial_input: Option<DurableInput>,
     pub inputs: Vec<DurableInput>,
     pub active: bool,
+    /// Deferred user Continue evidence, not authority to resume after a restart.
+    pub resume_requested: bool,
     pub stop_reason: Option<StopReason>,
     pub checkpoint: Option<crate::checkpoint::RunCheckpoint>,
     pub snapshot: Option<crate::checkpoint::SnapshotReference>,
