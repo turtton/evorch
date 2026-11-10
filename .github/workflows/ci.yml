@@ -166,6 +166,11 @@ jobs:
           artifact-name: ${{ needs.build-tests.outputs.archive-name }}
       - name: Verify the test inventory
         run: scripts/verify-test-inventory.sh --output-dir "$RUNNER_TEMP/test-inventory"
+      # Informational: where the archive's bytes go, for sizing the split. It
+      # runs in this job because no other job waits on it.
+      - name: Report the archive composition
+        continue-on-error: true
+        run: scripts/report-archive-composition.sh "$EVORCH_NEXTEST_ARCHIVE"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
