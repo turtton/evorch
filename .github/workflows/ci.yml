@@ -302,7 +302,8 @@ jobs:
   # (docs-schema), the otel-exporter build (otel) and the test binaries of
   # every group in scripts/ci-test-groups.json. It runs no test.
   cache-save:
-    if: github.ref == 'refs/heads/main'
+    # MEASUREMENT ONLY (reverted before merge): also run on PRs and save into the PR scope.
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
