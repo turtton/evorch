@@ -55,6 +55,59 @@ struct StartSeed {
     project_root: Option<std::path::PathBuf>,
     requires_ownership: bool,
 }
+
+pub(crate) fn ownership_failure_reason(
+    state: &crate::agent_loop::LoopState,
+    error: &crate::ownership::RegistryError,
+) -> String {
+    if state.task.parent.is_none()
+        && state.task.config.lane_scope == Some(LaneScope::Lane)
+        && error.is_fenced()
+    {
+        crate::RuntimeError::StaleOwnership {
+            run_id: state.task.run_id.to_string(),
+        }
+        .to_string()
+    } else {
+        error.to_string()
+    }
+}
+
+pub(crate) async fn persist_initial_context(
+    state: &mut crate::agent_loop::LoopState,
+) -> Result<(), String> {
+    let lane_root =
+        state.task.parent.is_none() && state.task.config.lane_scope == Some(LaneScope::Lane);
+    let _guard = if lane_root && let Some(permit) = &state.task.config.ownership {
+        let interrupts = state.channels.cancel_rx.clone();
+        let retry = state
+            .runtime()
+            .and_then(|runtime| runtime.shared.ownership_retry.get().copied())
+            .unwrap_or_else(crate::ownership::RetryPolicy::unbounded);
+        Some(
+            permit
+                .mutation_guard_off_thread(retry, move || interrupts.borrow().kind().is_some())
+                .await
+                .map_err(|error| ownership_failure_reason(state, &error))?,
+        )
+    } else {
+        None
+    };
+    crate::restore::persist_checkpoint(state)
+        .map_err(|error| format!("Cannot persist prepared context: {error}"))?;
+    // Keep authority across both writes: only a restorable context may make a
+    // creation intent started, and a successor must observe that same decision.
+    if state.task.parent.is_none()
+        && state.task.config.lane_scope.is_some()
+        && let Some(runtime) = state.runtime()
+    {
+        runtime
+            .record_lane_start(state.task.run_id)
+            .map_err(|error| format!("Cannot commit lane registration: {error}"))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub struct LaneOpened {
     pub lane_id: String,

@@ -268,6 +268,7 @@ pub(crate) enum HookPoint {
     CancelGate,
     SubtreeCollected,
     AdmissionRegistered,
+    LaneOwnershipValidated,
     AdmissionFailed,
     RootGoalUpdated,
     RootRestoreValidated,
@@ -316,5 +317,7 @@ impl AgentRuntime {
 
 #[cfg(test)]
 mod goal_tests;
+#[cfg(test)]
+mod lane_tests;
 #[cfg(test)]
 mod tests;

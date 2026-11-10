@@ -825,19 +825,12 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         if state.transition(AgentRunPhase::Running, None).is_err() {
             return;
         }
-        if let Err(error) = crate::restore::persist_checkpoint(&state) {
-            state.finish_error(format!("Cannot persist prepared context: {error}"));
-            return;
-        }
-        // The durable prepared context precedes the lane's registered generation.
-        // A crash before this point leaves the intent in unstarted_lanes; after it,
-        // the root has an ordinary restorable context, without a duplicate brief.
-        if state.task.parent.is_none()
-            && state.task.config.lane_scope.is_some()
-            && let Some(runtime) = state.runtime()
-            && let Err(error) = runtime.record_lane_start(state.task.run_id)
-        {
-            state.finish_error(format!("Cannot commit lane registration: {error}"));
+        if let Err(reason) = crate::lanes::persist_initial_context(&mut state).await {
+            if let Some(kind) = state.interrupted() {
+                state.finish_interrupted(kind);
+            } else {
+                state.finish_error(reason);
+            }
             return;
         }
         if completed_turn_end.is_some() {

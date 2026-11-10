@@ -451,6 +451,10 @@ impl AgentRuntime {
                     });
             }
             #[cfg(test)]
+            if lane_root && admitted.is_ok() {
+                runtime.execution_hook(cancellation::HookPoint::LaneOwnershipValidated, &execution);
+            }
+            #[cfg(test)]
             if admitted.is_err() {
                 runtime.execution_hook(cancellation::HookPoint::AdmissionFailed, &execution);
             }

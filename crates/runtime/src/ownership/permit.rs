@@ -124,6 +124,16 @@ impl OwnerPermit {
         clock: &std::sync::Arc<dyn Clock>,
         interrupted: &dyn Fn() -> bool,
     ) -> Result<(), RegistryError> {
+        self.generation_guard_on(policy, clock, interrupted)
+            .map(drop)
+    }
+
+    fn generation_guard_on(
+        &self,
+        policy: &RetryPolicy,
+        clock: &std::sync::Arc<dyn Clock>,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<Registry, RegistryError> {
         authority::observe(
             self,
             retry_contention(
@@ -142,7 +152,8 @@ impl OwnerPermit {
                         &self.thread_id,
                         attempt,
                     )?;
-                    registry.guard_generation(self)
+                    registry.guard_generation(self)?;
+                    Ok(registry)
                 },
             ),
         )
@@ -158,6 +169,19 @@ impl OwnerPermit {
         let permit = self.clone();
         join_blocking(tokio::task::spawn_blocking(move || {
             permit.validate_generation_with(&policy, &interrupted)
+        }))
+        .await
+    }
+
+    /// Unlike a preflight, the returned transaction must cover the owner write.
+    pub(crate) async fn mutation_guard_off_thread(
+        &self,
+        policy: RetryPolicy,
+        interrupted: impl Fn() -> bool + Send + 'static,
+    ) -> Result<Registry, RegistryError> {
+        let permit = self.clone();
+        join_blocking(tokio::task::spawn_blocking(move || {
+            permit.generation_guard_on(&policy, &system_clock(), &interrupted)
         }))
         .await
     }
