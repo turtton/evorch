@@ -31,7 +31,7 @@ nix develop -c env WGPU_BACKEND=vulkan cargo run -q -p gui --bin headless_captur
 - 解像度: 1280x720 PNG（RGBA8）
 - before 取得時点 SHA: `922a046`
 - after 取得時点 SHA: `7d98110`（コミット時に orchestrator が埋める）
-- ジオメトリの自動検証: `crates/gui/tests/agents_grid_headless.rs` が `AGENTS_COL_MIN=56` / `AGENTS_COL_MAX=160` / `CELL_PAD_X=8` による auto-fit 列幅を assert する（480px 全列収容テスト + 実障害を再現する 340px 外側 ScrollArea 回帰テストの 2 本）
+- ジオメトリの自動検証: `crates/gui/tests/runtime_threads/agents_grid_headless.rs` が `AGENTS_COL_MIN=56` / `AGENTS_COL_MAX=160` / `CELL_PAD_X=8` による auto-fit 列幅を assert する（480px 全列収容テスト + 実障害を再現する 340px 外側 ScrollArea 回帰テストの 2 本）
 
 ## 検証結果
 

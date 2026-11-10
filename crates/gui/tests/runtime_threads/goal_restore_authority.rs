@@ -1,0 +1,420 @@
+use event_bus::{AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent};
+use gui::{
+    model::commands::{ChatSubmission, CommandSink, GoalSubmission, LoopEvent, WorkbenchCommand},
+    runtime_sink::RuntimeCommandSink,
+};
+use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
+use runtime::{
+    AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RunId, RunStore,
+    RuntimeError,
+};
+use std::sync::{Arc, Mutex};
+
+struct CaptureModel(Arc<Mutex<Vec<Vec<Message>>>>);
+#[async_trait::async_trait]
+impl AgentModel for CaptureModel {
+    async fn complete(
+        &self,
+        _: &AgentInvocationContext,
+        _: Role,
+        messages: &[Message],
+        _: &[ToolSpec],
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.0.lock().unwrap().push(messages.to_vec());
+        if messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::Text { text } if text == "held child"))
+        {
+            std::future::pending::<()>().await;
+        }
+        Ok(ChatResponse {
+            usage_reported: true,
+            message: Message {
+                role: providers::Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "answer".into(),
+                }],
+            },
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+        })
+    }
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "test".into()
+    }
+}
+struct Fixture {
+    _dir: tempfile::TempDir,
+    config: storage::StorageConfig,
+    storage: storage::Storage,
+    rt: tokio::runtime::Runtime,
+    messages: Arc<Mutex<Vec<Vec<Message>>>>,
+}
+use crate::bound_root;
+
+struct World {
+    runtime: AgentRuntime,
+    sink: RuntimeCommandSink,
+    events: EventReceiver,
+}
+impl Fixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("gui.sqlite3"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        Self {
+            _dir: dir,
+            config,
+            storage,
+            rt: tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap(),
+            messages: Arc::default(),
+        }
+    }
+    fn world(&self) -> World {
+        let bus = Arc::new(EventBus::new(256));
+        let events = bus.subscribe();
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(tools::ToolExecutor::new(bus.clone())),
+            Arc::new(CaptureModel(self.messages.clone())),
+        )
+        .with_sequential_run_ids()
+        .with_run_store(RunStore::open(&self.config, self.storage.handle()).unwrap());
+        let sink = RuntimeCommandSink::new(runtime.clone(), self.rt.handle().clone())
+            .with_memory_storage(self.config.clone())
+            .with_team_writer(self.storage.handle());
+        World {
+            runtime,
+            sink,
+            events,
+        }
+    }
+    fn root(&self, world: &mut World, team: bool) -> RunId {
+        let mut config = RunConfig::default();
+        if team {
+            config.team_store = Some(runtime::team_context::TeamStore {
+                config: self.config.clone(),
+                writer: self.storage.handle(),
+                id: "project:thread".into(),
+            });
+            config.topology = runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
+            config.delegation_value = Some("independent work".into());
+            config.finding_store = Some(self.config.db_path.clone());
+        }
+        config.finding_store = Some(self.config.db_path.clone());
+        config.memory =
+            Some(runtime::memory::MemoryBoundary::capture(&self.config, "project").unwrap());
+        let _guard = self.rt.enter();
+        let root = bound_root::start(
+            &world.runtime,
+            &mut world.sink,
+            GoalSubmission {
+                project_root: None,
+                delegation_value: None,
+                project_id: "project".into(),
+                thread_id: "thread".into(),
+                goal: "direct: original goal".into(),
+                references: vec![],
+                constraints: vec![],
+            },
+            if team {
+                Role::Orchestrator
+            } else {
+                Role::Worker
+            },
+            config,
+        );
+        self.rt.block_on(async {
+            loop {
+                if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    run_id,
+                    to: AgentRunPhase::Done,
+                    ..
+                }) = world.events.recv().await.unwrap().kind
+                    && run_id == root.to_string()
+                {
+                    return root;
+                }
+            }
+        })
+    }
+    fn waiting(&self, world: &mut World, root: RunId) {
+        self.rt.block_on(async {
+            {
+                loop {
+                    if matches!(world.events.recv().await.unwrap().kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to: AgentRunPhase::Waiting, .. }) if run_id == root.to_string()) { break; }
+                }
+            }
+        });
+    }
+    fn stop(&self, world: &World, root: RunId) {
+        world.runtime.cancel(root).unwrap();
+        self.rt.block_on(world.runtime.wait(root)).unwrap();
+    }
+}
+fn parse(id: &str) -> RunId {
+    id.parse::<RunId>().unwrap()
+}
+fn send(world: &mut World, text: &str) -> Vec<LoopEvent> {
+    world
+        .sink
+        .submit(WorkbenchCommand::SendChat(ChatSubmission {
+            submission_id: String::new(),
+            project_root: None,
+            fork_seed: None,
+            thread_id: "thread".into(),
+            text: text.into(),
+            composer_role: Default::default(),
+            images: Vec::new(),
+            model_preference: None,
+            skills: Vec::new(),
+        }))
+}
+fn accepted(events: &[LoopEvent], root: RunId) {
+    assert!(
+        matches!(events, [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == root.to_string()),
+        "{events:?}"
+    );
+}
+fn rejected(events: &[LoopEvent], reason: &str) {
+    assert!(
+        matches!(events, [LoopEvent::ChatRejected { thread_id, reason: actual }] if thread_id == "thread" && actual.contains(reason)),
+        "{events:?}"
+    );
+    let mut app = gui::app::WorkbenchState::new(
+        gui::fixture::DemoSource(Vec::new()),
+        &workspace_ui::UiSettings::default(),
+    )
+    .unwrap();
+    app.apply_loop_event(events[0].clone());
+    assert!(app.transcript().entries().iter().any(|entry| match entry {
+        // English reasons stay a plain notice; Japanese ones are translated
+        // with the original kept in the hover.
+        gui::model::transcript::TranscriptEntry::Notice { text } => {
+            text.starts_with("chat failed:") && text.contains(reason)
+        }
+        gui::model::transcript::TranscriptEntry::Diagnostic { text, hover, .. } => {
+            text.starts_with("chat failed:") && hover.contains(reason)
+        }
+        _ => false,
+    }));
+}
+
+#[test]
+fn fresh_and_restarted_team_goals_continue_with_current_project_authority() {
+    let fixture = Fixture::new();
+    let mut first = fixture.world();
+    let root = fixture.root(&mut first, true);
+    accepted(&send(&mut first, "fresh followup"), root);
+    fixture.waiting(&mut first, root);
+    fixture.stop(&first, root);
+    let mut restarted = fixture.world();
+    restarted
+        .sink
+        .bind_goal_context("thread", "project", &root.to_string());
+    accepted(&send(&mut restarted, "restart followup"), root);
+    fixture.waiting(&mut restarted, root);
+    let requests = fixture.messages.lock().unwrap();
+    let last = serde_json::to_string(requests.last().unwrap()).unwrap();
+    assert!(last.contains("original goal"));
+    assert!(last.contains("fresh followup"));
+    assert!(last.contains("restart followup"));
+    drop(requests);
+    fixture.stop(&restarted, root);
+}
+#[test]
+fn another_project_or_team_cannot_reuse_the_saved_team_authority() {
+    let fixture = Fixture::new();
+    let mut original = fixture.world();
+    let root = fixture.root(&mut original, true);
+    let mut restarted = fixture.world();
+    restarted
+        .sink
+        .bind_goal_context("thread", "another-project", &root.to_string());
+    rejected(
+        &send(&mut restarted, "continue"),
+        "current_team_authority_required",
+    );
+    assert_eq!(fixture.messages.lock().unwrap().len(), 1);
+}
+#[test]
+fn single_goal_memory_and_finding_store_do_not_prevent_gui_followup() {
+    let fixture = Fixture::new();
+    let mut world = fixture.world();
+    let root = fixture.root(&mut world, false);
+    assert!(
+        world
+            .runtime
+            .restore_diagnostics(root)
+            .unwrap()
+            .unwrap()
+            .history_available_with_current_authority
+    );
+    accepted(&send(&mut world, "single followup"), root);
+    fixture.waiting(&mut world, root);
+    fixture.stop(&world, root);
+    assert!(
+        world
+            .runtime
+            .restore_diagnostics(root)
+            .unwrap()
+            .unwrap()
+            .disk_restorable
+    );
+}
+#[test]
+fn team_live_unclaimed_descendant_allows_chat_followup() {
+    let fixture = Fixture::new();
+    let mut world = fixture.world();
+    let root = fixture.root(&mut world, true);
+    let child = fixture.rt.block_on(async {
+        world
+            .runtime
+            .delegate_background_as_child(root, Role::Explorer, "held child", RunConfig::default())
+            .unwrap()
+    });
+    accepted(&send(&mut world, "continue"), root);
+    fixture.waiting(&mut world, root);
+    assert_eq!(
+        world
+            .runtime
+            .list_agents()
+            .iter()
+            .find(|agent| agent.run_id == child)
+            .unwrap()
+            .parent_run_id,
+        Some(root)
+    );
+    fixture.stop(&world, root);
+    fixture.stop(&world, child);
+}
+
+#[test]
+fn team_claim_failure_with_live_descendant_reaches_chat_rejection() {
+    let fixture = Fixture::new();
+    let mut world = fixture.world();
+    let root = fixture.root(&mut world, true);
+    let child = fixture.rt.block_on(async {
+        world
+            .runtime
+            .delegate_background_as_child(root, Role::Explorer, "held child", RunConfig::default())
+            .unwrap()
+    });
+    let board =
+        runtime::team::TeamBoard::durable(fixture.storage.handle(), "project:thread".into());
+    board
+        .enqueue(runtime::team::TaskSpec {
+            id: "uncertain".into(),
+            paths: vec!["src".into()],
+        })
+        .unwrap();
+    board
+        .claim("uncertain", "stopped-worker", u64::MAX - 10_000)
+        .unwrap();
+    rejected(&send(&mut world, "continue"), "persisted task claims");
+    fixture.stop(&world, child);
+}
+
+fn continue_chat(world: &mut World) -> Vec<LoopEvent> {
+    world.sink.submit(WorkbenchCommand::ContinueChat(
+        gui::model::commands::ChatContinuation {
+            project_root: None,
+            thread_id: "thread".into(),
+            composer_role: gui::model::composer::ComposerRole::Worker,
+            model_preference: None,
+            automatic: false,
+        },
+    ))
+}
+
+#[test]
+fn continue_restores_chat_after_runtime_restart_without_new_run_or_role_switch() {
+    let fixture = Fixture::new();
+    let mut original = fixture.world();
+    let events = original
+        .sink
+        .submit(WorkbenchCommand::SendChat(ChatSubmission {
+            submission_id: String::new(),
+            project_root: None,
+            fork_seed: None,
+            thread_id: "thread".into(),
+            text: "original chat task".into(),
+            composer_role: gui::model::composer::ComposerRole::Orchestrator,
+            images: Vec::new(),
+            model_preference: None,
+            skills: Vec::new(),
+        }));
+    let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
+        panic!("{events:?}")
+    };
+    let root = parse(run_id);
+    fixture.waiting(&mut original, root);
+    original
+        .runtime
+        .stop(root, runtime::StopScope::SelfOnly)
+        .unwrap();
+    fixture.rt.block_on(original.runtime.wait(root)).unwrap();
+    let before = storage::Database::open(&fixture.config)
+        .unwrap()
+        .run_context(&root.to_string())
+        .unwrap()
+        .unwrap();
+    drop(original);
+
+    let mut restarted = fixture.world();
+    accepted(&continue_chat(&mut restarted), root);
+    fixture.waiting(&mut restarted, root);
+    assert_eq!(
+        restarted.runtime.inspect_agent(root).unwrap().role_name,
+        Role::Orchestrator.name()
+    );
+    let messages = fixture.messages.lock().unwrap();
+    assert_eq!(
+        messages.len(),
+        1,
+        "completed history restores without a model call"
+    );
+    drop(messages);
+    let after = storage::Database::open(&fixture.config)
+        .unwrap()
+        .run_context(&root.to_string())
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.messages_json, before.messages_json);
+    fixture.stop(&restarted, root);
+}
+
+#[test]
+fn continue_renews_team_authority_and_still_rejects_wrong_project() {
+    let fixture = Fixture::new();
+    let mut original = fixture.world();
+    let root = fixture.root(&mut original, true);
+    accepted(&continue_chat(&mut original), root);
+    fixture.waiting(&mut original, root);
+    fixture.stop(&original, root);
+    let mut wrong = fixture.world();
+    wrong
+        .sink
+        .bind_goal_context("thread", "wrong-project", &root.to_string());
+    rejected(
+        &continue_chat(&mut wrong),
+        "current_team_authority_required",
+    );
+    assert!(wrong.runtime.list_agents().is_empty());
+
+    let mut restarted = fixture.world();
+    restarted
+        .sink
+        .bind_goal_context("thread", "project", &root.to_string());
+    accepted(&continue_chat(&mut restarted), root);
+    fixture.waiting(&mut restarted, root);
+    fixture.stop(&restarted, root);
+}

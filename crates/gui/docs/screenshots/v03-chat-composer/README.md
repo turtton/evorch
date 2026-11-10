@@ -28,4 +28,4 @@ nix develop -c env WGPU_BACKEND=vulkan cargo run -q -p gui --bin headless_captur
 - レンダラ: wgpu Vulkan / mesa lavapipe（`nix develop` 環境。CI と同一経路: `.github/workflows/ci.yml` の headless capture ジョブ）
 - 解像度: 1280x720 PNG（RGBA8）
 - before 取得時点 SHA: `c6d040b`
-- composer の動作は `crates/gui/tests/composer_dispatch_headless.rs`（送信・`/goal`・`/help`・provider 未設定ガード等の dispatch）と `crates/gui/tests/composer_ui_headless.rs`（pane 統合・Send ボタン・補完ボタン）が headless で assert する
+- composer の動作は `crates/gui/tests/transcript_cards/composer_dispatch_headless.rs`（送信・`/goal`・`/help`・provider 未設定ガード等の dispatch）と `crates/gui/tests/transcript_cards/composer_ui_headless.rs`（pane 統合・Send ボタン・補完ボタン）が headless で assert する
