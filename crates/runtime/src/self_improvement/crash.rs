@@ -122,11 +122,7 @@ pub fn register_crash_spool(spool_dir: PathBuf) -> CrashSpoolGuard {
                     .cloned()
                     .collect();
                 for spool_dir in dirs {
-                    if fs::create_dir_all(&spool_dir).is_ok() {
-                        let path = spool_dir
-                            .join(format!("crash-{timestamp}-{}.json", std::process::id()));
-                        let _ = atomic_write(&path, &bytes);
-                    }
+                    let _ = publish_crash_spool(&spool_dir, timestamp, &bytes);
                 }
             }
             previous(info);
@@ -138,6 +134,36 @@ pub fn register_crash_spool(spool_dir: PathBuf) -> CrashSpoolGuard {
         .entry(spool_dir.clone())
         .or_default() += 1;
     CrashSpoolGuard(Some(spool_dir))
+}
+
+// Panic and fault entries share one sequence, so neither can reuse a live path.
+// No-clobber publication also preserves an older file after PID/counter reuse.
+fn publish_crash_spool(spool_dir: &Path, timestamp: u64, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    fs::create_dir_all(spool_dir)?;
+    loop {
+        // Fail closed on exhaustion rather than reusing a path in this process.
+        let sequence = SEQUENCE
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| std::io::Error::other("crash spool sequence exhausted"))?;
+        let name = format!("crash-{timestamp}-{}-{sequence}", std::process::id());
+        let path = spool_dir.join(format!("{name}.json"));
+        let temporary = spool_dir.join(format!(".{name}.tmp"));
+        // Reuse the guarded, fsynced write, but never rename over a published path.
+        // read_crash_spool cannot see the hidden staging file. hard_link creates
+        // the complete entry atomically and refuses to overwrite an existing one.
+        atomic_write(&temporary, bytes)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let result = fs::hard_link(&temporary, &path);
+        let _ = fs::remove_file(&temporary);
+        match result {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            other => return other,
+        }
+    }
 }
 
 const BACKTRACE_MAX_BYTES: usize = 8192;
@@ -202,8 +228,6 @@ pub(crate) fn compact_backtrace(rendered: &str) -> String {
 /// groups occurrences the way a panic location does. Only codes the classifier
 /// treats as harness faults are ingested.
 pub fn spool_fault(spool_dir: &Path, code: &str, site: &str, message: &str) -> std::io::Result<()> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -220,13 +244,7 @@ pub fn spool_fault(spool_dir: &Path, code: &str, site: &str, message: &str) -> s
         code: Some(code.to_string()),
     };
     let bytes = serde_json::to_vec(&entry).map_err(std::io::Error::other)?;
-    fs::create_dir_all(spool_dir)?;
-    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let path = spool_dir.join(format!(
-        "crash-{timestamp}-{}-{sequence}.json",
-        std::process::id()
-    ));
-    atomic_write(&path, &bytes).map_err(|error| std::io::Error::other(error.to_string()))
+    publish_crash_spool(spool_dir, timestamp, &bytes)
 }
 
 /// Non-destructive, deterministic read of crash-*.json only. Missing dirs return
@@ -284,4 +302,68 @@ pub fn read_crash_spool(spool_dir: &Path) -> Vec<SpooledCrash> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use crate::self_improvement::{ImprovementCollector, ImprovementPolicy, ImprovementSettings};
+
+    #[test]
+    fn newer_panic_survives_older_panic_ack_and_unlink_in_the_same_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("crash-spool");
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("test.db"),
+            ..Default::default()
+        };
+        let store = storage::Storage::open(config.clone()).unwrap();
+        let collector = ImprovementCollector::new(ImprovementSettings {
+            writer: store.handle(),
+            project: "same-second".into(),
+            policy: ImprovementPolicy {
+                draft_dir: Some(dir.path().join("drafts")),
+                ..Default::default()
+            },
+        });
+        // Fixed timestamp and the real process PID deterministically exercise
+        // two panics in one second without making elapsed time a test condition.
+        let bytes = |message: &str| {
+            serde_json::to_vec(&CrashEntry {
+                message: message.into(),
+                location: Some("same-site".into()),
+                thread: None,
+                timestamp: 123,
+                build: None,
+                backtrace: None,
+                code: None,
+            })
+            .unwrap()
+        };
+        publish_crash_spool(&spool, 123, &bytes("panic A")).unwrap();
+        let first = read_crash_spool(&spool).remove(0);
+        let first_path = spool.join(&first.file_name);
+        // Publish B while A is in flight, before its persistence acknowledgement.
+        publish_crash_spool(&spool, 123, &bytes("panic B")).unwrap();
+        collector.ingest_crash(first).unwrap();
+        fs::remove_file(first_path).unwrap();
+        let mut pending = read_crash_spool(&spool);
+        assert_eq!(
+            pending.len(),
+            1,
+            "acknowledging A must not unlink unpublished-to-DB B"
+        );
+        let second = pending.remove(0);
+        assert_eq!(second.message, "panic B");
+        let second_path = spool.join(&second.file_name);
+        collector.ingest_crash(second).unwrap();
+        fs::remove_file(second_path).unwrap();
+        assert!(read_crash_spool(&spool).is_empty());
+        let rows = storage::Database::open(&config)
+            .unwrap()
+            .improvement_candidates("same-second", None, 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].occurrences, 2);
+    }
 }
