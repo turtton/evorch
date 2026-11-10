@@ -93,7 +93,9 @@ const C_GC: u64 = 24;
 // v58 adds one empty WITHOUT ROWID receipt table, with no backfill or secondary
 // index. Reserve 8 fixed schema frames; the independent VM-step comparison still
 // forbids scans proportional to existing rows.
-const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8;
+// v59 adds the empty lane instruction and receipt tables, one index, four triggers and
+// replaces one outbox trigger (schema pages only, no row work); 22 frames and 4 reserved.
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);

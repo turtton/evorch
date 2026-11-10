@@ -1104,6 +1104,31 @@ fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageErr
             });
         }
     }
+    // Instruction receipts and texts precede their FK owner, in bounded batches.
+    let instructions: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='lane_instructions')",
+        [],
+        |r| r.get(0),
+    )?;
+    if instructions {
+        for (table, bytes_expr) in [
+            (
+                "lane_instruction_receipts",
+                "OCTET_LENGTH(request_json)+OCTET_LENGTH(actor_json)+OCTET_LENGTH(result_json)",
+            ),
+            ("lane_instructions", "OCTET_LENGTH(body)"),
+        ] {
+            let bytes: u64 = tx.query_row(&format!("SELECT COALESCE(SUM(bytes),0) FROM (SELECT {bytes_expr} AS bytes FROM {table} WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1) LIMIT ?2)"), params![thread, limit], |r| r.get(0))?;
+            let deleted = tx.execute(&format!("DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1) LIMIT ?2)"), params![thread, limit])?;
+            if deleted > 0 {
+                return Ok(Work {
+                    rows: deleted as u64,
+                    bytes,
+                    ..Work::default()
+                });
+            }
+        }
+    }
     // New Phase 1c tables do not exist during older-format offline conversion.
     let phase2_tables: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='lane_stall_episodes')",
@@ -1905,6 +1930,10 @@ mod lane_delivery_tests {
              VALUES ('root','op','lane','q','{}','{}');
              INSERT INTO lane_management_receipts(operation_id,lane_id,request_json,actor_json,result_json,created_at_ns)
              VALUES ('management','lane','{}','{}','{}',1);
+             INSERT INTO lane_instructions(lane_id,instruction_seq,kind,operation_id,body,lead_thread_id,lead_root_run_id,accepted_management_revision,brief_revision_before,brief_revision_after,notification_id,created_at_ns)
+             VALUES ('lane',1,'supplement','instruction','{}','lead','lead-root',1,1,1,'notification',1);
+             INSERT INTO lane_instruction_receipts(operation_id,lane_id,request_json,actor_json,result_json,created_at_ns)
+             VALUES ('instruction','lane','{}','{}','{}',1);
              INSERT INTO thread_tombstones(thread_id,family_key,deleted_at_ns)
              VALUES ('source','family',10);",
         ).unwrap();
@@ -1932,6 +1961,8 @@ mod lane_delivery_tests {
             "lane_closes",
             "lane_forward_receipts",
             "lane_management_receipts",
+            "lane_instructions",
+            "lane_instruction_receipts",
             "lanes",
         ] {
             assert_eq!(

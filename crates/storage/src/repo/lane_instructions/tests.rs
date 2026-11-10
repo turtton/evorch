@@ -58,7 +58,7 @@ impl Fixture {
             "SELECT body FROM lane_instructions ORDER BY instruction_seq",
             "SELECT payload||state FROM lane_notifications ORDER BY notification_id",
             "SELECT result_json FROM lane_instruction_receipts ORDER BY operation_id",
-            "SELECT revision FROM lane_state",
+            "SELECT CAST(revision AS TEXT) FROM lane_state",
         ] {
             let mut s = self.c().prepare(sql).unwrap();
             values.extend(

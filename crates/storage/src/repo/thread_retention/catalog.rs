@@ -137,6 +137,16 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "bounded management operation receipts of the deleted lane",
     ),
     (
+        "lane_instructions",
+        ReclaimThread,
+        "immutable lead instruction texts of the deleted lane; a deleted lead thread does not take them",
+    ),
+    (
+        "lane_instruction_receipts",
+        ReclaimThread,
+        "bounded instruction operation receipts of the deleted lane",
+    ),
+    (
         "pr_auto_fix_state",
         Keep,
         "PR-wide budget, policy and source guard survive thread deletion",
