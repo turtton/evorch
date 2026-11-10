@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+[[bin]]
+name = "core-mcp-test-peer"
+path = "tests/support/mcp_peer.rs"
+test = false
+bench = false
+
 [dependencies]
 core-instance = { path = "../core-instance" }
 workbench-host = { path = "../workbench-host" }
@@ -20,6 +26,8 @@ uuid = { workspace = true }
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
+wiremock = { workspace = true }
 mock-openai = { path = "../mock-openai" }
 workbench-host = { path = "../workbench-host", features = ["test-support"] }
 providers = { path = "../providers" }

@@ -161,7 +161,7 @@ pub(crate) struct LoopState {
     benchmark: Option<crate::benchmark::BenchmarkCheckpoint>,
     benchmark_checked: bool,
     benchmark_replay: bool,
-    mcp_lease: Option<crate::mcp::RunMcpLease>,
+    mcp_lease: Option<Arc<crate::mcp::RunMcpLease>>,
     inherited_mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     mcp_cancellation: Option<mcp_setup::RunMcpCancellation>,
     pub(crate) task: RunTask,

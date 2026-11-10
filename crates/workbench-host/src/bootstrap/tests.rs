@@ -105,3 +105,104 @@ fn absent_access_is_unapproved_and_unknown_trust_does_not_grant_access() {
     assert!(access.allowed_directories.is_empty());
     assert!(serde_json::from_str::<components::ProjectAccess>(r#"{"trust":"trusted"}"#).is_err());
 }
+
+#[tokio::test]
+async fn core_catalog_prices_usage_and_diagnostics_are_flushed_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let catalog = root.join("catalog");
+    std::fs::create_dir(&catalog).unwrap();
+    // Timestamp is fixture input for catalog freshness, not a completion deadline.
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        catalog.join("models-dev.json"),
+        serde_json::json!({
+            "fetched_at": fetched_at,
+            "api":{"openai":{"models":{"gpt-test":{
+                "id":"gpt-test","cost":{"input":2.0,"output":4.0}
+            }}}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut boot = BootstrappedHost::open(BootstrapOptions {
+        config_dir: root.clone(),
+        project_root: root.clone(),
+        ownership_root: root.join("owners"),
+    })
+    .await
+    .unwrap();
+    // This current-thread test subscribes before yielding to the service factory.
+    let bus = boot.runtime.event_bus().clone();
+    let mut receiver = bus.subscribe();
+    loop {
+        let event = receiver.recv().await.unwrap();
+        if let event_bus::EventKind::Diagnostic(diagnostic) = event.kind
+            && diagnostic.source == "catalog"
+        {
+            assert_eq!(diagnostic.code, "catalog.loaded");
+            break;
+        }
+    }
+    assert_eq!(
+        boot.usage_pricing
+            .read()
+            .unwrap()
+            .pricing("openai", None, "gpt-test")
+            .unwrap()
+            .standard
+            .base
+            .input,
+        Some(2.0)
+    );
+    bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+        source: "core-test".into(),
+        severity: event_bus::DiagnosticSeverity::Warning,
+        code: "core.test".into(),
+        detail: "Persist this diagnostic once".into(),
+        run_id: None,
+        thread_id: None,
+        call_id: None,
+    }));
+    bus.emit(event_bus::Event::new(
+        event_bus::ProviderEvent::RequestCompleted {
+            request_id: "core-priced".into(),
+            provider: "openai".into(),
+            profile: None,
+            protocol: "openai-chat-completions".into(),
+            model: "gpt-test".into(),
+            usage_reported: true,
+            streaming: true,
+            duration_ms: 1,
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: None,
+            finish_reason: "stop".into(),
+            service_tier: None,
+            run_id: None,
+            purpose: None,
+        },
+    ));
+    boot.shutdown().await.unwrap();
+    let db = storage::Database::open(&boot.composition.storage).unwrap();
+    let events = db.events_all_ordered().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.event.kind,
+                event_bus::EventKind::Diagnostic(diagnostic) if diagnostic.code == "core.test"
+            ))
+            .count(),
+        1
+    );
+    let usage = db.usage_requests_between(0, i64::MAX).unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].record.request_id, "core-priced");
+    assert!((usage[0].record.cost_usd.unwrap() - 0.00028).abs() < f64::EPSILON);
+}
