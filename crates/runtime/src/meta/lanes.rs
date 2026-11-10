@@ -88,11 +88,16 @@ pub(super) fn open(state: &mut LoopState, runtime: &AgentRuntime, input: Value) 
         return error(state.budget.spawn_credits.uncollected_lane_rejection());
     }
     let opened = runtime.open_lane(state.caller_run_id(), &key, args.brief);
-    // An intent can commit before admission/start fails. Charge its durable identity
-    // once, including when a crash made the first return value unavailable.
+    // Count only an intent that became durable in this attempt. An old snapshot
+    // can lack the marker for an existing intent; retrying it is not a new open
+    // and must not be used as an implicit repair of lost crash bookkeeping.
     if let Ok(opened) = &opened {
-        state.budget.spawn_credits.record_lane_open(&opened.lane_id);
+        if opened.created {
+            state.budget.spawn_credits.record_lane_open(&opened.lane_id);
+        }
     } else if existing.is_none() {
+        // Admission/start can fail after the first durable insert. Record that
+        // insert here, independently of the idempotent retry path above.
         match store.handle.lane_by_creation_key(&thread, &key) {
             Ok(Some(lane)) => state.budget.spawn_credits.record_lane_open(&lane.lane_id),
             Ok(None) => {}
