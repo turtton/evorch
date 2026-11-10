@@ -241,7 +241,11 @@ async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
         "lane-stop-writes",
         "lane-recovery",
     ] {
-        assert!(services.contains(&required), "missing service: {required}");
+        assert_eq!(
+            services.iter().filter(|name| **name == required).count(),
+            1,
+            "service must be registered once: {required}"
+        );
     }
     let permit = boot.owner.start("learning-thread").unwrap();
     let run = boot.runtime.delegate_background(
@@ -608,5 +612,146 @@ async fn review_m3_evaluation_work_prevents_idle_exit_until_it_is_drained() {
     assert!(
         drained,
         "completed evaluation work must not keep the core alive"
+    );
+}
+
+#[derive(Default)]
+struct LateLaneAdmission {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    lessons: Model,
+}
+#[async_trait]
+impl AgentModel for LateLaneAdmission {
+    fn requires_admission(&self) -> bool {
+        true
+    }
+    async fn admit(
+        &self,
+        invocation: &AgentInvocationContext,
+        _: Role,
+    ) -> Result<(), RuntimeError> {
+        if invocation.run_id == "run-42" {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+    async fn complete(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.lessons
+            .complete(invocation, role, messages, tools)
+            .await
+    }
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "local/test".into()
+    }
+}
+
+#[tokio::test]
+async fn review_m6_late_lane_admission_terminal_diagnostic_survives_shutdown() {
+    use super::services::ServicePhase;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_config(root);
+    {
+        let storage = storage::Storage::open(storage::StorageConfig {
+            db_path: root.join("evorch-events.db"),
+            ..Default::default()
+        })
+        .unwrap();
+        storage
+            .handle()
+            .create_lane(storage::lanes::NewLane {
+                lane_id: "late-recovery".into(),
+                thread_id: "late-lane-thread".into(),
+                origin_thread_id: "lead".into(),
+                origin_run_id: "run-41".into(),
+                creation_key: "before-crash".into(),
+                brief: serde_json::from_value(json!({
+                    "objective":"resume durable intent", "inputs":[], "deliverables":["patch"],
+                    "acceptance_criteria":["review"], "constraints":[], "workspace":{},
+                    "report_policy":"attached"
+                }))
+                .unwrap(),
+                start_seed:
+                    json!({"run_id":"run-42", "project_root":root, "requires_ownership":true})
+                        .to_string(),
+                project_id: None,
+                project_root: Some(root.to_string_lossy().into_owned()),
+                title: None,
+                at_ns: 1,
+            })
+            .unwrap();
+    }
+    let model = Arc::new(LateLaneAdmission::default());
+    let mut boot = BootstrappedHost::open_with_test_seams(
+        options(root),
+        TestSeams {
+            model: model.clone(),
+            sandbox: Arc::new(Direct),
+        },
+    )
+    .await
+    .unwrap();
+    model.entered.notified().await;
+    let run: RunId = "run-42".parse().unwrap();
+    assert!(boot.runtime.list_agents().is_empty());
+    assert_eq!(boot.runtime.pending_lane_admissions(), [run]);
+    // Real startup recovered the durable intent. Keep that producer's completion
+    // gated while its provider admission is still outside the RunEntry snapshot.
+    boot.services.join_named("lane-recovery").await.unwrap();
+    let mut observer = boot.services.lifecycle("self-improvement").unwrap();
+    let (recovery_stopped, recovery_stop) = tokio::sync::oneshot::channel();
+    let (release_recovery, recovery_gate) = tokio::sync::oneshot::channel();
+    let runtime = boot.runtime.clone();
+    boot.services.start("lane-recovery", |stop| async move {
+        stop.await?;
+        recovery_stopped.send(()).unwrap();
+        recovery_gate.await?;
+        model.release.notify_one();
+        // Generation validation permits registration while quiescing, but the
+        // initial turn then fails the owner fence. Wait for that real terminal
+        // lifecycle event, not model entry (which must never happen here).
+        let outcome = runtime.wait(run).await;
+        assert!(
+            runtime.inspect_agent(run).is_ok(),
+            "late root registration failed: {outcome:?}"
+        );
+        Ok(())
+    });
+    let shutdown = tokio::spawn(async move {
+        boot.shutdown().await.unwrap();
+        boot
+    });
+    recovery_stop.await.unwrap();
+    // If shutdown already stopped the observer (the regression), wait for its
+    // actual completion before releasing either producer gate. Otherwise the
+    // held recovery join proves stop cannot yet have reached the observer.
+    // This drives the bad ordering without sleeps, yields, or timeouts.
+    let observer_was_stopped = *observer.borrow() != ServicePhase::Running;
+    if observer_was_stopped {
+        observer
+            .wait_for(|phase| *phase == ServicePhase::Completed)
+            .await
+            .unwrap();
+    }
+    release_recovery.send(()).unwrap();
+    let boot = shutdown.await.unwrap();
+    assert_eq!(
+        boot.runtime.inspect_agent(run).unwrap().phase,
+        event_bus::AgentRunPhase::Error
+    );
+    assert!(
+        candidates(root)
+            .iter()
+            .any(|candidate| candidate.code.starts_with("RunError:")
+                && candidate.run_id.as_deref() == Some("run-42")),
+        "late registered root's terminal diagnostic must survive observer drain"
     );
 }

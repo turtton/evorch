@@ -6,10 +6,20 @@ use super::BootstrapError;
 use std::future::Future;
 use tokio::{sync::oneshot, task::JoinHandle};
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServicePhase {
+    Running,
+    StopRequested,
+    Completed,
+}
+
 struct Service {
     name: &'static str,
     stop: Option<oneshot::Sender<()>>,
     task: JoinHandle<Result<(), BootstrapError>>,
+    #[cfg(test)]
+    phase: tokio::sync::watch::Sender<ServicePhase>,
 }
 
 impl Drop for Service {
@@ -36,10 +46,24 @@ impl BackgroundServices {
         Fut: Future<Output = Result<(), BootstrapError>> + Send + 'static,
     {
         let (stop, stopped) = oneshot::channel();
+        let future = factory(stopped);
+        #[cfg(test)]
+        let (phase, _) = tokio::sync::watch::channel(ServicePhase::Running);
+        #[cfg(test)]
+        let future = {
+            let phase = phase.clone();
+            async move {
+                let result = future.await;
+                phase.send_replace(ServicePhase::Completed);
+                result
+            }
+        };
         self.services.push(Service {
             name,
             stop: Some(stop),
-            task: tokio::spawn(factory(stopped)),
+            task: tokio::spawn(future),
+            #[cfg(test)]
+            phase,
         });
     }
 
@@ -47,11 +71,29 @@ impl BackgroundServices {
         self.services.iter().map(|service| service.name)
     }
 
+    /// Event-driven lifecycle observation for adversarial shutdown ordering tests.
+    #[cfg(test)]
+    pub(super) fn lifecycle(
+        &self,
+        name: &str,
+    ) -> Option<tokio::sync::watch::Receiver<ServicePhase>> {
+        self.services
+            .iter()
+            .find(|service| service.name == name)
+            .map(|service| service.phase.subscribe())
+    }
+
     /// Stop producers before draining runtime runs, without waiting for services
     /// that themselves need those runs to reach a terminal state.
     pub fn request_stop(&mut self) {
         for service in &mut self.services {
             if let Some(stop) = service.stop.take() {
+                #[cfg(test)]
+                service.phase.send_modify(|phase| {
+                    if *phase == ServicePhase::Running {
+                        *phase = ServicePhase::StopRequested;
+                    }
+                });
                 let _ = stop.send(());
             }
         }

@@ -1590,7 +1590,6 @@ struct GuiLearningServices {
 }
 impl Drop for GuiLearningServices {
     fn drop(&mut self) {
-        self.services.request_stop();
         self.handle.block_on(async {
             if let Some((drain, owner)) = &self.owner_drain {
                 if let Err(error) = drain.stop_and_drain(&mut self.services, owner).await {
@@ -1599,6 +1598,7 @@ impl Drop for GuiLearningServices {
                 return;
             }
             // Before ownership is opened no lane producer can have started.
+            self.services.request_stop();
             for run in self.runtime.list_agents() {
                 let _ = self.runtime.stop(run.run_id, runtime::StopScope::Subtree);
             }
