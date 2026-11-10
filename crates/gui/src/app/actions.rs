@@ -566,7 +566,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.apply_loop_event(LoopEvent::ChatNotice {
             thread_id: thread_id.to_string(),
             text: format!(
-                "Paused automatic continuation after {limit} subagent reports or question wake batches without your input. Send a message or Continue to deliver pending questions/reports."
+                "Paused automatic continuation after {limit} subagent reports or question wake batches without your input. Send a message to deliver pending questions/reports."
             ),
         });
     }

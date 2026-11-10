@@ -23,6 +23,29 @@ pub(crate) struct QuestionDelivery {
 }
 
 impl AgentRuntime {
+    pub(crate) fn close_question_mailbox(&self, parent: RunId, mailbox: &crate::RunMailbox) {
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(parent) {
+            self.execution_hook(
+                super::super::cancellation::HookPoint::QuestionMailboxClosing,
+                &execution,
+            );
+        }
+        // Closing fences concurrent producers before the final drain. A notice
+        // accepted after the loop's last flush must survive the old mailbox.
+        mailbox.close();
+        let runs = lock_runs(&self.shared.runs);
+        let pending = mailbox.drain_question_notices();
+        let retry = !pending.is_empty();
+        for queued in pending {
+            self.hold_queued_message(parent, queued);
+        }
+        drop(runs);
+        if retry {
+            self.schedule_wake(parent);
+        }
+    }
+
     pub(crate) fn question_reported(&self, id: &str) -> bool {
         let state = self
             .shared

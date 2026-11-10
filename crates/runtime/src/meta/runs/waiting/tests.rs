@@ -906,6 +906,48 @@ async fn question_attention_consumes_notice_for_wait_and_synchronous_delegate() 
 }
 
 #[tokio::test]
+async fn observed_child_questions_do_not_repeat_attention_before_terminal_event() {
+    for blocking in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: directory.path().join("observed-question.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let (runtime, _) = fixture(None);
+        let runtime =
+            runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let (parent, child, _) = spawn(&runtime);
+        let question = runtime
+            .request_user_question(child, "One attention event".into(), vec![], blocking)
+            .unwrap();
+        assert_eq!(runtime.take_inbox(parent).unwrap().len(), 1);
+        assert!(runtime.question_reported(&question.id));
+        let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+        let request = parse::<WaitArgs>(json!({"run_ids":[child.to_string()]}))
+            .unwrap()
+            .validate()
+            .unwrap();
+        let waiting = observe(&runtime, parent, &request, receiver);
+        tokio::pin!(waiting);
+        assert!(poll!(&mut waiting).is_pending());
+        runtime.cancel(child).unwrap();
+        let result = waiting.await.unwrap();
+        assert_eq!(result["attention_question_ids"], json!([]));
+        assert_eq!(result["completed_run_ids"], json!([child.to_string()]));
+        assert!(
+            runtime
+                .user_question(&question.id)
+                .unwrap()
+                .unwrap()
+                .answer
+                .is_none()
+        );
+        cleanup(&runtime).await;
+    }
+}
+
+#[tokio::test]
 async fn recording_a_wait_snapshot_does_not_consume_a_later_saved_question() {
     let directory = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {

@@ -82,15 +82,6 @@ impl AgentRuntime {
     ) -> Result<(), ChildResumeError> {
         self.deny_deleted_run(&child.to_string())
             .map_err(|deleted| deleted.to_string())?;
-        if self.entry(child).is_err() {
-            self.restore_and_deliver(caller, child, event_bus::AgentMessage {
-                message_id: format!("answer-resume-{}", question.id),
-                sender_run_id: "runtime".into(), recipient_run_id: child.to_string(),
-                kind: event_bus::AgentMessageKind::Steering, reply_to: None,
-                content: "A saved question was answered by your parent; the answer follows at this turn boundary. This is not user permission.".into(),
-            }).map_err(|e| ChildResumeError::Refused(e.to_string()))?;
-            return Ok(());
-        }
         while let Some(mut waiting) = self.try_resume_answered_child(caller, child, question)? {
             tokio::select! {
                 biased;
@@ -126,18 +117,20 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.validate_question_parent(caller, child)?;
-        let (role, ownership, budget, terminal) = {
+        let (registered_role, ownership, budget, terminal) = {
             let runs = super::super::lock_runs(&self.shared.runs);
-            let entry = &runs[&child];
+            let entry = runs.get(&child);
             let parent = &runs[&caller];
             if parent.execution.cancel_tx.borrow().is_interrupted() {
                 return Err("answer saved, but the parent was interrupted; retry after explicitly resuming the parent".into());
             }
-            let terminal = *entry.phase_rx.borrow();
-            if matches!(
-                terminal,
-                AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
-            ) {
+            let terminal = entry.map(|entry| *entry.phase_rx.borrow());
+            if let Some(entry) = entry.filter(|_| {
+                matches!(
+                    terminal,
+                    Some(AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting)
+                )
+            }) {
                 // An interruption of a live child is the operator's or parent's
                 // decision; the answer must not undo it.
                 match *entry.execution.cancel_tx.borrow() {
@@ -156,7 +149,7 @@ impl AgentRuntime {
                     caller_cancel: parent.execution.cancel_tx.subscribe(),
                 }));
             }
-            if let Some(reason) = self.continuation_refusal(child, Some(entry)) {
+            if let Some(reason) = self.continuation_refusal(child, entry) {
                 return Err(refused(&reason));
             }
             if !matches!(
@@ -168,9 +161,9 @@ impl AgentRuntime {
                 );
             }
             (
-                entry.role,
+                entry.map(|entry| entry.role),
                 parent.config.ownership.clone(),
-                entry.config.budget.clone(),
+                entry.map_or_else(Default::default, |entry| entry.config.budget.clone()),
                 terminal,
             )
         };
@@ -188,15 +181,17 @@ impl AgentRuntime {
             serde_json::from_str(&record.config_json).map_err(|error| error.to_string())?;
         // A failed terminal snapshot leaves the last completed tool round.
         let snapshot_matches = match terminal {
-            AgentRunPhase::Done => record.terminal_phase == "Done",
-            _ => matches!(
+            Some(AgentRunPhase::Done) => record.terminal_phase == "Done",
+            Some(_) => matches!(
                 record.terminal_phase.as_str(),
                 "Error" | "Stopped" | "Checkpoint"
             ),
+            None => true,
         };
+        let role = crate::Role::from_name(&descriptor.role).map_err(|error| error.to_string())?;
         if descriptor.parent_run_id != Some(caller)
             || record.parent_run_id.as_deref() != Some(caller.to_string().as_str())
-            || crate::Role::from_name(&descriptor.role) != Ok(role)
+            || registered_role.is_some_and(|registered| registered != role)
             || record.role != descriptor.role
             || !snapshot_matches
         {
@@ -232,6 +227,13 @@ impl AgentRuntime {
             .map_err(|error| error.to_string())?;
         self.reserve_restored_shell_handles(child, &restored)
             .map_err(|error| error.to_string())?;
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(caller) {
+            self.execution_hook(
+                super::super::cancellation::HookPoint::QuestionChildPrepared,
+                &execution,
+            );
+        }
         let mut intents = self
             .shared
             .spawn_intents
@@ -243,11 +245,12 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut runs = super::super::lock_runs(&self.shared.runs);
-        if !matches!(
-            *runs[&caller].phase_rx.borrow(),
-            AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
-        ) || *runs[&child].phase_rx.borrow() != terminal
-            || runs[&caller].execution.cancel_tx.borrow().is_interrupted()
+        if runs.get(&caller).is_none_or(|parent| {
+            !matches!(
+                *parent.phase_rx.borrow(),
+                AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+            ) || parent.execution.cancel_tx.borrow().is_interrupted()
+        }) || runs.get(&child).map(|entry| *entry.phase_rx.borrow()) != terminal
             || self.continuation_refusal(child, runs.get(&child)).is_some()
         {
             return Err(
@@ -270,10 +273,12 @@ impl AgentRuntime {
             .write(record.clone(), expected)
             .map_err(|error| error.to_string())?;
         #[cfg(test)]
-        self.execution_hook(
-            super::super::cancellation::HookPoint::ContinuationSnapshotPrepared,
-            &std::sync::Arc::clone(&runs[&child].execution),
-        );
+        if let Some(entry) = runs.get(&child) {
+            self.execution_hook(
+                super::super::cancellation::HookPoint::ContinuationSnapshotPrepared,
+                &std::sync::Arc::clone(&entry.execution),
+            );
+        }
         let saved = store
             .handle
             .save_snapshot_bundle(&write)
@@ -286,6 +291,7 @@ impl AgentRuntime {
             &mut admissions,
             &execution,
         );
+        self.shared.run_ids.observe(child);
         self.shared
             .model
             .restore_route_pins(&child.to_string(), &descriptor.route_pins);

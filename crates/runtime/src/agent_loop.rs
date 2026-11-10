@@ -1754,7 +1754,11 @@ impl LoopState {
                 runtime.close_artifact_page(&self.task.run_id.to_string());
             }
             self.channels.inbox_rx.close();
-            self.task.mailbox.close();
+            if let Some(runtime) = self.runtime() {
+                runtime.close_question_mailbox(self.task.run_id, &self.task.mailbox);
+            } else {
+                self.task.mailbox.close();
+            }
             // Public terminal state permits same-ID restoration. Publish only after
             // process teardown, final persistence, and workspace cleanup finish.
             self.pending_terminal = Some((previous, event));

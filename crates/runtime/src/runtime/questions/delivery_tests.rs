@@ -1,6 +1,6 @@
 use super::*;
 use crate::{RunConfig, RunStore};
-use event_bus::{EventBus, EventKind, LifecycleEvent};
+use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use tokio::sync::Notify;
 
 #[derive(Default)]
@@ -16,6 +16,8 @@ struct Model {
     middle_run: std::sync::Mutex<Option<RunId>>,
     child_inputs: std::sync::Mutex<Vec<Vec<providers::Message>>>,
     calls: std::sync::atomic::AtomicU32,
+    finish_children: std::sync::atomic::AtomicBool,
+    idle_each_turn: std::sync::atomic::AtomicBool,
 }
 #[async_trait::async_trait]
 impl crate::AgentModel for Model {
@@ -44,6 +46,9 @@ impl crate::AgentModel for Model {
             }
             self.child_inputs.lock().unwrap().push(messages.to_vec());
             self.child_started.notify_one();
+            if self.finish_children.load(Ordering::Acquire) {
+                return Ok(finished());
+            }
             return std::future::pending().await;
         }
         if messages.iter().flat_map(|m| &m.content).any(|block| matches!(block, providers::ContentBlock::Text { text } if text.contains("[subagent-question"))) {
@@ -55,6 +60,9 @@ impl crate::AgentModel for Model {
             Ok(finished())
         } else {
             self.resumed.notify_one();
+            if self.idle_each_turn.load(Ordering::Acquire) {
+                return Ok(finished());
+            }
             std::future::pending().await
         }
     }
@@ -99,6 +107,15 @@ fn fixture() -> Fixture {
         _storage: storage,
         _dir: dir,
     }
+}
+fn restarted_runtime(f: &Fixture, model: Arc<Model>) -> AgentRuntime {
+    let config = storage::StorageConfig {
+        db_path: f._dir.path().join("questions.db"),
+        ..Default::default()
+    };
+    let bus = Arc::new(EventBus::new(1024));
+    AgentRuntime::new(bus.clone(), Arc::new(tools::ToolExecutor::new(bus)), model)
+        .with_run_store(RunStore::open(&config, f._storage.handle()).unwrap())
 }
 async fn pair(f: &Fixture, interactive: bool) -> (RunId, RunId) {
     let root = f.runtime.delegate_background(
@@ -602,4 +619,202 @@ async fn held_subagent_report_is_retried_when_its_ancestor_is_explicitly_resumed
     f.runtime.cancel_subtree(root).unwrap();
     f.runtime.wait(child).await.unwrap();
     f.runtime.wait(root).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn question_accepted_after_final_flush_survives_mailbox_close() {
+    let f = fixture();
+    let (root, child) = pair(&f, false).await;
+    let (entered, closing) = tokio::sync::oneshot::channel();
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let gate = release.clone();
+    f.runtime.on_execution(
+        crate::runtime::cancellation::HookPoint::QuestionMailboxClosing,
+        &f.runtime.execution_snapshot(root).unwrap(),
+        move || {
+            entered.send(()).unwrap();
+            gate.wait();
+        },
+    );
+    let mut events = f.runtime.shared.bus.subscribe();
+    f.model.finish.notify_one();
+    closing.await.unwrap();
+    let question = ask(&f, child, true);
+    assert_eq!(f.runtime.run_mailbox(root).unwrap().len(), 1);
+    release.wait();
+    assert_eq!(f.runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(f.runtime.held_message_count(), 1);
+    assert!(!f.runtime.question_reported(&question.id));
+    root_wake(&mut events, root).await;
+    f.runtime.wake_chat(root, RunConfig::default()).unwrap();
+    f.model.question_seen.notified().await;
+    assert!(f.runtime.question_reported(&question.id));
+    assert_eq!(f.runtime.held_message_count(), 0);
+    f.runtime.cancel_subtree(root).unwrap();
+    f.runtime.wait(root).await.unwrap();
+    f.runtime.wait(child).await.unwrap();
+}
+
+#[tokio::test]
+async fn repeated_answer_after_restart_does_not_execute_an_already_answered_child() {
+    let f = fixture();
+    let (root, child) = pair(&f, false).await;
+    let question = ask(&f, child, true);
+    f.runtime.stop(root, crate::StopScope::Subtree).unwrap();
+    f.runtime.wait(root).await.unwrap();
+    f.runtime.wait(child).await.unwrap();
+
+    let model = Arc::new(Model::default());
+    model.finish_children.store(true, Ordering::Release);
+    let runtime = restarted_runtime(&f, model.clone());
+    runtime.resume_chat(root, RunConfig::default()).unwrap();
+    model.first.notified().await;
+    runtime
+        .answer_subagent_question(root, &question.id, "Execute once")
+        .await
+        .unwrap();
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(model.child_inputs.lock().unwrap().len(), 1);
+    runtime.stop(root, crate::StopScope::Subtree).unwrap();
+    runtime.wait(root).await.unwrap();
+
+    let next_model = Arc::new(Model::default());
+    let next = restarted_runtime(&f, next_model.clone());
+    next.resume_chat(root, RunConfig::default()).unwrap();
+    next_model.first.notified().await;
+    next.answer_subagent_question(root, &question.id, "Execute once")
+        .await
+        .unwrap();
+    assert!(
+        next.entry(child).is_err(),
+        "a duplicate answer needs no child registration"
+    );
+    assert!(next_model.child_inputs.lock().unwrap().is_empty());
+    assert_eq!(
+        next.user_question(&question.id)
+            .unwrap()
+            .unwrap()
+            .answer
+            .as_deref(),
+        Some("Execute once")
+    );
+    next.cancel_subtree(root).unwrap();
+    next.wait(root).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parent_subtree_stop_fences_unregistered_answered_child_registration() {
+    let f = fixture();
+    let (root, child) = pair(&f, false).await;
+    let question = ask(&f, child, true);
+    f.runtime.stop(root, crate::StopScope::Subtree).unwrap();
+    f.runtime.wait(root).await.unwrap();
+    f.runtime.wait(child).await.unwrap();
+
+    let model = Arc::new(Model::default());
+    let runtime = restarted_runtime(&f, model.clone());
+    runtime.resume_chat(root, RunConfig::default()).unwrap();
+    model.first.notified().await;
+    let (entered, prepared) = tokio::sync::oneshot::channel();
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let gate = release.clone();
+    runtime.on_execution(
+        crate::runtime::cancellation::HookPoint::QuestionChildPrepared,
+        &runtime.execution_snapshot(root).unwrap(),
+        move || {
+            entered.send(()).unwrap();
+            gate.wait();
+        },
+    );
+    let answering = runtime.clone();
+    let id = question.id.clone();
+    let answer = tokio::spawn(async move {
+        answering
+            .answer_subagent_question(root, &id, "Saved before Stop")
+            .await
+    });
+    prepared.await.unwrap();
+    assert!(runtime.entry(child).is_err());
+    runtime.stop(root, crate::StopScope::Subtree).unwrap();
+    release.wait();
+    assert!(answer.await.unwrap().is_err());
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Stopped);
+    assert!(runtime.entry(child).is_err());
+    assert!(model.child_inputs.lock().unwrap().is_empty());
+    assert_eq!(
+        runtime
+            .user_question(&question.id)
+            .unwrap()
+            .unwrap()
+            .answer
+            .as_deref(),
+        Some("Saved before Stop")
+    );
+}
+
+async fn root_idle(events: &mut event_bus::EventReceiver, root: RunId) {
+    loop {
+        if matches!(events.recv().await.unwrap().kind, EventKind::Lifecycle(LifecycleEvent::TurnCompleted { run_id, .. }) if run_id == root.to_string())
+        {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn actual_idle_question_wakes_stop_at_twenty_until_real_user_input() {
+    let f = fixture();
+    f.model.idle_each_turn.store(true, Ordering::Release);
+    let (root, child) = pair(&f, true).await;
+    let mut events = f.runtime.shared.bus.subscribe();
+    f.model.finish.notify_one();
+    root_idle(&mut events, root).await;
+    for expected in 1..=QUESTION_WAKE_LIMIT {
+        let question = ask(&f, child, false);
+        root_idle(&mut events, root).await;
+        assert!(f.runtime.question_reported(&question.id));
+        f.runtime
+            .answer_subagent_question(root, &question.id, "Continue")
+            .await
+            .unwrap();
+        assert_eq!(
+            f.runtime.shared.question_delivery.lock().unwrap().wakes[&(root, child)],
+            expected,
+            "answers, new IDs and Running/Waiting transitions must not reset the guard"
+        );
+    }
+    let held = ask(&f, child, false);
+    loop {
+        if matches!(events.recv().await.unwrap().kind, EventKind::Lifecycle(LifecycleEvent::AutoContinuationPaused { run_id, limit: QUESTION_WAKE_LIMIT }) if run_id == root.to_string())
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        f.model.calls.load(Ordering::Acquire),
+        QUESTION_WAKE_LIMIT + 1
+    );
+    assert!(!f.runtime.question_reported(&held.id));
+    assert_eq!(f.runtime.held_message_count(), 1);
+    assert_eq!(f.runtime.auto_wake_total(), 0);
+    f.runtime
+        .send_message(root, "Actual user continuation".into())
+        .unwrap();
+    root_idle(&mut events, root).await;
+    assert!(f.runtime.question_reported(&held.id));
+    assert!(
+        f.runtime
+            .shared
+            .question_delivery
+            .lock()
+            .unwrap()
+            .wakes
+            .get(&(root, child))
+            .copied()
+            .unwrap_or(0)
+            <= 1
+    );
+    f.runtime.cancel_subtree(root).unwrap();
+    f.runtime.wait(root).await.unwrap();
+    f.runtime.wait(child).await.unwrap();
 }
