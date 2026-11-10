@@ -17,6 +17,7 @@ impl CommandService {
         &self,
         run_id: RunId,
         authority: RunConfig,
+        observation: Option<runtime::ChatResumeObservation>,
     ) -> Result<Option<RunId>, runtime::RuntimeError> {
         if self.automatic_resume {
             if !self.runtime.prepare_held_wake(run_id, &authority)? {
@@ -24,7 +25,11 @@ impl CommandService {
             }
             self.runtime.wake_chat(run_id, authority).map(Some)
         } else {
-            self.runtime.resume_chat(run_id, authority).map(Some)
+            let observation =
+                observation.unwrap_or_else(|| self.runtime.observe_chat_resume(run_id));
+            self.runtime
+                .resume_chat_observed(run_id, authority, observation)
+                .map(Some)
         }
     }
 
@@ -94,6 +99,7 @@ impl CommandService {
             initial.project_root = self.bindings.thread_roots.get(&thread_id).cloned();
         }
         initial.memory = self.capture_memory(initial.project_root.as_deref());
+        let mut resume_observation = None;
         if resume_only {
             if !self.bindings.chat_runs.contains_key(&thread_id)
                 && !self.bindings.goal_runs.contains_key(&thread_id)
@@ -125,6 +131,9 @@ impl CommandService {
                 .or_else(|| self.bindings.goal_runs.get(&thread_id))
                 .copied()
                 .expect("resolved conversation root");
+            let observation = self.runtime.observe_chat_resume(run);
+            let graceful_stop = observation.graceful_stop_requested();
+            resume_observation = Some(observation);
             // A graceful Stop can still publish a live phase while its terminal
             // snapshot commits. Only an explicit user Continue bypasses this
             // live-run guard; runtime owns deferring it until that snapshot.
@@ -132,7 +141,7 @@ impl CommandService {
                 .runtime
                 .inspect_agent(run)
                 .ok()
-                .filter(|_| self.automatic_resume || !self.runtime.graceful_stop_requested(run))
+                .filter(|_| self.automatic_resume || !graceful_stop)
                 .map(|run| run.phase);
             if phase == Some(event_bus::AgentRunPhase::Waiting) {
                 return vec![HostEvent::ChatNotice {
@@ -153,6 +162,11 @@ impl CommandService {
                     text: "Run is still running or stopping; try /continue once it settles".into(),
                 }];
             }
+        }
+
+        #[cfg(test)]
+        if resume_only {
+            tests::after_resume_guard();
         }
 
         if let Some(&run_id) = self.bindings.goal_runs.get(&thread_id) {
@@ -205,7 +219,7 @@ impl CommandService {
             }
             let _guard = self.handle.enter();
             let continuation = if resume_only {
-                self.resume_chat(run_id, authority)
+                self.resume_chat(run_id, authority, resume_observation.clone())
             } else {
                 self.runtime
                     .continue_goal(run_id, submission.text.clone(), authority)
@@ -294,7 +308,7 @@ impl CommandService {
             }
             let _guard = self.handle.enter();
             let continuation = if resume_only {
-                self.resume_chat(run_id, authority)
+                self.resume_chat(run_id, authority, resume_observation.clone())
             } else {
                 self.runtime
                     .continue_goal(run_id, submission.text.clone(), authority)

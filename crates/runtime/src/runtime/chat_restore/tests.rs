@@ -8,6 +8,7 @@ mod host_receipts;
 mod invalidation;
 mod registration;
 mod resume;
+mod resume_races;
 mod review_authority;
 mod saved_compaction;
 mod shell_handles;

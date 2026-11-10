@@ -48,8 +48,15 @@ fn continuation(automatic: bool) -> HostCommand {
         automatic,
     })
 }
-#[tokio::test]
-async fn stop_pending_continue_reaches_runtime_but_ordinary_live_continue_is_not_applied() {
+struct ChatFixture {
+    _dir: tempfile::TempDir,
+    _storage: storage::Storage,
+    runtime: AgentRuntime,
+    service: CommandService,
+    run: RunId,
+    events: EventReceiver,
+}
+async fn chat_fixture() -> ChatFixture {
     let dir = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
         db_path: dir.path().join("events.db"),
@@ -83,6 +90,34 @@ async fn stop_pending_continue_reaches_runtime_but_ordinary_live_continue_is_not
         .chat_runs
         .insert("stop-pending".into(), run);
     waiting(&mut events, run).await;
+    ChatFixture {
+        _dir: dir,
+        _storage: storage,
+        runtime,
+        service,
+        run,
+        events,
+    }
+}
+
+thread_local! { static AFTER_RESUME_GUARD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+pub(super) fn after_resume_guard() {
+    let hook = AFTER_RESUME_GUARD.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[tokio::test]
+async fn stop_pending_continue_reaches_runtime_but_ordinary_live_continue_is_not_applied() {
+    let ChatFixture {
+        _dir,
+        _storage,
+        runtime,
+        mut service,
+        run,
+        mut events,
+    } = chat_fixture().await;
     assert!(!runtime.graceful_stop_requested(run));
     assert!(matches!(
         service
@@ -133,4 +168,91 @@ async fn stop_pending_continue_reaches_runtime_but_ordinary_live_continue_is_not
     ));
     runtime.stop(run, runtime::StopScope::Subtree).unwrap();
     runtime.wait(run).await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_race_cancel_after_host_guard_rejects_old_continue_but_accepts_fresh() {
+    let ChatFixture {
+        _dir,
+        _storage,
+        runtime,
+        mut service,
+        run,
+        mut events,
+    } = chat_fixture().await;
+    let original = runtime
+        .resume_intents()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.run_id == run)
+        .unwrap()
+        .incarnation;
+    runtime.stop(run, runtime::StopScope::SelfOnly).unwrap();
+    let guarded = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::runtime::Handle::current();
+    let worker_guarded = guarded.clone();
+    let worker_release = release.clone();
+    let submission = std::thread::spawn(move || {
+        let _enter = handle.enter();
+        AFTER_RESUME_GUARD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                worker_guarded.wait();
+                worker_release.wait();
+            }))
+        });
+        let result = service.submit_authorized(continuation(false), None);
+        result_tx.send((service, result)).ok().unwrap();
+    });
+    // Block this current-thread executor only until the host guard passes, so
+    // the stopped execution cannot retire before the stale request is observed.
+    guarded.wait();
+    assert_eq!(
+        runtime.inspect_agent(run).unwrap().phase,
+        AgentRunPhase::Waiting
+    );
+    runtime.cancel(run).unwrap();
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
+    let cancelled = runtime
+        .resume_intents()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.run_id == run)
+        .unwrap();
+    assert!(!cancelled.active);
+    assert_eq!(
+        cancelled.stop_reason,
+        Some(runtime::quiesce::StopReason::Cancelled)
+    );
+    release.wait();
+    let (mut service, old_result) = result_rx.await.unwrap();
+    submission.join().unwrap();
+    let unchanged = runtime
+        .resume_intents()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.run_id == run)
+        .unwrap()
+        .incarnation
+        == original;
+    let failed = events.drain_pending_snapshot().iter().any(
+        |event| matches!(&event.kind, EventKind::Diagnostic(d) if d.code == "chat_resume_failed"),
+    );
+    // A genuinely newer user action observes the completed Cancel and is not
+    // rejected merely because the previous incarnation was cancelled.
+    let fresh_result = service.submit_authorized(continuation(false), None);
+    let fresh = matches!(fresh_result.as_slice(), [HostEvent::ChatAccepted { .. }]);
+    runtime.stop(run, runtime::StopScope::Subtree).unwrap();
+    runtime.wait(run).await.unwrap();
+    assert!(
+        matches!(old_result.as_slice(), [HostEvent::ChatRejected { .. }]),
+        "old Continue revoked Cancel: {old_result:?}"
+    );
+    assert!(unchanged, "the stale Continue created a new incarnation");
+    assert!(failed, "the refusal must be observable");
+    assert!(
+        fresh,
+        "a fresh Continue after terminal Cancel must work: {fresh_result:?}"
+    );
 }

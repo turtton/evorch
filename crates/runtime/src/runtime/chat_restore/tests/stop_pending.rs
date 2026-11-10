@@ -1,6 +1,6 @@
 use super::*;
 
-async fn waiting_chat(runtime: &AgentRuntime) -> (RunId, event_bus::EventReceiver) {
+pub(super) async fn waiting_chat(runtime: &AgentRuntime) -> (RunId, event_bus::EventReceiver) {
     let mut events = runtime.shared.bus.subscribe();
     let run = runtime
         .delegate_chat(

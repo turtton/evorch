@@ -76,6 +76,10 @@ fn table() -> BTreeMap<&'static str, Guard> {
         ),
         ("runtime/chat_restore.rs::resume_chat", Guarded { via: &[] }),
         (
+            "runtime/chat_restore.rs::resume_chat_observed",
+            Guarded { via: &[] },
+        ),
+        (
             "runtime/chat_restore.rs::wake_chat",
             Guarded {
                 via: &["resume", "continue_chat", "continue_chat_fenced"],

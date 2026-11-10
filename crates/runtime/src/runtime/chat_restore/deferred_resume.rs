@@ -1,41 +1,122 @@
 use super::*;
-use crate::runtime::cancellation::PendingChatResume;
+use crate::runtime::cancellation::{PendingChatResume, current_execution};
 
-/// Both the execution and the accepted request are fenced. A later Stop can
-/// invalidate a request even after its authority has been taken for dispatch.
-pub(in crate::runtime) struct ResumeFence {
-    execution: Arc<ExecutionControl>,
-    valid: Arc<AtomicBool>,
+/// A host observation of one execution and its immutable incarnation. The watch
+/// cursor is sealed: a later Stop/Cancel (even the same value) invalidates it.
+#[derive(Clone)]
+pub struct ChatResumeObservation {
+    run: RunId,
+    // Pending observations live on the execution; do not create a self-cycle.
+    execution: Option<Weak<ExecutionControl>>,
+    interrupt: Option<watch::Receiver<RunInterrupt>>,
+    graceful_stop: bool,
+    cancelled: bool,
+}
+impl ChatResumeObservation {
+    /// Whether graceful Stop was recorded when this observation was captured.
+    pub fn graceful_stop_requested(&self) -> bool {
+        self.graceful_stop
+    }
+    fn is_current(&self, current: Option<&Arc<ExecutionControl>>, cancelled: bool) -> bool {
+        let same = match (&self.execution, current) {
+            (None, None) => true,
+            (Some(observed), Some(current)) => observed
+                .upgrade()
+                .is_some_and(|observed| Arc::ptr_eq(&observed, current)),
+            _ => false,
+        };
+        same && self
+            .interrupt
+            .as_ref()
+            .is_none_or(|rx| !rx.has_changed().unwrap_or(true))
+            && (self.cancelled || (!cancelled && current.is_none_or(|e| !e.cancelled())))
+    }
 }
 
+pub(in crate::runtime) struct ResumeFence {
+    observation: ChatResumeObservation,
+    valid: Arc<AtomicBool>,
+}
 impl ResumeFence {
-    pub(super) fn execution(&self) -> Arc<ExecutionControl> {
-        Arc::clone(&self.execution)
+    pub(super) fn observed(observation: ChatResumeObservation) -> Self {
+        Self {
+            observation,
+            valid: Arc::new(AtomicBool::new(true)),
+        }
     }
-
     pub(in crate::runtime) fn is_current(
         &self,
         execution: Option<&Arc<ExecutionControl>>,
         cancelled: bool,
     ) -> bool {
-        !cancelled
-            && !self.execution.cancelled()
-            && self.valid.load(Ordering::Acquire)
-            && execution.is_some_and(|current| Arc::ptr_eq(current, &self.execution))
+        self.valid.load(Ordering::Acquire) && self.observation.is_current(execution, cancelled)
     }
 }
 
 impl AgentRuntime {
+    /// Capture the host's decision boundary; not permission to restore. A fresh
+    /// observation after terminal Cancel can authorize a new explicit action.
+    pub fn observe_chat_resume(&self, run: RunId) -> ChatResumeObservation {
+        let intents = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runs = lock_runs(&self.shared.runs);
+        let execution = current_execution(run, &intents, &admissions, &runs);
+        let interrupt = execution.as_ref().map(|e| e.cancel_tx.subscribe());
+        let graceful_stop = interrupt
+            .as_ref()
+            .is_some_and(|rx| matches!(*rx.borrow(), RunInterrupt::Stop));
+        let cancelled = execution.as_ref().is_some_and(|e| e.cancelled());
+        ChatResumeObservation {
+            run,
+            execution: execution.map(|execution| Arc::downgrade(&execution)),
+            interrupt,
+            graceful_stop,
+            cancelled,
+        }
+    }
+
     pub(super) fn defer_chat_resume(
         &self,
         run: RunId,
         authority: &RunConfig,
+        observation: &ChatResumeObservation,
     ) -> Result<bool, RuntimeError> {
         let stop_gate = self.stop_restore_gate(run);
         let _stop_guard = stop_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Same I -> A -> R order as cancellation/registration. Acceptance and its
+        // durable evidence refer to exactly the execution observed by the host.
+        let intents = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runs = lock_runs(&self.shared.runs);
+        let current = current_execution(run, &intents, &admissions, &runs);
+        if observation.run != run
+            || !observation.is_current(
+                current.as_ref(),
+                intents.get(&run).is_some_and(|i| i.cancelled),
+            )
+        {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run.to_string(),
+            });
+        }
         let Some(entry) = runs.get(&run) else {
             return Ok(false);
         };
@@ -55,8 +136,6 @@ impl AgentRuntime {
         if !matches!(*entry.execution.cancel_tx.borrow(), RunInterrupt::Stop) {
             return Ok(false);
         }
-        // Persist before accepting the scheduling instruction. Current authority
-        // stays in memory: recovery must reauthorize this evidence in PR 06.
         self.shared
             .quiesce
             .update(
@@ -75,17 +154,20 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pending = pending.get_or_insert_with(|| PendingChatResume {
             authority: None,
+            observation: observation.clone(),
             valid: Arc::new(AtomicBool::new(true)),
         });
-        // Duplicate Continue requests coalesce; the latest current authority wins.
         pending.authority = Some(authority.clone());
+        pending.observation = observation.clone();
         Ok(true)
     }
 
     pub(in crate::runtime) fn resume_deferred_chat(&self, run: RunId) {
         let deferred = {
             let runs = lock_runs(&self.shared.runs);
-            let Some(entry) = runs.get(&run) else { return };
+            let Some(entry) = runs.get(&run) else {
+                return;
+            };
             if !matches!(
                 *entry.phase_rx.borrow(),
                 AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
@@ -103,13 +185,15 @@ impl AgentRuntime {
                     (
                         authority,
                         ResumeFence {
-                            execution: Arc::clone(&entry.execution),
-                            valid: Arc::clone(&pending.valid),
+                            observation: pending.observation.clone(),
+                            valid: pending.valid.clone(),
                         },
                     )
                 })
             })
         };
+        // Never wait for restore/StopGate while R is held. The sealed observation
+        // bridges this handoff; all validation/admission/commit runs under StopGate.
         let Some((authority, fence)) = deferred else {
             return;
         };

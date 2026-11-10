@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct PendingChatResume {
     pub authority: Option<RunConfig>,
+    pub observation: super::ChatResumeObservation,
     pub valid: Arc<AtomicBool>,
 }
 
@@ -63,6 +64,25 @@ impl ExecutionControl {
         {
             pending.valid.store(false, Ordering::Release);
         }
+    }
+
+    pub(super) fn commit_resume<T>(
+        &self,
+        run: RunId,
+        commit: impl FnOnce() -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let _gate = self
+            .publication
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.cancelled() {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run.to_string(),
+            });
+        }
+        commit()
     }
 
     fn forbid_publication(&self) {
@@ -329,6 +349,9 @@ pub(crate) enum HookPoint {
     AdmissionFailed,
     RootGoalUpdated,
     RootRestoreValidated,
+    ResumeRegistered,
+    StopGateAcquired,
+    StopGateBlocked,
     HandoffBeforeReserve,
     AdmissionCompleted,
     AdmissionGoalCheckpoint,
@@ -354,6 +377,30 @@ impl AgentRuntime {
         };
         if let Ok(execution) = self.execution_snapshot(run) {
             self.execution_hook(point, &execution);
+        }
+    }
+
+    pub(super) fn lock_stop_test_gate<'a>(
+        &self,
+        run: RunId,
+        gate: &'a Mutex<()>,
+    ) -> std::sync::MutexGuard<'a, ()> {
+        let execution = self.execution_snapshot(run).ok();
+        match gate.try_lock() {
+            Ok(guard) => {
+                if let Some(execution) = execution {
+                    self.execution_hook(HookPoint::StopGateAcquired, &execution);
+                }
+                guard
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if let Some(execution) = execution {
+                    self.execution_hook(HookPoint::StopGateBlocked, &execution);
+                }
+                gate.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            }
         }
     }
 

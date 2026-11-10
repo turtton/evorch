@@ -190,6 +190,15 @@ async fn safe_point_checkpoint_reuses_exact_prefix_after_reconnection() {
 
 #[tokio::test]
 async fn tools_applied_checkpoint_reuses_exact_prefix_after_reconnection() {
+    restore_after_tools(false).await;
+}
+
+#[tokio::test]
+async fn stop_pending_continue_reuses_exact_prefix_after_terminal_restore() {
+    restore_after_tools(true).await;
+}
+
+async fn restore_after_tools(pending_continue: bool) {
     for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
         let tool = Arc::new(GatedRead {
             started: Notify::new(),
@@ -236,23 +245,45 @@ async fn tools_applied_checkpoint_reuses_exact_prefix_after_reconnection() {
             )
             .unwrap();
         tool.started.notified().await;
-        harness.runtime.request_quiesce();
-        tool.release.notify_one();
-        harness.runtime.wait_quiesced().await.unwrap();
-        let intent = harness
-            .runtime
-            .resume_intents()
-            .unwrap()
-            .into_iter()
-            .find(|intent| intent.run_id == run)
-            .unwrap();
-        assert_eq!(
-            intent.checkpoint.as_ref().unwrap().boundary,
-            runtime::checkpoint::CheckpointBoundary::ToolsApplied
-        );
-        assert!(intent.tool_intent.is_empty());
-        // The quiesced acknowledgement precedes collection of the completed
-        // first request. No timing-based guess about tool completion is used.
+        if pending_continue {
+            // Hold the tool, so Continue is certainly accepted before terminal
+            // publication; no timing-based guess about the Stop boundary.
+            harness
+                .runtime
+                .stop(run, runtime::StopScope::SelfOnly)
+                .unwrap();
+            harness
+                .runtime
+                .resume_chat(run, run_config.clone())
+                .unwrap();
+            assert!(
+                harness
+                    .runtime
+                    .resume_intents()
+                    .unwrap()
+                    .iter()
+                    .any(|i| i.run_id == run && i.resume_requested)
+            );
+            tool.release.notify_one();
+        } else {
+            harness.runtime.request_quiesce();
+            tool.release.notify_one();
+            harness.runtime.wait_quiesced().await.unwrap();
+            let intent = harness
+                .runtime
+                .resume_intents()
+                .unwrap()
+                .into_iter()
+                .find(|intent| intent.run_id == run)
+                .unwrap();
+            assert_eq!(
+                intent.checkpoint.as_ref().unwrap().boundary,
+                runtime::checkpoint::CheckpointBoundary::ToolsApplied
+            );
+            assert!(intent.tool_intent.is_empty());
+        }
+        // The tool-start signal guarantees that the first provider request has
+        // completed. Collect its actual input-derived cache event, not a fixture.
         let mut events = Vec::new();
         loop {
             let event = harness.receiver.recv().await.unwrap();
@@ -262,9 +293,19 @@ async fn tools_applied_checkpoint_reuses_exact_prefix_after_reconnection() {
                 break;
             }
         }
-        let old = harness.runtime.clone();
-        restart_runtime(&mut harness, &config, &storage);
-        harness.runtime.resume_chat(run, run_config).unwrap();
+        if pending_continue {
+            // Both incarnations share the logical run ID. Consume the old
+            // Stop terminal event before awaiting the resumed Waiting phase.
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+        }
+        let old = if pending_continue {
+            None
+        } else {
+            let old = harness.runtime.clone();
+            restart_runtime(&mut harness, &config, &storage);
+            harness.runtime.resume_chat(run, run_config).unwrap();
+            Some(old)
+        };
         events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
         for input in ["next input", "another input"] {
             harness.runtime.send_message(run, input.into()).unwrap();
@@ -282,7 +323,9 @@ async fn tools_applied_checkpoint_reuses_exact_prefix_after_reconnection() {
         );
         harness.runtime.cancel(run).unwrap();
         harness.runtime.wait(run).await.unwrap();
-        old.cancel(run).unwrap();
-        old.wait(run).await.unwrap();
+        if let Some(old) = old {
+            old.cancel(run).unwrap();
+            old.wait(run).await.unwrap();
+        }
     }
 }

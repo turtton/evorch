@@ -9,6 +9,7 @@ mod cancellation;
 pub(crate) use cancellation::HookPoint;
 pub(crate) use cancellation::{ExecutionControl, PublicationToken};
 mod chat_restore;
+pub use chat_restore::ChatResumeObservation;
 mod child_renewal;
 mod completion_relay;
 mod held_messages;
@@ -72,6 +73,11 @@ use user_inbox::UserInbox;
 pub use user_inbox::{FollowUpStatus, FollowUpWithdrawalError};
 
 const INBOX_CAPACITY: usize = 32;
+
+struct RunAdmission {
+    run: RunId,
+    execution: Arc<ExecutionControl>,
+}
 
 /// Tokio タスクとして AgentRun を実行するランタイム。
 ///
@@ -1316,15 +1322,41 @@ impl AgentRuntime {
         parent: Option<RunId>,
         role: Role,
         prompt: String,
-        mut config: RunConfig,
+        config: RunConfig,
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
     ) -> RunId {
+        self.try_spawn_run_with_handoff(
+            run_id,
+            parent,
+            role,
+            prompt,
+            config,
+            continuation,
+            review_seed,
+        )
+        .map(|admission| admission.run)
+        .unwrap_or(run_id)
+    }
+
+    // Keep host provenance explicit at this installation boundary.
+    #[allow(clippy::too_many_arguments)]
+    fn try_spawn_run_with_handoff(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
+        mut config: RunConfig,
+        continuation: RunContinuation,
+        review_seed: Option<ReviewSeed>,
+    ) -> Result<RunAdmission, RuntimeError> {
         // Every spawn path ends here: an infallible entry point (`spawn_reserved`)
         // still cannot start a child Orchestrator. Its admission fails instead.
         if let Err(error) = crate::policy::authorize_child_role(parent, role) {
+            let reason = error.to_string();
             self.fail_admission(run_id, parent, &config, error);
-            return run_id;
+            return Err(RuntimeError::Model { reason });
         }
         if let Some(store) = self.shared.run_store.get() {
             let edges = parent
@@ -1339,8 +1371,9 @@ impl AgentRuntime {
             if !edges.is_empty()
                 && let Err(error) = store.handle.record_review_lineage_edge(&edges)
             {
-                self.fail_review_admission(run_id, parent, &config, error.to_string());
-                return run_id;
+                let reason = error.to_string();
+                self.fail_review_admission(run_id, parent, &config, reason.clone());
+                return Err(RuntimeError::Model { reason });
             }
         }
         config.lane_scope = parent
@@ -1361,17 +1394,21 @@ impl AgentRuntime {
             ..
         } = &continuation
         {
-            let current = intents.get(&run_id);
+            let admissions = self
+                .shared
+                .admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let runs = lock_runs(&self.shared.runs);
+            let current = cancellation::current_execution(run_id, &intents, &admissions, &runs);
             if !fence.is_current(
-                current.and_then(|intent| intent.execution.as_ref()),
-                current.is_some_and(|intent| intent.cancelled),
+                current.as_ref(),
+                intents.get(&run_id).is_some_and(|intent| intent.cancelled),
             ) {
                 drop(intents);
-                self.deferred_resume_diagnostic(
-                    run_id,
-                    "deferred Continue was superseded or cancelled",
-                );
-                return run_id;
+                return Err(RuntimeError::RunTerminated {
+                    run_id: run_id.to_string(),
+                });
             }
         }
         // An explicitly validated conversation restore starts a new generation of
@@ -1394,7 +1431,9 @@ impl AgentRuntime {
             .and_then(|intent| intent.parent)
             .or(parent);
         if self.shared.quiesce.active(run_id) {
-            return run_id;
+            return Err(RuntimeError::Model {
+                reason: "durable intent is still active".into(),
+            });
         }
         // Pre-admission reservations and registration share a single execution.
         // An explicit resume or replacement of a registered run starts a new one.
@@ -1432,7 +1471,10 @@ impl AgentRuntime {
             Ok(false) => {
                 drop(intents);
                 self.reserve_admission(run_id, parent, config.ownership.clone());
-                return run_id;
+                return Ok(RunAdmission {
+                    run: run_id,
+                    execution,
+                });
             }
             Err(error) => {
                 // Register only an Error diagnostic incarnation, never provider
@@ -1442,7 +1484,7 @@ impl AgentRuntime {
                     .startup_failure
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
-                return self.register_without_admission(
+                self.register_without_admission(
                     run_id,
                     parent,
                     role,
@@ -1453,6 +1495,7 @@ impl AgentRuntime {
                     execution,
                     &intents,
                 );
+                return Err(error);
             }
         }
         let run = if self.shared.model_for(&config).requires_admission() {
@@ -1482,7 +1525,7 @@ impl AgentRuntime {
         };
         drop(intents);
 
-        run
+        Ok(RunAdmission { run, execution })
     }
 
     // Keep host provenance explicit at this installation boundary.
@@ -2718,11 +2761,19 @@ impl AgentRuntime {
             .collect::<Vec<_>>();
         // Renewals take only their own gate. Sort subtree stops so overlapping
         // stops agree on lock order, without waiting for unrelated chat storage.
-        let _restore_guards = gates
+        let _restore_guards = targets
             .iter()
-            .map(|gate| {
-                gate.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .zip(&gates)
+            .map(|(_target, gate)| {
+                #[cfg(test)]
+                {
+                    self.lock_stop_test_gate(*_target, gate)
+                }
+                #[cfg(not(test))]
+                {
+                    gate.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                }
             })
             .collect::<Vec<_>>();
         for target in &targets {
