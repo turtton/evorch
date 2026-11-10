@@ -22,6 +22,39 @@ impl AgentRuntime {
         self
     }
 
+    /// Await producer completion, including the post-terminal lesson pipeline.
+    /// Ingress must already be quiesced. Pipeline failures are reported by their
+    /// diagnostic; a closed result channel also completes the drain.
+    pub async fn drain_learning(&self) {
+        for run in self.list_agents() {
+            let _ = self.wait(run.run_id).await;
+        }
+        let runs: Vec<_> = self
+            .shared
+            .learning_runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(run, rx)| (*run, rx.clone()))
+            .collect();
+        for (run, mut receiver) in runs {
+            let _ = self.wait(run).await;
+            loop {
+                if receiver.borrow_and_update().is_some() {
+                    break;
+                }
+                if receiver.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// A local run must still own its generation, including during quiescing.
+    pub fn owns_background_run(&self, run: RunId) -> bool {
+        self.validate_run_mutation(run).is_ok()
+    }
+
     pub(crate) fn prepare_learning(&self, task: &RunTask) -> Option<PendingLearning> {
         if task.parent.is_some() || task.config.learning_internal || task.config.keep_alive {
             return None;
@@ -180,6 +213,10 @@ impl PendingLearning {
         let Some(runtime) = AgentRuntime::from_weak(&weak) else {
             return Ok(());
         };
+        // A restored/fenced host must not become another learner of this source.
+        if !runtime.owns_background_run(run) {
+            return Ok(());
+        }
         if self.snapshot.is_none() {
             let policy = runtime
                 .shared

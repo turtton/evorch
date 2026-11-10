@@ -47,45 +47,97 @@ struct CrashEntry {
 /// unwraps, logs, or invokes user formatting.
 /// Calling during a panic is ignored because std::panic::set_hook would panic.
 pub fn install_crash_spool(spool_dir: PathBuf) {
-    if std::thread::panicking() {
-        return;
+    std::mem::forget(register_crash_spool(spool_dir));
+}
+
+static SPOOLS: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+static HOOK: std::sync::Once = std::sync::Once::new();
+
+/// Process-local hook registration. Multiple owners of the same directory do not
+/// duplicate spool writes; dropping the last registration disables that output.
+pub struct CrashSpoolGuard(Option<PathBuf>);
+impl Drop for CrashSpoolGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let mut dirs = SPOOLS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(count) = dirs.get_mut(&path) {
+                *count -= 1;
+                if *count == 0 {
+                    dirs.remove(&path);
+                }
+            }
+        }
     }
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        // A caught panic is reported live by its catcher; the process keeps running.
-        if crate::panic_capture::record_if_caught(info) {
+}
+
+pub fn register_crash_spool(spool_dir: PathBuf) -> CrashSpoolGuard {
+    if std::thread::panicking() {
+        return CrashSpoolGuard(None);
+    }
+    HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // A caught panic is reported live by its catcher; the process keeps running.
+            if crate::panic_capture::record_if_caught(info) {
+                previous(info);
+                return;
+            }
+            if SPOOLS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+            {
+                previous(info);
+                return;
+            }
+            let message = crate::panic_capture::payload_message(info.payload());
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let entry = CrashEntry {
+                message: bound_text(message, 4096),
+                location: info.location().map(|l| {
+                    bound_text(&format!("{}:{}:{}", l.file(), l.line(), l.column()), 4096)
+                }),
+                thread: std::thread::current()
+                    .name()
+                    .map(|name| bound_text(name, 1024)),
+                timestamp,
+                build: Some(super::build_info()),
+                code: None,
+                backtrace: Some(bound_text(
+                    &compact_backtrace(&std::backtrace::Backtrace::force_capture().to_string()),
+                    BACKTRACE_MAX_BYTES,
+                )),
+            };
+            if let Ok(bytes) = serde_json::to_vec(&entry) {
+                let dirs: Vec<_> = SPOOLS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .keys()
+                    .cloned()
+                    .collect();
+                for spool_dir in dirs {
+                    if fs::create_dir_all(&spool_dir).is_ok() {
+                        let path = spool_dir
+                            .join(format!("crash-{timestamp}-{}.json", std::process::id()));
+                        let _ = atomic_write(&path, &bytes);
+                    }
+                }
+            }
             previous(info);
-            return;
-        }
-        let message = crate::panic_capture::payload_message(info.payload());
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let entry = CrashEntry {
-            message: bound_text(message, 4096),
-            location: info
-                .location()
-                .map(|l| bound_text(&format!("{}:{}:{}", l.file(), l.line(), l.column()), 4096)),
-            thread: std::thread::current()
-                .name()
-                .map(|name| bound_text(name, 1024)),
-            timestamp,
-            build: Some(super::build_info()),
-            code: None,
-            backtrace: Some(bound_text(
-                &compact_backtrace(&std::backtrace::Backtrace::force_capture().to_string()),
-                BACKTRACE_MAX_BYTES,
-            )),
-        };
-        if let Ok(bytes) = serde_json::to_vec(&entry)
-            && fs::create_dir_all(&spool_dir).is_ok()
-        {
-            let path = spool_dir.join(format!("crash-{timestamp}-{}.json", std::process::id()));
-            let _ = atomic_write(&path, &bytes);
-        }
-        previous(info);
-    }));
+        }));
+    });
+    *SPOOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(spool_dir.clone())
+        .or_default() += 1;
+    CrashSpoolGuard(Some(spool_dir))
 }
 
 const BACKTRACE_MAX_BYTES: usize = 8192;

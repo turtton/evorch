@@ -14,6 +14,10 @@ impl Drop for ObserverTask {
 }
 
 impl AgentRuntime {
+    pub fn self_improvement_settings(&self) -> Option<ImprovementSettings> {
+        self.shared.self_improvement.get().cloned()
+    }
+
     /// Opt in to passive collection. Reconfiguration is warn-ignored, not a panic.
     pub fn with_self_improvement(self, settings: ImprovementSettings) -> Self {
         if self.shared.self_improvement.set(settings).is_err() {

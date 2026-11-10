@@ -226,7 +226,18 @@ impl SharedLeases {
 /// # Errors
 /// Fails when the lock file cannot be created or locked for another reason.
 pub fn reclaim_lease(db_path: &Path) -> Result<Option<File>, StorageError> {
-    let path = sibling_path(db_path, ".reclaim-lock")?;
+    service_lease(db_path, ".reclaim-lock")
+}
+
+/// One collector of database-wide diagnostics and crash spool intake. This must
+/// not take the maintenance lock exclusively: live writers hold it shared. Like
+/// the reclaim lock, this inode is never unlinked and closes on process death.
+pub fn improvement_lease(db_path: &Path) -> Result<Option<File>, StorageError> {
+    service_lease(db_path, ".improvement-lock")
+}
+
+fn service_lease(db_path: &Path, suffix: &str) -> Result<Option<File>, StorageError> {
+    let path = sibling_path(db_path, suffix)?;
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -240,7 +251,7 @@ pub fn reclaim_lease(db_path: &Path) -> Result<Option<File>, StorageError> {
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(error) if would_block(&error) => Ok(None),
-        Err(error) => Err(lock_error("reclaim", error)),
+        Err(error) => Err(lock_error(suffix, error)),
     }
 }
 

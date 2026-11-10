@@ -1247,3 +1247,28 @@ async fn bus_diagnostics_record_their_wall_clock_and_split_by_emitter() {
         "{draft}"
     );
 }
+
+#[test]
+fn managed_crash_hook_remains_until_last_owner_and_then_stops_spooling() {
+    const CHILD: &str = "EVORCH_PR03B_CRASH_HOOK_CHILD";
+    if let Some(spool) = std::env::var_os(CHILD) {
+        let spool = PathBuf::from(spool);
+        let first = register_crash_spool(spool.clone());
+        let second = register_crash_spool(spool.clone());
+        drop(first);
+        let _ = std::panic::catch_unwind(|| panic!("active managed hook"));
+        let crashes = drain_crash_spool(&spool);
+        assert_eq!(crashes.len(), 1);
+        assert_eq!(crashes[0].message, "active managed hook");
+        drop(second);
+        let _ = std::panic::catch_unwind(|| panic!("disabled managed hook"));
+        assert!(drain_crash_spool(&spool).is_empty());
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    // Panic hooks are process-global; never replace another test's hook.
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "self_improvement::tests::managed_crash_hook_remains_until_last_owner_and_then_stops_spooling", "--nocapture"])
+        .env(CHILD, directory.path()).status().unwrap();
+    assert!(status.success());
+}

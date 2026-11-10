@@ -100,6 +100,7 @@ fn spawn(cli: &Path, args: &[OsString], member: &Member) -> std::io::Result<toki
     // started from, nor hold the GUI's descriptors.
     sandbox::process::apply_launch_policy(command.as_std_mut());
     end_with_parent(&mut command);
+    command.kill_on_drop(true);
     command.spawn()
 }
 
@@ -133,6 +134,21 @@ pub(super) fn launch(
     overlay: &str,
     launches: Vec<Launch>,
 ) -> Result<GroupRecord, String> {
+    launch_with(shared, run_id, overlay, launches, spawn)
+}
+
+fn launch_with(
+    shared: &Arc<Shared>,
+    run_id: &str,
+    overlay: &str,
+    launches: Vec<Launch>,
+    mut spawn_child: impl FnMut(&Path, &[OsString], &Member) -> std::io::Result<tokio::process::Child>,
+) -> Result<GroupRecord, String> {
+    let mut admission = shared.lifecycle.state.lock().unwrap();
+    if admission.closed {
+        return Err("evaluation host is stopping".into());
+    }
+    shared.context.host.authorize_run(run_id)?;
     let context = &shared.context;
     let cli = match &context.cli {
         Some(cli) => cli.clone(),
@@ -188,7 +204,7 @@ pub(super) fn launch(
             context.user_config_dir.clone().into(),
         ]
         .into();
-        match spawn(&cli, &args, &member) {
+        match spawn_child(&cli, &args, &member) {
             Ok(child) => {
                 member.pid = child.id();
                 children.push((members.len(), child));
@@ -228,18 +244,43 @@ pub(super) fn launch(
     let record = Arc::new(Mutex::new(record));
     shared.groups.insert(Arc::clone(&record));
     for (index, child) in children {
-        tokio::spawn(watch(Arc::clone(shared), Arc::clone(&record), index, child));
+        admission.tasks.push(tokio::spawn(watch(
+            shared.context.clone(),
+            shared.lifecycle.stop.subscribe(),
+            Arc::clone(&record),
+            index,
+            child,
+        )));
     }
     Ok(snapshot)
 }
 
 async fn watch(
-    shared: Arc<Shared>,
+    context: super::EvaluatorContext,
+    mut stopped: tokio::sync::watch::Receiver<bool>,
     record: Arc<Mutex<GroupRecord>>,
     index: usize,
     mut child: tokio::process::Child,
 ) {
-    let exit = match child.wait().await {
+    let stop = async {
+        loop {
+            if *stopped.borrow_and_update() {
+                break;
+            }
+            if stopped.changed().await.is_err() {
+                break;
+            }
+        }
+    };
+    let status = tokio::select! {
+        biased;
+        () = stop => {
+            let _ = child.start_kill();
+            child.wait().await
+        }
+        status = child.wait() => status,
+    };
+    let exit = match status {
         Ok(status) => Exit::of(status),
         Err(error) => Exit::now(None, None, Some(format!("cannot wait for it: {error}"))),
     };
@@ -259,7 +300,11 @@ async fn watch(
         .await
         .unwrap_or_else(|error| (error.to_string(), false));
     let run_id = lock(&record).run_id.clone();
-    let delivered = shared.context.host.deliver_notice(&run_id, &notice);
+    let delivered = if *stopped.borrow() {
+        Err("evaluation host stopped; notice retained in report".into())
+    } else {
+        context.host.deliver_notice(&run_id, &notice)
+    };
     let (target, outcome) = match &delivered {
         Ok(run) => (run.clone(), format!("notice delivered to {run}")),
         Err(reason) => (
@@ -267,7 +312,7 @@ async fn watch(
             format!("notice not delivered ({reason}); eval_report shows the result"),
         ),
     };
-    shared.context.bus.emit(Event::new(DiagnosticEvent {
+    context.bus.emit(Event::new(DiagnosticEvent {
         source: "eval".into(),
         severity: if all_succeeded {
             DiagnosticSeverity::Info
@@ -509,5 +554,90 @@ mod launch_tests {
         assert!(pid.parse::<u32>().is_ok(), "{stdout}");
         assert_eq!(session, pid, "{stdout}");
         assert_eq!(descriptor, "descriptor-closed", "{stdout}");
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Host(AtomicUsize);
+    impl crate::evaluator::EvaluatorHost for Host {
+        fn deliver_notice(&self, _: &str, _: &str) -> Result<String, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok("notice".into())
+        }
+        fn reload_config(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_child_start_is_reaped_and_saved_before_service_drain_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("test.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let host = Arc::new(Host(AtomicUsize::new(0)));
+        let lifecycle = crate::evaluator::EvaluationService::default();
+        let sh = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join("sh"))
+            .find(|sh| sh.is_file())
+            .unwrap();
+        let shared = Arc::new(Shared {
+            context: crate::evaluator::EvaluatorContext {
+                database: config.db_path,
+                storage: storage.handle(),
+                user_config_dir: dir.path().into(),
+                catalog_dir: None,
+                bus: Arc::new(event_bus::EventBus::new(32)),
+                host: host.clone(),
+                cli: Some(sh),
+            },
+            catalog: tokio::sync::OnceCell::new(),
+            groups: Default::default(),
+            lifecycle: lifecycle.clone(),
+        });
+        let launches = || {
+            ["started", "refused"]
+                .into_iter()
+                .map(|thread_id| Launch {
+                    thread_id: thread_id.into(),
+                    purpose: Purpose::Target,
+                    repeat: 1,
+                    problem: "test".into(),
+                })
+                .collect()
+        };
+        let mut count = 0;
+        let group = launch_with(&shared, "run-1", "overlay", launches(), |cli, _, member| {
+            count += 1;
+            if count == 2 {
+                return Err(std::io::Error::other("injected spawn failure"));
+            }
+            // The shell blocks itself, not by sleeping; shutdown can kill it even
+            // before exec. Child wait is the completion signal, not elapsed time.
+            spawn(cli, &["-c".into(), "kill -STOP $$".into()], member)
+        })
+        .unwrap();
+        assert!(group.members[0].exit.is_none());
+        assert!(group.members[1].exit.is_some());
+        lifecycle.shutdown().await.unwrap();
+        lifecycle.wait_drained().await;
+        let group = detail(&shared, &dir.path().join("eval"), &group.id).unwrap();
+        assert!(!group["finished_at"].is_null());
+        assert_eq!(
+            host.0.load(Ordering::SeqCst),
+            0,
+            "no shutdown notice may start a new run"
+        );
+        assert!(
+            launch(&shared, "run-1", "overlay", launches())
+                .unwrap_err()
+                .contains("stopping")
+        );
+        lifecycle.shutdown().await.unwrap();
     }
 }

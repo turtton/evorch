@@ -353,9 +353,21 @@ fn simulator_config(base: &Config) -> (Config, BindingSummary) {
 /// The original project's trust in the GUI sidebar, or approved when the
 /// sidebar does not know it: the replay runs in a clone the user asked for.
 fn mirrored_trust(user_config_dir: Option<&Path>, project_root: &Path) -> ProjectTrust {
+    // Read only the ownership-independent project declaration, not GUI state.
+    #[derive(serde::Deserialize)]
+    struct Sidebar {
+        projects: Vec<Project>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Project {
+        repo_root: PathBuf,
+        #[serde(default)]
+        trust: String,
+    }
     let Some(sidebar) = user_config_dir
         .map(|dir| dir.join("sidebar.json"))
-        .and_then(|path| workspace_ui::load_sidebar(&path).ok())
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Sidebar>(&bytes).ok())
     else {
         return ProjectTrust::Approved;
     };
@@ -365,10 +377,10 @@ fn mirrored_trust(user_config_dir: Option<&Path>, project_root: &Path) -> Projec
         .projects
         .iter()
         .find(|project| canonical(&project.repo_root) == root)
-        .map(|project| project.trust)
+        .map(|project| project.trust.as_str())
     {
-        Some(workspace_ui::TrustState::Unapproved) => ProjectTrust::Unapproved,
-        _ => ProjectTrust::Approved,
+        Some("approved") | None => ProjectTrust::Approved,
+        Some(_) => ProjectTrust::Unapproved,
     }
 }
 
@@ -668,3 +680,34 @@ fn configured_routed_model(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod project_trust_boundary_tests {
+    use super::*;
+    #[test]
+    fn replay_reads_only_project_trust_without_loading_gui_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for (trust, expected) in [
+            (Some("approved"), ProjectTrust::Approved),
+            (Some("unapproved"), ProjectTrust::Unapproved),
+            (None, ProjectTrust::Unapproved),
+        ] {
+            let mut project = serde_json::json!({"repo_root":root});
+            if let Some(trust) = trust {
+                project["trust"] = trust.into();
+            }
+            // Deliberately omit GUI ids/layout/thread state: none grants authority.
+            std::fs::write(
+                root.join("sidebar.json"),
+                serde_json::json!({"projects":[project]}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(mirrored_trust(Some(root), root), expected);
+        }
+        assert_eq!(
+            mirrored_trust(Some(root), &root.join("not-recorded")),
+            ProjectTrust::Approved
+        );
+    }
+}
