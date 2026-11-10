@@ -750,3 +750,175 @@ fn unclassified_reads_do_not_trust_changing_display_text() {
         }
     }
 }
+
+#[test]
+fn uncollected_cohort_survives_unrelated_completion_rereads_and_snapshot() {
+    let mut counters = BudgetCounters::default();
+    let managed = BTreeSet::from(["A".into(), "B".into(), "C".into()]);
+    assert!(
+        !counters
+            .spawn_credits
+            .reconcile_uncollected_lanes(&managed, &managed)
+    );
+    for n in 0..99 {
+        counters.spawn_credits.record_lane_open(&format!("new-{n}"));
+        counters.mark_lane_spawned(&format!("new-{n}"));
+    }
+    assert_eq!(counters.spawn_credits.uncollected_lane_open_count, 99);
+    assert!(
+        !counters
+            .spawn_credits
+            .reconcile_uncollected_lanes(&managed, &managed)
+    );
+    assert!(counters.mark_lane_completed("A"));
+    assert_eq!(counters.spawn_credits.unobserved, 0); // Existing all-credit refund.
+    assert_eq!(
+        counters.spawn_credits.uncollected_lane_ids,
+        BTreeSet::from(["B".into(), "C".into()])
+    );
+    counters.spawn_credits.record_lane_open("hundredth");
+    counters.spawn_credits.record_lane_open("hundredth"); // Intent-only retry.
+    assert_eq!(counters.spawn_credits.uncollected_lane_open_count, 100);
+    assert!(
+        counters
+            .spawn_credits
+            .reconcile_uncollected_lanes(&managed, &managed)
+    );
+    assert!(counters.mark_lane_completed("small-new-result"));
+    assert!(!counters.mark_lane_completed("A"));
+    counters.mark_progress();
+    let snapshot = serde_json::to_string(&counters.spawn_credits).unwrap();
+    counters.spawn_credits = serde_json::from_str(&snapshot).unwrap();
+    assert!(
+        counters
+            .spawn_credits
+            .reconcile_uncollected_lanes(&managed, &managed)
+    );
+    assert_eq!(counters.spawn_credits.uncollected_lane_open_count, 100);
+    assert!(counters.mark_lane_completed("B"));
+    assert!(
+        counters
+            .spawn_credits
+            .reconcile_uncollected_lanes(&managed, &managed)
+    );
+    assert_eq!(
+        counters.spawn_credits.uncollected_lane_ids,
+        BTreeSet::from(["C".into()])
+    );
+    assert!(counters.mark_lane_completed("C"));
+    assert!(
+        !counters
+            .spawn_credits
+            .reconcile_uncollected_lanes(&managed, &managed)
+    );
+    assert_eq!(counters.spawn_credits.uncollected_lane_open_count, 0);
+}
+
+#[test]
+fn uncollected_running_and_management_end_are_not_completion() {
+    let mut credits = SpawnCredits::default();
+    let managed = BTreeSet::from(["old".into(), "new".into()]);
+    let old = BTreeSet::from(["old".into()]);
+    assert!(!credits.reconcile_uncollected_lanes(&managed, &old));
+    for n in 0..100 {
+        credits.record_lane_open(&format!("open-{n}"));
+    }
+    assert!(credits.reconcile_uncollected_lanes(&managed, &old));
+    // A temporary Working report disables refusal, not the original cohort/count.
+    assert!(!credits.reconcile_uncollected_lanes(&managed, &BTreeSet::new()));
+    assert_eq!(credits.uncollected_lane_open_count, 100);
+    assert!(credits.reconcile_uncollected_lanes(&managed, &old));
+    // A newer terminal result does not replace the older cohort.
+    assert!(!credits.reconcile_uncollected_lanes(&managed, &BTreeSet::from(["new".into()])));
+    assert_eq!(credits.uncollected_lane_ids, old);
+    credits.unobserved = 17;
+    assert!(
+        !credits.reconcile_uncollected_lanes(&BTreeSet::from(["new".into()]), &BTreeSet::new())
+    );
+    assert!(credits.uncollected_lane_ids.is_empty());
+    assert_eq!(credits.unobserved, 17); // Detach never refunds common credit.
+    assert_eq!(credits.uncollected_lane_open_count, 0);
+    for n in 0..101 {
+        credits.record_lane_open(&format!("running-{n}"));
+    }
+    assert_eq!(credits.uncollected_lane_open_count, 0);
+}
+
+#[test]
+fn uncollected_old_json_defaults_but_invalid_values_fail() {
+    let old = r#"{"spawned":[],"observed":[],"unobserved":20}"#;
+    let credits: SpawnCredits = serde_json::from_str(old).unwrap();
+    assert_eq!(credits.uncollected_lane_open_count, 0);
+    assert!(credits.uncollected_lane_ids.is_empty());
+    let mut value = serde_json::to_value(credits).unwrap();
+    value["uncollected_lane_open_count"] = serde_json::json!(-1);
+    assert!(serde_json::from_value::<SpawnCredits>(value).is_err());
+}
+
+#[test]
+fn uncollected_tool_presentation_compacted_before_request_is_not_collection() {
+    let mut budget = BudgetCounters::default();
+    let cohort = BTreeSet::from(["artifact".into()]);
+    budget
+        .spawn_credits
+        .reconcile_uncollected_lanes(&cohort, &cohort);
+    for n in 0..100 {
+        budget.spawn_credits.record_lane_open(&format!("open-{n}"));
+    }
+    budget.queue_lane_presentation("full tool report", vec!["artifact".into()]);
+    let snapshot = serde_json::to_string(&budget.spawn_credits).unwrap();
+    budget.spawn_credits = serde_json::from_str(&snapshot).unwrap();
+    assert!(
+        budget
+            .spawn_credits
+            .reconcile_uncollected_lanes(&cohort, &cohort)
+    );
+    // Only a compaction summary survives the provider boundary.
+    budget.observe_lane_presentations(&[providers::Message {
+        role: providers::Role::User,
+        content: vec![providers::ContentBlock::Text {
+            text: "summary: reference to artifact".into(),
+        }],
+    }]);
+    assert!(
+        budget
+            .spawn_credits
+            .reconcile_uncollected_lanes(&cohort, &cohort)
+    );
+    assert!(!budget.spawn_credits.observed.contains("lane:artifact"));
+    budget.queue_lane_presentation("full tool report", vec!["artifact".into()]);
+    budget.observe_lane_presentations(&[providers::Message {
+        role: providers::Role::User,
+        content: vec![providers::ContentBlock::ToolResult {
+            tool_call_id: "read-again".into(),
+            content: vec![providers::ToolResultContent::Text {
+                text: "full tool report".into(),
+            }],
+            is_error: false,
+        }],
+    }]);
+    assert!(budget.spawn_credits.observed.contains("lane:artifact"));
+    assert!(
+        !budget
+            .spawn_credits
+            .reconcile_uncollected_lanes(&cohort, &cohort)
+    );
+}
+
+#[test]
+fn uncollected_reattach_requires_new_current_terminal_report_without_reviving_old_counts() {
+    let mut credits = SpawnCredits::default();
+    let ids = BTreeSet::from(["lane".into()]);
+    credits.reconcile_uncollected_lanes(&ids, &ids);
+    credits.record_lane_open("before-detach");
+    credits.reconcile_uncollected_lanes(&BTreeSet::new(), &BTreeSet::new());
+    assert_eq!(credits.uncollected_lane_open_count, 0);
+    // A reattached lane with only the old revision has no effective terminal report.
+    credits.reconcile_uncollected_lanes(&ids, &BTreeSet::new());
+    credits.record_lane_open("after-reattach");
+    assert!(credits.uncollected_lane_ids.is_empty());
+    assert_eq!(credits.uncollected_lane_open_count, 0);
+    credits.reconcile_uncollected_lanes(&ids, &ids);
+    assert_eq!(credits.uncollected_lane_ids, ids);
+    assert_eq!(credits.uncollected_lane_open_count, 0);
+}

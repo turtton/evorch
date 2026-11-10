@@ -205,6 +205,37 @@ pub(crate) fn get(conn: &Connection, lane_id: &str) -> Result<Option<LaneRecord>
         .optional()?)
 }
 
+/// Internal live membership scan; unlike lane_list it creates no cursor snapshot.
+pub(crate) fn managed_lanes(
+    conn: &Connection,
+    lead: &str,
+) -> Result<Vec<LaneRecord>, StorageError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM lanes WHERE lead_thread_id = ?1 AND {LIVE} ORDER BY lane_id"
+    ))?;
+    statement
+        .query_map([lead], from_row)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+/// Identity lookup deliberately ignores current lead/policy: detached intents
+/// still own their original creation key.
+pub(crate) fn get_by_creation_key(
+    conn: &Connection,
+    origin_thread_id: &str,
+    creation_key: &str,
+) -> Result<Option<LaneRecord>, StorageError> {
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT lane_id FROM lanes WHERE origin_thread_id = ?1 AND creation_key = ?2",
+            params![origin_thread_id, creation_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    id.map(|id| get(conn, &id)).transpose().map(Option::flatten)
+}
+
 pub(crate) fn get_by_thread(
     conn: &Connection,
     thread_id: &str,

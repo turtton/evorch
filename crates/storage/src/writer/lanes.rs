@@ -249,6 +249,30 @@ impl StorageHandle {
         self.lane_read(move |conn| crate::repo::lanes::reports(conn, &lane_id, after_seq, limit))
     }
 
+    /// Internal live membership scan without creating/evicting lane_list cursors.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn managed_lanes(&self, lead_thread_id: &str) -> Result<Vec<LaneRecord>, StorageError> {
+        let lead = lead_thread_id.to_owned();
+        self.lane_read(move |conn| crate::repo::lanes::managed_lanes(conn, &lead))
+    }
+
+    /// Read an existing creation intent, including after detach or before start.
+    /// This does not create, start, update or acknowledge anything.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn lane_by_creation_key(
+        &self,
+        origin_thread_id: &str,
+        creation_key: &str,
+    ) -> Result<Option<LaneRecord>, StorageError> {
+        let origin = origin_thread_id.to_owned();
+        let key = creation_key.to_owned();
+        self.lane_read(move |conn| crate::repo::lanes::get_by_creation_key(conn, &origin, &key))
+    }
+
     /// Recoverable creation intents a crash left, in lane ID order, at most
     /// `limit` (200 at most). Cancelled or locally failed intents are excluded.
     ///

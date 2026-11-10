@@ -143,18 +143,100 @@ pub struct SpawnCredits {
     spawned: BTreeSet<String>,
     observed: BTreeSet<String>,
     unobserved: u32,
+    /// Successful creation intents while the original uncollected cohort remains.
+    #[serde(default)]
+    uncollected_lane_open_count: u32,
+    #[serde(default)]
+    uncollected_lane_ids: BTreeSet<String>,
     /// Receipt acceptance is not model observation. Retained until a successful
     /// provider request, including across a crash/restore before presentation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) lane_presentations: Vec<LanePresentation>,
 }
 
+/// Not a lane-count limit; only further model-authored creation is suppressed.
+pub(crate) const UNCOLLECTED_LANE_OPEN_LIMIT: u32 = 100;
+
+impl SpawnCredits {
+    /// Ledger state is authoritative. Working is not collection: keep a cohort
+    /// through temporary nonterminal reports, but never suppress on running alone.
+    pub(crate) fn reconcile_uncollected_lanes(
+        &mut self,
+        managed: &BTreeSet<String>,
+        terminal: &BTreeSet<String>,
+    ) -> bool {
+        self.uncollected_lane_ids
+            .retain(|id| managed.contains(id) && !self.observed.contains(&format!("lane:{id}")));
+        if self.uncollected_lane_ids.is_empty() {
+            self.uncollected_lane_open_count = 0;
+            self.uncollected_lane_ids = terminal
+                .iter()
+                .filter(|id| !self.observed.contains(&format!("lane:{id}")))
+                .cloned()
+                .collect();
+        }
+        self.uncollected_lane_open_count >= UNCOLLECTED_LANE_OPEN_LIMIT
+            && self
+                .uncollected_lane_ids
+                .iter()
+                .any(|id| terminal.contains(id))
+    }
+
+    /// The durable creation identity, not admission or a new root generation.
+    /// Sharing the existing identity set also handles an intent-only partial failure.
+    pub(crate) fn record_lane_open(&mut self, lane_id: &str) {
+        if self.spawned.insert(format!("lane-open:{lane_id}"))
+            && !self.uncollected_lane_ids.is_empty()
+        {
+            self.uncollected_lane_open_count = self.uncollected_lane_open_count.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn uncollected_lane_rejection(&self) -> String {
+        // IDs are bounded at ingestion; at most eight are returned to the provider.
+        serde_json::json!({
+            "code": "lane_creation_suppressed",
+            "uncollected_lane_open_count": self.uncollected_lane_open_count,
+            "threshold": UNCOLLECTED_LANE_OPEN_LIMIT,
+            "lane_ids": self.uncollected_lane_ids.iter().take(8).collect::<Vec<_>>(),
+            "remaining_lane_ids": self.uncollected_lane_ids.len().saturating_sub(8),
+            "message": "New lane_open temporarily suppressed. Collect the listed lanes' current ready/failed reports with lane_list or notification delivery. Existing lanes, collection and answers remain available; this is not a lane-count limit."
+        }).to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LanePresentation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) nudge_episode_ids: Vec<String>,
-    fingerprint: String,
-    lanes: Vec<String>,
+    pub(crate) fingerprint: String,
+    pub(crate) lanes: Vec<String>,
+}
+
+/// Exact provider-visible bodies, never summaries or reference-only substitutes.
+pub(crate) fn presentation_texts(messages: &[providers::Message]) -> impl Iterator<Item = &str> {
+    messages.iter().flat_map(|message| {
+        message.content.iter().flat_map(move |block| {
+            let mut texts = Vec::new();
+            match block {
+                providers::ContentBlock::Text { text } if message.role == providers::Role::User => {
+                    texts.push(text.as_str())
+                }
+                providers::ContentBlock::ToolResult {
+                    content,
+                    is_error: false,
+                    ..
+                } => {
+                    texts.extend(content.iter().filter_map(|part| match part {
+                        providers::ToolResultContent::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    }));
+                }
+                _ => {}
+            }
+            texts
+        })
+    })
 }
 
 pub(crate) struct BudgetCounters {
@@ -395,16 +477,8 @@ impl BudgetCounters {
         use sha2::{Digest, Sha256};
         let pending = std::mem::take(&mut self.spawn_credits.lane_presentations);
         let changed = !pending.is_empty();
-        let visible: std::collections::HashSet<String> = visible
-            .iter()
-            .filter(|m| m.role == providers::Role::User)
-            .flat_map(|m| &m.content)
-            .filter_map(|b| match b {
-                providers::ContentBlock::Text { text } => {
-                    Some(format!("{:x}", Sha256::digest(text)))
-                }
-                _ => None,
-            })
+        let visible: std::collections::HashSet<String> = presentation_texts(visible)
+            .map(|text| format!("{:x}", Sha256::digest(text)))
             .collect();
         for presentation in pending {
             if visible.contains(&presentation.fingerprint) {
@@ -419,7 +493,12 @@ impl BudgetCounters {
     }
 
     pub(crate) fn mark_lane_completed(&mut self, lane_id: &str) -> bool {
-        self.mark_child_completed(&format!("lane:{lane_id}"))
+        let counted = self.mark_child_completed(&format!("lane:{lane_id}"));
+        self.spawn_credits.uncollected_lane_ids.remove(lane_id);
+        if self.spawn_credits.uncollected_lane_ids.is_empty() {
+            self.spawn_credits.uncollected_lane_open_count = 0;
+        }
+        counted
     }
 
     pub(crate) fn finish_round(&mut self) {
