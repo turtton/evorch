@@ -485,18 +485,51 @@ pub(crate) fn limit_events(
     .collect::<Result<_, _>>()?)
 }
 
-/// Takes the one notification of the stop at `budget_epoch`: true for the first caller of any
-/// window, false for every later one and for an epoch that never stopped.
+/// Takes the one notification of the stop at `claim.budget_epoch`: true for the first caller of
+/// any window, false for every later one. The stop must still stand for the thread the claim
+/// is made for: auto fix stopped at that epoch's limit, this thread the destination and
+/// its link (same revision) still active. A claim made for a stop that no longer applies
+/// there (Unlink, relink, Reset, a moved destination, a deleted thread) takes nothing.
 pub(crate) fn claim_limit_notification(
     c: &Connection,
-    key: &PullRequestKey,
-    budget_epoch: u64,
+    claim: &PrLimitClaim,
     now_ns: i64,
 ) -> Result<bool, StorageError> {
-    let key = key.normalized()?;
-    let claimed = c.execute(
+    let key = claim.key.normalized()?;
+    let tx = immediate(c)?;
+    let current = state(&tx, &key)?;
+    let standing = current.stop_reason.as_deref() == Some("limit_reached")
+        && current.budget_epoch == claim.budget_epoch
+        && current.limit_reached_epoch == Some(claim.budget_epoch)
+        && current.destination_thread_id.as_deref() == Some(claim.thread_id.as_str())
+        && current.link_revision == Some(claim.link_revision);
+    if !standing {
+        return Ok(false);
+    }
+    match check_link(&tx, &key, &claim.thread_id, claim.link_revision) {
+        Ok(()) => {}
+        Err(StorageError::PrAutoFix(_) | StorageError::Tombstoned { .. }) => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let claimed = tx.execute(
         "UPDATE pr_auto_fix_limit_events SET notified_at_ns=?3 WHERE pr_key=?1 AND budget_epoch=?2 AND notified_at_ns IS NULL",
-        params![key_id(&key)?, budget_epoch, now_ns],
+        params![key_id(&key)?, claim.budget_epoch, now_ns],
     )?;
+    tx.commit()?;
     Ok(claimed == 1)
+}
+
+/// Gives back a claim taken at `claimed_at_ns` whose taker found it no longer held the
+/// thread, so the window that does hold it can still tell. Another claim is never undone.
+pub(crate) fn release_limit_notification(
+    c: &Connection,
+    claim: &PrLimitClaim,
+    claimed_at_ns: i64,
+) -> Result<bool, StorageError> {
+    let key = claim.key.normalized()?;
+    let released = c.execute(
+        "UPDATE pr_auto_fix_limit_events SET notified_at_ns=NULL WHERE pr_key=?1 AND budget_epoch=?2 AND notified_at_ns=?3",
+        params![key_id(&key)?, claim.budget_epoch, claimed_at_ns],
+    )?;
+    Ok(released == 1)
 }

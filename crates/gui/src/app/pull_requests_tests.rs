@@ -130,10 +130,10 @@ use std::sync::{Arc, Mutex};
 use event_bus::{
     Event, LifecycleEvent, PullRequestAutoFixChange, PullRequestEvent, PullRequestRef,
 };
+use storage::pull_request_auto_fix::PrLimitClaim;
 use storage::pull_request_auto_fix::{PrAutoFixState, PrNoticeMode, PrNoticePhase};
-use storage::pull_requests::PullRequestKey;
 
-use super::pull_requests::PullRequestReader;
+use super::pull_requests::{LimitClaimOutcome, PullRequestReader};
 use crate::model::commands::LoopEvent;
 use crate::model::harness_card::HarnessCard;
 use crate::model::notifications::NotificationKind;
@@ -168,13 +168,24 @@ impl PullRequestReader for Reader {
         Ok(vec![THREAD.into()])
     }
 
-    fn claim_limit_notification(&self, _: &PullRequestKey, epoch: u64) -> Result<bool, String> {
+    fn claim_limit_notification(
+        &self,
+        claim: &PrLimitClaim,
+        still_held: &dyn Fn() -> bool,
+    ) -> Result<LimitClaimOutcome, String> {
         let mut failures = self.claim_failures.lock().unwrap();
         if *failures > 0 {
             *failures -= 1;
             return Err("busy".into());
         }
-        Ok(self.claims.lock().unwrap().insert(epoch))
+        if !still_held() {
+            return Ok(LimitClaimOutcome::NotHeld);
+        }
+        Ok(if self.claims.lock().unwrap().insert(claim.budget_epoch) {
+            LimitClaimOutcome::Claimed
+        } else {
+            LimitClaimOutcome::Declined
+        })
     }
 
     fn harness_card(&self, notice_id: &str) -> Result<Option<HarnessCard>, String> {
@@ -818,4 +829,287 @@ fn a_notice_is_one_card_however_often_its_event_arrives() {
         cards(&window),
         [("prn-1".to_owned(), true), ("prn-2".to_owned(), false)]
     );
+}
+
+// --- the claim of a limit notification against a real database ---
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use storage::pull_request_auto_fix::{PrPolicyAction, PrPolicyUpdate};
+use storage::pull_requests::{LinkPullRequest, PullRequestKey};
+use storage::{Storage, StorageConfig, StorageHandle};
+
+use super::pull_requests::StoragePullRequestReader;
+
+/// A database where `parent` is linked to turtton/evorch#12 (link revision 1) and auto fix,
+/// destined for `parent`, stopped at the limit of budget epoch 0.
+struct StoppedWorld {
+    _dir: tempfile::TempDir,
+    config: StorageConfig,
+    storage: Storage,
+}
+
+fn pull_request_key() -> PullRequestKey {
+    PullRequestKey::github("turtton/evorch", 12).unwrap()
+}
+
+impl StoppedWorld {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("limit.db"),
+            ..StorageConfig::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let world = Self {
+            _dir: dir,
+            config,
+            storage,
+        };
+        world.sql(
+            "INSERT INTO threads(thread_id,archived,created_at_ns,updated_at_ns,source) VALUES ('parent',0,1,1,'runtime')",
+        );
+        world.link(0);
+        world
+            .handle()
+            .update_pr_auto_fix_policy(PrPolicyUpdate {
+                key: pull_request_key(),
+                expected_policy_revision: 0,
+                expected_destination_thread_id: None,
+                destination_thread_id: THREAD.into(),
+                link_revision: 1,
+                action: PrPolicyAction::SetEnabled(true),
+            })
+            .unwrap();
+        world.sql(
+            "UPDATE pr_auto_fix_state SET enabled=0,used=3,stop_reason='limit_reached',limit_reached_epoch=0;
+             INSERT INTO pr_auto_fix_limit_events(pr_key,budget_epoch,notice_id,at_ns) SELECT pr_key,0,'n',1 FROM pr_auto_fix_state;",
+        );
+        world
+    }
+
+    fn handle(&self) -> StorageHandle {
+        self.storage.handle()
+    }
+
+    fn sql(&self, statements: &str) {
+        let connection = rusqlite::Connection::open(&self.config.db_path).unwrap();
+        connection.execute_batch(statements).unwrap();
+    }
+
+    fn link(&self, expected_revision: u64) {
+        self.handle()
+            .link_pull_request(LinkPullRequest {
+                thread_id: THREAD.into(),
+                key: pull_request_key(),
+                expected_revision,
+                at_ns: 1,
+            })
+            .unwrap();
+    }
+
+    fn reader(&self) -> StoragePullRequestReader {
+        StoragePullRequestReader::new(self.config.db_path.clone()).with_limit_claims(self.handle())
+    }
+
+    fn notified(&self) -> Option<i64> {
+        self.handle()
+            .pr_auto_fix_limit_events(pull_request_key(), None)
+            .unwrap()[0]
+            .notified_at_ns
+    }
+}
+
+type Step = Box<dyn FnOnce() + Send>;
+
+/// The real reader, with a step the test runs inside the claim job, at the moment a queued
+/// claim would have been waiting: once before the claim is written, and once between the claim
+/// and the second ask whether the window still holds the thread.
+struct Spy {
+    inner: StoragePullRequestReader,
+    before_claim: Mutex<Option<Step>>,
+    after_claim: Mutex<Option<Step>>,
+    claims_run: AtomicUsize,
+}
+
+impl Spy {
+    fn new(inner: StoragePullRequestReader) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            before_claim: Mutex::new(None),
+            after_claim: Mutex::new(None),
+            claims_run: AtomicUsize::new(0),
+        })
+    }
+}
+
+impl PullRequestReader for Spy {
+    fn load(&self, thread_id: &str) -> Result<ThreadPullRequest, String> {
+        self.inner.load(thread_id)
+    }
+
+    fn linked_threads(&self) -> Result<Vec<String>, String> {
+        self.inner.linked_threads()
+    }
+
+    fn harness_card(&self, notice_id: &str) -> Result<Option<HarnessCard>, String> {
+        self.inner.harness_card(notice_id)
+    }
+
+    fn claim_limit_notification(
+        &self,
+        claim: &PrLimitClaim,
+        still_held: &dyn Fn() -> bool,
+    ) -> Result<LimitClaimOutcome, String> {
+        self.claims_run.fetch_add(1, Ordering::SeqCst);
+        if let Some(step) = self.before_claim.lock().unwrap().take() {
+            step();
+        }
+        let asked = AtomicUsize::new(0);
+        self.inner.claim_limit_notification(claim, &|| {
+            // The second ask comes after the claim is written.
+            if asked.fetch_add(1, Ordering::SeqCst) == 1
+                && let Some(step) = self.after_claim.lock().unwrap().take()
+            {
+                step();
+            }
+            still_held()
+        })
+    }
+}
+
+fn real_window(
+    directory: &std::path::Path,
+    reader: Arc<Spy>,
+    held: &Arc<AtomicBool>,
+) -> WorkbenchState<DemoSource> {
+    let held = Arc::clone(held);
+    let mut window = state(directory)
+        .with_pull_requests(
+            reader,
+            Some(Arc::new(move |_: &str| held.load(Ordering::SeqCst))),
+        )
+        .with_pull_request_spawner(Arc::new(|job| job()));
+    pump(&mut window);
+    window
+}
+
+// Given: the claim of a stop is about to be written / When: the window loses the thread before
+// it runs / Then: it spends nothing and tells nobody; the window that holds the thread tells
+// the stop once
+#[test]
+fn a_window_that_lost_the_thread_before_its_claim_ran_spends_nothing() {
+    let world = StoppedWorld::new();
+    let directory = tempfile::tempdir().unwrap();
+    let held = Arc::new(AtomicBool::new(true));
+    let spy = Spy::new(world.reader());
+    let lose = Arc::clone(&held);
+    *spy.before_claim.lock().unwrap() = Some(Box::new(move || lose.store(false, Ordering::SeqCst)));
+
+    let old_owner = real_window(directory.path(), spy.clone(), &held);
+
+    assert_eq!(spy.claims_run.load(Ordering::SeqCst), 1);
+    assert_eq!(limit_notifications(&old_owner), 0);
+    assert_eq!(world.notified(), None);
+
+    let new_owner = real_window(
+        directory.path(),
+        Spy::new(world.reader()),
+        &Arc::new(AtomicBool::new(true)),
+    );
+    assert_eq!(limit_notifications(&new_owner), 1);
+    assert!(world.notified().is_some());
+}
+
+// Given: the claim was written / When: the window turns out to have lost the thread meanwhile /
+// Then: the claim is given back, nobody is told here, and the window that holds the thread takes
+// it
+#[test]
+fn a_claim_taken_just_as_the_thread_was_lost_is_given_back() {
+    let world = StoppedWorld::new();
+    let directory = tempfile::tempdir().unwrap();
+    let held = Arc::new(AtomicBool::new(true));
+    let spy = Spy::new(world.reader());
+    let lose = Arc::clone(&held);
+    *spy.after_claim.lock().unwrap() = Some(Box::new(move || lose.store(false, Ordering::SeqCst)));
+
+    let old_owner = real_window(directory.path(), spy, &held);
+
+    assert_eq!(limit_notifications(&old_owner), 0);
+    assert_eq!(world.notified(), None, "the claim stayed taken");
+
+    let new_owner = real_window(
+        directory.path(),
+        Spy::new(world.reader()),
+        &Arc::new(AtomicBool::new(true)),
+    );
+    assert_eq!(limit_notifications(&new_owner), 1);
+}
+
+// Given: the claim of a stop is about to be written / When: the link ends, or ends and is made
+// again, before it runs / Then: the stop is not told, and the claim is not spent
+#[test]
+fn an_unlink_or_a_relink_before_the_claim_ran_tells_nothing() {
+    for relink in [false, true] {
+        let world = StoppedWorld::new();
+        let directory = tempfile::tempdir().unwrap();
+        let held = Arc::new(AtomicBool::new(true));
+        let spy = Spy::new(world.reader());
+        let handle = world.handle();
+        *spy.before_claim.lock().unwrap() = Some(Box::new(move || {
+            handle.unlink_pull_request(THREAD, 1, 2).unwrap();
+            if relink {
+                handle
+                    .link_pull_request(LinkPullRequest {
+                        thread_id: THREAD.into(),
+                        key: pull_request_key(),
+                        expected_revision: 2,
+                        at_ns: 3,
+                    })
+                    .unwrap();
+            }
+        }));
+
+        let window = real_window(directory.path(), spy, &held);
+
+        assert_eq!(limit_notifications(&window), 0, "relink: {relink}");
+        assert_eq!(world.notified(), None, "relink: {relink}");
+    }
+}
+
+// Given: a stop shown to the window that holds the thread / When: the claim job has run / Then:
+// the notification is raised by the frame that drains its result (no read or wait in between),
+// and a window that began to close starts no claim
+#[test]
+fn the_claim_result_is_shown_by_the_frame_that_drains_it_and_closing_starts_no_claim() {
+    let world = StoppedWorld::new();
+    let directory = tempfile::tempdir().unwrap();
+    let held = Arc::new(AtomicBool::new(true));
+
+    let closing_spy = Spy::new(world.reader());
+    let reader = Arc::clone(&closing_spy);
+    let mut closing = state(directory.path())
+        .with_pull_requests(reader, Some(Arc::new(|_: &str| true)))
+        .with_pull_request_spawner(Arc::new(|job| job()));
+    closing.shutdown_requested = true;
+    pump(&mut closing);
+    assert_eq!(closing_spy.claims_run.load(Ordering::SeqCst), 0);
+    assert_eq!(world.notified(), None);
+
+    let spy = Spy::new(world.reader());
+    let mut window = state(directory.path())
+        .with_pull_requests(
+            spy.clone(),
+            Some(Arc::new({
+                let held = Arc::clone(&held);
+                move |_: &str| held.load(Ordering::SeqCst)
+            })),
+        )
+        .with_pull_request_spawner(Arc::new(|job| job()));
+    while spy.claims_run.load(Ordering::SeqCst) == 0 {
+        window.pump_pull_requests();
+    }
+    // The pump that ran the claim also drained its result: nothing else ran in between.
+    assert_eq!(limit_notifications(&window), 1);
+    assert!(world.notified().is_some());
 }

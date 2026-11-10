@@ -5,8 +5,9 @@
 //! this process's runtime, or from another window through the shared feed); the event only says
 //! *which* thread and pull request to read again, and the read runs off the UI thread. A window
 //! that does not track a thread shows what the owner stored and does nothing else: it fetches
-//! nothing, republishes no event and raises no notification. Only an event this process's own
-//! runtime published can raise one.
+//! nothing, republishes no event and raises no notification. Only the window that holds the
+//! thread raises one: for a CI transition the runtime claimed, and for an auto fix stop at the
+//! limit, the one the database shows (see `claim_limit_stop`).
 //!
 //! Link, Unlink, Refresh and Confirm take the thread's write mode the way chat does
 //! ([`WorkbenchState::chat_permit`]): they start or claim the lease when nobody holds it, which
@@ -20,6 +21,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use event_bus::{Event, EventKind, PullRequestAutoFixChange, PullRequestEvent, PullRequestRef};
 use runtime::pull_requests::HeadAttribution;
 use storage::Database;
+use storage::pull_request_auto_fix::PrLimitClaim;
 use storage::pull_requests::{PullRequestDisplay, PullRequestKey};
 
 use super::WorkbenchState;
@@ -58,16 +60,29 @@ pub trait PullRequestReader: Send + Sync + 'static {
     /// A message when the database cannot be read.
     fn harness_card(&self, notice_id: &str) -> Result<Option<HarnessCard>, String>;
 
-    /// Takes the one notification of the stop at `budget_epoch`, durably: true for the first
-    /// claim of any window or process, false for every later one.
+    /// Takes the one notification of a limit stop, durably: for the first claim of any window or
+    /// process only, and only while `still_held` says this window holds the thread (asked
+    /// before the claim and again after it, so a window that lost the thread meanwhile gives the
+    /// claim back instead of spending it).
     ///
     /// # Errors
     /// A message when the claim cannot be written.
     fn claim_limit_notification(
         &self,
-        key: &PullRequestKey,
-        budget_epoch: u64,
-    ) -> Result<bool, String>;
+        claim: &PrLimitClaim,
+        still_held: &dyn Fn() -> bool,
+    ) -> Result<LimitClaimOutcome, String>;
+}
+
+/// What a claim of a limit notification came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitClaimOutcome {
+    /// This window took it and tells the person.
+    Claimed,
+    /// Another window took it, or the stop no longer stands for this thread and link.
+    Declined,
+    /// This window does not hold the thread (any more); nothing is kept from the holder.
+    NotHeld,
 }
 
 /// Reads through a read-only connection to the shared database.
@@ -171,21 +186,37 @@ impl PullRequestReader for StoragePullRequestReader {
 
     fn claim_limit_notification(
         &self,
-        key: &PullRequestKey,
-        budget_epoch: u64,
-    ) -> Result<bool, String> {
+        claim: &PrLimitClaim,
+        still_held: &dyn Fn() -> bool,
+    ) -> Result<LimitClaimOutcome, String> {
         let handle = self
             .claims
             .as_ref()
             .ok_or("no writer to claim the limit notification")?;
+        if !still_held() {
+            return Ok(LimitClaimOutcome::NotHeld);
+        }
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| {
+            .map_or(1, |elapsed| {
                 i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)
             });
-        handle
-            .claim_pr_limit_notification(key.clone(), budget_epoch, now_ns)
-            .map_err(|error| error.to_string())
+        let taken = handle
+            .claim_pr_limit_notification(claim.clone(), now_ns)
+            .map_err(|error| error.to_string())?;
+        if !taken {
+            return Ok(LimitClaimOutcome::Declined);
+        }
+        // The thread's registry is another store, so the claim cannot carry the lease: asking
+        // again once it is taken is what keeps a window that lost the thread meanwhile from
+        // spending the claim the new holder needs.
+        if !still_held() {
+            handle
+                .release_pr_limit_notification(claim.clone(), now_ns)
+                .map_err(|error| error.to_string())?;
+            return Ok(LimitClaimOutcome::NotHeld);
+        }
+        Ok(LimitClaimOutcome::Claimed)
     }
 
     fn linked_threads(&self) -> Result<Vec<String>, String> {
@@ -253,8 +284,13 @@ enum Loaded {
     /// The card of a harness notice the transcript shows without it.
     Card(String, Result<Option<Box<HarnessCard>>, String>),
     /// The claim of a limit notification: the thread and pull request it is about, the budget
-    /// epoch, and whether this window took it.
-    LimitClaim(String, PullRequestKey, u64, Result<bool, String>),
+    /// epoch, and what the claim came to.
+    LimitClaim(
+        String,
+        PullRequestKey,
+        u64,
+        Result<LimitClaimOutcome, String>,
+    ),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -331,6 +367,8 @@ pub(super) struct PullRequestState {
     /// Threads whose bar folds once a read made after an automatic adoption was shown: the
     /// read may itself expand the bar (a move into failure), and the fold must come after.
     pending_collapses: Vec<(String, u64)>,
+    /// The window began to close: no limit claim starts, and one already running gives way.
+    closing: Arc<std::sync::atomic::AtomicBool>,
     /// `(pull request, budget epoch)` this process already claimed, so a read does not claim
     /// again. The claim in the database is what keeps other windows and restarts from telling
     /// it twice.
@@ -373,6 +411,7 @@ impl Default for PullRequestState {
             issued: BTreeSet::new(),
             pending_collapses: Vec::new(),
             limit_notified: std::collections::VecDeque::new(),
+            closing: Arc::default(),
             cards_dirty: false,
             cards_in_flight: BTreeSet::new(),
         }
@@ -512,6 +551,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.pull_requests.model.clear();
             self.pull_requests.scan = ScanPhase::Pending;
         }
+        self.pull_requests
+            .closing
+            .store(self.shutdown_requested, std::sync::atomic::Ordering::SeqCst);
         while let Ok(loaded) = self.pull_requests.results.try_recv() {
             self.apply_loaded_pull_request(loaded);
         }
@@ -654,9 +696,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }
                 }
             }
+            // Raised in the frame that drains the result, with no read or wait in between: the
+            // claim is spent by the time it arrives, so it is shown now or never.
             Loaded::LimitClaim(thread, key, epoch, claimed) => match claimed {
-                Ok(true) => self.raise_auto_fix_limit_notification(&thread, &key),
-                Ok(false) => {}
+                Ok(LimitClaimOutcome::Claimed) => {
+                    self.raise_auto_fix_limit_notification(&thread, &key);
+                }
+                Ok(LimitClaimOutcome::Declined) => {}
+                Ok(LimitClaimOutcome::NotHeld) => {
+                    self.pull_requests.forget_limit_notified(&key, epoch);
+                }
                 Err(error) => {
                     // Not told, not claimed: a later read tries again.
                     self.pull_requests.forget_limit_notified(&key, epoch);
@@ -803,7 +852,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Starts the claim of the notification for a stop at the limit that `view` shows, once per
     /// pull request and budget epoch. Whether the runtime's event for the adoption ever came is
     /// no condition: the database shows the stop, and the claim in it tells whether any window
-    /// already told. Only the window that holds the destination thread claims.
+    /// already told. Only the window that holds the destination thread claims, and it re-asks
+    /// whether it still does when the claim runs (see [`PullRequestReader::claim_limit_notification`]).
+    ///
+    /// The claim is spent before the person is told, so a crash after it and before the result
+    /// is drawn loses the notification rather than repeating it (at most once). A window that
+    /// begins to close starts no claim.
     fn claim_limit_stop(&mut self, view: &ThreadPullRequest) {
         let (Some(link), Some(auto)) = (&view.link, &view.auto_fix) else {
             return;
@@ -814,6 +868,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             && state.destination_thread_id.as_deref() == Some(view.thread_id.as_str())
             && state.link_revision == Some(link.link_revision);
         if !view.tracked_here
+            || self.shutdown_requested
             || !stopped
             || self
                 .pull_requests
@@ -835,10 +890,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         }
         let thread = view.thread_id.clone();
+        let claim = PrLimitClaim {
+            key: key.clone(),
+            thread_id: thread.clone(),
+            link_revision: link.link_revision,
+            budget_epoch: epoch,
+        };
+        let probe = self.pull_requests.probe.clone();
+        let closing = Arc::clone(&self.pull_requests.closing);
         let sender = self.pull_requests.sender.clone();
         let waker = Arc::clone(&self.pull_requests.waker);
         (self.pull_requests.spawner)(Box::new(move || {
-            let claimed = reader.claim_limit_notification(&key, epoch);
+            let still_held = || {
+                !closing.load(std::sync::atomic::Ordering::SeqCst)
+                    && probe.as_ref().is_none_or(|probe| probe(&claim.thread_id))
+            };
+            let claimed = reader.claim_limit_notification(&claim, &still_held);
             let _ = sender.send(Loaded::LimitClaim(thread, key, epoch, claimed));
             waker();
         }));
