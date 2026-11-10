@@ -231,7 +231,7 @@ Phase 2 の実装を通じて次の仕様を確定した。
 - 実際の routing fallback と、実際の CAS 拒否を通す統合テストがない。
 - live run への誤配送を検出するテストがない。
 - 主モデルと fallback モデルでの審査効果の評価は、まだ行っていない。
-- `pull_request_review_cache` の CI で、まれに失敗することがある。`an_upload_review_reads_the_stored_facts_and_starts_nothing` が #538 の CI で 1 回だけ失敗し、再実行で通った。原因は未調査。以前記録された 180 秒停止についても、CI 上の記録は特定できていない。
+- 以前記録された `pull_request_review_cache` の 180 秒停止について、CI 上の記録は特定できていない。
 
 ## 外部の参考
 
