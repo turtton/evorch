@@ -56,7 +56,8 @@ pub fn kind_detail(kind: &LaneAttentionKind) -> Option<String> {
                 LaneReadyState::NoEvidence => "no fixed artifact and no review",
                 LaneReadyState::Unreviewed => "not reviewed",
                 LaneReadyState::ReviewInProgress => "review under way",
-                LaneReadyState::ReviewRejected => "review rejected or incomplete",
+                LaneReadyState::ReviewRejected => "review rejected",
+                LaneReadyState::ReviewIncomplete => "review did not finish",
                 LaneReadyState::AwaitingClose => "review approved",
             }
         ),

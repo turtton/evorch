@@ -123,7 +123,10 @@ fn close_now(f: &Fixture) -> CloseLane {
 }
 fn human_close(f: &Fixture, kind: LaneCloseKind) -> CloseLane {
     CloseLane {
-        closer: LaneCloser::Human,
+        closer: LaneCloser::Human {
+            surface: "web".into(),
+            client_id: Some("client-1".into()),
+        },
         kind,
         ready_seq: None,
         note: "ending this lane".into(),

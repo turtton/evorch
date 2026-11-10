@@ -58,44 +58,72 @@ fn compare(conn: &Connection, expected: &LaneVerificationTarget) -> Result<(), S
     }
     Ok(())
 }
-/// Current ADR 0043 facts binding, read within the caller's transaction (no nested
-/// thread_state transaction, no network). Missing/last-failed facts are unavailable.
-pub(crate) fn pr_evidence(
+/// The lane's PR as the ledger stores it, read within the caller's transaction (no nested
+/// thread_state transaction, no network). It reports what is missing instead of failing,
+/// so a close can record the state it was decided in; it never decides anything.
+pub(crate) fn pr_context(
     conn: &Connection,
     thread_id: &str,
-) -> Result<Option<LanePrEvidence>, StorageError> {
+) -> Result<LaneClosePrContext, StorageError> {
+    let context = |status, evidence| LaneClosePrContext { status, evidence };
     let Some(link) = crate::repo::pull_requests::active_link(conn, thread_id)? else {
-        return Ok(None);
+        return Ok(context(LanePrContextStatus::NotLinked, None));
     };
-    let snapshot = crate::repo::pull_requests::snapshots::get(conn, &link.key)?
-        .ok_or_else(|| err(LaneOperationError::EvidenceUnavailable))?;
-    if snapshot
+    let Some(snapshot) = crate::repo::pull_requests::snapshots::get(conn, &link.key)? else {
+        return Ok(context(LanePrContextStatus::NoSnapshot, None));
+    };
+    let failed = snapshot
         .last_attempt
         .as_ref()
-        .is_some_and(|a| a.failure.is_some())
-    {
-        return Err(err(LaneOperationError::EvidenceUnavailable));
-    }
-    let facts = snapshot
-        .facts
-        .ok_or_else(|| err(LaneOperationError::EvidenceUnavailable))?;
-    let fetched_at_ns = snapshot
-        .fetched_at_ns
-        .ok_or_else(|| err(LaneOperationError::EvidenceUnavailable))?;
+        .is_some_and(|a| a.failure.is_some());
+    let (Some(facts), Some(fetched_at_ns)) = (snapshot.facts.as_ref(), snapshot.fetched_at_ns)
+    else {
+        return Ok(context(
+            if failed {
+                LanePrContextStatus::LastFetchFailed
+            } else {
+                LanePrContextStatus::NoSnapshot
+            },
+            None,
+        ));
+    };
     let head:Option<(String,i64)>=conn.query_row("SELECT local_head_sha,local_head_observed_at_ns FROM thread_pull_request_state WHERE thread_id=?1 AND local_head_link_revision=?2 AND local_head_sha IS NOT NULL",params![thread_id,link.link_revision],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-    Ok(Some(LanePrEvidence {
+    let evidence = LanePrEvidence {
         repository: link.key.repository,
         number: link.key.number,
         link_id: link.link_id,
         link_revision: link.link_revision,
         head_sha: facts.head_sha.clone(),
         success_seq: snapshot.success_seq,
-        last_attempt_seq: snapshot.last_attempt.map_or(0, |a| a.seq),
+        last_attempt_seq: snapshot.last_attempt.as_ref().map_or(0, |a| a.seq),
         fetched_at_ns,
-        facts_digest: digest(&facts)?,
+        facts_digest: digest(facts)?,
         local_head_sha: head.as_ref().map(|(s, _)| s.clone()),
         local_head_observed_at_ns: head.map(|(_, at)| at),
-    }))
+    };
+    Ok(context(
+        if failed {
+            LanePrContextStatus::LastFetchFailed
+        } else {
+            LanePrContextStatus::Available
+        },
+        Some(evidence),
+    ))
+}
+/// Current ADR 0043 facts binding for a review. Missing or last-failed facts are
+/// unavailable here; a close uses [`pr_context`] and is never refused for them.
+pub(crate) fn pr_evidence(
+    conn: &Connection,
+    thread_id: &str,
+) -> Result<Option<LanePrEvidence>, StorageError> {
+    let context = pr_context(conn, thread_id)?;
+    match context.status {
+        LanePrContextStatus::NotLinked => Ok(None),
+        LanePrContextStatus::Available => Ok(context.evidence),
+        LanePrContextStatus::NoSnapshot | LanePrContextStatus::LastFetchFailed => {
+            Err(err(LaneOperationError::EvidenceUnavailable))
+        }
+    }
 }
 pub(crate) fn verification(
     conn: &Connection,
@@ -270,6 +298,32 @@ fn latest_report(conn: &Connection, l: &LaneRecord) -> Result<Option<LaneReport>
             .next(),
     )
 }
+/// A Reviewer that ended without a complete submission (failed, cancelled, or finished
+/// without submitting) leaves its verification Incomplete, so the lane is not shown as
+/// still under review. A completed review is never changed.
+pub(crate) fn incomplete_verification(
+    conn: &Connection,
+    verification_id: VerificationId,
+    run_id: &str,
+) -> Result<LaneVerification, StorageError> {
+    let tx = tx(conn)?;
+    let mut v = verification(&tx, verification_id)?
+        .ok_or_else(|| err(LaneOperationError::VerificationMissing))?;
+    if v.reviewer_run_id != run_id {
+        return Err(err(LaneOperationError::NotResponder));
+    }
+    let old = v.state;
+    if !matches!(
+        old,
+        LaneVerificationState::Pending | LaneVerificationState::Submitted
+    ) {
+        return Ok(v);
+    }
+    v.state = LaneVerificationState::Incomplete;
+    save_verification(&tx, &v, old)?;
+    tx.commit()?;
+    Ok(v)
+}
 pub(crate) fn close_context(
     conn: &Connection,
     lane_id: &str,
@@ -326,15 +380,36 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
     }
     let valid_shape = match &r.closer {
         LaneCloser::Lead { .. } => r.kind == LaneCloseKind::LeadClosed && r.ready_seq.is_some(),
-        LaneCloser::Human => r.kind != LaneCloseKind::LeadClosed,
+        LaneCloser::Human { .. } => r.kind != LaneCloseKind::LeadClosed,
     };
     if !valid_shape || r.ready_seq == Some(0) {
         return Err(err(LaneOperationError::InvalidInput));
     }
     let tx = tx(conn)?;
-    let lead = match &r.closer {
-        LaneCloser::Lead { thread_id, .. } => Some(thread_id.as_str()),
-        LaneCloser::Human => None,
+    let (lead, closed_by) = match &r.closer {
+        LaneCloser::Lead {
+            thread_id,
+            root_run_id,
+        } => (
+            Some(thread_id.as_str()),
+            LaneCloseActor::Lead {
+                thread_id: thread_id.clone(),
+                root_run_id: root_run_id.clone(),
+            },
+        ),
+        LaneCloser::Human { surface, client_id } => {
+            id(surface)?;
+            if let Some(client_id) = client_id {
+                id(client_id)?;
+            }
+            (
+                None,
+                LaneCloseActor::Human {
+                    surface: surface.clone(),
+                    client_id: client_id.clone(),
+                },
+            )
+        }
     };
     let l = managed(&tx, &r.lane_id, r.expected_management_revision, lead)?;
     if let LaneCloser::Lead {
@@ -421,6 +496,8 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
         artifact_revision: ready.as_ref().and_then(|x| x.artifact_revision.clone()),
         note: note.to_owned(),
         review,
+        pr_context: Some(pr_context(&tx, &l.thread_id)?),
+        closed_by: Some(closed_by),
         at_ns: r.at_ns,
         outcome: LaneCloseOutcome::Closed,
     };

@@ -34,6 +34,20 @@ fn second_ready() -> LaneReportInput {
     ready.summary = "second ready".into();
     ready
 }
+fn states(f: &Fixture) -> (LaneReadyState, Vec<LaneAttentionAction>) {
+    let item = f
+        .h()
+        .lane_attention(filter(), None, 20)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|i| matches!(i.kind, LaneAttentionKind::ReadyUnclosed { .. }))
+        .unwrap();
+    let LaneAttentionKind::ReadyUnclosed { readiness, .. } = item.kind else {
+        unreachable!()
+    };
+    (readiness, item.available_actions)
+}
 fn revise_brief(f: &Fixture, at: i64) {
     let mut brief = f.db().lane("lane-1").unwrap().unwrap().brief;
     brief.objective = format!("revised objective {at}");
@@ -52,6 +66,18 @@ fn a_ready_without_any_artifact_or_review_closes_on_the_leads_judgement_alone() 
     assert_eq!(closed.review, None);
     assert_eq!(closed.note, "accepted on my own judgement");
     assert_eq!(closed.ready_seq, Some(1));
+    // The deciding root is recorded from the trusted closer, immutably.
+    assert_eq!(
+        closed.closed_by,
+        Some(LaneCloseActor::Lead {
+            thread_id: "lead".into(),
+            root_run_id: "lead-root".into()
+        })
+    );
+    assert_eq!(
+        closed.pr_context.as_ref().unwrap().status,
+        LanePrContextStatus::NotLinked
+    );
     assert_eq!(payload(&f, &closed.close_id), {
         let mut stored = closed.clone();
         stored.outcome = LaneCloseOutcome::Closed;
@@ -188,7 +214,14 @@ fn the_callers_root_is_compared_with_the_lead_thread_inside_the_close_transactio
         thread_id: "lead".into(),
         root_run_id: "lead-root-restarted".into(),
     };
-    f.h().close_lane(restarted).unwrap();
+    let closed = f.h().close_lane(restarted).unwrap();
+    assert_eq!(
+        closed.closed_by,
+        Some(LaneCloseActor::Lead {
+            thread_id: "lead".into(),
+            root_run_id: "lead-root-restarted".into()
+        })
+    );
     // Not the lead thread at all.
     let f = Fixture::new();
     started(&f);
@@ -294,6 +327,13 @@ fn a_human_close_or_discard_is_recorded_apart_from_a_lead_close() {
         .unwrap();
     assert_eq!(closed.kind, LaneCloseKind::HumanClosed);
     assert_eq!(closed.ready_seq, None);
+    assert_eq!(
+        closed.closed_by,
+        Some(LaneCloseActor::Human {
+            surface: "web".into(),
+            client_id: Some("client-1".into())
+        })
+    );
     let discard = f
         .h()
         .close_lane(human_close(&f, LaneCloseKind::Discarded))
@@ -339,20 +379,6 @@ fn a_lead_cannot_claim_a_human_kind_and_a_human_cannot_claim_a_lead_close() {
 fn ready_attention_says_why_it_waits_and_never_withholds_close() {
     let f = Fixture::new();
     started(&f);
-    let states = |f: &Fixture| -> (LaneReadyState, Vec<LaneAttentionAction>) {
-        let item = f
-            .h()
-            .lane_attention(filter(), None, 20)
-            .unwrap()
-            .items
-            .into_iter()
-            .find(|i| matches!(i.kind, LaneAttentionKind::ReadyUnclosed { .. }))
-            .unwrap();
-        let LaneAttentionKind::ReadyUnclosed { readiness, .. } = item.kind else {
-            unreachable!()
-        };
-        (readiness, item.available_actions)
-    };
     ready_without_artifact(&f);
     let (readiness, actions) = states(&f);
     assert_eq!(readiness, LaneReadyState::NoEvidence);
@@ -396,4 +422,176 @@ fn ready_attention_says_why_it_waits_and_never_withholds_close() {
             .items
             .is_empty()
     );
+}
+
+fn facts() -> storage::pull_requests::PullRequestFacts {
+    use storage::pull_requests::*;
+    PullRequestFacts {
+        state: PullRequestState::Open,
+        base_branch: "main".into(),
+        head_repository: Some("owner/repo".into()),
+        head_branch: "feature".into(),
+        head_sha: "a".repeat(40),
+        checks: vec![],
+        checks_complete: true,
+        review_decision: ReviewDecision::Approved,
+    }
+}
+fn link_pr(f: &Fixture) -> storage::pull_requests::PullRequestKey {
+    use storage::pull_requests::*;
+    let key = PullRequestKey::github("owner/repo", 7).unwrap();
+    f.h()
+        .link_pull_request(LinkPullRequest {
+            thread_id: "thread-1".into(),
+            key: key.clone(),
+            expected_revision: 0,
+            at_ns: 2,
+        })
+        .unwrap();
+    key
+}
+
+#[test]
+fn a_close_without_a_review_still_records_the_stored_pr_context() {
+    use storage::pull_requests::*;
+    // Not linked.
+    let f = Fixture::new();
+    started(&f);
+    ready_without_artifact(&f);
+    let status = |f: &Fixture| f.h().close_lane(close_now(f)).unwrap().pr_context.unwrap();
+    assert_eq!(status(&f).status, LanePrContextStatus::NotLinked);
+    // Linked, nothing fetched yet.
+    let f = Fixture::new();
+    started(&f);
+    link_pr(&f);
+    ready_without_artifact(&f);
+    let context = status(&f);
+    assert_eq!(context.status, LanePrContextStatus::NoSnapshot);
+    assert_eq!(context.evidence, None);
+    // Fetched: the stored evidence is attached, with no fetch from the close.
+    let f = Fixture::new();
+    started(&f);
+    let key = link_pr(&f);
+    let seq = f.h().begin_pull_request_fetch(&key).unwrap();
+    f.h()
+        .commit_pull_request_fetch(&key, seq, facts(), 5)
+        .unwrap();
+    ready_without_artifact(&f);
+    let stored = f.h().lane_pr_evidence("thread-1".into()).unwrap();
+    let context = status(&f);
+    assert_eq!(context.status, LanePrContextStatus::Available);
+    assert_eq!(context.evidence, stored);
+    assert_eq!(
+        f.h()
+            .pull_request_snapshot(&key)
+            .unwrap()
+            .unwrap()
+            .fetch_seq,
+        seq
+    );
+    // The latest fetch failed: the earlier evidence is kept and the failure is named.
+    let f = Fixture::new();
+    started(&f);
+    let key = link_pr(&f);
+    let seq = f.h().begin_pull_request_fetch(&key).unwrap();
+    f.h()
+        .commit_pull_request_fetch(&key, seq, facts(), 5)
+        .unwrap();
+    let failed = f.h().begin_pull_request_fetch(&key).unwrap();
+    f.h()
+        .fail_pull_request_fetch(
+            &key,
+            failed,
+            FetchFailure {
+                kind: FetchErrorKind::Network,
+                message: "unavailable".into(),
+            },
+            24,
+        )
+        .unwrap();
+    ready_without_artifact(&f);
+    let context = status(&f);
+    assert_eq!(context.status, LanePrContextStatus::LastFetchFailed);
+    assert!(context.evidence.is_some());
+}
+
+#[test]
+fn a_reviewer_that_ended_without_a_complete_submission_is_incomplete_not_under_review() {
+    let f = Fixture::new();
+    started(&f);
+    f.h()
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
+        .unwrap();
+    let r = begin(&f, 1);
+    f.h().begin_lane_verification(r.clone()).unwrap();
+    assert_eq!(states(&f).0, LaneReadyState::ReviewInProgress);
+    // The run ended (failed or cancelled) but nothing wrote that back, e.g. a crash:
+    // attention derives it from the Reviewer's own record and changes nothing.
+    done(&f, &r.reviewer_run_id, "Reviewer", "Error");
+    let (readiness, actions) = states(&f);
+    assert_eq!(readiness, LaneReadyState::ReviewIncomplete);
+    assert!(actions.contains(&LaneAttentionAction::Verify));
+    assert!(actions.contains(&LaneAttentionAction::Close));
+    assert_eq!(
+        f.h()
+            .lane_verification(r.verification_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        LaneVerificationState::Pending
+    );
+    // Writing it back is bound to the reserved run and changes only a running review.
+    rejected(
+        f.h()
+            .incomplete_lane_verification(r.verification_id, "reviewer-2".into()),
+        LaneOperationError::NotResponder,
+    );
+    let marked = f
+        .h()
+        .incomplete_lane_verification(r.verification_id, r.reviewer_run_id.clone())
+        .unwrap();
+    assert_eq!(marked.state, LaneVerificationState::Incomplete);
+    assert_eq!(states(&f).0, LaneReadyState::ReviewIncomplete);
+    // An Incomplete review is not a rejection and a close records it as it was.
+    let closed = f.h().close_lane(close_request(&r)).unwrap();
+    assert_eq!(
+        closed.review.unwrap().state,
+        LaneVerificationState::Incomplete
+    );
+}
+
+#[test]
+fn a_finished_review_is_never_downgraded_and_a_silent_finish_is_incomplete() {
+    let f = Fixture::new();
+    started(&f);
+    f.h()
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
+        .unwrap();
+    // Submitted and ended normally, but the completion write was lost (crash): the
+    // submission stands, so it is shown by what it says, not as running or incomplete.
+    let r = begin(&f, 1);
+    f.h().begin_lane_verification(r.clone()).unwrap();
+    f.h()
+        .submit_lane_verification(
+            r.verification_id,
+            r.reviewer_run_id.clone(),
+            submission(),
+            11,
+        )
+        .unwrap();
+    done(&f, &r.reviewer_run_id, "Reviewer", "Done");
+    assert_eq!(states(&f).0, LaneReadyState::AwaitingClose);
+    f.h()
+        .complete_lane_verification(r.verification_id, r.reviewer_run_id.clone(), 21)
+        .unwrap();
+    let unchanged = f
+        .h()
+        .incomplete_lane_verification(r.verification_id, r.reviewer_run_id.clone())
+        .unwrap();
+    assert_eq!(unchanged.state, LaneVerificationState::Completed);
+    // A Reviewer that finished normally without submitting is incomplete.
+    let silent = begin(&f, 2);
+    f.h().begin_lane_verification(silent.clone()).unwrap();
+    done(&f, &silent.reviewer_run_id, "Reviewer", "Done");
+    assert_eq!(states(&f).0, LaneReadyState::ReviewIncomplete);
 }

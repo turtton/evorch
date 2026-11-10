@@ -30,8 +30,12 @@ pub enum LaneCloser {
         thread_id: String,
         root_run_id: String,
     },
-    /// A human host operation. Only runtime's human context can construct this.
-    Human,
+    /// A human host operation. Only runtime's human context can construct this; the
+    /// surface and client are the host's authenticated provenance.
+    Human {
+        surface: String,
+        client_id: Option<String>,
+    },
 }
 /// A close is a judgement of the lead (or a human) about management of the lane.
 /// Nothing here observes artifacts, Git, GitHub or the Reviewer's run.

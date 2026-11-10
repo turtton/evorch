@@ -115,12 +115,15 @@ fn items(
                             .filter(|v| target(conn, &lane_id).is_ok_and(|t| v.target == t));
                         // Informative only; no state here stops the lead from closing.
                         let state = match current {
-                            Some(v) => match (v.state, v.submission.as_ref()) {
+                            Some(v) => match (derived_state(conn, &v)?, v.submission.as_ref()) {
                                 (
                                     LaneVerificationState::Pending
                                     | LaneVerificationState::Submitted,
                                     _,
                                 ) => LaneReadyState::ReviewInProgress,
+                                (LaneVerificationState::Incomplete, _) => {
+                                    LaneReadyState::ReviewIncomplete
+                                }
                                 (LaneVerificationState::Completed, Some(s))
                                     if s.verdict == LaneVerificationVerdict::Approved
                                         && s.checks.iter().all(|c| c.passed) =>
@@ -320,6 +323,33 @@ fn items(
     }
     result.sort_by(|a, b| b.since_at_ns.cmp(&a.since_at_ns).then(a.id.cmp(&b.id)));
     Ok(result)
+}
+/// What a verification's durable state means now. A Reviewer that already ended is not
+/// "under way" even when the termination was never written back (a crash between the
+/// run's final snapshot and the update), so this reads the run's own record. It only
+/// derives: reading attention changes nothing.
+fn derived_state(
+    conn: &Connection,
+    v: &LaneVerification,
+) -> Result<LaneVerificationState, StorageError> {
+    if !matches!(
+        v.state,
+        LaneVerificationState::Pending | LaneVerificationState::Submitted
+    ) {
+        return Ok(v.state);
+    }
+    let phase: Option<String> = conn
+        .query_row(
+            "SELECT terminal_phase FROM run_contexts WHERE run_id=?1 AND role='Reviewer'",
+            [&v.reviewer_run_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match (phase.as_deref(), v.state, v.submission.is_some()) {
+        (Some("Done"), LaneVerificationState::Submitted, true) => LaneVerificationState::Completed,
+        (Some("Done" | "Error" | "Stopped"), _, _) => LaneVerificationState::Incomplete,
+        _ => v.state,
+    })
 }
 pub(crate) fn attention(
     conn: &Connection,

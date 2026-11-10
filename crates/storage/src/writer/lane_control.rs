@@ -85,6 +85,16 @@ impl StorageHandle {
     ) -> Result<Option<LaneVerification>, StorageError> {
         self.lane_job(false, move |c| ledger::verification(c, id))
     }
+    /// The Reviewer ended without a complete submission; a completed review is unchanged.
+    pub fn incomplete_lane_verification(
+        &self,
+        id: VerificationId,
+        run_id: String,
+    ) -> Result<LaneVerification, StorageError> {
+        self.lane_job(true, move |c| {
+            ledger::incomplete_verification(c, id, &run_id)
+        })
+    }
     /// Runtime supplies the authenticated run ID, never a tool argument.
     pub fn submit_lane_verification(
         &self,

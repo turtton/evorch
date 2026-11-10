@@ -386,11 +386,28 @@ async fn no_review_outcome_blocks_a_lead_close() {
                 assert_eq!(review.state, LaneVerificationState::Completed);
                 assert_eq!(review.verdict, Some(LaneVerificationVerdict::Rejected));
             }
-            // Never submitted: attached as it was, not as a verdict.
-            _ => {
+            // Still running when the lead decided: attached as it was.
+            Mode::Hold => {
                 assert_eq!(review.state, LaneVerificationState::Pending);
                 assert_eq!(review.verdict, None);
             }
+            // Ended without a submission (silently or by failing): Incomplete, which is not
+            // a rejection and is not shown as still under review.
+            _ => {
+                assert_eq!(review.state, LaneVerificationState::Incomplete);
+                assert_eq!(review.verdict, None);
+            }
+        }
+        if matches!(mode, Mode::Hold) {
+            // The cancelled Reviewer's verification is written back as Incomplete; the
+            // close that was already decided keeps the state it saw.
+            let saved = f
+                .storage
+                .handle()
+                .lane_verification(v.verification_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.state, LaneVerificationState::Incomplete);
         }
         f.cleanup().await;
     }
@@ -974,9 +991,13 @@ async fn forged_lead_worker_advisor_and_different_verification_reviewer_cannot_s
         .await
         .unwrap();
     assert_ne!(other.verification_id, v.verification_id);
-    for id in [v.verification_id, other.verification_id] {
+    // The held Reviewer still runs; the other one ended without a submission.
+    for (id, expected) in [
+        (v.verification_id, LaneVerificationState::Pending),
+        (other.verification_id, LaneVerificationState::Incomplete),
+    ] {
         let saved = f.storage.handle().lane_verification(id).unwrap().unwrap();
-        assert_eq!(saved.state, LaneVerificationState::Pending);
+        assert_eq!(saved.state, expected);
         assert!(saved.submission.is_none());
     }
     {
@@ -1028,15 +1049,16 @@ async fn a_submission_without_normal_reviewer_termination_is_not_complete_but_ne
         .cancel(v.reviewer_run_id.parse().unwrap())
         .unwrap();
     let _ = f.runtime.wait(v.reviewer_run_id.parse().unwrap()).await;
-    assert_eq!(
-        f.storage
-            .handle()
-            .lane_verification(v.verification_id)
-            .unwrap()
-            .unwrap()
-            .state,
-        LaneVerificationState::Submitted
-    );
+    // Cancelled before a normal end: the submission is kept, but the review is
+    // Incomplete, never Completed.
+    let saved = f
+        .storage
+        .handle()
+        .lane_verification(v.verification_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.state, LaneVerificationState::Incomplete);
+    assert!(saved.submission.is_some());
     assert_eq!(
         f.close(&v).await.unwrap().outcome,
         LaneCloseOutcome::AlreadyClosed

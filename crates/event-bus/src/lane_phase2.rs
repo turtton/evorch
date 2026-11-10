@@ -207,6 +207,40 @@ impl LaneCloseKind {
         }
     }
 }
+/// Who decided a close, from the runtime's trusted facts at the time of the close; never
+/// from tool arguments or message text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaneCloseActor {
+    /// The lead thread and the root run that was running it when it closed.
+    Lead {
+        thread_id: String,
+        root_run_id: String,
+    },
+    /// A human, through the host's authenticated surface.
+    Human {
+        surface: String,
+        client_id: Option<String>,
+    },
+}
+/// What the ledger holds about the lane's PR when the close was decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanePrContextStatus {
+    NotLinked,
+    /// Linked, with no stored facts yet.
+    NoSnapshot,
+    /// The latest fetch failed; any evidence is from an earlier success.
+    LastFetchFailed,
+    Available,
+}
+/// Stored PR facts as they were when the close was decided: read from the ledger,
+/// never fetched, and never a condition of the close.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneClosePrContext {
+    pub status: LanePrContextStatus,
+    pub evidence: Option<LanePrEvidence>,
+}
 /// Reviewer record attached to a close for reference, as it was when the close
 /// was decided. It is not an observation made at close time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +287,12 @@ pub struct LaneCloseResult {
     pub note: String,
     #[serde(default)]
     pub review: Option<LaneCloseReview>,
+    /// Stored PR facts as the ledger held them; present for every close.
+    #[serde(default)]
+    pub pr_context: Option<LaneClosePrContext>,
+    /// Who decided it. Absent only for a close migrated from before it was recorded.
+    #[serde(default)]
+    pub closed_by: Option<LaneCloseActor>,
     #[serde(default)]
     pub at_ns: i64,
     pub outcome: LaneCloseOutcome,
@@ -268,8 +308,11 @@ pub enum LaneReadyState {
     Unreviewed,
     /// A Reviewer was started and has not finished.
     ReviewInProgress,
-    /// The finished review rejected the Ready, or never completed.
+    /// The finished review rejected the Ready.
     ReviewRejected,
+    /// The Reviewer ended without a complete submission (failed, cancelled, stopped or
+    /// finished silently). Not a rejection: the lead may start another review.
+    ReviewIncomplete,
     /// The review approved; the lead has not closed.
     AwaitingClose,
 }

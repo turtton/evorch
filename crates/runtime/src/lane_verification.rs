@@ -205,10 +205,14 @@ impl AgentRuntime {
         );
         Ok(verification)
     }
-    /// Called after final snapshot persistence, before terminal publication. A crash
-    /// between those steps is repaired from durable submit + normal Done by close.
+    /// Called after final snapshot persistence, before terminal publication. A normal Done
+    /// with a durable submission completes the verification; a Reviewer that failed,
+    /// was cancelled or finished without submitting leaves it Incomplete (an operator
+    /// Stop is resumable and is left alone). A crash between the final snapshot and this
+    /// write is not repaired here: lane attention reads the Reviewer's own run record, so
+    /// the lane is not shown as under review, and the lead may close or review again.
     pub(crate) fn complete_lane_reviewer(&self, run: RunId, phase: AgentRunPhase) {
-        if phase != AgentRunPhase::Done {
+        if !matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
             return;
         }
         let purpose = self
@@ -224,14 +228,27 @@ impl AgentRuntime {
         else {
             return;
         };
-        if let Some(store) = self.shared.run_store.get()
-            && let Err(error) = store.handle.complete_lane_verification(
-                verification_id,
-                run.to_string(),
-                crate::run_store::review_time_ns(),
-            )
+        let Some(store) = self.shared.run_store.get() else {
+            return;
+        };
+        let completed = phase == AgentRunPhase::Done
+            && store
+                .handle
+                .complete_lane_verification(
+                    verification_id,
+                    run.to_string(),
+                    crate::run_store::review_time_ns(),
+                )
+                .inspect_err(|error| {
+                    tracing::warn!(%run, %error, "lane Reviewer has no completed durable submission");
+                })
+                .is_ok();
+        if !completed
+            && let Err(error) = store
+                .handle
+                .incomplete_lane_verification(verification_id, run.to_string())
         {
-            tracing::warn!(%run, %error, "lane Reviewer has no completed durable submission");
+            tracing::warn!(%run, %error, "lane verification could not be marked incomplete");
         }
     }
     /// Facts of the lane's own PR for a review, or why there are none. A failure is

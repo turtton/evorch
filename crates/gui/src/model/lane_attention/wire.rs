@@ -173,6 +173,7 @@ const fn ready_state_of(state: domain::LaneReadyState) -> wire::LaneReadyState {
         domain::LaneReadyState::Unreviewed => wire::LaneReadyState::Unreviewed,
         domain::LaneReadyState::ReviewInProgress => wire::LaneReadyState::ReviewInProgress,
         domain::LaneReadyState::ReviewRejected => wire::LaneReadyState::ReviewRejected,
+        domain::LaneReadyState::ReviewIncomplete => wire::LaneReadyState::ReviewIncomplete,
         domain::LaneReadyState::AwaitingClose => wire::LaneReadyState::AwaitingClose,
     }
 }

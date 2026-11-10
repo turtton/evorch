@@ -265,6 +265,14 @@ impl CommandHost {
         if provenance.actor != Actor::Human {
             return Err(failure("human_action_required"));
         }
+        let mut request = request;
+        // The record names the surface and client the host authenticated, not what the
+        // caller put in the request.
+        request.surface = serde_json::to_value(provenance.surface)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into());
+        request.client_id = provenance.client_id.as_ref().map(|c| c.as_str().to_owned());
         let adapter = HumanLaneManagement::new(
             self.service().runtime().clone(),
             self.service().ownership().cloned(),

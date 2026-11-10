@@ -339,6 +339,8 @@ async fn a_human_close_ends_only_the_ledger_entry_and_an_agent_cannot_reach_it()
             expected_request_revision: lane.request_revision,
             discard,
             note: "ending this lane".into(),
+            surface: "forged".into(),
+            client_id: None,
         }
     }
     let mut f = Fixture::new().await;

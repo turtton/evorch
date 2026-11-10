@@ -155,8 +155,10 @@ pub enum LaneReadyState {
     /// A fixed artifact is named; no independent review exists.
     Unreviewed,
     ReviewInProgress,
-    /// The finished review rejected the Ready, or never completed.
+    /// The finished review rejected the Ready.
     ReviewRejected,
+    /// The Reviewer ended without a complete submission; not a rejection.
+    ReviewIncomplete,
     /// The review approved; the lead has not closed.
     AwaitingClose,
 }

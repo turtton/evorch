@@ -43,6 +43,9 @@ pub struct HumanLaneCloseRequest {
     /// `true` ends the lane without claiming it is done.
     pub discard: bool,
     pub note: String,
+    /// The host's authenticated provenance, recorded with the close.
+    pub surface: String,
+    pub client_id: Option<String>,
 }
 
 /// A rejected close for a moved lane says what the lane looks like now, so the lead can
@@ -147,7 +150,10 @@ impl AgentRuntime {
         let result = store
             .handle
             .close_lane(CloseLane {
-                closer: LaneCloser::Human,
+                closer: LaneCloser::Human {
+                    surface: request.surface,
+                    client_id: request.client_id,
+                },
                 kind: if request.discard {
                     LaneCloseKind::Discarded
                 } else {
