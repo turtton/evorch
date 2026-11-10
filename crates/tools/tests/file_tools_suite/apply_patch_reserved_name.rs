@@ -1,7 +1,7 @@
 //! `apply_patch` names one built-in only: MCP and host tools cannot take it
 //! over, whichever registration path they come through.
 
-#[path = "support/mcp_registry.rs"]
+#[path = "../support/mcp_registry.rs"]
 mod mcp_registry;
 
 use async_trait::async_trait;

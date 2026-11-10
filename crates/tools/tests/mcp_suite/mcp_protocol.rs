@@ -13,7 +13,7 @@ use tools::mcp::{
     transport::api::*,
 };
 #[allow(dead_code)]
-#[path = "../shared-test-support/mcp/mod.rs"]
+#[path = "../../shared-test-support/mcp/mod.rs"]
 mod golden;
 struct Fake {
     steps: Mutex<VecDeque<golden::Step>>,

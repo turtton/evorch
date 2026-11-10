@@ -695,7 +695,7 @@ impl Fixture {
             .replace('\'', "'\\''");
         std::fs::write(
             &binary,
-            include_str!("fixtures/comment_checker.sh")
+            include_str!("../fixtures/comment_checker.sh")
                 .replace("__COMMENT_CHECKER_TEST_FIXTURE__", &fixture),
         )
         .unwrap();

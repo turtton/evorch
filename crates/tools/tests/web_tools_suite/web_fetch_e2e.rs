@@ -1,6 +1,7 @@
 //! `web_fetch` の E2E 抽出品質テスト: MDN 風 / rustdoc 風 fixture を
 //! ローカル TLS サーバで配信し、実ネットワークなしで抽出チェーンを検証する (AC3)。
 
+#[path = "../common/mod.rs"]
 mod common;
 
 use std::{net::IpAddr, sync::Arc};
@@ -11,8 +12,8 @@ use tools::{DnsResolver, NetworkGuard, NetworkGuardError, Tool, ToolResult, WebF
 
 use common::{FixtureServer, TestResult};
 
-const MDN_LIKE: &str = include_str!("fixtures/mdn_like.html");
-const RUST_DOCS_LIKE: &str = include_str!("fixtures/rust_docs_like.html");
+const MDN_LIKE: &str = include_str!("../fixtures/mdn_like.html");
+const RUST_DOCS_LIKE: &str = include_str!("../fixtures/rust_docs_like.html");
 
 const MDN_ARTICLE_SENTENCE: &str = "flatMap first maps each element using a mapping function, then flattens the result into a new array one level deep.";
 const MDN_CODE_FRAGMENT: &str = "async function loadExamples(baseUrl)";

@@ -3,7 +3,7 @@
 //! ツール実行の窓口として、開始・完了イベントの発行、引数スキーマ検証、
 //! 制御マーカのエスケープ（ADR 0008）を検証する。
 
-#[path = "support/mcp_registry.rs"]
+#[path = "../support/mcp_registry.rs"]
 mod mcp_registry;
 
 use std::path::Path;

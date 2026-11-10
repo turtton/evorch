@@ -1,8 +1,9 @@
+#[path = "../common/mod.rs"]
 mod common;
 
 // NetworkGuard 専用の response ヘルパー。search_mcp など他テストバイナリでは
 // 未使用のままコンパイルされないよう、このバイナリだけが取り込む。
-#[path = "common/guard_responses.rs"]
+#[path = "../common/guard_responses.rs"]
 mod guard_responses;
 
 use std::{

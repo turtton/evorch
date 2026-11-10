@@ -23,7 +23,7 @@ use tools::{
     },
 };
 #[allow(dead_code)]
-#[path = "../shared-test-support/mcp/mod.rs"]
+#[path = "../../shared-test-support/mcp/mod.rs"]
 mod golden;
 struct Resolver(Mutex<Vec<IpAddr>>);
 #[async_trait]

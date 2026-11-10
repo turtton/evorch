@@ -1,6 +1,6 @@
 //! NetworkGuard 統合テスト専用の response 組み立てヘルパー。
 
-use crate::common::response_with_status;
+use super::common::response_with_status;
 
 pub fn identity_response(body: &[u8]) -> Vec<u8> {
     response_with_headers(&[format!("Content-Length: {}", body.len())], body)

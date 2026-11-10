@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tools::mcp::{McpErrorKind, McpToolDefinition, transport::*, types::*};
-#[path = "../shared-test-support/mcp/mod.rs"]
+#[path = "../../shared-test-support/mcp/mod.rs"]
 mod fixture;
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())

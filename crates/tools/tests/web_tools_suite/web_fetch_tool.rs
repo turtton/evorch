@@ -1,6 +1,7 @@
+#[path = "../common/mod.rs"]
 mod common;
 
-#[path = "common/guard_responses.rs"]
+#[path = "../common/guard_responses.rs"]
 mod guard_responses;
 
 use std::{
