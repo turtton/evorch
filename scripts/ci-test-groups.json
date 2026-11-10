@@ -1,0 +1,75 @@
+{
+  "groups": {
+    "runtime": {
+      "shards": 2,
+      "packages": [
+        "runtime",
+        "evorch",
+        "evorch-core"
+      ],
+      "features": [
+        "storage/test-support"
+      ],
+      "allow_empty_suites": []
+    },
+    "gui": {
+      "shards": 2,
+      "packages": [
+        "gui",
+        "browser-cef",
+        "workspace-ui",
+        "core-client-e2e"
+      ],
+      "features": [
+        "storage/test-support"
+      ],
+      "allow_empty_suites": []
+    },
+    "storage-tools": {
+      "shards": 1,
+      "packages": [
+        "storage",
+        "tools",
+        "browser",
+        "js-engine",
+        "sandbox",
+        "test-support"
+      ],
+      "features": [
+        "storage/test-support",
+        "sandbox/keychain"
+      ],
+      "allow_empty_suites": []
+    },
+    "support": {
+      "shards": 1,
+      "packages": [
+        "config",
+        "providers",
+        "mock-openai",
+        "event-bus",
+        "agents",
+        "apply-patch",
+        "catalog",
+        "core-instance",
+        "core-launcher",
+        "eval",
+        "model",
+        "recorder",
+        "routing",
+        "secret-guard",
+        "workbench-client",
+        "workbench-host",
+        "workbench-protocol",
+        "workbench-web"
+      ],
+      "features": [
+        "storage/unchecked-open",
+        "workbench-host/test-support"
+      ],
+      "allow_empty_suites": [
+        "io"
+      ]
+    }
+  }
+}
