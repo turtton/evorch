@@ -1,7 +1,7 @@
 #[test]
 fn ac14_overlays_guide_materials_html_discretion_and_delegation() {
-    let visual = include_str!("../assets/presets/category-visual.md");
-    let conversation = include_str!("../assets/presets/category-conversation.md");
+    let visual = include_str!("../../assets/presets/category-visual.md");
+    let conversation = include_str!("../../assets/presets/category-conversation.md");
     for overlay in [visual, conversation] {
         for term in [
             "generate_image",

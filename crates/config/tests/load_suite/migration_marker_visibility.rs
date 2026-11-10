@@ -27,7 +27,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
     }
 }
 
-// Same thread-local capture as storage/tests/undecodable_events.rs: no global subscriber.
+// Same thread-local capture as storage/tests/run_data_suite/undecodable_events.rs: no global subscriber.
 fn capture_logs<T>(action: impl FnOnce() -> T) -> (T, String) {
     let buffer = LogBuffer::default();
     let subscriber = tracing_subscriber::fmt()
