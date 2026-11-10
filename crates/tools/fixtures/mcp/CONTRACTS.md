@@ -220,8 +220,8 @@ classifications.
 
 | Existing test | Replacement and invariant that must remain |
 | --- | --- |
-| `tools/tests/executor.rs` optional-null MCP validation | Frozen fake registry, concrete public name from binding. Both validation outcomes leave connector/call counts zero. Keep `reads_null_as_omitted = false`. |
-| `tools/tests/apply_patch_reserved_name.rs` | Keep direct `ToolExecutor` reserved-name denial for a scope-gated non-builtin impostor, add forged frozen-binding rejection, and verify remote `apply_patch` is namespaced without replacing the builtin. Keep host-inheritance coverage. Do not simply delete the raw-name denial. |
+| `tools/tests/exec_suite/executor.rs` optional-null MCP validation | Frozen fake registry, concrete public name from binding. Both validation outcomes leave connector/call counts zero. Keep `reads_null_as_omitted = false`. |
+| `tools/tests/file_tools_suite/apply_patch_reserved_name.rs` | Keep direct `ToolExecutor` reserved-name denial for a scope-gated non-builtin impostor, add forged frozen-binding rejection, and verify remote `apply_patch` is namespaced without replacing the builtin. Keep host-inheritance coverage. Do not simply delete the raw-name denial. |
 | `runtime/tests/web_mcp/mcp_scope_e2e.rs` | Move registration to frozen bindings/concrete role allowlist. Preserve scope/policy denial with zero I/O, approval provenance/order, and the real guarded transport diagnostic scenarios; update fixture IDs only when moving to modern-first transport. |
 | `runtime/tests/web_mcp/mcp_scope_diagnostics/mod.rs` | Reuse migrated scope harness; preserve safe classified status/server/request correlation and absence of URL/header/body/credential material. |
 
