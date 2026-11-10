@@ -264,7 +264,7 @@ impl ApprovalLedger {
     pub fn open_user() -> Result<Self, McpErrorKind> {
         Self::at_user_config_dir(config::user_config_dir().ok_or(McpErrorKind::Unavailable)?)
     }
-    /// Explicit directory injection for isolated tests; production uses open_user.
+    /// Explicit core user configuration directory, also usable by isolated tests.
     pub fn at_user_config_dir(dir: PathBuf) -> Result<Self, McpErrorKind> {
         if !dir.is_absolute() {
             return Err(McpErrorKind::Configuration);

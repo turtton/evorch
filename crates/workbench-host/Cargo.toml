@@ -11,6 +11,8 @@ description = "Core-side command handling for the evorch workbench protocol (ADR
 # must never reach a GUI or client crate. scripts/check-workbench-boundaries.sh
 # enforces that in CI.
 [dependencies]
+base64 = { workspace = true }
+image = { workspace = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 workbench-protocol = { path = "../workbench-protocol" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }

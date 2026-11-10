@@ -2,6 +2,7 @@
   "approvals.v1": "approvals.v1",
   "commands.v1": "commands.v1",
   "committed_bodies.v1": "committed_bodies.v1",
+  "conversation.v1": "conversation.v1",
   "input_receipts.v1": "input_receipts.v1",
   "queries.v1": "queries.v1",
   "questions.v1": "questions.v1",

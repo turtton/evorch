@@ -115,7 +115,7 @@ impl OwnerPermit {
         policy: &RetryPolicy,
         interrupted: &dyn Fn() -> bool,
     ) -> Result<(), RegistryError> {
-        self.validate_generation_on(policy, &system_clock(), interrupted)
+        self.validate_generation_on(policy, &self.generation_clock(), interrupted)
     }
 
     pub(super) fn validate_generation_on(
@@ -124,6 +124,16 @@ impl OwnerPermit {
         clock: &std::sync::Arc<dyn Clock>,
         interrupted: &dyn Fn() -> bool,
     ) -> Result<(), RegistryError> {
+        self.generation_guard_on(policy, clock, interrupted)
+            .map(drop)
+    }
+
+    fn generation_guard_on(
+        &self,
+        policy: &RetryPolicy,
+        clock: &std::sync::Arc<dyn Clock>,
+        interrupted: &dyn Fn() -> bool,
+    ) -> Result<Registry, RegistryError> {
         authority::observe(
             self,
             retry_contention(
@@ -142,7 +152,8 @@ impl OwnerPermit {
                         &self.thread_id,
                         attempt,
                     )?;
-                    registry.guard_generation(self)
+                    registry.guard_generation(self)?;
+                    Ok(registry)
                 },
             ),
         )
@@ -160,6 +171,44 @@ impl OwnerPermit {
             permit.validate_generation_with(&policy, &interrupted)
         }))
         .await
+    }
+
+    /// Unlike a preflight, the returned transaction must cover the owner write.
+    pub(crate) async fn mutation_guard_off_thread(
+        &self,
+        policy: RetryPolicy,
+        interrupted: impl Fn() -> bool + Send + 'static,
+    ) -> Result<Registry, RegistryError> {
+        let permit = self.clone();
+        join_blocking(tokio::task::spawn_blocking(move || {
+            permit.generation_guard_on(&policy, &permit.generation_clock(), &interrupted)
+        }))
+        .await
+    }
+
+    fn generation_clock(&self) -> std::sync::Arc<dyn Clock> {
+        #[cfg(test)]
+        if let Some(clock) = generation_clocks()
+            .lock()
+            .unwrap()
+            .get(&self.registry_path)
+            .and_then(std::sync::Weak::upgrade)
+        {
+            return clock;
+        }
+        system_clock()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_generation_clock_for_test(
+        &self,
+        clock: &std::sync::Arc<super::VirtualClock>,
+    ) -> GenerationClockOverride {
+        generation_clocks().lock().unwrap().insert(
+            self.registry_path.clone(),
+            std::sync::Arc::downgrade(&clock.shared()),
+        );
+        GenerationClockOverride(self.registry_path.clone())
     }
     /// Begin a turn, retrying registry contention within the default policy.
     /// Blocks the calling thread; async code uses [`Self::begin_turn_off_thread`].
@@ -474,6 +523,26 @@ impl OwnerPermit {
         }))
         .await
     }
+}
+
+#[cfg(test)]
+pub(crate) struct GenerationClockOverride(PathBuf);
+
+#[cfg(test)]
+impl Drop for GenerationClockOverride {
+    fn drop(&mut self) {
+        generation_clocks().lock().unwrap().remove(&self.0);
+    }
+}
+
+#[cfg(test)]
+type GenerationClocks =
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<dyn Clock>>>;
+
+#[cfg(test)]
+fn generation_clocks() -> &'static GenerationClocks {
+    static CLOCKS: std::sync::OnceLock<GenerationClocks> = std::sync::OnceLock::new();
+    CLOCKS.get_or_init(Default::default)
 }
 
 async fn join_blocking<T>(

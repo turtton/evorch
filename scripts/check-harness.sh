@@ -18,20 +18,24 @@ run() {
 }
 run format cargo fmt --all --check
 run cache-contracts scripts/check-cache-contracts.sh
-run runtime cargo test -p runtime --test restore_expansion --test restore_tool_intent \
-    --test shell_jobs_integration --test state_transitions --test background --test messaging_loop \
-    --test wait_runs --test user_questions --test escalation_questions --test escalation_handoff \
-    --test context_observability --test compaction_engine --test compaction_policy \
-    --test compaction_triggers --test compaction_continuation --test meta_ops --lib
+# The grouped targets run every test of their group; the filters keep the former per-file selection.
+run runtime cargo test -p runtime --test restore_state --test tools_shell --test delegation \
+    --test waits_messaging --test escalation_ownership --test compaction_budget -- \
+    restore_expansion:: restore_tool_intent:: shell_jobs_integration:: state_transitions:: \
+    background:: messaging_loop:: wait_runs:: user_questions:: escalation_questions:: \
+    escalation_handoff:: context_observability:: compaction_engine:: compaction_policy:: \
+    compaction_continuation:: meta_ops::
+run runtime-standalone cargo test -p runtime --test compaction_triggers --lib
 run providers cargo test -p providers --lib
 run tools cargo test -p tools -p sandbox
-run storage cargo test -p storage --test user_questions --test migration
+run storage cargo test -p storage --test run_data_suite --test platform_suite -- \
+    user_questions:: migration::
 run gui cargo test -p gui --test user_questions_headless --test goal_restore_authority \
     --test runtime_wiring --lib
 if [[ "$mode" == full ]]; then
     run workspace cargo test --workspace --no-fail-fast
     run lint cargo clippy --workspace --all-targets -- -D warnings
-    run gui-no-default cargo clippy -p gui --all-targets --no-default-features -- -D warnings
+    run gui-requires-cef scripts/tests/test_gui_requires_cef.sh
     run otel cargo test -p event-bus --features otel-exporter
 fi
 printf 'Passed. Logs are temporary files in %s; remove this directory when no longer needed.\n' "$out"

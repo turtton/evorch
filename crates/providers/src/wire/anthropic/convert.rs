@@ -1,11 +1,12 @@
 use crate::message::{
-    ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, Role, ToolResultContent, Usage,
+    ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, Role, ToolChoice,
+    ToolResultContent, Usage,
 };
 
 use super::DEFAULT_MAX_TOKENS;
 use super::types::{
     CacheControl, WireContentBlock, WireMessage, WireMessagesRequest, WireMessagesResponse,
-    WireRole, WireTool, WireToolResultContent, WireUsage,
+    WireRole, WireTool, WireToolChoice, WireToolResultContent, WireUsage,
 };
 
 /// canonical request を Anthropic Messages API のリクエストへ変換します。
@@ -91,6 +92,8 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
         max_tokens: request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         system,
         messages,
+        tool_choice: (!tools.is_empty() && request.tool_choice == Some(ToolChoice::None))
+            .then_some(WireToolChoice::None),
         tools,
         temperature: request.temperature,
         stream,

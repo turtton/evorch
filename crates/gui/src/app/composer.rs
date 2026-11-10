@@ -121,7 +121,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         } else {
             self.composer.parse_submission(&raw)
         };
-        if !matches!(parsed, ComposerInput::Chat(_)) && !self.thread_writable() {
+        let side_question = matches!(
+            &parsed,
+            ComposerInput::Command { spec, .. } if spec.name == "btw"
+        );
+        if !matches!(parsed, ComposerInput::Chat(_)) && !side_question && !self.thread_writable() {
             self.push_notice("Read-only attach: explicitly Start or Claim before sending.");
             return;
         }
@@ -411,6 +415,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         self.goal_form.goal = args.into();
                         self.goal_form.delegation_value = None;
                         self.submit_goal();
+                        self.composer.input.clear();
+                    }
+                }
+                "btw" => {
+                    if self.submit_btw(args) {
                         self.composer.input.clear();
                     }
                 }

@@ -86,7 +86,9 @@ const C_GC: u64 = 24;
 // v53 replaces provenance fences; v54 adds the empty handoff receipt table,
 // indexes and lane-delete trigger. The full upgrade measured 354 frames with
 // 100,000 rows (22 above v52), so budget 24 fixed schema frames.
-const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24;
+// v56 adds one column to the empty limit-event table (a schema page rewrite and no row
+// work: 377 frames with 100,000 rows); reserve 4 frames.
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -323,6 +325,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v56.sql"),
                     include_str!("../undo/undo_v55.sql"),
                     include_str!("../undo/undo_v54.sql"),
                     include_str!("../undo/undo_v53.sql"),

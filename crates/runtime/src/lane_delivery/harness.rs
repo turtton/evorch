@@ -288,15 +288,6 @@ impl crate::agent_loop::LoopState {
                 notification_id: notice.notice_id.clone(),
             }));
             let automatic = notice.mode == PrNoticeMode::Auto;
-            let limit_epoch = if automatic {
-                handle
-                    .pr_auto_fix_state(notice.key.clone())
-                    .ok()
-                    .and_then(|state| state.limit_reached_epoch)
-                    .filter(|epoch| *epoch == notice.budget_epoch)
-            } else {
-                None
-            };
             bus.emit(Event::new(PullRequestEvent::AutoFixChanged {
                 thread_id: thread.to_owned(),
                 link_revision: notice.link_revision,
@@ -307,10 +298,7 @@ impl crate::agent_loop::LoopState {
                     repository: notice.key.repository.clone(),
                     number: notice.key.number,
                 },
-                reason: PullRequestAutoFixChange::Adopted {
-                    automatic,
-                    limit_epoch,
-                },
+                reason: PullRequestAutoFixChange::Adopted { automatic },
             }));
         }
     }

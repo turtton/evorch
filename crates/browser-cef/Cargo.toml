@@ -8,7 +8,8 @@ publish = false
 
 [features]
 default = []
-# Off by default so workspace builds never download or link the CEF distribution.
+# Off by default for this crate alone. `gui`'s default `cef` feature enables it,
+# so workspace builds download (or read `CEF_PATH`) and link the CEF distribution.
 cef = ["dep:cef", "dep:async-trait", "dep:base64", "dep:browser", "dep:image", "dep:tokio"]
 
 [dependencies]

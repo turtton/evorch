@@ -51,7 +51,7 @@ impl LoopState {
             {
                 Ok(()) => true,
                 Err(error) => {
-                    self.finalization_error(error.to_string());
+                    self.finalization_error(crate::lanes::ownership_failure_reason(self, &error));
                     false
                 }
             }

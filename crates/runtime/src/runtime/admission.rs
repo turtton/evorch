@@ -2,6 +2,52 @@ use super::*;
 use event_bus::event::diagnostic_codes;
 
 pub(super) type Admissions = Mutex<HashMap<RunId, Admission>>;
+/// Host-owned lane producers can still be waiting before a RunEntry exists.
+#[derive(Default)]
+pub(super) struct LaneAdmissions {
+    state: Mutex<LaneAdmissionState>,
+    draining: tokio::sync::Mutex<()>,
+}
+
+#[derive(Default)]
+struct LaneAdmissionState {
+    tasks: tokio::task::JoinSet<()>,
+    executions: HashMap<tokio::task::Id, (RunId, Arc<ExecutionControl>)>,
+    failure: Option<tokio::task::JoinError>,
+}
+
+impl LaneAdmissionState {
+    fn reap(&mut self) {
+        while let Some(result) = self.tasks.try_join_next_with_id() {
+            match result {
+                Ok((id, ())) => {
+                    self.executions.remove(&id);
+                }
+                Err(error) => {
+                    self.executions.remove(&error.id());
+                    self.failure.get_or_insert(error);
+                }
+            }
+        }
+    }
+}
+
+impl LaneAdmissions {
+    fn spawn(
+        &self,
+        run: RunId,
+        execution: Arc<ExecutionControl>,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.reap();
+        let id = state.tasks.spawn(task).id();
+        state.executions.insert(id, (run, execution));
+    }
+}
 #[cfg(test)]
 pub(super) type RegistrationHook = Arc<dyn Fn(RunId) + Send + Sync>;
 
@@ -37,6 +83,81 @@ impl Admission {
 }
 
 impl AgentRuntime {
+    /// Lane root admissions not yet finished, including ones absent from list_agents.
+    pub fn pending_lane_admissions(&self) -> Vec<RunId> {
+        let mut state = self
+            .shared
+            .lane_admissions
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.reap();
+        let mut runs: Vec<_> = state.executions.values().map(|(run, _)| *run).collect();
+        runs.sort_unstable();
+        runs.dedup();
+        runs
+    }
+
+    /// After stopping lane producers, cancel and join every lane admission generation.
+    /// The provider future is dropped by its cancellation branch, not detached.
+    pub async fn drain_lane_admissions(&self) -> Result<(), tokio::task::JoinError> {
+        let _draining = self.shared.lane_admissions.draining.lock().await;
+        let mut failure = None;
+        loop {
+            let (mut tasks, executions) = {
+                let mut state = self
+                    .shared
+                    .lane_admissions
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.reap();
+                if let Some(error) = state.failure.take() {
+                    failure.get_or_insert(error);
+                }
+                (
+                    std::mem::take(&mut state.tasks),
+                    std::mem::take(&mut state.executions),
+                )
+            };
+            if tasks.is_empty() {
+                break;
+            }
+            for (run, execution) in executions.into_values() {
+                let unregistered = {
+                    // Registration holds A -> R too. Mark cancellation under
+                    // that fence; never acquire a publication gate under A/R.
+                    let mut admissions = self
+                        .shared
+                        .admissions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let runs = lock_runs(&self.shared.runs);
+                    let registered = runs
+                        .get(&run)
+                        .is_some_and(|entry| Arc::ptr_eq(&entry.execution, &execution));
+                    if !registered
+                        && let Some(admission) = admissions.get_mut(&run)
+                        && Arc::ptr_eq(&admission.execution, &execution)
+                    {
+                        admission.cancelled = true;
+                    }
+                    !registered
+                };
+                // Registered roots belong to the host's ordinary Stop/drain.
+                if unregistered {
+                    self.cancel_execution(&execution);
+                }
+            }
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
     pub(super) fn fail_review_admission(
         &self,
         run_id: RunId,
@@ -272,8 +393,10 @@ impl AgentRuntime {
             .and_then(|admission| admission.completion.take())
             .expect("reserved admission has one completion sender");
         let goal_stamp = self.goal_input_stamp(run_id);
+        let lane_root = parent.is_none() && config.lane_scope == Some(event_bus::LaneScope::Lane);
+        let lane_execution = Arc::clone(&execution);
         let runtime = self.clone();
-        tokio::spawn(async move {
+        let task = async move {
             let handoff = matches!(
                 &continuation,
                 RunContinuation::Handoff(_)
@@ -283,6 +406,7 @@ impl AgentRuntime {
                     }
             );
             let invocation = crate::AgentInvocationContext {
+                btw: None,
                 attempts: None,
                 turn: None,
                 run_id: run_id.to_string(),
@@ -290,11 +414,47 @@ impl AgentRuntime {
                 category: config.category.clone(),
                 purpose: event_bus::RequestPurpose::Agent,
             };
-            let mut admitted = runtime
-                .shared
-                .model_for(&config)
-                .admit(&invocation, role)
-                .await;
+            let model = runtime.shared.model_for(&config);
+            let mut cancellation = execution.cancel_tx.subscribe();
+            let mut admitted = if lane_root {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.wait_for(|signal| matches!(signal, RunInterrupt::Stop | RunInterrupt::Cancel)) =>
+                        Err(RuntimeError::RunTerminated { run_id: run_id.to_string() }),
+                    result = model.admit(&invocation, role) => result,
+                }
+            } else {
+                model.admit(&invocation, role).await
+            };
+            // Admission may outlive a lane handoff. Reject its old generation
+            // before registration can schedule even the initial snapshot write.
+            if lane_root
+                && admitted.is_ok()
+                && let Some(permit) = config.ownership.as_ref()
+            {
+                let interrupts = cancellation.clone();
+                let retry = runtime
+                    .shared
+                    .ownership_retry
+                    .get()
+                    .copied()
+                    .unwrap_or_else(crate::ownership::RetryPolicy::unbounded);
+                admitted = permit
+                    .validate_generation_off_thread(retry, move || {
+                        interrupts.borrow().kind().is_some()
+                    })
+                    .await
+                    .map_err(|error| {
+                        tracing::debug!(%run_id, %error, "lane admission ownership rejected");
+                        RuntimeError::StaleOwnership {
+                            run_id: run_id.to_string(),
+                        }
+                    });
+            }
+            #[cfg(test)]
+            if lane_root && admitted.is_ok() {
+                runtime.execution_hook(cancellation::HookPoint::LaneOwnershipValidated, &execution);
+            }
             #[cfg(test)]
             if admitted.is_err() {
                 runtime.execution_hook(cancellation::HookPoint::AdmissionFailed, &execution);
@@ -411,7 +571,14 @@ impl AgentRuntime {
             if admitted.is_err() {
                 result.send_replace(Some(admitted));
             }
-        });
+        };
+        if lane_root {
+            self.shared
+                .lane_admissions
+                .spawn(run_id, lane_execution, task);
+        } else {
+            tokio::spawn(task);
+        }
         run_id
     }
 

@@ -61,13 +61,13 @@ B が `DELEGATE_ROLES`、parser、child admission/spawn 経路を変更する。
 `delegate_background` の `parent=None` は変更しない。`spawn_reserved` 等の下位経路でも、通常実行における Orchestrator child の迂回を許さない。
 
 名指しするテスト:
-- `crates/runtime/tests/parallel_delegates.rs`: `awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives` は現在、モデルが Orchestrator を delegate して孫 Worker を作る。1a では直接 child の attention/input 契約へ整理し、lane とその Worker の独立性は 1b/1c で別途検証する。
+- `crates/runtime/tests/delegation/parallel_delegates.rs`: `awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives` は現在、モデルが Orchestrator を delegate して孫 Worker を作る。1a では直接 child の attention/input 契約へ整理し、lane とその Worker の独立性は 1b/1c で別途検証する。
 - `crates/runtime/tests/request_turn_context.rs`
 - `crates/runtime/src/meta/role_tests.rs`
 - `crates/runtime/tests/system_prompt_seam.rs`
-- `crates/runtime/tests/delegation_progress.rs`
+- `crates/runtime/tests/delegation/delegation_progress.rs`
 - `crates/runtime/src/runtime/completion_relay/tests.rs`
-- `crates/runtime/tests/restore/` 配下
+- `crates/runtime/tests/restore_state/restore/` 配下
 
 root 起動に使う `delegate_background(Role::Orchestrator, …)` を一括削除しない。`chat_restore/renewal.rs` 等の汎用 deep-tree unit test は、モデルから許される木を表すテストと区別する。必要なら test-only fixture で保持し、production の認可迂回を残さない。
 
@@ -139,7 +139,7 @@ root 起動に使う `delegate_background(Role::Orchestrator, …)` を一括削
 予算と資源上限の設計方針:
 - runtime 内部の予算型（`BudgetSettings` 等）で `ResourceLimit<T> { Unlimited, Bounded(T) }` を導入し、lane scope 起動時に無制限を適用する。
 - 「未指定（既定値適用）」と「無制限」の取り違えは runtime の型定義で担保する。
-- operator 向けの `BudgetConfig`（`crates/config/src/types/budget.rs`, `strict.rs`, `config/tests/budget.rs`）への露出は 1b では行わず、将来必要になった時点で別途検討する（Phase 1b の変更対象から config 系ファイルを除外し、担当 B の責務を縮小）。
+- operator 向けの `BudgetConfig`（`crates/config/src/types/budget.rs`, `strict.rs`, `config/tests/settings_suite/budget.rs`）への露出は 1b では行わず、将来必要になった時点で別途検討する（Phase 1b の変更対象から config 系ファイルを除外し、担当 B の責務を縮小）。
 - 通常 lead の既定値（400 calls、2 時間、token 上限なし）および既存明示設定は維持する。
 - usage 計測・NoProgress・IdenticalToolCalls は維持する。
 - child/lane 共通の spawn credit と、lane terminal の初回観測を接続する。

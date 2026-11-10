@@ -5,7 +5,7 @@ in this map is NOT a claim that those implementations/tests exist at T0. Use the
 exact names for cross-worker coverage review. Feature-gated/fake-store checks
 are additional to the no-default-features build gate.
 
-## A: crates/config/tests/mcp_config.rs
+## A: crates/config/tests/load_suite/mcp_config.rs
 
 - mcp_json_is_never_written
 - toml_replaces_whole_server
@@ -23,13 +23,13 @@ are additional to the no-default-features build gate.
 - revocation_invalidates_live_permit
 - corrupt_ledger_is_unapproved
 
-## B: crates/tools/tests/mcp_secrets.rs
+## B: crates/tools/tests/mcp_suite/mcp_secrets.rs
 
 - secrets_absent_from_debug_events_errors_snapshots_and_ledger
 - keychain_failure_never_falls_back_to_file
 - unavailable_keychain_does_not_disable_literal_or_env
 
-## C: crates/tools/tests/mcp_protocol.rs
+## C: crates/tools/tests/mcp_suite/mcp_protocol.rs
 
 - golden_modern_http
 - golden_legacy_http
@@ -41,7 +41,7 @@ are additional to the no-default-features build gate.
 - invalid_schema_excludes_only_one_tool
 - input_required_is_not_replayed
 
-## C: crates/tools/tests/mcp_http.rs
+## C: crates/tools/tests/mcp_suite/mcp_http.rs
 
 - sse_finishes_on_matching_result_without_eof
 - local_exception_is_destination_bound
@@ -60,7 +60,7 @@ are additional to the no-default-features build gate.
 - legacy_initialize_is_not_cancelled
 - unknown_call_outcome_is_not_replayed
 
-## E2: crates/runtime/tests/mcp_prepare.rs
+## E2: crates/runtime/tests/web_mcp/mcp_prepare.rs
 
 - unapproved_stdio_never_spawns
 - unapproved_http_never_connects
@@ -78,7 +78,7 @@ are additional to the no-default-features build gate.
 The GUI limiter check uses the actual shared limiter at E2; E4 adds the privileged
 GUI test-connection entry point. No real keychain or external service is required.
 
-## E2: crates/tools/tests/executor.rs
+## E2: crates/tools/tests/exec_suite/executor.rs
 
 - run_js_cannot_invoke_external_mcp (real dispatcher and fixed CALLABLE_TOOLS)
 
@@ -95,10 +95,10 @@ GUI test-connection entry point. No real keychain or external service is require
 
 ## E: existing tests (preserve/migrate)
 
-- crates/tools/tests/executor.rs
-- crates/tools/tests/apply_patch_reserved_name.rs
-- crates/runtime/tests/mcp_scope_e2e.rs
-- crates/runtime/tests/mcp_scope_diagnostics/mod.rs
+- crates/tools/tests/exec_suite/executor.rs
+- crates/tools/tests/file_tools_suite/apply_patch_reserved_name.rs
+- crates/runtime/tests/web_mcp/mcp_scope_e2e.rs
+- crates/runtime/tests/web_mcp/mcp_scope_diagnostics/mod.rs
 
 ## F1: crates/gui/tests/mcp_settings.rs
 
@@ -129,10 +129,10 @@ GUI test-connection entry point. No real keychain or external service is require
 ## T0 tests already implemented
 
 - crates/tools/src/mcp/contracts_tests.rs: search_wire_helpers_preserve_existing_contract
-- crates/tools/tests/mcp_contracts.rs: fingerprint separation, bounded 400 envelope,
+- crates/tools/tests/mcp_suite/mcp_contracts.rs: fingerprint separation, bounded 400 envelope,
   redaction, cancellation policy golden, sticky cancellation, explicit fixture
   gate, mismatch rejection, all transcript loading, Rust stdio fixture roundtrip
-- crates/runtime/tests/mcp_contracts.rs: inert fake-store injection, project shared
+- crates/runtime/tests/web_mcp/mcp_contracts.rs: inert fake-store injection, project shared
   non-waiting limiter/drop, strict saved snapshot shape, Role::config_key parity
 - crates/gui/src/model/transcript/diagnostics.rs: exhaustive natural-language
   rendering of all safe McpErrorKind classes (existing test extended)

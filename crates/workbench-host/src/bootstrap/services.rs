@@ -57,6 +57,22 @@ impl BackgroundServices {
         }
     }
 
+    /// Join only a producer that must finish before the runtime snapshot.
+    /// Other services may still need runtime terminal events to finish.
+    pub async fn join_named(&mut self, name: &str) -> Result<(), BootstrapError> {
+        let mut selected = Self::default();
+        let mut remaining = Vec::new();
+        for service in self.services.drain(..) {
+            if service.name == name {
+                selected.services.push(service);
+            } else {
+                remaining.push(service);
+            }
+        }
+        self.services = remaining;
+        selected.shutdown().await
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), BootstrapError> {
         self.request_stop();
         let mut failure = None;
@@ -126,5 +142,25 @@ mod tests {
         );
         completed.await.unwrap();
         assert_eq!(services.names().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn producer_join_does_not_wait_for_a_service_that_needs_runtime_drain() {
+        let mut services = BackgroundServices::default();
+        let (runtime_drained, drained) = oneshot::channel();
+        services.start("runtime-dependent", |stop| async move {
+            stop.await?;
+            drained.await?;
+            Ok(())
+        });
+        services.start("producer", |stop| async move {
+            stop.await?;
+            Ok(())
+        });
+        services.request_stop();
+        services.join_named("producer").await.unwrap();
+        assert_eq!(services.names().collect::<Vec<_>>(), ["runtime-dependent"]);
+        runtime_drained.send(()).unwrap();
+        services.shutdown().await.unwrap();
     }
 }

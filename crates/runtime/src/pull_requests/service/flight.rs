@@ -137,6 +137,11 @@ impl Inner {
         interests: Vec<Interest>,
     ) -> Arc<Flight> {
         let mut state = self.lock();
+        if *self.shutdown.borrow() {
+            let flight = Arc::new(Flight::new(interests));
+            flight.outcome.send_replace(Some(FlightOutcome::Discarded));
+            return flight;
+        }
         if let Some(flight) = state.flights.get(&key) {
             flight.join(interests);
             return Arc::clone(flight);
@@ -144,7 +149,8 @@ impl Inner {
         let flight = Arc::new(Flight::new(interests));
         state.flights.insert(key.clone(), Arc::clone(&flight));
         drop(state);
-        tokio::spawn(run(Arc::clone(self), key, Arc::clone(&flight)));
+        self.tasks
+            .spawn(run(Arc::clone(self), key, Arc::clone(&flight)));
         flight
     }
 
@@ -171,7 +177,12 @@ impl Inner {
             return FlightOutcome::Discarded;
         }
         let deadline = Duration::from_secs(self.config().fetch_timeout_seconds);
-        let result = self.source.fetch(key, deadline).await;
+        let mut shutdown = self.shutdown.subscribe();
+        let result = tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|stopped| *stopped) => return FlightOutcome::Discarded,
+            result = self.source.fetch(key, deadline) => result,
+        };
         // Tracking may have been switched off while `gh` ran: nothing more is started for it.
         if !self.config().enabled {
             return FlightOutcome::Discarded;

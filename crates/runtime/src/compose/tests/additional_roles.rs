@@ -32,6 +32,7 @@ async fn additional_roles_keep_affinity_per_run() {
             model
                 .complete(
                     &AgentInvocationContext {
+                        btw: None,
                         attempts: None,
                         turn: None,
                         category: None,

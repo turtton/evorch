@@ -517,15 +517,9 @@ impl Inner {
             state.preparing.insert(notice.notice_id.clone());
         }
         let inner = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut shutdown = inner.shutdown.subscribe();
-            tokio::select! {
-                result = inner.prepare_notice(&target, &notice) => {
-                    if let Err(error) = result {
-                        tracing::warn!(%error, notice_id = %notice.notice_id, "PR notice preparation stopped");
-                    }
-                }
-                _ = shutdown.changed() => {}
+        self.tasks.spawn(async move {
+            if let Err(error) = inner.prepare_notice(&target, &notice).await {
+                tracing::warn!(%error, notice_id = %notice.notice_id, "PR notice preparation stopped");
             }
             inner.lock().preparing.remove(&notice.notice_id);
             #[cfg(test)]
@@ -579,7 +573,12 @@ impl Inner {
             .map(|c| c.name.clone())
             .collect::<Vec<_>>();
         let request = LogRequest::new(notice.key.clone(), &notice.head_sha, failed_checks);
-        let bundle = self.logs.fetch_failed_logs(&request).await;
+        let mut shutdown = self.shutdown.subscribe();
+        let bundle = tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|stopped| *stopped) => return Ok(()),
+            bundle = self.logs.fetch_failed_logs(&request) => bundle,
+        };
         let payload = crate::lane_delivery::prepare_pr_notice_payload(
             notice,
             &names,

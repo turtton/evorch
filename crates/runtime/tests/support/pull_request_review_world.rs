@@ -5,7 +5,7 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::support::{ScriptedModel, text_response, tool_response};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agents::Role;
@@ -133,6 +133,49 @@ impl PullRequestSource for ReviewSource {
     }
 }
 
+/// Keep setup's first poll behind the complete link operation, not merely its database write.
+/// Otherwise a poll can finish before `link` registers its forced refresh, and that refresh can
+/// cross a test's fetch-count baseline. This gates only setup; real review lookups and refreshes
+/// still use the enabled service and the same source.
+struct ReviewOwnership {
+    host: Arc<OwnerHost>,
+    linking: Mutex<bool>,
+    linked: Condvar,
+    poll_waiting: tokio::sync::Notify,
+}
+
+impl ReviewOwnership {
+    fn pause_polling(&self) -> LinkSetup<'_> {
+        let mut linking = self.linking.lock().unwrap();
+        assert!(!*linking, "link setup is not reentrant");
+        *linking = true;
+        LinkSetup(self)
+    }
+}
+
+impl OwnershipView for ReviewOwnership {
+    fn owned_permit(&self, thread_id: &str) -> Option<runtime::ownership::OwnerPermit> {
+        let mut linking = self.linking.lock().unwrap();
+        while *linking {
+            self.poll_waiting.notify_one();
+            // OwnershipView is synchronous; the service calls it on its blocking pool.
+            linking = self.linked.wait(linking).unwrap();
+        }
+        drop(linking);
+        self.host.owned_permit(thread_id).ok()
+    }
+}
+
+/// Release the blocking-pool reader even if setup panics or its future is dropped.
+struct LinkSetup<'a>(&'a ReviewOwnership);
+
+impl Drop for LinkSetup<'_> {
+    fn drop(&mut self) {
+        *self.0.linking.lock().unwrap() = false;
+        self.0.linked.notify_all();
+    }
+}
+
 /// A runtime with the pull request service on, and its fake source.
 pub struct World {
     pub bus: Arc<EventBus>,
@@ -143,6 +186,7 @@ pub struct World {
     pub storage: storage::Storage,
     pub events: tokio::sync::Mutex<EventReceiver>,
     pub _directory: tempfile::TempDir,
+    ownership: Arc<ReviewOwnership>,
 }
 
 pub fn world(
@@ -192,9 +236,15 @@ pub fn world_with(
         .unwrap(),
     );
     let source = ReviewSource::default();
+    let ownership = Arc::new(ReviewOwnership {
+        host: Arc::clone(&host),
+        linking: Mutex::new(false),
+        linked: Condvar::new(),
+        poll_waiting: tokio::sync::Notify::new(),
+    });
     let service = runtime
         .start_pull_requests(
-            Arc::clone(&host) as Arc<dyn OwnershipView>,
+            Arc::clone(&ownership) as Arc<dyn OwnershipView>,
             Arc::new(source.clone()),
             settings,
         )
@@ -208,6 +258,7 @@ pub fn world_with(
         storage,
         events: tokio::sync::Mutex::new(events),
         _directory: directory,
+        ownership,
     }
 }
 
@@ -235,6 +286,7 @@ impl World {
 
     /// Links the thread to the current PR state.
     pub async fn link(&self, first: FetchedPullRequest) {
+        let setup = self.ownership.pause_polling();
         let head = first.facts.head_sha.chars().next().unwrap();
         self.source.set(first);
         let revision = self
@@ -243,10 +295,33 @@ impl World {
             .pull_request_thread_state(THREAD)
             .unwrap()
             .lifecycle_revision;
-        self.service
-            .link(THREAD, &format!("{REPOSITORY}#7"), revision, &self.permit())
-            .await
-            .unwrap();
+        let permit = self.permit();
+        let locator = format!("{REPOSITORY}#7");
+        let mut events = self.bus.subscribe();
+        let linking = self.service.link(THREAD, &locator, revision, &permit);
+        tokio::pin!(linking);
+        loop {
+            tokio::select! {
+                biased;
+                event = events.recv() => {
+                    if matches!(event.unwrap().kind, EventKind::PullRequest(
+                        event_bus::PullRequestEvent::Linked { .. }
+                    )) {
+                        // Exercise the adversarial order: planning sees the saved link before
+                        // the link future resumes to register its forced refresh.
+                        self.service.notify_changed();
+                        self.ownership.poll_waiting.notified().await;
+                        linking.await.unwrap();
+                        break;
+                    }
+                }
+                result = &mut linking => {
+                    result.unwrap();
+                    break;
+                }
+            }
+        }
+        drop(setup);
         self.head_is(head).await;
     }
 

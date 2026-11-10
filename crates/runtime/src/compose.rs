@@ -645,6 +645,7 @@ impl RoutedModel {
         let provider = &self.providers[&route.profile];
         let (base, speed) = config::types::provider::parse_model_speed(&route.model_id);
         let request = ChatRequest {
+            tool_choice: None,
             model: base.into(),
             messages: Vec::new(),
             tools: Vec::new(),
@@ -856,6 +857,7 @@ impl RoutedModel {
                 .accepts_images(messages, &route.profile, base_model_id)
                 .await;
             let mut request = ChatRequest {
+                tool_choice: None,
                 responses_replay: Some(replay_metadata(&route.model_id, speed)),
                 output_schema: output_schema.cloned(),
                 model: base_model_id.to_owned(),
@@ -898,6 +900,16 @@ impl RoutedModel {
                     invocation,
                     role,
                     &format!("{}/{}", route.profile, route.model_id),
+                );
+            }
+            if invocation.purpose == event_bus::RequestPurpose::Agent
+                && let Some(btw) = &invocation.btw
+            {
+                btw.publish(
+                    &request,
+                    Arc::clone(&provider.client),
+                    provider.auth.clone(),
+                    self.context_window(&route),
                 );
             }
             let result = structured::send(provider, &mut request, bus).await;
@@ -1203,6 +1215,7 @@ impl AgentModel for RoutedModel {
             .accepts_images(messages, &route.profile, base_model_id)
             .await;
         let mut request = ChatRequest {
+            tool_choice: None,
             responses_replay: Some(replay_metadata(&route.model_id, speed)),
             model: base_model_id.to_owned(),
             messages: images::for_model(messages, &tools, accepts_images),

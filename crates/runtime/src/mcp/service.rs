@@ -13,10 +13,10 @@ use sandbox::Secret;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::{Mutex as AsyncMutex, RwLock, watch};
 use tools::{
     NetworkGuard,
     mcp::{
@@ -54,6 +54,9 @@ struct ServiceInner {
     stdio: Option<Arc<dyn McpTransportFactory>>,
     http: Arc<dyn McpTransportFactory>,
     statuses: Mutex<BTreeMap<PathBuf, watch::Sender<Vec<McpStatusEvent>>>>,
+    admission: RwLock<()>,
+    stopped: CancelContext,
+    sessions: Mutex<Vec<Weak<PreparedSession>>>,
 }
 impl ProjectMcpService {
     pub fn new(
@@ -72,6 +75,9 @@ impl ProjectMcpService {
                 guard,
                 limiter: Arc::new(ProjectMcpLimiter::default()),
                 statuses: Mutex::new(BTreeMap::new()),
+                admission: RwLock::new(()),
+                stopped: CancelContext::default(),
+                sessions: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -85,6 +91,31 @@ impl ProjectMcpService {
         inner.stdio = Some(stdio);
         inner.http = http;
         self
+    }
+    /// Close admission, cancel in-flight work, and await transport cleanup and calls.
+    /// Repeated shutdown is safe. No task or process may outlive the host drain.
+    pub async fn shutdown(&self) -> Result<(), McpErrorKind> {
+        self.inner.stopped.cancel();
+        let _admission = self.inner.admission.write().await;
+        let sessions: Vec<_> = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for session in &sessions {
+            session._owner.cancel.cancel();
+        }
+        let mut failure = None;
+        for session in sessions {
+            if let Err(error) = session.raw.shutdown(ShutdownReason::Cancelled).await {
+                failure.get_or_insert(error.kind);
+            }
+            let _completed = session.client.lock().await;
+        }
+        failure.map_or(Ok(()), Err)
     }
     pub fn limiter(&self) -> Arc<ProjectMcpLimiter> {
         self.inner.limiter.clone()
@@ -285,6 +316,10 @@ impl ServiceInner {
         expected_fingerprint: Option<tools::mcp::types::ApprovalFingerprint>,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<Arc<PreparedSession>, McpErrorKind> {
+        let _admission = self.admission.read().await;
+        if self.stopped.is_cancelled() {
+            return Err(McpErrorKind::Cancelled);
+        }
         // One budget covers resolution, connection, negotiation and all list pages.
         let deadline = deadline.unwrap_or_else(|| {
             tokio::time::Instant::now() + Duration::from_millis(PREPARATION_TIMEOUT_MS)
@@ -292,6 +327,7 @@ impl ServiceInner {
         let (resolved, permit) = tokio::select! {
             biased;
             _=run_cancel.cancelled()=>return Err(McpErrorKind::Cancelled),
+            _=self.stopped.cancelled()=>return Err(McpErrorKind::Cancelled),
             result=tokio::time::timeout_at(deadline,self.resolved(scope,revision,definition,expected_fingerprint))=>result.unwrap_or(Err(McpErrorKind::Timeout))?,
         };
         let kind = match resolved.transport {
@@ -306,7 +342,7 @@ impl ServiceInner {
         let fingerprint = resolved.fingerprint;
         let startup = resolved.startup_timeout;
         let request_timeout = resolved.request_timeout;
-        let owner = SessionOwner::new(run_cancel.clone());
+        let owner = SessionOwner::new(run_cancel.clone(), self.stopped.clone());
         self.publish(McpStatusEvent {
             scope: scope.clone(),
             status: McpServerStatus::Connecting,
@@ -343,6 +379,7 @@ impl ServiceInner {
         let (raw, native_stdio) = tokio::select! {
             biased;
             _=run_cancel.cancelled()=>return Err(McpErrorKind::Cancelled),
+            _=self.stopped.cancelled()=>return Err(McpErrorKind::Cancelled),
             result=tokio::time::timeout_at(deadline,connect)=>result.unwrap_or(Err(McpErrorKind::Timeout))?,
         };
         let initialize = async {
@@ -366,6 +403,7 @@ impl ServiceInner {
         let result = tokio::select! {
             biased;
             _=run_cancel.cancelled()=>Err(McpErrorKind::Cancelled),
+            _=self.stopped.cancelled()=>Err(McpErrorKind::Cancelled),
             result=tokio::time::timeout_at(deadline,initialize)=>result.unwrap_or(Err(McpErrorKind::Timeout)),
         };
         let (client, definitions) = match result {
@@ -383,7 +421,7 @@ impl ServiceInner {
                 return Err(kind);
             }
         };
-        Ok(Arc::new(PreparedSession {
+        let session = Arc::new(PreparedSession {
             client: AsyncMutex::new(ClientState {
                 client,
                 failed: false,
@@ -400,7 +438,14 @@ impl ServiceInner {
             root: scope.canonical_root.clone(),
             raw,
             _owner: owner,
-        }))
+        });
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sessions.retain(|session| session.strong_count() > 0);
+        sessions.push(Arc::downgrade(&session));
+        Ok(session)
     }
 }
 enum LaunchTarget {
@@ -418,11 +463,14 @@ struct SessionOwner {
     link: tokio::task::JoinHandle<()>,
 }
 impl SessionOwner {
-    fn new(parent: CancelContext) -> Self {
+    fn new(parent: CancelContext, stopped: CancelContext) -> Self {
         let cancel = CancelContext::default();
         let child = cancel.clone();
         let link = tokio::spawn(async move {
-            parent.cancelled().await;
+            tokio::select! {
+                _ = parent.cancelled() => (),
+                _ = stopped.cancelled() => (),
+            }
             child.cancel();
         });
         Self { cancel, link }
@@ -691,6 +739,9 @@ impl McpRunService for ProjectMcpService {
         &self,
         mut request: PrepareMcpRun,
     ) -> Result<RunMcpLease, McpErrorKind> {
+        if self.inner.stopped.is_cancelled() {
+            return Err(McpErrorKind::Cancelled);
+        }
         let config = mcp::load_project(&request.canonical_root).map_err(mcp_config_error_kind)?;
         request.canonical_root = config.canonical_root.clone();
         if config.preparation_blocked {

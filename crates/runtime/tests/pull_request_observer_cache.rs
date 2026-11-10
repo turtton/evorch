@@ -13,8 +13,7 @@ use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
 use runtime::pull_requests::{
-    FakePullRequestSource, OwnershipView, PullRequestService, ServiceParts, SystemWallClock,
-    ThreadEnvironment,
+    FakePullRequestSource, PullRequestService, ServiceParts, SystemWallClock, ThreadEnvironment,
 };
 use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RuntimeError};
 use serde_json::{Value, json};
@@ -73,14 +72,6 @@ impl ThreadEnvironment for EveryRunIsInOneThread {
 
     fn checkout_directories(&self, _thread_id: &str) -> Vec<std::path::PathBuf> {
         Vec::new()
-    }
-}
-
-struct OwnsNothing;
-
-impl OwnershipView for OwnsNothing {
-    fn owned_permit(&self, _thread_id: &str) -> Option<runtime::ownership::OwnerPermit> {
-        None
     }
 }
 
@@ -160,6 +151,7 @@ struct Fixture {
     events: EventReceiver,
     storage: storage::Storage,
     _service: Option<PullRequestService>,
+    _owner: Arc<runtime::ownership::OwnerHost>,
     _directory: tempfile::TempDir,
 }
 
@@ -171,6 +163,15 @@ fn fixture(model: Arc<dyn AgentModel>, observed: bool) -> Fixture {
     })
     .unwrap();
     let bus = Arc::new(EventBus::new(4096));
+    let owner = Arc::new(
+        runtime::ownership::OwnerHost::open(
+            &directory.path().join("owners"),
+            Default::default(),
+            bus.clone(),
+        )
+        .unwrap(),
+    );
+    owner.start(THREAD).unwrap();
     let events = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor
@@ -181,7 +182,7 @@ fn fixture(model: Arc<dyn AgentModel>, observed: bool) -> Fixture {
         PullRequestService::start(ServiceParts {
             storage: storage.handle(),
             source: Arc::new(FakePullRequestSource::new()),
-            ownership: Arc::new(OwnsNothing),
+            ownership: owner.clone(),
             environment: Arc::new(EveryRunIsInOneThread),
             bus,
             settings: config::PullRequestsConfig {
@@ -197,6 +198,7 @@ fn fixture(model: Arc<dyn AgentModel>, observed: bool) -> Fixture {
         events,
         storage,
         _service: service,
+        _owner: owner,
         _directory: directory,
     }
 }

@@ -755,3 +755,33 @@ fn b3_review_m1_existing_text_debug_shape_is_unchanged() {
         r#"Reasoning { text: "plain thinking" }"#
     );
 }
+
+// Given: a request with tools / When: it forbids tool calls / Then: only `tool_choice`
+// changes, so tool definitions, their order and the input keep the cached prefix
+#[test]
+fn forbidding_tools_changes_only_tool_choice() {
+    for dialect in [ResponsesDialect::Codex, ResponsesDialect::OpenAi] {
+        let normal = rich_request();
+        assert!(!normal.tools.is_empty());
+        let mut forbidden = normal.clone();
+        forbidden.tool_choice = Some(crate::message::ToolChoice::None);
+
+        let mut with_none = wire(&forbidden, dialect, Some("run"));
+        let mut default = wire(&normal, dialect, Some("run"));
+        assert_eq!(with_none["tool_choice"], "none");
+        assert_eq!(default["tool_choice"], "auto");
+        with_none.as_object_mut().unwrap().remove("tool_choice");
+        default.as_object_mut().unwrap().remove("tool_choice");
+        assert_eq!(with_none, default);
+    }
+}
+
+// Given: no tools at all / When: tool calls are forbidden / Then: no `tool_choice` is
+// added where the dialect sends none, since there is nothing to choose from
+#[test]
+fn forbidding_tools_without_tools_adds_no_choice_to_the_official_wire() {
+    let mut request = minimal_request();
+    request.tool_choice = Some(crate::message::ToolChoice::None);
+    let value = wire(&request, ResponsesDialect::OpenAi, None);
+    assert!(value.get("tool_choice").is_none());
+}

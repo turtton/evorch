@@ -421,6 +421,14 @@ pub struct JsonSchema {
     pub schema: serde_json::Value,
 }
 
+/// Constraint on whether the model may call the tools a request defines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// The model must answer in text; tool definitions stay in the request.
+    None,
+}
+
 /// チャット完了リクエスト。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -449,6 +457,10 @@ pub struct ChatRequest {
     /// 最終回答の構造制約。未指定なら通常のテキスト生成。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<JsonSchema>,
+    /// Tool selection constraint. `None` keeps the wire exactly as it was; the
+    /// tool definitions are sent either way so the cached prefix is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
     /// 観測相関コンテキスト。OpenAI では run ID が cache affinity にも使われる。
     #[serde(default, skip_serializing)]
     pub observation: Option<ObservationContext>,
@@ -588,6 +600,7 @@ mod tests {
     #[test]
     fn chat_request_round_trip_uses_canonical_field_names() {
         let request = ChatRequest {
+            tool_choice: None,
             responses_replay: None,
             model: "gpt-test".to_string(),
             messages: vec![Message {

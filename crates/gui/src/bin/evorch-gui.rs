@@ -49,6 +49,7 @@ const EVENT_CAPACITY: usize = 2048;
 #[path = "evorch-gui/lane_startup_tests.rs"]
 mod lane_startup_tests;
 
+#[cfg(test)]
 /// Called only after the current host and retention fence are installed.
 /// The GUI thread is synchronous; recovery spawns its driver and lane roots on `handle`.
 fn start_owned_runtime(
@@ -57,23 +58,7 @@ fn start_owned_runtime(
     handle: &tokio::runtime::Handle,
 ) -> Result<tokio::task::JoinHandle<()>, runtime::lanes::LaneError> {
     let _guard = handle.enter();
-    runtime.set_thread_scratch(ownership.thread_scratch());
-    runtime.recover_lanes_on_startup(ownership)
-}
-
-/// Starts pull request tracking (ADR 0043). The service is always started: while
-/// `[pull_requests] enabled` is false it fetches and observes nothing, and a later reload that
-/// enables it takes effect at once.
-fn start_pull_requests(
-    runtime: &AgentRuntime,
-    ownership: &Arc<runtime::ownership::OwnerHost>,
-    settings: config::PullRequestsConfig,
-) {
-    let view: Arc<dyn runtime::pull_requests::OwnershipView> = ownership.clone();
-    let source = Arc::new(runtime::pull_requests::GhSource::new());
-    if let Err(error) = runtime.start_pull_requests(view, source, settings) {
-        tracing::warn!(%error, "pull request tracking did not start");
-    }
+    workbench_host::bootstrap::lane_pr::start_recovery(runtime, ownership)
 }
 
 /// Applies `[pull_requests]` from the configuration to the running service.
@@ -141,6 +126,8 @@ enum GuiError {
 #[derive(Debug, Default)]
 struct Arguments {
     demo: bool,
+    core_client: bool,
+    config_dir: Option<PathBuf>,
     settings: Option<PathBuf>,
     layout: Option<PathBuf>,
     save_layout: Option<PathBuf>,
@@ -160,6 +147,8 @@ fn parse_arguments_from(mut values: impl Iterator<Item = String>) -> Result<Argu
     while let Some(argument) = values.next() {
         match argument.as_str() {
             "--demo" => arguments.demo = true,
+            "--core-client" => arguments.core_client = true,
+            "--config-dir" => arguments.config_dir = Some(next_path(&mut values, "--config-dir")?),
             "--settings" => arguments.settings = Some(next_path(&mut values, "--settings")?),
             "--layout" => arguments.layout = Some(next_path(&mut values, "--layout")?),
             "--save-layout" => {
@@ -183,7 +172,7 @@ fn parse_arguments_from(mut values: impl Iterator<Item = String>) -> Result<Argu
 
 fn print_help() {
     println!(
-        r#"Usage: evorch-gui [--demo] [--settings PATH] [--layout PATH] [--save-layout PATH] [--state PATH] [--window-title <text>]
+        r#"Usage: evorch-gui [--core-client [--config-dir PATH]] [--demo] [--settings PATH] [--layout PATH] [--save-layout PATH] [--state PATH] [--window-title <text>]
 
 --window-title <text>  Set the window title (default: evorch).
 
@@ -799,6 +788,28 @@ fn prepare() -> Result<Prepared, GuiError> {
 
 fn run() -> Result<(), GuiError> {
     gui::logging::init();
+    let arguments = parse_arguments()?;
+    if arguments.core_client {
+        if arguments.demo
+            || arguments.state.is_some()
+            || arguments.settings.is_some()
+            || arguments.layout.is_some()
+            || arguments.save_layout.is_some()
+        {
+            return Err(GuiError::Arguments("--core-client does not support legacy --demo/--state/--settings/--layout/--save-layout".into()));
+        }
+        let directory = arguments
+            .config_dir
+            .or_else(|| std::env::var_os("EVORCH_CONFIG_DIR").map(PathBuf::from))
+            .or_else(config::user_config_dir)
+            .ok_or_else(|| GuiError::Startup("user config directory is unavailable".into()))?;
+        return gui::core_client::run(directory, arguments.window_title).map_err(GuiError::Startup);
+    }
+    if arguments.config_dir.is_some() {
+        return Err(GuiError::Arguments(
+            "--config-dir requires --core-client".into(),
+        ));
+    }
     // Panicking runs then report where they panicked; the crash spool wraps this later.
     runtime::panic_capture::install();
     let prepared = prepare()?;
@@ -942,7 +953,7 @@ fn build_workbench(
             })
             .unwrap_or_default()
     };
-    let (runtime, agent_browser) = match demo_directory.as_ref() {
+    let (runtime, agent_browser, runtime_executor) = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
             let ExecutionComponents {
@@ -964,7 +975,7 @@ fn build_workbench(
                 user_config_dir: Some(directory.path().to_path_buf()),
                 config: &composition_config,
                 bus: Arc::clone(&bus),
-                executor,
+                executor: Arc::clone(&executor),
                 credential_store,
                 env: Arc::new(ProcessEnv),
                 model_source: ModelSource::Fixed(demo_model),
@@ -974,7 +985,7 @@ fn build_workbench(
                 ?model_identity,
                 "demo runtime composed via provider composition root"
             );
-            (runtime, agent_browser)
+            (runtime, agent_browser, executor)
         }
         None => {
             let ExecutionComponents {
@@ -998,7 +1009,7 @@ fn build_workbench(
                 user_config_dir: None,
                 config: &composition_config,
                 bus: Arc::clone(&bus),
-                executor,
+                executor: Arc::clone(&executor),
                 credential_store,
                 env: Arc::new(ProcessEnv),
                 model_source: ModelSource::Fixed(match &production_model {
@@ -1011,13 +1022,11 @@ fn build_workbench(
                 ?model_identity,
                 "runtime composed via provider composition root"
             );
-            (runtime, agent_browser)
+            (runtime, agent_browser, executor)
         }
     };
     // Before anything restores or continues a conversation.
     let runtime_guarded = install_runtime_tombstones(&runtime, &prelude.tombstones);
-    #[cfg(not(feature = "browser"))]
-    drop(agent_browser);
 
     // Runs of other projects use models composed from those projects' role profiles.
     let project_models = production_model
@@ -1292,28 +1301,39 @@ fn build_workbench(
     install_host_tombstones(&ownership, &prelude.tombstones);
     // Install the retained host before any later fallible startup work. State
     // and command-sink locals may drop first, but cannot release this generation.
-    let storage = GuiStorageResources {
+    let mut storage = GuiStorageResources {
         _storage: storage,
         ownership: Arc::clone(&ownership),
         _demo_directory: demo_directory,
         _storage_fallback: storage_fallback,
+        services: None,
         _leases: prelude.leases,
     };
     // Recover durable lane intents under this host, never serialized authority.
     // Keep the retained storage/host guard alive before starting any root.
-    start_owned_runtime(&runtime, &ownership, &handle)
-        .map_err(|error| GuiError::Startup(format!("lane recovery: {error}")))?;
-    {
+    let mut services = workbench_host::bootstrap::services::BackgroundServices::default();
+    let started = {
         let _enter = handle.enter();
-        start_pull_requests(&runtime, &ownership, composition_config.pull_requests);
-    }
+        workbench_host::bootstrap::lane_pr::start(
+            &mut services,
+            &runtime,
+            &ownership,
+            composition_config.pull_requests,
+            Default::default(),
+        )
+    };
+    storage.services = Some((
+        handle.clone(),
+        workbench_host::bootstrap::lane_pr::RuntimeDrain::new(runtime.clone(), runtime_executor),
+        services,
+    ));
+    started.map_err(|error| GuiError::Startup(format!("lane/PR services: {error}")))?;
     let owner_probe: gui::app::pull_requests::OwnerProbe = {
         let host = Arc::clone(&ownership);
         Arc::new(move |thread: &str| host.owned_permit(thread).is_ok())
     };
     let portal_opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> =
         Arc::new(gui::model::artifact_opener::PortalArtifactOpener);
-    #[cfg(feature = "cef")]
     let (artifact_opener, mut html_previews) = {
         let (opener, requests) =
             gui::model::artifact_opener::HtmlPreviewOpener::new(Arc::clone(&portal_opener));
@@ -1329,8 +1349,6 @@ fn build_workbench(
             ),
         )
     };
-    #[cfg(not(feature = "cef"))]
-    let artifact_opener = portal_opener;
     // 会話と goal の投入を production 経路で接続する CommandSink (demo も同様)。
     let mcp_gui_service = mcp_services
         .map(|services| services.gui)
@@ -1379,7 +1397,6 @@ fn build_workbench(
         Ok(sink) => state = state.with_system_notifications(Arc::new(sink)),
         Err(error) => tracing::warn!(%error, "system notification worker unavailable"),
     }
-    #[cfg(feature = "browser")]
     if let Some(browser) = agent_browser {
         state.set_agent_browser(Box::new(gui::browser::AgentBrowserPane::new(
             gui::browser::LiveAgentView::new(browser, handle.clone()),
@@ -1432,7 +1449,8 @@ fn build_workbench(
             Arc::new({
                 let reader = gui::app::pull_requests::StoragePullRequestReader::new(
                     storage_config.db_path.clone(),
-                );
+                )
+                .with_limit_claims(storage.handle());
                 match runtime.pull_requests() {
                     Some(service) => reader.with_auto_fix_probe(Arc::new(move |thread: &str| {
                         gui::app::pull_requests::AutoFixFacts {
@@ -1521,22 +1539,18 @@ fn build_workbench(
             }
         }
     };
-    #[cfg(feature = "cef")]
     let inspecting_runtime = runtime.clone();
     state.reload_theme(ctx, settings.theme_preset.into());
-    #[cfg(feature = "cef")]
     html_previews.install_snapshots(ctx);
     // Fix tool availability now without starting CEF. The first page
     // request wakes this GUI thread to initialize it; shutdown stays
     // on the same thread and the tool schema never changes.
-    #[cfg(feature = "cef")]
     match html_previews.artifact_pages(ctx) {
         Ok(pages) => inspecting_runtime.set_artifact_pages(pages),
         Err(error) => tracing::warn!(%error, "agents cannot inspect HTML artifacts"),
     }
     Ok(Ready {
         workbench: WorkbenchApp(state),
-        #[cfg(feature = "cef")]
         html_previews,
         executor,
         _storage: storage,
@@ -1633,7 +1647,6 @@ impl Starting {
 /// The running workbench.
 struct Ready {
     workbench: WorkbenchApp<AgentRuntime>,
-    #[cfg(feature = "cef")]
     html_previews: gui::html_preview::HtmlPreviewWindows,
     /// Stops before the storage resources are released.
     executor: Option<ReclaimExecutor>,
@@ -1647,6 +1660,11 @@ struct GuiStorageResources {
     ownership: Arc<runtime::ownership::OwnerHost>,
     _demo_directory: Option<tempfile::TempDir>,
     _storage_fallback: Option<tempfile::TempDir>,
+    services: Option<(
+        tokio::runtime::Handle,
+        workbench_host::bootstrap::lane_pr::RuntimeDrain,
+        workbench_host::bootstrap::services::BackgroundServices,
+    )>,
     /// Last: the shared locks outlive every user of the database and the ownership root.
     _leases: SharedLeases,
 }
@@ -1661,6 +1679,15 @@ impl Drop for GuiStorageResources {
     fn drop(&mut self) {
         if let Err(error) = self.ownership.begin_quiesce() {
             tracing::warn!(%error, "failed to quiesce ownership before storage drain");
+        }
+        if let Some((handle, drain, mut services)) = self.services.take()
+            && let Err(error) =
+                handle.block_on(drain.stop_and_drain(&mut services, &self.ownership))
+        {
+            tracing::warn!(%error, "failed to drain lane/PR services before storage drain");
+        }
+        if let Err(error) = self.ownership.begin_quiesce() {
+            tracing::warn!(%error, "failed to quiesce leases acquired during service drain");
         }
         if let Err(error) = self._storage.flush() {
             tracing::warn!(%error, "failed to flush queued events before ownership release");
@@ -1679,7 +1706,6 @@ impl Drop for GuiStorageResources {
 impl eframe::App for Ready {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.workbench.logic(ctx, frame);
-        #[cfg(feature = "cef")]
         self.html_previews.logic();
     }
 
@@ -1691,7 +1717,6 @@ impl eframe::App for Ready {
         self.workbench.0.ui(ui, frame);
         // After the workbench, so artifacts opened this frame show without a
         // second repaint.
-        #[cfg(feature = "cef")]
         self.html_previews.render(ui.ctx());
     }
 }
@@ -1740,6 +1765,32 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn core_client_is_explicit_and_keeps_legacy_argument_defaults() {
+        let legacy = super::parse_arguments_from(std::iter::empty()).unwrap();
+        assert!(!legacy.core_client);
+        assert!(legacy.config_dir.is_none());
+        let client = super::parse_arguments_from(
+            [
+                "--core-client",
+                "--config-dir",
+                "/tmp/core-config",
+                "--window-title",
+                "client",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(client.core_client);
+        assert_eq!(
+            client.config_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/core-config"))
+        );
+        assert_eq!(client.window_title, "client");
+        assert!(super::parse_arguments_from(["--config-dir".into()].into_iter()).is_err());
+    }
+
     // Given: the fail-closed credential store of the Fixed model source
     // When: its error reaches a provider / run failure reason
     // Then: the wording the model reads is unchanged; only the GUI translates it
@@ -2476,6 +2527,7 @@ mod storage_shutdown_tests {
         assert!(write_monitor.set(monitor.clone()).is_ok());
         let weak_host = Arc::downgrade(&host);
         let resources = GuiStorageResources {
+            services: None,
             _storage: bridge,
             ownership: host.clone(),
             _demo_directory: None,

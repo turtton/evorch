@@ -101,11 +101,14 @@ pub(crate) struct Shared {
     pub(crate) pull_requests: OnceLock<crate::pull_requests::PullRequestService>,
     pub(crate) benchmark_recording: OnceLock<crate::benchmark::Recording>,
     pub(crate) benchmark_replays: Mutex<HashMap<RunId, crate::benchmark::BenchmarkCheckpoint>>,
+    /// Frozen request context per run for `/btw` side questions.
+    pub(crate) btw: crate::btw::BtwRegistry,
     pub(crate) benchmark_executors: Mutex<HashMap<RunId, Arc<ToolExecutor>>>,
     pub(crate) question_version: watch::Sender<u64>,
     pub(crate) turn_version: watch::Sender<u64>,
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
     admissions: admission::Admissions,
+    lane_admissions: admission::LaneAdmissions,
     #[cfg(test)]
     admission_registration_hook: Mutex<Option<admission::RegistrationHook>>,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
@@ -746,11 +749,13 @@ impl AgentRuntime {
                 pull_requests: OnceLock::new(),
                 benchmark_recording: OnceLock::new(),
                 benchmark_replays: Mutex::new(HashMap::new()),
+                btw: crate::btw::BtwRegistry::default(),
                 benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
                 turn_version: watch::channel(0).0,
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 admissions: Mutex::new(HashMap::new()),
+                lane_admissions: Default::default(),
                 #[cfg(test)]
                 admission_registration_hook: Mutex::new(None),
                 spawn_intents: Mutex::new(HashMap::new()),
@@ -1085,10 +1090,12 @@ impl AgentRuntime {
                 pull_requests: OnceLock::new(),
                 benchmark_recording: OnceLock::new(),
                 benchmark_replays: Mutex::new(HashMap::new()),
+                btw: crate::btw::BtwRegistry::default(),
                 benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
                 turn_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
+                lane_admissions: Default::default(),
                 #[cfg(test)]
                 admission_registration_hook: Mutex::new(None),
                 spawn_intents: Mutex::new(HashMap::new()),
@@ -2607,45 +2614,14 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
-        // A pending lane keeps the stop across a restart: block its creation intent
-        // before the stop is accepted, with a reason a resume can tell from a cancel.
-        for target in &targets {
-            if admissions
-                .get(target)
-                .is_some_and(|admission| admission.result.borrow().is_none())
-            {
-                self.persist_pending_lane_cancellation(
-                    *target,
-                    &runs,
-                    &admissions,
-                    storage::lanes::LANE_START_OPERATOR_STOP,
-                )?;
-            }
-        }
-        for target in &targets {
-            // Pending admission is the current incarnation, not an old terminal entry.
-            let admission = admissions
-                .get(target)
-                .map(|a| a.snapshot())
-                .filter(|a| a.result.is_none());
-            let persisted = if let Some(admission) = admission {
-                self.persist_lane_delivery_stop(*target, admission.ownership.as_ref())
-            } else if let Some(entry) = runs.get(target) {
-                self.persist_lane_delivery_stop(*target, entry.config.ownership.as_ref())
-            } else {
-                Ok(())
-            };
-            // Storage failure must never prevent the operator from stopping live work.
-            // This process retains operator_stops; a restarted driver also refuses
-            // to wake a nonterminal checkpoint with unknown Stop state.
-            if let Err(error) = persisted {
-                self.lane_delivery_diagnostic(
-                    Some(*target),
-                    "lane_stop_persistence_failed",
-                    &error.to_string(),
-                );
-            }
-        }
+        let durable = targets
+            .iter()
+            .map(|target| {
+                let ownership =
+                    Self::pending_lane_cancellation_ownership(*target, &runs, &admissions);
+                (*target, ownership)
+            })
+            .collect::<Vec<_>>();
         let mut operator_stops = self
             .shared
             .operator_stops
@@ -2656,6 +2632,7 @@ impl AgentRuntime {
                 && admission.result.borrow().is_none()
             {
                 admission.cancelled = true;
+                admission.execution.stop_admission();
             } else if let Some(entry) = runs.get(&target) {
                 entry.execution.cancel_tx.send_replace(RunInterrupt::Stop);
                 entry.execution.approvals.close();
@@ -2666,7 +2643,30 @@ impl AgentRuntime {
             // their snapshot reservation, until the operator explicitly resumes.
             operator_stops.insert(target);
         }
-        Ok(())
+        drop(operator_stops);
+        drop(runs);
+        drop(admissions);
+        // A contended registry must not keep I/A/R locked or prevent Stop from
+        // interrupting a pending generation retry. The restore gates still pin
+        // the selected incarnation against a concurrent explicit resume.
+        let mut failure = None;
+        for (target, ownership) in durable {
+            if let Err(error) = self.persist_lane_start_cancellation(
+                target,
+                ownership.as_ref(),
+                storage::lanes::LANE_START_OPERATOR_STOP,
+            ) {
+                failure.get_or_insert_with(|| cancellation::lane_cancellation_error(target, error));
+            }
+            if let Err(error) = self.persist_lane_delivery_stop(target, ownership.as_ref()) {
+                self.lane_delivery_diagnostic(
+                    Some(target),
+                    "lane_stop_persistence_failed",
+                    &error.to_string(),
+                );
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     pub(crate) fn stop_restore_gate(&self, run: RunId) -> Arc<Mutex<()>> {
@@ -2730,12 +2730,7 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
-        self.persist_pending_lane_cancellation(
-            run_id,
-            &runs,
-            &admissions,
-            "cancelled before root start",
-        )?;
+        let ownership = Self::pending_lane_cancellation_ownership(run_id, &runs, &admissions);
         let mut cancellations = Vec::new();
         for target in Self::collect_subtree_ids(run_id, &intents, &runs) {
             if let Some(execution) =
@@ -2758,7 +2753,12 @@ impl AgentRuntime {
             self.execution_hook(cancellation::HookPoint::SubtreeCollected, &execution);
             self.cancel_execution(&execution);
         }
-        Ok(())
+        self.persist_lane_start_cancellation(
+            run_id,
+            ownership.as_ref(),
+            "cancelled before root start",
+        )
+        .map_err(|error| cancellation::lane_cancellation_error(run_id, error))
     }
 
     /// 指定された run 自身を除き、実行中または admission 待機中の全子孫を ID 順で返す。

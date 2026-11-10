@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。2026-11-05 に Phase 1 の実装を完了（#481: storage と設定、#485: gh source と checkout 照合、#489: runtime の追跡サービス・ownership・候補・継承・event、#492: 審査の harness_facts と manifest、#493: GUI、#495: 統合 e2e）。2026-11-07 に Phase 2 の実装を完了（#509: PR バーのタイトル表示、#507: CI ログ source、#510: storage と outbox の一般化、#518: harness notice の配送、#517: coordinator・auto の適格判定・帰属、#519: GUI の操作・harness カード・上限の通知）。
+Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。2026-11-05 に Phase 1 の実装を完了（#481: storage と設定、#485: gh source と checkout 照合、#489: runtime の追跡サービス・ownership・候補・継承・event、#492: 審査の harness_facts と manifest、#493: GUI、#495: 統合 e2e）。2026-11-07 に Phase 2 の実装を完了（#509: PR バーのタイトル表示、#507: CI ログ source、#510: storage と outbox の一般化、#518: harness notice の配送、#517: coordinator・auto の適格判定・帰属、#519: GUI の操作・harness カード・上限の通知）。2026-11-10 に Phase 2 の残課題に対応した（#526、#528、#530、#532、#538）。
 
 ## Context
 
@@ -197,6 +197,8 @@ Phase 2 の実装を通じて次の仕様を確定した。
 - 予約に対する ready/cancel は、reservation_revision の CAS で ABA を防ぐ（migration v52）。
 - GUI の「External commit」表示は、coordinator の attribution（Unknown）に基づいて出す。local HEAD との一致だけでは agent 由来とみなさない。
 - 全体スイッチがオフのときは、GUI に「Off by settings」と表示する。手動送信は可能。
+- 上限到達の通知は at-most-once とする。claim が成功してから GUI が受け取るまでの間に異常終了すると通知が欠けるが、重複を防ぐことを優先して許容する。
+- owner の判定は、worker が claim を採用した時点で行う。その後、キューで待っている間に所有権が移った場合は、旧 owner の window に 1 件出ることを許容する。
 
 ## Consequences
 
@@ -229,10 +231,7 @@ Phase 2 の実装を通じて次の仕様を確定した。
 - 実際の routing fallback と、実際の CAS 拒否を通す統合テストがない。
 - live run への誤配送を検出するテストがない。
 - 主モデルと fallback モデルでの審査効果の評価は、まだ行っていない。
-- 全体設定の変更が即座に表示へ反映されない。
-- 採用 commit から表示 event までの間に異常終了すると、カードが欠ける。
-- 別の thread から Reset するための導線がない。
-- B（CI ログ source）の minimal_ci_log_data が 1 byte ずれる。
+- 以前記録された `pull_request_review_cache` の 180 秒停止について、CI 上の記録は特定できていない。
 
 ## 外部の参考
 

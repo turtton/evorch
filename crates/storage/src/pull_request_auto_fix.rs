@@ -161,6 +161,19 @@ pub struct PrAutoFixLimitEvent {
     pub budget_epoch: u64,
     pub notice_id: String,
     pub at_ns: i64,
+    /// When a window told the person; `None` while nobody has.
+    pub notified_at_ns: Option<i64>,
+}
+
+/// A window's claim on the notification of a limit stop: who it is for and which stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrLimitClaim {
+    pub key: PullRequestKey,
+    /// The destination thread the stop is told in.
+    pub thread_id: String,
+    /// The revision of that thread's link when the stop was read.
+    pub link_revision: u64,
+    pub budget_epoch: u64,
 }
 
 /// Read-only access for a display that follows the shared database. The writes (policy,

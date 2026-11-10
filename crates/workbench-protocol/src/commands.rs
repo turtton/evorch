@@ -138,6 +138,8 @@ pub struct PacketReference {
 pub enum Delegation {
     /// The thread's own orchestrator works the goal.
     Direct,
+    /// The GUI team mode; the value is an objective, not a packet reference.
+    Team { value: String },
     /// Hand the goal to a packet or issue the host resolves.
     Reference { value: String },
 }
@@ -211,6 +213,7 @@ pub struct SetAgentWebToolsEnabled {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum Command {
+    Conversation(crate::conversation::ConversationCommand),
     ManageLane(crate::lane_management::ManageLane),
     SendChat(SendChat),
     ContinueChat(ContinueChat),
@@ -229,7 +232,8 @@ pub enum Command {
 
 impl Command {
     /// Wire names of every variant, for rejecting unknown ones precisely.
-    pub const TYPES: [&'static str; 14] = [
+    pub const TYPES: [&'static str; 15] = [
+        "conversation",
         "manage_lane",
         "send_chat",
         "continue_chat",
@@ -249,6 +253,7 @@ impl Command {
     /// The capability a core must offer before this command may be sent.
     pub fn required_capability(&self) -> Capability {
         match self {
+            Self::Conversation(_) => Capability::Conversation,
             Self::AnswerUserQuestion(_) => Capability::Questions,
             Self::DecideToolApproval(_) => Capability::Approvals,
             Self::SendChat(_) | Self::WithdrawFollowUp(_) => Capability::InputReceipts,
@@ -259,6 +264,7 @@ impl Command {
     /// Check every string, collection and cross-field rule.
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
+            Self::Conversation(c) => c.validate(),
             Self::ManageLane(_) => Ok(()),
             Self::SendChat(c) => c.validate(),
             Self::ContinueChat(c) => c
@@ -339,8 +345,14 @@ impl SubmitGoal {
         check_all(&self.constraints, |c| {
             check_text("constraints", c, MAX_CONSTRAINT_BYTES, false)
         })?;
-        if let Some(Delegation::Reference { value }) = &self.delegation {
-            check_line("delegation.value", value, MAX_REFERENCE_BYTES, false)?;
+        match &self.delegation {
+            Some(Delegation::Reference { value }) => {
+                check_line("delegation.value", value, MAX_REFERENCE_BYTES, false)?
+            }
+            Some(Delegation::Team { value }) => {
+                check_text("delegation.value", value, MAX_OBJECTIVE_BYTES, false)?
+            }
+            _ => (),
         }
         Ok(())
     }
@@ -359,6 +371,8 @@ pub enum CommandDisposition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<Box<crate::conversation::ConversationResult>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane_management: Option<Box<crate::lane_management::LaneManagementResult>>,
     pub disposition: CommandDisposition,

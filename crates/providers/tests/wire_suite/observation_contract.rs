@@ -1,0 +1,1173 @@
+// allow: SIZE_OK — 観測イベントの契約表を1つの統合テストバイナリに集約する。
+#[allow(dead_code)]
+#[path = "../support/codex.rs"]
+mod codex_support;
+#[path = "../support/mod.rs"]
+mod support;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use event_bus::{Event, EventBus, EventKind, ProviderEvent, ProviderFailureKind, UsageEvent};
+use futures_util::StreamExt;
+use providers::provider::anthropic::{AnthropicClient, AnthropicConfig};
+use providers::provider::codex::tokens::{CodexTokenStore, InMemoryTokenStore, TokenBundle};
+use providers::provider::codex::{CodexClient, CodexConfig};
+use providers::provider::openai::{OpenAiClient, OpenAiConfig};
+use providers::provider::openai_compatible::OpenAiCompatibleClient;
+use providers::{
+    AttemptLog, AttemptOutcome, ChatRequest, ContentBlock, Message, ObservationContext,
+    ProviderAuth, ProviderClient, ProviderError, Role,
+};
+use support::{
+    fixture, json_response, next_event, next_provider_event, next_usage_event, sse_response,
+};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const OPENAI_MODEL: &str = "gpt-contract";
+const ANTHROPIC_MODEL: &str = "claude-test";
+const COMPATIBLE_MODEL: &str = "compatible-model";
+const CODEX_MODEL: &str = "gpt-codex-contract";
+
+fn request(model: &str) -> ChatRequest {
+    ChatRequest {
+        tool_choice: None,
+        responses_replay: None,
+        model: model.to_string(),
+        messages: vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Hello".to_string(),
+            }],
+        }],
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        reasoning_effort: None,
+        service_tier: None,
+        output_schema: None,
+        observation: None,
+    }
+}
+
+fn request_with_context(model: &str, run_id: &str) -> ChatRequest {
+    let mut request = request(model);
+    request.observation = Some(ObservationContext {
+        attempts: None,
+        turn: None,
+        run_id: run_id.to_string(),
+        purpose: Default::default(),
+    });
+    request
+}
+
+async fn mount(server: &MockServer, endpoint: &str, response: ResponseTemplate) {
+    Mock::given(method("POST"))
+        .and(path(endpoint))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+async fn collect_events(rx: &mut event_bus::EventReceiver, count: usize) -> Vec<Event> {
+    let mut events = Vec::with_capacity(count);
+    for _ in 0..count {
+        events.push(next_event(rx).await);
+    }
+    events
+}
+
+async fn assert_no_more_events(rx: &mut event_bus::EventReceiver) {
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), rx.recv())
+            .await
+            .is_err()
+    );
+}
+
+fn started(event: &Event) -> (&str, &str, Option<&str>, &str, &str, bool) {
+    let EventKind::Provider(ProviderEvent::RequestStarted {
+        request_id,
+        provider,
+        profile,
+        protocol,
+        model,
+        streaming,
+        ..
+    }) = &event.kind
+    else {
+        panic!("RequestStarted を期待しました: {:?}", event.kind)
+    };
+    (
+        request_id,
+        provider,
+        profile.as_deref(),
+        protocol,
+        model,
+        *streaming,
+    )
+}
+
+fn failed(event: &Event) -> (&str, ProviderFailureKind, u64) {
+    let EventKind::Provider(ProviderEvent::RequestFailed {
+        request_id,
+        failure,
+        duration_ms,
+        ..
+    }) = &event.kind
+    else {
+        panic!("RequestFailed を期待しました: {:?}", event.kind)
+    };
+    (request_id, *failure, *duration_ms)
+}
+
+fn attempt_run_id(event: &Event) -> Option<&str> {
+    match &event.kind {
+        EventKind::Provider(ProviderEvent::RequestStarted { run_id, .. })
+        | EventKind::Provider(ProviderEvent::FirstTokenObserved { run_id, .. })
+        | EventKind::Provider(ProviderEvent::RequestCompleted { run_id, .. })
+        | EventKind::Provider(ProviderEvent::CacheReuseObserved { run_id, .. })
+        | EventKind::Provider(ProviderEvent::RequestFailed { run_id, .. }) => run_id.as_deref(),
+        other => panic!("attempt 観測イベントを期待しました: {other:?}"),
+    }
+}
+
+fn openai_client(server: &MockServer, bus: Arc<EventBus>, timeout: Duration) -> OpenAiClient {
+    OpenAiClient::new(OpenAiConfig {
+        base_url: server.uri(),
+        timeout,
+        event_bus: Some(bus),
+    })
+    .expect("OpenAI client を構築できる")
+    .with_profile("openai-profile")
+}
+
+fn anthropic_client(server: &MockServer, bus: Arc<EventBus>) -> AnthropicClient {
+    AnthropicClient::new(AnthropicConfig {
+        base_url: server.uri(),
+        timeout: Duration::from_secs(1),
+        event_bus: Some(bus),
+    })
+    .expect("Anthropic client を構築できる")
+    .with_profile("anthropic-profile")
+}
+
+fn compatible_client(server: &MockServer, bus: Arc<EventBus>) -> OpenAiCompatibleClient {
+    OpenAiCompatibleClient::new(
+        server.uri(),
+        "custom-compatible",
+        Duration::from_secs(1),
+        Some(bus),
+    )
+    .expect("互換 client を構築できる")
+    .with_profile("compatible-profile")
+}
+
+fn codex_store() -> Arc<InMemoryTokenStore> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let store = Arc::new(InMemoryTokenStore::new());
+    let payload = serde_json::json!({
+        "exp": u64::MAX,
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acc-observe"}
+    });
+    store
+        .save(&TokenBundle {
+            access_token: "observe-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            id_token: format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(payload.to_string())),
+        })
+        .expect("token bundle を保存できる");
+    store
+}
+
+fn codex_client(
+    server: &MockServer,
+    bus: Arc<EventBus>,
+    store: Arc<dyn CodexTokenStore>,
+) -> CodexClient {
+    CodexClient::with_config(
+        CodexConfig {
+            base_url: server.uri(),
+            auth_base_url: server.uri(),
+            timeout: Duration::from_secs(1),
+            event_bus: Some(bus),
+        },
+        store,
+    )
+    .expect("Codex client を構築できる")
+}
+
+fn assert_success_sequence(
+    events: &[Event],
+    provider: &str,
+    profile: &str,
+    protocol: &str,
+    model: &str,
+    streaming: bool,
+    expects_first_token: bool,
+) {
+    let (
+        request_id,
+        actual_provider,
+        actual_profile,
+        actual_protocol,
+        actual_model,
+        actual_streaming,
+    ) = started(&events[0]);
+    assert_eq!(actual_provider, provider);
+    assert_eq!(actual_profile, Some(profile));
+    assert_eq!(actual_protocol, protocol);
+    assert_eq!(actual_model, model);
+    assert_eq!(actual_streaming, streaming);
+    let usage_index = if expects_first_token {
+        assert!(matches!(
+            &events[1].kind,
+            EventKind::Provider(ProviderEvent::FirstTokenObserved { request_id: id, .. }) if id == request_id
+        ));
+        2
+    } else {
+        1
+    };
+    let EventKind::Usage(UsageEvent::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        ..
+    }) = events[usage_index].kind
+    else {
+        panic!("Usage を期待しました")
+    };
+    let EventKind::Provider(ProviderEvent::RequestCompleted {
+        request_id: completed_id,
+        duration_ms,
+        input_tokens: completed_input,
+        output_tokens: completed_output,
+        cache_read_tokens: completed_cache_read,
+        cache_write_tokens: completed_cache_write,
+        finish_reason,
+        ..
+    }) = &events[usage_index + 1].kind
+    else {
+        panic!("RequestCompleted を期待しました")
+    };
+    assert_eq!(completed_id, request_id);
+    assert_eq!(
+        (
+            *completed_input,
+            *completed_output,
+            *completed_cache_read,
+            *completed_cache_write
+        ),
+        (
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens
+        )
+    );
+    assert_eq!(finish_reason, "stop");
+    assert!(*duration_ms < 2_000);
+}
+
+// Given: EventBus 接続済み OpenAI client と正常 JSON / When: send / Then: Started→Usage→Completed の順で同一 attempt を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_success_emits_ordered_observation() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")).set_delay(Duration::from_millis(2)),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    openai_client(&server, bus, Duration::from_secs(1))
+        .send(&ProviderAuth::new("sk"), &request(OPENAI_MODEL))
+        .await
+        .expect("send は成功する");
+
+    let ProviderEvent::RequestStarted {
+        request_id,
+        provider,
+        profile,
+        protocol,
+        model,
+        streaming,
+        ..
+    } = next_provider_event(&mut rx).await
+    else {
+        panic!("RequestStarted を期待")
+    };
+    assert_eq!(provider, "openai");
+    assert_eq!(profile.as_deref(), Some("openai-profile"));
+    assert_eq!(protocol, "openai-responses");
+    assert_eq!(model, OPENAI_MODEL);
+    assert!(!streaming);
+    let usage = next_usage_event(&mut rx).await;
+    let ProviderEvent::RequestCompleted {
+        request_id: completed_id,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        finish_reason,
+        duration_ms,
+        ..
+    } = next_provider_event(&mut rx).await
+    else {
+        panic!("RequestCompleted を期待")
+    };
+    assert_eq!(completed_id, request_id);
+    let UsageEvent::Usage {
+        input_tokens: usage_input,
+        output_tokens: usage_output,
+        cache_read_tokens: usage_cache_read,
+        cache_write_tokens: usage_cache_write,
+        ..
+    } = usage
+    else {
+        panic!("Usage を期待")
+    };
+    assert_eq!(
+        (
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens
+        ),
+        (
+            usage_input,
+            usage_output,
+            usage_cache_read,
+            usage_cache_write
+        )
+    );
+    assert_eq!(finish_reason, "stop");
+    assert!(duration_ms > 0);
+}
+
+// Given: EventBus 接続済み OpenAI client と正常 SSE / When: stream を完了まで読む / Then: Started→FirstToken 1件→Usage→Completed を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_stream_success_emits_first_token_once() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    let _: Vec<_> = openai_client(&server, bus, Duration::from_secs(1))
+        .stream(&ProviderAuth::new("sk"), &request(OPENAI_MODEL))
+        .await
+        .expect("stream を開始できる")
+        .collect()
+        .await;
+
+    let events = collect_events(&mut rx, 4).await;
+    assert_success_sequence(
+        &events,
+        "openai",
+        "openai-profile",
+        "openai-responses",
+        OPENAI_MODEL,
+        true,
+        true,
+    );
+    assert_no_more_events(&mut rx).await;
+}
+
+async fn assert_openai_send_failure(response: ResponseTemplate, expected: ProviderFailureKind) {
+    let server = MockServer::start().await;
+    mount(&server, "/responses", response).await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    openai_client(&server, bus, Duration::from_secs(1))
+        .send(&ProviderAuth::new("sk"), &request(OPENAI_MODEL))
+        .await
+        .expect_err("send は失敗する");
+
+    let events = collect_events(&mut rx, 2).await;
+    let (request_id, ..) = started(&events[0]);
+    let (failed_id, failure, _) = failed(&events[1]);
+    assert_eq!(failed_id, request_id);
+    assert_eq!(failure, expected);
+    assert_no_more_events(&mut rx).await;
+}
+
+// Given: OpenAI HTTP 500 / When: send / Then: Started→Http failure を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_http_500_emits_http_failure() {
+    assert_openai_send_failure(
+        json_response(500, "boom"),
+        ProviderFailureKind::Http { status: 500 },
+    )
+    .await;
+}
+
+// Given: OpenAI 200 と不正 JSON の SSE frame / When: send / Then: Started→InvalidResponse を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_invalid_json_emits_invalid_response() {
+    assert_openai_send_failure(
+        sse_response("event: response.completed\ndata: {broken\n\n"),
+        ProviderFailureKind::InvalidResponse,
+    )
+    .await;
+}
+
+// Given: OpenAI stream の不正 JSON frame / When: stream を読む / Then: Started→InvalidResponse を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_stream_invalid_json_emits_invalid_response() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/responses",
+        sse_response("data: {invalid json}\n\n"),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let events = openai_client(&server, bus, Duration::from_secs(1))
+        .stream(&ProviderAuth::new("sk"), &request(OPENAI_MODEL))
+        .await
+        .expect("stream を開始できる")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(matches!(
+        events.as_slice(),
+        [Err(ProviderError::InvalidJson { .. })]
+    ));
+
+    let observed = collect_events(&mut rx, 2).await;
+    assert_eq!(failed(&observed[1]).1, ProviderFailureKind::InvalidResponse);
+    assert_eq!(failed(&observed[1]).0, started(&observed[0]).0);
+}
+
+// Given: 100ms timeout と 2秒遅延する OpenAI 応答 / When: send / Then: Started→Timeout を短い duration で観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_timeout_emits_timeout_failure() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")).set_delay(Duration::from_secs(2)),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    openai_client(&server, bus, Duration::from_millis(100))
+        .send(&ProviderAuth::new("sk"), &request(OPENAI_MODEL))
+        .await
+        .expect_err("timeout する");
+
+    let observed = collect_events(&mut rx, 2).await;
+    let (failed_id, failure, duration_ms) = failed(&observed[1]);
+    assert_eq!(failed_id, started(&observed[0]).0);
+    assert_eq!(failure, ProviderFailureKind::Timeout);
+    assert!(duration_ms < 2_000);
+}
+
+// Given: Anthropic 正常 JSON / When: send / Then: Started→Usage→Completed を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_send_success_emits_ordered_observation() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/messages",
+        json_response(200, &fixture("anthropic", "send_text.json")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    anthropic_client(&server, bus)
+        .send(&ProviderAuth::new("sk"), &request(ANTHROPIC_MODEL))
+        .await
+        .expect("send は成功する");
+
+    let events = collect_events(&mut rx, 3).await;
+    assert_success_sequence(
+        &events,
+        "anthropic",
+        "anthropic-profile",
+        "anthropic-messages",
+        ANTHROPIC_MODEL,
+        false,
+        false,
+    );
+}
+
+// Given: Anthropic 正常 SSE / When: stream を完了まで読む / Then: Started→FirstToken→Usage→Completed を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_stream_success_emits_ordered_observation() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/messages",
+        sse_response(&fixture("anthropic", "stream_text.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let _: Vec<_> = anthropic_client(&server, bus)
+        .stream(&ProviderAuth::new("sk"), &request(ANTHROPIC_MODEL))
+        .await
+        .expect("stream を開始できる")
+        .collect()
+        .await;
+
+    let events = collect_events(&mut rx, 4).await;
+    assert_success_sequence(
+        &events,
+        "anthropic",
+        "anthropic-profile",
+        "anthropic-messages",
+        ANTHROPIC_MODEL,
+        true,
+        true,
+    );
+}
+
+async fn assert_anthropic_failure(
+    response: ResponseTemplate,
+    stream: bool,
+    expected: ProviderFailureKind,
+) {
+    let server = MockServer::start().await;
+    mount(&server, "/messages", response).await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let client = anthropic_client(&server, bus);
+    if stream {
+        let _: Vec<_> = client
+            .stream(&ProviderAuth::new("sk"), &request(ANTHROPIC_MODEL))
+            .await
+            .expect("stream は開始する")
+            .collect()
+            .await;
+    } else {
+        client
+            .send(&ProviderAuth::new("sk"), &request(ANTHROPIC_MODEL))
+            .await
+            .expect_err("send は失敗する");
+    }
+    let events = collect_events(&mut rx, 2).await;
+    assert_eq!(failed(&events[1]).0, started(&events[0]).0);
+    assert_eq!(failed(&events[1]).1, expected);
+}
+
+// Given: Anthropic HTTP 500 / When: send / Then: Http failure を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_send_http_500_emits_http_failure() {
+    assert_anthropic_failure(
+        json_response(500, "boom"),
+        false,
+        ProviderFailureKind::Http { status: 500 },
+    )
+    .await;
+}
+
+// Given: Anthropic 不正 JSON / When: send / Then: InvalidResponse を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_send_invalid_json_emits_invalid_response() {
+    assert_anthropic_failure(
+        json_response(200, "{broken"),
+        false,
+        ProviderFailureKind::InvalidResponse,
+    )
+    .await;
+}
+
+// Given: Anthropic 不正 SSE JSON / When: stream / Then: InvalidResponse を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_stream_invalid_json_emits_invalid_response() {
+    assert_anthropic_failure(
+        sse_response("event: content_block_delta\ndata: {broken\n\n"),
+        true,
+        ProviderFailureKind::InvalidResponse,
+    )
+    .await;
+}
+
+// Given: OpenAI互換正常 JSON / When: send / Then: custom provider label で Started→Usage→Completed を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn compatible_send_success_emits_custom_provider_observation() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/chat/completions",
+        json_response(200, &fixture("openai", "send_text.json")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    compatible_client(&server, bus)
+        .send(&ProviderAuth::new("sk"), &request(COMPATIBLE_MODEL))
+        .await
+        .expect("send は成功する");
+
+    let events = collect_events(&mut rx, 3).await;
+    assert_success_sequence(
+        &events,
+        "custom-compatible",
+        "compatible-profile",
+        "openai-chat-completions",
+        COMPATIBLE_MODEL,
+        false,
+        false,
+    );
+}
+
+// Given: OpenAI互換正常 SSE / When: stream / Then: FirstToken を含む成功列を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn compatible_stream_success_emits_observation() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/chat/completions",
+        sse_response(&fixture("openai", "stream_text.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let _: Vec<_> = compatible_client(&server, bus)
+        .stream(&ProviderAuth::new("sk"), &request(COMPATIBLE_MODEL))
+        .await
+        .expect("stream を開始できる")
+        .collect()
+        .await;
+
+    let events = collect_events(&mut rx, 4).await;
+    assert_success_sequence(
+        &events,
+        "custom-compatible",
+        "compatible-profile",
+        "openai-chat-completions",
+        COMPATIBLE_MODEL,
+        true,
+        true,
+    );
+}
+
+// Given: OpenAI互換 HTTP 500 / When: send / Then: custom provider label の Http failure を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn compatible_send_http_500_emits_failure() {
+    let server = MockServer::start().await;
+    mount(&server, "/chat/completions", json_response(500, "boom")).await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    compatible_client(&server, bus)
+        .send(&ProviderAuth::new("sk"), &request(COMPATIBLE_MODEL))
+        .await
+        .expect_err("send は失敗する");
+
+    let events = collect_events(&mut rx, 2).await;
+    assert_eq!(failed(&events[1]).0, started(&events[0]).0);
+    assert_eq!(
+        failed(&events[1]).1,
+        ProviderFailureKind::Http { status: 500 }
+    );
+}
+
+// Given: 完了前の OpenAI stream の最初の delta / When: consumer が stream を破棄 / Then: Started と同じ request ID の Other failure を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_consumer_drop_emits_other_failure() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/responses",
+        sse_response(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        ),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let mut stream = openai_client(&server, bus, Duration::from_secs(1))
+        .stream(&ProviderAuth::new("sk"), &request(OPENAI_MODEL))
+        .await
+        .expect("stream を開始できる");
+    let _ = stream.next().await;
+    drop(stream);
+
+    let events = collect_events(&mut rx, 3).await;
+    let request_id = started(&events[0]).0;
+    assert!(matches!(
+        events[1].kind,
+        EventKind::Provider(ProviderEvent::FirstTokenObserved { .. })
+    ));
+    assert_eq!(failed(&events[2]).0, request_id);
+    assert_eq!(failed(&events[2]).1, ProviderFailureKind::Other);
+}
+
+// Given: observation context を持つ ChatRequest / When: serde_json へシリアライズ / Then: wire 非搭載のため observation キーは出現しない
+#[test]
+fn chat_request_serialization_omits_observation_context() {
+    let request = request_with_context(OPENAI_MODEL, "run-ctx-1");
+
+    let json = serde_json::to_value(&request).expect("ChatRequest を JSON 化できる");
+
+    assert!(
+        json.get("observation").is_none(),
+        "observation は wire 非搭載のため ChatRequest JSON に出現してはならない: {json}"
+    );
+}
+
+// Given: observation context を持つ ChatRequest / When: OpenAI wire リクエストへ変換 / Then: 変換後 JSON に observation キーは出現しない
+#[test]
+fn openai_wire_request_omits_observation_context() {
+    let request = request_with_context(OPENAI_MODEL, "run-ctx-1");
+
+    let wire = providers::wire::openai::to_wire_request(&request, false);
+    let json = serde_json::to_value(&wire).expect("OpenAI wire request を JSON 化できる");
+
+    assert!(
+        json.get("observation").is_none(),
+        "OpenAI wire リクエストに observation は出現してはならない: {json}"
+    );
+}
+
+// Given: observation context を持つ ChatRequest / When: Anthropic wire リクエストへ変換 / Then: 変換後 JSON に observation キーは出現しない
+#[test]
+fn anthropic_wire_request_omits_observation_context() {
+    let request = request_with_context(ANTHROPIC_MODEL, "run-ctx-1");
+
+    let wire = providers::wire::anthropic::to_wire_request(&request, false);
+    let json = serde_json::to_value(&wire).expect("Anthropic wire request を JSON 化できる");
+
+    assert!(
+        json.get("observation").is_none(),
+        "Anthropic wire リクエストに observation は出現してはならない: {json}"
+    );
+}
+
+// Given: observation context 付きリクエスト / When: OpenAI send が成功 / Then: RequestStarted・CacheReuseObserved・RequestCompleted に context の run_id が載る
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_stamps_context_run_id_on_observation_events() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    openai_client(&server, bus, Duration::from_secs(1))
+        .send(
+            &ProviderAuth::new("sk"),
+            &request_with_context(OPENAI_MODEL, "run-ctx-1"),
+        )
+        .await
+        .expect("send は成功する");
+
+    let events = collect_events(&mut rx, 4).await;
+    assert_eq!(attempt_run_id(&events[0]), Some("run-ctx-1"));
+    assert!(matches!(
+        &events[1].kind,
+        EventKind::Usage(UsageEvent::Usage { .. })
+    ));
+    assert_eq!(attempt_run_id(&events[2]), Some("run-ctx-1"));
+    assert_eq!(attempt_run_id(&events[3]), Some("run-ctx-1"));
+}
+
+// Given: 目的付き context と reasoning 内訳付き usage / When: OpenAI send が成功
+// Then: RequestCompleted が目的と reasoning トークン数を usage 集計へ伝える
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_completion_carries_purpose_and_reasoning_tokens() {
+    let server = MockServer::start().await;
+    let body = format!(
+        "event: response.completed\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 30,
+                    "output_tokens": 12,
+                    "output_tokens_details": { "reasoning_tokens": 8 }
+                }
+            }
+        })
+    );
+    mount(&server, "/responses", sse_response(&body)).await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let mut request = request_with_context(OPENAI_MODEL, "auto-title:thread-1");
+    if let Some(observation) = request.observation.as_mut() {
+        observation.purpose = event_bus::RequestPurpose::Title;
+    }
+
+    openai_client(&server, bus, Duration::from_secs(1))
+        .send(&ProviderAuth::new("sk"), &request)
+        .await
+        .expect("send は成功する");
+
+    let completed = collect_events(&mut rx, 4)
+        .await
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                output_tokens,
+                reasoning_tokens,
+                purpose,
+                ..
+            }) => Some((output_tokens, reasoning_tokens, purpose)),
+            _ => None,
+        });
+    assert_eq!(
+        completed,
+        Some((12, Some(8), Some(event_bus::RequestPurpose::Title)))
+    );
+}
+
+// Given: observation context 付きリクエスト / When: OpenAI stream が完了まで流れる / Then: Started・FirstToken・CacheReuse・Completed の全観測イベントに context の run_id が載る
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_stream_stamps_context_run_id_on_observation_events() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    let _: Vec<_> = openai_client(&server, bus, Duration::from_secs(1))
+        .stream(
+            &ProviderAuth::new("sk"),
+            &request_with_context(OPENAI_MODEL, "run-ctx-2"),
+        )
+        .await
+        .expect("stream を開始できる")
+        .collect()
+        .await;
+
+    let events = collect_events(&mut rx, 5).await;
+    assert_eq!(attempt_run_id(&events[0]), Some("run-ctx-2"));
+    assert!(matches!(
+        &events[1].kind,
+        EventKind::Provider(ProviderEvent::FirstTokenObserved { .. })
+    ));
+    assert_eq!(attempt_run_id(&events[1]), Some("run-ctx-2"));
+    assert!(matches!(
+        &events[2].kind,
+        EventKind::Usage(UsageEvent::Usage { .. })
+    ));
+    assert_eq!(attempt_run_id(&events[3]), Some("run-ctx-2"));
+    assert_eq!(attempt_run_id(&events[4]), Some("run-ctx-2"));
+}
+
+// Given: observation context 付きリクエスト / When: OpenAI send が HTTP 500 で失敗 / Then: RequestFailed にも context の run_id が載る
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_failure_stamps_context_run_id_on_failure_event() {
+    let server = MockServer::start().await;
+    mount(&server, "/responses", json_response(500, "boom")).await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    openai_client(&server, bus, Duration::from_secs(1))
+        .send(
+            &ProviderAuth::new("sk"),
+            &request_with_context(OPENAI_MODEL, "run-ctx-3"),
+        )
+        .await
+        .expect_err("send は失敗する");
+
+    let events = collect_events(&mut rx, 2).await;
+    assert_eq!(attempt_run_id(&events[0]), Some("run-ctx-3"));
+    assert_eq!(
+        failed(&events[1]).1,
+        ProviderFailureKind::Http { status: 500 }
+    );
+    assert_eq!(attempt_run_id(&events[1]), Some("run-ctx-3"));
+}
+
+// Given: observation context を持たないリクエスト / When: OpenAI send が成功 / Then: 観測イベントの run_id は None のまま
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_without_context_emits_none_run_id() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/responses",
+        sse_response(&fixture("openai", "responses_text.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    openai_client(&server, bus, Duration::from_secs(1))
+        .send(&ProviderAuth::new("sk"), &request(OPENAI_MODEL))
+        .await
+        .expect("send は成功する");
+
+    let events = collect_events(&mut rx, 3).await;
+    assert_eq!(attempt_run_id(&events[0]), None);
+    assert_eq!(attempt_run_id(&events[2]), None);
+}
+
+// Given: Codex 正常 SSE / When: send / Then: Codex labels で Started→Usage→Completed を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_send_success_emits_ordered_observation() {
+    let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
+    mount(
+        &server,
+        "/backend-api/codex/responses",
+        sse_response(&fixture("codex", "responses_success.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    codex_client(&server, bus, codex_store())
+        .send(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect("send は成功する");
+    let events = collect_events(&mut rx, 3).await;
+    assert_codex_success_sequence(&events, false, false);
+    assert_no_more_events(&mut rx).await;
+}
+
+// Given: Codex 正常 SSE / When: stream / Then: FirstToken は1件だけで成功列を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_stream_success_emits_first_token_once() {
+    let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
+    mount(
+        &server,
+        "/backend-api/codex/responses",
+        sse_response(&fixture("codex", "responses_success.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let _: Vec<_> = codex_client(&server, bus, codex_store())
+        .stream(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect("stream を開始できる")
+        .collect()
+        .await;
+    let events = collect_events(&mut rx, 4).await;
+    assert_codex_success_sequence(&events, true, true);
+    assert_no_more_events(&mut rx).await;
+}
+
+// Given: Codex HTTP 500 / When: send / Then: Started→Http failure、Usage 0件を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_send_http_500_emits_http_failure() {
+    let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
+    mount(
+        &server,
+        "/backend-api/codex/responses",
+        json_response(500, "boom"),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    codex_client(&server, bus, codex_store())
+        .send(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect_err("send は失敗する");
+    let events = collect_events(&mut rx, 2).await;
+    assert_eq!(failed(&events[1]).0, started(&events[0]).0);
+    assert_eq!(
+        failed(&events[1]).1,
+        ProviderFailureKind::Http { status: 500 }
+    );
+    assert_no_more_events(&mut rx).await;
+}
+
+// Given: Codex 不正 SSE / When: stream を読む / Then: Failed、Usage 0件を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_stream_invalid_sse_emits_failure_zero_usage() {
+    let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
+    mount(
+        &server,
+        "/backend-api/codex/responses",
+        sse_response("event: response.output_text.delta\ndata: {broken\n\n"),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let events = codex_client(&server, bus, codex_store())
+        .stream(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect("stream を開始できる")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(matches!(
+        events.as_slice(),
+        [Err(ProviderError::InvalidJson { .. })]
+    ));
+    let observed = collect_events(&mut rx, 2).await;
+    assert_eq!(failed(&observed[1]).0, started(&observed[0]).0);
+    assert_eq!(failed(&observed[1]).1, ProviderFailureKind::InvalidResponse);
+    assert_no_more_events(&mut rx).await;
+}
+
+// Given: Codex token store が空 / When: send / Then: Started も Usage も発行しない
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_auth_failure_emits_no_usage() {
+    let server = MockServer::start().await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    codex_client(&server, bus, Arc::new(InMemoryTokenStore::new()))
+        .send(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect_err("認証は失敗する");
+    assert_no_more_events(&mut rx).await;
+}
+
+fn assert_codex_success_sequence(events: &[Event], streaming: bool, first_token: bool) {
+    let (request_id, provider, profile, protocol, model, actual_streaming) = started(&events[0]);
+    assert_eq!(provider, "openai-codex");
+    assert_eq!(profile, None);
+    assert_eq!(protocol, "openai-codex-responses");
+    assert_eq!(model, CODEX_MODEL);
+    assert_eq!(actual_streaming, streaming);
+    let usage_index = usize::from(first_token) + 1;
+    if first_token {
+        assert!(matches!(
+            events[1].kind,
+            EventKind::Provider(ProviderEvent::FirstTokenObserved { .. })
+        ));
+    }
+    assert!(matches!(
+        events[usage_index].kind,
+        EventKind::Usage(UsageEvent::Usage { .. })
+    ));
+    assert!(
+        matches!(&events[usage_index + 1].kind, EventKind::Provider(ProviderEvent::RequestCompleted { request_id: id, .. }) if id == request_id)
+    );
+}
+
+/// A client whose request deadline never decides these tests: they end when the
+/// call returns, and the runner's hang detection covers a stuck server.
+fn compatible_client_without_deadline(
+    server: &MockServer,
+    bus: Arc<EventBus>,
+) -> OpenAiCompatibleClient {
+    OpenAiCompatibleClient::new(
+        server.uri(),
+        "custom-compatible",
+        Duration::from_secs(24 * 60 * 60),
+        Some(bus),
+    )
+    .expect("互換 client を構築できる")
+    .with_profile("compatible-profile")
+}
+
+fn request_with_log(model: &str, log: &AttemptLog) -> ChatRequest {
+    let mut request = request_with_context(model, "run-log");
+    request.observation.as_mut().unwrap().attempts = Some(log.clone());
+    request
+}
+
+// Given: 観測 context に AttemptLog を載せた成功する send / When: 完了 / Then: ログの attempt は bus の request_id・provider・model と一致し Completed
+#[tokio::test(flavor = "multi_thread")]
+async fn attempt_log_names_the_attempt_the_bus_observed() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/chat/completions",
+        json_response(200, &fixture("openai", "send_text.json")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let log = AttemptLog::default();
+    compatible_client_without_deadline(&server, bus)
+        .send(
+            &ProviderAuth::new("sk"),
+            &request_with_log(COMPATIBLE_MODEL, &log),
+        )
+        .await
+        .expect("send は成功する");
+
+    // The observer emits before `send` returns: nothing is left to wait for.
+    let events = rx.drain_pending_snapshot();
+    let first = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                EventKind::Provider(ProviderEvent::RequestStarted { .. })
+            )
+        })
+        .expect("the attempt started");
+    let (request_id, provider, profile, protocol, model, streaming) = started(first);
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::Provider(ProviderEvent::RequestCompleted { request_id: id, .. }) if id == request_id
+    )));
+    let [record] = log.snapshot().try_into().expect("1 attempt");
+    assert_eq!(record.request_id, request_id);
+    assert_eq!(record.provider, provider);
+    assert_eq!(record.profile.as_deref(), profile);
+    assert_eq!(record.protocol, protocol);
+    assert_eq!(record.model, model);
+    assert_eq!(record.streaming, streaming);
+    assert_eq!(
+        record.outcome,
+        AttemptOutcome::Completed {
+            finish_reason: "stop".into()
+        }
+    );
+}
+
+// Given: HTTP 500 で失敗する send / When: 失敗 / Then: ログは同じ request_id を Failed で持つ
+#[tokio::test(flavor = "multi_thread")]
+async fn attempt_log_records_a_failed_attempt() {
+    let server = MockServer::start().await;
+    mount(&server, "/chat/completions", json_response(500, "boom")).await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let log = AttemptLog::default();
+    compatible_client_without_deadline(&server, bus)
+        .send(
+            &ProviderAuth::new("sk"),
+            &request_with_log(COMPATIBLE_MODEL, &log),
+        )
+        .await
+        .expect_err("send は失敗する");
+
+    let events = rx.drain_pending_snapshot();
+    let first = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                EventKind::Provider(ProviderEvent::RequestStarted { .. })
+            )
+        })
+        .expect("the attempt started");
+    let (request_id, ..) = started(first);
+    let terminal = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                EventKind::Provider(ProviderEvent::RequestFailed { .. })
+            )
+        })
+        .expect("the attempt failed");
+    assert_eq!(failed(terminal).0, request_id);
+    let [record] = log.snapshot().try_into().expect("1 attempt");
+    assert_eq!(record.request_id, request_id);
+    assert_eq!(
+        record.outcome,
+        AttemptOutcome::Failed {
+            failure: ProviderFailureKind::Http { status: 500 }
+        }
+    );
+}

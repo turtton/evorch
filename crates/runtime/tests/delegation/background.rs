@@ -1,0 +1,180 @@
+use crate::support;
+
+use std::sync::Arc;
+
+use agents::Role;
+use event_bus::{
+    AgentRunPhase, Event, EventBus, EventKind, EventReceiver, LifecycleEvent, MessageEvent,
+};
+use providers::FinishReason;
+use runtime::{AgentRuntime, RunConfig, RunId, RuntimeError};
+use sandbox::DirectSandbox;
+use serde_json::json;
+use tokio::sync::Notify;
+use tools::ToolExecutor;
+
+use support::{ScriptedModel, text_response, tool_response};
+
+async fn collect_until(
+    receiver: &mut EventReceiver,
+    reached: impl Fn(&EventKind) -> bool,
+) -> Vec<Event> {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut events = Vec::new();
+        loop {
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(error) => panic!("event receiver failed: {error:?}"),
+            };
+            let done = reached(&event.kind);
+            events.push(event);
+            if done {
+                return events;
+            }
+        }
+    })
+    .await;
+    match result {
+        Ok(events) => events,
+        Err(error) => panic!("expected event was not published: {error}"),
+    }
+}
+
+fn runtime_with(model: ScriptedModel) -> (AgentRuntime, Arc<EventBus>) {
+    let bus = Arc::new(EventBus::new(64));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    (
+        AgentRuntime::new(Arc::clone(&bus), executor, Arc::new(model)),
+        bus,
+    )
+}
+
+#[tokio::test]
+async fn background_start_is_observable_before_wait_and_completion_is_success_only() {
+    // Given
+    let (runtime, bus) = runtime_with(ScriptedModel::new([Ok(text_response(
+        "done",
+        FinishReason::Stop,
+    ))]));
+    let mut events = bus.subscribe();
+
+    // When
+    let run_id =
+        runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
+    let started = collect_until(&mut events, |kind| matches!(kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskStarted { task_id }) if task_id == &run_id.to_string())).await;
+
+    // Then
+    assert!(started.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskStarted { task_id }) if task_id == &run_id.to_string())));
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    let remaining = collect_until(&mut events, |kind| matches!(kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id }) if task_id == &run_id.to_string())).await;
+    assert!(remaining.iter().any(|event| matches!(&event.kind, EventKind::Message(MessageEvent::MessageDelta { delta, .. }) if delta == "done")));
+    assert!(remaining.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id }) if task_id == &run_id.to_string())));
+}
+
+#[tokio::test]
+async fn cancel_mid_model_turn_emits_cancelled_and_error() {
+    // Given
+    let gate = Arc::new(Notify::new());
+    let (runtime, bus) = runtime_with(ScriptedModel::gated(
+        [Ok(text_response("unused", FinishReason::Stop))],
+        Arc::clone(&gate),
+    ));
+    let mut events = bus.subscribe();
+    let run_id =
+        runtime.delegate_background(Role::Worker, "blocked".to_string(), RunConfig::default());
+    let _started = collect_until(&mut events, |kind| matches!(kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id: id, to: AgentRunPhase::Running, .. }) if id == &run_id.to_string())).await;
+
+    // When
+    assert_eq!(runtime.cancel(run_id), Ok(()));
+
+    // Then
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Error));
+    let events = collect_until(&mut events, |kind| matches!(kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id: id, to: AgentRunPhase::Error, .. }) if id == &run_id.to_string())).await;
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCancelled { task_id }) if task_id == &run_id.to_string())));
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { to: AgentRunPhase::Error, reason: Some(reason), .. }) if reason == "cancelled")));
+    assert!(!events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { .. })
+    )));
+}
+
+#[tokio::test]
+async fn run_result_exposes_final_assistant_text() {
+    // Given: Stop で "done" を返す worker run
+    let (runtime, _bus) = runtime_with(ScriptedModel::new([Ok(text_response(
+        "done",
+        FinishReason::Stop,
+    ))]));
+    let run_id =
+        runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
+
+    // When: run を完了させる
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+
+    // Then: 最終 assistant テキストが run_result で観測できる
+    assert_eq!(runtime.run_result(run_id), Ok(Some("done".to_string())));
+
+    // Given: finish meta-op で結果を返す Orchestrator run
+    let meta_model = ScriptedModel::new([]);
+    meta_model
+        .add_keyed(
+            "META",
+            [Ok(tool_response(
+                "finish",
+                "finish",
+                json!({ "result": "meta done" }),
+            ))],
+        )
+        .await;
+    let (meta_runtime, _meta_bus) = runtime_with(meta_model);
+    let meta_run = meta_runtime.delegate_background(
+        Role::Orchestrator,
+        "META".to_string(),
+        RunConfig::default(),
+    );
+
+    // When: finish meta-op で run を終端させる
+    assert_eq!(meta_runtime.wait(meta_run).await, Ok(AgentRunPhase::Done));
+
+    // Then: finish meta-op の result も run_result で観測できる
+    assert_eq!(
+        meta_runtime.run_result(meta_run),
+        Ok(Some("meta done".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn run_result_reports_error_for_unknown_run() {
+    // Given: 空の runtime
+    let (runtime, _bus) = runtime_with(ScriptedModel::new([]));
+    let missing = RunId::new(999);
+
+    // When / Then: 未登録 run は UnknownRun で拒否する
+    assert_eq!(
+        runtime.run_result(missing),
+        Err(RuntimeError::UnknownRun {
+            run_id: missing.to_string()
+        })
+    );
+}
+
+#[tokio::test]
+async fn send_message_to_unknown_run_returns_unknown_run() {
+    // Given
+    let (runtime, _bus) = runtime_with(ScriptedModel::new([]));
+    let missing = RunId::new(999);
+
+    // When
+    let result = runtime.send_message(missing, "hello".to_string());
+
+    // Then
+    assert_eq!(
+        result,
+        Err(RuntimeError::UnknownRun {
+            run_id: missing.to_string()
+        })
+    );
+}

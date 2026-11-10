@@ -242,11 +242,11 @@ async fn a_detected_candidate_runs_to_a_merge_and_is_then_left_alone() {
     assert_eq!(kinds(&window).len(), 2);
 }
 
-// Scenario 2. Given: a thread linked and unlinked while a fetch for it was out / When: the
-// process restarts and the late answer arrives / Then: the thread stays unlinked, the review is
-// given no facts, and nothing is published or fetched for it
+// Scenario 2. Given: a thread linked and unlinked while a fetch for it was out / When:
+// a replacement opens before the old process stops and the late answer arrives / Then: the
+// thread stays unlinked, the review is given no facts, and nothing is published or fetched for it
 #[tokio::test(start_paused = true)]
-async fn an_unlinked_thread_stays_unlinked_through_a_restart_and_a_late_answer() {
+async fn an_unlinked_thread_stays_unlinked_through_an_overlapping_restart_and_a_late_answer() {
     let site = Site::new();
     let model = || CreatePullRequestModel::new([]);
     let mut first = site.open(model());
@@ -259,12 +259,13 @@ async fn an_unlinked_thread_stays_unlinked_through_a_restart_and_a_late_answer()
     first.show(&mut before);
     assert!(before.pull_request_model().linked(THREAD).is_some());
 
-    // When: the person unlinks while the fetch is out, and the process restarts.
+    // When: the person unlinks while the fetch is out, and the replacement opens.
     before.apply_pull_request_action(unlink(THREAD));
     first.until(unlinked(THREAD)).await;
     first.show(&mut before);
     assert!(before.pull_request_model().linked(THREAD).is_none());
-    first.service.shutdown();
+    // The old service stays alive until its late answer below. Once shutdown
+    // starts, fetch cancellation is required; that boundary is tested separately.
     let mut second = site.open(model());
     let mut after = site.window(&second, &[THREAD]);
 
@@ -315,6 +316,43 @@ async fn an_unlinked_thread_stays_unlinked_through_a_restart_and_a_late_answer()
     second.scheduler_round().await;
     assert_eq!(second.fetches_of(12), 0);
     assert!(second.linked_to(THREAD).is_none());
+    first.service.shutdown_and_drain().await.unwrap();
+    second.service.shutdown_and_drain().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_drains_the_unlinked_fetch_before_a_replacement_opens() {
+    let site = Site::new();
+    let mut first = site.open(CreatePullRequestModel::new([]));
+    first.host.start(THREAD).unwrap();
+    let mut before = site.window(&first, &[THREAD]);
+    let gate = first.source.push_gate(&key(12));
+    before.apply_pull_request_action(link_action("turtton/evorch#12"));
+    first.until(linked(THREAD)).await;
+    gate.arrived().await;
+    first.show(&mut before);
+    before.apply_pull_request_action(unlink(THREAD));
+    first.until(unlinked(THREAD)).await;
+
+    // Drain is the completion signal: even an answer supplied afterwards cannot
+    // commit facts. No timer or absence-of-events wait stands in for completion.
+    first.service.shutdown_and_drain().await.unwrap();
+    gate.release_ok(running(12));
+    let mut second = site.open(CreatePullRequestModel::new([]));
+    assert!(second.linked_to(THREAD).is_none());
+    assert!(
+        second
+            .database()
+            .pull_request_snapshot(&key(12))
+            .unwrap()
+            .and_then(|snapshot| snapshot.facts)
+            .is_none()
+    );
+    let published = first.quiet_events().await;
+    assert_eq!(pull_request_events_of(&published, THREAD), 0);
+    second.scheduler_round().await;
+    assert_eq!(second.fetches_of(12), 0);
+    second.service.shutdown_and_drain().await.unwrap();
 }
 
 // Scenario 3. Given: two derived threads whose inheritance is still pending / When: the
