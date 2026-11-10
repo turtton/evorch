@@ -1,4 +1,5 @@
 // allow: SIZE_OK — OpenAI のHTTP/SSE契約を1つの統合テストバイナリで網羅する契約表です。
+#[path = "../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;

@@ -7,7 +7,7 @@ use providers::provider::codex::tokens::{CodexTokenStore, InMemoryTokenStore, To
 use serde_json::json;
 use wiremock::{Match, Request};
 
-use crate::codex_support::MODEL;
+use super::codex_support::MODEL;
 
 /// セッション・ターン識別子の形式と同一リクエスト内の対応を検証する。
 pub struct CodexIdMatcher;

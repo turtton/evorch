@@ -1,8 +1,8 @@
-#[path = "support/codex.rs"]
+#[path = "../support/codex.rs"]
 mod codex_support;
-#[path = "support/codex_contract.rs"]
+#[path = "../support/codex_contract.rs"]
 mod contract_support;
-#[path = "support/codex_compaction_timeouts.rs"]
+#[path = "../support/codex_compaction_timeouts.rs"]
 mod timeout_tests;
 
 use codex_support::{client, request};

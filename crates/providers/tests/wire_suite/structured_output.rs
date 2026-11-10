@@ -1,9 +1,10 @@
-#[path = "support/codex.rs"]
+#[path = "../support/codex.rs"]
 mod codex_support;
 #[allow(dead_code)]
-#[path = "support/codex_contract.rs"]
+#[path = "../support/codex_contract.rs"]
 mod contract_support;
 #[allow(dead_code)]
+#[path = "../support/mod.rs"]
 mod support;
 
 use std::time::Duration;

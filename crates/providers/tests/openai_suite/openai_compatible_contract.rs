@@ -1,4 +1,5 @@
 // allow: SIZE_OK — OpenAI互換 usage exactly-once 契約を 1 バイナリに集約する。
+#[path = "../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;

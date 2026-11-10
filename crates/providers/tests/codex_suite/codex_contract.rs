@@ -1,11 +1,12 @@
-#[path = "support/codex.rs"]
+#[path = "../support/codex.rs"]
 mod codex_support;
-#[path = "support/codex_contract.rs"]
+#[path = "../support/codex_contract.rs"]
 mod contract_support;
-#[path = "support/codex_overload_contract.rs"]
+#[path = "../support/codex_overload_contract.rs"]
 mod overload_contract;
-#[path = "support/codex_priority_contract.rs"]
+#[path = "../support/codex_priority_contract.rs"]
 mod priority_contract;
+#[path = "../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;

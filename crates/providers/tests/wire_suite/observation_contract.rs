@@ -1,7 +1,8 @@
 // allow: SIZE_OK — 観測イベントの契約表を1つの統合テストバイナリに集約する。
 #[allow(dead_code)]
-#[path = "support/codex.rs"]
+#[path = "../support/codex.rs"]
 mod codex_support;
+#[path = "../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;

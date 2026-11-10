@@ -185,7 +185,7 @@ async fn returns_http_error_when_strict_catalog_rejects_client_headers() {
     );
 }
 
-const CATALOG_0166: &str = include_str!("../fixtures/codex/models_catalog_0166.json");
+const CATALOG_0166: &str = include_str!("../../fixtures/codex/models_catalog_0166.json");
 
 async fn fetch(body: serde_json::Value) -> Vec<providers::CodexModelInfo> {
     let server = MockServer::start().await;

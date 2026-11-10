@@ -1,5 +1,6 @@
 #[path = "codex_oauth_contract/support.rs"]
 mod oauth_support;
+#[path = "../support/mod.rs"]
 mod support;
 
 use std::time::Duration;

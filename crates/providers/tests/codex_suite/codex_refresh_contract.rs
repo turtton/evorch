@@ -14,7 +14,7 @@ use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const SUCCESS_SSE: &str = include_str!("../fixtures/codex/responses_success.sse");
+const SUCCESS_SSE: &str = include_str!("../../fixtures/codex/responses_success.sse");
 
 fn request() -> ChatRequest {
     ChatRequest {

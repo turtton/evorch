@@ -1,5 +1,8 @@
 //! 公式 OpenAI Responses の全体タイムアウトが非ストリーミングだけに掛かることを、
 //! 手動で進める Tokio 時計と実 TCP で固定する契約テストです。
+// A `pub mod` at a test-binary root was exempt from dead_code; now it is nested.
+#[allow(dead_code)]
+#[path = "../support/mod.rs"]
 pub mod support;
 
 use std::sync::Arc;

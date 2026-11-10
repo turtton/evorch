@@ -1,5 +1,8 @@
 //! 公式 OpenAI Responses の SSE 内失敗が、再試行・レート制限・観測の既存分類へ
 //! 乗ることを実 HTTP 経由で固定する契約テストです。
+// A `pub mod` at a test-binary root was exempt from dead_code; now it is nested.
+#[allow(dead_code)]
+#[path = "../support/mod.rs"]
 pub mod support;
 
 use std::sync::Arc;

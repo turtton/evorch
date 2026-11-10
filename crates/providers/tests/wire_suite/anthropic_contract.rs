@@ -1,4 +1,5 @@
 // allow: SIZE_OK — Anthropic の HTTP/SSE 契約を 1 統合テストバイナリで網羅する。
+#[path = "../support/mod.rs"]
 mod support;
 
 use std::sync::Arc;

@@ -10,7 +10,7 @@ use serde_json::json;
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use crate::support::{fixture, json_response};
+use super::support::{fixture, json_response};
 
 pub fn make_dummy_jwt(account_id: &str) -> String {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
@@ -30,10 +30,10 @@ pub fn make_dummy_jwt(account_id: &str) -> String {
 }
 
 pub fn client(server: &MockServer) -> DeviceAuthClient {
-    let _ = crate::support::sse_response;
-    let _ = crate::support::next_usage_event;
-    let _ = crate::support::next_provider_event;
-    let _ = crate::support::next_event;
+    let _ = super::support::sse_response;
+    let _ = super::support::next_usage_event;
+    let _ = super::support::next_provider_event;
+    let _ = super::support::next_event;
     DeviceAuthClient::new(server.uri(), reqwest::Client::new())
 }
 

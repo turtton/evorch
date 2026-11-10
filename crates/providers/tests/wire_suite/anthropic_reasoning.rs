@@ -1,5 +1,6 @@
 //! API-key Anthropic requests carry the selected reasoning effort only when the model supports it.
 #[allow(dead_code)]
+#[path = "../support/mod.rs"]
 mod support;
 
 use futures_util::StreamExt;

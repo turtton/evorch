@@ -1,3 +1,6 @@
+// A `pub mod` at a test-binary root was exempt from dead_code; now it is nested.
+#[allow(dead_code)]
+#[path = "../support/mod.rs"]
 pub mod support;
 
 use std::sync::atomic::Ordering;
