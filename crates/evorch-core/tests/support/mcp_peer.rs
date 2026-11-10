@@ -42,6 +42,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::io::stdout().flush()?;
                     continue;
                 }
+                if command.trim() == "content-error" {
+                    let result = json!({"resultType":"complete","isError":true,"content":[{"type":"text","text":secret}]});
+                    println!("{}", json!({"jsonrpc":"2.0","id":id,"result":result}));
+                    std::io::stdout().flush()?;
+                    continue;
+                }
                 assert_eq!(command.trim(), "continue");
                 json!({"resultType":"complete","content":[{"type":"text","text":"mcp-ok"}]})
             }

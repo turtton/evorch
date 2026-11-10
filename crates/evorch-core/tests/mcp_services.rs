@@ -432,13 +432,10 @@ async fn core_mcp_execution_credentials_and_settings_during_call() {
     fresh_peer.get_mut().write_all(b"continue\n").await.unwrap();
     core.waiting(readded).await;
     core.boot.shutdown().await.unwrap();
-    assert!(!Path::new(&format!("/proc/{fresh_pid}")).exists());
+    assert_reaped_on_linux(fresh_pid);
     let mut eof = String::new();
     assert_eq!(peer.read_line(&mut eof).await.unwrap(), 0);
-    assert!(
-        !Path::new(&format!("/proc/{pid}")).exists(),
-        "child must have been reaped"
-    );
+    assert_reaped_on_linux(pid);
     let db = storage::Database::open(&storage::StorageConfig {
         db_path: root.join("evorch-events.db"),
         ..Default::default()
@@ -489,7 +486,7 @@ async fn reconnect_is_for_a_later_explicit_call_and_does_not_replay_unknown_outc
             .contains("mcp-ok")
     );
     core.boot.shutdown().await.unwrap();
-    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert_reaped_on_linux(pid);
 }
 
 async fn legacy_host(core: &Core, legacy_model: Arc<Model>) -> BootstrappedHost {
@@ -532,7 +529,7 @@ async fn parallel_legacy_host_cannot_connect_or_execute_the_core_owned_thread() 
 }
 
 #[tokio::test]
-async fn idle_handoff_fences_old_calls_and_drains_the_previous_process() {
+async fn idle_handoff_fences_old_calls_and_drains_the_previous_host() {
     let mut core = Core::open().await;
     core.model.call("before-handoff");
     let run = core.send("thread", "first");
@@ -547,6 +544,7 @@ async fn idle_handoff_fences_old_calls_and_drains_the_previous_process() {
     let _next = core.boot.owner.handoff(&old, &legacy.owner).unwrap();
     // No async yield since handoff: the previous socket is still alive, but
     // the exact mutation fence used before tool calls already rejects it.
+    #[cfg(target_os = "linux")]
     assert!(Path::new(&format!("/proc/{old_pid}")).exists());
     assert!(old.validate_mutation().is_err());
     core.model.call("must-not-execute-after-handoff");
@@ -572,7 +570,7 @@ async fn idle_handoff_fences_old_calls_and_drains_the_previous_process() {
             break;
         }
     }
-    assert!(!Path::new(&format!("/proc/{old_pid}")).exists());
+    assert_reaped_on_linux(old_pid);
     assert_eq!(core.model.inputs.lock().unwrap().len(), inputs);
     let mut events = legacy.runtime.event_bus().subscribe();
     model.call("new-owner");
@@ -583,17 +581,42 @@ async fn idle_handoff_fences_old_calls_and_drains_the_previous_process() {
     through(&mut events, successor, AgentRunPhase::Waiting).await;
     legacy.shutdown().await.unwrap();
     core.boot.shutdown().await.unwrap();
-    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert_reaped_on_linux(pid);
+}
+
+fn assert_reaped_on_linux(pid: u64) {
+    #[cfg(target_os = "linux")]
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "child must have been reaped"
+    );
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
+}
+
+#[cfg(target_os = "linux")]
+fn fd_targets() -> Vec<PathBuf> {
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|fd| match std::fs::read_link(fd.unwrap().path()) {
+            Ok(target) => Some(target),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("could not inspect process FDs: {error}"),
+        })
+        .collect()
 }
 
 #[tokio::test]
 async fn core_shutdown_drains_inflight_mcp_and_reaps_child_and_fds() {
     let mut core = Core::open().await;
+    #[cfg(target_os = "linux")]
+    let before = fd_targets();
     core.model.call("blocked");
     let run = core.send("thread", "first");
     let (mut peer, pid) = core.peer(run).await;
     core.called(&mut peer, run).await;
-    let stdio = [0, 1].map(|fd| std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).unwrap());
+    #[cfg(target_os = "linux")]
+    let stdio = [0, 1, 2].map(|fd| std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).unwrap());
     core.boot.shutdown().await.unwrap();
     assert!(matches!(
         core.boot
@@ -611,15 +634,16 @@ async fn core_shutdown_drains_inflight_mcp_and_reaps_child_and_fds() {
         0,
         "all child-owned control FDs closed"
     );
-    assert!(!Path::new(&format!("/proc/{pid}")).exists());
-    for fd in std::fs::read_dir("/proc/self/fd").unwrap() {
-        match std::fs::read_link(fd.unwrap().path()) {
-            Ok(target) => assert!(
-                !stdio.contains(&target),
-                "MCP stdio FD retained after drain"
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => panic!("could not inspect process FDs: {error}"),
+    assert_reaped_on_linux(pid);
+    #[cfg(target_os = "linux")]
+    {
+        let after = fd_targets();
+        for target in stdio {
+            // stderr is /dev/null, shared with unrelated parent descriptors.
+            // Unique pipes must disappear; shared targets return to baseline.
+            let initial = before.iter().filter(|fd| **fd == target).count();
+            let remaining = after.iter().filter(|fd| **fd == target).count();
+            assert!(remaining <= initial, "MCP stdio FD retained: {target:?}");
         }
     }
     assert_eq!(
@@ -694,6 +718,32 @@ async fn credential_bearing_server_error_is_not_exposed_in_core_events_or_histor
             .unwrap()
             .contains(SECRET)
     );
+    core.boot.shutdown().await.unwrap();
+    traces::assert_redacted(SECRET);
+}
+
+#[tokio::test]
+async fn server_error_content_is_not_copied_into_host_diagnostics_or_logs() {
+    let mut core = Core::open().await;
+    core.model.call("content-error");
+    let run = core.send("thread", "first");
+    let (mut peer, _) = core.peer(run).await;
+    core.called(&mut peer, run).await;
+    peer.get_mut().write_all(b"content-error\n").await.unwrap();
+    let events = core.waiting(run).await;
+    // Server-returned content remains model input, including isError=true.
+    // Host-generated diagnostics and logs must not copy that content.
+    assert!(
+        serde_json::to_string(&*core.model.inputs.lock().unwrap())
+            .unwrap()
+            .contains(SECRET)
+    );
+    for event in events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::Diagnostic(_)))
+    {
+        assert!(!serde_json::to_string(event).unwrap().contains(SECRET));
+    }
     core.boot.shutdown().await.unwrap();
     traces::assert_redacted(SECRET);
 }
