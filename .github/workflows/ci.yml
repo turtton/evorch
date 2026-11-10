@@ -12,20 +12,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Aggregate gate: this job (the workflow's `ci` check) succeeds only when every
+  # job it depends on succeeded. A skipped or cancelled dependency is a failure
+  # (`needs` results are success, failure, cancelled or skipped).
   ci:
+    if: always()
+    needs:
+      - quick-checks
+      - lint
+      - build-tests
+      - inventory
+      - cache-contracts
+      - io-contracts
+      - remaining
+      - docs-schema
+      - otel
     runs-on: ubuntu-latest
-    # Normal runs take ~13 min; a cold dependency cache roughly doubles that.
-    timeout-minutes: 60
-    # workspace 全体 + browser feature + otel-exporter feature のビルドで
-    # runner のディスクが枯渇したため (2026-09-11 No space left on device)、
-    # docs/browser.md の低リソース指定を job 全体に適用し未使用ツールを削除する。
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      # gui/wgpu 系の linking が重いため mold で短縮する (feature 差分の
-      # 再ビルド自体は cargo の fingerprint で避けられないため linker を速くする)。
-      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-      EVORCH_CI_METADATA_DIR: target/ci-metadata
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if ! echo "$NEEDS" | jq -e 'length == 9 and all(.[]; .result == "success")' > /dev/null; then
+            echo "::error::a job that ci depends on did not succeed"
+            exit 1
+          fi
+
+  # Fast checks that need no dependency cache: formatting, Node tests, and the
+  # fixture tests of the shell gates.
+  quick-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Claude compatibility skill offline tools
@@ -35,6 +54,39 @@ jobs:
       # Node before 22.7 only detects as modules with this flag.
       - name: Web workbench JavaScript unit tests
         run: node --experimental-detect-module crates/workbench-web/tests/web/run-node.mjs
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.0
+          components: rustfmt
+      - run: cargo fmt --all --check
+      # Fixture tests for the gates below; jq is provided by the ubuntu-latest image.
+      - name: Gate script fixture tests
+        run: |
+          scripts/tests/test_check_workbench_boundaries.sh
+          scripts/tests/test_verify_test_inventory.sh
+      # scripts/setup-cef.sh (CI) and flake.nix (Nix) must fetch the CEF build
+      # that Cargo.lock binds.
+      - name: CEF pin consistency
+        run: scripts/tests/test_setup_cef_pin.sh
+
+  # workspace 全体 + browser feature + otel-exporter feature のビルドで
+  # runner のディスクが枯渇したため (2026-09-11 No space left on device)、
+  # docs/browser.md の低リソース指定を job に適用し未使用ツールを削除する。
+  # Builds every test binary once; the test jobs below run this archive. The one
+  # job that saves the dependency cache (main only).
+  build-tests:
+    runs-on: ubuntu-latest
+    # A cold dependency cache roughly doubles the warm build time.
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      # gui/wgpu 系の linking が重いため mold で短縮する。
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+    outputs:
+      archive-name: ${{ steps.archive-name.outputs.name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # 2026-10-09 時点の runner は root の空きが約 86G あり、削除 (android だけで
       # 71s) は不要になった。空きが少ない runner でだけ従来どおり削除する。
       - name: Free runner disk space
@@ -50,17 +102,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
-          components: rustfmt,clippy
-      - name: Install linker, search, and Claude transport build dependencies
-        # crates/tools の grep テストが rg を必要とするが、ubuntu-latest から
-        # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
+      - name: Install linker and Claude transport build dependencies
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
-          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
-      # `gui` enables CEF by default, so the workspace build, the tests and the
-      # doctests all link libcef.so. None of them starts CEF (the cef-e2e job
-      # does), so only a libcef.so link goes on the loader path.
+          packages: mold cmake clang libclang-dev ninja-build perl git
+      # `gui` enables CEF by default, so the workspace build links libcef.so.
+      # The build starts no CEF (the cef-e2e job does), so only a libcef.so link
+      # goes on the loader path.
       - uses: ./.github/actions/setup-cef
       # ジョブ内の依存キャッシュを復元する。profile/feature が異なるジョブは別キー。
       # PR ごとの保存は repo の cache 上限 (10GB) を圧迫するため main でのみ保存する。
@@ -74,67 +123,170 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
-      - run: cargo fmt --all --check
-      # Compile the default workspace once; the contract gates and remainder use
-      # these exact binaries so package selection cannot change dependency features.
-      - name: Compile and lint check targets
+      # Compile the default workspace once. The contract gates and the remainder
+      # run exactly these binaries, so package selection cannot change dependency
+      # features. The archive lives only for this run (see retention-days).
+      - name: Build the nextest archive
         env:
           CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          mkdir -p "$RUNNER_TEMP/nextest-archive"
+          start=$SECONDS
+          cargo nextest archive --workspace --locked --archive-file "$RUNNER_TEMP/nextest-archive/workspace.tar.zst"
+          ls -l "$RUNNER_TEMP/nextest-archive/workspace.tar.zst"
+          echo "archive step (build + pack): $((SECONDS - start))s"
+      # A re-run of only the failed jobs reuses this job's outputs, so the
+      # consumers keep naming the artifact of the attempt that built it.
+      - id: archive-name
+        run: echo "name=nextest-archive-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      # The archive is already zstd-compressed, so skip the zip compression.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.archive-name.outputs.name }}
+          path: ${{ runner.temp }}/nextest-archive/workspace.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      # 削除省略の閾値を見直せるよう、ビルド後の使用量を残す。
+      - name: Report disk usage
+        if: always()
+        run: df -h /
+
+  # Every default non-ignored test belongs to exactly one of cache, io and
+  # remaining, and the remaining shards partition remaining. Checked against the
+  # archive the test jobs run, on every run.
+  inventory:
+    needs: build-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/nextest-archive
+        with:
+          artifact-name: ${{ needs.build-tests.outputs.archive-name }}
+      - name: Verify the test inventory
+        run: scripts/verify-test-inventory.sh --output-dir "$RUNNER_TEMP/test-inventory"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: test-inventory-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-inventory
+          retention-days: 7
+          if-no-files-found: warn
+
+  # CI enforces cost-sensitive invariants with this offline gate. The mock
+  # computes cache usage from received input; compaction has an explicit boundary.
+  cache-contracts:
+    needs: build-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/nextest-archive
+        with:
+          artifact-name: ${{ needs.build-tests.outputs.archive-name }}
+      - name: Cache preservation contracts (offline)
+        run: scripts/check-cache-contracts.sh
+
+  io-contracts:
+    needs: build-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/nextest-archive
+        with:
+          artifact-name: ${{ needs.build-tests.outputs.archive-name }}
+      - name: Storage I/O contracts (offline)
+        run: scripts/check-io-contracts.sh
+
+  # nextest owns parallelism and the per-test hang watchdog. Every default
+  # non-ignored test belongs to exactly one of cache, io and remaining; the
+  # remaining suite is split into hash shards, which the inventory job checks
+  # are a partition.
+  remaining:
+    needs: build-tests
+    name: remaining (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/nextest-archive
+        with:
+          artifact-name: ${{ needs.build-tests.outputs.archive-name }}
+      - name: Remaining workspace tests
+        run: scripts/run-contract-tests.sh remaining --partition hash:${{ matrix.shard }}/4
+
+  # Clippy and the dependency-graph boundary gate. Own cache key: check-mode
+  # artifacts are not part of build-tests' cache.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.0
+          components: clippy
+      - name: Install linker and Claude transport build dependencies
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git
+      # Clippy builds gui's default `cef` feature, which needs the CEF distribution.
+      - uses: ./.github/actions/setup-cef
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ${{ runner.os }}-cargo-lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Clippy
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy -p event-bus --all-targets --features otel-exporter -- -D warnings
-          mkdir -p "$EVORCH_CI_METADATA_DIR"
-          cargo metadata --format-version 1 --locked > "$EVORCH_CI_METADATA_DIR/cargo.json"
-          cargo nextest list --workspace --locked --list-type binaries-only --message-format json > "$EVORCH_CI_METADATA_DIR/default-binaries.json"
-          cargo build -p config --example dump_schema
       # ADR 0045 §11: workbench-protocol stays free of workspace crates and
       # workbench-client depends only on it. gui and evorch may not gain
       # workspace dependencies beyond scripts/workbench-boundary-allowlist.txt.
-      # Reads `cargo metadata`; needs jq, which the ubuntu-latest image provides.
+      # Reads `cargo metadata`, which needs the registry the cache restored.
       - name: Workbench crate boundaries
-        run: |
-          scripts/tests/test_check_workbench_boundaries.sh
-          scripts/check-workbench-boundaries.sh
-      # scripts/setup-cef.sh (CI) and flake.nix (Nix) must fetch the CEF build
-      # that Cargo.lock binds.
-      - name: CEF pin consistency
-        run: scripts/tests/test_setup_cef_pin.sh
+        run: scripts/check-workbench-boundaries.sh
       # gui has no non-CEF build any more.
       - name: GUI refuses to build without CEF
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
         run: scripts/tests/test_gui_requires_cef.sh
-      # CI enforces cost-sensitive invariants with this offline gate. The mock
-      # computes cache usage from received input; compaction has an explicit boundary.
-      - name: Cache preservation contracts (offline)
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/check-cache-contracts.sh
-      - name: Storage I/O contracts (offline)
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/check-io-contracts.sh
-      # nextest owns parallelism and the per-test hang watchdog. Every default
-      # non-ignored test belongs to exactly one of these three suites.
-      - name: Remaining workspace tests
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/run-contract-tests.sh remaining
-      - name: Workspace doctests
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        timeout-minutes: 10
-        run: cargo test --workspace --doc
-      # ADR 0023: retain the opt-in OTLP end-to-end coverage.
-      - name: Event bus otel-exporter tests
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        run: cargo nextest run -p event-bus --features otel-exporter --no-tests fail
-      - name: Event bus otel-exporter doctests
-        env:
-          CARGO_TARGET_DIR: target/ci-shared
-        timeout-minutes: 10
-        run: cargo test -p event-bus --features otel-exporter --doc
+
+  # Workspace doctests and the generated config schema. Restores build-tests'
+  # dependency cache without saving it.
+  docs-schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.0
+      - name: Install linker and Claude transport build dependencies
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ${{ runner.os }}-cargo
+          save-if: false
+      # Doctests link libcef.so (`gui` enables CEF by default) and `cargo run`
+      # starts config's example, so the CEF distribution is needed here too.
+      - uses: ./.github/actions/setup-cef
       # Config 型を変更したら versioned schema artifact も再生成が必要 (issue #33)。
       - name: Check config schema artifact is up to date
         env:
@@ -142,10 +294,45 @@ jobs:
         run: |
           cargo run -q -p config --example dump_schema -- docs/config/evorch-config-v3.schema.json
           git diff --exit-code docs/config/evorch-config-v3.schema.json
-      # 削除省略の閾値を見直せるよう、ビルド後の使用量を残す。
+      - name: Workspace doctests
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        timeout-minutes: 10
+        run: cargo test --workspace --doc
       - name: Report disk usage
         if: always()
         run: df -h /
+
+  # ADR 0023: retain the opt-in OTLP end-to-end coverage.
+  otel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.0
+      - name: Install linker and Claude transport build dependencies
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ${{ runner.os }}-cargo-otel
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest
+      - name: Event bus otel-exporter tests
+        run: cargo nextest run -p event-bus --features otel-exporter --no-tests fail
+      - name: Event bus otel-exporter doctests
+        timeout-minutes: 10
+        run: cargo test -p event-bus --features otel-exporter --doc
 
   # nix run / nix build が cargo test では拾えない sandbox 固有の失敗
   # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。

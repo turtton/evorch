@@ -109,7 +109,8 @@ the next main CI run validates the complete tree again.
 ## Prompt-cache regression gate
 
 CI enforces the offline cache contract with `scripts/check-cache-contracts.sh` in
-a named step. The harness checks also run the script, and it can be run manually
+the `cache-contracts` job, which runs the nextest archive built by `build-tests`
+(`EVORCH_NEXTEST_ARCHIVE`; the script never rebuilds from a missing archive). The harness checks also run the script, and it can be run manually
 for focused local validation. Repository branch protection is separate from
 this change.
 

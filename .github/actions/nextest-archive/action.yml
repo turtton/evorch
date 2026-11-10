@@ -1,0 +1,56 @@
+name: nextest-archive
+description: >-
+  Prepare a job that only runs tests: download the nextest archive built by the
+  build-tests job and install what running it needs (no compiler, no cargo
+  build). Exports EVORCH_NEXTEST_ARCHIVE for scripts/run-contract-tests.sh.
+inputs:
+  artifact-name:
+    description: Name of the archive artifact, from needs.build-tests.outputs.
+    required: true
+runs:
+  using: composite
+  steps:
+    # The archive extracts to ~46 GB and the download adds ~10 GB.
+    - name: Free runner disk space
+      shell: bash
+      run: |
+        df -h /
+        avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+        if [ "$avail_gb" -ge 70 ]; then
+          echo "skip cleanup: ${avail_gb}G available"
+          exit 0
+        fi
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        df -h /
+    # nextest is started as `cargo nextest`; RUSTUP_TOOLCHAIN keeps rustup from
+    # installing the components that rust-toolchain.toml lists (nothing compiles).
+    - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      with:
+        toolchain: 1.99.0
+    # Only the runtime dependencies of the tests: crates/tools' grep tests need
+    # rg (ubuntu-latest no longer ships ripgrep, 2026-09-11) and git is used by
+    # many tests. The build dependencies (mold, clang, cmake) are not needed.
+    - name: Install test runtime dependencies
+      uses: ./.github/actions/apt-install
+      with:
+        packages: ripgrep git
+        timeout-seconds: 600
+    # Test binaries link libcef.so (`gui` enables CEF by default); none of them
+    # starts CEF, so only a libcef.so link goes on the loader path.
+    - uses: ./.github/actions/setup-cef
+    - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      with:
+        tool: cargo-nextest
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/nextest-archive
+    - name: Locate the archive
+      shell: bash
+      run: |
+        archive="$RUNNER_TEMP/nextest-archive/workspace.tar.zst"
+        ls -l "$archive"
+        {
+          echo "EVORCH_NEXTEST_ARCHIVE=$archive"
+          echo "RUSTUP_TOOLCHAIN=1.99.0"
+        } >> "$GITHUB_ENV"
