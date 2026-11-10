@@ -109,7 +109,7 @@ impl LoopState {
                     bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
                         source: "mcp".into(),
                         severity: event_bus::DiagnosticSeverity::Info,
-                        code: "mcp.owner_drained".into(),
+                        code: event_bus::event::diagnostic_codes::MCP_OWNER_DRAINED.into(),
                         detail: "Previous owner's MCP sessions drained".into(),
                         run_id: None,
                         thread_id,

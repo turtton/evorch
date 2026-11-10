@@ -444,6 +444,8 @@ pub mod diagnostic_codes {
     /// A run waited noticeably for a contended thread owner registry. It keeps
     /// its authority and continues once the registry is available.
     pub const OWNERSHIP_REGISTRY_WAIT: &str = "OwnershipRegistryWait";
+    /// A fenced owner finished draining its MCP sessions.
+    pub const MCP_OWNER_DRAINED: &str = "mcp.owner_drained";
     /// An attempted context compaction failed (provider call, summary, or limits).
     pub const COMPACTION_FAILED: &str = "CompactionFailed";
     /// Post-run lesson extraction or review failed.
@@ -519,6 +521,7 @@ pub mod diagnostic_codes {
         CACHE_REGRESSION,
         TOOL_ARGUMENTS_MALFORMED,
         OWNERSHIP_REGISTRY_WAIT,
+        MCP_OWNER_DRAINED,
         COMPACTION_FAILED,
         LEARNING_PIPELINE_FAILED,
         CONTEXT_CHECKPOINT_SAVED,
