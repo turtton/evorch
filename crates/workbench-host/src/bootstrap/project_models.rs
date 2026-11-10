@@ -21,23 +21,20 @@ pub(super) fn resolver(
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
-            runtime::compose::compose_routed_model(
+            super::models::compose_production_model(
                 &config,
-                routing::ComposeDeps {
+                &super::models::ProductionModel {
                     credential_store: credentials.clone(),
-                    event_bus: Some(bus.clone()),
+                    bus: bus.clone(),
                     env: Arc::new(routing::ProcessEnv),
-                    catalog: model::ModelCatalog::new(),
-                    factory: routing::factory::FactoryOptions {
-                        claude_installation_id_path: Some(
-                            options
-                                .config_dir
-                                .join(providers::provider::claude::CLAUDE_INSTALLATION_ID_FILE),
-                        ),
+                    model_catalog_dir: Some(options.config_dir.join("catalog")),
+                    load_options: config::LoadOptions {
+                        project_dir: Some(root.to_path_buf()),
+                        user_config_dir: Some(options.config_dir.clone()),
+                        read_env: false,
                         ..Default::default()
                     },
                 },
-                None,
             )
             .map(|m| m as Arc<dyn runtime::AgentModel>)
             .map_err(|e| e.to_string())

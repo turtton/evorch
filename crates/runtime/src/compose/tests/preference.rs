@@ -58,6 +58,7 @@ async fn preferred(
     model
         .complete(
             &AgentInvocationContext {
+                btw: None,
                 attempts: None,
                 turn: None,
                 category: None,

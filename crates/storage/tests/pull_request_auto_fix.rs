@@ -99,6 +99,14 @@ impl Fixture {
             .unwrap();
     }
 }
+fn limit_claim(budget_epoch: u64) -> PrLimitClaim {
+    PrLimitClaim {
+        key: key(),
+        thread_id: "lead".into(),
+        link_revision: 1,
+        budget_epoch,
+    }
+}
 fn key() -> PullRequestKey {
     PullRequestKey::github("Owner/Repo", 42).unwrap()
 }
@@ -327,11 +335,33 @@ fn third_adoption_is_atomic_auto_off_and_reset_preserves_sha_and_cooldown() {
     let events = f.h().pr_auto_fix_limit_events(key(), None).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].budget_epoch, 0);
+    assert_eq!(events[0].notified_at_ns, None);
     assert!(
         f.h()
             .pr_auto_fix_limit_events(key(), Some(0))
             .unwrap()
             .is_empty()
+    );
+    // One window takes the notification of the stop; no other claim, and no stop that never
+    // happened, can.
+    assert!(
+        !f.h()
+            .claim_pr_limit_notification(limit_claim(1), 500)
+            .unwrap()
+    );
+    assert!(
+        f.h()
+            .claim_pr_limit_notification(limit_claim(0), 500)
+            .unwrap()
+    );
+    assert!(
+        !f.h()
+            .claim_pr_limit_notification(limit_claim(0), 501)
+            .unwrap()
+    );
+    assert_eq!(
+        f.h().pr_auto_fix_limit_events(key(), None).unwrap()[0].notified_at_ns,
+        Some(500)
     );
     let reset = f.policy(PrPolicyAction::ResetBudget);
     assert_eq!(
@@ -847,7 +877,9 @@ fn v50_outbox_upgrade_preserves_lane_wire_ids_and_title() {
     let undo = std::fs::read_to_string(root.join("undo/undo_v51.sql")).unwrap();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.pragma_update(None, "foreign_keys", true).unwrap();
-    let management_undo = std::fs::read_to_string(root.join("undo/undo_v54.sql")).unwrap()
+    let management_undo = std::fs::read_to_string(root.join("undo/undo_v56.sql")).unwrap()
+        + &std::fs::read_to_string(root.join("undo/undo_v55.sql")).unwrap()
+        + &std::fs::read_to_string(root.join("undo/undo_v54.sql")).unwrap()
         + &std::fs::read_to_string(root.join("undo/undo_v53.sql")).unwrap();
     conn.execute_batch(&management_undo).unwrap();
     let preparation_undo = std::fs::read_to_string(root.join("undo/undo_v52.sql")).unwrap();
@@ -1152,6 +1184,8 @@ fn v51_upgrade_preserves_a_ready_notice_and_its_outbox_with_an_initial_generatio
         .unwrap();
     f.sql()
         .execute_batch(concat!(
+            include_str!("../undo/undo_v56.sql"),
+            include_str!("../undo/undo_v55.sql"),
             include_str!("../undo/undo_v54.sql"),
             include_str!("../undo/undo_v53.sql"),
             include_str!("../undo/undo_v52.sql")
@@ -1251,5 +1285,84 @@ fn harness_history_requires_verified_native_provenance_and_a_receipt() {
     assert!(
         db.adopted_harness_notices(None).unwrap().is_empty(),
         "unknown provenance never becomes delivery evidence"
+    );
+}
+
+/// Auto fix stopped at the limit of epoch 0, destination `lead`, link revision 1.
+fn stopped_at_the_limit(f: &Fixture) {
+    f.policy(PrPolicyAction::SetEnabled(true));
+    f.sql()
+        .execute_batch(
+            "UPDATE pr_auto_fix_state SET enabled=0,used=3,stop_reason='limit_reached',limit_reached_epoch=0;
+             INSERT INTO pr_auto_fix_limit_events(pr_key,budget_epoch,notice_id,at_ns) SELECT pr_key,0,'n',1 FROM pr_auto_fix_state;",
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_limit_claim_takes_nothing_the_stop_no_longer_stands_for() {
+    let f = Fixture::new();
+    stopped_at_the_limit(&f);
+    let at = |claim: PrLimitClaim| f.h().claim_pr_limit_notification(claim, 500).unwrap();
+    let notified = || f.h().pr_auto_fix_limit_events(key(), None).unwrap()[0].notified_at_ns;
+
+    // Another thread, another link revision: not the stop this claim was made for.
+    assert!(!at(PrLimitClaim {
+        thread_id: "other".into(),
+        ..limit_claim(0)
+    }));
+    assert!(!at(PrLimitClaim {
+        link_revision: 2,
+        ..limit_claim(0)
+    }));
+    assert_eq!(notified(), None);
+
+    // A claim made before the link ended and the thread linked again (revision 2) takes
+    // nothing, and neither does one for the new link, whose destination is not this thread.
+    f.h().unlink_pull_request("lead", 1, 2).unwrap();
+    assert!(!at(limit_claim(0)));
+    f.h()
+        .link_pull_request(LinkPullRequest {
+            thread_id: "lead".into(),
+            key: key(),
+            expected_revision: 2,
+            at_ns: 3,
+        })
+        .unwrap();
+    assert!(!at(limit_claim(0)));
+    assert!(!at(PrLimitClaim {
+        link_revision: 3,
+        ..limit_claim(0)
+    }));
+    assert_eq!(notified(), None);
+}
+
+#[test]
+fn a_claim_can_be_given_back_only_by_the_one_that_took_it() {
+    let f = Fixture::new();
+    stopped_at_the_limit(&f);
+    assert!(
+        f.h()
+            .claim_pr_limit_notification(limit_claim(0), 500)
+            .unwrap()
+    );
+    assert!(
+        !f.h()
+            .release_pr_limit_notification(limit_claim(0), 499)
+            .unwrap()
+    );
+    assert_eq!(
+        f.h().pr_auto_fix_limit_events(key(), None).unwrap()[0].notified_at_ns,
+        Some(500)
+    );
+    assert!(
+        f.h()
+            .release_pr_limit_notification(limit_claim(0), 500)
+            .unwrap()
+    );
+    assert!(
+        f.h()
+            .claim_pr_limit_notification(limit_claim(0), 600)
+            .unwrap()
     );
 }

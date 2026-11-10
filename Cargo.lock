@@ -1476,6 +1476,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-client-e2e"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "core-instance",
+ "core-launcher",
+ "egui",
+ "event-bus",
+ "evorch-core",
+ "gui",
+ "image",
+ "providers",
+ "recorder",
+ "reqwest 0.12.28",
+ "runtime",
+ "rusqlite",
+ "sandbox",
+ "serde_json",
+ "storage",
+ "tempfile",
+ "tokio",
+ "tools",
+ "workbench-host",
+ "workbench-protocol",
+ "workbench-web",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2454,7 +2483,9 @@ dependencies = [
  "test-support",
  "tokio",
  "tools",
+ "tracing-subscriber",
  "uuid",
+ "wiremock",
  "workbench-client",
  "workbench-host",
  "workbench-protocol",
@@ -3004,6 +3035,8 @@ dependencies = [
  "catalog",
  "chrono",
  "config",
+ "core-instance",
+ "core-launcher",
  "eframe",
  "egui",
  "egui-phosphor",
@@ -3044,6 +3077,7 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
+ "workbench-client",
  "workbench-host",
  "workbench-protocol",
  "workspace-ui",
@@ -8389,8 +8423,11 @@ name = "workbench-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "catalog",
  "config",
  "event-bus",
+ "image",
  "model",
  "providers",
  "recorder",

@@ -272,6 +272,7 @@ pub(crate) async fn compact_candidate(
         })
         .or_else(|| state.channels.model_preference_rx.borrow().clone());
     let invocation = crate::AgentInvocationContext {
+        btw: None,
         attempts: None,
         turn: Some(state.turn.clone()),
         run_id: state.caller_run_id().to_string(),
@@ -564,6 +565,7 @@ pub(crate) async fn prepare_model_switch(
             reasoning_effort: None,
         });
     let invocation = crate::AgentInvocationContext {
+        btw: None,
         attempts: None,
         run_id: state.caller_run_id().to_string(),
         turn: Some(state.turn.clone()),

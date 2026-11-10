@@ -10,7 +10,10 @@ use crate::pull_requests::FetchError;
 async fn refresh_during_a_fetch(failed: bool) {
     let world = World::new();
     let process = world.process(enabled());
-    process.service.shutdown();
+    // Stop and join autonomous producers before manually driving rounds. Only
+    // this fixture resets cancellation; a stopped production service stays stopped.
+    process.service.shutdown_and_drain().await.unwrap();
+    process.service.inner().shutdown.send_replace(false);
     process.link_directly("t1", 1);
     let permit = process.permit("t1");
     let inner = process.service.inner();

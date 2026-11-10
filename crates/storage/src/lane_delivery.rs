@@ -215,3 +215,48 @@ impl crate::Database {
         crate::repo::lane_delivery::destination(&self.conn, thread_id)
     }
 }
+
+/// Maximum number of actual failed restores of one unchanged source.
+pub const LANE_RESTORE_FAILURE_LIMIT: u32 = 3;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneRecoveryState {
+    Retryable,
+    Suppressed,
+    Resolved,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneRecoveryEpisode {
+    pub episode_id: String,
+    pub destination_thread_id: String,
+    pub saved_root_run_id: String,
+    pub stable_recovery_target: String,
+    pub attempts: u32,
+    pub last_attempt_at_ns: Option<i64>,
+    pub state: LaneRecoveryState,
+    pub last_failure_class: Option<String>,
+    pub revision: u64,
+    pub failure_report_ref: Option<String>,
+}
+/// Report CAS captured BEFORE an external restore, separate from episode identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneRecoveryReportTarget {
+    pub lane_id: String,
+    pub management_revision: u64,
+    pub generation: u64,
+    pub report_seq: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneRecoveryAttempt {
+    /// Ownership/claim fencing only, never episode identity.
+    pub destination_epoch: u64,
+    pub owner: LaneDeliveryOwner,
+    pub token: String,
+    pub episode: LaneRecoveryEpisode,
+    pub report_target: Option<LaneRecoveryReportTarget>,
+}
+#[derive(Debug, Clone)]
+pub struct LaneRecoveryFailure {
+    pub episode: LaneRecoveryEpisode,
+    pub report: Option<crate::lanes::LaneReportAppended>,
+}

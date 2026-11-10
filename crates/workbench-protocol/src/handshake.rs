@@ -27,6 +27,8 @@ impl ProtocolVersion {
 /// here says nothing about any core implementing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Capability {
+    #[serde(rename = "conversation.v1")]
+    Conversation,
     #[serde(rename = "commands.v1")]
     Commands,
     #[serde(rename = "queries.v1")]
@@ -47,7 +49,7 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability this crate can name, in canonical order.
-    pub const ALL: [Capability; 8] = [
+    pub const ALL: [Capability; 9] = [
         Self::Commands,
         Self::Queries,
         Self::SnapshotEvents,
@@ -56,6 +58,7 @@ impl Capability {
         Self::Questions,
         Self::CommittedBodies,
         Self::SafeRestart,
+        Self::Conversation,
     ];
 
     /// The wire spelling.
@@ -69,6 +72,7 @@ impl Capability {
             Self::Questions => "questions.v1",
             Self::CommittedBodies => "committed_bodies.v1",
             Self::SafeRestart => "safe_restart.v1",
+            Self::Conversation => "conversation.v1",
         }
     }
 

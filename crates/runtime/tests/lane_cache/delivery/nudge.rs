@@ -149,6 +149,40 @@ async fn live_nudge_and_silent_done_wake_keep_wire_prefix_and_share_durable_one_
         } else {
             n.f.delivered_request().await;
         }
+        // State, sequence, summary and question churn cannot buy another nudge.
+        for status in [
+            event_bus::LaneStatus::Waiting,
+            event_bus::LaneStatus::Working,
+            event_bus::LaneStatus::Waiting,
+            event_bus::LaneStatus::Working,
+        ] {
+            n.f.store
+                .handle()
+                .append_lane_report_with_delivery(
+                    n.observation.lane_id.clone(),
+                    1,
+                    event_bus::LaneReportInput {
+                        status,
+                        summary: "state churn without artifacts".into(),
+                        artifact_refs: vec![],
+                        artifact_revision: None,
+                        failure_episode: None,
+                        needs_human: false,
+                        question_refs: vec!["question-changing".into()],
+                        reason_code: None,
+                        producer: event_bus::LaneReportProducer::LaneAgent,
+                    },
+                    101,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            n.f.store
+                .handle()
+                .lane_progress_anchor(n.observation.lane_id.clone())
+                .unwrap(),
+            n.observation.progress_anchor
+        );
         let accepted = n.queue();
         assert_eq!(accepted.nudge_state, LaneNudgeState::Accepted);
         assert_eq!(accepted.notification_id, pending.notification_id);

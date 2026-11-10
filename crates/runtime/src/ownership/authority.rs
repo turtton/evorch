@@ -35,8 +35,32 @@ impl Generation {
 struct Authority {
     fenced: HashSet<Generation>,
     approvals: HashMap<Generation, Vec<std::sync::Weak<sandbox::approval::ApprovalOwner>>>,
+    mcp: HashMap<Generation, Vec<std::sync::Weak<tools::mcp::transport::CancelContext>>>,
 }
 static FENCED: LazyLock<RwLock<Authority>> = LazyLock::new(RwLock::default);
+
+/// Cancel idle MCP sessions too: a waiting run does not poll its owner permit.
+/// Uses the existing generation observation, not a second ownership registry.
+pub(crate) fn watch_mcp(
+    permit: &super::OwnerPermit,
+    cancel: &std::sync::Arc<tools::mcp::transport::CancelContext>,
+) {
+    let generation = Generation::new(&permit.registry_path, &permit.thread_id, &permit.lease);
+    let fenced = {
+        let mut authority = FENCED.write().unwrap_or_else(PoisonError::into_inner);
+        if authority.fenced.contains(&generation) {
+            true
+        } else {
+            let sessions = authority.mcp.entry(generation).or_default();
+            sessions.retain(|session| session.strong_count() > 0);
+            sessions.push(std::sync::Arc::downgrade(cancel));
+            false
+        }
+    };
+    if fenced {
+        cancel.cancel();
+    }
+}
 
 /// Subscribe to observed ownership loss, including a fence that predates this
 /// execution. Never invoke registry code while holding the authority record.
@@ -64,16 +88,20 @@ pub(crate) fn watch_approvals(
 /// Record that `lease` no longer holds `thread_id` in `registry`.
 pub(crate) fn record_fenced(registry: &Path, thread_id: &str, lease: &Lease) {
     let generation = Generation::new(registry, thread_id, lease);
-    let (inserted, owners) = {
+    let (inserted, owners, mcp) = {
         let mut authority = FENCED.write().unwrap_or_else(PoisonError::into_inner);
         let inserted = authority.fenced.insert(generation.clone());
         (
             inserted,
             authority.approvals.remove(&generation).unwrap_or_default(),
+            authority.mcp.remove(&generation).unwrap_or_default(),
         )
     };
     for owner in owners.into_iter().filter_map(|o| o.upgrade()) {
         owner.close();
+    }
+    for cancel in mcp.into_iter().filter_map(|session| session.upgrade()) {
+        cancel.cancel();
     }
     if inserted {
         tracing::info!(

@@ -1,5 +1,6 @@
 use super::*;
 use providers::provider::claude::{CLAUDE_INSTALLATION_ID_FILE, ClaudeInstallationId};
+use std::sync::Arc;
 
 #[test]
 fn production_reload_reuses_the_user_config_installation_seed() {

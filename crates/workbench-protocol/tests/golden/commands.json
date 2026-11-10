@@ -22,6 +22,15 @@
     },
     "type": "continue_chat"
   },
+  "conversation": {
+    "payload": {
+      "payload": {
+        "root": "/work/project"
+      },
+      "type": "resolve_project"
+    },
+    "type": "conversation"
+  },
   "decide_tool_approval": {
     "payload": {
       "approval_id": "ap-1",

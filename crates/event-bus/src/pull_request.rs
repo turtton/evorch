@@ -179,8 +179,6 @@ pub enum PullRequestAutoFixChange {
     Adopted {
         /// Whether the adopted notice came from the automatic path.
         automatic: bool,
-        /// The budget epoch whose last automatic notice this was, when it reached the limit.
-        limit_epoch: Option<u64>,
     },
 }
 
@@ -338,10 +336,7 @@ mod tests {
                 link_revision: 2,
                 transition_seq: 7,
                 pull_request: reference(),
-                reason: PullRequestAutoFixChange::Adopted {
-                    automatic: true,
-                    limit_epoch: Some(1),
-                },
+                reason: PullRequestAutoFixChange::Adopted { automatic: true },
             },
         ];
         for event in events {

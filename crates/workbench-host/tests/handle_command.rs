@@ -126,7 +126,7 @@ fn a_rejected_send_is_not_remembered_and_may_be_retried() {
         .handle_command(Command::SendChat(send("thread-1", "sub-1", "look")), web())
         .unwrap();
 
-    assert_eq!(error.code, ErrorCode::UnsupportedCapability);
+    assert_eq!(error.code, ErrorCode::NotFound);
     assert_eq!(retry.disposition, CommandDisposition::Accepted);
 }
 

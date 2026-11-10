@@ -70,6 +70,8 @@
         runtimeLibraries = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
           pkgs.stdenv.cc.cc.lib
         ];
+        # CEF is hashed for x86_64-linux only (see cefDist below).
+        isCefSystem = system == "x86_64-linux";
         commonArgs = {
           pname = "evorch";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
@@ -121,18 +123,40 @@
             printf '%s\n' "''${cargoVendorDir:?}" > "$out/cargo-vendor-dir"
           '';
         };
-        shippedCargoArgs = "-p evorch -p gui -p evorch-core --bin evorch --bin evorch-gui --bin evorch-core";
+        # No non-CEF GUI is built on any system: it compiled the whole gui crate
+        # a second time next to evorch-gui-cef (about five minutes of the CI
+        # nix-build job). The only GUI package is the CEF build below, on
+        # x86_64-linux; other systems get the CLI and evorch-core.
+        shippedCargoArgs = "-p evorch -p evorch-core --bin evorch --bin evorch-core";
         cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // {
           cargoExtraArgs = shippedCargoArgs;
           doCheck = false;
         });
-        testCargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs);
-        tests = craneLib.cargoTest (commonArgs // {
+        # The workspace builds gui with its default `cef` feature, so the test
+        # builds read the fixed CEF distribution (cefDist, below) through CEF_PATH
+        # and link its runtime libraries. gui is CEF-only and Nix has no CEF
+        # build elsewhere, so the other systems test the workspace without it.
+        workspaceCefArgs =
+          if isCefSystem then
+            {
+              cargoExtraArgs = "--workspace";
+              CEF_PATH = cefDist;
+              buildInputs = commonArgs.buildInputs ++ cefRuntimeLibraries;
+            }
+          else
+            { cargoExtraArgs = "--workspace --exclude gui"; };
+        # Only libcef.so, so the test binaries load: the distribution's own
+        # Vulkan loader would shadow the system one. No test starts CEF.
+        cefLibcefOnly = pkgs.runCommand "libcef-only" { } ''
+          mkdir -p $out/lib
+          ln -s ${cefDist}/libcef.so $out/lib/libcef.so
+        '';
+        testCargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // workspaceCefArgs);
+        tests = craneLib.cargoTest (commonArgs // workspaceCefArgs // {
           cargoArtifacts = testCargoArtifacts;
-          cargoExtraArgs = "--workspace";
           nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
           preCheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath runtimeLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (runtimeLibraries ++ pkgs.lib.optionals isCefSystem [ cefLibcefOnly ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           '';
           # These PTY tests hard-code /bin/sh, which is absent in the Linux sandbox.
           cargoTestExtraArgs = pkgs.lib.concatStringsSep " " ([ "--" ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -159,8 +183,6 @@
           # Recorded in self-improvement evidence; kept out of commonArgs so deps stay cached.
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
           postFixup = ''
-            wrapProgram "$out/bin/evorch-gui" \
-              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
             wrapProgram "$out/bin/evorch-core" \
               --prefix PATH : "${pkgs.lib.makeBinPath ([ pkgs.which pkgs.git pkgs.coreutils ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.bubblewrap ])}"
           '';
@@ -175,14 +197,12 @@
             test "$helpStatus" -eq 1
             grep -q '^usage: evorch ' evorch-help.txt
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-              for binary in evorch .evorch-gui-wrapped; do
-                env -u LD_LIBRARY_PATH -u LIBSQLITE3_FLAGS \
-                  ${pkgs.stdenv.cc.bintools.dynamicLinker} --list "$out/bin/$binary"
-              done
+              env -u LD_LIBRARY_PATH -u LIBSQLITE3_FLAGS \
+                ${pkgs.stdenv.cc.bintools.dynamicLinker} --list "$out/bin/evorch"
             ''}
             runHook postInstallCheck
           '';
-          meta.mainProgram = "evorch-gui";
+          meta.mainProgram = "evorch";
         });
         evorch-core = craneLib.buildPackage (commonArgs // {
           pname = "evorch-core";
@@ -336,7 +356,6 @@
           meta.mainProgram = "evorch-gui-cef";
           meta.platforms = [ "x86_64-linux" ];
         });
-        isCefSystem = system == "x86_64-linux";
         # The default package on CEF systems: the CLI and tools from `evorch`,
         # with `evorch-gui` launching the CEF build so presented HTML opens in
         # the app (ADR 0034 B). Other systems fall back to `evorch`.
@@ -429,7 +448,7 @@
             };
         # Dev shell with the fenix toolchain's own cargo; the fork shell is built from it.
         # `rustcWrapperDefault` is RUSTC_WRAPPER when the caller leaves it unset.
-        mkCargoDevShell = rustcWrapperDefault: pkgs.mkShell {
+        mkCargoDevShell = rustcWrapperDefault: pkgs.mkShell ({
           nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
           packages = [
             pkgs.bashInteractive
@@ -451,6 +470,12 @@
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (devShellGuiLibraries ++ runtimeLibraries)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            ${pkgs.lib.optionalString isCefSystem ''
+              # CEF finds its resources beside the libcef.so it loads. The
+              # distribution goes last so the Nix Vulkan loader above wins over
+              # the one it bundles.
+              export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${cefDist}"
+            ''}
             # devShell 内だけ mold でリンクする(nix 外のビルドには影響しない)。
             # 呼び出し元の既存 RUSTFLAGS(sanitizer 等)は保持して追記する。
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "export RUSTFLAGS=\"\${RUSTFLAGS:+$RUSTFLAGS }-C link-args=-fuse-ld=mold\""}
@@ -464,7 +489,9 @@
               lefthook install >/dev/null 2>&1 || echo "evorch: lefthook install failed (non-fatal)" >&2
             fi
           '';
-        };
+          # `gui` enables CEF by default, so cargo reads the fixed distribution
+          # instead of downloading one.
+        } // pkgs.lib.optionalAttrs isCefSystem { CEF_PATH = cefDist; });
         upstreamCargoDevShell = mkCargoDevShell "sccache";
         # The fork goes first in PATH, ahead of the fenix toolchain's cargo. Its
         # self-update would try to replace binaries outside the Nix store, so
@@ -484,9 +511,8 @@
       {
         packages = {
           default = defaultPackage;
-          # Without CEF on every system; CI smoke-tests this one.
+          # The CLI and evorch-core, without any GUI, on every system.
           inherit evorch evorch-core;
-          evorch-gui = defaultPackage;
           # cargoArtifacts (crane buildDepsOnly) を attic に push するための専用出力。
           # Cargo manifests/config、lockfile、toolchain とビルド設定が同じなら
           # 再利用できる。製品ソース本文の変更だけでは deps を再ビルドしない。
@@ -496,36 +522,37 @@
           attic-client = atticClient;
         } // pkgs.lib.optionalAttrs isCefSystem {
           inherit evorch-gui-cef evorch-with-cef cefDist;
+          # The default package, named for the GUI it launches.
+          evorch-gui = defaultPackage;
           # The CEF build's cargoArtifacts, pushed to attic like evorch-deps.
           evorch-gui-cef-deps = cefCargoArtifacts;
         };
         checks.tests = tests;
         apps = {
+          # CEF systems launch the GUI; the others have only the CLI.
           default = {
             type = "app";
-            program = "${defaultPackage}/bin/evorch-gui";
-          };
-          evorch-gui = {
-            type = "app";
-            program = "${defaultPackage}/bin/evorch-gui";
+            program = if isCefSystem then "${defaultPackage}/bin/evorch-gui" else "${evorch}/bin/evorch";
           };
           evorch = {
             type = "app";
             program = "${evorch}/bin/evorch";
           };
-        };
+        # `if` rather than pkgs.lib.optionalAttrs: apps stays evaluable on a
+        # system nixpkgs no longer supports, as before.
+        } // (if isCefSystem then {
+          evorch-gui = {
+            type = "app";
+            program = "${defaultPackage}/bin/evorch-gui";
+          };
+        } else { });
         devShells = {
           default = devShell;
           upstream-cargo = upstreamCargoDevShell;
         } // pkgs.lib.optionalAttrs isCefSystem {
-          # `nix develop .#cef`: CEF builds and the ignored browser-cef tests
-          # without downloading CEF. cef-dll-sys copies libcef.so into target/<profile>.
-          cef = devShell.overrideAttrs (old: {
-            CEF_PATH = cefDist;
-            shellHook = old.shellHook + ''
-              export LD_LIBRARY_PATH=$PWD/target/debug''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-            '';
-          });
+          # The default shell builds CEF too now; this name stays for scripts
+          # that entered `nix develop .#cef`.
+          cef = devShell;
         };
       }
     );

@@ -18,6 +18,7 @@ pub use stream::OpenAiStreamInterpreter;
 pub use types::{
     WireChatRequest, WireContent, WireFunction, WireFunctionDefinition, WireJsonSchema,
     WireMessage, WireResponseFormat, WireStreamOptions, WireTextPart, WireTool, WireToolCall,
+    WireToolChoice,
 };
 
 #[cfg(test)]

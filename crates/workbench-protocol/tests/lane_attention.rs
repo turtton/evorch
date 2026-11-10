@@ -49,6 +49,8 @@ fn every_kind() -> Vec<LaneAttentionKind> {
         LaneAttentionKind::RestoreFailed {
             destination_thread: thread(),
             failure_ref: "lane_delivery:dest-1".into(),
+            attempts: 3,
+            suppressed: true,
         },
         LaneAttentionKind::ReadyUnverified {
             ready_seq: Sequence(7),

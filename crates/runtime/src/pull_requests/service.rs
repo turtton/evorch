@@ -32,6 +32,7 @@ mod flight;
 mod observer;
 mod policy;
 mod scheduler;
+mod tasks;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -277,6 +278,7 @@ pub(crate) struct Inner {
     pub(crate) auto_fix_switch_changes: AtomicU64,
     pub(crate) state: Mutex<State>,
     pub(crate) shutdown: watch::Sender<bool>,
+    tasks: tasks::ServiceTasks,
     #[cfg(test)]
     pub(crate) stage_hooks: Mutex<HashMap<Stage, Box<dyn FnOnce() + Send>>>,
 }
@@ -356,11 +358,12 @@ impl Inner {
             .into_iter()
             .any(|permit| matches!(permit.try_mutation_guard(), Ok(Some(_))))
             && self.config().enabled
+            && !*self.shutdown.borrow()
     }
 
     pub(crate) fn enabled(&self) -> Result<PullRequestsConfig, PullRequestError> {
         let config = self.config();
-        if config.enabled {
+        if config.enabled && !*self.shutdown.borrow() {
             Ok(config)
         } else {
             Err(PullRequestError::Disabled)
@@ -693,14 +696,19 @@ impl PullRequestService {
             auto_fix_switch_changes: AtomicU64::new(0),
             state: Mutex::new(State::default()),
             shutdown,
+            tasks: tasks::ServiceTasks::default(),
             #[cfg(test)]
             stage_hooks: Mutex::default(),
         });
         let receiver = inner.bus.subscribe();
         let resumes = inner.delivery.subscribe_resumes();
-        tokio::spawn(coordinator::observe_resumes(Arc::clone(&inner), resumes));
-        tokio::spawn(scheduler::run(Arc::clone(&inner)));
-        tokio::spawn(observer::run(Arc::clone(&inner), receiver));
+        inner
+            .tasks
+            .spawn(coordinator::observe_resumes(Arc::clone(&inner), resumes));
+        inner.tasks.spawn(scheduler::run(Arc::clone(&inner)));
+        inner
+            .tasks
+            .spawn(observer::run(Arc::clone(&inner), receiver));
         Ok(Self {
             _guard: Arc::new(TaskGuard(Arc::clone(&inner))),
             inner,
@@ -1096,6 +1104,13 @@ impl PullRequestService {
     /// Stops the background tasks now (they also stop when the last clone is dropped).
     pub fn shutdown(&self) {
         self.inner.shutdown.send_replace(true);
+    }
+
+    /// Stops producers and awaits every scheduler, observer, fetch, inheritance and
+    /// notice task, including storage work already in progress. Call before closing storage.
+    pub async fn shutdown_and_drain(&self) -> Result<(), tokio::task::JoinError> {
+        self.shutdown();
+        self.inner.tasks.drain().await
     }
 
     #[cfg(test)]

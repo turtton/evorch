@@ -321,6 +321,10 @@ impl AnthropicClient {
 
 #[async_trait]
 impl ProviderClient for AnthropicClient {
+    async fn supports_tool_choice_none(&self, _request: &ChatRequest) -> bool {
+        true
+    }
+
     fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
         Some(self)
     }

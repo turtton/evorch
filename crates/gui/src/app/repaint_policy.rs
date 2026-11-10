@@ -36,6 +36,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// ownership probe (scheduled on its own).
     pub(super) fn polled_work_pending(&self) -> bool {
         self.external_command_running()
+            || self.btw_running()
             || !self.auto_title_jobs.is_empty()
             || self.sink.has_background_work()
             || self.diff.is_busy()

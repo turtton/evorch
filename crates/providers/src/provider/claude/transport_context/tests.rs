@@ -215,3 +215,24 @@ fn prompt_provenance_is_validated_and_used_consistently() {
         (None, None)
     );
 }
+
+#[test]
+fn a_side_question_neither_chains_from_nor_replaces_the_main_correlation() {
+    let state = ClaudeTransportContext::default();
+    let agent = observation(RequestPurpose::Agent);
+    let side = observation(RequestPurpose::Btw);
+    state
+        .begin("one", "device", Some(&agent))
+        .unwrap()
+        .complete(Some("req_main"), Some("msg_main"));
+    let side_request = state.begin("one", "device", Some(&side)).unwrap();
+    assert_eq!(previous(&side_request), (None, None));
+    let mut headers = HeaderMap::new();
+    side_request.apply_headers(&mut headers).unwrap();
+    assert_eq!(headers["x-claude-code-request-class"], "auxiliary");
+    side_request.complete(Some("req_side"), Some("msg_side"));
+    assert_eq!(
+        previous(&state.begin("one", "device", Some(&agent)).unwrap()),
+        (Some("req_main"), Some("msg_main"))
+    );
+}

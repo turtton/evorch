@@ -195,6 +195,7 @@ impl ModelSummarizer {
         });
         let request_tokens = super::estimator::estimate_tokens(&messages);
         let invocation = AgentInvocationContext {
+            btw: None,
             attempts: None,
             turn: self.turn.clone(),
             category: self.category.clone(),

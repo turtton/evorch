@@ -51,6 +51,9 @@ pub struct AgentInvocationContext {
     /// Where the provider attempts made for this call are noted. Observation
     /// only: it reaches no wire request.
     pub attempts: Option<providers::AttemptLog>,
+    /// Where the request sent for this call is published for `/btw`. Observation
+    /// only: it reaches no wire request and never differs between contexts.
+    pub btw: Option<crate::btw::BtwPublisher>,
 }
 
 /// ロール実行のためのモデル呼び出し境界。
@@ -550,6 +553,7 @@ mod tests {
         ];
 
         let invocation = AgentInvocationContext {
+            btw: None,
             attempts: None,
             turn: None,
             category: None,

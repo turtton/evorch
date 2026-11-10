@@ -649,6 +649,8 @@ fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     drop(storage);
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(concat!(
+        include_str!("../undo/undo_v56.sql"),
+        include_str!("../undo/undo_v55.sql"),
         include_str!("../undo/undo_v54.sql"),
         include_str!("../undo/undo_v53.sql"),
         include_str!("../undo/undo_v52.sql"),
@@ -988,3 +990,45 @@ fn missing_canonical_route_cannot_hide_a_legacy_root_behind_a_stale_lead_project
     assert_eq!(restored.routing_revision, 0);
     assert_eq!(restored.management_revision, None);
 }
+
+#[test]
+fn different_claims_of_one_recovery_target_do_not_multiply_failed_reports() {
+    let f = Fixture::new();
+    f.lane(1, LanePolicy::Attached);
+    f.h().start_lane_run("lane-1", 0, "run-1", 2).unwrap();
+    f.h()
+        .append_lane_report_with_delivery("lane-1".into(), 1, report(LaneStatus::Working), 3)
+        .unwrap();
+    let mut failed = report(LaneStatus::Failed);
+    failed.failure_episode = Some("recovery:saved-root-1:snapshot-1".into());
+    failed.producer = LaneReportProducer::Harness;
+    failed.reason_code = Some("restore_failed".into());
+    // Tokens fence the attempted delivery; they must not create Report identity.
+    for at in [10, 20, 30] {
+        let batch = claim(&f.h(), at);
+        f.h()
+            .append_lane_report_with_delivery("lane-1".into(), 1, failed.clone(), at)
+            .unwrap();
+        f.h()
+            .nack_lane_delivery(batch, LaneDeliveryNack::RestoreFailed, at + 1)
+            .unwrap();
+    }
+    assert_eq!(
+        f.count("lane_reports"),
+        2,
+        "one Working and one Failed, not a Failed per claim"
+    );
+    assert_eq!(
+        f.sql()
+            .query_row(
+                "SELECT COUNT(*) FROM lane_notifications WHERE event_kind='failed'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[path = "lane_delivery/recovery_episodes.rs"]
+mod recovery_episodes;

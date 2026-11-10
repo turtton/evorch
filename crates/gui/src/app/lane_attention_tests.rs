@@ -443,3 +443,103 @@ fn monitor_hints_refresh_stall_creation_nudge_changes_and_resolution_from_the_re
         "GUI frames do not create polling"
     );
 }
+
+fn recovery_item(destination: &str) -> LaneAttentionItem {
+    let mut value = item(3);
+    value.kind = LaneAttentionKind::RestoreFailed {
+        destination_thread: WireThread::new(destination).unwrap(),
+        failure_ref: "recovery-episode".into(),
+        attempts: 3,
+        suppressed: true,
+    };
+    value.available_actions = vec![LaneAttentionAction::Inspect, LaneAttentionAction::Resume];
+    value
+}
+fn resume_recovery(destination: &str) -> AttentionAction {
+    AttentionAction {
+        lead: "thread".into(),
+        item: Some(("item".into(), 3)),
+        op: AttentionOp::ResumeThread(destination.into()),
+    }
+}
+#[test]
+fn recovery_resume_uses_the_confirmed_destination_and_existing_resume_command() {
+    for destination in ["thread", "lane-thread-1"] {
+        let (mut workbench, reader, _dir) = workbench();
+        reader.set(vec![recovery_item(destination)]);
+        settle(&mut workbench);
+        workbench.apply_attention_action(&egui::Context::default(), resume_recovery(destination));
+        assert!(
+            workbench.issued().is_empty(),
+            "a fresh read must confirm first"
+        );
+        settle(&mut workbench);
+        assert!(
+            matches!(workbench.issued(), [crate::model::commands::WorkbenchCommand::ResumeLaneDeliveries { thread_id }] if thread_id == destination)
+        );
+    }
+}
+#[test]
+fn recovery_resume_cannot_redirect_or_bypass_fresh_item_permission() {
+    for case in [
+        "wrong-destination",
+        "no-permission",
+        "not-suppressed",
+        "changed-destination",
+        "stale-revision",
+        "wrong-lead",
+        "unreadable",
+    ] {
+        let (mut workbench, reader, _dir) = workbench();
+        let mut current = recovery_item("lane-thread-1");
+        reader.set(vec![current.clone()]);
+        settle(&mut workbench);
+        let mut action = resume_recovery("lane-thread-1");
+        match case {
+            "wrong-destination" => action.op = AttentionOp::ResumeThread("another-lane".into()),
+            "no-permission" => {
+                current.available_actions =
+                    vec![LaneAttentionAction::Inspect, LaneAttentionAction::Continue]
+            }
+            "not-suppressed" => {
+                if let LaneAttentionKind::RestoreFailed { suppressed, .. } = &mut current.kind {
+                    *suppressed = false;
+                }
+            }
+            "changed-destination" => current = recovery_item("another-lane"),
+            "stale-revision" => current.revision = Revision(4),
+            "wrong-lead" => action.lead = "another-lead".into(),
+            "unreadable" => reader.fail(true),
+            _ => unreachable!(),
+        }
+        reader.set(vec![current]);
+        workbench.apply_attention_action(&egui::Context::default(), action);
+        settle(&mut workbench);
+        assert!(workbench.issued().is_empty(), "{case}");
+    }
+}
+
+#[test]
+fn old_recovery_resume_cannot_confirm_a_new_episode_at_the_same_revision() {
+    let (mut workbench, reader, _dir) = workbench();
+    let mut old = recovery_item("lane-thread-1");
+    old.revision = Revision(4);
+    reader.set(vec![old.clone()]);
+    settle(&mut workbench);
+    let mut new = old;
+    // Storage gives distinct episodes distinct item IDs, even when their
+    // destination and within-episode revision coincide.
+    new.id = LaneAttentionItemId::new("second-recovery-item").unwrap();
+    if let LaneAttentionKind::RestoreFailed { failure_ref, .. } = &mut new.kind {
+        *failure_ref = "second-recovery-episode".into();
+    }
+    reader.set(vec![new]);
+    let action = AttentionAction {
+        item: Some(("item".into(), 4)),
+        ..resume_recovery("lane-thread-1")
+    };
+    workbench.apply_attention_action(&egui::Context::default(), action);
+    assert!(workbench.issued().is_empty());
+    settle(&mut workbench);
+    assert!(workbench.issued().is_empty());
+}

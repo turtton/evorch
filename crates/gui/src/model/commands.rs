@@ -234,7 +234,51 @@ pub enum LoopEvent {
 pub type ContextPreviewReceiver =
     std::sync::mpsc::Receiver<Result<runtime::base_context::BaseContextReport, String>>;
 
+/// How a `/btw` side question ended.
+pub type BtwOutcome = Result<runtime::btw::BtwAnswer, runtime::btw::BtwError>;
+
+/// Stops a running side question; dropping its request cancels it at the provider.
+pub struct BtwCancel(Box<dyn FnOnce() + Send>);
+
+impl BtwCancel {
+    pub fn new(cancel: impl FnOnce() + Send + 'static) -> Self {
+        Self(Box::new(cancel))
+    }
+
+    pub fn cancel(self) {
+        (self.0)();
+    }
+}
+
+impl std::fmt::Debug for BtwCancel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BtwCancel")
+    }
+}
+
+/// A started side question: its single answer arrives on `receiver`. It is
+/// separate from the thread's run, so nothing here reaches the conversation.
+pub struct BtwJob {
+    pub source: runtime::btw::BtwSource,
+    pub receiver: std::sync::mpsc::Receiver<BtwOutcome>,
+    pub cancel: BtwCancel,
+}
+
+/// Why a side question did not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BtwStartError {
+    /// The sink has no runtime behind it (fixtures, demos).
+    Unavailable,
+    Refused(runtime::btw::BtwError),
+}
+
 pub trait CommandSink: Send {
+    /// Asks `question` of the thread's conversation context without touching the
+    /// thread. The default has no context to ask.
+    fn start_btw(&self, _thread: &str, _question: String) -> Result<BtwJob, BtwStartError> {
+        Err(BtwStartError::Unavailable)
+    }
+
     /// Capability check without a storage query (in particular, no empty-ID probe).
     fn has_host_input_receipts(&self) -> bool {
         false

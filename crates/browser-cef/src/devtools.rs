@@ -254,12 +254,18 @@ mod tests {
         use crate::offline::ArtifactBundle;
         use crate::{ArtifactContext, CefRuntime, Dialogs, RuntimeConfig};
 
-        let helper = std::env::current_exe()
-            .expect("test executable")
-            .parent()
-            .and_then(|deps| deps.parent())
-            .expect("target profile directory")
-            .join(crate::runtime::HELPER_NAME);
+        // Cargo puts test executables in `<profile>/deps`; the huacnlee/cargo fork
+        // does not, so `EVORCH_CEF_HELPER` takes precedence there.
+        let helper = std::env::var_os("EVORCH_CEF_HELPER")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_exe()
+                    .expect("test executable")
+                    .parent()
+                    .and_then(|deps| deps.parent())
+                    .expect("target profile directory")
+                    .join(crate::runtime::HELPER_NAME)
+            });
         let runtime = CefRuntime::initialize(RuntimeConfig {
             helper_path: helper,
             ..RuntimeConfig::offline()

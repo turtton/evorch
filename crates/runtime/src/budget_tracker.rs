@@ -6,7 +6,7 @@ use event_bus::{
 };
 use providers::Usage;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -79,7 +79,8 @@ pub struct BudgetSettings {
     pub max_tool_calls: ResourceLimit<u32>,
     pub max_elapsed: ResourceLimit<Duration>,
     pub max_tokens: ResourceLimit<u64>,
-    /// Reads after the first read of the same path.
+    /// Repetitions after the first observation of the same path, content and effective range.
+    /// Unclassified run_js reads share that allowance conservatively; unrelated success does not reset it.
     pub max_file_rereads: u32,
     pub max_no_progress_rounds: u32,
     pub max_identical_tool_call_repeats: u32,
@@ -162,7 +163,7 @@ pub(crate) struct BudgetCounters {
     paused_total: Duration,
     cumulative_input_tokens: u64,
     cumulative_output_tokens: u64,
-    file_reads: BTreeMap<PathBuf, u32>,
+    file_reads: BTreeMap<PathBuf, FileReads>,
     no_progress_rounds: u32,
     last_checkpoint_at: u32,
     warned: bool,
@@ -170,6 +171,9 @@ pub(crate) struct BudgetCounters {
     round_changed: bool,
     /// Children whose terminal result was already counted as progress.
     pub(crate) spawn_credits: SpawnCredits,
+    /// Run-local semantic read identities; restored runs start fresh, like repeat streaks.
+    /// SHA-256 entries are fixed-size; no eviction that could mint progress on a reread.
+    pub(crate) lane_observations: HashSet<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +195,20 @@ pub(crate) struct BudgetContext<'a> {
     pub settings: &'a BudgetSettings,
 }
 
+/// run_js records paths, not result content. Charge those reads against every
+/// direct observation so switching interfaces cannot double the allowance.
+#[derive(Debug, Clone, Default)]
+struct FileReads {
+    unclassified: u32,
+    observations: BTreeMap<[u8; 32], u32>,
+}
+impl FileReads {
+    fn count(&self) -> u32 {
+        self.unclassified
+            .saturating_add(self.observations.values().copied().max().unwrap_or(0))
+    }
+}
+
 impl Default for BudgetCounters {
     fn default() -> Self {
         Self {
@@ -206,6 +224,7 @@ impl Default for BudgetCounters {
             exhausted: None,
             round_changed: false,
             spawn_credits: SpawnCredits::default(),
+            lane_observations: HashSet::new(),
         }
     }
 }
@@ -252,11 +271,74 @@ impl BudgetCounters {
 
     pub(crate) fn read(&mut self, path: &Path) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let count = self.file_reads.entry(path).or_default();
+        let count = &mut self.file_reads.entry(path).or_default().unclassified;
+        *count = count.saturating_add(1);
+    }
+
+    /// Key the returned bytes and their effective position, not ignored arguments
+    /// or the read tool's pagination footer. Image ranges and empty EOF ranges
+    /// carry no position information. Never rewrite the result sent to the model.
+    pub(crate) fn read_result(
+        &mut self,
+        path: &Path,
+        input: &serde_json::Value,
+        result: &tools::ToolResult,
+    ) {
+        use sha2::{Digest, Sha256};
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let mut hash = Sha256::new();
+        if result.images.is_empty() {
+            let detail = result.detail.as_ref();
+            let Some(content) = detail
+                .and_then(|d| d["bytes_returned"].as_u64())
+                .and_then(|n| usize::try_from(n).ok())
+                .and_then(|n| result.content.get(..n))
+            else {
+                // The limiter can replace metadata with a fresh artifact ID.
+                // Display text is not evidence of new file contents.
+                self.read(&path);
+                return;
+            };
+            let range = (!content.is_empty()).then(|| {
+                [
+                    detail
+                        .and_then(|d| d["offset"].as_u64())
+                        .or_else(|| input["offset"].as_u64())
+                        .unwrap_or(1),
+                    detail
+                        .and_then(|d| d["byte_offset"].as_u64())
+                        .or_else(|| input["byte_offset"].as_u64())
+                        .unwrap_or(0),
+                ]
+            });
+            hash.update(b"text");
+            hash.update(serde_json::json!(range).to_string());
+            hash.update(content.as_bytes());
+        } else {
+            hash.update(b"images");
+            for image in &result.images {
+                for bytes in [image.media_type.as_bytes(), image.data.as_bytes()] {
+                    hash.update((bytes.len() as u64).to_be_bytes());
+                    hash.update(bytes);
+                }
+            }
+        }
+        let count = self
+            .file_reads
+            .entry(path)
+            .or_default()
+            .observations
+            .entry(hash.finalize().into())
+            .or_default();
         *count = count.saturating_add(1);
     }
 
     pub(crate) const fn mark_progress(&mut self) {
+        self.round_changed = true;
+    }
+
+    /// A read's own success must not forgive its reread streak.
+    pub(crate) const fn mark_read_progress(&mut self) {
         self.round_changed = true;
     }
 
@@ -375,7 +457,7 @@ impl BudgetCounters {
         let rereads = self
             .file_reads
             .values()
-            .copied()
+            .map(FileReads::count)
             .max()
             .unwrap_or(0)
             .saturating_sub(1);
@@ -423,7 +505,7 @@ impl BudgetCounters {
                         diagnostic_codes::BUDGET_EXHAUSTED
                     },
                     detail: format!(
-                        "task {} exhausted {threshold}={}; tool_call_count={tool_calls}",
+                        "task {} exhausted {threshold}={}; tool_call_count={tool_calls}; action=stop_run",
                         context.task_id,
                         limit.unwrap_or_default()
                     ),

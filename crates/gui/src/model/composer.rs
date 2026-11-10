@@ -111,6 +111,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Start a background run without opening a pane",
         argument_hint: Some("<text>"),
     },
+    SlashCommandSpec {
+        name: "btw",
+        description: "Ask a side question without adding to the conversation",
+        argument_hint: Some("<question>"),
+    },
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,6 +269,15 @@ pub struct ComposerModel {
 }
 
 impl ComposerModel {
+    /// Whether the input is a `/btw` command, which asks beside the run instead of
+    /// queueing behind it.
+    pub fn is_side_question(&self) -> bool {
+        matches!(
+            parse_input(&self.input),
+            ComposerInput::Command { spec, .. } if spec.name == "btw"
+        )
+    }
+
     pub fn completions_visible(&self) -> bool {
         !self.completion_items().is_empty()
     }
@@ -474,11 +488,14 @@ mod tests {
                     "compaction",
                     "continue",
                     "run",
+                    "btw",
                 ],
             ),
             ("/comp", &["compaction"]),
             ("/compaction ", &[]),
             ("/r", &["run"]),
+            ("/b", &["btw"]),
+            ("/btw ", &[]),
             ("/con", &["continue"]),
             ("/continue ", &[]),
             ("/run ", &[]),

@@ -9,7 +9,8 @@
         "approvals.v1",
         "questions.v1",
         "committed_bodies.v1",
-        "safe_restart.v1"
+        "safe_restart.v1",
+        "conversation.v1"
       ],
       "core": "core-abc",
       "instance_epoch": "7",

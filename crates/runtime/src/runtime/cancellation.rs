@@ -50,6 +50,14 @@ impl ExecutionControl {
         self.cancel_tx.send_replace(RunInterrupt::Cancel);
         self.approvals.close();
     }
+
+    // Only for an unregistered admission, while A prevents registration. No
+    // publication can be in flight, so this must not wait for a publication gate.
+    pub(super) fn stop_admission(&self) {
+        self.publication.0.cancelled.store(true, Ordering::Release);
+        self.cancel_tx.send_replace(RunInterrupt::Stop);
+        self.approvals.close();
+    }
 }
 
 impl PublicationToken {
@@ -147,45 +155,41 @@ impl AgentRuntime {
                 drop(gate);
                 continue;
             }
-            self.persist_pending_lane_cancellation(
-                run,
-                &runs,
-                &admissions,
-                "cancelled before root start",
-            )?;
+            let ownership = Self::pending_lane_cancellation_ownership(run, &runs, &admissions);
             if let Some(admission) = admissions.get_mut(&run)
                 && Arc::ptr_eq(&admission.execution, &execution)
             {
                 admission.cancelled = true;
             }
             execution.forbid_publication();
-            return Ok(());
+            drop(runs);
+            drop(admissions);
+            drop(intents);
+            drop(gate);
+            return self
+                .persist_lane_start_cancellation(
+                    run,
+                    ownership.as_ref(),
+                    "cancelled before root start",
+                )
+                .map_err(|error| lane_cancellation_error(run, error));
         }
     }
 
-    // Called with I -> A -> R so the persisted decision names the same execution
-    // as the memory cancellation. A lane root cannot be inside another subtree.
-    pub(super) fn persist_pending_lane_cancellation(
-        &self,
+    pub(super) fn pending_lane_cancellation_ownership(
         run: RunId,
         runs: &HashMap<RunId, RunEntry>,
         admissions: &HashMap<RunId, admission::Admission>,
-        reason: &str,
-    ) -> Result<(), RuntimeError> {
-        let ownership = runs
+    ) -> Option<crate::ownership::OwnerPermit> {
+        // Settlement does not unregister this incarnation's authority: a
+        // failed admission may never have had a RunEntry to carry its permit.
+        admissions
             .get(&run)
-            .and_then(|entry| entry.config.ownership.clone())
-            .or_else(|| {
-                admissions
-                    .get(&run)
-                    .and_then(|admission| admission.snapshot().ownership)
-            });
-        self.persist_lane_start_cancellation(run, ownership.as_ref(), reason)
-            .map_err(|error| RuntimeError::LaneCancellation {
-                run_id: run.to_string(),
-                reason: error.to_string(),
-            })?;
-        Ok(())
+            .map(|admission| admission.snapshot().ownership)
+            .unwrap_or_else(|| {
+                runs.get(&run)
+                    .and_then(|entry| entry.config.ownership.clone())
+            })
     }
 
     pub(super) fn cancel_execution(&self, execution: &Arc<ExecutionControl>) {
@@ -261,6 +265,22 @@ impl AgentRuntime {
     }
 }
 
+pub(super) fn lane_cancellation_error(run: RunId, error: crate::lanes::LaneError) -> RuntimeError {
+    if error.code == "lane_stop_pending" {
+        RuntimeError::LaneCancellationPending {
+            run_id: run.to_string(),
+            reason: error.to_string(),
+        }
+    } else {
+        RuntimeError::LaneCancellation {
+            run_id: run.to_string(),
+            reason: format!(
+                "live execution is stopped; durable cancellation was not recorded: {error}"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookPoint {
@@ -268,6 +288,9 @@ pub(crate) enum HookPoint {
     CancelGate,
     SubtreeCollected,
     AdmissionRegistered,
+    LaneOwnershipValidated,
+    LaneStopWriteFailed,
+    LaneStopPersisted,
     AdmissionFailed,
     RootGoalUpdated,
     RootRestoreValidated,
@@ -288,6 +311,17 @@ type ExecutionHook = (HookPoint, Weak<ExecutionControl>, Box<dyn FnOnce() + Send
 pub(super) struct TestHooks(Mutex<Vec<ExecutionHook>>);
 #[cfg(test)]
 impl AgentRuntime {
+    pub(crate) fn lane_stop_write_hook(&self, run: RunId, persisted: bool) {
+        let point = if persisted {
+            HookPoint::LaneStopPersisted
+        } else {
+            HookPoint::LaneStopWriteFailed
+        };
+        if let Ok(execution) = self.execution_snapshot(run) {
+            self.execution_hook(point, &execution);
+        }
+    }
+
     pub(crate) fn on_execution(
         &self,
         point: HookPoint,
@@ -318,5 +352,7 @@ impl AgentRuntime {
 
 #[cfg(test)]
 mod goal_tests;
+#[cfg(test)]
+mod lane_tests;
 #[cfg(test)]
 mod tests;

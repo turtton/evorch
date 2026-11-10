@@ -1,5 +1,3 @@
-#![cfg(feature = "browser")]
-
 use egui_kittest::kittest::Queryable;
 use gui::browser::{Activity, AgentBrowserPane, FakeAgentView};
 use gui::panes::agent_browser::{AgentBrowserSurface, BrowserRun, BrowserTabView};

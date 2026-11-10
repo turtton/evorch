@@ -15,7 +15,7 @@ fn project_directory_preserves_sidebar_ids_without_writing_sidebar_state() {
         project_root: root.clone(),
         ownership_root: root.join("owners"),
     };
-    let projects = known_projects(&options).unwrap().entries();
+    let projects = known_projects(&options).unwrap().directory.entries();
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].0.as_str(), "desktop-project");
     assert_eq!(projects[0].1, root);
@@ -37,10 +37,172 @@ async fn bootstrap_drains_before_releasing_its_owner() {
     .await
     .unwrap();
     let _permit = boot.owner.start("owned").unwrap();
+    let owner = boot.owner.clone();
+    let (stopped, completed) = tokio::sync::oneshot::channel();
+    boot.services.start("test-service", |stop| async move {
+        stop.await?;
+        assert_eq!(
+            owner.attach("owned")?.state,
+            runtime::ownership::OwnerState::Quiescing
+        );
+        stopped.send(()).unwrap();
+        Ok(())
+    });
     assert!(!boot.busy());
     boot.shutdown().await.unwrap();
+    completed.await.unwrap();
     assert_eq!(
         boot.owner.attach("owned").unwrap().state,
         runtime::ownership::OwnerState::Released
     );
+}
+
+#[tokio::test]
+async fn saved_access_only_declares_approved_existing_directories_without_rewriting_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let allowed = root.join("allowed");
+    let rejected = root.join("unapproved");
+    std::fs::create_dir(&allowed).unwrap();
+    std::fs::create_dir(&rejected).unwrap();
+    let sidebar = serde_json::json!({
+        "projects": [{"id":"desktop", "repo_root":root, "trust":"approved",
+            "allowed_directories": [
+                {"path": allowed, "trust":"approved"},
+                {"path": allowed, "trust":"approved"},
+                {"path": rejected, "trust":"unapproved"},
+                {"path": root.join("missing"), "trust":"approved"}
+            ]}],
+        "threads": [{"draft":"untouched"}]
+    })
+    .to_string();
+    std::fs::write(root.join("sidebar.json"), &sidebar).unwrap();
+    let mut boot = BootstrappedHost::open(BootstrapOptions {
+        config_dir: root.clone(),
+        project_root: root.clone(),
+        ownership_root: root.join("owners"),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        boot.runtime
+            .project_allowed_directories(&root)
+            .get()
+            .as_ref(),
+        &[allowed]
+    );
+    boot.shutdown().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("sidebar.json")).unwrap(),
+        sidebar
+    );
+}
+
+#[test]
+fn absent_access_is_unapproved_and_unknown_trust_does_not_grant_access() {
+    let access: components::ProjectAccess = serde_json::from_str("{}").unwrap();
+    assert!(matches!(access.trust, components::Trust::Unapproved));
+    assert!(access.allowed_directories.is_empty());
+    assert!(serde_json::from_str::<components::ProjectAccess>(r#"{"trust":"trusted"}"#).is_err());
+}
+
+#[tokio::test]
+async fn core_catalog_prices_usage_and_diagnostics_are_flushed_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let catalog = root.join("catalog");
+    std::fs::create_dir(&catalog).unwrap();
+    // Timestamp is fixture input for catalog freshness, not a completion deadline.
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        catalog.join("models-dev.json"),
+        serde_json::json!({
+            "fetched_at": fetched_at,
+            "api":{"openai":{"models":{"gpt-test":{
+                "id":"gpt-test","cost":{"input":2.0,"output":4.0}
+            }}}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut boot = BootstrappedHost::open(BootstrapOptions {
+        config_dir: root.clone(),
+        project_root: root.clone(),
+        ownership_root: root.join("owners"),
+    })
+    .await
+    .unwrap();
+    // This current-thread test subscribes before yielding to the service factory.
+    let bus = boot.runtime.event_bus().clone();
+    let mut receiver = bus.subscribe();
+    loop {
+        let event = receiver.recv().await.unwrap();
+        if let event_bus::EventKind::Diagnostic(diagnostic) = event.kind
+            && diagnostic.source == "catalog"
+        {
+            assert_eq!(diagnostic.code, "catalog.loaded");
+            break;
+        }
+    }
+    assert_eq!(
+        boot.usage_pricing
+            .read()
+            .unwrap()
+            .pricing("openai", None, "gpt-test")
+            .unwrap()
+            .standard
+            .base
+            .input,
+        Some(2.0)
+    );
+    bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+        source: "core-test".into(),
+        severity: event_bus::DiagnosticSeverity::Warning,
+        code: "core.test".into(),
+        detail: "Persist this diagnostic once".into(),
+        run_id: None,
+        thread_id: None,
+        call_id: None,
+    }));
+    bus.emit(event_bus::Event::new(
+        event_bus::ProviderEvent::RequestCompleted {
+            request_id: "core-priced".into(),
+            provider: "openai".into(),
+            profile: None,
+            protocol: "openai-chat-completions".into(),
+            model: "gpt-test".into(),
+            usage_reported: true,
+            streaming: true,
+            duration_ms: 1,
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: None,
+            finish_reason: "stop".into(),
+            service_tier: None,
+            run_id: None,
+            purpose: None,
+        },
+    ));
+    boot.shutdown().await.unwrap();
+    let db = storage::Database::open(&boot.composition.storage).unwrap();
+    let events = db.events_all_ordered().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.event.kind,
+                event_bus::EventKind::Diagnostic(diagnostic) if diagnostic.code == "core.test"
+            ))
+            .count(),
+        1
+    );
+    let usage = db.usage_requests_between(0, i64::MAX).unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].record.request_id, "core-priced");
+    assert!((usage[0].record.cost_usd.unwrap() - 0.00028).abs() < f64::EPSILON);
 }

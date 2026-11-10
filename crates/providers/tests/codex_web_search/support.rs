@@ -68,6 +68,7 @@ pub fn request() -> HostedWebSearchRequest {
 
 pub fn chat_request() -> ChatRequest {
     ChatRequest {
+        tool_choice: None,
         responses_replay: None,
         model: "selected-codex-model".into(),
         messages: vec![Message {

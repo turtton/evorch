@@ -1,0 +1,347 @@
+//! Configured runtime E2E against the shared streaming-capable OpenAI mock.
+//!
+//! Agent-loop and direct-model tests both exercise live SSE (`stream: true`).
+//! Completion is asserted via both `wait()` and the bus lifecycle Done event.
+//! Collection stops on the target run's terminal lifecycle event.
+// allow: SIZE_OK — streaming scenarios share the configured-runtime harness.
+
+use std::sync::Arc;
+
+use config::{Config, LoadOptions};
+use event_bus::{
+    AgentRunPhase, EventBus, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
+};
+use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
+use routing::MapEnv;
+use runtime::{ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime};
+use sandbox::DirectSandbox;
+use sandbox::credential::{CredentialStore, FileCredentialStore};
+use serde_json::json;
+use tools::ToolExecutor;
+
+const KEY_ENV: &str = "EVORCH_TEST_KEY_STREAMING_MOCK_E2E";
+const KEY: &str = "streaming-mock-e2e-key";
+const MODEL: &str = "gpt-4o";
+
+#[tokio::test]
+async fn streaming_deltas_reach_bus_before_completion() {
+    use runtime::{AgentInvocationContext, AgentModel};
+    // Given: the server cannot finish until the subscriber releases its gate.
+    let directory = tempfile::tempdir().expect("project");
+    let (release, gate) = std::sync::mpsc::channel();
+    let mock = StreamingMockOpenAi::spawn_with(
+        vec![ScriptedResponse::text_stream(
+            "live",
+            MODEL,
+            ["first ", "second"],
+        )],
+        mock_openai::WriteMode::GatedAfterFirst(Arc::new(std::sync::Mutex::new(gate))),
+    );
+    let config = load_config(directory.path(), &mock.base_url());
+    let bus = Arc::new(EventBus::new(64));
+    let mut receiver = bus.subscribe();
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        routing::ComposeDeps {
+            credential_store: Arc::new(
+                FileCredentialStore::open(directory.path().join("credentials"))
+                    .expect("credentials"),
+            ),
+            event_bus: Some(Arc::clone(&bus)),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, KEY)])),
+            catalog: model::ModelCatalog::new(),
+            factory: routing::factory::FactoryOptions::default(),
+        },
+        Some(test_support::model_catalog_dir()),
+    )
+    .expect("model");
+    let invocation = AgentInvocationContext {
+        btw: None,
+        attempts: None,
+        turn: None,
+        category: None,
+        run_id: "stream-run".into(),
+        model_preference: None,
+        purpose: Default::default(),
+    };
+    // When: drive the real model while independently receiving bus events.
+    let completion = model.complete_streaming(&invocation, Role::Worker, &[], &[], &bus);
+    tokio::pin!(completion);
+    let mut first_tokens = 0;
+    loop {
+        tokio::select! {
+            result = &mut completion => panic!("completed before subscriber released SSE: {result:?}"),
+            event = receiver.recv() => match event.expect("bus").kind {
+                EventKind::Message(MessageEvent::MessageDelta { delta, run_id }) => {
+                    assert_eq!(delta, "first ");
+                    assert_eq!(run_id.as_deref(), Some("stream-run"));
+                    break;
+                }
+                EventKind::Provider(ProviderEvent::FirstTokenObserved { .. }) => first_tokens += 1,
+                _ => {}
+            }
+        }
+    }
+    // Then: releasing the remaining chunks yields the unchanged canonical message.
+    assert_eq!(first_tokens, 1);
+    release.send(()).expect("release SSE");
+    let response = completion.await.expect("completion");
+    assert_eq!(
+        response.message.content,
+        vec![providers::ContentBlock::Text {
+            text: "first second".into()
+        }]
+    );
+    let recorded = mock.recorded_requests();
+    assert_eq!(recorded[0].path, "/v1/models");
+    let completions: Vec<_> = recorded
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
+    assert_eq!(completions.len(), 1);
+    assert!(completions[0].stream);
+}
+
+fn load_config(root: &std::path::Path, base_url: &str) -> Config {
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
+    std::fs::write(
+        config::project_main_config_path(root),
+        format!(
+            r#"[providers.local]
+type = "openai-compatible"
+base_url = "{base_url}"
+api_key_env = "{KEY_ENV}"
+models = ["{MODEL}"]
+default_model = "{MODEL}"
+[[routing.routes.worker]]
+profile = "local"
+"#
+        ),
+    )
+    .expect("write config");
+    Config::load(&LoadOptions {
+        project_dir: Some(root.to_path_buf()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..LoadOptions::default()
+    })
+    .expect("load config")
+}
+
+// Keep the composition precedent's four inputs explicit: config, bus, project,
+// and injected credentials are independent harness dependencies.
+fn composition<'a>(
+    config: &'a Config,
+    bus: Arc<EventBus>,
+    root: &std::path::Path,
+    env: MapEnv,
+) -> RuntimeComposition<'a> {
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    let credential_store: Arc<dyn CredentialStore> =
+        Arc::new(FileCredentialStore::open(root.join("credentials")).expect("credential store"));
+    RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
+        user_config_dir: Some(root.join("empty-user-config")),
+        config,
+        bus,
+        executor,
+        credential_store,
+        env: Arc::new(env),
+        model_source: ModelSource::Configured,
+        workspace: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_run_with_tool_call_completes_over_mock() {
+    // Given: configured credentials and a three-fragment edit followed by text.
+    let directory = tempfile::tempdir().expect("project directory");
+    let edited = directory.path().join("worker-output.txt");
+    let path_chunk = format!("{{\"path\":{},", json!(edited));
+    let mock = StreamingMockOpenAi::spawn_with_models(
+        vec![
+            ScriptedResponse::tool_call(
+                "chatcmpl-1",
+                MODEL,
+                0,
+                "call_1",
+                "write",
+                [
+                    path_chunk.as_str(),
+                    "\"content\":\"written by ",
+                    "streaming mock e2e\"}",
+                ],
+            ),
+            ScriptedResponse::text_stream("chatcmpl-2", MODEL, ["All ", "done."]),
+        ],
+        mock_openai::WriteMode::default(),
+        vec![MODEL.into()],
+    );
+    let config = load_config(directory.path(), &mock.base_url());
+    let bus = Arc::new(EventBus::new(256));
+    let mut receiver = bus.subscribe();
+    let composed = compose_runtime(composition(
+        &config,
+        Arc::clone(&bus),
+        directory.path(),
+        MapEnv::from_iter([(KEY_ENV, KEY)]),
+    ))
+    .expect("configured runtime");
+
+    // When: a Worker executes through the real provider and standard edit tool.
+    let run_id = composed.runtime.delegate_background(
+        Role::Worker,
+        "Write the requested file.".to_string(),
+        RunConfig::default(),
+    );
+    let phase = composed.runtime.wait(run_id).await;
+
+    // Then: completion, correlated events, file contents and wire history agree.
+    assert_eq!(phase, Ok(AgentRunPhase::Done));
+    assert!(
+        std::fs::read_to_string(&edited)
+            .expect("edited file")
+            .contains("written by streaming mock e2e")
+    );
+    let expected_run_id = run_id.to_string();
+    let mut provider_started = 0;
+    let mut provider_completed = 0;
+    let mut tool_started = 0;
+    let mut tool_completed = 0;
+    let mut message_deltas = Vec::new();
+    loop {
+        let event = receiver.recv().await.expect("event loss or bus closure");
+        match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestStarted {
+                profile, run_id, ..
+            }) if profile.as_deref() == Some("local")
+                && run_id.as_deref() == Some(expected_run_id.as_str()) =>
+            {
+                provider_started += 1;
+            }
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                profile, run_id, ..
+            }) if profile.as_deref() == Some("local")
+                && run_id.as_deref() == Some(expected_run_id.as_str()) =>
+            {
+                provider_completed += 1;
+            }
+            EventKind::Tool(ToolEvent::ToolStarted {
+                tool_name, run_id, ..
+            }) if tool_name == "write" && run_id.as_deref() == Some(expected_run_id.as_str()) => {
+                tool_started += 1;
+            }
+            EventKind::Tool(ToolEvent::ToolCompleted {
+                tool_name,
+                run_id,
+                is_error: false,
+                ..
+            }) if tool_name == "write" && run_id.as_deref() == Some(expected_run_id.as_str()) => {
+                tool_completed += 1;
+            }
+            EventKind::Message(MessageEvent::MessageDelta { delta, run_id })
+                if run_id.as_deref() == Some(expected_run_id.as_str()) =>
+            {
+                message_deltas.push(delta.clone());
+            }
+            // event-bus/src/event.rs defines `to`; see also
+            // state_transitions.rs::run_emits_pending_running_done_in_order.
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: AgentRunPhase::Done,
+                ..
+            }) if run_id == &expected_run_id => break,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: AgentRunPhase::Error | AgentRunPhase::Stopped,
+                reason,
+                ..
+            }) if run_id == &expected_run_id => {
+                panic!("target run terminated without Done: {reason:?}");
+            }
+            EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
+            | EventKind::Provider(_)
+            | EventKind::Tool(_)
+            | EventKind::Message(_)
+            | EventKind::Usage(_)
+            | EventKind::Fault(_)
+            | EventKind::AgentMessage(_)
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_)
+            | EventKind::Diagnostic(_)
+            | EventKind::Ownership(_)
+            | EventKind::PullRequest(_) => {}
+        }
+    }
+    assert_eq!(provider_started, 2);
+    assert_eq!(provider_completed, 2);
+    assert_eq!(tool_started, 1);
+    assert_eq!(tool_completed, 1);
+    assert!(!message_deltas.is_empty());
+    assert_eq!(message_deltas.concat(), "All done.");
+
+    let recorded = mock.recorded_requests();
+    assert_eq!(recorded[0].path, "/v1/models");
+    let requests: Vec<_> = recorded
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
+    assert_eq!(requests.len(), 2);
+    let authorization = format!("Bearer {KEY}");
+    for request in &requests {
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some(authorization.as_str())
+        );
+        assert_eq!(request.body["model"], MODEL);
+        assert!(request.stream);
+        assert_eq!(request.body["stream"], true);
+    }
+    assert!(
+        requests[1].body["messages"]
+            .as_array()
+            .expect("message history")
+            .iter()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == "call_1")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unscripted_request_fails_run_not_hangs() {
+    // Given: a configured runtime whose mock has no scripted response.
+    let directory = tempfile::tempdir().expect("project directory");
+    let mock = StreamingMockOpenAi::spawn_with_models(
+        Vec::new(),
+        mock_openai::WriteMode::default(),
+        vec![MODEL.into()],
+    );
+    let config = load_config(directory.path(), &mock.base_url());
+    let bus = Arc::new(EventBus::new(256));
+    let composed = compose_runtime(composition(
+        &config,
+        bus,
+        directory.path(),
+        MapEnv::from_iter([(KEY_ENV, KEY)]),
+    ))
+    .expect("configured runtime");
+
+    // When: the Worker receives the mock's unscripted-request HTTP error.
+    let run_id = composed.runtime.delegate_background(
+        Role::Worker,
+        "Request an unscripted completion.".to_string(),
+        RunConfig::default(),
+    );
+    let phase = composed.runtime.wait(run_id).await;
+
+    // Then: Error is the runtime's terminal failure phase, not a wait error.
+    assert_eq!(phase, Ok(AgentRunPhase::Error));
+    assert!(
+        mock.recorded_requests()
+            .iter()
+            .any(|request| request.path == "/v1/chat/completions")
+    );
+}

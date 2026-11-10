@@ -89,7 +89,14 @@ impl IdenticalCalls {
         advanced: bool,
         limit: u32,
     ) -> bool {
-        self.stalled.push(name, input);
+        // lane_list is one operation across filters, limits, cursors and inbox mode.
+        // Keep the real input separately for diagnostic hashing.
+        let operation_input = if name == "lane_list" {
+            &Value::Null
+        } else {
+            input
+        };
+        self.stalled.push(name, operation_input);
         if advanced {
             self.stalled.count = 0;
         }
@@ -106,11 +113,15 @@ fn input_digest(input: &Value) -> String {
         .collect()
 }
 
+fn reports_progress(executor: &tools::ToolExecutor, name: &str, input: &Value) -> bool {
+    matches!(name, "wait" | "lane_list") || executor.reports_progress(name, input)
+}
+
 impl LoopState {
     /// Calls judged by their results rather than their inputs: an explicit
     /// shell poll, and `wait`, which blocks until something happens.
     pub(super) fn reports_progress(&self, name: &str, input: &Value) -> bool {
-        name == "wait" || self.shared.executor.reports_progress(name, input)
+        reports_progress(&self.shared.executor, name, input)
     }
 
     /// Records the result of a call that reports progress. Returns true when
@@ -133,7 +144,7 @@ impl LoopState {
         let executor = std::sync::Arc::clone(&self.shared.executor);
         let Some((call_id, name, input)) = self.identical_calls.observe(
             calls,
-            |name, input| name == "wait" || executor.reports_progress(name, input),
+            |name, input| reports_progress(&executor, name, input),
             limit,
         ) else {
             return true;
@@ -163,7 +174,7 @@ impl LoopState {
         let code = diagnostic_codes::IDENTICAL_TOOL_CALLS;
         let kind = if stalled { " without progress" } else { "" };
         let detail = format!(
-            "consecutive identical tool calls{kind} reached max_identical_tool_call_repeats={limit}"
+            "consecutive identical tool calls{kind} reached max_identical_tool_call_repeats={limit}; action=stop_run"
         );
         self.shared.bus.emit(Event::new(DiagnosticEvent {
             source: "budget_tracker".into(),

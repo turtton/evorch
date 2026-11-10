@@ -198,6 +198,8 @@ pub enum LaneAttentionKind {
     RestoreFailed {
         destination_thread_id: String,
         failure_ref: String,
+        attempts: u32,
+        suppressed: bool,
     },
     ReadyUnverified {
         ready_seq: u64,

@@ -63,6 +63,10 @@ mod output_limit_tests;
 
 #[async_trait]
 impl ProviderClient for OpenAiCompatibleClient {
+    async fn supports_tool_choice_none(&self, _request: &ChatRequest) -> bool {
+        true
+    }
+
     fn supports_structured_output(&self) -> bool {
         true
     }
