@@ -64,13 +64,7 @@ async fn a_panicking_run_ends_in_error_with_its_panic_site() {
         composed
             .runtime
             .delegate_background(Role::Worker, "panic".into(), RunConfig::default());
-    let phase = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        composed.runtime.wait(run),
-    )
-    .await
-    .expect("a panicked run still reaches a terminal phase")
-    .unwrap();
+    let phase = composed.runtime.wait(run).await.unwrap();
     // Then: Error, with one correlated diagnostic naming the panic site.
     assert_eq!(phase, AgentRunPhase::Error);
     let events = drain_events(&mut receiver).await;

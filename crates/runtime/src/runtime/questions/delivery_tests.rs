@@ -18,6 +18,7 @@ struct Model {
     calls: std::sync::atomic::AtomicU32,
     finish_children: std::sync::atomic::AtomicBool,
     idle_each_turn: std::sync::atomic::AtomicBool,
+    panic_first_turn: std::sync::atomic::AtomicBool,
 }
 #[async_trait::async_trait]
 impl crate::AgentModel for Model {
@@ -57,6 +58,9 @@ impl crate::AgentModel for Model {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             self.first.notify_one();
             self.finish.notified().await;
+            if self.panic_first_turn.load(Ordering::Acquire) {
+                panic!("question parent panicked");
+            }
             Ok(finished())
         } else {
             self.resumed.notify_one();
@@ -652,6 +656,43 @@ async fn question_accepted_after_final_flush_survives_mailbox_close() {
     assert_eq!(f.runtime.held_message_count(), 0);
     f.runtime.cancel_subtree(root).unwrap();
     f.runtime.wait(root).await.unwrap();
+    f.runtime.wait(child).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn question_accepted_during_panic_cleanup_survives_mailbox_close() {
+    let f = fixture();
+    f.model.panic_first_turn.store(true, Ordering::Release);
+    let (root, child) = pair(&f, false).await;
+    let (entered, closing) = tokio::sync::oneshot::channel();
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let gate = release.clone();
+    f.runtime.on_execution(
+        crate::runtime::cancellation::HookPoint::QuestionMailboxClosing,
+        &f.runtime.execution_snapshot(root).unwrap(),
+        move || {
+            entered.send(()).unwrap();
+            gate.wait();
+        },
+    );
+    let mut events = f.runtime.shared.bus.subscribe();
+    f.model.finish.notify_one();
+    tokio::select! {
+        entered = closing => entered.unwrap(),
+        terminal = f.runtime.wait(root) => {
+            panic!("panic cleanup published {terminal:?} without closing the question mailbox");
+        }
+    }
+    let question = ask(&f, child, true);
+    let queued = f.runtime.run_mailbox(root).unwrap().len();
+    release.wait();
+    assert_eq!(queued, 1);
+    assert_eq!(f.runtime.wait(root).await.unwrap(), AgentRunPhase::Error);
+    assert_eq!(f.runtime.run_mailbox(root).unwrap().len(), 0);
+    assert_eq!(f.runtime.held_message_count(), 1);
+    assert!(!f.runtime.question_reported(&question.id));
+    root_wake(&mut events, root).await;
+    f.runtime.cancel(child).unwrap();
     f.runtime.wait(child).await.unwrap();
 }
 
