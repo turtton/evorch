@@ -276,6 +276,7 @@ async fn a_web_review_reads_the_stored_facts_and_starts_nothing() {
     // Fetched long ago, so the facts are older than the review's limit.
     world.link(answer('a', 1_000)).await;
     let fetches = world.source.fetches();
+    assert_eq!(fetches, 1, "link setup fetched exactly once");
 
     let root = world
         .runtime
@@ -436,6 +437,7 @@ async fn an_upload_review_reads_the_stored_facts_and_starts_nothing() {
     let (world, page, _workspace) = upload_world(model.clone()).await;
     world.link(answer('a', 1_000)).await;
     let fetches = world.source.fetches();
+    assert_eq!(fetches, 1, "link setup fetched exactly once");
 
     let root = world
         .runtime
