@@ -140,3 +140,100 @@ async fn resume_race_fresh_continue_after_pending_continue_cancel_and_terminal_i
     }
     cleanup(runtime, run).await;
 }
+
+#[tokio::test]
+async fn resume_race_m4_later_subtree_cancel_fences_already_cancelled_observation() {
+    let fixture = Fixture::new();
+    let runtime = &fixture.runtime;
+    let (run, mut events) = waiting_chat(runtime).await;
+    runtime.cancel(run).unwrap();
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
+    let old = runtime.execution_snapshot(run).unwrap();
+    let original = runtime
+        .resume_intents()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.run_id == run)
+        .unwrap()
+        .incarnation;
+    let restore_release = Arc::new(Barrier::new(2));
+    let cancel_release = Arc::new(Barrier::new(2));
+    let (validated, validation) = tokio::sync::oneshot::channel();
+    let (collected, collection) = tokio::sync::oneshot::channel();
+    let release = restore_release.clone();
+    runtime.on_execution(HookPoint::RootRestoreValidated, &old, move || {
+        validated.send(()).unwrap();
+        release.wait();
+    });
+    let release = cancel_release.clone();
+    runtime.on_execution(HookPoint::SubtreeCollected, &old, move || {
+        collected.send(()).unwrap();
+        release.wait();
+    });
+    let resuming = runtime.clone();
+    let dispatch =
+        tokio::task::spawn_blocking(move || resuming.resume_chat(run, RunConfig::default()));
+    validation.await.unwrap();
+    let cancelling = runtime.clone();
+    let cancel = tokio::task::spawn_blocking(move || cancelling.cancel_subtree(run));
+    collection.await.unwrap();
+    // I has recorded the later cancellation, but notification still targets the
+    // old execution. Its watch value was already Cancel before this request.
+    restore_release.wait();
+    let result = dispatch.await.unwrap();
+    let unchanged = Arc::ptr_eq(&old, &runtime.execution_snapshot(run).unwrap())
+        && runtime
+            .resume_intents()
+            .unwrap()
+            .into_iter()
+            .find(|i| i.run_id == run)
+            .unwrap()
+            .incarnation
+            == original;
+    let failed = events.drain_pending_snapshot().iter().any(|e| matches!(&e.kind, event_bus::EventKind::Diagnostic(d) if d.code == "chat_resume_failed"));
+    cancel_release.wait();
+    cancel.await.unwrap().unwrap();
+    cleanup(runtime, run).await;
+    assert_eq!(
+        (result.is_err(), unchanged, failed),
+        (true, true, true),
+        "a later inherited cancellation must reject the old observation: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn resume_race_cancel_after_registration_prevents_lane_resume_commit() {
+    let fixture = Fixture::new();
+    let runtime = &fixture.runtime;
+    let (run, mut events) = waiting_chat(runtime).await;
+    runtime.stop(run, StopScope::SelfOnly).unwrap();
+    runtime.wait(run).await.unwrap();
+    let old = runtime.execution_snapshot(run).unwrap();
+    let release = Arc::new(Barrier::new(2));
+    let (arrived, registered) = tokio::sync::oneshot::channel();
+    let gate = release.clone();
+    runtime.on_execution(HookPoint::ResumeRegistered, &old, move || {
+        arrived.send(()).unwrap();
+        gate.wait();
+    });
+    let resuming = runtime.clone();
+    let dispatch =
+        tokio::task::spawn_blocking(move || resuming.resume_chat(run, RunConfig::default()));
+    registered.await.unwrap();
+    let new = runtime.execution_snapshot(run).unwrap();
+    assert!(!Arc::ptr_eq(&old, &new));
+    runtime.cancel(run).unwrap();
+    release.wait();
+    let result = dispatch.await.unwrap();
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
+    let held = stopped(runtime);
+    let pending = events.drain_pending_snapshot();
+    let failed = pending.iter().any(|e| matches!(&e.kind, event_bus::EventKind::Diagnostic(d) if d.code == "chat_resume_failed"));
+    let resumed = pending.iter().any(|e| matches!(&e.kind, event_bus::EventKind::Diagnostic(d) if d.code == "lane_delivery_resumed"));
+    cleanup(runtime, run).await;
+    assert_eq!(
+        (result.is_err(), new.cancelled(), held, failed, resumed),
+        (true, true, true, true, false),
+        "Cancel won before lane commit: {result:?}"
+    );
+}

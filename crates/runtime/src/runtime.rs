@@ -1401,10 +1401,7 @@ impl AgentRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let runs = lock_runs(&self.shared.runs);
             let current = cancellation::current_execution(run_id, &intents, &admissions, &runs);
-            if !fence.is_current(
-                current.as_ref(),
-                intents.get(&run_id).is_some_and(|intent| intent.cancelled),
-            ) {
+            if !fence.is_current(current.as_ref(), intents.get(&run_id)) {
                 drop(intents);
                 return Err(RuntimeError::RunTerminated {
                     run_id: run_id.to_string(),
@@ -1449,11 +1446,16 @@ impl AgentRuntime {
         } else {
             execution
         };
+        let cancellation_generation = intents
+            .get(&run_id)
+            .map(|intent| Arc::clone(&intent.cancellation_generation))
+            .unwrap_or_default();
         intents.insert(
             run_id,
             cancellation::SpawnIntent {
                 parent: owner,
                 cancelled,
+                cancellation_generation,
                 execution: Some(Arc::clone(&execution)),
             },
         );
@@ -2959,7 +2961,9 @@ impl AgentRuntime {
                 }
                 cancellations.push(execution);
             }
-            intents.entry(target).or_default().cancelled = true;
+            let intent = intents.entry(target).or_default();
+            intent.cancelled = true;
+            intent.cancellation_generation = Arc::new(());
         }
         drop(runs);
         drop(admissions);

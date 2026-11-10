@@ -208,11 +208,20 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(fence) = &after_stop {
-            let execution = self.execution_snapshot(run_id).ok();
-            if !fence.is_current(
-                execution.as_ref(),
-                execution.as_ref().is_some_and(|e| e.cancelled()),
-            ) {
+            let intents = self
+                .shared
+                .spawn_intents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let admissions = self
+                .shared
+                .admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let runs = lock_runs(&self.shared.runs);
+            let execution =
+                super::cancellation::current_execution(run_id, &intents, &admissions, &runs);
+            if !fence.is_current(execution.as_ref(), intents.get(&run_id)) {
                 return Err(RuntimeError::RunTerminated {
                     run_id: run_id.to_string(),
                 });

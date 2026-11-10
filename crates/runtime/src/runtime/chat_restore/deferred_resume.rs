@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::cancellation::{PendingChatResume, current_execution};
+use crate::runtime::cancellation::{PendingChatResume, SpawnIntent, current_execution};
 
 /// A host observation of one execution and its immutable incarnation. The watch
 /// cursor is sealed: a later Stop/Cancel (even the same value) invalidates it.
@@ -11,13 +11,18 @@ pub struct ChatResumeObservation {
     interrupt: Option<watch::Receiver<RunInterrupt>>,
     graceful_stop: bool,
     cancelled: bool,
+    cancellation_generation: Option<Arc<()>>,
 }
 impl ChatResumeObservation {
     /// Whether graceful Stop was recorded when this observation was captured.
     pub fn graceful_stop_requested(&self) -> bool {
         self.graceful_stop
     }
-    fn is_current(&self, current: Option<&Arc<ExecutionControl>>, cancelled: bool) -> bool {
+    fn is_current(
+        &self,
+        current: Option<&Arc<ExecutionControl>>,
+        intent: Option<&SpawnIntent>,
+    ) -> bool {
         let same = match (&self.execution, current) {
             (None, None) => true,
             (Some(observed), Some(current)) => observed
@@ -25,11 +30,20 @@ impl ChatResumeObservation {
                 .is_some_and(|observed| Arc::ptr_eq(&observed, current)),
             _ => false,
         };
-        same && self
-            .interrupt
-            .as_ref()
-            .is_none_or(|rx| !rx.has_changed().unwrap_or(true))
-            && (self.cancelled || (!cancelled && current.is_none_or(|e| !e.cancelled())))
+        let same_generation = match (&self.cancellation_generation, intent) {
+            (None, None) => true,
+            (Some(observed), Some(current)) => {
+                Arc::ptr_eq(observed, &current.cancellation_generation)
+            }
+            _ => false,
+        };
+        same && same_generation
+            && self
+                .interrupt
+                .as_ref()
+                .is_none_or(|rx| !rx.has_changed().unwrap_or(true))
+            && (self.cancelled
+                || (!intent.is_some_and(|i| i.cancelled) && current.is_none_or(|e| !e.cancelled())))
     }
 }
 
@@ -47,9 +61,9 @@ impl ResumeFence {
     pub(in crate::runtime) fn is_current(
         &self,
         execution: Option<&Arc<ExecutionControl>>,
-        cancelled: bool,
+        intent: Option<&SpawnIntent>,
     ) -> bool {
-        self.valid.load(Ordering::Acquire) && self.observation.is_current(execution, cancelled)
+        self.valid.load(Ordering::Acquire) && self.observation.is_current(execution, intent)
     }
 }
 
@@ -80,6 +94,9 @@ impl AgentRuntime {
             interrupt,
             graceful_stop,
             cancelled,
+            cancellation_generation: intents
+                .get(&run)
+                .map(|i| Arc::clone(&i.cancellation_generation)),
         }
     }
 
@@ -107,12 +124,7 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runs = lock_runs(&self.shared.runs);
         let current = current_execution(run, &intents, &admissions, &runs);
-        if observation.run != run
-            || !observation.is_current(
-                current.as_ref(),
-                intents.get(&run).is_some_and(|i| i.cancelled),
-            )
-        {
+        if observation.run != run || !observation.is_current(current.as_ref(), intents.get(&run)) {
             return Err(RuntimeError::RunTerminated {
                 run_id: run.to_string(),
             });

@@ -126,6 +126,9 @@ pub(super) struct SpawnIntent {
     pub(super) parent: Option<RunId>,
     // A subtree tombstone outlives the execution it cancelled.
     pub(super) cancelled: bool,
+    // Rotated under I before subtree notification, including repeated Cancel.
+    // An opaque allocation avoids generation wraparound/ABA while tokens exist.
+    pub(super) cancellation_generation: Arc<()>,
     pub(super) execution: Option<Arc<ExecutionControl>>,
 }
 
@@ -306,6 +309,7 @@ impl AgentRuntime {
                 parent: Some(parent),
                 cancelled,
                 execution: None,
+                ..Default::default()
             },
         );
     }
