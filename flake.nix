@@ -70,6 +70,8 @@
         runtimeLibraries = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
           pkgs.stdenv.cc.cc.lib
         ];
+        # CEF is hashed for x86_64-linux only (see cefDist below).
+        isCefSystem = system == "x86_64-linux";
         commonArgs = {
           pname = "evorch";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
@@ -121,7 +123,15 @@
             printf '%s\n' "''${cargoVendorDir:?}" > "$out/cargo-vendor-dir"
           '';
         };
-        shippedCargoArgs = "-p evorch -p gui -p evorch-core --bin evorch --bin evorch-gui --bin evorch-core";
+        # The non-CEF GUI is no longer built where the CEF GUI exists: building
+        # it too compiled the whole gui crate a second time next to evorch-gui-cef
+        # (about five minutes of the CI nix-build job). Systems without a CEF
+        # build keep it, as their only GUI.
+        shippedCargoArgs =
+          if isCefSystem then
+            "-p evorch -p evorch-core --bin evorch --bin evorch-core"
+          else
+            "-p evorch -p gui -p evorch-core --bin evorch --bin evorch-gui --bin evorch-core";
         cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // {
           cargoExtraArgs = shippedCargoArgs;
           doCheck = false;
@@ -159,8 +169,10 @@
           # Recorded in self-improvement evidence; kept out of commonArgs so deps stay cached.
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
           postFixup = ''
-            wrapProgram "$out/bin/evorch-gui" \
-              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
+            ${pkgs.lib.optionalString (!isCefSystem) ''
+              wrapProgram "$out/bin/evorch-gui" \
+                --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
+            ''}
             wrapProgram "$out/bin/evorch-core" \
               --prefix PATH : "${pkgs.lib.makeBinPath ([ pkgs.which pkgs.git pkgs.coreutils ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.bubblewrap ])}"
           '';
@@ -175,14 +187,14 @@
             test "$helpStatus" -eq 1
             grep -q '^usage: evorch ' evorch-help.txt
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-              for binary in evorch .evorch-gui-wrapped; do
+              for binary in evorch ${pkgs.lib.optionalString (!isCefSystem) ".evorch-gui-wrapped"}; do
                 env -u LD_LIBRARY_PATH -u LIBSQLITE3_FLAGS \
                   ${pkgs.stdenv.cc.bintools.dynamicLinker} --list "$out/bin/$binary"
               done
             ''}
             runHook postInstallCheck
           '';
-          meta.mainProgram = "evorch-gui";
+          meta.mainProgram = if isCefSystem then "evorch" else "evorch-gui";
         });
         evorch-core = craneLib.buildPackage (commonArgs // {
           pname = "evorch-core";
@@ -336,7 +348,6 @@
           meta.mainProgram = "evorch-gui-cef";
           meta.platforms = [ "x86_64-linux" ];
         });
-        isCefSystem = system == "x86_64-linux";
         # The default package on CEF systems: the CLI and tools from `evorch`,
         # with `evorch-gui` launching the CEF build so presented HTML opens in
         # the app (ADR 0034 B). Other systems fall back to `evorch`.
