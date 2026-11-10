@@ -1,7 +1,6 @@
 //! Real routing/HTTP cache contract with the production GUI initialization
 //! bridge. Only the CEF backend is replaced, so this gate never starts CEF
 //! (the binary still links libcef.so with the default `cef` feature).
-#![cfg(feature = "browser")]
 #[path = "../src/html_preview/runtime_requests.rs"]
 mod runtime_requests;
 

@@ -92,7 +92,6 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
     .unwrap();
     let mut app = Ready {
         workbench: WorkbenchApp(state),
-        #[cfg(feature = "cef")]
         html_previews: {
             let (_, requests) = std::sync::mpsc::channel();
             gui::html_preview::HtmlPreviewWindows::new(
@@ -182,7 +181,6 @@ fn dropping_the_running_app_stops_the_executor_before_the_locks_are_released() {
     assert!(executor.wait_for_cycles(1).holds_lease);
     let app = Ready {
         workbench: WorkbenchApp(state),
-        #[cfg(feature = "cef")]
         html_previews: {
             let (_, requests) = std::sync::mpsc::channel();
             gui::html_preview::HtmlPreviewWindows::new(

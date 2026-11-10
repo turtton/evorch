@@ -82,8 +82,6 @@ jobs:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
-          # `cef` (and so `browser`) is a default GUI feature; keep the remaining non-CEF code paths compiling.
-          cargo clippy -p gui --all-targets --no-default-features -- -D warnings
           cargo clippy -p event-bus --all-targets --features otel-exporter -- -D warnings
           mkdir -p "$EVORCH_CI_METADATA_DIR"
           cargo metadata --format-version 1 --locked > "$EVORCH_CI_METADATA_DIR/cargo.json"
@@ -101,6 +99,11 @@ jobs:
       # that Cargo.lock binds.
       - name: CEF pin consistency
         run: scripts/tests/test_setup_cef_pin.sh
+      # gui has no non-CEF build any more.
+      - name: GUI refuses to build without CEF
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: scripts/tests/test_gui_requires_cef.sh
       # CI enforces cost-sensitive invariants with this offline gate. The mock
       # computes cache usage from received input; compaction has an explicit boundary.
       - name: Cache preservation contracts (offline)

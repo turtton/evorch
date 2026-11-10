@@ -200,8 +200,9 @@ The `cef` feature of `gui` opens presented HTML artifacts (`.html`/`.htm`) in
 an in-app window rendered off-screen by CEF (`crates/browser-cef`, ADR 0034 B).
 Other artifacts, and every artifact when CEF cannot start, still go to the XDG
 Portal. The Nix default package includes it on x86_64-linux (see Building).
-The cargo feature stays off by default, so cargo builds without it never fetch
-CEF.
+The cargo feature is on by default, so a cargo build of `gui` needs the CEF
+distribution: it reads `CEF_PATH`, and downloads CEF there when the variable is
+unset (see Building). `gui` refuses to build without the feature.
 
 The preview is offline. The artifact is served from
 `https://artifact.evorch.invalid` by a scheme handler, every other request and

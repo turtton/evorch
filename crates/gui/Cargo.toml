@@ -12,8 +12,9 @@ name = "gui"
 [features]
 # The CEF GUI is the only supported GUI build, so `cef` is a default feature:
 # cargo builds need the CEF distribution (cef-dll-sys downloads it into
-# `CEF_PATH` on the first build; docs/browser.md). The non-CEF code paths stay
-# compilable with `--no-default-features` but are not shipped.
+# `CEF_PATH` on the first build; docs/browser.md). lib.rs refuses a build without
+# `cef`; the feature exists so that the CEF dependencies stay optional for
+# `cargo` tooling that selects packages individually.
 default = ["cef"]
 # The agent browser tab. Runtime and tools link `browser` regardless, so
 # enabling it costs no extra dependency.
