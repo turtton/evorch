@@ -1,6 +1,7 @@
 //! イベントログからのセッション復元と再調整を検証します。
 
 #[rustfmt::skip]
+#[allow(clippy::module_inception)]
 mod resume {
 use std::time::{Duration, UNIX_EPOCH};
 use event_bus::{Event, EventMeta, LifecycleEvent, MessageEvent, ToolEvent};

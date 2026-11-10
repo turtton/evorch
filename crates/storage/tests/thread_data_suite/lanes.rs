@@ -585,18 +585,18 @@ fn v45_migration_keeps_pending_v44_intents_recoverable() {
         let conn = Connection::open(&config.db_path).unwrap();
         conn.execute_batch(concat!(
             concat!(
-                include_str!("../undo/undo_v56.sql"),
-                include_str!("../undo/undo_v55.sql"),
-                include_str!("../undo/undo_v54.sql"),
-                include_str!("../undo/undo_v53.sql"),
-                include_str!("../undo/undo_v52.sql"),
-                include_str!("../undo/undo_v51.sql"),
-                include_str!("../undo/undo_v50.sql"),
-                include_str!("../undo/undo_v49.sql"),
-                include_str!("../undo/undo_v48.sql"),
-                include_str!("../undo/undo_v47.sql")
+                include_str!("../../undo/undo_v56.sql"),
+                include_str!("../../undo/undo_v55.sql"),
+                include_str!("../../undo/undo_v54.sql"),
+                include_str!("../../undo/undo_v53.sql"),
+                include_str!("../../undo/undo_v52.sql"),
+                include_str!("../../undo/undo_v51.sql"),
+                include_str!("../../undo/undo_v50.sql"),
+                include_str!("../../undo/undo_v49.sql"),
+                include_str!("../../undo/undo_v48.sql"),
+                include_str!("../../undo/undo_v47.sql")
             ),
-            include_str!("../undo/undo_v46.sql")
+            include_str!("../../undo/undo_v46.sql")
         ))
         .unwrap();
         conn.execute_batch(

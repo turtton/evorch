@@ -332,7 +332,7 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
     let connection = Connection::open(&path).unwrap();
-    let sql = include_str!("../src/migrations/sql.rs");
+    let sql = include_str!("../../src/migrations/sql.rs");
     for migration in sql.split("r#\"").skip(1) {
         connection
             .execute_batch(migration.split("\"#;").next().unwrap())
@@ -363,7 +363,7 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
     let connection = Connection::open(&path).unwrap();
-    for migration in include_str!("../src/migrations/sql.rs")
+    for migration in include_str!("../../src/migrations/sql.rs")
         .split("r#\"")
         .skip(1)
     {
@@ -372,14 +372,14 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
             .unwrap();
     }
     for migration in [
-        include_str!("../src/migrations/v3.sql"),
-        include_str!("../src/migrations/v4.sql"),
-        include_str!("../src/migrations/v5.sql"),
+        include_str!("../../src/migrations/v3.sql"),
+        include_str!("../../src/migrations/v4.sql"),
+        include_str!("../../src/migrations/v5.sql"),
     ] {
         connection.execute_batch(migration).unwrap();
     }
     connection
-        .execute_batch(include_str!("../src/migrations/v6.sql"))
+        .execute_batch(include_str!("../../src/migrations/v6.sql"))
         .unwrap();
     connection.pragma_update(None, "user_version", 6).unwrap();
     connection
@@ -1193,18 +1193,18 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
-                include_str!("../undo/undo_v56.sql"),
-                include_str!("../undo/undo_v55.sql"),
-                include_str!("../undo/undo_v54.sql"),
-                include_str!("../undo/undo_v53.sql"),
-                include_str!("../undo/undo_v52.sql"),
-                include_str!("../undo/undo_v51.sql"),
-                include_str!("../undo/undo_v50.sql"),
-                include_str!("../undo/undo_v49.sql"),
-                include_str!("../undo/undo_v48.sql"),
-                include_str!("../undo/undo_v47.sql")
+                include_str!("../../undo/undo_v56.sql"),
+                include_str!("../../undo/undo_v55.sql"),
+                include_str!("../../undo/undo_v54.sql"),
+                include_str!("../../undo/undo_v53.sql"),
+                include_str!("../../undo/undo_v52.sql"),
+                include_str!("../../undo/undo_v51.sql"),
+                include_str!("../../undo/undo_v50.sql"),
+                include_str!("../../undo/undo_v49.sql"),
+                include_str!("../../undo/undo_v48.sql"),
+                include_str!("../../undo/undo_v47.sql")
             ),
-            include_str!("../undo/undo_v46.sql")
+            include_str!("../../undo/undo_v46.sql")
         ))
         .unwrap();
     connection
@@ -1231,10 +1231,10 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
         )
         .unwrap();
     connection
-        .execute_batch(include_str!("../undo/undo_v44.sql"))
+        .execute_batch(include_str!("../../undo/undo_v44.sql"))
         .unwrap();
     connection
-        .execute_batch(include_str!("../undo/undo_v43.sql"))
+        .execute_batch(include_str!("../../undo/undo_v43.sql"))
         .unwrap();
     connection.pragma_update(None, "user_version", 41).unwrap();
     connection

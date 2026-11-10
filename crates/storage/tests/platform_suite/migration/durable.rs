@@ -6,7 +6,7 @@ fn v8_upgrade_preserves_task_links_and_defaults() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
     let connection = Connection::open(&path).unwrap();
-    for migration in include_str!("../../src/migrations/sql.rs")
+    for migration in include_str!("../../../src/migrations/sql.rs")
         .split("r#\"")
         .skip(1)
     {
@@ -15,11 +15,11 @@ fn v8_upgrade_preserves_task_links_and_defaults() {
             .unwrap();
     }
     for migration in [
-        include_str!("../../src/migrations/v3.sql"),
-        include_str!("../../src/migrations/v4.sql"),
-        include_str!("../../src/migrations/v5.sql"),
-        include_str!("../../src/migrations/v6.sql"),
-        include_str!("../../src/migrations/v7.sql"),
+        include_str!("../../../src/migrations/v3.sql"),
+        include_str!("../../../src/migrations/v4.sql"),
+        include_str!("../../../src/migrations/v5.sql"),
+        include_str!("../../../src/migrations/v6.sql"),
+        include_str!("../../../src/migrations/v7.sql"),
     ] {
         connection.execute_batch(migration).unwrap();
     }

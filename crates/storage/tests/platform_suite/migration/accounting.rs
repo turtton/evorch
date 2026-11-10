@@ -5,7 +5,7 @@ fn v12_backfills_bytes_once_including_streams_null_sessions_and_utc_boundaries()
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
     let conn = Connection::open(&path).unwrap();
-    for migration in include_str!("../../src/migrations/sql.rs")
+    for migration in include_str!("../../../src/migrations/sql.rs")
         .split("r#\"")
         .skip(1)
     {
@@ -13,15 +13,15 @@ fn v12_backfills_bytes_once_including_streams_null_sessions_and_utc_boundaries()
             .unwrap();
     }
     for migration in [
-        include_str!("../../src/migrations/v3.sql"),
-        include_str!("../../src/migrations/v4.sql"),
-        include_str!("../../src/migrations/v5.sql"),
-        include_str!("../../src/migrations/v6.sql"),
-        include_str!("../../src/migrations/v7.sql"),
-        include_str!("../../src/migrations/v8.sql"),
-        include_str!("../../src/migrations/v9.sql"),
-        include_str!("../../src/migrations/v10.sql"),
-        include_str!("../../src/migrations/v11.sql"),
+        include_str!("../../../src/migrations/v3.sql"),
+        include_str!("../../../src/migrations/v4.sql"),
+        include_str!("../../../src/migrations/v5.sql"),
+        include_str!("../../../src/migrations/v6.sql"),
+        include_str!("../../../src/migrations/v7.sql"),
+        include_str!("../../../src/migrations/v8.sql"),
+        include_str!("../../../src/migrations/v9.sql"),
+        include_str!("../../../src/migrations/v10.sql"),
+        include_str!("../../../src/migrations/v11.sql"),
     ] {
         conn.execute_batch(migration).unwrap();
     }

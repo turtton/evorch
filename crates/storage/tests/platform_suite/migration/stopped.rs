@@ -6,7 +6,7 @@ use rusqlite::{params, types::Value};
 // Captured verbatim with:
 // git show 0f8940ac61e3e79006477eef5658a8d249535bdc:crates/storage/src/migrations/v8.sql
 const OLD_V8: &str = include_str!("v8_before_stopped.sql");
-const V10: &str = include_str!("../../src/migrations/v10.sql");
+const V10: &str = include_str!("../../../src/migrations/v10.sql");
 const OLD_STATUSES: [&str; 8] = [
     "pending",
     "queued",
@@ -21,7 +21,7 @@ const OLD_STATUSES: [&str; 8] = [
 fn legacy_database(path: &Path, version: u32, already_allows_stopped: bool) {
     let conn = Connection::open(path).unwrap();
     conn.pragma_update(None, "foreign_keys", true).unwrap();
-    for migration in include_str!("../../src/migrations/sql.rs")
+    for migration in include_str!("../../../src/migrations/sql.rs")
         .split("r#\"")
         .skip(1)
     {
@@ -29,13 +29,13 @@ fn legacy_database(path: &Path, version: u32, already_allows_stopped: bool) {
             .unwrap();
     }
     for migration in [
-        include_str!("../../src/migrations/v3.sql"),
-        include_str!("../../src/migrations/v4.sql"),
-        include_str!("../../src/migrations/v5.sql"),
-        include_str!("../../src/migrations/v6.sql"),
-        include_str!("../../src/migrations/v7.sql"),
+        include_str!("../../../src/migrations/v3.sql"),
+        include_str!("../../../src/migrations/v4.sql"),
+        include_str!("../../../src/migrations/v5.sql"),
+        include_str!("../../../src/migrations/v6.sql"),
+        include_str!("../../../src/migrations/v7.sql"),
         if already_allows_stopped {
-            include_str!("../../src/migrations/v8.sql")
+            include_str!("../../../src/migrations/v8.sql")
         } else {
             OLD_V8
         },
@@ -44,7 +44,7 @@ fn legacy_database(path: &Path, version: u32, already_allows_stopped: bool) {
     }
     if version == 9 {
         // v9 is unchanged from the same commit as OLD_V8.
-        conn.execute_batch(include_str!("../../src/migrations/v9.sql"))
+        conn.execute_batch(include_str!("../../../src/migrations/v9.sql"))
             .unwrap();
     }
     conn.pragma_update(None, "user_version", version).unwrap();
