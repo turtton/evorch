@@ -103,7 +103,7 @@ jobs:
       # includes CARGO_TARGET_DIR below; keep that variable scoped to Cargo steps.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-cargo
+          shared-key: ${{ runner.os }}-ci-lint
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy (workspace)
         env:
@@ -142,7 +142,7 @@ jobs:
       - uses: ./.github/actions/setup-cef
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-cargo
+          shared-key: ${{ runner.os }}-ci-docs
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Workspace doctests
         env:
@@ -177,7 +177,7 @@ jobs:
           packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-cargo
+          shared-key: ${{ runner.os }}-ci-otel
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -252,7 +252,7 @@ jobs:
       # main. PR runs only restore (see the lint job).
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-cargo
+          shared-key: ${{ runner.os }}-ci-${{ matrix.group }}
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
