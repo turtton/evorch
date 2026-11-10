@@ -512,18 +512,25 @@ async fn an_unowned_seed_keeps_the_handoff_fence_while_admission_is_pending() {
             Arc::new(Logs::default()),
         )
         .await;
+    let mut next_events = next.runtime.event_bus().subscribe();
     let permit = old.owner.owned_permit("lane-thread").unwrap();
     old.owner.handoff(&permit, &next.owner).unwrap();
     old_model.release_admission.notify_one();
-    assert_eq!(
+    // A provider completing admission is not authority to register a root after
+    // handoff. Even its initial context would race the successor's snapshot.
+    assert!(matches!(
         old.runtime.wait(RunId::new(42)).await,
-        Ok(event_bus::AgentRunPhase::Error)
-    );
+        Err(RuntimeError::StaleOwnership { .. })
+    ));
+    assert!(old.runtime.list_agents().is_empty());
     assert_eq!(old_model.calls.load(Ordering::SeqCst), 0);
     next.runtime
         .recover_unstarted_lanes(Some(&next.owner))
         .unwrap();
-    next_model.entered.notified().await;
+    tokio::select! {
+        _ = next_model.entered.notified() => {},
+        result = next.runtime.wait(RunId::new(42)) => panic!("next lane root ended before model entry: {result:?}, events={:?}", next_events.drain_pending_snapshot()),
+    }
     assert_eq!(next_model.calls.load(Ordering::SeqCst), 1);
     old.shutdown().await.unwrap();
     next.shutdown().await.unwrap();

@@ -425,6 +425,31 @@ impl AgentRuntime {
             } else {
                 model.admit(&invocation, role).await
             };
+            // Admission may outlive a lane handoff. Reject its old generation
+            // before registration can schedule even the initial snapshot write.
+            if lane_root
+                && admitted.is_ok()
+                && let Some(permit) = config.ownership.as_ref()
+            {
+                let interrupts = cancellation.clone();
+                let retry = runtime
+                    .shared
+                    .ownership_retry
+                    .get()
+                    .copied()
+                    .unwrap_or_else(crate::ownership::RetryPolicy::unbounded);
+                admitted = permit
+                    .validate_generation_off_thread(retry, move || {
+                        interrupts.borrow().kind().is_some()
+                    })
+                    .await
+                    .map_err(|error| {
+                        tracing::debug!(%run_id, %error, "lane admission ownership rejected");
+                        RuntimeError::StaleOwnership {
+                            run_id: run_id.to_string(),
+                        }
+                    });
+            }
             #[cfg(test)]
             if admitted.is_err() {
                 runtime.execution_hook(cancellation::HookPoint::AdmissionFailed, &execution);
