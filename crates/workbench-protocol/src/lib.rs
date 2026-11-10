@@ -16,6 +16,7 @@
 //! request and reply envelopes in [`envelope`].
 
 pub mod commands;
+pub mod conversation;
 pub mod envelope;
 pub mod errors;
 pub mod events;

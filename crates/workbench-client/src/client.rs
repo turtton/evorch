@@ -8,7 +8,7 @@ use crate::subscription::{
 use crate::transport::{FrameSink, FrameSource, Transport, framing_error};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use workbench_protocol::commands::{Command, CommandReply};
@@ -42,12 +42,16 @@ pub struct ClientConfig {
     /// Numbers request ids. Reuse one config (or clone it) across reconnects so
     /// request ids never repeat for the same client instance.
     pub request_counter: Arc<AtomicU64>,
+    /// Logical receipt namespace. Keep the same config across reconnects so a
+    /// command with a lost reply can be looked up without being resent.
+    pub receipt_session: Arc<OnceLock<SessionId>>,
 }
 
 impl ClientConfig {
     /// Requires commands and queries; asks for everything else when offered.
     pub fn new(client_instance_id: ClientId, client_build: BuildInfo) -> Self {
         Self {
+            receipt_session: Arc::new(OnceLock::new()),
             client_instance_id,
             client_build,
             supported_versions: vec![ProtocolVersion::CURRENT],
@@ -562,11 +566,17 @@ impl WorkbenchClient {
         check_accepted(&config, &server)?;
 
         source.set_max_frame_bytes(server.limits.max_frame_bytes);
-        let session_id = SessionId::new(format!(
-            "{}.s{}",
-            config.client_instance_id,
-            SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ))?;
+        let session_id = config
+            .receipt_session
+            .get_or_init(|| {
+                SessionId::new(format!(
+                    "{}.s{}",
+                    config.client_instance_id,
+                    SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
+                ))
+                .expect("validated client id fits a session id")
+            })
+            .clone();
         // Room for every allowed in-flight request plus background unsubscribes.
         let (writer_tx, writer_rx) =
             mpsc::channel(server.limits.max_in_flight_requests as usize + 8);

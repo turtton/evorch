@@ -91,6 +91,7 @@ pub fn stop_chat(thread: &str) -> Command {
 
 pub fn command_reply() -> CommandReply {
     CommandReply {
+        conversation: None,
         lane_management: None,
         disposition: CommandDisposition::Accepted,
         submission_id: None,

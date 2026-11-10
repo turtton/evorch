@@ -296,6 +296,7 @@ impl CommandHost {
                 CommandDisposition::Accepted
             },
             thread_revision: None,
+            conversation: None,
             lane_management: Some(Box::new(result)),
             submission_id: None,
             run_id: None,
