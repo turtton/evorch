@@ -622,10 +622,15 @@ mod lifecycle_tests {
             spawn(cli, &["-c".into(), "kill -STOP $$".into()], member)
         })
         .unwrap();
+        assert!(
+            lifecycle.is_busy(),
+            "a real evaluation child and its report task are unfinished"
+        );
         assert!(group.members[0].exit.is_none());
         assert!(group.members[1].exit.is_some());
         lifecycle.shutdown().await.unwrap();
         lifecycle.wait_drained().await;
+        assert!(!lifecycle.is_busy());
         let group = detail(&shared, &dir.path().join("eval"), &group.id).unwrap();
         assert!(!group["finished_at"].is_null());
         assert_eq!(

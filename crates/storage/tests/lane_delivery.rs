@@ -649,6 +649,7 @@ fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     drop(storage);
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(concat!(
+        include_str!("../undo/undo_v58.sql"),
         include_str!("../undo/undo_v57.sql"),
         include_str!("../undo/undo_v56.sql"),
         include_str!("../undo/undo_v55.sql"),

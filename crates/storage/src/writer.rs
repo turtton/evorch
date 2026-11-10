@@ -65,6 +65,7 @@ enum Command {
         String,
         crate::improvement::NewImprovementCandidate,
         crate::improvement::ImprovementWritePolicy,
+        Option<String>,
         ReplyTx<crate::improvement::ImprovementRecordOutcome>,
     ),
     SetImprovementStatus(String, crate::improvement::ImprovementStatus, ReplyTx<bool>),
@@ -956,6 +957,26 @@ impl StorageHandle {
         })
     }
 
+    /// Atomically account for an immutable bus observation at most once across writers.
+    /// `observation` is the SHA-256 fingerprint of the original event, not a fault key.
+    pub fn record_improvement_observation(
+        &self,
+        project: impl Into<String>,
+        candidate: crate::improvement::NewImprovementCandidate,
+        policy: crate::improvement::ImprovementWritePolicy,
+        observation: impl Into<String>,
+    ) -> Result<crate::improvement::ImprovementRecordOutcome, StorageError> {
+        self.request(|reply| {
+            Command::RecordImprovementCandidate(
+                project.into(),
+                candidate,
+                policy,
+                Some(observation.into()),
+                reply,
+            )
+        })
+    }
+
     /// Record a secret-guarded candidate under explicit deduplication and retention policy.
     /// Policy checks, insertion and eviction run atomically on the single writer.
     pub fn record_improvement_candidate(
@@ -965,7 +986,7 @@ impl StorageHandle {
         policy: crate::improvement::ImprovementWritePolicy,
     ) -> Result<crate::improvement::ImprovementRecordOutcome, StorageError> {
         self.request(|reply| {
-            Command::RecordImprovementCandidate(project.into(), candidate, policy, reply)
+            Command::RecordImprovementCandidate(project.into(), candidate, policy, None, reply)
         })
     }
 

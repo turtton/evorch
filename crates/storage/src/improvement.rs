@@ -156,10 +156,18 @@ pub struct ImprovementWritePolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImprovementRecordOutcome {
-    Stored { id: String },
-    Reopened { id: String },
-    Duplicate { existing_id: String },
+    Stored {
+        id: String,
+    },
+    Reopened {
+        id: String,
+    },
+    Duplicate {
+        existing_id: String,
+    },
     RateLimited,
+    /// This exact bus observation was already accounted for, even if its candidate was evicted.
+    AlreadyObserved,
 }
 
 impl Database {
@@ -248,12 +256,40 @@ pub(crate) fn record(
     record_at(conn, project, candidate, policy, SystemTime::now())
 }
 
+pub(crate) fn record_observation(
+    conn: &Connection,
+    project: &str,
+    candidate: &NewImprovementCandidate,
+    policy: ImprovementWritePolicy,
+    observation: &str,
+) -> Result<ImprovementRecordOutcome, StorageError> {
+    record_observed_at(
+        conn,
+        project,
+        candidate,
+        policy,
+        SystemTime::now(),
+        Some(observation),
+    )
+}
+
 fn record_at(
     conn: &Connection,
     project: &str,
     candidate: &NewImprovementCandidate,
     policy: ImprovementWritePolicy,
     now: SystemTime,
+) -> Result<ImprovementRecordOutcome, StorageError> {
+    record_observed_at(conn, project, candidate, policy, now, None)
+}
+
+fn record_observed_at(
+    conn: &Connection,
+    project: &str,
+    candidate: &NewImprovementCandidate,
+    policy: ImprovementWritePolicy,
+    now: SystemTime,
+    observation: Option<&str>,
 ) -> Result<ImprovementRecordOutcome, StorageError> {
     let guard = crate::entity::SecretGuard::from_env();
     // Project is also caller-controlled persisted text, so guard it like lesson.project.
@@ -284,6 +320,23 @@ fn record_at(
     let now_ns = system_time_to_ns(now)?;
     // Lock before checking policy so separate storage instances cannot race these checks.
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    if let Some(key) = observation {
+        if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(StorageError::Serialization(
+                "observation key must be a SHA-256 fingerprint".into(),
+            ));
+        }
+        // Receipt and candidate/occurrence/quota writes commit or roll back together.
+        // BEGIN IMMEDIATE serializes separate online writers, not just one handle.
+        if transaction.execute(
+            "INSERT OR IGNORE INTO improvement_observations (observation_key) VALUES (?1)",
+            [key],
+        )? == 0
+        {
+            transaction.commit()?;
+            return Ok(ImprovementRecordOutcome::AlreadyObserved);
+        }
+    }
     // Insertion order, not wall-clock order: a backwards clock jump must not
     // make an older candidate authoritative. Reopening restarts its cooldown.
     let newest: Option<(String, i64, String)> = transaction
@@ -1761,5 +1814,119 @@ mod tests {
                 .draft_path,
             None
         );
+    }
+    #[test]
+    fn observation_receipts_are_atomic_between_writers_and_survive_reopen_and_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::StorageConfig {
+            db_path: dir.path().join("observations.db"),
+            ..Default::default()
+        };
+        let first = crate::Storage::open(config.clone()).unwrap();
+        let second = crate::Storage::open(config.clone()).unwrap();
+        let key = "a".repeat(64);
+        let barrier = std::sync::Barrier::new(3);
+        let outcomes = std::thread::scope(|scope| {
+            let barrier = &barrier;
+            let jobs: Vec<_> = [first.handle(), second.handle()]
+                .into_iter()
+                .enumerate()
+                .map(|(i, handle)| {
+                    let key = &key;
+                    scope.spawn(move || {
+                        let input = candidate(&format!("writer-{i}"));
+                        barrier.wait();
+                        handle
+                            .record_improvement_observation("p", input, policy(), key)
+                            .unwrap()
+                    })
+                })
+                .collect();
+            barrier.wait();
+            jobs.into_iter()
+                .map(|job| job.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|v| matches!(v, ImprovementRecordOutcome::Stored { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|v| matches!(v, ImprovementRecordOutcome::AlreadyObserved))
+                .count(),
+            1
+        );
+        drop((first, second));
+        let reopened = crate::Storage::open(config.clone()).unwrap();
+        let handle = reopened.handle();
+        let limit = ImprovementWritePolicy {
+            max_candidates: 1,
+            ..policy()
+        };
+        handle
+            .record_improvement_observation("p", candidate("eviction"), limit, "b".repeat(64))
+            .unwrap();
+        assert_eq!(
+            handle
+                .record_improvement_observation("p", candidate("late-replay"), limit, key)
+                .unwrap(),
+            ImprovementRecordOutcome::AlreadyObserved
+        );
+        let rows = Database::open(&config)
+            .unwrap()
+            .improvement_candidates("p", None, 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "eviction");
+        assert_eq!(rows[0].occurrences, 1);
+        // A distinct observation of the same normalized fault is a real occurrence.
+        handle
+            .record_improvement_observation("p", candidate("eviction"), limit, "c".repeat(64))
+            .unwrap();
+        assert_eq!(
+            Database::open(&config)
+                .unwrap()
+                .improvement_candidate("eviction")
+                .unwrap()
+                .unwrap()
+                .occurrences,
+            2
+        );
+    }
+
+    #[test]
+    fn rejected_observation_rolls_back_its_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::StorageConfig {
+            db_path: dir.path().join("rollback.db"),
+            ..Default::default()
+        };
+        let store = crate::Storage::open(config).unwrap();
+        let key = "d".repeat(64);
+        store
+            .handle()
+            .record_improvement_candidate("p", candidate("first"), policy())
+            .unwrap();
+        let mut input = candidate("first");
+        // Pass validation but fail INSERT after the observation receipt was staged.
+        input.dedup_key = "another-fault-with-a-colliding-id".into();
+        assert!(
+            store
+                .handle()
+                .record_improvement_observation("p", input, policy(), &key)
+                .is_err()
+        );
+        assert!(matches!(
+            store
+                .handle()
+                .record_improvement_observation("p", candidate("corrected"), policy(), &key)
+                .unwrap(),
+            ImprovementRecordOutcome::Stored { .. }
+        ));
     }
 }

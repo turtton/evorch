@@ -37,6 +37,26 @@ impl Default for EvaluationService {
 }
 
 impl EvaluationService {
+    /// Register host work while admission is open; shutdown owns its completion.
+    pub fn spawn(
+        &self,
+        work: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), &'static str> {
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            return Err("evaluation host is stopping");
+        }
+        state.tasks.push(tokio::spawn(work));
+        Ok(())
+    }
+
+    /// Child execution and its completion/report/notice future are all work.
+    pub fn is_busy(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.tasks.iter().any(|task| !task.is_finished())
+            || (state.closed && !*self.drained.borrow())
+    }
+
     pub fn request_stop(&self) {
         self.state.lock().unwrap().closed = true;
         self.stop.send_replace(true);

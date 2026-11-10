@@ -206,11 +206,15 @@ enum SelfImprovementError {
 
 pub struct ImprovementCollector {
     settings: ImprovementSettings,
+    observation_key: Option<String>,
 }
 
 impl ImprovementCollector {
     pub fn new(settings: ImprovementSettings) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            observation_key: None,
+        }
     }
 
     /// Synchronous intake. All persistence/draft/identity errors are warn-only.
@@ -398,6 +402,35 @@ impl ImprovementCollector {
     }
 
     fn observe(&self, event: event_bus::Event) {
+        if !matches!(
+            &event.kind,
+            EventKind::Diagnostic(_)
+                | EventKind::Fault(FaultEvent::SkillDiagnostic { .. })
+                | EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    to: AgentRunPhase::Error,
+                    ..
+                })
+        ) {
+            return;
+        }
+        use sha2::Digest;
+        // Fingerprint the ORIGINAL immutable event, including provenance/timestamps,
+        // not the normalized candidate key: independent occurrences still count.
+        let bytes = match serde_json::to_vec(&event) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, "cannot identify improvement observation");
+                return;
+            }
+        };
+        let collector = Self {
+            settings: self.settings.clone(),
+            observation_key: Some(format!("{:x}", sha2::Sha256::digest(bytes))),
+        };
+        collector.observe_once(event);
+    }
+
+    fn observe_once(&self, event: event_bus::Event) {
         match event.kind {
             EventKind::Diagnostic(diagnostic) => {
                 self.diagnostic_observed_at(&diagnostic, event.meta.wall_clock)
@@ -509,11 +542,19 @@ impl ImprovementCollector {
     }
 
     fn record(&self, candidate: NewImprovementCandidate) -> Result<(), SelfImprovementError> {
-        let outcome = self.settings.writer.record_improvement_candidate(
-            &self.settings.project,
-            candidate.clone(),
-            self.settings.policy.write_policy(),
-        )?;
+        let outcome = match &self.observation_key {
+            Some(key) => self.settings.writer.record_improvement_observation(
+                &self.settings.project,
+                candidate.clone(),
+                self.settings.policy.write_policy(),
+                key,
+            )?,
+            None => self.settings.writer.record_improvement_candidate(
+                &self.settings.project,
+                candidate.clone(),
+                self.settings.policy.write_policy(),
+            )?,
+        };
         if let ImprovementRecordOutcome::Stored { id } | ImprovementRecordOutcome::Reopened { id } =
             outcome
         {

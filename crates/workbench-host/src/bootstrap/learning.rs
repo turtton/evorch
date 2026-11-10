@@ -1,8 +1,9 @@
 //! PR03b: shared legacy-GUI/core learning and passive evidence factories.
 //!
 //! Run jobs are local and fenced by ADR0024; claim_learning is the durable
-//! root/goal idempotency barrier. A separate flock elects the database-wide
-//! diagnostic/spool consumer, without excluding the other process's writers.
+//! root/goal idempotency barrier. Every local bus feeds passive diagnostics;
+//! atomic database observation receipts deduplicate shared events. A short flock
+//! serializes spool intake without a lifetime-elected consumer.
 use super::{BootstrapError, services::BackgroundServices};
 use runtime::{AgentRuntime, ownership::OwnerHost};
 use std::{
@@ -68,7 +69,7 @@ pub fn configure(
     }
 }
 
-/// Synchronous subscription and lease acquisition make startup deterministic.
+/// Synchronous subscription makes startup deterministic; no process is a permanent collector.
 /// Even a later factory failure is drained by the caller's startup guard.
 pub fn start(
     services: &mut BackgroundServices,
@@ -87,23 +88,21 @@ pub fn start(
         });
         return Ok(());
     };
-    let lease = storage::improvement_lease(&storage.db_path)?;
-    let global = lease.is_some();
     let spool = drafts.join("crash-spool");
     std::fs::create_dir_all(&spool)?;
     let hook = runtime::self_improvement::register_crash_spool(spool.canonicalize()?);
-    if global {
-        runtime.ingest_spooled_crashes();
-    }
+    ingest_available(runtime, &storage.db_path)?;
     let settings = runtime
         .self_improvement_settings()
         .ok_or("self-improvement not configured")?;
     let receiver = runtime.event_bus().subscribe();
     let weak = runtime.downgrade();
     let draining = runtime.clone();
+    let intake_db = storage.db_path.clone();
+    let drain_db = intake_db.clone();
     services.start("self-improvement", |stop| async move {
-        // Hold the DB lease and panic registration through writer acknowledgement.
-        let (_lease, _hook) = (lease, hook);
+        // The hook outlives producers and the final writer acknowledgement.
+        let _hook = hook;
         runtime::self_improvement::ImprovementCollector::new(settings)
             .run_until(
                 receiver,
@@ -111,8 +110,26 @@ pub fn start(
                     let _ = stop.await;
                     draining.drain_learning().await;
                     evaluations.wait_drained().await;
+                    if let Err(error) = ingest_available(&draining, &drain_db) {
+                        tracing::warn!(%error, "crash spool final intake failed");
+                    }
                 },
                 move |event| {
+                    if !matches!(
+                        &event.kind,
+                        event_bus::EventKind::Diagnostic(_)
+                            | event_bus::EventKind::Fault(
+                                event_bus::FaultEvent::SkillDiagnostic { .. }
+                            )
+                            | event_bus::EventKind::Lifecycle(
+                                event_bus::LifecycleEvent::AgentRunStateChanged {
+                                    to: event_bus::AgentRunPhase::Error,
+                                    ..
+                                }
+                            )
+                    ) {
+                        return false;
+                    }
                     let (run, thread) = match &event.kind {
                         event_bus::EventKind::Diagnostic(d) => {
                             (d.run_id.as_deref(), d.thread_id.as_deref())
@@ -142,11 +159,27 @@ pub fn start(
                             .zip(weak.upgrade())
                             .is_some_and(|(run, runtime)| runtime.owns_background_run(run));
                     }
-                    global
+                    if let Some(runtime) = weak.upgrade()
+                        && let Err(error) = ingest_available(&runtime, &intake_db)
+                    {
+                        tracing::warn!(%error, "crash spool intake failed");
+                    }
+                    // Local buses need no elected observer: storage receipts fence
+                    // duplicate delivery of the same event across owners.
+                    true
                 },
             )
             .await?;
         Ok(())
     });
+    Ok(())
+}
+
+fn ingest_available(runtime: &AgentRuntime, database: &Path) -> Result<(), storage::StorageError> {
+    // Only the read/delete intake is exclusive. No live process pins this lease,
+    // so any remaining host can take over on input or final drain without polling.
+    if let Some(_lease) = storage::improvement_lease(database)? {
+        runtime.ingest_spooled_crashes();
+    }
     Ok(())
 }

@@ -289,48 +289,8 @@ async fn gui_factory_and_core_partition_thread_and_global_work_on_one_database()
     write_config(root);
     let model = Arc::new(Model::default());
     let mut core = open(root, model.clone()).await;
-    // Construct precisely the factory the legacy GUI calls, on a second runtime.
-    let bus = Arc::new(EventBus::new(64));
-    let db = components::storage_config(&core.config, root.join("evorch-events.db"));
-    let store = storage::Storage::open(db.clone()).unwrap();
-    let gui_owner = Arc::new(
-        OwnerHost::open(
-            &root.join("owners"),
-            core.config.ownership.clone(),
-            bus.clone(),
-        )
-        .unwrap(),
-    );
-    let gui = learning::configure(
-        AgentRuntime::new(
-            bus.clone(),
-            Arc::new(tools::ToolExecutor::new(bus.clone())),
-            model.clone(),
-        ),
-        &core.config,
-        db.clone(),
-        store.handle(),
-        root,
-    );
-    let mut services = services::BackgroundServices::default();
-    let evaluation = eval::evaluator::EvaluationService::default();
-    services.start("evaluation", {
-        let evaluation = evaluation.clone();
-        |stop| async move {
-            let _ = stop.await;
-            evaluation.shutdown().await?;
-            Ok(())
-        }
-    });
-    learning::start(
-        &mut services,
-        &gui,
-        gui_owner.clone(),
-        &core.config,
-        &db,
-        evaluation,
-    )
-    .unwrap();
+    let (_store, gui, gui_owner, mut services) = gui_factory(root, &core, model.clone());
+    let bus = gui.event_bus();
     let permit = core.owner.start("core-thread").unwrap();
     assert!(gui_owner.start("core-thread").is_err());
     let run = core.runtime.delegate_background(
@@ -449,5 +409,153 @@ async fn shutdown_drains_an_inflight_lesson_review_before_collector_and_lease_re
         storage::improvement_lease(&dir.path().join("evorch-events.db"))
             .unwrap()
             .is_some()
+    );
+}
+
+fn gui_factory(
+    root: &std::path::Path,
+    core: &BootstrappedHost,
+    model: Arc<Model>,
+) -> (
+    storage::Storage,
+    AgentRuntime,
+    Arc<OwnerHost>,
+    services::BackgroundServices,
+) {
+    // Construct precisely the factory the legacy GUI calls, on a second runtime.
+    let bus = Arc::new(EventBus::new(64));
+    let db = components::storage_config(&core.config, root.join("evorch-events.db"));
+    let store = storage::Storage::open(db.clone()).unwrap();
+    let gui_owner = Arc::new(
+        OwnerHost::open(
+            &root.join("owners"),
+            core.config.ownership.clone(),
+            bus.clone(),
+        )
+        .unwrap(),
+    );
+    let gui = learning::configure(
+        AgentRuntime::new(
+            bus.clone(),
+            Arc::new(tools::ToolExecutor::new(bus.clone())),
+            model.clone(),
+        ),
+        &core.config,
+        db.clone(),
+        store.handle(),
+        root,
+    );
+    let mut services = services::BackgroundServices::default();
+    let evaluation = eval::evaluator::EvaluationService::default();
+    services.start("evaluation", {
+        let evaluation = evaluation.clone();
+        |stop| async move {
+            let _ = stop.await;
+            evaluation.shutdown().await?;
+            Ok(())
+        }
+    });
+    learning::start(
+        &mut services,
+        &gui,
+        gui_owner.clone(),
+        &core.config,
+        &db,
+        evaluation,
+    )
+    .unwrap();
+    (store, gui, gui_owner, services)
+}
+
+#[tokio::test]
+async fn review_m1_non_elected_bus_diagnostics_are_collected_without_broadcasting() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_config(root);
+    let model = Arc::new(Model::default());
+    let mut core = open(root, model.clone()).await;
+    let (_store, gui, _owner, mut services) = gui_factory(root, &core, model);
+    gui.event_bus().emit(diagnostic(None));
+    gui.event_bus().emit(event_bus::Event::new(
+        event_bus::FaultEvent::SkillDiagnostic {
+            kind: event_bus::SkillDiagnosticKind::ValidationError,
+            skill: "local-only".into(),
+            scope: "project".into(),
+            detail: "invalid metadata".into(),
+        },
+    ));
+    services.shutdown().await.unwrap();
+    core.shutdown().await.unwrap();
+    let rows = candidates(root);
+    for code in ["NoProgress", "SkillDiagnostic:ValidationError"] {
+        let row = rows
+            .iter()
+            .find(|r| r.code == code)
+            .unwrap_or_else(|| panic!("missing local {code}"));
+        assert_eq!(row.occurrences, 1);
+    }
+}
+
+#[tokio::test]
+async fn review_m2_remaining_host_collects_events_and_spool_after_first_host_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_config(root);
+    let model = Arc::new(Model::default());
+    let mut first = open(root, model.clone()).await;
+    let (_store, remaining, _owner, mut services) = gui_factory(root, &first, model);
+    first.shutdown().await.unwrap();
+    runtime::self_improvement::spool_fault(
+        &root.join("self-improvement/drafts/crash-spool"),
+        "StorageWriterHalted",
+        "handover",
+        "recovered after first owner exited",
+    )
+    .unwrap();
+    remaining.event_bus().emit(diagnostic(None));
+    services.shutdown().await.unwrap();
+    let rows = candidates(root);
+    for code in ["NoProgress", "StorageWriterHalted"] {
+        assert!(
+            rows.iter().any(|r| r.code == code),
+            "missing {code} after owner exit"
+        );
+    }
+}
+
+#[tokio::test]
+async fn review_m3_evaluation_work_prevents_idle_exit_until_it_is_drained() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = BootstrappedHost::open(options(dir.path())).await.unwrap();
+    assert!(!core.busy());
+    let sh = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|p| p.join("sh"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let mut child = tokio::process::Command::new(sh)
+        .args(["-c", "kill -STOP $$"])
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    core.evaluations
+        .spawn(async move {
+            let _ = released.await;
+            let _ = child.start_kill();
+            child.wait().await.unwrap();
+        })
+        .unwrap();
+    let busy = core.busy();
+    release.send(()).unwrap();
+    core.evaluations.shutdown().await.unwrap();
+    let drained = !core.busy();
+    core.shutdown().await.unwrap();
+    assert!(
+        busy,
+        "an evaluation child must keep the core alive without any active agent"
+    );
+    assert!(
+        drained,
+        "completed evaluation work must not keep the core alive"
     );
 }

@@ -588,13 +588,30 @@ pub(super) fn run_writer_with_index(
                 };
                 let _ = reply.send(result);
             }
-            Ok(Command::RecordImprovementCandidate(project, candidate, policy, reply)) => {
+            Ok(Command::RecordImprovementCandidate(
+                project,
+                candidate,
+                policy,
+                observation,
+                reply,
+            )) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(
                         "improvement writes suspended by storage limit".into(),
                     ))
                 } else {
-                    crate::improvement::record(&state.conn, &project, &candidate, policy)
+                    match observation {
+                        Some(key) => crate::improvement::record_observation(
+                            &state.conn,
+                            &project,
+                            &candidate,
+                            policy,
+                            &key,
+                        ),
+                        None => {
+                            crate::improvement::record(&state.conn, &project, &candidate, policy)
+                        }
+                    }
                 };
                 let _ = reply.send(result);
             }

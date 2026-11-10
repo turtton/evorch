@@ -110,6 +110,7 @@ pub struct BootstrappedHost {
     pub mcp: runtime::mcp::McpHostServices,
     pub usage_pricing: recorder::pricing::SharedUsagePricing,
     pub evaluator: Arc<evaluation::EvaluatorHost>,
+    evaluations: eval::evaluator::EvaluationService,
     #[cfg(any(test, feature = "test-support"))]
     pub composition: CompositionInventory,
     bridge: Option<OwnedStorageBridge>,
@@ -430,6 +431,7 @@ impl BootstrappedHost {
             runtime,
             owner,
             evaluator,
+            evaluations: evaluations.clone(),
             config,
             services: services::BackgroundServices::default(),
             mcp,
@@ -490,7 +492,8 @@ impl BootstrappedHost {
         // TODO(P9): once safe-point restart/auto-resume can restore an ordinary
         // chat's Waiting state, count that idle conversation as no work. Until
         // then retain all Waiting runs conservatively to avoid losing them.
-        self.runtime.pending_lane_stop_writes() != 0
+        self.evaluations.is_busy()
+            || self.runtime.pending_lane_stop_writes() != 0
             || !self.runtime.pending_lane_admissions().is_empty()
             || self.host.lock().unwrap().service().has_background_work()
             || self.runtime.list_agents().iter().any(|r| {
