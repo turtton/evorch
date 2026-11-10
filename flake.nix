@@ -123,15 +123,11 @@
             printf '%s\n' "''${cargoVendorDir:?}" > "$out/cargo-vendor-dir"
           '';
         };
-        # The non-CEF GUI is no longer built where the CEF GUI exists: building
-        # it too compiled the whole gui crate a second time next to evorch-gui-cef
-        # (about five minutes of the CI nix-build job). Systems without a CEF
-        # build keep it, as their only GUI.
-        shippedCargoArgs =
-          if isCefSystem then
-            "-p evorch -p evorch-core --bin evorch --bin evorch-core"
-          else
-            "-p evorch -p gui -p evorch-core --bin evorch --bin evorch-gui --bin evorch-core";
+        # No non-CEF GUI is built on any system: it compiled the whole gui crate
+        # a second time next to evorch-gui-cef (about five minutes of the CI
+        # nix-build job). The only GUI package is the CEF build below, on
+        # x86_64-linux; other systems get the CLI and evorch-core.
+        shippedCargoArgs = "-p evorch -p evorch-core --bin evorch --bin evorch-core";
         cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // {
           cargoExtraArgs = shippedCargoArgs;
           doCheck = false;
@@ -169,10 +165,6 @@
           # Recorded in self-improvement evidence; kept out of commonArgs so deps stay cached.
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
           postFixup = ''
-            ${pkgs.lib.optionalString (!isCefSystem) ''
-              wrapProgram "$out/bin/evorch-gui" \
-                --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
-            ''}
             wrapProgram "$out/bin/evorch-core" \
               --prefix PATH : "${pkgs.lib.makeBinPath ([ pkgs.which pkgs.git pkgs.coreutils ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.bubblewrap ])}"
           '';
@@ -187,14 +179,12 @@
             test "$helpStatus" -eq 1
             grep -q '^usage: evorch ' evorch-help.txt
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-              for binary in evorch ${pkgs.lib.optionalString (!isCefSystem) ".evorch-gui-wrapped"}; do
-                env -u LD_LIBRARY_PATH -u LIBSQLITE3_FLAGS \
-                  ${pkgs.stdenv.cc.bintools.dynamicLinker} --list "$out/bin/$binary"
-              done
+              env -u LD_LIBRARY_PATH -u LIBSQLITE3_FLAGS \
+                ${pkgs.stdenv.cc.bintools.dynamicLinker} --list "$out/bin/evorch"
             ''}
             runHook postInstallCheck
           '';
-          meta.mainProgram = if isCefSystem then "evorch" else "evorch-gui";
+          meta.mainProgram = "evorch";
         });
         evorch-core = craneLib.buildPackage (commonArgs // {
           pname = "evorch-core";
@@ -495,9 +485,8 @@
       {
         packages = {
           default = defaultPackage;
-          # Without CEF on every system; CI smoke-tests this one.
+          # The CLI and evorch-core, without any GUI, on every system.
           inherit evorch evorch-core;
-          evorch-gui = defaultPackage;
           # cargoArtifacts (crane buildDepsOnly) を attic に push するための専用出力。
           # Cargo manifests/config、lockfile、toolchain とビルド設定が同じなら
           # 再利用できる。製品ソース本文の変更だけでは deps を再ビルドしない。
@@ -507,22 +496,26 @@
           attic-client = atticClient;
         } // pkgs.lib.optionalAttrs isCefSystem {
           inherit evorch-gui-cef evorch-with-cef cefDist;
+          # The default package, named for the GUI it launches.
+          evorch-gui = defaultPackage;
           # The CEF build's cargoArtifacts, pushed to attic like evorch-deps.
           evorch-gui-cef-deps = cefCargoArtifacts;
         };
         checks.tests = tests;
         apps = {
+          # CEF systems launch the GUI; the others have only the CLI.
           default = {
             type = "app";
-            program = "${defaultPackage}/bin/evorch-gui";
-          };
-          evorch-gui = {
-            type = "app";
-            program = "${defaultPackage}/bin/evorch-gui";
+            program = if isCefSystem then "${defaultPackage}/bin/evorch-gui" else "${evorch}/bin/evorch";
           };
           evorch = {
             type = "app";
             program = "${evorch}/bin/evorch";
+          };
+        } // pkgs.lib.optionalAttrs isCefSystem {
+          evorch-gui = {
+            type = "app";
+            program = "${defaultPackage}/bin/evorch-gui";
           };
         };
         devShells = {
