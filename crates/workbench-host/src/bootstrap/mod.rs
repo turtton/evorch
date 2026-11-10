@@ -1,5 +1,5 @@
 //! GUI-free owner composition and reusable construction parts (ADR 0045 P8a).
-//! Legacy GUI wiring stays in place; background service wiring follows in P8b.
+//! Legacy GUI wiring stays in place during the single-core transition.
 //!
 //! Deliberate legacy GUI/core differences:
 //! - Core loads strict configuration from an explicit directory without env
@@ -11,9 +11,11 @@
 //!   core only holds shared leases and keeps its 5s tick. Both share DB settings.
 //! - Saved project access is read-only here; live settings updates remain with
 //!   the existing GUI. No project configuration can manufacture trust.
-//! - PR03 owns lane/PR/learning/MCP service factories. Register their stop and
+//! - MCP and catalog factories live in `host_services`; diagnostics/usage share
+//!   the owned storage bridge. Other PR03 services register their stop and
 //!   completion futures in `services`, never detach a storage-using task.
 pub mod components;
+mod host_services;
 pub mod models;
 mod project_models;
 pub mod services;
@@ -104,6 +106,8 @@ pub struct BootstrappedHost {
     pub owner: Arc<OwnerHost>,
     pub config: config::Config,
     pub services: services::BackgroundServices,
+    pub mcp: runtime::mcp::McpHostServices,
+    pub usage_pricing: recorder::pricing::SharedUsagePricing,
     #[cfg(any(test, feature = "test-support"))]
     pub composition: CompositionInventory,
     bridge: Option<OwnedStorageBridge>,
@@ -122,7 +126,7 @@ pub struct CompositionInventory {
 
 impl BootstrappedHost {
     pub async fn open(options: BootstrapOptions) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, None).await
+        Self::open_composed(options, None, None).await
     }
 
     /// The production composition with the model and the per-run sandbox replaced, so a test
@@ -133,12 +137,22 @@ impl BootstrappedHost {
         options: BootstrapOptions,
         seams: TestSeams,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, Some(seams)).await
+        Self::open_composed(options, Some(seams), None).await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn open_with_mcp_test_seams(
+        options: BootstrapOptions,
+        seams: TestSeams,
+        mcp: runtime::mcp::McpHostServices,
+    ) -> Result<Self, BootstrapError> {
+        Self::open_composed(options, Some(seams), Some(mcp)).await
     }
 
     async fn open_composed(
         options: BootstrapOptions,
         seams: Option<TestSeams>,
+        mcp: Option<runtime::mcp::McpHostServices>,
     ) -> Result<Self, BootstrapError> {
         let config = config::Config::load_strict(&config::LoadOptions {
             user_config_dir: Some(options.config_dir.clone()),
@@ -171,7 +185,7 @@ impl BootstrappedHost {
             storage,
             config.diagnostics.persistence,
             config.metrics.enabled,
-            pricing,
+            pricing.clone(),
             components::BridgeOptions {
                 session_id: "evorch-core".into(),
                 flush_every: Duration::from_secs(5),
@@ -182,6 +196,10 @@ impl BootstrappedHost {
         let credentials =
             tokio::task::spawn_blocking(move || sandbox::credential::open_default(credential_dir))
                 .await??;
+        let mcp = match mcp {
+            Some(mcp) => mcp,
+            None => host_services::mcp(&options.config_dir).await?,
+        };
         // Health stays available without providers, tools or a production sandbox.
         let components::ExecutionComponents {
             executor,
@@ -212,7 +230,7 @@ impl BootstrappedHost {
         let composed = runtime::compose_runtime(RuntimeComposition {
             config: &config,
             user_config_dir: Some(options.config_dir.clone()),
-            model_catalog_dir: None,
+            model_catalog_dir: Some(options.config_dir.join("catalog")),
             bus: bus.clone(),
             executor: executor.clone(),
             credential_store: credentials.clone(),
@@ -232,6 +250,7 @@ impl BootstrappedHost {
         )?);
         let runtime = composed
             .runtime
+            .with_mcp_service(mcp.runs.clone())
             .with_project_models(project_models::resolver(&options, credentials, bus.clone()))
             .with_sandbox_root(options.project_root.clone())
             .with_run_store(RunStore::open(&storage_config, handle.clone())?)
@@ -250,7 +269,7 @@ impl BootstrappedHost {
             .map_err(|_| "owner tombstone guard already set")?;
         runtime.set_thread_scratch(owner.thread_scratch());
         let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current())
-            .with_event_bus(bus)
+            .with_event_bus(bus.clone())
             .with_memory_storage(storage_config.clone())
             .with_team_writer(handle.clone())
             .with_ownership(owner.clone());
@@ -277,12 +296,23 @@ impl BootstrappedHost {
         let reclaim = runtime::thread_retention::ReclaimExecutor::spawn(
             runtime::thread_retention::ExecutorConfig::new(handle, storage_config, Some(artifacts)),
         )?;
+        let mut services = services::BackgroundServices::default();
+        host_services::start(
+            &mut services,
+            &options,
+            &config,
+            bus,
+            pricing.clone(),
+            mcp.clone(),
+        );
         Ok(Self {
             host,
             runtime,
             owner,
             config,
-            services: services::BackgroundServices::default(),
+            services,
+            mcp,
+            usage_pricing: pricing,
             #[cfg(any(test, feature = "test-support"))]
             composition,
             bridge: Some(bridge),

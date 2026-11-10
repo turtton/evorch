@@ -108,6 +108,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("OwnershipRegistryWait", TransientOrExternal),
         ("CompactionFailed", TransientOrExternal),
         ("ContextCheckpointSaved", Ignored),
+        ("mcp.owner_drained", Ignored),
         ("EvaluationFinished", Ignored),
         ("NestedOrchestratorRejected", Ignored),
         ("ThreadTodoReconcileFailed", Ignored),

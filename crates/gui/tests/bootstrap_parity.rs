@@ -71,6 +71,14 @@ max_bytes = 2097152
         ..Default::default()
     };
     let config = config::Config::load(&options).unwrap();
+    // Core now starts catalog as a host service; keep this composition test offline.
+    let catalog_dir = user_dir.join("catalog");
+    std::fs::create_dir_all(&catalog_dir).unwrap();
+    std::fs::copy(
+        test_support::model_catalog_dir().join("models-dev.json"),
+        catalog_dir.join("models-dev.json"),
+    )
+    .unwrap();
     let mut core = BootstrappedHost::open(BootstrapOptions {
         config_dir: user_dir.clone(),
         project_root: root.clone(),
@@ -199,8 +207,11 @@ max_bytes = 2097152
         assert_eq!(policy.escalation_approval, config::EscalationApproval::User);
         assert!(policy.escalate_to_user_on_deny);
     }
-    // No service was silently started by extracting constructors. PR03 adds them.
-    assert_eq!(core.services.names().count(), 0);
+    // PR03c intentionally starts these services at the core composition root.
+    // Additional host services do not affect the shared constructor parity.
+    let services = core.services.names().collect::<Vec<_>>();
+    assert!(services.contains(&"mcp"));
+    assert!(services.contains(&"catalog"));
     // Neither root infers project trust or extra mounts from the project config.
     assert!(
         core.runtime

@@ -27,7 +27,7 @@ pub(super) fn resolver(
                     credential_store: credentials.clone(),
                     bus: bus.clone(),
                     env: Arc::new(routing::ProcessEnv),
-                    model_catalog_dir: None,
+                    model_catalog_dir: Some(options.config_dir.join("catalog")),
                     load_options: config::LoadOptions {
                         project_dir: Some(root.to_path_buf()),
                         user_config_dir: Some(options.config_dir.clone()),
