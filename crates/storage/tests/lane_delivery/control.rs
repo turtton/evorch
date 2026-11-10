@@ -1,6 +1,8 @@
 //! Phase 2 storage contracts: deterministic integer clocks, explicit writer
 //! completion and barriers. The shared fixture exercises the production writer.
 use super::*;
+#[path = "close.rs"]
+mod close;
 #[path = "forward_return.rs"]
 mod forward_return;
 #[path = "management.rs"]
@@ -12,7 +14,19 @@ fn rejected<T: std::fmt::Debug>(r: Result<T, StorageError>, reason: LaneOperatio
         "expected {reason:?}, got {r:?}"
     );
 }
+/// The lead thread exists with its current root, which a lead close compares.
+fn lead_thread(f: &Fixture) {
+    f.h()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "lead".into(),
+            root_run_id: Some("lead-root".into()),
+            chat_role: Some("Orchestrator".into()),
+            ..Default::default()
+        }])
+        .unwrap();
+}
 fn started(f: &Fixture) -> LaneDeliveryOwner {
+    lead_thread(f);
     f.lane(1, LanePolicy::Attached);
     f.h().start_lane_run("lane-1", 0, "run-1", 2).unwrap();
     let owner = LaneDeliveryOwner {
@@ -47,6 +61,7 @@ fn begin(f: &Fixture, n: u8) -> BeginLaneVerification {
         target: f.h().lane_verification_target("lane-1".into()).unwrap(),
         reviewer_run_id: format!("reviewer-{n}"),
         pr_evidence: None,
+        caveats: vec![],
         at_ns: 10,
     }
 }
@@ -71,13 +86,48 @@ fn done(f: &Fixture, run: &str, role: &str, phase: &str) {
     record.updated_at_ns = 20;
     f.h().upsert_run_context(&record).unwrap();
 }
+fn lead() -> LaneCloser {
+    LaneCloser::Lead {
+        thread_id: "lead".into(),
+        root_run_id: "lead-root".into(),
+    }
+}
+/// The close a lead would send after observing `r.target`, with `r` attached for reference.
 fn close_request(r: &BeginLaneVerification) -> CloseLane {
     CloseLane {
-        lead_thread_id: r.lead_thread_id.clone(),
-        target: r.target.clone(),
-        verification_id: r.verification_id,
-        pr_evidence: r.pr_evidence.clone(),
+        closer: lead(),
+        kind: LaneCloseKind::LeadClosed,
+        lane_id: r.target.lane_id.clone(),
+        ready_seq: Some(r.target.ready_seq),
+        expected_management_revision: r.target.management_revision,
+        expected_request_revision: r.target.request_revision,
+        note: "accepted".into(),
+        verification_id: Some(r.verification_id),
         at_ns: 30,
+    }
+}
+/// A bare lead close of whatever the lane looks like now, with nothing attached.
+fn close_now(f: &Fixture) -> CloseLane {
+    let c = f.h().lane_close_context("lane-1".into()).unwrap();
+    CloseLane {
+        closer: lead(),
+        kind: LaneCloseKind::LeadClosed,
+        lane_id: "lane-1".into(),
+        ready_seq: c.latest_ready_seq,
+        expected_management_revision: c.management_revision,
+        expected_request_revision: c.request_revision,
+        note: "accepted on my own judgement".into(),
+        verification_id: None,
+        at_ns: 30,
+    }
+}
+fn human_close(f: &Fixture, kind: LaneCloseKind) -> CloseLane {
+    CloseLane {
+        closer: LaneCloser::Human,
+        kind,
+        ready_seq: None,
+        note: "ending this lane".into(),
+        ..close_now(f)
     }
 }
 fn verified(f: &Fixture, n: u8) -> BeginLaneVerification {
@@ -575,9 +625,11 @@ fn verification_submit_is_bound_to_reserved_run_and_is_one_shot() {
         ),
         LaneOperationError::AlreadySubmitted,
     );
-    rejected(
-        f.h().close_lane(close_request(&r)),
-        LaneOperationError::ReviewerIncomplete,
+    // A review that has only submitted is attachable and never blocks a close.
+    let early = f.h().close_lane(close_request(&r)).unwrap();
+    assert_eq!(
+        early.review.as_ref().unwrap().state,
+        LaneVerificationState::Submitted
     );
     let f = f.reopen();
     assert_eq!(
@@ -598,15 +650,19 @@ fn verification_submit_is_bound_to_reserved_run_and_is_one_shot() {
     f.h()
         .complete_lane_verification(r.verification_id, r.reviewer_run_id.clone(), 21)
         .unwrap();
-    let closed = f.h().close_lane(close_request(&r)).unwrap();
+    // The close decided earlier keeps the state it saw; later completion rewrites nothing.
     let again = f.h().close_lane(close_request(&r)).unwrap();
     assert_eq!(again.outcome, LaneCloseOutcome::AlreadyClosed);
-    assert_eq!(again.close_id, closed.close_id);
-    assert_eq!(again.verification_ref, closed.verification_ref);
+    assert_eq!(again.close_id, early.close_id);
+    assert_eq!(
+        again.review.as_ref().unwrap().state,
+        LaneVerificationState::Submitted
+    );
+    assert!(!again.review.unwrap().artifact_rechecked_at_close);
     assert_eq!(f.count("lane_closes"), 1);
 }
 #[test]
-fn done_without_submit_and_incomplete_or_rejected_checks_cannot_close() {
+fn incomplete_and_rejected_reviews_are_recorded_but_never_block_a_close() {
     let f = Fixture::new();
     started(&f);
     f.h()
@@ -636,13 +692,17 @@ fn done_without_submit_and_incomplete_or_rejected_checks_cannot_close() {
     f.h()
         .complete_lane_verification(r.verification_id, r.reviewer_run_id.clone(), 21)
         .unwrap();
-    rejected(
-        f.h().close_lane(close_request(&r)),
-        LaneOperationError::VerificationRejected,
-    );
+    let closed = f.h().close_lane(close_request(&r)).unwrap();
+    let review = closed.review.unwrap();
+    assert_eq!(closed.kind, LaneCloseKind::LeadClosed);
+    assert_eq!(review.state, LaneVerificationState::Completed);
+    assert_eq!(review.verdict, Some(LaneVerificationVerdict::Rejected));
+    assert!(review.targets_this_ready);
 }
 #[test]
-fn target_changes_reject_submit_and_close_and_reopen_only_current_projection() {
+fn target_changes_reject_a_stale_close_clear_the_current_one_and_keep_late_reviews() {
+    // Reviews are references: a review that finishes after the lane moved on is kept.
+    // A close decided on an older observation is rejected, never applied.
     for change in ["report", "brief", "input", "artifact"] {
         let f = Fixture::new();
         started(&f);
@@ -672,16 +732,14 @@ fn target_changes_reject_submit_and_close_and_reopen_only_current_projection() {
                 f.h().append_lane_report("lane-1", 1, report, 40).unwrap();
             }
         }
-        assert!(
-            f.h()
-                .submit_lane_verification(
-                    pending.verification_id,
-                    pending.reviewer_run_id,
-                    submission(),
-                    41
-                )
-                .is_err()
-        );
+        f.h()
+            .submit_lane_verification(
+                pending.verification_id,
+                pending.reviewer_run_id,
+                submission(),
+                41,
+            )
+            .unwrap();
         assert!(f.h().close_lane(close_request(&r)).is_err());
         assert_eq!(
             f.sql()
@@ -703,7 +761,7 @@ fn target_changes_reject_submit_and_close_and_reopen_only_current_projection() {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(history.verification_ref, r.verification_id);
+        assert_eq!(history.review.unwrap().verification_id, r.verification_id);
     }
 }
 #[test]
@@ -1159,7 +1217,7 @@ fn attention_derives_delivery_failure_stop_capacity_guard_and_stall_and_resolves
     )));
 }
 #[test]
-fn pr_facts_versions_head_and_link_are_bound_without_fetching_in_close() {
+fn pr_facts_are_bound_to_a_review_but_a_close_never_checks_or_fetches_them() {
     use storage::pull_requests::*;
     let f = Fixture::new();
     started(&f);
@@ -1215,13 +1273,9 @@ fn pr_facts_versions_head_and_link_are_bound_without_fetching_in_close() {
     f.h()
         .commit_pull_request_fetch(&key, seq, facts.clone(), 22)
         .unwrap();
-    rejected(
-        f.h().close_lane(close_request(&r)),
-        LaneOperationError::EvidenceUnavailable,
-    );
-    let mut close = close_request(&r);
-    close.pr_evidence = f.h().lane_pr_evidence("thread-1".into()).unwrap();
-    f.h().close_lane(close).unwrap();
+    // The facts moved on after the review; the close records the review's snapshot.
+    let closed = f.h().close_lane(close_request(&r)).unwrap();
+    assert_eq!(closed.review.unwrap().pr_evidence, r.pr_evidence);
     assert_eq!(
         f.h()
             .pull_request_snapshot(&key)
@@ -1248,9 +1302,10 @@ fn pr_facts_versions_head_and_link_are_bound_without_fetching_in_close() {
         f.h().lane_pr_evidence("thread-1".into()),
         LaneOperationError::EvidenceUnavailable,
     );
-    rejected(
-        f.h().close_lane(close_request(&r)),
-        LaneOperationError::EvidenceUnavailable,
+    // A failed fetch or another PR changes nothing about the close that stands.
+    assert_eq!(
+        f.h().close_lane(close_request(&r)).unwrap().outcome,
+        LaneCloseOutcome::AlreadyClosed
     );
     f.h()
         .link_pull_request(LinkPullRequest {
@@ -1260,9 +1315,9 @@ fn pr_facts_versions_head_and_link_are_bound_without_fetching_in_close() {
             at_ns: 25,
         })
         .unwrap();
-    rejected(
-        f.h().close_lane(close_request(&r)),
-        LaneOperationError::EvidenceUnavailable,
+    assert_eq!(
+        f.h().close_lane(close_request(&r)).unwrap().outcome,
+        LaneCloseOutcome::AlreadyClosed
     );
 }
 #[test]
@@ -1373,11 +1428,10 @@ fn lead_answer_acceptance_atomically_advances_target_and_progress_only_once() {
         f.h().lane_verification_target("lane-1".into()).unwrap(),
         current
     );
-    rejected(
-        f.h()
-            .submit_lane_verification(r.verification_id, r.reviewer_run_id, submission(), 15),
-        LaneOperationError::StaleVerification,
-    );
+    // The pending review is a reference for the older request: kept, not discarded.
+    f.h()
+        .submit_lane_verification(r.verification_id, r.reviewer_run_id, submission(), 15)
+        .unwrap();
 }
 
 #[test]

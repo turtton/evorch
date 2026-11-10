@@ -149,11 +149,16 @@ pub enum LaneQuestionCapacity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LaneVerificationState {
-    Pending,
-    Submitted,
-    Completed,
-    Incomplete,
+pub enum LaneReadyState {
+    /// No fixed artifact is named and nothing was reviewed.
+    NoEvidence,
+    /// A fixed artifact is named; no independent review exists.
+    Unreviewed,
+    ReviewInProgress,
+    /// The finished review rejected the Ready, or never completed.
+    ReviewRejected,
+    /// The review approved; the lead has not closed.
+    AwaitingClose,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -202,11 +207,11 @@ pub enum LaneAttentionKind {
         attempts: u32,
         suppressed: bool,
     },
-    /// The lane says it is ready; nothing independent has confirmed it.
-    ReadyUnverified {
+    /// The lane reported Ready and its lead has not closed it. Not a stall of the work,
+    /// and no state here stops the lead from closing.
+    ReadyUnclosed {
         ready_seq: Sequence,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        verification: Option<LaneVerificationState>,
+        readiness: LaneReadyState,
     },
     QuestionCapacityBlocked {
         capacity: LaneQuestionCapacity,

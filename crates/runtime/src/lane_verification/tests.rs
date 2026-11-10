@@ -1,4 +1,5 @@
 use super::*;
+use crate::lane_close::{BEFORE_CLOSE_COMMIT, LaneCloseRequest};
 mod management;
 use agents::Role;
 use event_bus::{EventBus, EventKind, LifecycleEvent};
@@ -275,15 +276,24 @@ impl Fixture {
             .await
             .unwrap()
     }
+    /// The close a lead sends after observing what `v` was started for.
+    fn close_request(
+        &self,
+        v: Option<&LaneVerification>,
+        target: &LaneVerificationTarget,
+    ) -> LaneCloseRequest {
+        LaneCloseRequest {
+            lane_id: self.lane.lane_id.clone(),
+            ready_seq: target.ready_seq,
+            expected_management_revision: target.management_revision,
+            expected_request_revision: target.request_revision,
+            note: "accepted on my own judgement".into(),
+            verification_id: v.map(|v| v.verification_id),
+        }
+    }
     async fn close(&self, v: &LaneVerification) -> Result<LaneCloseResult, LaneError> {
         self.runtime
-            .close_verified_lane(
-                self.lead,
-                &self.lane.lane_id,
-                v.target.ready_seq,
-                v.verification_id,
-            )
-            .await
+            .close_lane(self.lead, self.close_request(Some(v), &v.target))
     }
     async fn cleanup(&self) {
         for run in [self.lead, self.lane.root_run_id] {
@@ -307,23 +317,22 @@ async fn approved_reviewer_completes_and_close_is_idempotent_without_pr() {
     assert_eq!(saved.state, LaneVerificationState::Completed);
     let closed = f.close(&v).await.unwrap();
     assert_eq!(closed.outcome, LaneCloseOutcome::Closed);
+    assert_eq!(closed.kind, LaneCloseKind::LeadClosed);
+    let review = closed.review.clone().unwrap();
+    assert_eq!(review.verification_id, v.verification_id);
+    assert_eq!(review.verdict, Some(LaneVerificationVerdict::Approved));
+    assert!(!review.artifact_rechecked_at_close);
     let retry = f.close(&v).await.unwrap();
+    // A retry without the review attached still returns the close that stands.
     let alternate = f
         .runtime
-        .close_verified_lane(
-            f.lead,
-            &f.lane.lane_id,
-            v.target.ready_seq,
-            VerificationId([0; 16]),
-        )
-        .await
+        .close_lane(f.lead, f.close_request(None, &v.target))
         .unwrap();
     assert_eq!(alternate.outcome, LaneCloseOutcome::AlreadyClosed);
-    assert_eq!(alternate.verification_ref, closed.verification_ref);
+    assert_eq!(alternate.review, closed.review);
     assert_eq!(alternate.close_id, closed.close_id);
     assert_eq!(retry.outcome, LaneCloseOutcome::AlreadyClosed);
     assert_eq!(retry.close_id, closed.close_id);
-    assert_eq!(retry.verification_ref, closed.verification_ref);
     {
         let requests = f.model.requests.lock().unwrap();
         let (_, _, tools) = requests
@@ -353,30 +362,42 @@ async fn approved_reviewer_completes_and_close_is_idempotent_without_pr() {
     f.cleanup().await;
 }
 #[tokio::test]
-async fn silent_done_error_cancel_and_rejection_cannot_close() {
+async fn no_review_outcome_blocks_a_lead_close() {
     for mode in [Mode::Silent, Mode::Error, Mode::Hold, Mode::Reject] {
         let f = Fixture::new(mode).await;
         let v = f.verify().await;
         let reviewer = v.reviewer_run_id.parse().unwrap();
-        if matches!(mode, Mode::Hold) {
+        let closed = if matches!(mode, Mode::Hold) {
+            // The Reviewer is still running; the lead decides without waiting for it.
             f.model.entered.notified().await;
-            assert_eq!(f.close(&v).await.unwrap_err().code, "reviewer_incomplete");
+            let closed = f.close(&v).await.unwrap();
             f.runtime.cancel(reviewer).unwrap();
-        }
-        let _ = f.runtime.wait(reviewer).await;
-        assert_eq!(
-            f.close(&v).await.unwrap_err().code,
-            if matches!(mode, Mode::Reject) {
-                "verification_rejected"
-            } else {
-                "reviewer_incomplete"
+            let _ = f.runtime.wait(reviewer).await;
+            closed
+        } else {
+            let _ = f.runtime.wait(reviewer).await;
+            f.close(&v).await.unwrap()
+        };
+        assert_eq!(closed.outcome, LaneCloseOutcome::Closed);
+        assert_eq!(closed.kind, LaneCloseKind::LeadClosed);
+        let review = closed.review.unwrap();
+        match mode {
+            Mode::Reject => {
+                assert_eq!(review.state, LaneVerificationState::Completed);
+                assert_eq!(review.verdict, Some(LaneVerificationVerdict::Rejected));
             }
-        );
+            // Never submitted: attached as it was, not as a verdict.
+            _ => {
+                assert_eq!(review.state, LaneVerificationState::Pending);
+                assert_eq!(review.verdict, None);
+            }
+        }
         f.cleanup().await;
     }
 }
 #[tokio::test]
-async fn external_digest_and_new_report_invalidate_without_rewriting_evidence() {
+async fn a_changed_artifact_and_a_new_report_do_not_rewrite_evidence_and_a_stale_close_is_rejected()
+{
     let f = Fixture::new(Mode::Approve).await;
     let v = f.verify().await;
     f.runtime
@@ -388,10 +409,10 @@ async fn external_digest_and_new_report_invalidate_without_rewriting_evidence() 
         .handle()
         .lane_verification(v.verification_id)
         .unwrap();
+    // A close never re-observes the artifact.
     std::fs::write(f.dir.path().join("artifact.txt"), b"unreviewed edit").unwrap();
-    assert_eq!(f.close(&v).await.unwrap_err().code, "artifact_changed");
-    std::fs::write(f.dir.path().join("artifact.txt"), b"verified contents").unwrap();
-    f.close(&v).await.unwrap();
+    let request = f.close_request(Some(&v), &v.target);
+    f.runtime.close_lane(f.lead, request.clone()).unwrap();
     f.report();
     assert!(
         f.storage
@@ -400,13 +421,129 @@ async fn external_digest_and_new_report_invalidate_without_rewriting_evidence() 
             .unwrap()
             .is_none()
     );
-    assert_eq!(f.close(&v).await.unwrap_err().code, "stale_verification");
+    assert_eq!(
+        f.runtime.close_lane(f.lead, request).unwrap_err().code,
+        "stale_ready"
+    );
     assert_eq!(
         f.storage
             .handle()
             .lane_verification(v.verification_id)
             .unwrap(),
         old
+    );
+    f.cleanup().await;
+}
+#[tokio::test]
+async fn verify_starts_a_reviewer_with_a_caveat_when_the_artifact_changed() {
+    let f = Fixture::new(Mode::Approve).await;
+    std::fs::write(f.dir.path().join("artifact.txt"), b"edited since the Ready").unwrap();
+    let v = f.verify().await;
+    assert!(
+        v.caveats.iter().any(|c| c.contains("artifact differs")),
+        "{:?}",
+        v.caveats
+    );
+    f.runtime
+        .wait(v.reviewer_run_id.parse().unwrap())
+        .await
+        .unwrap();
+    let closed = f.close(&v).await.unwrap();
+    assert_eq!(closed.review.unwrap().caveats, v.caveats);
+    f.cleanup().await;
+}
+#[tokio::test]
+async fn a_revised_brief_makes_an_older_ready_unclosable_by_the_lead() {
+    let f = Fixture::new(Mode::Approve).await;
+    let lane = f.storage.handle().lane(&f.lane.lane_id).unwrap().unwrap();
+    let mut brief = lane.brief.clone();
+    brief.constraints.push("a new constraint".into());
+    f.storage
+        .handle()
+        .revise_lane_brief(&lane.lane_id, lane.brief_revision, brief, 3)
+        .unwrap();
+    // The lead re-reads every revision after the revision and still holds the old Ready.
+    let now = f
+        .storage
+        .handle()
+        .lane_close_context(f.lane.lane_id.clone())
+        .unwrap();
+    let request = LaneCloseRequest {
+        lane_id: f.lane.lane_id.clone(),
+        ready_seq: now.latest_ready_seq.unwrap(),
+        expected_management_revision: now.management_revision,
+        expected_request_revision: now.request_revision,
+        note: "closing the old Ready".into(),
+        verification_id: None,
+    };
+    assert_eq!(
+        f.runtime.close_lane(f.lead, request).unwrap_err().code,
+        "stale_brief"
+    );
+    assert!(
+        f.storage
+            .handle()
+            .current_lane_close(f.lane.lane_id.clone())
+            .unwrap()
+            .is_none()
+    );
+    // A Ready for the revised brief closes.
+    f.report();
+    let now = f
+        .storage
+        .handle()
+        .lane_close_context(f.lane.lane_id.clone())
+        .unwrap();
+    let request = LaneCloseRequest {
+        lane_id: f.lane.lane_id.clone(),
+        ready_seq: now.latest_ready_seq.unwrap(),
+        expected_management_revision: now.management_revision,
+        expected_request_revision: now.request_revision,
+        note: "closing the new Ready".into(),
+        verification_id: None,
+    };
+    f.runtime.close_lane(f.lead, request).unwrap();
+    f.cleanup().await;
+}
+#[tokio::test]
+async fn a_root_replaced_between_authorization_and_commit_cannot_close() {
+    let f = Fixture::new(Mode::Approve).await;
+    let now = f
+        .storage
+        .handle()
+        .lane_close_context(f.lane.lane_id.clone())
+        .unwrap();
+    let request = LaneCloseRequest {
+        lane_id: f.lane.lane_id.clone(),
+        ready_seq: now.latest_ready_seq.unwrap(),
+        expected_management_revision: now.management_revision,
+        expected_request_revision: now.request_revision,
+        note: "close".into(),
+        verification_id: None,
+    };
+    let db = f.dir.path().join("lanes.db");
+    BEFORE_CLOSE_COMMIT.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            // Stop followed by a restart: the lead thread's root is another run now.
+            rusqlite::Connection::open(db)
+                .unwrap()
+                .execute(
+                    "UPDATE threads SET root_run_id='the-restarted-root' WHERE thread_id='lead'",
+                    [],
+                )
+                .unwrap();
+        }))
+    });
+    assert_eq!(
+        f.runtime.close_lane(f.lead, request).unwrap_err().code,
+        "not_current_lead"
+    );
+    assert!(
+        f.storage
+            .handle()
+            .current_lane_close(f.lane.lane_id.clone())
+            .unwrap()
+            .is_none()
     );
     f.cleanup().await;
 }
@@ -434,13 +571,13 @@ async fn pr_requirement_is_explicit_and_lane_never_inherits_parent_pr() {
     // Test the enforcement entry directly; the serialized brief is also checked by
     // storage's revision CAS when a real brief update races verify/submit/close.
     assert_eq!(
-        f.runtime
-            .verification_pr(&lane, true)
-            .await
-            .unwrap_err()
-            .code,
+        f.runtime.verification_pr(&lane).await.unwrap_err().code,
         "evidence_unavailable"
     );
+    // For a review that is only a caveat, never a refusal.
+    let (evidence, review, caveats) = f.runtime.verification_pr_advisory(&lane).await;
+    assert!(evidence.is_none() && review.is_none());
+    assert_eq!(caveats.len(), 1);
     f.cleanup().await;
 }
 #[test]
@@ -613,29 +750,35 @@ fn install_pr_with(
     (service, clock, source, key)
 }
 #[tokio::test]
-async fn fresh_pr_versions_are_bound_and_close_never_fetches_even_for_old_missing_or_failed_facts()
-{
+async fn fresh_pr_versions_are_bound_to_a_review_and_a_close_never_fetches_or_checks_them() {
     use crate::pull_requests::WallClock;
     use storage::pull_requests::*;
     let f = Fixture::new(Mode::Approve).await;
     let lane = require_pr(&f);
     let (service, clock, source, key) = install_pr(&f);
     assert_eq!(
-        f.runtime
-            .verification_pr(&lane, false)
-            .await
-            .unwrap_err()
-            .code,
+        f.runtime.verification_pr(&lane).await.unwrap_err().code,
         "evidence_unavailable"
     );
-    assert_eq!(
-        f.runtime
-            .verify_lane(f.lead, &lane.lane_id, lane.latest_report_seq)
-            .await
-            .unwrap_err()
-            .code,
-        "evidence_unavailable"
-    ); // NoFacts + NotOwner
+    // NoFacts + NotOwner: the review still starts, with the missing facts noted.
+    let early = f
+        .runtime
+        .verify_lane(f.lead, &lane.lane_id, lane.latest_report_seq)
+        .await
+        .unwrap();
+    assert!(early.pr_evidence.is_none());
+    assert!(
+        early
+            .caveats
+            .iter()
+            .any(|c| c.contains("PR facts were not available")),
+        "{:?}",
+        early.caveats
+    );
+    f.runtime
+        .wait(early.reviewer_run_id.parse().unwrap())
+        .await
+        .unwrap();
     let seq = f.storage.handle().begin_pull_request_fetch(&key).unwrap();
     f.storage
         .handle()
@@ -658,12 +801,17 @@ async fn fresh_pr_versions_are_bound_and_close_never_fetches_even_for_old_missin
         .handle()
         .commit_pull_request_fetch(&key, seq, facts(), clock.now_ns() + 1)
         .unwrap();
-    f.close(&v).await.unwrap();
+    let closed = f.close(&v).await.unwrap();
+    assert_eq!(closed.review.unwrap().pr_evidence, v.pr_evidence);
     clock.0.store(
         clock.now_ns() + 61_000_000_000,
         std::sync::atomic::Ordering::SeqCst,
     );
-    assert_eq!(f.close(&v).await.unwrap_err().code, "evidence_unavailable"); // TooOld, no refresh
+    // TooOld facts, no refresh: the close that stands is returned.
+    assert_eq!(
+        f.close(&v).await.unwrap().outcome,
+        LaneCloseOutcome::AlreadyClosed
+    );
     let seq = f.storage.handle().begin_pull_request_fetch(&key).unwrap();
     f.storage
         .handle()
@@ -677,7 +825,10 @@ async fn fresh_pr_versions_are_bound_and_close_never_fetches_even_for_old_missin
             clock.now_ns(),
         )
         .unwrap();
-    assert_eq!(f.close(&v).await.unwrap_err().code, "evidence_unavailable"); // LastFetchFailed
+    assert_eq!(
+        f.close(&v).await.unwrap().outcome,
+        LaneCloseOutcome::AlreadyClosed
+    ); // LastFetchFailed
     assert!(
         source.calls().is_empty(),
         "neither close nor a NotOwner refresh fetched"
@@ -693,7 +844,7 @@ async fn fresh_pr_versions_are_bound_and_close_never_fetches_even_for_old_missin
     f.cleanup().await;
 }
 #[tokio::test]
-async fn relink_head_and_required_facts_changes_reject_old_evidence() {
+async fn relink_head_and_required_facts_changes_never_reject_a_close() {
     use crate::pull_requests::WallClock;
     for change in ["head", "checks", "link"] {
         let f = Fixture::new(Mode::Approve).await;
@@ -732,7 +883,8 @@ async fn relink_head_and_required_facts_changes_reject_old_evidence() {
                 .commit_pull_request_fetch(&key, seq, changed, clock.now_ns())
                 .unwrap();
         }
-        assert_eq!(f.close(&v).await.unwrap_err().code, "evidence_unavailable");
+        let closed = f.close(&v).await.unwrap();
+        assert_eq!(closed.review.unwrap().pr_evidence, v.pr_evidence);
         assert!(source.calls().is_empty());
         service.shutdown();
         f.cleanup().await;
@@ -774,6 +926,14 @@ async fn only_current_lead_can_verify_and_detached_lanes_are_not_closable() {
             3,
         )
         .unwrap();
+    let request = f.close_request(Some(&v), &v.target);
+    assert_eq!(
+        f.runtime
+            .close_lane(f.lane.root_run_id, request.clone())
+            .unwrap_err()
+            .code,
+        "not_current_lead"
+    );
     assert_eq!(f.close(&v).await.unwrap_err().code, "not_attached");
     f.runtime
         .cancel(v.reviewer_run_id.parse().unwrap())
@@ -834,7 +994,8 @@ async fn forged_lead_worker_advisor_and_different_verification_reviewer_cannot_s
     f.cleanup().await;
 }
 #[tokio::test]
-async fn a_submission_without_normal_reviewer_termination_is_not_complete() {
+async fn a_submission_without_normal_reviewer_termination_is_not_complete_but_never_blocks_a_close()
+{
     let f = Fixture::new(Mode::Hold).await;
     let v = f.verify().await;
     f.model.entered.notified().await;
@@ -857,17 +1018,34 @@ async fn a_submission_without_normal_reviewer_termination_is_not_complete() {
             crate::run_store::review_time_ns(),
         )
         .unwrap();
-    assert_eq!(f.close(&v).await.unwrap_err().code, "reviewer_incomplete");
+    // Submitted but still running: attachable, recorded as submitted.
+    let closed = f.close(&v).await.unwrap();
+    assert_eq!(
+        closed.review.unwrap().state,
+        LaneVerificationState::Submitted
+    );
     f.runtime
         .cancel(v.reviewer_run_id.parse().unwrap())
         .unwrap();
     let _ = f.runtime.wait(v.reviewer_run_id.parse().unwrap()).await;
-    assert_eq!(f.close(&v).await.unwrap_err().code, "reviewer_incomplete");
+    assert_eq!(
+        f.storage
+            .handle()
+            .lane_verification(v.verification_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        LaneVerificationState::Submitted
+    );
+    assert_eq!(
+        f.close(&v).await.unwrap().outcome,
+        LaneCloseOutcome::AlreadyClosed
+    );
     f.cleanup().await;
 }
 
 #[tokio::test]
-async fn lane_input_report_and_brief_changes_win_the_submission_cas() {
+async fn lane_input_report_and_brief_changes_do_not_discard_a_review_in_flight() {
     for change in ["input", "report", "brief"] {
         let mut f = Fixture::new(Mode::Hold).await;
         let v = f.verify().await;
@@ -903,9 +1081,27 @@ async fn lane_input_report_and_brief_changes_win_the_submission_cas() {
             .lane_verification(v.verification_id)
             .unwrap()
             .unwrap();
-        assert!(saved.submission.is_none());
-        assert_eq!(saved.state, LaneVerificationState::Pending);
-        assert!(f.close(&v).await.is_err());
+        // The review is a reference for an older observation: kept, not discarded.
+        assert!(saved.submission.is_some());
+        assert_eq!(saved.state, LaneVerificationState::Completed);
+        let current = f
+            .storage
+            .handle()
+            .lane_close_context(f.lane.lane_id.clone())
+            .unwrap();
+        let mut target = v.target.clone();
+        target.ready_seq = current.latest_ready_seq.unwrap();
+        target.request_revision = current.request_revision;
+        let attempt = f
+            .runtime
+            .close_lane(f.lead, f.close_request(Some(&v), &target));
+        match change {
+            // The Ready is for the old brief.
+            "brief" => assert_eq!(attempt.unwrap_err().code, "stale_brief"),
+            // The Ready is a newer one; the review was of the older Ready.
+            "report" => assert!(!attempt.unwrap().review.unwrap().targets_this_ready),
+            _ => assert!(attempt.unwrap().review.unwrap().targets_this_ready),
+        }
         f.cleanup().await;
     }
 }
@@ -933,7 +1129,8 @@ async fn untargeted_lead_input_preserves_evidence_but_lane_input_reopens_current
             .unwrap(),
         before
     );
-    let closed = f.close(&v).await.unwrap();
+    let request = f.close_request(Some(&v), &v.target);
+    let closed = f.runtime.close_lane(f.lead, request.clone()).unwrap();
     let saved = f
         .storage
         .handle()
@@ -950,7 +1147,11 @@ async fn untargeted_lead_input_preserves_evidence_but_lane_input_reopens_current
             .unwrap()
             .is_none()
     );
-    assert!(f.close(&v).await.is_err());
+    // The old request is stale; it cannot close again by retry.
+    assert_eq!(
+        f.runtime.close_lane(f.lead, request).unwrap_err().code,
+        "stale_request"
+    );
     assert_eq!(
         f.storage
             .handle()
@@ -1030,53 +1231,62 @@ fn commit_fixture(f: &Fixture) -> (String, String) {
         .unwrap();
     (head, tree)
 }
-#[tokio::test]
-async fn commit_evidence_uses_resolved_clean_checkout_and_rejects_dirty_or_moved_head() {
-    let f = Fixture::new(Mode::Approve).await;
-    let (head, tree) = commit_fixture(&f);
-    let dir = f.dir.path();
+async fn started_reviewer(f: &Fixture) -> LaneVerification {
     let v = f.verify().await;
     f.runtime
         .wait(v.reviewer_run_id.parse().unwrap())
         .await
         .unwrap();
+    v
+}
+fn differs(v: &LaneVerification) -> bool {
+    v.caveats.iter().any(|c| c.contains("artifact differs"))
+}
+#[tokio::test]
+async fn a_dirty_or_moved_checkout_is_noted_for_a_review_and_never_blocks_a_close() {
+    let f = Fixture::new(Mode::Approve).await;
+    let (head, tree) = commit_fixture(&f);
+    let dir = f.dir.path();
+    let clean = started_reviewer(&f).await;
+    assert!(clean.caveats.is_empty(), "{:?}", clean.caveats);
     std::fs::write(dir.join("artifact.txt"), b"dirty").unwrap();
-    assert_eq!(f.close(&v).await.unwrap_err().code, "artifact_changed");
+    let dirty = started_reviewer(&f).await;
+    assert!(differs(&dirty), "{:?}", dirty.caveats);
     std::fs::write(dir.join("artifact.txt"), b"verified contents").unwrap();
     let new_head = git(
         dir,
         &["commit-tree", &tree, "-p", &head, "-m", "next fixture"],
     );
     git(dir, &["update-ref", "refs/heads/feature", &new_head]);
-    assert_eq!(f.close(&v).await.unwrap_err().code, "artifact_changed");
+    let moved = started_reviewer(&f).await;
+    assert!(differs(&moved), "{:?}", moved.caveats);
+    let closed = f.close(&moved).await.unwrap();
+    assert_eq!(closed.review.unwrap().caveats, moved.caveats);
     f.cleanup().await;
 }
 #[tokio::test]
-async fn index_flags_that_hide_edits_from_status_reject_commit_evidence() {
+async fn index_flags_that_hide_edits_from_status_are_noted_for_a_review() {
     for flag in ["assume-unchanged", "skip-worktree"] {
         let f = Fixture::new(Mode::Approve).await;
         commit_fixture(&f);
         let dir = f.dir.path();
-        let v = f.verify().await;
-        f.runtime
-            .wait(v.reviewer_run_id.parse().unwrap())
-            .await
-            .unwrap();
         git(dir, &["update-index", &format!("--{flag}"), "artifact.txt"]);
         std::fs::write(dir.join("artifact.txt"), b"hidden edit").unwrap();
         assert!(
             git(dir, &["status", "--porcelain=v1"]).is_empty(),
             "{flag} must hide the edit from status, which is the bypass under test"
         );
-        assert_eq!(f.close(&v).await.unwrap_err().code, "artifact_changed");
-        // A flagged file is refused even when its contents match the commit again.
+        assert!(differs(&started_reviewer(&f).await));
+        // A flagged file is noted even when its contents match the commit again.
         std::fs::write(dir.join("artifact.txt"), b"verified contents").unwrap();
-        assert_eq!(f.close(&v).await.unwrap_err().code, "artifact_changed");
+        assert!(differs(&started_reviewer(&f).await));
         git(
             dir,
             &["update-index", &format!("--no-{flag}"), "artifact.txt"],
         );
-        f.close(&v).await.unwrap();
+        let clean = started_reviewer(&f).await;
+        assert!(clean.caveats.is_empty(), "{:?}", clean.caveats);
+        f.close(&clean).await.unwrap();
         f.cleanup().await;
     }
 }
@@ -1175,7 +1385,7 @@ async fn an_owned_lane_refreshes_pr_facts_on_verify_and_close_never_fetches() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn verify_returns_evidence_unavailable_when_owned_pr_refresh_times_out() {
+async fn verify_still_starts_with_a_caveat_when_owned_pr_refresh_times_out() {
     let f = Fixture::new(Mode::Approve).await;
     require_pr(&f);
     let owner = Arc::new(
@@ -1205,7 +1415,19 @@ async fn verify_returns_evidence_unavailable_when_owned_pr_refresh_times_out() {
         .await;
     };
     let (result, ()) = tokio::join!(verify, expire);
-    assert_eq!(result.unwrap_err().code, "evidence_unavailable");
+    let v = result.unwrap();
+    assert!(v.pr_evidence.is_none());
+    assert!(
+        v.caveats
+            .iter()
+            .any(|c| c.contains("PR facts were not available")),
+        "{:?}",
+        v.caveats
+    );
+    f.runtime
+        .wait(v.reviewer_run_id.parse().unwrap())
+        .await
+        .unwrap();
     assert_eq!(source.calls().len(), 1);
     service.shutdown();
     drop(gate);

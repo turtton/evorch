@@ -320,3 +320,51 @@ async fn foreign_missing_owner_agent_and_unmirrored_pin_are_rejected() {
     }
     f.stop().await;
 }
+
+#[tokio::test]
+async fn a_human_close_ends_only_the_ledger_entry_and_an_agent_cannot_reach_it() {
+    use event_bus::lane::LaneCloseKind;
+    use runtime::lane_close::HumanLaneCloseRequest;
+    use workbench_protocol::envelope::{Actor, Provenance, Surface};
+    fn request(f: &Fixture, discard: bool) -> HumanLaneCloseRequest {
+        let lane = f
+            .storage
+            .handle()
+            .lane_close_context(f.lane.lane_id.clone())
+            .unwrap();
+        HumanLaneCloseRequest {
+            lane_id: f.lane.lane_id.clone(),
+            ready_seq: None,
+            expected_management_revision: lane.management_revision,
+            expected_request_revision: lane.request_revision,
+            discard,
+            note: "ending this lane".into(),
+        }
+    }
+    let mut f = Fixture::new().await;
+    let agent = Provenance {
+        actor: Actor::Agent,
+        surface: Surface::Cli,
+        client_id: None,
+        agent_run_id: None,
+    };
+    let as_agent = request(&f, false);
+    assert_eq!(
+        f.host.close_lane_human(as_agent, &agent).unwrap_err().code,
+        ErrorCode::PermissionDenied
+    );
+    assert!(
+        f.storage
+            .handle()
+            .current_lane_close(f.lane.lane_id.clone())
+            .unwrap()
+            .is_none()
+    );
+    let discard = request(&f, true);
+    let closed = f.host.close_lane_human(discard, &common::web()).unwrap();
+    assert_eq!(closed.kind, LaneCloseKind::Discarded);
+    // Nothing else changed: the lane is still attached to its lead and its run is alive.
+    assert_eq!(f.state().policy, LaneManagementPolicy::Attached);
+    assert!(f.runtime.inspect_agent(f.lane.root_run_id).is_ok());
+    f.stop().await;
+}

@@ -59,7 +59,7 @@ define_meta_ops! {
     LaneSetPolicy => "lane_set_policy" => super::lane_management::spec => |state, runtime, input| { super::lane_management::manage(state, runtime, "lane_set_policy", input) },
     LaneDetach => "lane_detach" => super::lane_management::spec => |state, runtime, input| { super::lane_management::manage(state, runtime, "lane_detach", input) },
     LaneVerify => "lane_verify" => lane_verification::spec => |state, runtime, input| { lane_verification::verify(state, runtime, input).await },
-    LaneClose => "lane_close" => lane_verification::spec => |state, runtime, input| { lane_verification::close(state, runtime, input).await },
+    LaneClose => "lane_close" => lane_verification::spec => |state, runtime, input| { lane_verification::close(state, runtime, input) },
     SubmitLaneVerification => "submit_lane_verification" => lane_verification::spec => |state, runtime, input| { lane_verification::submit(state, runtime, input) },
     LaneOpen => "lane_open" => lanes::open_spec => |state, runtime, input| { lanes::open(state, runtime, input) },
     LaneList => "lane_list" => lanes::list_spec => |state, runtime, input| { lanes::list(state, runtime, input) },

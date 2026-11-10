@@ -11,7 +11,7 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 56;
+const LATEST_SCHEMA: u32 = 57;
 
 const EXPECTED_TABLES: [&str; 98] = [
     "pr_auto_fix_state",
@@ -1193,6 +1193,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v57.sql"),
                 include_str!("../../undo/undo_v56.sql"),
                 include_str!("../../undo/undo_v55.sql"),
                 include_str!("../../undo/undo_v54.sql"),

@@ -408,7 +408,7 @@ pub(super) fn list_spec(name: &str) -> providers::ToolSpec {
 pub(super) fn report_spec(name: &str) -> providers::ToolSpec {
     object(
         name,
-        "Append this lane root's bounded structured report (summary <=1 KiB, whole report <=4 KiB, at most 8 artifact refs). ready is an unverified claim, not completion/close. Important reports enter the durable delivery outbox; delivery requires a bound host. artifact_revision is an immutable commit SHA or SHA-256; failed episodes are assigned by runtime, not caller. Detached lanes do not report to a lead.",
+        "Append this lane root's bounded structured report (summary <=1 KiB, whole report <=4 KiB, at most 8 artifact refs). ready is an unverified claim, not completion/close. Important reports enter the durable delivery outbox; delivery requires a bound host. artifact_revision, when given, is an immutable commit SHA or SHA-256. For a ready report, pinning one (full commit SHA, PR URL or artifact file in artifact_refs) is recommended, never required: the lead closes on its own judgement and keeps what you reported; if you cannot pin an artifact, say what and why in the summary. Failed episodes are assigned by runtime, not caller. Detached lanes do not report to a lead.",
         json!({"status":{"enum":["working","waiting","blocked","ready","failed"]},"summary":{"type":"string"},"artifact_refs":strings(),"artifact_revision":{"type":"object","properties":{"kind":{"enum":["commit_sha","sha256"]},"value":{"type":"string"}},"required":["kind","value"],"additionalProperties":false},"needs_human":{"type":"boolean"},"question_refs":strings(),"reason_code":{"type":"string"}}),
         &["status", "summary"],
     )

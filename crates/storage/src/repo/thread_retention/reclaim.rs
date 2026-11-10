@@ -1119,8 +1119,6 @@ fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageErr
         ] {
             let bytes_expr = if table == "lane_forward_receipts" {
                 "OCTET_LENGTH(request_json)+OCTET_LENGTH(result_json)"
-            } else if table == "lane_closes" {
-                "OCTET_LENGTH(payload)+COALESCE(OCTET_LENGTH(pr_evidence_json),0)"
             } else {
                 "OCTET_LENGTH(payload)"
             };

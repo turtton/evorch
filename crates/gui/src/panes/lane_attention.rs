@@ -12,8 +12,7 @@ use std::collections::BTreeMap;
 
 use egui::{RichText, Ui};
 use workbench_protocol::lane_attention::{
-    LaneAttentionAction, LaneAttentionKind, LaneNudgeState, LaneStallClassification,
-    LaneVerificationState,
+    LaneAttentionAction, LaneAttentionKind, LaneNudgeState, LaneReadyState, LaneStallClassification,
 };
 
 use crate::model::lane_attention::{
@@ -39,7 +38,7 @@ pub fn kind_label(kind: &LaneAttentionKind) -> &'static str {
         LaneAttentionKind::Blocked { .. } => "Blocked",
         LaneAttentionKind::Failed { .. } => "Failed",
         LaneAttentionKind::RestoreFailed { .. } => "Restore failed",
-        LaneAttentionKind::ReadyUnverified { .. } => "Ready (unverified)",
+        LaneAttentionKind::ReadyUnclosed { .. } => "Ready (awaiting close)",
         LaneAttentionKind::QuestionCapacityBlocked { .. } => "Question limit",
         LaneAttentionKind::WakeSuppressed { .. } => "Wake paused",
         LaneAttentionKind::StopPending { .. } => "Notices held",
@@ -51,18 +50,16 @@ pub fn kind_label(kind: &LaneAttentionKind) -> &'static str {
 #[must_use]
 pub fn kind_detail(kind: &LaneAttentionKind) -> Option<String> {
     Some(match kind {
-        LaneAttentionKind::ReadyUnverified { verification, .. } => match verification {
-            None => "The lane says it is done; nothing independent has confirmed it.".to_owned(),
-            Some(state) => format!(
-                "The lane says it is done; verification is {}.",
-                match state {
-                    LaneVerificationState::Pending => "under way",
-                    LaneVerificationState::Submitted => "submitted, not yet finished",
-                    LaneVerificationState::Completed => "complete, not yet closed",
-                    LaneVerificationState::Incomplete => "incomplete",
-                }
-            ),
-        },
+        LaneAttentionKind::ReadyUnclosed { readiness, .. } => format!(
+            "The lane reported ready and waits for its lead to close it ({}). The lead decides; this is not a stall.",
+            match readiness {
+                LaneReadyState::NoEvidence => "no fixed artifact and no review",
+                LaneReadyState::Unreviewed => "not reviewed",
+                LaneReadyState::ReviewInProgress => "review under way",
+                LaneReadyState::ReviewRejected => "review rejected or incomplete",
+                LaneReadyState::AwaitingClose => "review approved",
+            }
+        ),
         LaneAttentionKind::QuestionCapacityBlocked { limit, .. } => format!(
             "New questions are refused at {limit} unanswered. Answer some to continue; nothing is retried automatically."
         ),
@@ -540,9 +537,9 @@ mod tests {
         let (mut harness, captured) = draw(
             vec![item(
                 "r",
-                LaneAttentionKind::ReadyUnverified {
+                LaneAttentionKind::ReadyUnclosed {
                     ready_seq: Sequence(4),
-                    verification: None,
+                    readiness: LaneReadyState::Unreviewed,
                 },
                 &[
                     LaneAttentionAction::Verify,
@@ -554,7 +551,7 @@ mod tests {
         );
         harness.run_steps(2);
 
-        assert!(harness.query_by_label("Ready (unverified)").is_some());
+        assert!(harness.query_by_label("Ready (awaiting close)").is_some());
         assert!(harness.query_by_label("Open lane").is_some());
         for label in ["Verify", "Close", "Close lane", "Verify lane"] {
             assert!(harness.query_by_label(label).is_none(), "{label}");
