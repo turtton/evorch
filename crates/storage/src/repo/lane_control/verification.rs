@@ -346,6 +346,33 @@ pub(crate) fn close_context(
         ready_brief_revision: ready.map(|r| r.brief_revision),
     })
 }
+/// What a verification's durable state means now. A Reviewer that already ended is not
+/// "under way" even when the termination was never written back (a crash between the
+/// run's final snapshot and the update), so this reads the run's own record. It only
+/// derives: reading attention changes nothing.
+pub(crate) fn derived_state(
+    conn: &Connection,
+    v: &LaneVerification,
+) -> Result<LaneVerificationState, StorageError> {
+    if !matches!(
+        v.state,
+        LaneVerificationState::Pending | LaneVerificationState::Submitted
+    ) {
+        return Ok(v.state);
+    }
+    let phase: Option<String> = conn
+        .query_row(
+            "SELECT terminal_phase FROM run_contexts WHERE run_id=?1 AND role='Reviewer'",
+            [&v.reviewer_run_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match (phase.as_deref(), v.state, v.submission.is_some()) {
+        (Some("Done"), LaneVerificationState::Submitted, true) => LaneVerificationState::Completed,
+        (Some("Done" | "Error" | "Stopped"), _, _) => LaneVerificationState::Incomplete,
+        _ => v.state,
+    })
+}
 fn review_snapshot(
     conn: &Connection,
     lane_id: &str,
@@ -362,8 +389,10 @@ fn review_snapshot(
     });
     Ok(LaneCloseReview {
         verification_id: v.verification_id,
-        reviewer_run_id: v.reviewer_run_id,
-        state: v.state,
+        reviewer_run_id: v.reviewer_run_id.clone(),
+        // As lane attention sees it: a Reviewer that already ended (failed, cancelled,
+        // stopped, or finished without submitting) is not recorded as still running.
+        state: derived_state(conn, &v)?,
         verdict: v.submission.as_ref().map(|s| s.verdict),
         result_ref: v.submission.as_ref().map(|s| s.result_ref.clone()),
         result_digest: v.submission.as_ref().map(|s| s.result_digest.clone()),

@@ -595,3 +595,69 @@ fn a_finished_review_is_never_downgraded_and_a_silent_finish_is_incomplete() {
     done(&f, &silent.reviewer_run_id, "Reviewer", "Done");
     assert_eq!(states(&f).0, LaneReadyState::ReviewIncomplete);
 }
+
+#[test]
+fn a_close_records_a_reviewer_that_already_ended_as_it_ended_not_as_running() {
+    // Stopped by the operator (resumable, so never written back) before it submitted.
+    let f = Fixture::new();
+    started(&f);
+    f.h()
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
+        .unwrap();
+    let r = begin(&f, 1);
+    f.h().begin_lane_verification(r.clone()).unwrap();
+    done(&f, &r.reviewer_run_id, "Reviewer", "Stopped");
+    let closed = f.h().close_lane(close_request(&r)).unwrap();
+    assert_eq!(
+        closed.review.unwrap().state,
+        LaneVerificationState::Incomplete
+    );
+    // The review itself is untouched: only the close's reference is derived.
+    assert_eq!(
+        f.h()
+            .lane_verification(r.verification_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        LaneVerificationState::Pending
+    );
+    // Submitted, then ended normally, with the completion write lost: it is recorded by
+    // what it says.
+    let f = Fixture::new();
+    started(&f);
+    f.h()
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
+        .unwrap();
+    let r = begin(&f, 1);
+    f.h().begin_lane_verification(r.clone()).unwrap();
+    f.h()
+        .submit_lane_verification(
+            r.verification_id,
+            r.reviewer_run_id.clone(),
+            submission(),
+            11,
+        )
+        .unwrap();
+    done(&f, &r.reviewer_run_id, "Reviewer", "Done");
+    let review = f.h().close_lane(close_request(&r)).unwrap().review.unwrap();
+    assert_eq!(review.state, LaneVerificationState::Completed);
+    assert_eq!(review.verdict, Some(LaneVerificationVerdict::Approved));
+    // A Reviewer still running (only a checkpoint on record) is recorded as running.
+    let f = Fixture::new();
+    started(&f);
+    f.h()
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
+        .unwrap();
+    let r = begin(&f, 1);
+    f.h().begin_lane_verification(r.clone()).unwrap();
+    done(&f, &r.reviewer_run_id, "Reviewer", "Checkpoint");
+    assert_eq!(
+        f.h()
+            .close_lane(close_request(&r))
+            .unwrap()
+            .review
+            .unwrap()
+            .state,
+        LaneVerificationState::Pending
+    );
+}
