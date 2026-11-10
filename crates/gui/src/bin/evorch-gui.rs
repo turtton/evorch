@@ -49,6 +49,7 @@ const EVENT_CAPACITY: usize = 2048;
 #[path = "evorch-gui/lane_startup_tests.rs"]
 mod lane_startup_tests;
 
+#[cfg(test)]
 /// Called only after the current host and retention fence are installed.
 /// The GUI thread is synchronous; recovery spawns its driver and lane roots on `handle`.
 fn start_owned_runtime(
@@ -57,23 +58,7 @@ fn start_owned_runtime(
     handle: &tokio::runtime::Handle,
 ) -> Result<tokio::task::JoinHandle<()>, runtime::lanes::LaneError> {
     let _guard = handle.enter();
-    runtime.set_thread_scratch(ownership.thread_scratch());
-    runtime.recover_lanes_on_startup(ownership)
-}
-
-/// Starts pull request tracking (ADR 0043). The service is always started: while
-/// `[pull_requests] enabled` is false it fetches and observes nothing, and a later reload that
-/// enables it takes effect at once.
-fn start_pull_requests(
-    runtime: &AgentRuntime,
-    ownership: &Arc<runtime::ownership::OwnerHost>,
-    settings: config::PullRequestsConfig,
-) {
-    let view: Arc<dyn runtime::pull_requests::OwnershipView> = ownership.clone();
-    let source = Arc::new(runtime::pull_requests::GhSource::new());
-    if let Err(error) = runtime.start_pull_requests(view, source, settings) {
-        tracing::warn!(%error, "pull request tracking did not start");
-    }
+    workbench_host::bootstrap::lane_pr::start_recovery(runtime, ownership)
 }
 
 /// Applies `[pull_requests]` from the configuration to the running service.
@@ -968,7 +953,7 @@ fn build_workbench(
             })
             .unwrap_or_default()
     };
-    let (runtime, agent_browser) = match demo_directory.as_ref() {
+    let (runtime, agent_browser, runtime_executor) = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
             let ExecutionComponents {
@@ -990,7 +975,7 @@ fn build_workbench(
                 user_config_dir: Some(directory.path().to_path_buf()),
                 config: &composition_config,
                 bus: Arc::clone(&bus),
-                executor,
+                executor: Arc::clone(&executor),
                 credential_store,
                 env: Arc::new(ProcessEnv),
                 model_source: ModelSource::Fixed(demo_model),
@@ -1000,7 +985,7 @@ fn build_workbench(
                 ?model_identity,
                 "demo runtime composed via provider composition root"
             );
-            (runtime, agent_browser)
+            (runtime, agent_browser, executor)
         }
         None => {
             let ExecutionComponents {
@@ -1024,7 +1009,7 @@ fn build_workbench(
                 user_config_dir: None,
                 config: &composition_config,
                 bus: Arc::clone(&bus),
-                executor,
+                executor: Arc::clone(&executor),
                 credential_store,
                 env: Arc::new(ProcessEnv),
                 model_source: ModelSource::Fixed(match &production_model {
@@ -1037,7 +1022,7 @@ fn build_workbench(
                 ?model_identity,
                 "runtime composed via provider composition root"
             );
-            (runtime, agent_browser)
+            (runtime, agent_browser, executor)
         }
     };
     // Before anything restores or continues a conversation.
@@ -1318,21 +1303,33 @@ fn build_workbench(
     install_host_tombstones(&ownership, &prelude.tombstones);
     // Install the retained host before any later fallible startup work. State
     // and command-sink locals may drop first, but cannot release this generation.
-    let storage = GuiStorageResources {
+    let mut storage = GuiStorageResources {
         _storage: storage,
         ownership: Arc::clone(&ownership),
         _demo_directory: demo_directory,
         _storage_fallback: storage_fallback,
+        services: None,
         _leases: prelude.leases,
     };
     // Recover durable lane intents under this host, never serialized authority.
     // Keep the retained storage/host guard alive before starting any root.
-    start_owned_runtime(&runtime, &ownership, &handle)
-        .map_err(|error| GuiError::Startup(format!("lane recovery: {error}")))?;
-    {
+    let mut services = workbench_host::bootstrap::services::BackgroundServices::default();
+    let started = {
         let _enter = handle.enter();
-        start_pull_requests(&runtime, &ownership, composition_config.pull_requests);
-    }
+        workbench_host::bootstrap::lane_pr::start(
+            &mut services,
+            &runtime,
+            &ownership,
+            composition_config.pull_requests,
+            Default::default(),
+        )
+    };
+    storage.services = Some((
+        handle.clone(),
+        workbench_host::bootstrap::lane_pr::RuntimeDrain::new(runtime.clone(), runtime_executor),
+        services,
+    ));
+    started.map_err(|error| GuiError::Startup(format!("lane/PR services: {error}")))?;
     let owner_probe: gui::app::pull_requests::OwnerProbe = {
         let host = Arc::clone(&ownership);
         Arc::new(move |thread: &str| host.owned_permit(thread).is_ok())
@@ -1674,6 +1671,11 @@ struct GuiStorageResources {
     ownership: Arc<runtime::ownership::OwnerHost>,
     _demo_directory: Option<tempfile::TempDir>,
     _storage_fallback: Option<tempfile::TempDir>,
+    services: Option<(
+        tokio::runtime::Handle,
+        workbench_host::bootstrap::lane_pr::RuntimeDrain,
+        workbench_host::bootstrap::services::BackgroundServices,
+    )>,
     /// Last: the shared locks outlive every user of the database and the ownership root.
     _leases: SharedLeases,
 }
@@ -1688,6 +1690,15 @@ impl Drop for GuiStorageResources {
     fn drop(&mut self) {
         if let Err(error) = self.ownership.begin_quiesce() {
             tracing::warn!(%error, "failed to quiesce ownership before storage drain");
+        }
+        if let Some((handle, drain, mut services)) = self.services.take()
+            && let Err(error) =
+                handle.block_on(drain.stop_and_drain(&mut services, &self.ownership))
+        {
+            tracing::warn!(%error, "failed to drain lane/PR services before storage drain");
+        }
+        if let Err(error) = self.ownership.begin_quiesce() {
+            tracing::warn!(%error, "failed to quiesce leases acquired during service drain");
         }
         if let Err(error) = self._storage.flush() {
             tracing::warn!(%error, "failed to flush queued events before ownership release");
@@ -2529,6 +2540,7 @@ mod storage_shutdown_tests {
         assert!(write_monitor.set(monitor.clone()).is_ok());
         let weak_host = Arc::downgrade(&host);
         let resources = GuiStorageResources {
+            services: None,
             _storage: bridge,
             ownership: host.clone(),
             _demo_directory: None,

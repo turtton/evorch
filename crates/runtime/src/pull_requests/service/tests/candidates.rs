@@ -84,6 +84,7 @@ fn by_number(process: &Process, number: u64) -> storage::pull_requests::PullRequ
 fn tracked_process(world: &World) -> Process {
     let process = world.process(enabled());
     process.environment.bind("r1", "t1");
+    process.permit("t1");
     process
 }
 
@@ -399,4 +400,26 @@ async fn the_end_of_a_publishing_command_fetches_now() {
         4,
         "a poll that sees the job end counts"
     );
+}
+
+// Both hosts may observe an output stream, but only the current thread owner
+// writes a candidate and emits its announcement.
+#[tokio::test(start_paused = true)]
+async fn a_nonowner_observer_cannot_claim_the_owners_candidate_announcement() {
+    let world = World::new();
+    let mut owner = tracked_process(&world);
+    let observer = world.process(enabled());
+    observer.environment.bind("r1", "t1");
+    let (checked, observed) = tokio::sync::oneshot::channel();
+    observer
+        .hooks
+        .before_permit(move || checked.send(()).unwrap());
+    completed(&observer, "shell", "same-call", &url(7), None, None);
+    observed.await.unwrap();
+    observer.service.shutdown_and_drain().await.unwrap();
+    assert!(presented(&owner).is_empty());
+    completed(&owner, "shell", "same-call", &url(7), None, None);
+    let events = owner.quiet_events().await;
+    assert_eq!(presented(&owner).len(), 1);
+    assert_eq!(candidates_changed(&events).len(), 1);
 }

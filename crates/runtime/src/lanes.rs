@@ -1,5 +1,6 @@
 //! Independent lane roots and their durable creation intents (ADR 0044).
 use crate::{AgentRuntime, RunConfig, RunId};
+mod stops;
 #[cfg(test)]
 mod tests;
 use agents::Role;
@@ -18,6 +19,7 @@ pub(crate) struct LaneRuntime {
     // Cancellation can look up a pending lane without I/O for ordinary runs.
     pub(crate) creation_intents: Mutex<std::collections::HashMap<RunId, String>>,
     pub(crate) started: Mutex<std::collections::HashMap<RunId, Vec<String>>>,
+    stops: stops::LaneStopWrites,
     #[cfg(test)]
     activity_time: Mutex<Option<i64>>,
 }
@@ -55,6 +57,59 @@ struct StartSeed {
     project_root: Option<std::path::PathBuf>,
     requires_ownership: bool,
 }
+
+pub(crate) fn ownership_failure_reason(
+    state: &crate::agent_loop::LoopState,
+    error: &crate::ownership::RegistryError,
+) -> String {
+    if state.task.parent.is_none()
+        && state.task.config.lane_scope == Some(LaneScope::Lane)
+        && error.is_fenced()
+    {
+        crate::RuntimeError::StaleOwnership {
+            run_id: state.task.run_id.to_string(),
+        }
+        .to_string()
+    } else {
+        error.to_string()
+    }
+}
+
+pub(crate) async fn persist_initial_context(
+    state: &mut crate::agent_loop::LoopState,
+) -> Result<(), String> {
+    let lane_root =
+        state.task.parent.is_none() && state.task.config.lane_scope == Some(LaneScope::Lane);
+    let _guard = if lane_root && let Some(permit) = &state.task.config.ownership {
+        let interrupts = state.channels.cancel_rx.clone();
+        let retry = state
+            .runtime()
+            .and_then(|runtime| runtime.shared.ownership_retry.get().copied())
+            .unwrap_or_else(crate::ownership::RetryPolicy::unbounded);
+        Some(
+            permit
+                .mutation_guard_off_thread(retry, move || interrupts.borrow().kind().is_some())
+                .await
+                .map_err(|error| ownership_failure_reason(state, &error))?,
+        )
+    } else {
+        None
+    };
+    crate::restore::persist_checkpoint(state)
+        .map_err(|error| format!("Cannot persist prepared context: {error}"))?;
+    // Keep authority across both writes: only a restorable context may make a
+    // creation intent started, and a successor must observe that same decision.
+    if state.task.parent.is_none()
+        && state.task.config.lane_scope.is_some()
+        && let Some(runtime) = state.runtime()
+    {
+        runtime
+            .record_lane_start(state.task.run_id)
+            .map_err(|error| format!("Cannot commit lane registration: {error}"))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub struct LaneOpened {
     pub lane_id: String,
@@ -138,36 +193,6 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&run_id);
-        Ok(())
-    }
-
-    pub(crate) fn persist_lane_start_cancellation(
-        &self,
-        run_id: RunId,
-        ownership: Option<&crate::ownership::OwnerPermit>,
-        reason: &str,
-    ) -> Result<(), LaneError> {
-        let lane_id = self
-            .shared
-            .lanes
-            .creation_intents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&run_id)
-            .cloned();
-        let Some(lane_id) = lane_id else {
-            return Ok(());
-        };
-        let _guard = ownership
-            .map(|permit| permit.mutation_guard())
-            .transpose()
-            .map_err(|error| LaneError::new("lane_creation_denied", error))?;
-        let store = self.shared.run_store.get().ok_or_else(|| {
-            LaneError::new("storage_unavailable", "lane ledger is not configured")
-        })?;
-        store
-            .handle
-            .block_lane_start(&lane_id, reason, self.lane_activity_time())?;
         Ok(())
     }
 
@@ -259,10 +284,19 @@ impl AgentRuntime {
         &self,
         host: &std::sync::Arc<crate::ownership::OwnerHost>,
     ) -> Result<tokio::task::JoinHandle<()>, LaneError> {
+        Ok(tokio::spawn(self.prepare_lane_recovery(host)?))
+    }
+
+    /// Initial synchronous recovery followed by an owned retry future. Hosts register
+    /// this future with their service lifecycle instead of detaching a retry task.
+    pub fn prepare_lane_recovery(
+        &self,
+        host: &std::sync::Arc<crate::ownership::OwnerHost>,
+    ) -> Result<impl std::future::Future<Output = ()> + Send + use<>, LaneError> {
         self.recover_unstarted_lanes(Some(host))?;
         let runtime = self.downgrade();
         let host = std::sync::Arc::downgrade(host);
-        Ok(tokio::spawn(async move {
+        Ok(async move {
             // External host death/lease expiry has no in-process notification.
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -286,7 +320,7 @@ impl AgentRuntime {
                     return;
                 }
             }
-        }))
+        })
     }
 
     /// Recover durable intents after a crash before registration. Authority is current
@@ -428,7 +462,11 @@ impl AgentRuntime {
         seed: &StartSeed,
         host: Option<&crate::ownership::OwnerHost>,
     ) -> Result<Option<Option<crate::ownership::OwnerPermit>>, LaneError> {
-        if !seed.requires_ownership {
+        // A host startup always participates in ADR 0024, including intents
+        // created by an unowned/demo runtime. The persisted seed is not authority
+        // to bypass another live host or its quiescing fence. Standalone runtimes
+        // without a host keep their explicit unowned recovery path.
+        if !seed.requires_ownership && host.is_none() {
             return Ok(Some(None));
         }
         let host = host.ok_or_else(|| {
@@ -550,17 +588,19 @@ impl AgentRuntime {
             }
             return Ok((seed.run_id, false));
         }
-        let ownership = if seed.requires_ownership {
-            let source = authority.ownership.as_ref().ok_or_else(|| {
-                LaneError::new("lane_creation_denied", "current ownership is required")
-            })?;
-            Some(
+        let ownership = match authority.ownership.as_ref() {
+            Some(source) => Some(
                 source
                     .prepare_lane(&lane.thread_id)
                     .map_err(|e| LaneError::new("lane_creation_denied", e))?,
-            )
-        } else {
-            None
+            ),
+            None if seed.requires_ownership => {
+                return Err(LaneError::new(
+                    "lane_creation_denied",
+                    "current ownership is required",
+                ));
+            }
+            None => None,
         };
         let config = RunConfig {
             lane_scope: Some(LaneScope::Lane),

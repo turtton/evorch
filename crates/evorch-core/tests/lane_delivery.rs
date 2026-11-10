@@ -362,12 +362,26 @@ async fn the_core_bootstrap_delivers_a_lane_report_and_a_lead_answer_by_restorin
     );
     core.phase(&[lead], AgentRunPhase::Waiting).await;
     core.drive(LEAD).await;
-    let question = core
-        .questions
-        .iter()
-        .find(|q| q.title == "Which task scope?")
-        .expect("the lane's question was announced")
-        .clone();
+    // drive() does not consume bus events. Waiting can precede this delivery,
+    // so wait for the announcement instead of inspecting an earlier snapshot.
+    let question = loop {
+        if let Some(question) = core
+            .questions
+            .iter()
+            .find(|q| q.title == "Which task scope?")
+        {
+            break question.clone();
+        }
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            run_id,
+            to: AgentRunPhase::Error,
+            reason,
+            ..
+        }) = core.next_event().await.kind
+        {
+            panic!("{run_id} failed before the question announcement: {reason:?}");
+        }
+    };
 
     core.model.scripted.lock().unwrap().insert(
         lane.root_run_id.to_string(),

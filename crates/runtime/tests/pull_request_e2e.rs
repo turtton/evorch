@@ -275,6 +275,9 @@ async fn flow(settings: PullRequestsConfig) -> Flow {
     let enabled = settings.enabled;
     let bus = Arc::new(EventBus::new(4096));
     let world = world_with(model.clone(), executor(&bus), bus, settings);
+    // Observing output is an owned mutation, just like Link. Keep identical
+    // authority for the enabled/disabled sides of the cache comparison.
+    let _permit = world.permit();
     let mut pull_request_events = 0;
 
     let echo = world

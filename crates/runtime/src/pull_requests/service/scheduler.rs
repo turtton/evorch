@@ -343,7 +343,7 @@ impl Inner {
 
     fn spawn_resolution(self: &Arc<Self>, child: String, permit: OwnerPermit, flight: Arc<Flight>) {
         let inner = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let result = inner.resolve_child_in(child.clone(), permit, flight).await;
             let pending = Duration::from_secs(inner.config().pending_poll_seconds);
             {

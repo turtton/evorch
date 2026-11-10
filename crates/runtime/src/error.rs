@@ -29,6 +29,10 @@ pub enum RuntimeError {
     StaleOwnership { run_id: String },
     #[error("cannot durably cancel lane startup {run_id}: {reason}")]
     LaneCancellation { run_id: String, reason: String },
+    #[error(
+        "lane startup {run_id} is stopped in memory; durable cancellation is pending: {reason}"
+    )]
+    LaneCancellationPending { run_id: String, reason: String },
     /// 存在しない AgentRun が参照された。
     #[error("未知の AgentRun が指定されました: {run_id}")]
     UnknownRun {
