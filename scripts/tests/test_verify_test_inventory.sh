@@ -152,6 +152,9 @@ expect_fail "group missing" "missing inventory for group b shard 1/1" "$t"
 make_valid "$t"; cp -r "$t/inv-a-1" "$t/rerun-a-1"
 expect_fail "duplicate shard artifact" "inventory for a/1 appears twice" "$t"
 
+make_valid "$t"; cp -r "$t/inv-a-2" "$t/inv-a-3"
+expect_fail "shard beyond the configured count" "inventory inv-a-3 is for shard 3 but group a has only 2 shards" "$t"
+
 make_valid "$t"; mkdir "$t/inv-zzz-1"
 expect_fail "unknown group artifact" "unexpected inventory directory" "$t"
 

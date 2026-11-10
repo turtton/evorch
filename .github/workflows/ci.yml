@@ -12,9 +12,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # PR gate. Branch protection requires this job: it succeeds only when every
-  # job below succeeded and the per-group test inventories add up to the whole
-  # workspace test set (scripts/verify-test-inventory.sh).
+  # Aggregate gate, usable as a required check: it succeeds only when every job
+  # it needs succeeded and the per-group test inventories add up to the whole
+  # workspace test set (scripts/verify-test-inventory.sh). main has no required
+  # checks configured today.
   ci:
     if: always()
     needs: [quick-checks, lint, docs-schema, otel, tests]
@@ -97,14 +98,14 @@ jobs:
         with:
           packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
       - uses: ./.github/actions/setup-cef
-      # Dependency caches are per job group and saved by main only: a PR run
-      # restores them, and saving from every PR would crowd the repository's
-      # 10GB cache budget. The cache action caches target/ recursively, which
-      # includes CARGO_TARGET_DIR below; keep that variable scoped to Cargo steps.
+      # One dependency cache serves lint, docs-schema, otel and every test group:
+      # only the cache-save job writes it (main pushes), this job restores it.
+      # The cache action caches target/ recursively, which includes
+      # CARGO_TARGET_DIR below; keep that variable scoped to Cargo steps.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-lint
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ${{ runner.os }}-ci-workspace
+          save-if: false
       - name: Clippy (workspace)
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -142,8 +143,8 @@ jobs:
       - uses: ./.github/actions/setup-cef
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-docs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ${{ runner.os }}-ci-workspace
+          save-if: false
       - name: Workspace doctests
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -177,8 +178,8 @@ jobs:
           packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-otel
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ${{ runner.os }}-ci-workspace
+          save-if: false
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
@@ -248,12 +249,11 @@ jobs:
       # CEF (the cef-e2e job does), so only a libcef.so link goes on the loader path.
       - uses: ./.github/actions/setup-cef
         if: matrix.cef
-      # One cache per group, shared by its shards; the first shard saves it on
-      # main. PR runs only restore (see the lint job).
+      # Restore only: the cache-save job writes the shared dependency cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-${{ matrix.group }}
-          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
+          shared-key: ${{ runner.os }}-ci-workspace
+          save-if: false
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
@@ -263,12 +263,15 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/run-test-group.sh inventory "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" "$EVORCH_TEST_INVENTORY_DIR"
-      # CI enforces cost-sensitive invariants with this offline gate. The mock
-      # computes cache usage from received input; compaction has an explicit boundary.
+      # CI enforces cost-sensitive invariants with this offline gate
+      # (scripts/check-cache-contracts.sh, called by run-test-group.sh with the
+      # group and shard). The mock computes cache usage from received input;
+      # compaction has an explicit boundary.
       - name: Cache preservation contracts (offline)
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" cache "$EVORCH_TEST_INVENTORY_DIR"
+      # scripts/check-io-contracts.sh, again through run-test-group.sh.
       - name: Storage I/O contracts (offline)
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -289,6 +292,61 @@ jobs:
       - name: Report disk usage
         if: always()
         run: df -h /
+
+  # The only writer of the shared dependency cache (key *-ci-workspace) that
+  # lint, docs-schema, otel and the test groups restore. It runs on main pushes
+  # only, so it is never on a PR's critical path and PRs never crowd the
+  # repository's 10GB cache budget. It compiles every dependency artifact the
+  # other jobs need, with each of their own package and feature selections:
+  # the workspace check (lint), the doctests and the schema example
+  # (docs-schema), the otel-exporter build (otel) and the test binaries of
+  # every group in scripts/ci-test-groups.json. It runs no test.
+  cache-save:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.0
+          components: clippy
+      - name: Install linker and Claude transport build dependencies
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
+      - uses: ./.github/actions/setup-cef
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ${{ runner.os }}-ci-workspace
+          save-if: true
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest
+      - name: Build the dependencies of every other job
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          cargo clippy --workspace --all-targets --locked
+          cargo clippy -p event-bus --all-targets --features otel-exporter --locked
+          cargo test --workspace --doc --locked
+          cargo build --locked -p config --example dump_schema
+          cargo nextest list -p event-bus --features otel-exporter --locked > /dev/null
+          for group in $(jq -r '.groups | keys[]' scripts/ci-test-groups.json); do
+            echo "::group::build the test binaries of $group"
+            scripts/run-contract-tests.sh --group "$group" --list default > /dev/null
+            echo "::endgroup::"
+          done
+      - name: Report disk usage
+        if: always()
+        run: |
+          df -h /
+          du -sh target/ci-shared
 
   # nix run / nix build が cargo test では拾えない sandbox 固有の失敗
   # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。

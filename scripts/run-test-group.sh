@@ -112,7 +112,12 @@ case "$mode" in
       exit 0
     fi
     echo "running $(count "$out/$suite.part.tsv") of $(count "$out/$suite.tsv") $suite tests (group $group, shard $shard)"
-    exec scripts/run-contract-tests.sh --group "$group" --shard "$shard" "$suite"
+    # The cache and io suites go through the gates AGENTS.md names.
+    case "$suite" in
+      cache) exec scripts/check-cache-contracts.sh --group "$group" --shard "$shard" ;;
+      io) exec scripts/check-io-contracts.sh --group "$group" --shard "$shard" ;;
+      *) exec scripts/run-contract-tests.sh --group "$group" --shard "$shard" "$suite" ;;
+    esac
     ;;
   *)
     echo "unknown mode: $mode" >&2

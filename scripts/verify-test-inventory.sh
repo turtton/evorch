@@ -16,7 +16,7 @@
 # (an artifact download with pattern + merge-multiple false), each with the
 # files documented in run-test-group.sh.
 #
-# Rejected: a missing, extra or duplicated shard; an inventory whose status is
+# Rejected: a missing, extra (also beyond the configured shard count) or duplicated shard; an inventory whose status is
 # not ok or whose group/shard/shard count/package list disagrees with the
 # config; mixed commits or config hashes; groups that overlap or do not cover the
 # workspace members; shards of a group that disagree about the pre-partition
@@ -103,7 +103,12 @@ if [[ "$check_config" == 0 ]]; then
     matched=0
     for g in "${groups[@]}"; do
       if [[ "$name" =~ ^(.*-)?"$g"-([1-9][0-9]*)$ ]]; then
-        key="$g/${BASH_REMATCH[2]}"
+        entry_shard="${BASH_REMATCH[2]}"
+        key="$g/$entry_shard"
+        shard_limit=$(jq -r --arg g "$g" '.groups[$g].shards' "$config")
+        if (( entry_shard > shard_limit )); then
+          fail "inventory $name is for shard $entry_shard but group $g has only $shard_limit shards"
+        fi
         if [[ -n "${shard_dir[$key]:-}" ]]; then
           fail "inventory for $key appears twice: ${shard_dir[$key]##*/} and $name"
         fi
