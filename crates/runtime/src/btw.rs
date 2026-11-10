@@ -19,7 +19,8 @@ const FRAMING: &str = "This is a one-off side question, not part of the conversa
 Answer it briefly from what is already in the conversation. You have no tool access here, so do \
 not call tools. Neither this question nor your answer will be kept in the conversation.";
 
-/// Oldest idle slots go first once the registry holds this many runs.
+/// Once the registry holds more runs than this, the oldest slot that no live run
+/// holds is released. A running run's slot is never evicted, so the bound is soft.
 const MAX_SLOTS: usize = 64;
 
 /// Why a side question could not be answered.
@@ -27,6 +28,8 @@ const MAX_SLOTS: usize = 64;
 pub enum BtwError {
     #[error("this thread has no conversation context in this process")]
     NoLocalContext,
+    #[error("another window or process now holds this thread")]
+    OwnedElsewhere,
     #[error("the conversation has not sent its first request yet")]
     ContextNotReady,
     #[error("the conversation's provider cannot answer without tools")]
@@ -131,7 +134,7 @@ impl BtwSnapshot {
     /// # Errors
     /// See [`BtwError`]; a tool call in the reply is refused, never run.
     pub async fn ask(&self, question: &str) -> Result<BtwAnswer, BtwError> {
-        if !self.client.supports_tool_choice_none() {
+        if !self.client.supports_tool_choice_none(&self.request).await {
             return Err(BtwError::UnsupportedProvider);
         }
         let request = self.question_request(question);
@@ -351,6 +354,10 @@ impl crate::AgentRuntime {
     /// [`BtwError::NoLocalContext`] for a run this process holds no context for,
     /// [`BtwError::ContextNotReady`] before its first request.
     pub fn btw_snapshot(&self, run: RunId) -> Result<Arc<BtwSnapshot>, BtwError> {
+        if self.deny_deleted_run(&run.to_string()).is_err() {
+            self.shared.btw.forget(run);
+            return Err(BtwError::NoLocalContext);
+        }
         self.shared.btw.snapshot(run)
     }
 
@@ -361,5 +368,65 @@ impl crate::AgentRuntime {
 
     pub(crate) fn btw_publisher(&self, run: RunId) -> BtwPublisher {
         self.shared.btw.publisher(run)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slots(registry: &BtwRegistry) -> usize {
+        registry.lock().by_run.len()
+    }
+
+    #[test]
+    fn idle_slots_are_released_oldest_first_beyond_the_cap() {
+        let registry = BtwRegistry::default();
+        for index in 0..(MAX_SLOTS as u64 + 10) {
+            drop(registry.publisher(RunId::new(index)));
+        }
+        assert_eq!(slots(&registry), MAX_SLOTS);
+        assert_eq!(
+            registry.snapshot(RunId::new(0)).unwrap_err(),
+            BtwError::NoLocalContext
+        );
+        let newest = RunId::new(MAX_SLOTS as u64 + 9);
+        assert_eq!(
+            registry.snapshot(newest).unwrap_err(),
+            BtwError::ContextNotReady
+        );
+    }
+
+    #[test]
+    fn a_slot_a_live_run_holds_is_never_evicted() {
+        let registry = BtwRegistry::default();
+        let live: Vec<_> = (0..(MAX_SLOTS as u64 + 10))
+            .map(|index| registry.publisher(RunId::new(index)))
+            .collect();
+        assert_eq!(
+            slots(&registry),
+            live.len(),
+            "the cap is soft for live runs"
+        );
+        assert_eq!(
+            registry.snapshot(RunId::new(0)).unwrap_err(),
+            BtwError::ContextNotReady
+        );
+    }
+
+    #[test]
+    fn forgetting_a_run_drops_only_that_slot() {
+        let registry = BtwRegistry::default();
+        drop(registry.publisher(RunId::new(1)));
+        drop(registry.publisher(RunId::new(2)));
+        registry.forget(RunId::new(1));
+        assert_eq!(
+            registry.snapshot(RunId::new(1)).unwrap_err(),
+            BtwError::NoLocalContext
+        );
+        assert_eq!(
+            registry.snapshot(RunId::new(2)).unwrap_err(),
+            BtwError::ContextNotReady
+        );
     }
 }

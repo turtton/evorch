@@ -79,7 +79,7 @@ impl ProviderClient for FakeClient {
         }
     }
 
-    fn supports_tool_choice_none(&self) -> bool {
+    async fn supports_tool_choice_none(&self, _request: &ChatRequest) -> bool {
         self.supports_none
     }
 

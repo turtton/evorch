@@ -321,7 +321,7 @@ impl AnthropicClient {
 
 #[async_trait]
 impl ProviderClient for AnthropicClient {
-    fn supports_tool_choice_none(&self) -> bool {
+    async fn supports_tool_choice_none(&self, _request: &ChatRequest) -> bool {
         true
     }
 

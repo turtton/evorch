@@ -276,6 +276,10 @@ impl CommandSink for RuntimeCommandSink {
             .ok_or(BtwStartError::Refused(
                 runtime::btw::BtwError::NoLocalContext,
             ))?;
+        // The context outlives a handoff, so ownership is checked now, as every command does.
+        service
+            .permit_for_thread(Some(thread))
+            .map_err(|_| BtwStartError::Refused(runtime::btw::BtwError::OwnedElsewhere))?;
         let snapshot = service
             .runtime()
             .btw_snapshot(run)

@@ -72,6 +72,9 @@ fn refusal_text(error: &BtwError) -> String {
         BtwError::NoLocalContext => "/btw needs this process to hold the conversation: a saved \
             history alone, or a thread another process owns, cannot be asked about"
             .into(),
+        BtwError::OwnedElsewhere => {
+            "/btw cannot ask here: another window or process holds this thread".into()
+        }
         BtwError::ContextNotReady => {
             "/btw has nothing to ask about yet: the conversation has not sent a request".into()
         }
@@ -106,6 +109,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.push_notice("Select or start a thread first");
             return false;
         };
+        if !self.thread_writable() {
+            self.push_notice(refusal_text(&BtwError::OwnedElsewhere));
+            return false;
+        }
         if self.btw_running() {
             self.push_notice("A side question is already running — wait for it or dismiss it");
             return false;

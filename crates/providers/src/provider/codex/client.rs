@@ -612,8 +612,16 @@ impl CodexClient {
 /// `ProviderAuth` は使用せず、セッションの token bundle から認証します。
 #[async_trait]
 impl ProviderClient for CodexClient {
-    fn supports_tool_choice_none(&self) -> bool {
-        true
+    /// A Responses Lite model moves its tools into the input and the server's handling of
+    /// `tool_choice: none` there is unverified, so such a model cannot serve a request that
+    /// forbids tool calls.
+    async fn supports_tool_choice_none(&self, request: &ChatRequest) -> bool {
+        match self.ensure_catalog().await {
+            Ok(catalog) => !catalog
+                .capabilities(&request.model)
+                .is_some_and(|capabilities| capabilities.use_responses_lite),
+            Err(_) => true,
+        }
     }
 
     async fn resolve_responses_scope(

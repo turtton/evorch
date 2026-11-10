@@ -66,7 +66,7 @@ pub trait ProviderClient: Send + Sync {
     /// Whether `ToolChoice::None` is honoured on the wire while the tool
     /// definitions stay in the request. A client that cannot promise this must
     /// not serve a request that forbids tool calls.
-    fn supports_tool_choice_none(&self) -> bool {
+    async fn supports_tool_choice_none(&self, _request: &ChatRequest) -> bool {
         false
     }
 
