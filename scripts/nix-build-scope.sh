@@ -22,9 +22,10 @@
 #                                        the CEF install check inspects
 #   scripts/push-attic.sh                what the PR and main steps upload with
 #   this script and its test             the decision itself
-#   .github/workflows/ci.yml             only the workflow header (`on`,
-#                                        `concurrency`) and the nix-build job;
-#                                        the other jobs do not reach Nix
+#   .github/workflows/ci.yml             only the top-level keys other than
+#                                        `jobs` (`on`, `concurrency`, `env`,
+#                                        wherever placed) and the nix-build
+#                                        job; the other jobs do not reach Nix
 # Rust sources of the crates are deliberately not listed: the ci job tests them
 # and the non-test cargo check of the same -p/--bin selection (the nix-build
 # job's substitute) compiles them as the Nix build does.
@@ -64,12 +65,13 @@ git rev-parse --verify -q "$head^{commit}" > /dev/null 2>&1 || full "cannot reso
 # path still matches.
 changed=$(git diff --name-only --no-renames "$base" "$head") || full "git diff failed"
 
-# The workflow compared without comments and blank lines: the header before
-# `jobs:` and the nix-build job's block.
+# The workflow compared without comments and blank lines: every top-level key
+# other than `jobs` (`on`, `concurrency`, and an `env` or `defaults` placed
+# before or after the jobs) and the nix-build job's block.
 nix_workflow_scope() {
   awk '
     /^[[:space:]]*(#|$)/ { next }
-    /^jobs:/ { in_jobs = 1; print; next }
+    /^[^[:space:]]/ { in_jobs = ($1 == "jobs:"); current = 0; print; next }
     !in_jobs { print; next }
     /^  [A-Za-z0-9_-]+:/ { current = ($1 == "nix-build:") }
     current { print }

@@ -130,6 +130,33 @@ workflow_case "workflow nix-build edit" true 'nix build .#default' 'nix build .#
 workflow_case "workflow header edit" true 'group: x' 'group: y'
 workflow_case "workflow comment edit" false '# nix comment' '# other comment'
 
+# Top-level keys after the jobs count too: an env placed behind every job.
+# trailing_case <name> <want> <base block> <head block>: both blocks are appended to
+# the fixture workflow, the base's on main and the head's on topic.
+trailing_case() {
+  local name=$1 want=$2 base_block=$3 head_block=$4
+  new_repo "$name"
+  printf '%s' "$base_block" >> "$repo/.github/workflows/ci.yml"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q --allow-empty -m trailing-base
+  git -C "$repo" checkout -q -B topic main
+  git -C "$repo" show main~1:.github/workflows/ci.yml > "$repo/.github/workflows/ci.yml"
+  printf '%s' "$head_block" >> "$repo/.github/workflows/ci.yml"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q --allow-empty -m trailing-head
+  expect "$name" "$want" "$repo" EVENT_NAME=pull_request
+}
+nix_env='env:
+  NIX_CONFIG: "substituters = https://example.invalid"
+'
+nix_env_changed='env:
+  NIX_CONFIG: "substituters = https://other.invalid"
+'
+trailing_case "workflow trailing env added" true '' "$nix_env"
+trailing_case "workflow trailing env changed" true "$nix_env" "$nix_env_changed"
+trailing_case "workflow trailing env removed" true "$nix_env" ''
+trailing_case "workflow trailing env unchanged" false "$nix_env" "$nix_env"
+
 # Fail-safe cases.
 new_repo push
 commit_change "$repo" docs/readme.md
