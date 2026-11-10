@@ -369,9 +369,9 @@ pub(super) struct PullRequestState {
     pending_collapses: Vec<(String, u64)>,
     /// The window began to close: no limit claim starts, and one already running gives way.
     closing: Arc<std::sync::atomic::AtomicBool>,
-    /// `(pull request, budget epoch)` this process already claimed, so a read does not claim
-    /// again. The claim in the database is what keeps other windows and restarts from telling
-    /// it twice.
+    /// `(pull request, budget epoch)` whose claim is running here or was taken here, so a read
+    /// does not claim again. The claim in the database is what keeps other windows and restarts
+    /// from telling it twice.
     limit_notified: std::collections::VecDeque<(String, u64)>,
     /// A transcript may show a notice whose card is not read yet.
     cards_dirty: bool,
@@ -702,8 +702,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 Ok(LimitClaimOutcome::Claimed) => {
                     self.raise_auto_fix_limit_notification(&thread, &key);
                 }
-                Ok(LimitClaimOutcome::Declined) => {}
-                Ok(LimitClaimOutcome::NotHeld) => {
+                // Only a claim this window took is remembered. Another window's claim may be
+                // given back (its taker lost the thread), so a declined one is tried again by
+                // the next read.
+                Ok(LimitClaimOutcome::Declined | LimitClaimOutcome::NotHeld) => {
                     self.pull_requests.forget_limit_notified(&key, epoch);
                 }
                 Err(error) => {

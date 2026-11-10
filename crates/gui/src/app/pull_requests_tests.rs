@@ -1113,3 +1113,70 @@ fn the_claim_result_is_shown_by_the_frame_that_drains_it_and_closing_starts_no_c
     assert_eq!(limit_notifications(&window), 1);
     assert!(world.notified().is_some());
 }
+
+// Given: window A took the claim and then lost the thread to window B / When: B's claim is declined
+// because A's is still taken, and A then gives its claim back / Then: B's next read claims it and
+// tells the stop, once
+#[test]
+fn a_declined_claim_is_tried_again_once_the_other_window_gave_its_claim_back() {
+    use std::sync::mpsc::channel;
+
+    let world = StoppedWorld::new();
+    let directory = tempfile::tempdir().unwrap();
+    let held_a = Arc::new(AtomicBool::new(true));
+    let spy_a = Spy::new(world.reader());
+
+    // B is a window of another process, which can only live on its own thread.
+    let (go_tx, go_rx) = channel::<()>();
+    let (declined_tx, declined_rx) = channel::<usize>();
+    let (again_tx, again_rx) = channel::<()>();
+    let (told_tx, told_rx) = channel::<usize>();
+    let reader_b = world.reader();
+    let directory_b = tempfile::tempdir().unwrap();
+    let window_b = std::thread::spawn(move || {
+        let spy_b = Spy::new(reader_b);
+        let held_b = Arc::new(AtomicBool::new(true));
+        let mut window = state(directory_b.path())
+            .with_pull_requests(
+                spy_b.clone(),
+                Some(Arc::new({
+                    let held = Arc::clone(&held_b);
+                    move |_: &str| held.load(Ordering::SeqCst)
+                })),
+            )
+            .with_pull_request_spawner(Arc::new(|job| job()));
+        go_rx.recv().unwrap();
+        while spy_b.claims_run.load(Ordering::SeqCst) == 0 {
+            window.pump_pull_requests();
+        }
+        declined_tx.send(limit_notifications(&window)).unwrap();
+        again_rx.recv().unwrap();
+        window.apply_shared_pull_request_event(&adopted(true));
+        pump(&mut window);
+        told_tx.send(limit_notifications(&window)).unwrap();
+    });
+
+    let lose = Arc::clone(&held_a);
+    *spy_a.after_claim.lock().unwrap() = Some(Box::new(move || {
+        // A has taken the claim; the thread moves to B, whose claim finds it taken.
+        lose.store(false, Ordering::SeqCst);
+        go_tx.send(()).unwrap();
+        assert_eq!(
+            declined_rx.recv().unwrap(),
+            0,
+            "B was declined and tells nothing yet"
+        );
+    }));
+    let window_a = real_window(directory.path(), spy_a, &held_a);
+    assert_eq!(limit_notifications(&window_a), 0);
+    assert_eq!(world.notified(), None, "A gave its claim back");
+
+    again_tx.send(()).unwrap();
+    assert_eq!(
+        told_rx.recv().unwrap(),
+        1,
+        "B claims on its next read and tells the stop"
+    );
+    window_b.join().unwrap();
+    assert!(world.notified().is_some());
+}
