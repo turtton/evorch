@@ -2,9 +2,17 @@
 //!
 //! 層構造: `model` (egui 非依存 view model) -> `pty` / `terminal` / `events` (adapter) -> panes/app (Wave 3)。
 
+// The CEF GUI is the only supported GUI build; the code paths for building
+// without it are gone, so refuse the configuration instead of compiling a
+// partial GUI.
+#[cfg(not(feature = "cef"))]
+compile_error!(
+    "gui requires the `cef` feature (on by default): build without --no-default-features; \
+     see docs/browser.md for the CEF distribution"
+);
+
 pub mod app;
 pub mod body;
-#[cfg(feature = "browser")]
 pub mod browser;
 pub mod core_client;
 pub mod diff;
@@ -14,7 +22,6 @@ pub mod evidence;
 pub mod fixture;
 pub mod format;
 pub mod headless;
-#[cfg(feature = "cef")]
 pub mod html_preview;
 pub mod keymap;
 pub mod logging;

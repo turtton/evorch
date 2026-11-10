@@ -58,6 +58,10 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
+      # `gui` enables CEF by default, so the workspace build, the tests and the
+      # doctests all link libcef.so. None of them starts CEF (the cef-e2e job
+      # does), so only a libcef.so link goes on the loader path.
+      - uses: ./.github/actions/setup-cef
       # ジョブ内の依存キャッシュを復元する。profile/feature が異なるジョブは別キー。
       # PR ごとの保存は repo の cache 上限 (10GB) を圧迫するため main でのみ保存する。
       # Keep CARGO_TARGET_DIR scoped to Cargo steps below: the cache action's
@@ -78,8 +82,6 @@ jobs:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
-          # `browser` is a default GUI feature; keep the build without it compiling.
-          cargo clippy -p gui --all-targets --no-default-features -- -D warnings
           cargo clippy -p event-bus --all-targets --features otel-exporter -- -D warnings
           mkdir -p "$EVORCH_CI_METADATA_DIR"
           cargo metadata --format-version 1 --locked > "$EVORCH_CI_METADATA_DIR/cargo.json"
@@ -93,6 +95,15 @@ jobs:
         run: |
           scripts/tests/test_check_workbench_boundaries.sh
           scripts/check-workbench-boundaries.sh
+      # scripts/setup-cef.sh (CI) and flake.nix (Nix) must fetch the CEF build
+      # that Cargo.lock binds.
+      - name: CEF pin consistency
+        run: scripts/tests/test_setup_cef_pin.sh
+      # gui has no non-CEF build any more.
+      - name: GUI refuses to build without CEF
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: scripts/tests/test_gui_requires_cef.sh
       # CI enforces cost-sensitive invariants with this offline gate. The mock
       # computes cache usage from received input; compaction has an explicit boundary.
       - name: Cache preservation contracts (offline)
@@ -276,13 +287,17 @@ jobs:
         with:
           packages: libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
           save: ${{ github.ref == 'refs/heads/main' }}
+      # Only a libcef.so link: the distribution's own Vulkan loader would shadow
+      # the system one the lavapipe renders below go through.
+      - uses: ./.github/actions/setup-cef
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence/model-metadata /tmp/opencode
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
+      # The ignored html_preview tests start a real CEF; the cef-e2e job runs them.
       - name: Run all ignored GUI tests (required real render)
-        run: cargo nextest run -p gui --tests --test-threads 1 --run-ignored only --success-output immediate --no-tests fail
+        run: cargo nextest run -p gui --tests --test-threads 1 --run-ignored only -E 'not (package(=gui) & kind(lib) & test(/^html_preview::tests::/))' --success-output immediate --no-tests fail
         env:
           EVORCH_REQUIRE_ADAPTER: "1"
           # Cargo runs tests from the crate directory, not the workspace root.
@@ -369,9 +384,10 @@ jobs:
           if-no-files-found: warn
           path: target/web-ui-screenshots
 
-  # ADR 0034 B: the opt-in CEF HTML preview. cef-dll-sys downloads the CEF
-  # build cef-rs pins into CEF_PATH; it is not cached because the extracted
-  # distribution (~1.8 GB) would crowd the repository cache.
+  # ADR 0034 B: the real CEF HTML preview. setup-cef installs the pinned
+  # distribution (scripts/setup-cef.sh) that every job's build now links; this
+  # job also starts it. The lint of the CEF feature is the workspace clippy in
+  # the ci job, which builds gui with its default features.
   cef-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -379,13 +395,11 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-      CEF_PATH: ${{ github.workspace }}/../cef-dist
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
-          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ runner.os }}-cef
@@ -395,6 +409,10 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           packages: mold cmake clang libclang-dev ninja-build perl git
+      # CEF reads its resources beside the libcef.so it was loaded from.
+      - uses: ./.github/actions/setup-cef
+        with:
+          runtime-path: full
       # Chromium's sandbox needs unprivileged user namespaces; the SUID
       # chrome-sandbox is never used (ADR 0034).
       - name: Allow unprivileged user namespaces
@@ -402,15 +420,10 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
-      - name: Lint the CEF feature
-        run: cargo clippy -p gui -p browser-cef --features gui/cef,browser-cef/cef --all-targets -- -D warnings
       - name: CEF offline isolation and crash recovery
-        run: |
-          export LD_LIBRARY_PATH="$PWD/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          cargo nextest run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
+        run: cargo nextest run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
       - name: Card snapshots and agent artifact inspection through CEF
         run: |
-          export LD_LIBRARY_PATH="$PWD/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export EVORCH_CEF_HELPER="$PWD/target/debug/evorch-cef-helper"
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          cargo nextest run -p gui --features cef --lib -E 'test(/^html_preview::tests::/)' --run-ignored only --success-output immediate --no-tests fail
+          cargo nextest run -p gui --lib -E 'test(/^html_preview::tests::/)' --run-ignored only --success-output immediate --no-tests fail

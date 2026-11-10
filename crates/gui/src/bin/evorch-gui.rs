@@ -1027,8 +1027,6 @@ fn build_workbench(
     };
     // Before anything restores or continues a conversation.
     let runtime_guarded = install_runtime_tombstones(&runtime, &prelude.tombstones);
-    #[cfg(not(feature = "browser"))]
-    drop(agent_browser);
 
     // Runs of other projects use models composed from those projects' role profiles.
     let project_models = production_model
@@ -1336,7 +1334,6 @@ fn build_workbench(
     };
     let portal_opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> =
         Arc::new(gui::model::artifact_opener::PortalArtifactOpener);
-    #[cfg(feature = "cef")]
     let (artifact_opener, mut html_previews) = {
         let (opener, requests) =
             gui::model::artifact_opener::HtmlPreviewOpener::new(Arc::clone(&portal_opener));
@@ -1352,8 +1349,6 @@ fn build_workbench(
             ),
         )
     };
-    #[cfg(not(feature = "cef"))]
-    let artifact_opener = portal_opener;
     // 会話と goal の投入を production 経路で接続する CommandSink (demo も同様)。
     let mcp_gui_service = mcp_services
         .map(|services| services.gui)
@@ -1402,7 +1397,6 @@ fn build_workbench(
         Ok(sink) => state = state.with_system_notifications(Arc::new(sink)),
         Err(error) => tracing::warn!(%error, "system notification worker unavailable"),
     }
-    #[cfg(feature = "browser")]
     if let Some(browser) = agent_browser {
         state.set_agent_browser(Box::new(gui::browser::AgentBrowserPane::new(
             gui::browser::LiveAgentView::new(browser, handle.clone()),
@@ -1545,22 +1539,18 @@ fn build_workbench(
             }
         }
     };
-    #[cfg(feature = "cef")]
     let inspecting_runtime = runtime.clone();
     state.reload_theme(ctx, settings.theme_preset.into());
-    #[cfg(feature = "cef")]
     html_previews.install_snapshots(ctx);
     // Fix tool availability now without starting CEF. The first page
     // request wakes this GUI thread to initialize it; shutdown stays
     // on the same thread and the tool schema never changes.
-    #[cfg(feature = "cef")]
     match html_previews.artifact_pages(ctx) {
         Ok(pages) => inspecting_runtime.set_artifact_pages(pages),
         Err(error) => tracing::warn!(%error, "agents cannot inspect HTML artifacts"),
     }
     Ok(Ready {
         workbench: WorkbenchApp(state),
-        #[cfg(feature = "cef")]
         html_previews,
         executor,
         _storage: storage,
@@ -1657,7 +1647,6 @@ impl Starting {
 /// The running workbench.
 struct Ready {
     workbench: WorkbenchApp<AgentRuntime>,
-    #[cfg(feature = "cef")]
     html_previews: gui::html_preview::HtmlPreviewWindows,
     /// Stops before the storage resources are released.
     executor: Option<ReclaimExecutor>,
@@ -1717,7 +1706,6 @@ impl Drop for GuiStorageResources {
 impl eframe::App for Ready {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.workbench.logic(ctx, frame);
-        #[cfg(feature = "cef")]
         self.html_previews.logic();
     }
 
@@ -1729,7 +1717,6 @@ impl eframe::App for Ready {
         self.workbench.0.ui(ui, frame);
         // After the workbench, so artifacts opened this frame show without a
         // second repaint.
-        #[cfg(feature = "cef")]
         self.html_previews.render(ui.ctx());
     }
 }

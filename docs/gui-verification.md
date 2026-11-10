@@ -65,7 +65,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - コマンド: `cargo test -j 1 -p gui --test browser --test agent_browser_workbench -- --test-threads=1`
 - 例: `crates/gui/tests/browser.rs::a_closed_page_keeps_its_last_frame_and_says_so`
 - 環境変数: なし
-- CI ジョブ: `ci` (`browser` は `gui` の既定 feature なので既定のワークスペーステストで実行される。`--no-default-features` のビルドは clippy で確認する)
+- CI ジョブ: `ci` (`cef` と `browser` は `gui` の既定 feature なので既定のワークスペーステストで実行される。`gui` は CEF なしのビルドを `compile_error!` で拒否し、ci は `--no-default-features` が拒否されることを確認する)
 
 ### L6: 実 Chromium E2E
 

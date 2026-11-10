@@ -1,0 +1,37 @@
+name: setup-cef
+description: >-
+  Install the pinned CEF distribution for `gui`'s default `cef` feature and put
+  libcef.so on the loader path (scripts/setup-cef.sh).
+inputs:
+  runtime-path:
+    description: >-
+      "libcef" puts only a libcef.so link on LD_LIBRARY_PATH, enough to load
+      test binaries and the GUI fixtures. "full" puts the whole distribution
+      there, which tests that start CEF need to find its resources; it also
+      carries a Vulkan loader that shadows the system one, so use it only in
+      jobs that do not render with wgpu.
+    default: libcef
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        RUNTIME_PATH: ${{ inputs.runtime-path }}
+      run: |
+        set -euo pipefail
+        dist="$RUNNER_TEMP/cef-dist"
+        scripts/setup-cef.sh "$dist"
+        case "$RUNTIME_PATH" in
+          full) lib="$dist" ;;
+          libcef)
+            lib="$RUNNER_TEMP/cef-libcef"
+            mkdir -p "$lib"
+            ln -s "$dist/libcef.so" "$lib/libcef.so"
+            ;;
+          *) echo "unknown runtime-path: $RUNTIME_PATH" >&2; exit 2 ;;
+        esac
+        {
+          echo "CEF_PATH=$dist"
+          echo "LD_LIBRARY_PATH=$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        } >> "$GITHUB_ENV"

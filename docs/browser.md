@@ -2,8 +2,9 @@
 
 The agent browser (launch, CDP, network guard) lives in `crates/browser` so
 runtime and tools can use it. The GUI tab that watches it is behind the
-`browser` feature of `gui`, which is on by default; build with
-`--no-default-features` to leave it out. CEF builds include it.
+`browser` feature of `gui`. `gui`'s default feature is `cef`, which includes
+`browser`, so a plain `cargo build` is the CEF GUI and needs the CEF distribution
+(see Building). The CEF GUI is the only supported GUI build.
 Install Chromium separately. No browser is downloaded or opened automatically.
 
 The GUI used to have a manual **Browser** window (navigate a URL, click a CSS
@@ -199,8 +200,9 @@ The `cef` feature of `gui` opens presented HTML artifacts (`.html`/`.htm`) in
 an in-app window rendered off-screen by CEF (`crates/browser-cef`, ADR 0034 B).
 Other artifacts, and every artifact when CEF cannot start, still go to the XDG
 Portal. The Nix default package includes it on x86_64-linux (see Building).
-The cargo feature stays off by default, so cargo builds without it never fetch
-CEF.
+The cargo feature is on by default, so a cargo build of `gui` needs the CEF
+distribution: it reads `CEF_PATH`, and downloads CEF there when the variable is
+unset (see Building). `gui` refuses to build without the feature.
 
 The preview is offline. The artifact is served from
 `https://artifact.evorch.invalid` by a scheme handler, every other request and
@@ -234,8 +236,7 @@ renders it offline at 1024×768 DIP under the same isolation, waits for loading
 to finish and one more paint, and stores a PNG in
 `$XDG_CACHE_HOME/evorch/html-snapshots/<sha256>-v1.png`. Artifacts are
 content-addressed, so a cached snapshot is never stale. Snapshots render one at
-a time on a worker thread; clicking one opens the in-app preview. Without the
-feature, cards keep the text entry and the Open button that goes to the Portal.
+a time on a worker thread; clicking one opens the in-app preview.
 
 Agents check their HTML artifacts through CEF with `inspect_artifact`. The
 action `open` loads an artifact of the caller's conversation into an offline
@@ -272,7 +273,7 @@ popups are listed in the next outline. Nobody sees the page's JS dialogs:
 - Frame rates: off-screen rendering is capped at 30 fps for the preview window
   and 10 fps for agent pages. Card snapshots stay at 60 fps: a lower rate
   exposed a blank-frame capture in the isolation test when it was tried.
-- Builds without CEF, and runtimes without the GUI, do not offer the tool.
+- Runtimes without the GUI do not offer the tool.
 - Why it is separate from `browser_*`:
   - It reaches different agents.
   - It needs no network permission.
@@ -291,31 +292,46 @@ writes a verbose CEF log.
   is the CLI and tools from `.#evorch` with `bin/evorch-gui` starting
   `evorch-gui-cef`. `.#evorch` holds the CLI and `evorch-core` only, on every
   system: Nix builds no non-CEF GUI. Other systems get `.#evorch` as
-  `packages.default` and `apps.default` and have no `.#evorch-gui`; build the
-  non-CEF GUI there with cargo (`cargo build -p gui --bin evorch-gui`).
+  `packages.default` and `apps.default` and have no `.#evorch-gui`: the GUI
+  needs CEF, which Nix builds on x86_64-linux only.
   `nix build .#evorch-gui-cef` builds the CEF GUI alone. It fetches the CEF
   build cef-rs pins with a fixed hash, strips `libcef.so`, keeps the `en-US`
   and `ja` locales, and installs `evorch-gui-cef` with the helper and CEF files
   in one `libexec` directory.
-- Development: `nix develop .#cef` sets `CEF_PATH` to that distribution and puts
-  `target/debug` (where cef-dll-sys copies `libcef.so`) on `LD_LIBRARY_PATH`.
-  Outside Nix, cef-dll-sys downloads CEF into `CEF_PATH` on the first build.
+- Development: the default `nix develop` shell (`.#cef` is the same shell) sets
+  `CEF_PATH` to that distribution and puts it at the end of `LD_LIBRARY_PATH`.
+  Outside Nix, run `scripts/setup-cef.sh <dir>` once, which installs the
+  pinned distribution in the same layout, then export `CEF_PATH=<dir>` and
+  `LD_LIBRARY_PATH=<dir>`. Without `CEF_PATH`, cef-dll-sys downloads CEF itself
+  on the first build, and `libcef.so` must still be on `LD_LIBRARY_PATH`.
+- cef-dll-sys copies the CEF runtime beside the build artifacts only where cargo
+  puts intermediate files under `target/`. The huacnlee/cargo fork keeps them
+  under `~/.cargo/targets`, so `target/debug` does not hold `libcef.so`. Do
+  not rely on that copy: CEF reads its resources (paks, ICU data, locales) from
+  the directory of the `libcef.so` it loaded, so `LD_LIBRARY_PATH` must name the
+  distribution directory itself.
+- The distribution bundles a Vulkan loader (`libvulkan.so.1`) that would shadow
+  the system one for wgpu. Put the distribution after the system's Vulkan loader
+  on `LD_LIBRARY_PATH`, or use a directory holding only a `libcef.so` link where
+  CEF is not started (CI does, except in `cef-e2e`).
+
+`cargo build -p gui` builds `evorch-gui` only; the helper is a binary of
+`browser-cef`, so build both together:
 
 ```sh
-nix develop .#cef
-cargo build -p gui -p browser-cef --features gui/cef,browser-cef/cef \
-  --bin evorch-gui --bin evorch-cef-helper
-cargo run -p gui --features cef --bin evorch-gui
+cargo build --locked -p gui -p browser-cef --bin evorch-gui --bin evorch-cef-helper
+cargo run -p gui --bin evorch-gui
 ```
 
 ### Tests
 
 The pure parts (frame upload, input translation including IME, popup placement,
-the URL allowlist) run in the normal workspace suite. The end-to-end tests need
-CEF and are ignored by default; the `cef-e2e` CI job runs them.
+the URL allowlist) run in the normal workspace suite. The end-to-end tests start
+CEF and are ignored by default; the `cef-e2e` CI job runs them, and the
+`offscreen-gate` job's ignored `gui` run leaves the `html_preview` ones to it.
 
 ```sh
-nix develop .#cef -c cargo nextest run -p browser-cef --features cef --run-ignored all
+nix develop -c cargo nextest run -p browser-cef --features cef --run-ignored all
 ```
 
 `offline_isolation` serves a page that probes fetch, XHR, WebSocket, beacon,
@@ -349,9 +365,9 @@ are:
   Throughout, no connection may reach a loopback listener.
 
 ```sh
-nix develop .#cef
+nix develop
 cargo build -p browser-cef --features cef --bin evorch-cef-helper
 EVORCH_CEF_HELPER=$PWD/target/debug/evorch-cef-helper \
-  cargo nextest run -p gui --features cef --lib --run-ignored only \
+  cargo nextest run -p gui --lib --run-ignored only \
   -E 'test(/^html_preview::tests::/)'
 ```

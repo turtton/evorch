@@ -1,6 +1,5 @@
 //! The agent browser tab opens beside the conversation whose agent opened a
 //! page, and the View button on a browser tool card brings it back.
-#![cfg(feature = "browser")]
 
 use std::sync::{Arc, Mutex};
 
