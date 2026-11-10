@@ -187,20 +187,20 @@ jobs:
           if ! ATTIC_PUSH_ATTEMPTS=1 ATTIC_PUSH_TIMEOUT=290s scripts/push-attic.sh ./result-cef-deps; then
             echo "::warning::PR CEF dependency upload failed or timed out; continuing the build"
           fi
-      # The package also checks CLI startup and ELF linkage after runtime fixup.
+      # The default package is the CLI from .#evorch plus the CEF GUI on
+      # x86_64-linux (ADR 0034), so one build runs both install checks (CLI
+      # startup, ELF linkage after runtime fixup, the CEF layout). .#evorch
+      # builds no non-CEF GUI there, and its closure is part of the default
+      # package's, so the attic push below covers it.
       - name: Build and smoke-test flake package in the Nix sandbox
-        run: |
-          # Explicit out-links keep multiple installables' output names stable.
-          nix build -L .#evorch --out-link ./result-evorch
-          # The default package adds the CEF GUI build on x86_64-linux (ADR 0034).
-          nix build -L .#default --out-link ./result-default
+        run: nix build -L .#default --out-link ./result-default
       - name: Push to attic
         if: success() && github.ref == 'refs/heads/main'
         timeout-minutes: 60
         run: |
           # How the runner reaches attic (direct or DERP relay) bounds throughput.
           timeout 60 sudo tailscale ping -c 3 attic.taile2777.ts.net || true
-          scripts/push-attic.sh ./result-attic ./result-evorch ./result-default ./result-deps ./result-cef-deps
+          scripts/push-attic.sh ./result-attic ./result-default ./result-deps ./result-cef-deps
 
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
   # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。

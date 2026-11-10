@@ -165,6 +165,12 @@ CLI（`evorch run` 等）は次の方針とする。
 7. **ADR 0024 の撤去（20）**: 旧所有権機構・共有 DB 同期として `owners.db`、heartbeat/claim、`readonly_threads`、`shared_feed`、`sidebar.json` merge を完全削除する。
 8. **allowlist のゼロ化（19b）**: §11 の allowlist を 0 にし、内部 crate への直接依存を CI で禁止する。
 
+**移行期間の既知制約（PR 20 まで）**:
+
+- **Stop の永続化遅延**: lane の起動待ち中に operator が Stop を出しても、owners registry の EXCLUSIVE ロックが長時間保持されていると Stop を直ちに durable に記録できない。その場合は Stop をメモリ上で先に有効化し、ロック解放後に記録を書き直す。書き直し前にコアが強制終了されると、再起動後に lane が復活することがある。この制約は PR 20 まで許容し、所有権 guard の外に journal は新設しない（ユーザー決定: `question-5a4cb7e9cf8474970666fd7ee1b7667e`）。
+- **一時的な二重 MCP 接続**: GUI とコアが並存している間、idle thread の handoff 直後に旧・新の MCP 接続が同時に存在することがある。ツールの二重実行は per-call fence で防止し、旧 owner は fence を検知したら MCP セッションを drain する。この状態は PR 20 で解消する（暫定判断）。
+- **MCP 結果内の credential**: MCP の成功結果またはエラー content にサーバが credential を echo して含めても redaction は行わず、既存の挙動を維持する。一方、host が生成するログや診断には credential を含めない。
+
 **19a の条件**: 単一 writer をデフォルトにするのは、管理画面の更新操作の移行が完了してからとする。read-only 表示だけは暫定の例外として、移行完了前も認める。
 
 **並行開発との競合回避**:
@@ -229,4 +235,5 @@ CLI（`evorch run` 等）は次の方針とする。
 
 ## 改訂履歴
 
+- 2026-11-10: §12 に PR 20 までの移行期間の既知制約（Stop の永続化遅延、一時的な二重 MCP 接続、MCP 結果と credential redaction の扱い）を追記。
 - 2026-11-09: §2（ロック 2 本、AlreadyRunning の再接続扱い、connect-or-start）、§3（CEF renderer helper の分離）、§6（CLI の Provenance、切断時の扱い）、§8（restart transaction、予定再起動、CLI の再接続）、§9（ローカル限定の自動再起動、永続予算、CLI run の非復活）、§10（CLI の全面改訂）、§11（allowlist のゼロ化）、§12（opt-in 移行と 19a / 20 / 19b の順序）を反映。

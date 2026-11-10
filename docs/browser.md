@@ -292,8 +292,9 @@ writes a verbose CEF log.
 
 - Nix: on x86_64-linux, `nix build` (`packages.default`, also `.#evorch-gui`)
   is the CLI and tools from `.#evorch` with `bin/evorch-gui` starting
-  `evorch-gui-cef`. Other systems get `.#evorch`, which has no CEF, and
-  `nix build .#evorch` still builds that version anywhere.
+  `evorch-gui-cef`. `.#evorch` holds the CLI and `evorch-core` only on this
+  system: it builds no non-CEF GUI. Other systems get `.#evorch`, which has no
+  CEF but keeps the non-CEF `evorch-gui` as their only GUI.
   `nix build .#evorch-gui-cef` builds the CEF GUI alone. It fetches the CEF
   build cef-rs pins with a fixed hash, strips `libcef.so`, keeps the `en-US`
   and `ja` locales, and installs `evorch-gui-cef` with the helper and CEF files
