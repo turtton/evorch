@@ -512,12 +512,14 @@
             type = "app";
             program = "${evorch}/bin/evorch";
           };
-        } // pkgs.lib.optionalAttrs isCefSystem {
+        # `if` rather than pkgs.lib.optionalAttrs: apps stays evaluable on a
+        # system nixpkgs no longer supports, as before.
+        } // (if isCefSystem then {
           evorch-gui = {
             type = "app";
             program = "${defaultPackage}/bin/evorch-gui";
           };
-        };
+        } else { });
         devShells = {
           default = devShell;
           upstream-cargo = upstreamCargoDevShell;
