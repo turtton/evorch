@@ -118,6 +118,20 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
         "lane_detach",
         json!({"operation_id":"detach-1","lane_id":"lane","expected_management_revision":1}),
     );
+    contract::<meta::lane_instructions::SendArgs>(
+        "lane_send",
+        json!({"operation_id":"send-1","lane_id":"lane","expected_management_revision":1,"expected_brief_revision":1,"message":"Prefer the smaller fix"}),
+    );
+    contract::<meta::lane_instructions::ReviseArgs>(
+        "lane_revise_brief",
+        json!({
+            "operation_id":"revise-1","lane_id":"lane","expected_management_revision":1,"expected_brief_revision":1,
+            "brief":{
+                "objective":"Ship the fix","inputs":[],"deliverables":["patch"],
+                "acceptance_criteria":["tests pass"],"constraints":[],"report_policy":"attached"
+            }
+        }),
+    );
     contract::<meta::FinishArgs>(
         "finish",
         json!({"result":"Completed, files x, tested y, no open blockers."}),

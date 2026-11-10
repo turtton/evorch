@@ -33,6 +33,7 @@ pub(crate) mod git_read;
 pub mod image_generation;
 pub mod lane_close;
 pub mod lane_delivery;
+pub mod lane_instructions;
 pub mod lane_management;
 mod lane_monitor;
 mod lane_reports;

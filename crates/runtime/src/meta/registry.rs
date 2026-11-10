@@ -58,6 +58,8 @@ macro_rules! define_meta_ops {
 define_meta_ops! {
     LaneSetPolicy => "lane_set_policy" => super::lane_management::spec => |state, runtime, input| { super::lane_management::manage(state, runtime, "lane_set_policy", input) },
     LaneDetach => "lane_detach" => super::lane_management::spec => |state, runtime, input| { super::lane_management::manage(state, runtime, "lane_detach", input) },
+    LaneSend => "lane_send" => super::lane_instructions::spec => |state, runtime, input| { super::lane_instructions::send(state, runtime, "lane_send", input) },
+    LaneReviseBrief => "lane_revise_brief" => super::lane_instructions::spec => |state, runtime, input| { super::lane_instructions::send(state, runtime, "lane_revise_brief", input) },
     LaneVerify => "lane_verify" => lane_verification::spec => |state, runtime, input| { lane_verification::verify(state, runtime, input).await },
     LaneClose => "lane_close" => lane_verification::spec => |state, runtime, input| { lane_verification::close(state, runtime, input) },
     SubmitLaneVerification => "submit_lane_verification" => lane_verification::spec => |state, runtime, input| { lane_verification::submit(state, runtime, input) },

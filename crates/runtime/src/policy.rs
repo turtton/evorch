@@ -67,6 +67,11 @@ impl ExecutionPolicy {
                         ]
                         .map(str::to_owned),
                     );
+                    // Instructions to a lane: a fixed part of the lead's schema, so the
+                    // lane state can never add or remove them mid-run.
+                    self.capabilities
+                        .allowed_tools
+                        .extend(["lane_send", "lane_revise_brief"].map(str::to_owned));
                 }
                 if is_root && self.role_name == Role::Orchestrator.name() {
                     let lane_tools: &[&str] = if config.lane_scope.is_some() {
@@ -512,6 +517,8 @@ mod tests {
                         "lane_close",
                         "lane_set_policy",
                         "lane_detach",
+                        "lane_send",
+                        "lane_revise_brief",
                     ]
                     .map(str::to_owned),
                 );
@@ -885,7 +892,12 @@ mod lane_management_exposure_tests {
                         ..Default::default()
                     };
                     let policy = ExecutionPolicy::for_role(role).for_run_config(&config, root);
-                    for name in ["lane_set_policy", "lane_detach"] {
+                    for name in [
+                        "lane_set_policy",
+                        "lane_detach",
+                        "lane_send",
+                        "lane_revise_brief",
+                    ] {
                         assert_eq!(
                             policy.authorize(name).is_ok(),
                             role == Role::Orchestrator && root && lane.is_none()

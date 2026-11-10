@@ -681,10 +681,24 @@ pub(crate) fn revise_brief(
     brief: &LaneBrief,
     at_ns: i64,
 ) -> Result<LaneUpdate, StorageError> {
+    let tx = immediate(conn)?;
+    let update = revise_brief_in(&tx, lane_id, expected_revision, brief, at_ns)?;
+    tx.commit()?;
+    Ok(update)
+}
+
+/// The brief replacement inside the caller's transaction, which owns the commit. An
+/// instruction acceptance needs the brief and its delivery reservation in one commit.
+pub(crate) fn revise_brief_in(
+    tx: &Transaction<'_>,
+    lane_id: &str,
+    expected_revision: u64,
+    brief: &LaneBrief,
+    at_ns: i64,
+) -> Result<LaneUpdate, StorageError> {
     brief.validate().map_err(StorageError::LaneInvalid)?;
     guard_texts("lane_brief", brief.guarded_texts())?;
-    let tx = immediate(conn)?;
-    let lane = require(&tx, lane_id)?;
+    let lane = require(tx, lane_id)?;
     if lane.brief_revision != expected_revision {
         return Err(StorageError::StaleRevision {
             kind: "brief",
@@ -711,9 +725,8 @@ pub(crate) fn revise_brief(
             updated_at_ns = max(updated_at_ns, ?3) WHERE lane_id = ?1",
         params![lane_id, brief_json, at_ns],
     )?;
-    bump_revision(&tx)?;
-    let lane = require(&tx, lane_id)?;
-    tx.commit()?;
+    bump_revision(tx)?;
+    let lane = require(tx, lane_id)?;
     Ok(LaneUpdate {
         lane,
         changed: true,
