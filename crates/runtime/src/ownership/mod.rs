@@ -10,8 +10,12 @@ mod permit;
 mod retry;
 mod state;
 pub use observe::{DbOperation, DbPhase, TARGET as DB_TRACE_TARGET};
+#[cfg(test)]
+pub(crate) use permit::GenerationClockOverride;
 pub use permit::OwnerPermit;
 pub use retry::RetryPolicy;
+#[cfg(test)]
+pub(crate) use retry::virtual_time::VirtualClock;
 pub use state::{HeartbeatTick, OwnershipError, ThreadOwner};
 mod registry;
 pub use registry::{OwnerVerdict, Registry, RegistryError};

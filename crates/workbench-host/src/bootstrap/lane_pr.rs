@@ -57,6 +57,11 @@ pub fn start(
         service.shutdown_and_drain().await?;
         Ok(())
     });
+    let writer = runtime.clone();
+    services.start("lane-stop-writes", |stop| async move {
+        writer.run_lane_stop_writes(stop).await?;
+        Ok(())
+    });
     runtime.set_thread_scratch(owner.thread_scratch());
     let recovery = runtime.prepare_lane_recovery(owner)?;
     services.start("lane-recovery", |stop| async move {
@@ -139,6 +144,7 @@ pub async fn stop_and_drain(
         );
     }
     remember(&mut failure, runtime.drain_lane_admissions().await);
+    remember(&mut failure, runtime.drain_lane_stop_writes().await);
     remember(&mut failure, services.shutdown().await);
     failure.map_or(Ok(()), Err)
 }

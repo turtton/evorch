@@ -355,7 +355,7 @@ pub(super) mod virtual_time {
             })
         }
 
-        pub(crate) fn shared(self: &Arc<Self>) -> Arc<dyn Clock> {
+        pub(in crate::ownership) fn shared(self: &Arc<Self>) -> Arc<dyn Clock> {
             Arc::clone(self) as Arc<dyn Clock>
         }
     }

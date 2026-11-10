@@ -50,6 +50,14 @@ impl ExecutionControl {
         self.cancel_tx.send_replace(RunInterrupt::Cancel);
         self.approvals.close();
     }
+
+    // Only for an unregistered admission, while A prevents registration. No
+    // publication can be in flight, so this must not wait for a publication gate.
+    pub(super) fn stop_admission(&self) {
+        self.publication.0.cancelled.store(true, Ordering::Release);
+        self.cancel_tx.send_replace(RunInterrupt::Stop);
+        self.approvals.close();
+    }
 }
 
 impl PublicationToken {
@@ -147,45 +155,40 @@ impl AgentRuntime {
                 drop(gate);
                 continue;
             }
-            self.persist_pending_lane_cancellation(
-                run,
-                &runs,
-                &admissions,
-                "cancelled before root start",
-            )?;
+            let ownership = Self::pending_lane_cancellation_ownership(run, &runs, &admissions);
             if let Some(admission) = admissions.get_mut(&run)
                 && Arc::ptr_eq(&admission.execution, &execution)
             {
                 admission.cancelled = true;
             }
             execution.forbid_publication();
-            return Ok(());
+            drop(runs);
+            drop(admissions);
+            drop(intents);
+            drop(gate);
+            return self
+                .persist_lane_start_cancellation(
+                    run,
+                    ownership.as_ref(),
+                    "cancelled before root start",
+                )
+                .map_err(|error| lane_cancellation_error(run, error));
         }
     }
 
-    // Called with I -> A -> R so the persisted decision names the same execution
-    // as the memory cancellation. A lane root cannot be inside another subtree.
-    pub(super) fn persist_pending_lane_cancellation(
-        &self,
+    pub(super) fn pending_lane_cancellation_ownership(
         run: RunId,
         runs: &HashMap<RunId, RunEntry>,
         admissions: &HashMap<RunId, admission::Admission>,
-        reason: &str,
-    ) -> Result<(), RuntimeError> {
-        let ownership = runs
+    ) -> Option<crate::ownership::OwnerPermit> {
+        admissions
             .get(&run)
-            .and_then(|entry| entry.config.ownership.clone())
-            .or_else(|| {
-                admissions
-                    .get(&run)
-                    .and_then(|admission| admission.snapshot().ownership)
-            });
-        self.persist_lane_start_cancellation(run, ownership.as_ref(), reason)
-            .map_err(|error| RuntimeError::LaneCancellation {
-                run_id: run.to_string(),
-                reason: error.to_string(),
-            })?;
-        Ok(())
+            .filter(|admission| admission.result.borrow().is_none())
+            .map(|admission| admission.snapshot().ownership)
+            .unwrap_or_else(|| {
+                runs.get(&run)
+                    .and_then(|entry| entry.config.ownership.clone())
+            })
     }
 
     pub(super) fn cancel_execution(&self, execution: &Arc<ExecutionControl>) {
@@ -258,6 +261,22 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&run)
             .is_some_and(|i| i.cancelled)
+    }
+}
+
+pub(super) fn lane_cancellation_error(run: RunId, error: crate::lanes::LaneError) -> RuntimeError {
+    if error.code == "lane_stop_pending" {
+        RuntimeError::LaneCancellationPending {
+            run_id: run.to_string(),
+            reason: error.to_string(),
+        }
+    } else {
+        RuntimeError::LaneCancellation {
+            run_id: run.to_string(),
+            reason: format!(
+                "live execution is stopped; durable cancellation was not recorded: {error}"
+            ),
+        }
     }
 }
 

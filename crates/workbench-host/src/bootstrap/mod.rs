@@ -388,7 +388,8 @@ impl BootstrappedHost {
         // TODO(P9): once safe-point restart/auto-resume can restore an ordinary
         // chat's Waiting state, count that idle conversation as no work. Until
         // then retain all Waiting runs conservatively to avoid losing them.
-        !self.runtime.pending_lane_admissions().is_empty()
+        self.runtime.pending_lane_stop_writes() != 0
+            || !self.runtime.pending_lane_admissions().is_empty()
             || self.host.lock().unwrap().service().has_background_work()
             || self.runtime.list_agents().iter().any(|r| {
                 self.executor.has_running_shell_jobs(&r.run_id.to_string())

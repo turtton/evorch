@@ -1,5 +1,6 @@
 //! Independent lane roots and their durable creation intents (ADR 0044).
 use crate::{AgentRuntime, RunConfig, RunId};
+mod stops;
 #[cfg(test)]
 mod tests;
 use agents::Role;
@@ -18,6 +19,7 @@ pub(crate) struct LaneRuntime {
     // Cancellation can look up a pending lane without I/O for ordinary runs.
     pub(crate) creation_intents: Mutex<std::collections::HashMap<RunId, String>>,
     pub(crate) started: Mutex<std::collections::HashMap<RunId, Vec<String>>>,
+    stops: stops::LaneStopWrites,
     #[cfg(test)]
     activity_time: Mutex<Option<i64>>,
 }
@@ -191,36 +193,6 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&run_id);
-        Ok(())
-    }
-
-    pub(crate) fn persist_lane_start_cancellation(
-        &self,
-        run_id: RunId,
-        ownership: Option<&crate::ownership::OwnerPermit>,
-        reason: &str,
-    ) -> Result<(), LaneError> {
-        let lane_id = self
-            .shared
-            .lanes
-            .creation_intents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&run_id)
-            .cloned();
-        let Some(lane_id) = lane_id else {
-            return Ok(());
-        };
-        let _guard = ownership
-            .map(|permit| permit.mutation_guard())
-            .transpose()
-            .map_err(|error| LaneError::new("lane_creation_denied", error))?;
-        let store = self.shared.run_store.get().ok_or_else(|| {
-            LaneError::new("storage_unavailable", "lane ledger is not configured")
-        })?;
-        store
-            .handle
-            .block_lane_start(&lane_id, reason, self.lane_activity_time())?;
         Ok(())
     }
 
