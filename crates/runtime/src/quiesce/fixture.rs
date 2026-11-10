@@ -56,6 +56,7 @@ impl AgentModel for GateModel {
                 model: "test".into(),
                 messages: messages.to_vec(),
                 tools: tools.to_vec(),
+                tool_choice: None,
                 temperature: None,
                 max_tokens: None,
                 reasoning_effort: None,

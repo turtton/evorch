@@ -53,6 +53,7 @@ pub(super) type RegistrationHook = Arc<dyn Fn(RunId) + Send + Sync>;
 
 pub(super) struct Admission {
     parent: Option<RunId>,
+    lane_root: bool,
     pub(super) cancelled: bool,
     pub(super) execution: Arc<ExecutionControl>,
     ownership: Option<crate::ownership::OwnerPermit>,
@@ -92,14 +93,27 @@ impl Admission {
 impl AgentRuntime {
     /// Lane root admissions not yet finished, including ones absent from list_agents.
     pub fn pending_lane_admissions(&self) -> Vec<RunId> {
-        let mut state = self
+        let mut runs: Vec<_> = {
+            let mut state = self
+                .shared
+                .lane_admissions
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.reap();
+            state.executions.values().map(|(run, _)| *run).collect()
+        };
+        let admissions = self
             .shared
-            .lane_admissions
-            .state
+            .admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.reap();
-        let mut runs: Vec<_> = state.executions.values().map(|(run, _)| *run).collect();
+        runs.extend(
+            admissions
+                .iter()
+                .filter(|(_, a)| a.lane_root && a.result.borrow().is_none())
+                .map(|(run, _)| *run),
+        );
         runs.sort_unstable();
         runs.dedup();
         runs
@@ -111,26 +125,52 @@ impl AgentRuntime {
         let _draining = self.shared.lane_admissions.draining.lock().await;
         let mut failure = None;
         loop {
+            // I serializes the snapshot with reservation and task registration.
+            // A queued admission has no JoinSet task, but still owns a permit.
             let (mut tasks, executions) = {
-                let mut state = self
+                let _intents = self
                     .shared
-                    .lane_admissions
-                    .state
+                    .spawn_intents
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.reap();
-                if let Some(error) = state.failure.take() {
-                    failure.get_or_insert(error);
+                let (tasks, executions) = {
+                    let mut state = self
+                        .shared
+                        .lane_admissions
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.reap();
+                    if let Some(error) = state.failure.take() {
+                        failure.get_or_insert(error);
+                    }
+                    (
+                        std::mem::take(&mut state.tasks),
+                        std::mem::take(&mut state.executions),
+                    )
+                };
+                let mut executions: Vec<_> = executions.into_values().collect();
+                {
+                    let admissions = self
+                        .shared
+                        .admissions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    executions.extend(
+                        admissions
+                            .iter()
+                            .filter(|(_, a)| {
+                                a.lane_root && a.completion.is_some() && a.result.borrow().is_none()
+                            })
+                            .map(|(run, a)| (*run, Arc::clone(&a.execution))),
+                    );
                 }
-                (
-                    std::mem::take(&mut state.tasks),
-                    std::mem::take(&mut state.executions),
-                )
+                (tasks, executions)
             };
-            if tasks.is_empty() {
+            if tasks.is_empty() && executions.is_empty() {
                 break;
             }
-            for (run, execution) in executions.into_values() {
+            for (run, execution) in executions {
                 let unregistered = {
                     // Registration holds A -> R too. Mark cancellation under
                     // that fence; never acquire a publication gate under A/R.
@@ -148,6 +188,18 @@ impl AgentRuntime {
                         && Arc::ptr_eq(&admission.execution, &execution)
                     {
                         admission.cancelled = true;
+                        let queued = self.note_intent_stop(
+                            run,
+                            &execution.publication().incarnation(),
+                            crate::quiesce::StopReason::Cancelled,
+                        );
+                        // Registration is fenced by A/R: set the signal before a
+                        // completing provider can choose its durable stop reason.
+                        execution.cancel_tx.send_replace(RunInterrupt::Cancel);
+                        execution.approvals.close();
+                        if queued {
+                            admission.finish_queued(run);
+                        }
                     }
                     !registered
                 };
@@ -223,26 +275,28 @@ impl AgentRuntime {
                 .execution
                 .get_or_insert_with(|| ExecutionControl::new(inherited)),
         );
-        self.reserve_admission_for(run_id, parent, ownership, Arc::clone(&execution));
+        self.reserve_admission_for(run_id, parent, ownership, Arc::clone(&execution), false);
         execution
     }
 
-    fn reserve_admission_for(
+    pub(super) fn reserve_admission_for(
         &self,
         run_id: RunId,
         parent: Option<RunId>,
         ownership: Option<crate::ownership::OwnerPermit>,
         execution: Arc<ExecutionControl>,
+        lane_root: bool,
     ) {
         let mut admissions = self
             .shared
             .admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if admissions
-            .get(&run_id)
-            .is_some_and(|a| Arc::ptr_eq(&a.execution, &execution) && a.snapshot().result.is_none())
+        if let Some(admission) = admissions.get_mut(&run_id)
+            && Arc::ptr_eq(&admission.execution, &execution)
+            && admission.snapshot().result.is_none()
         {
+            admission.lane_root |= lane_root;
             return;
         }
         let (completion, result) = watch::channel(None);
@@ -250,6 +304,7 @@ impl AgentRuntime {
             run_id,
             Admission {
                 parent,
+                lane_root,
                 cancelled: execution.cancelled(),
                 execution,
                 ownership,
@@ -394,11 +449,13 @@ impl AgentRuntime {
                 .and_then(|i| i.execution.as_ref())
                 .is_some_and(|current| Arc::ptr_eq(current, &execution))
         );
+        let lane_root = parent.is_none() && config.lane_scope == Some(event_bus::LaneScope::Lane);
         self.reserve_admission_for(
             run_id,
             parent,
             config.ownership.clone(),
             Arc::clone(&execution),
+            lane_root,
         );
         let result = self
             .shared
@@ -409,7 +466,6 @@ impl AgentRuntime {
             .and_then(|admission| admission.completion.take())
             .expect("reserved admission has one completion sender");
         let goal_stamp = self.goal_input_stamp(run_id);
-        let lane_root = parent.is_none() && config.lane_scope == Some(event_bus::LaneScope::Lane);
         let lane_execution = Arc::clone(&execution);
         let runtime = self.clone();
         let task = async move {

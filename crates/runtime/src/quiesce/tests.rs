@@ -341,3 +341,59 @@ async fn cancel_before_registration_is_durably_cancelled() {
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 0);
     assert!(fixture.runtime.wait(run).await.is_err());
 }
+
+#[tokio::test]
+async fn queued_lane_admissions_are_busy_but_not_drained_by_restart() {
+    let fixture = Fixture::new(1);
+    fixture.runtime.quiesce().await.unwrap();
+    let lane = fixture.runtime.delegate_background(
+        Role::Worker,
+        "lane queued".into(),
+        RunConfig {
+            lane_scope: Some(event_bus::LaneScope::Lane),
+            ..Default::default()
+        },
+    );
+    let ordinary = fixture.start();
+    assert_eq!(fixture.runtime.pending_lane_admissions(), vec![lane]);
+    fixture.runtime.quiesce().await.unwrap();
+    assert_eq!(fixture.runtime.pending_lane_admissions(), vec![lane]);
+    assert_eq!(fixture.intent(lane).wait, ResumeWait::AdmissionQueued);
+    assert!(fixture.intent(lane).active);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 0);
+    fixture.runtime.cancel(lane).unwrap();
+    fixture.runtime.cancel(ordinary).unwrap();
+    assert!(fixture.runtime.pending_lane_admissions().is_empty());
+}
+
+#[tokio::test]
+async fn queued_lane_admissions_are_operator_drained_without_provider_tasks() {
+    let fixture = Fixture::new(1);
+    fixture.runtime.quiesce().await.unwrap();
+    let lane = fixture.runtime.delegate_background(
+        Role::Worker,
+        "lane queued".into(),
+        RunConfig {
+            lane_scope: Some(event_bus::LaneScope::Lane),
+            ..Default::default()
+        },
+    );
+    let ordinary = fixture.start();
+    let input = fixture.intent(lane).initial_input;
+    assert!(fixture.runtime.list_agents().is_empty());
+    fixture.runtime.drain_lane_admissions().await.unwrap();
+    let intent = fixture.intent(lane);
+    assert_eq!(
+        (intent.active, intent.stop_reason),
+        (false, Some(StopReason::Cancelled))
+    );
+    assert_eq!(intent.initial_input, input);
+    assert!(fixture.runtime.wait(lane).await.is_err());
+    assert!(fixture.runtime.list_agents().is_empty());
+    assert!(fixture.runtime.pending_lane_admissions().is_empty());
+    assert_eq!(fixture.intent(ordinary).wait, ResumeWait::AdmissionQueued);
+    assert!(fixture.intent(ordinary).active);
+    assert_eq!(fixture.model.admission_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 0);
+    fixture.runtime.cancel(ordinary).unwrap();
+}

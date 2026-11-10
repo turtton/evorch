@@ -1471,8 +1471,13 @@ impl AgentRuntime {
         ) {
             Ok(true) => {}
             Ok(false) => {
-                drop(intents);
-                self.reserve_admission(run_id, parent, config.ownership.clone());
+                self.reserve_admission_for(
+                    run_id,
+                    parent,
+                    config.ownership.clone(),
+                    Arc::clone(&execution),
+                    parent.is_none() && config.lane_scope == Some(event_bus::LaneScope::Lane),
+                );
                 return Ok(RunAdmission {
                     run: run_id,
                     execution,
