@@ -236,8 +236,7 @@ renders it offline at 1024×768 DIP under the same isolation, waits for loading
 to finish and one more paint, and stores a PNG in
 `$XDG_CACHE_HOME/evorch/html-snapshots/<sha256>-v1.png`. Artifacts are
 content-addressed, so a cached snapshot is never stale. Snapshots render one at
-a time on a worker thread; clicking one opens the in-app preview. Without the
-feature, cards keep the text entry and the Open button that goes to the Portal.
+a time on a worker thread; clicking one opens the in-app preview.
 
 Agents check their HTML artifacts through CEF with `inspect_artifact`. The
 action `open` loads an artifact of the caller's conversation into an offline
