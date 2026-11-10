@@ -18,7 +18,7 @@ use sandbox::DirectSandbox;
 use tokio::sync::Notify;
 use tools::ToolExecutor;
 
-mod support;
+use crate::support;
 use support::{text_response, tool_response};
 
 const SECRET: &str = "sk-btw-test-secret";
