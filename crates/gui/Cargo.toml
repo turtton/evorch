@@ -67,6 +67,9 @@ uuid = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
 workbench-host = { path = "../workbench-host" }
 workbench-protocol = { path = "../workbench-protocol" }
+workbench-client = { path = "../workbench-client" }
+core-instance = { path = "../core-instance" }
+core-launcher = { path = "../core-launcher" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notify-rust = "4"
