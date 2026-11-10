@@ -116,7 +116,8 @@ EmbeddedSkillDef {
 ```sh
 cargo fmt --all --check
 cargo test -p runtime --lib skill::
-cargo test -p runtime --test builtin_git_skill --test skill_hot_reload --test skill_hot_reload_cache --test skill_surface --test skill_delegation --test repo_skill_authoring
+cargo test -p runtime --test builtin_git_skill --test skill_hot_reload_cache --test repo_skill_authoring
+cargo test -p runtime --test prompt_skills --test delegation -- skill_hot_reload:: skill_surface:: skill_delegation::
 cargo clippy --workspace --all-targets -- -D warnings
 scripts/check-cache-contracts.sh
 ```

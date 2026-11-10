@@ -60,7 +60,7 @@ are additional to the no-default-features build gate.
 - legacy_initialize_is_not_cancelled
 - unknown_call_outcome_is_not_replayed
 
-## E2: crates/runtime/tests/mcp_prepare.rs
+## E2: crates/runtime/tests/web_mcp/mcp_prepare.rs
 
 - unapproved_stdio_never_spawns
 - unapproved_http_never_connects
@@ -97,8 +97,8 @@ GUI test-connection entry point. No real keychain or external service is require
 
 - crates/tools/tests/executor.rs
 - crates/tools/tests/apply_patch_reserved_name.rs
-- crates/runtime/tests/mcp_scope_e2e.rs
-- crates/runtime/tests/mcp_scope_diagnostics/mod.rs
+- crates/runtime/tests/web_mcp/mcp_scope_e2e.rs
+- crates/runtime/tests/web_mcp/mcp_scope_diagnostics/mod.rs
 
 ## F1: crates/gui/tests/mcp_settings.rs
 
@@ -132,7 +132,7 @@ GUI test-connection entry point. No real keychain or external service is require
 - crates/tools/tests/mcp_contracts.rs: fingerprint separation, bounded 400 envelope,
   redaction, cancellation policy golden, sticky cancellation, explicit fixture
   gate, mismatch rejection, all transcript loading, Rust stdio fixture roundtrip
-- crates/runtime/tests/mcp_contracts.rs: inert fake-store injection, project shared
+- crates/runtime/tests/web_mcp/mcp_contracts.rs: inert fake-store injection, project shared
   non-waiting limiter/drop, strict saved snapshot shape, Role::config_key parity
 - crates/gui/src/model/transcript/diagnostics.rs: exhaustive natural-language
   rendering of all safe McpErrorKind classes (existing test extended)
