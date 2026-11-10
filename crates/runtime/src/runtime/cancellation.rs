@@ -181,9 +181,10 @@ impl AgentRuntime {
         runs: &HashMap<RunId, RunEntry>,
         admissions: &HashMap<RunId, admission::Admission>,
     ) -> Option<crate::ownership::OwnerPermit> {
+        // Settlement does not unregister this incarnation's authority: a
+        // failed admission may never have had a RunEntry to carry its permit.
         admissions
             .get(&run)
-            .filter(|admission| admission.result.borrow().is_none())
             .map(|admission| admission.snapshot().ownership)
             .unwrap_or_else(|| {
                 runs.get(&run)
@@ -288,6 +289,8 @@ pub(crate) enum HookPoint {
     SubtreeCollected,
     AdmissionRegistered,
     LaneOwnershipValidated,
+    LaneStopWriteFailed,
+    LaneStopPersisted,
     AdmissionFailed,
     RootGoalUpdated,
     RootRestoreValidated,
@@ -306,6 +309,17 @@ type ExecutionHook = (HookPoint, Weak<ExecutionControl>, Box<dyn FnOnce() + Send
 pub(super) struct TestHooks(Mutex<Vec<ExecutionHook>>);
 #[cfg(test)]
 impl AgentRuntime {
+    pub(crate) fn lane_stop_write_hook(&self, run: RunId, persisted: bool) {
+        let point = if persisted {
+            HookPoint::LaneStopPersisted
+        } else {
+            HookPoint::LaneStopWriteFailed
+        };
+        if let Ok(execution) = self.execution_snapshot(run) {
+            self.execution_hook(point, &execution);
+        }
+    }
+
     pub(crate) fn on_execution(
         &self,
         point: HookPoint,

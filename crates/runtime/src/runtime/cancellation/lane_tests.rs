@@ -360,6 +360,10 @@ async fn queued_lane_stop_cannot_write_after_handoff_and_reports_the_unrecorded_
     )
     .unwrap();
     f.owner.handoff(&contention.permit, &next).unwrap();
+    assert!(matches!(
+        f.runtime.cancel(f.run),
+        Err(RuntimeError::LaneCancellationPending { .. })
+    ));
     let error = f.runtime.drain_lane_stop_writes().await.unwrap_err();
     assert!(matches!(error, RuntimeError::LaneCancellation { .. }));
     assert!(
@@ -377,6 +381,97 @@ async fn queued_lane_stop_cannot_write_after_handoff_and_reports_the_unrecorded_
             .start_blocked_reason
             .is_none()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settled_unregistered_lane_keeps_its_permit_without_an_existing_stop_queue() {
+    let f = Fixture::new();
+    let contention = f
+        .interrupt_contended_admission(RunInterrupt::Stop, false)
+        .await;
+    contention.lock.execute_batch("ROLLBACK").unwrap();
+    f.runtime.drain_lane_stop_writes().await.unwrap();
+    let next = OwnerHost::open(
+        &f.dir.path().join("owners"),
+        Default::default(),
+        Arc::new(EventBus::new(128)),
+    )
+    .unwrap();
+    f.owner.handoff(&contention.permit, &next).unwrap();
+    assert!(matches!(
+        f.runtime.cancel(f.run),
+        Err(RuntimeError::LaneCancellation { .. })
+    ));
+    assert!(f.runtime.drain_lane_stop_writes().await.is_err());
+    assert_eq!(f.runtime.pending_lane_stop_writes(), 1);
+    assert_eq!(
+        f.storage
+            .handle()
+            .lane("lane")
+            .unwrap()
+            .unwrap()
+            .start_blocked_reason
+            .as_deref(),
+        Some(storage::lanes::LANE_START_OPERATOR_STOP)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn lane_stop_writeback_retries_storage_recovery_and_stop_interrupts_its_backoff() {
+    for recover in [true, false] {
+        let f = Fixture::new();
+        f.model.hold_admission.store(true, Ordering::SeqCst);
+        f.runtime.recover_unstarted_lanes(Some(&f.owner)).unwrap();
+        f.model.admission_entered.notified().await;
+        let lock = rusqlite::Connection::open(f.dir.path().join("lanes.db")).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(matches!(
+            f.runtime.stop(f.run, StopScope::SelfOnly),
+            Err(RuntimeError::LaneCancellation { .. })
+        ));
+        assert!(f.runtime.wait(f.run).await.is_err());
+        assert_eq!(f.runtime.pending_lane_stop_writes(), 1);
+        let execution = f.runtime.execution_snapshot(f.run).unwrap();
+        let (failed, failure_observed) = tokio::sync::oneshot::channel();
+        f.runtime
+            .on_execution(HookPoint::LaneStopWriteFailed, &execution, move || {
+                failed.send(()).unwrap();
+            });
+        let (written, write_observed) = tokio::sync::oneshot::channel();
+        f.runtime
+            .on_execution(HookPoint::LaneStopPersisted, &execution, move || {
+                let _ = written.send(());
+            });
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let runtime = f.runtime.clone();
+        let service = tokio::spawn(async move { runtime.run_lane_stop_writes(stopped).await });
+        failure_observed.await.unwrap();
+        if recover {
+            lock.execute_batch("ROLLBACK").unwrap();
+            // Paused Tokio time advances to the backoff tick. No new runtime
+            // notification is sent after the external SQLite writer unlocks.
+            write_observed.await.unwrap();
+            stop.send(()).unwrap();
+            service.await.unwrap().unwrap();
+        } else {
+            stop.send(()).unwrap();
+            assert!(service.await.unwrap().is_err());
+            assert_eq!(f.runtime.pending_lane_stop_writes(), 1);
+            lock.execute_batch("ROLLBACK").unwrap();
+            f.runtime.drain_lane_stop_writes().await.unwrap();
+        }
+        assert_eq!(f.runtime.pending_lane_stop_writes(), 0);
+        assert_eq!(
+            f.storage
+                .handle()
+                .lane("lane")
+                .unwrap()
+                .unwrap()
+                .start_blocked_reason
+                .as_deref(),
+            Some(storage::lanes::LANE_START_OPERATOR_STOP)
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
