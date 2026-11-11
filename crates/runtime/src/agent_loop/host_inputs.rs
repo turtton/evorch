@@ -77,8 +77,18 @@ impl LoopState {
     /// The one place host and internal input enters the context: adopt its
     /// identity, append it with its images, and note a tracked host input.
     pub(crate) fn take_user_input(&mut self, input: crate::runtime::user_inbox::UserInput) -> bool {
+        if self
+            .runtime()
+            .is_some_and(|runtime| !runtime.shared.quiesce.running())
+        {
+            self.queue_user_message(input);
+            return false;
+        }
         if !self.channels.user_inbox.claim(input.4) {
             return false;
+        }
+        if let Some(id) = &input.3 {
+            self.consumed_intent_inputs.push(id.clone());
         }
         let tracked = crate::runtime::user_inbox::tracked_prompt_id(&input).map(String::from);
         let (text, images, trusted_user, prompt_id, _) = input;

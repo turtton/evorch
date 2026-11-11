@@ -230,6 +230,7 @@ pub struct RoutedModel {
     tool_router: routing::Router,
     providers: BTreeMap<String, routing::ComposedProvider>,
     affinity: Mutex<SessionAffinity>,
+    checkpoint_inputs: Mutex<BTreeMap<String, crate::quiesce::ProviderInput>>,
     /// 失敗したプロファイル・モデルのクールダウン。両 Router と共有する。
     health: Arc<routing::ProviderHealth>,
     image_health: Arc<routing::ProviderHealth>,
@@ -294,6 +295,7 @@ impl RoutedModel {
             image_health: Arc::new(routing::ProviderHealth::default()),
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
+            checkpoint_inputs: Mutex::default(),
             agents,
             admission_routes: Vec::new(),
             max_retry_after_wait: std::time::Duration::from_secs(
@@ -913,6 +915,28 @@ impl RoutedModel {
                 );
             }
             let result = structured::send(provider, &mut request, bus).await;
+            if invocation.purpose == event_bus::RequestPurpose::Agent {
+                let affinity_key =
+                    if provider.profile.api_protocol == model::ApiProtocol::OpenAiCodexResponses {
+                        providers::provider::codex::run_cache_affinity(&invocation.run_id)
+                    } else {
+                        invocation.run_id.clone()
+                    };
+                self.checkpoint_inputs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        invocation.run_id.clone(),
+                        crate::quiesce::ProviderInput {
+                            profile: route.profile.clone(),
+                            protocol: provider.profile.api_protocol,
+                            edit_tool: provider.profile.edit_tool_for(&route.model_id),
+                            affinity_key,
+                            replay: request.responses_replay.clone(),
+                            request: request.clone(),
+                        },
+                    );
+            }
             let error = match result {
                 Ok(response) => {
                     if let (true, Some(chain), Some(position)) =
@@ -1047,6 +1071,27 @@ struct FallbackAttempt<'a> {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn restore_checkpoint_provider_state(
+        &self,
+        run_id: &str,
+        role: Role,
+        category: Option<&str>,
+        input: &crate::quiesce::ProviderInput,
+    ) {
+        self.edit_tools_by_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                (run_id.to_owned(), chain_key(role, category)),
+                input.edit_tool,
+            );
+    }
+    fn checkpoint_provider_input(&self, run_id: &str) -> Option<crate::quiesce::ProviderInput> {
+        self.checkpoint_inputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(run_id)
+    }
     fn image_generation_enabled(&self) -> bool {
         !self.agents.image_generator_chain().is_empty()
     }

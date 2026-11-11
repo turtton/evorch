@@ -49,7 +49,7 @@ pub(super) fn notifications(
     new: &LaneRecord,
 ) -> Result<(), StorageError> {
     // Tombstoned destinations are already fenced and must not be updated.
-    let mut s=c.prepare("SELECT payload FROM lane_notifications WHERE source_kind='lane' AND lane_id=?1 AND state='pending' AND ((source_kind='lane' AND event_kind='answer') OR source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)")?;
+    let mut s=c.prepare("SELECT payload FROM lane_notifications WHERE source_kind='lane' AND lane_id=?1 AND state='pending' AND ((source_kind='lane' AND event_kind IN ('answer','instruction')) OR source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)")?;
     let notices = s
         .query_map([&old.lane_id], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -59,10 +59,14 @@ pub(super) fn notifications(
         // Release the entire touched batch so unrelated lanes are immediately
         // retryable. Ownership, destination epoch and Stop are unchanged.
         c.execute("UPDATE lane_delivery_destinations SET claim_epoch=claim_epoch+1,lease_token=NULL,lease_until_ns=NULL WHERE thread_id=?1 AND lease_token IS NOT NULL",[&n.destination_thread_id])?;
-        c.execute("UPDATE lane_notifications SET claim_epoch=NULL WHERE destination_thread_id=?1 AND state='pending' AND ((source_kind='lane' AND event_kind='answer') OR source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones))",[&n.destination_thread_id])?;
+        c.execute("UPDATE lane_notifications SET claim_epoch=NULL WHERE destination_thread_id=?1 AND state='pending' AND ((source_kind='lane' AND event_kind IN ('answer','instruction')) OR source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones))",[&n.destination_thread_id])?;
         let to_lane = n.destination_thread_id == new.thread_id;
         let keep = match &n.kind {
-            LaneNotificationKind::Answer { .. } => to_lane,
+            // Accepted instructions outlive the lead relation: they are the lead's
+            // already-committed words to this lane, delivered once and in order.
+            LaneNotificationKind::Answer { .. } | LaneNotificationKind::Instruction { .. } => {
+                to_lane
+            }
             LaneNotificationKind::Nudge { .. } => set_policy && to_lane,
             LaneNotificationKind::Ready { .. }
             | LaneNotificationKind::Failed { .. }

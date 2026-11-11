@@ -89,6 +89,7 @@ pub enum LaneManagementError {
     StorageUnavailable,
     ProjectionPending,
     InvalidInput,
+    LaneNotStarted,
 }
 impl LaneManagementError {
     pub const fn as_str(self) -> &'static str {
@@ -106,6 +107,7 @@ impl LaneManagementError {
             Self::StorageUnavailable => "storage_unavailable",
             Self::ProjectionPending => "projection_pending",
             Self::InvalidInput => "invalid_input",
+            Self::LaneNotStarted => "lane_not_started",
         }
     }
 }

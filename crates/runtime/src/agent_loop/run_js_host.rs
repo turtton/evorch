@@ -147,7 +147,7 @@ impl LoopState {
     }
 
     /// The same condition, for finalization.
-    pub(super) fn run_js_unconfirmed_detail(&self) -> Option<String> {
+    pub(crate) fn run_js_unconfirmed_detail(&self) -> Option<String> {
         self.run_js_unconfirmed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

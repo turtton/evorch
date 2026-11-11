@@ -11,9 +11,9 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 58;
+const LATEST_SCHEMA: u32 = 60;
 
-const EXPECTED_TABLES: [&str; 99] = [
+const EXPECTED_TABLES: [&str; 102] = [
     "pr_auto_fix_state",
     "pr_notices",
     "pr_auto_fix_limit_events",
@@ -113,9 +113,12 @@ const EXPECTED_TABLES: [&str; 99] = [
     "lane_notifications",
     "lane_delivery_destinations",
     "host_chat_submissions",
+    "lane_instructions",
+    "lane_instruction_receipts",
+    "resume_intents",
 ];
 
-const EXPECTED_INDICES: [&str; 91] = [
+const EXPECTED_INDICES: [&str; 92] = [
     "lane_recovery_active_destination",
     "lane_handoff_questions_operation",
     "pr_notices_destination",
@@ -207,6 +210,7 @@ const EXPECTED_INDICES: [&str; 91] = [
     "idx_tasks_session_id",
     "lane_notifications_pending",
     "lane_routes_responder",
+    "lane_instruction_receipts_lane",
 ];
 
 fn database_path(temp_dir: &TempDir) -> std::path::PathBuf {
@@ -1194,6 +1198,8 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v60.sql"),
+                include_str!("../../undo/undo_v59.sql"),
                 include_str!("../../undo/undo_v58.sql"),
                 include_str!("../../undo/undo_v57.sql"),
                 include_str!("../../undo/undo_v56.sql"),

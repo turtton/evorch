@@ -105,6 +105,9 @@ fn semantic(kind: &LaneNotificationKind) -> Result<(&'static str, String), Stora
             id(input_id)?;
             ("intervention", input_id.clone())
         }
+        LaneNotificationKind::Instruction { instruction_seq } => {
+            ("instruction", instruction_seq.to_string())
+        }
         _ => return Err(conflict("unsupported_notification")),
     })
 }

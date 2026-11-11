@@ -9,6 +9,7 @@ mod delegation;
 pub(crate) use delegation::{cleanup_delegates, spawn_delegate, wait_delegates};
 mod escalation;
 mod history;
+mod lane_instructions;
 mod lane_management;
 mod lane_verification;
 mod lanes;

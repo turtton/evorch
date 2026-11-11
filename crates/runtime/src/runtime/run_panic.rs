@@ -9,6 +9,12 @@ impl AgentRuntime {
     /// workspace (as a failed finalization does), report the panic, then publish Error.
     pub(super) async fn run_panicked(&self, run_id: RunId, panic: CaughtPanic) {
         let id = run_id.to_string();
+        // Panic is never a safe-point checkpoint, even after successful cleanup.
+        if !self.shared.quiesce.running() {
+            self.shared
+                .quiesce
+                .fail(format!("run {run_id} panicked before a safe point"));
+        }
         let executor = self
             .shared
             .benchmark_executors
@@ -29,8 +35,22 @@ impl AgentRuntime {
         self.close_artifact_page(&id);
         let shells = match executor.drain_shell_jobs(&id).await {
             Ok(()) => "stopped".to_string(),
-            Err(error) => format!("cleanup failed: {error}"),
+            Err(error) => {
+                self.shared
+                    .quiesce
+                    .fail(format!("shell cleanup failed: {error}"));
+                format!("cleanup failed: {error}")
+            }
         };
+        // Keep the intent active until actual shell cleanup, never just until
+        // a panic/timeout has ended the Rust future.
+        if let Ok(execution) = self.execution_snapshot(run_id) {
+            self.end_intent(
+                run_id,
+                &execution.publication().incarnation(),
+                crate::quiesce::StopReason::Terminal,
+            );
+        }
         // Close host input before Error is public; the loop's state is gone,
         // so anything it accepted may or may not have reached the model.
         let inbox = lock_runs(&self.shared.runs)

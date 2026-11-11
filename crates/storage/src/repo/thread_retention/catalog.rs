@@ -68,6 +68,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ("run_ledger", ReclaimRun, "run notes, deleted with a grant"),
     ("host_input_receipts", ReclaimRun, "delivery receipts"),
     (
+        "resume_intents",
+        ReclaimRun,
+        "incarnation, safe-point receipt and durable input queue",
+    ),
+    (
         "host_chat_submissions",
         ReclaimRun,
         "fingerprints of accepted chat messages, kept with their run",
@@ -135,6 +140,16 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "lane_management_receipts",
         ReclaimThread,
         "bounded management operation receipts of the deleted lane",
+    ),
+    (
+        "lane_instructions",
+        ReclaimThread,
+        "immutable lead instruction texts of the deleted lane; a deleted lead thread does not take them",
+    ),
+    (
+        "lane_instruction_receipts",
+        ReclaimThread,
+        "bounded instruction operation receipts of the deleted lane",
     ),
     (
         "pr_auto_fix_state",

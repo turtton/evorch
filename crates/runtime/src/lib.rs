@@ -21,6 +21,7 @@ pub mod artifacts;
 pub mod base_context;
 pub mod btw;
 pub mod budget_tracker;
+pub mod checkpoint;
 pub(crate) mod compaction;
 pub mod compose;
 pub mod context;
@@ -33,6 +34,7 @@ pub(crate) mod git_read;
 pub mod image_generation;
 pub mod lane_close;
 pub mod lane_delivery;
+pub mod lane_instructions;
 pub mod lane_management;
 mod lane_monitor;
 mod lane_reports;
@@ -54,6 +56,7 @@ pub mod panic_capture;
 pub mod policy;
 pub mod prompt;
 pub mod pull_requests;
+pub mod quiesce;
 pub mod repository;
 mod request_turn;
 pub mod restore;
@@ -117,9 +120,9 @@ pub use run::{
 };
 pub use run_store::RunStore;
 pub use runtime::{
-    AgentRuntime, AnswerOutcome, AnswerQuestionError, FollowUpStatus, FollowUpWithdrawalError,
-    ProjectModelResolver, ProjectSlugResolver, RunWait, SandboxFactory, WeakAgentRuntime,
-    WorkspaceMounts, production_executor, production_executor_with_config,
+    AgentRuntime, AnswerOutcome, AnswerQuestionError, ChatResumeObservation, FollowUpStatus,
+    FollowUpWithdrawalError, ProjectModelResolver, ProjectSlugResolver, RunWait, SandboxFactory,
+    WeakAgentRuntime, WorkspaceMounts, production_executor, production_executor_with_config,
     production_executor_with_host_tools,
 };
 pub use skill::{

@@ -887,6 +887,12 @@ pub enum LaneNotificationKind {
     Intervention {
         input_id: String,
     },
+    /// A lead's supplement or brief revision addressed to the lane. The full text is
+    /// an immutable `lane_instructions` row, never the outbox payload; `instruction_seq`
+    /// is the lane-local order in which instructions must be presented.
+    Instruction {
+        instruction_seq: u64,
+    },
 }
 
 /// References only: input text and full question/report bodies are not duplicated.

@@ -279,10 +279,26 @@ impl AgentRuntime {
                 &std::sync::Arc::clone(&entry.execution),
             );
         }
-        let saved = store
-            .handle
-            .save_snapshot_bundle(&write)
-            .map_err(save_failure)?;
+        let (_, saved) = self
+            .admit_intent_with_snapshot(
+                child,
+                execution.publication().incarnation(),
+                Some(caller),
+                role,
+                "",
+                &config,
+                true,
+                false,
+                Some(&write),
+            )
+            .map_err(|error| match error {
+                crate::quiesce::AdmissionError::Snapshot(error) => save_failure(error),
+                crate::quiesce::AdmissionError::Storage(error) => read_failure(error),
+                crate::quiesce::AdmissionError::Invalid(reason) => {
+                    ChildResumeError::Refused(reason)
+                }
+            })?;
+        let saved = saved.expect("atomic child continuation returns a snapshot receipt");
         restored.snapshot_revision.commit(saved.snapshot_revision);
         Self::install_restored_execution(
             child,
@@ -311,6 +327,7 @@ impl AgentRuntime {
             restored,
             &trigger,
             None,
+            true,
         )
         .map_err(|e| e.to_string())?;
         Ok(None)

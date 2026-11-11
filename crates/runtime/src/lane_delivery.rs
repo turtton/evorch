@@ -1573,6 +1573,21 @@ impl crate::agent_loop::LoopState {
                 observed.push(notice.lane_id.clone());
             }
         }
+        // An instruction is presented whole or not at all: its full immutable text is
+        // appended after the budgeted details, never cut, and a missing text defers the
+        // whole batch (nothing is received, so nothing is lost or duplicated).
+        for notice in &missing {
+            if let LaneNotificationKind::Instruction { instruction_seq } = &notice.kind {
+                let record = store
+                    .handle
+                    .lane_instruction(&notice.lane_id, *instruction_seq)
+                    .map_err(|_| LaneDeliveryNack::StorageFailed)?
+                    .filter(|record| record.notification_id == notice.notification_id)
+                    .ok_or(LaneDeliveryNack::PayloadUnavailable)?;
+                body.push_str(&record.body);
+                body.push('\n');
+            }
+        }
         candidate.push_user(&body);
         self.budget.queue_lane_presentation(&body, observed);
         if let Some(presentation) = self.budget.spawn_credits.lane_presentations.last_mut() {

@@ -17,10 +17,12 @@ mod cleanup;
 mod index;
 mod lane_control;
 mod lane_delivery;
+mod lane_instructions;
 mod lane_management;
 mod lanes;
 mod pull_request_auto_fix;
 mod pull_requests;
+mod resume_intent;
 use crate::thread_index::{
     IndexCapacityStatus, IndexLease, IndexOwner, IndexSettingsReceipt, IndexStepResult,
     LeaseResult, ReindexRequest, RequestFailure, RequestStatus, RequestSubmission,
@@ -97,8 +99,20 @@ enum Command {
         ReplyTx,
     ),
     UpsertRunContext(crate::RunContextRecord, ReplyTx<crate::RunContextReceipt>),
+    SaveResumeIntent(
+        crate::resume_intent::ResumeIntentRecord,
+        Option<String>,
+        ReplyTx,
+    ),
+    FlushResumeIntents(ReplyTx),
     AppendIndexedNote(String, String, ReplyTx<crate::thread_index::NoteReceipt>),
     SaveSnapshotBundle(Box<crate::thread_index::SnapshotWrite>, SnapshotReplyTx),
+    SaveSnapshotBundleWithResumeIntent(
+        Box<crate::thread_index::SnapshotWrite>,
+        crate::resume_intent::ResumeIntentRecord,
+        Option<String>,
+        SnapshotReplyTx,
+    ),
     SaveSnapshotBundleWithEvidence(
         Box<crate::thread_index::SnapshotWrite>,
         Vec<crate::ReviewEvidenceRow>,

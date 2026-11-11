@@ -435,16 +435,20 @@ fn object(
 fn strings() -> Value {
     json!({"type":"array","items":{"type":"string"}})
 }
-pub(super) fn open_spec(name: &str) -> providers::ToolSpec {
-    object(
-        name,
-        "Open an independent Orchestrator lane from an agent-authored brief; does not transfer this lead's goal or ownership. Workspace declarations grant no permissions. Returns lane/thread/root IDs. Attached root questions go to the lead only when durable delivery is bound; otherwise questions go to the user. Use lane_list for reports; ready remains unverified.",
-        json!({"brief":{"type":"object","properties":{
+/// The brief a lane receives, shared by lane_open and lane_revise_brief.
+pub(super) fn brief_schema() -> Value {
+    json!({"type":"object","properties":{
         "objective":{"type":"string"},"inputs":{"type":"array","items":{"type":"object","properties":{"kind":{"enum":["description","thread","message","artifact"]},"value":{"type":"string"}},"required":["kind","value"],"additionalProperties":false}},
         "deliverables":strings(),"acceptance_criteria":strings(),"constraints":strings(),
         "workspace":{"type":"object","properties":{"branch":{"type":"string"},"worktree":{"type":"string"},"notes":{"type":"string"}},"additionalProperties":false},
         "verification_requirements":{"type":"object","properties":{"pull_request":{"type":"boolean","default":false}},"additionalProperties":false},
-        "report_policy":{"enum":["attached","summary","detached"]}},"required":["objective","inputs","deliverables","acceptance_criteria","constraints","report_policy"],"additionalProperties":false}}),
+        "report_policy":{"enum":["attached","summary","detached"]}},"required":["objective","inputs","deliverables","acceptance_criteria","constraints","report_policy"],"additionalProperties":false})
+}
+pub(super) fn open_spec(name: &str) -> providers::ToolSpec {
+    object(
+        name,
+        "Open an independent Orchestrator lane from an agent-authored brief; does not transfer this lead's goal or ownership. Workspace declarations grant no permissions. Returns lane/thread/root IDs. Attached root questions go to the lead only when durable delivery is bound; otherwise questions go to the user. Use lane_list for reports; ready remains unverified.",
+        json!({"brief":brief_schema()}),
         &["brief"],
     )
 }

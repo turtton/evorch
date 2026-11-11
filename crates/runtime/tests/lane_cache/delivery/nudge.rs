@@ -2,13 +2,13 @@
 use super::*;
 use event_bus::lane::{LaneNudgeState, LaneStallClassification, LaneStallEpisode};
 use storage::lane_control::ObserveLaneStall;
-struct NudgeFixture {
-    f: Fixture,
+pub(super) struct NudgeFixture {
+    pub(super) f: Fixture,
     _owner: Arc<runtime::ownership::OwnerHost>,
-    observation: ObserveLaneStall,
+    pub(super) observation: ObserveLaneStall,
 }
 impl NudgeFixture {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let mut f = Fixture::new().await;
         let lane = f.store.handle().lane(&f.lanes[0]).unwrap().unwrap();
         f.lead = lane.root_run_id.as_deref().unwrap().parse().unwrap();
@@ -81,17 +81,17 @@ impl NudgeFixture {
             .request_lane_nudge(self.observation.clone(), e.episode_id, e.revision)
             .unwrap()
     }
-    fn receipts(&self) -> usize {
+    pub(super) fn receipts(&self) -> usize {
         rusqlite::Connection::open(&self.f.config.db_path).unwrap().query_row("SELECT count(*) FROM host_input_receipts WHERE json_extract(provenance_json,'$.kind')='lane_notification'",[],|r|r.get(0)).unwrap()
     }
-    async fn drive(&mut self) -> Result<LaneDeliveryOutcome, runtime::lanes::LaneError> {
+    pub(super) async fn drive(&mut self) -> Result<LaneDeliveryOutcome, runtime::lanes::LaneError> {
         self.f
             .h
             .runtime
             .drive_lane_deliveries(&self.f.host.thread)
             .await
     }
-    async fn stopped(&mut self) {
+    pub(super) async fn stopped(&mut self) {
         self.f
             .h
             .runtime
@@ -102,7 +102,7 @@ impl NudgeFixture {
         );
         self.f.h.runtime.wait(self.f.lead).await.unwrap();
     }
-    fn failures(&self) -> usize {
+    pub(super) fn failures(&self) -> usize {
         self.f
             .events
             .iter()
@@ -111,12 +111,12 @@ impl NudgeFixture {
             )
             .count()
     }
-    async fn next_failure(&mut self, previous: usize) {
+    pub(super) async fn next_failure(&mut self, previous: usize) {
         while self.failures() <= previous {
             self.f.events.push(self.f.h.receiver.recv().await.unwrap());
         }
     }
-    async fn cancel(self) {
+    pub(super) async fn cancel(self) {
         self.f.h.runtime.cancel(self.f.lead).unwrap();
         self.f.h.runtime.wait(self.f.lead).await.unwrap();
     }

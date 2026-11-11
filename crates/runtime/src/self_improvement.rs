@@ -139,6 +139,9 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         // thread_todos: end-of-work marking was skipped (fenced owner, exhausted revision);
         // the list is left as it was and no run behaves differently.
         THREAD_TODO_RECONCILE_FAILED => Ignored,
+        // Explicit Continue refusal includes valid cancellation/fencing; not
+        // evidence that the model or harness needs an improvement candidate.
+        CHAT_RESUME_FAILED => Ignored,
         // runtime: an agent run's task panicked and was moved to Error.
         AGENT_RUN_PANICKED => HarnessImprovement,
         // storage bridge (spooled): the writer stopped accepting events entirely.
