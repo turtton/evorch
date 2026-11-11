@@ -300,7 +300,8 @@ jobs:
   # other jobs need, with each of their own package and feature selections:
   # the workspace check (lint), the doctests and the schema example
   # (docs-schema), the otel-exporter build (otel) and the test binaries of
-  # every group in scripts/ci-test-groups.json. It runs no test.
+  # every group in scripts/ci-test-groups.json. It does not run the normal
+  # nextest suite (the doctests above do run).
   cache-save:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
