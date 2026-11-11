@@ -166,6 +166,7 @@ impl CommandHost {
         match command {
             Command::Conversation(input) => self.conversation_command(input, &provenance),
             Command::ManageLane(input) => self.manage_lane_command(input, &provenance),
+            Command::CloseLane(input) => self.close_lane_command(input, &provenance),
             Command::SendChat(send) => self.send_chat(&send, &provenance),
             Command::WithdrawFollowUp(withdraw) => self.withdraw_follow_up(&withdraw),
             Command::DecideToolApproval(decide) => self.decide_approval(&decide, &provenance),
@@ -387,6 +388,7 @@ impl CommandHost {
         Ok(CommandReply {
             conversation: None,
             lane_management: None,
+            lane_close: None,
             disposition: CommandDisposition::Accepted,
             submission_id: None,
             run_id: None,
@@ -749,6 +751,7 @@ impl CommandHost {
             Executed::Duplicate { run_id, .. } => Ok(CommandReply {
                 conversation: None,
                 lane_management: None,
+                lane_close: None,
                 disposition: CommandDisposition::AlreadyApplied,
                 submission_id: Some(send.submission_id.clone()),
                 run_id: run_id.and_then(|run| workbench_protocol::ids::RunId::new(run).ok()),
@@ -840,6 +843,7 @@ impl CommandHost {
             },
             Command::Conversation(_)
             | Command::ManageLane(_)
+            | Command::CloseLane(_)
             | Command::SendChat(_)
             | Command::WithdrawFollowUp(_)
             | Command::DecideToolApproval(_) => {
@@ -908,6 +912,7 @@ impl CommandHost {
             Ok(()) => Ok(CommandReply {
                 conversation: None,
                 lane_management: None,
+                lane_close: None,
                 disposition: CommandDisposition::Accepted,
                 submission_id: Some(withdraw.submission_id.clone()),
                 run_id: Some(withdraw.run.clone()),
@@ -976,6 +981,7 @@ fn reply_from_events(
     let mut reply = CommandReply {
         conversation: None,
         lane_management: None,
+        lane_close: None,
         disposition: CommandDisposition::Accepted,
         submission_id,
         run_id: None,

@@ -4,7 +4,7 @@ use crate::validation::ValidationError;
 use crate::{
     ids::{RunId, ThreadId},
     lane_attention::LaneId,
-    wire::Revision,
+    wire::{Revision, Sequence},
 };
 use serde::{Deserialize, Serialize};
 /// Durable, globally unique operation identity, independent of a connection/request.
@@ -117,6 +117,78 @@ pub struct LaneManagementResult {
     pub replayed: bool,
     pub projection_pending: bool,
 }
+/// How a person ends a lane's ledger entry (ADR 0044 §9). Neither stops a run, deletes a
+/// thread or worktree, nor detaches the lane: those are separate operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanLaneCloseKind {
+    /// The person judged the lane done, with no verification behind it
+    /// (recorded as `human_closed`).
+    Complete,
+    /// The person ended the lane without claiming it is done (recorded as `discarded`).
+    Discard,
+}
+
+/// A person's request to end a lane's ledger entry. There is no field for who decided: the
+/// core records the surface and client its ingress authenticated, and refuses an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseLane {
+    pub lane_id: LaneId,
+    pub kind: HumanLaneCloseKind,
+    /// The Ready the person looked at, if any. A newer report makes the request stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_seq: Option<Sequence>,
+    /// The revisions the person's screen showed; a lane that moved since is refused as
+    /// stale and nothing is recorded.
+    pub expected_management_revision: Revision,
+    pub expected_request_revision: Revision,
+    /// Why (required, at most 2 KiB).
+    pub note: String,
+}
+
+impl CloseLane {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        crate::validation::check_text("note", &self.note, MAX_CLOSE_NOTE_BYTES, false)?;
+        if self.note.trim().is_empty() {
+            return Err(ValidationError::Empty { field: "note" });
+        }
+        if self.ready_seq == Some(Sequence(0)) {
+            return Err(ValidationError::OutOfRange {
+                field: "ready_seq",
+                reason: "report sequences start at 1",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Longest note a close accepts, in bytes.
+pub const MAX_CLOSE_NOTE_BYTES: usize = 2048;
+
+/// How a lane's close was recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneCloseRecordKind {
+    LeadClosed,
+    HumanClosed,
+    Discarded,
+}
+
+/// The close that stands after a [`CloseLane`]. When another close already stood for these
+/// revisions, that earlier record is returned and `already_closed` is true.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneCloseResult {
+    pub lane_id: LaneId,
+    pub close_id: String,
+    pub kind: LaneCloseRecordKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_seq: Option<Sequence>,
+    pub management_revision: Revision,
+    pub request_revision: Revision,
+    pub already_closed: bool,
+}
 /// Stable mapping for adapters; no storage/runtime error types cross the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -165,6 +237,31 @@ mod tests {
             serde_json::from_value::<LaneManagementResult>(value).unwrap(),
             result
         );
+    }
+    #[test]
+    fn a_close_request_has_no_field_for_who_decided_and_requires_a_reason() {
+        let request = serde_json::json!({"lane_id":"lane","kind":"complete","ready_seq":"2","expected_management_revision":"1","expected_request_revision":"3","note":"done by hand"});
+        let close: CloseLane = serde_json::from_value(request.clone()).unwrap();
+        assert!(close.validate().is_ok());
+        for forged in ["surface", "client_id", "closed_by", "actor", "provenance"] {
+            let mut bad = request.clone();
+            bad[forged] = serde_json::json!("web");
+            assert!(
+                serde_json::from_value::<CloseLane>(bad).is_err(),
+                "{forged} must be refused, not ignored"
+            );
+        }
+        let mut kind = request.clone();
+        kind["kind"] = serde_json::json!("lead_closed");
+        assert!(serde_json::from_value::<CloseLane>(kind).is_err());
+        for note in ["", "  \n\t", &"x".repeat(MAX_CLOSE_NOTE_BYTES + 1)] {
+            let mut bad = close.clone();
+            bad.note = note.into();
+            assert!(bad.validate().is_err(), "{note:?}");
+        }
+        let mut zero = close;
+        zero.ready_seq = Some(Sequence(0));
+        assert!(zero.validate().is_err());
     }
     #[test]
     fn ingress_rejects_actor_injection_detached_policy_and_unbounded_id() {

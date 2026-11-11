@@ -215,6 +215,7 @@ pub struct SetAgentWebToolsEnabled {
 pub enum Command {
     Conversation(crate::conversation::ConversationCommand),
     ManageLane(crate::lane_management::ManageLane),
+    CloseLane(crate::lane_management::CloseLane),
     SendChat(SendChat),
     ContinueChat(ContinueChat),
     CompactChat(ThreadTarget),
@@ -232,9 +233,10 @@ pub enum Command {
 
 impl Command {
     /// Wire names of every variant, for rejecting unknown ones precisely.
-    pub const TYPES: [&'static str; 15] = [
+    pub const TYPES: [&'static str; 16] = [
         "conversation",
         "manage_lane",
+        "close_lane",
         "send_chat",
         "continue_chat",
         "compact_chat",
@@ -266,6 +268,7 @@ impl Command {
         match self {
             Self::Conversation(c) => c.validate(),
             Self::ManageLane(_) => Ok(()),
+            Self::CloseLane(c) => c.validate(),
             Self::SendChat(c) => c.validate(),
             Self::ContinueChat(c) => c
                 .model_preference
@@ -375,6 +378,8 @@ pub struct CommandReply {
     pub conversation: Option<Box<crate::conversation::ConversationResult>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane_management: Option<Box<crate::lane_management::LaneManagementResult>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_close: Option<Box<crate::lane_management::LaneCloseResult>>,
     pub disposition: CommandDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submission_id: Option<SubmissionId>,

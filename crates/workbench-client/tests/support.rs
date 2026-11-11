@@ -93,6 +93,7 @@ pub fn command_reply() -> CommandReply {
     CommandReply {
         conversation: None,
         lane_management: None,
+        lane_close: None,
         disposition: CommandDisposition::Accepted,
         submission_id: None,
         run_id: None,

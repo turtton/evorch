@@ -190,6 +190,7 @@ impl WorkbenchBackend for FakeBackend {
                 RequestBody::Command(_) => ReplyPayload::Command(CommandReply {
                     conversation: None,
                     lane_management: None,
+                    lane_close: None,
                     disposition: CommandDisposition::Accepted,
                     submission_id: None,
                     run_id: None,

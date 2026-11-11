@@ -115,6 +115,7 @@ fn snapshot_of(db: &Database, thread_id: &str) -> Result<Option<LaneSnapshot>, S
             None => false,
         },
     };
+    let close = db.current_lane_close(&record.lane_id).map_err(fail)?;
     Ok(Some(LaneSnapshot {
         project_id: row.as_ref().and_then(|row| row.project_id.clone()),
         title: row.as_ref().and_then(|row| row.title.clone()),
@@ -129,6 +130,7 @@ fn snapshot_of(db: &Database, thread_id: &str) -> Result<Option<LaneSnapshot>, S
             record,
             latest_report,
             delivery,
+            close,
         },
     }))
 }
@@ -370,6 +372,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// [`Self::poll_lanes`] without an egui context: what a headless host calls once per tick.
     pub fn pump_lanes(&mut self) -> bool {
         self.pump_attention();
+        self.pump_lane_close();
         if self.lanes.reader.is_none() {
             return false;
         }

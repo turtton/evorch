@@ -15,6 +15,7 @@ pub mod evaluations;
 pub mod file_viewer;
 pub mod image_viewer;
 pub mod lane_attention;
+pub mod lane_close;
 mod ledger;
 pub mod markdown_render;
 pub mod memory;

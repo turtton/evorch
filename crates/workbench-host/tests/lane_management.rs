@@ -370,3 +370,116 @@ async fn a_human_close_ends_only_the_ledger_entry_and_an_agent_cannot_reach_it()
     assert!(f.runtime.inspect_agent(f.lane.root_run_id).is_ok());
     f.stop().await;
 }
+
+#[tokio::test]
+async fn a_wire_close_is_recorded_under_the_authenticated_provenance_and_a_stale_screen_is_refused()
+{
+    use event_bus::lane::{LaneCloseActor, LaneCloseKind};
+    use workbench_protocol::envelope::Provenance;
+    let mut f = Fixture::new().await;
+    let lane_id = f.lane.lane_id.clone();
+    let seen = f
+        .storage
+        .handle()
+        .lane_close_context(lane_id.clone())
+        .unwrap();
+    let close = |kind, note: &str, request_revision: u64| {
+        Command::CloseLane(CloseLane {
+            lane_id: workbench_protocol::lane_attention::LaneId::new(&lane_id).unwrap(),
+            kind,
+            ready_seq: None,
+            expected_management_revision: Revision(seen.management_revision),
+            expected_request_revision: Revision(request_revision),
+            note: note.into(),
+        })
+    };
+    let standing = |f: &Fixture| {
+        f.storage
+            .handle()
+            .current_lane_close(lane_id.clone())
+            .unwrap()
+    };
+
+    // An agent's provenance cannot end a lane, whatever the request says.
+    let agent = Provenance::agent(workbench_protocol::ids::RunId::new("run-agent").unwrap());
+    let refused = f
+        .host
+        .handle_command(
+            close(
+                HumanLaneCloseKind::Discard,
+                "I decided",
+                seen.request_revision,
+            ),
+            agent,
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::PermissionDenied);
+    // The reason is required before the ledger is touched.
+    for note in ["", "   "] {
+        let invalid = f
+            .host
+            .handle_command(
+                close(HumanLaneCloseKind::Discard, note, seen.request_revision),
+                common::web(),
+            )
+            .unwrap_err();
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest, "{note:?}");
+    }
+    // A screen that read an older request revision is refused as stale; nothing is recorded.
+    let stale = f
+        .host
+        .handle_command(
+            close(
+                HumanLaneCloseKind::Discard,
+                "late",
+                seen.request_revision + 1,
+            ),
+            common::web(),
+        )
+        .unwrap_err();
+    assert_eq!(stale.code, ErrorCode::StaleRevision);
+    assert!(standing(&f).is_none());
+
+    // The record names the surface and client the host authenticated.
+    let reply = f
+        .host
+        .handle_command(
+            close(
+                HumanLaneCloseKind::Complete,
+                "reviewed by hand",
+                seen.request_revision,
+            ),
+            common::web(),
+        )
+        .unwrap();
+    assert_eq!(reply.disposition, CommandDisposition::Accepted);
+    let result = reply.lane_close.expect("a close result");
+    assert_eq!(result.kind, LaneCloseRecordKind::HumanClosed);
+    assert!(!result.already_closed);
+    let stored = standing(&f).unwrap();
+    assert_eq!(stored.kind, LaneCloseKind::HumanClosed);
+    assert_eq!(
+        stored.closed_by,
+        Some(LaneCloseActor::Human {
+            surface: "web".into(),
+            client_id: Some("web-1".into()),
+        })
+    );
+
+    // The same request again changes nothing and says so.
+    let again = f
+        .host
+        .handle_command(
+            close(
+                HumanLaneCloseKind::Complete,
+                "reviewed by hand",
+                seen.request_revision,
+            ),
+            common::web(),
+        )
+        .unwrap();
+    assert_eq!(again.disposition, CommandDisposition::AlreadyApplied);
+    assert_eq!(again.lane_close.unwrap().close_id, result.close_id);
+    assert_eq!(f.state().policy, LaneManagementPolicy::Attached);
+    f.stop().await;
+}

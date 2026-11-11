@@ -8,6 +8,17 @@
     },
     "type": "answer_user_question"
   },
+  "close_lane": {
+    "payload": {
+      "expected_management_revision": "1",
+      "expected_request_revision": "2",
+      "kind": "discard",
+      "lane_id": "lane-1",
+      "note": "superseded by another lane",
+      "ready_seq": "3"
+    },
+    "type": "close_lane"
+  },
   "compact_chat": {
     "payload": {
       "thread": "thr-1"

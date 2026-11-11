@@ -125,6 +125,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut pull_request_action = None;
         let pull_request_badges = self.pull_request_badges();
         let lane_delivery_bound = self.sink.lane_delivery_bound();
+        let can_close_lanes = self.can_close_lanes();
         let mut self_improvement_action = None;
         let mut diagnostics_request = false;
         let mut context_request = false;
@@ -171,6 +172,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 notifications: &mut self.notifications,
                 notifications_action: &mut notifications_action,
                 lane_attention: &self.attention.board,
+                can_close_lanes,
                 lane_attention_action: &mut lane_attention_action,
                 attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
@@ -413,6 +415,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.render_project_dialog(ui.ctx());
         self.render_link_dialog(ui.ctx());
+        self.render_lane_close_dialog(ui.ctx());
         self.render_destination_dialog(ui.ctx());
         self.render_thread_search(ui.ctx());
         self.render_theme_settings(ui.ctx());

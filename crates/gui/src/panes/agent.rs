@@ -1116,6 +1116,7 @@ mod tests {
                 created_at_ns: 0,
             }),
             delivery: Default::default(),
+            close: None,
         }
     }
 

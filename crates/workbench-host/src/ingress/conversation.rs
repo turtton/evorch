@@ -214,6 +214,7 @@ impl CommandHost {
         Ok(CommandReply {
             conversation: Some(Box::new(result)),
             lane_management: None,
+            lane_close: None,
             disposition: CommandDisposition::Accepted,
             submission_id: None,
             run_id: None,

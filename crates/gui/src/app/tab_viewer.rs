@@ -47,6 +47,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) notifications: &'a mut NotificationsModel,
     pub(super) notifications_action: &'a mut Option<NotificationsAction>,
     pub(super) lane_attention: &'a crate::model::lane_attention::AttentionBoard,
+    pub(super) can_close_lanes: bool,
     pub(super) lane_attention_action: &'a mut Option<crate::model::lane_attention::AttentionAction>,
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
     pub(super) usage: &'a mut crate::panes::usage::UsagePane,
@@ -366,6 +367,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     self.lane_attention,
                     &rows,
                     self.question_drafts,
+                    self.can_close_lanes,
                 );
                 if let Some(action) = attention.action {
                     *self.lane_attention_action = Some(action);

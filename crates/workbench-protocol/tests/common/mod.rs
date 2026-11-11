@@ -195,6 +195,14 @@ pub fn commands() -> Vec<Command> {
         Command::SetAgentWebToolsEnabled(SetAgentWebToolsEnabled { enabled: true }),
         Command::Conversation(workbench_protocol::conversation::ConversationCommand::ResolveProject { root: "/work/project".into() }),
         Command::ManageLane(workbench_protocol::lane_management::ManageLane { request: serde_json::from_value(serde_json::json!({"operation_id":"manage-1","lane_id":"lane-1","expected_management_revision":"1","action":{"type":"set_policy","payload":{"policy":"summary"}}})).unwrap(), expected_family_revision: None }),
+        Command::CloseLane(workbench_protocol::lane_management::CloseLane {
+            lane_id: workbench_protocol::lane_attention::LaneId::new("lane-1").unwrap(),
+            kind: workbench_protocol::lane_management::HumanLaneCloseKind::Discard,
+            ready_seq: Some(workbench_protocol::wire::Sequence(3)),
+            expected_management_revision: Revision(1),
+            expected_request_revision: Revision(2),
+            note: "superseded by another lane".into(),
+        }),
     ]
 }
 
@@ -381,6 +389,7 @@ pub fn command_reply() -> CommandReply {
     CommandReply {
         conversation: None,
         lane_management: None,
+        lane_close: None,
         disposition: CommandDisposition::Accepted,
         submission_id: Some(SubmissionId::new("sub-a").unwrap()),
         run_id: Some(run()),

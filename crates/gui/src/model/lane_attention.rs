@@ -274,6 +274,9 @@ pub enum AttentionOp {
     ResumeDelivery,
     /// Read the lead's list again.
     Refresh,
+    /// Open the confirmation for ending the lane by hand. It reads the ledger and changes
+    /// nothing until the person confirms there.
+    BeginClose(crate::model::lane_close::CloseChoice),
 }
 
 /// An operation with the item it was chosen on, so a screen older than the latest read cannot
