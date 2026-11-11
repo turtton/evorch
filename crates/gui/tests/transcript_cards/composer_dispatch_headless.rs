@@ -1,0 +1,745 @@
+// allow: SIZE_OK — Existing dispatch contract suite; this task is restricted to this test file.
+use event_bus::{Event, MessageEvent};
+use gui::app::WorkbenchState;
+use gui::fixture::DemoSource;
+use gui::headless::HeadlessWorkbench;
+use gui::model::commands::{ChatSubmission, LoopEvent, WorkbenchCommand};
+use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
+use gui::model::transcript::TranscriptEntry;
+use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
+
+fn workbench(root: &std::path::Path, status: ProviderStatus) -> HeadlessWorkbench<DemoSource> {
+    let mut sidebar = SidebarState::default();
+    let project_id = ProjectId::new("demo");
+    sidebar
+        .add_project(project_id.clone(), "demo", root)
+        .expect("project added");
+    sidebar
+        .select_project(&project_id)
+        .expect("project selected");
+    sidebar
+        .create_thread(ThreadId::new("thread-1"), project_id, "thread-1")
+        .expect("thread created");
+    sidebar
+        .switch_thread(&ThreadId::new("thread-1"))
+        .expect("thread selected");
+    let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("default state builds")
+        .with_sidebar(sidebar)
+        .with_provider_status(status);
+    HeadlessWorkbench::new(state, [1200.0, 900.0])
+}
+
+fn submit(harness: &mut HeadlessWorkbench<DemoSource>, input: &str) {
+    harness.state_mut().composer_mut().input = input.into();
+    harness.state_mut().submit_composer();
+    harness.run();
+}
+
+#[test]
+fn compaction_dispatches_without_a_message_and_preserves_attachments() {
+    let temp = tempfile::tempdir().unwrap();
+    // Unlike sending a message, compaction does not need current provider settings.
+    let mut harness = workbench(temp.path(), ProviderStatus::default());
+    harness
+        .state_mut()
+        .composer_mut()
+        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+    submit(&mut harness, " /compaction \n");
+    assert_eq!(
+        harness.state().issued(),
+        &[WorkbenchCommand::CompactChat {
+            thread_id: "thread-1".into(),
+        }]
+    );
+    assert!(
+        !harness
+            .state()
+            .transcripts()
+            .thread()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }))
+    );
+    assert!(harness.state().composer().input.is_empty());
+    assert_eq!(harness.state().composer().attachments.len(), 1);
+    assert!(harness.has_label("Context compaction is unavailable in demo mode"));
+}
+
+#[test]
+fn compaction_checks_arguments_and_active_thread() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "/compaction extra");
+    assert!(harness.state().issued().is_empty());
+    assert!(harness.has_label("usage: /compaction"));
+    assert_eq!(harness.state().composer().input, "/compaction extra");
+
+    let state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default()).unwrap();
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    submit(&mut harness, "/compaction");
+    assert!(harness.state().issued().is_empty());
+    assert!(harness.has_label("Select or start a thread first"));
+    assert_eq!(harness.state().composer().input, "/compaction");
+}
+
+#[test]
+fn compaction_is_available_in_completions_and_help() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().input = "/comp".into();
+    harness.run();
+    harness.click_label("/compaction");
+    harness.run();
+    assert_eq!(harness.state().composer().input.trim(), "/compaction");
+    submit(&mut harness, "/help");
+    assert!(harness.state().transcripts().thread().entries().iter().any(
+        |entry| matches!(entry, TranscriptEntry::Notice { text } if text.contains("/compaction —"))
+    ));
+}
+
+#[test]
+fn continue_dispatches_without_a_user_message_and_preserves_attachments() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().toggle_role();
+    harness
+        .state_mut()
+        .composer_mut()
+        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+    harness
+        .state_mut()
+        .set_thread_model_preference(Some(workspace_ui::ModelPreference {
+            profile: "local".into(),
+            model: Some("chosen".into()),
+            reasoning_effort: None,
+        }));
+    submit(&mut harness, "/continue");
+    assert!(
+        matches!(harness.state().issued(), [WorkbenchCommand::ContinueChat(request)]
+        if request.thread_id == "thread-1"
+            && !request.automatic
+            && request.composer_role == gui::model::composer::ComposerRole::Orchestrator
+            && request.model_preference.as_ref().unwrap().model.as_deref() == Some("chosen"))
+    );
+    assert!(
+        !harness
+            .state()
+            .transcripts()
+            .thread()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }))
+    );
+    assert!(harness.state().composer().input.is_empty());
+    assert_eq!(harness.state().composer().attachments.len(), 1);
+}
+
+#[test]
+fn continue_checks_arguments_provider_and_active_thread() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "/continue extra");
+    assert!(harness.state().issued().is_empty());
+    assert!(harness.has_label("usage: /continue"));
+    assert_eq!(harness.state().composer().input, "/continue extra");
+
+    let mut harness = workbench(temp.path(), ProviderStatus::default());
+    submit(&mut harness, "/continue");
+    assert!(harness.state().issued().is_empty());
+    assert_eq!(harness.state().composer().input, "/continue");
+
+    let mut state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default())
+        .unwrap()
+        .with_provider_status(ProviderStatus::Configured);
+    state.composer_mut().input = "/continue".into();
+    state.submit_composer();
+    assert!(state.issued().is_empty());
+}
+
+#[test]
+fn continue_is_available_in_completions_and_help() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().input = "/con".into();
+    harness.run();
+    harness.click_label("/continue");
+    harness.run();
+    assert_eq!(harness.state().composer().input.trim(), "/continue");
+    submit(&mut harness, "/help");
+    assert!(harness.state().transcripts().thread().entries().iter().any(
+        |entry| matches!(entry, TranscriptEntry::Notice { text } if text.contains("/continue —"))
+    ));
+}
+
+#[test]
+fn orchestrator_role_plain_chat_issues_send_chat_not_goal() {
+    // Given: the composer is toggled to orchestrator.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().toggle_role();
+    // When: ordinary text is submitted.
+    submit(&mut harness, "hello");
+    // Then: chat is dispatched without consuming a goal ID.
+    assert!(
+        matches!(harness.state().issued(), [WorkbenchCommand::SendChat(_)]),
+        "orchestrator plain text must issue SendChat, got {:?}",
+        harness.state().issued()
+    );
+    assert_eq!(harness.state().goal_form().last_accepted, None);
+    let WorkbenchCommand::SendChat(chat) = &harness.state().issued()[0] else {
+        panic!("expected orchestrator chat");
+    };
+    assert_eq!(
+        chat.composer_role,
+        gui::model::composer::ComposerRole::Orchestrator
+    );
+    submit(&mut harness, "/goal explicit");
+    assert_eq!(
+        harness.state().goal_form().last_accepted.as_deref(),
+        Some("goal-1")
+    );
+}
+
+#[test]
+fn explicit_goal_command_still_creates_goal_in_orchestrator_role() {
+    // Given: the composer is toggled to orchestrator.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().toggle_role();
+    // When: an explicit goal is submitted.
+    submit(&mut harness, "/goal explicit");
+    // Then: the explicit command retains the goal flow.
+    assert!(
+        matches!(harness.state().issued(), [WorkbenchCommand::SubmitGoal(goal)] if goal.goal == "explicit")
+    );
+    assert_eq!(
+        harness.state().goal_form().last_accepted.as_deref(),
+        Some("goal-1")
+    );
+}
+
+#[test]
+fn image_only_send_button_carries_attachment() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    let composer = harness.state_mut().composer_mut();
+    composer.image_input_supported = true;
+    assert!(composer.add_pasted_image("data:image/png;base64,aGVsbG8="));
+    harness.run();
+    harness.click_label("Send");
+    harness.run();
+    let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
+        panic!("image-only chat must dispatch");
+    };
+    assert_eq!(chat.images[0].data, "aGVsbG8=");
+    assert!(chat.text.is_empty());
+}
+
+#[test]
+fn external_review_dispatches_from_gui() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    let registry = &mut harness.state_mut().composer_mut().registry;
+    registry.load_external("review\tReview files\t<path>");
+    registry.executable = Some("printf".into());
+    submit(&mut harness, "/review src");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while harness.state().external_command_running() {
+        assert!(std::time::Instant::now() < deadline);
+        harness.step();
+        std::thread::yield_now();
+    }
+    harness.run();
+    assert!(harness.has_label("review"));
+    assert!(harness.state().issued().is_empty());
+    assert!(harness.state().composer().input.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn pending_discovery_does_not_block_gui_and_can_be_cancelled() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let executable = temp.path().join("discovery");
+    std::fs::write(&executable, "#!/bin/sh\nexec sleep 60\n").expect("script");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .expect("permissions");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().load_external_commands(executable);
+    assert!(harness.state().external_command_running());
+    harness.step();
+    harness.state_mut().cancel_external_command();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while harness.state().external_command_running() {
+        assert!(std::time::Instant::now() < deadline);
+        harness.step();
+        std::thread::yield_now();
+    }
+    assert!(harness.state().issued().is_empty());
+}
+
+#[test]
+fn external_review_completion_and_help_are_available() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness
+        .state_mut()
+        .composer_mut()
+        .registry
+        .load_external("review\tReview files\t<path>");
+    harness.state_mut().composer_mut().input = "/rev".into();
+    harness.run();
+    harness.click_label("/review");
+    harness.run();
+    assert_eq!(harness.state().composer().input, "/review ");
+    submit(&mut harness, "/help");
+    assert!(harness.state().transcripts().thread().entries().iter().any(|entry|
+        matches!(entry, TranscriptEntry::Notice { text } if text.lines().any(|line| line.starts_with("/review <path>")))));
+}
+
+#[test]
+fn unsupported_image_preserves_draft_and_does_not_dispatch() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness
+        .state_mut()
+        .composer_mut()
+        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+    harness.run();
+    harness.click_label("Send");
+    harness.run();
+    assert!(harness.state().issued().is_empty());
+    assert_eq!(harness.state().composer().attachments.len(), 1);
+    assert!(harness.state().composer().image_warning().is_some());
+}
+
+#[test]
+fn stop_chat_dispatches_active_thread_command() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "hello");
+    harness.state_mut().apply_events([
+        Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+            run_id: "chat-1".into(),
+            parent_run_id: None,
+            agent_name: "chat:thread-1".into(),
+            role: "Worker".into(),
+        }),
+        Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
+            run_id: "chat-1".into(),
+            from: event_bus::AgentRunPhase::Pending,
+            to: event_bus::AgentRunPhase::Running,
+            reason: None,
+        }),
+    ]);
+    harness.step();
+    harness.step();
+    assert!(harness.has_label("Stop"));
+    harness.click_label("Stop");
+    harness.step();
+    harness.step();
+    assert_eq!(
+        harness.state().issued().last(),
+        Some(&WorkbenchCommand::StopChat {
+            thread_id: "thread-1".into(),
+        })
+    );
+}
+
+#[test]
+fn stopped_parent_with_live_child_keeps_banner_and_stops_subagents_without_discard() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "hello");
+    harness.state_mut().apply_events([
+        Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+            run_id: "chat-1".into(),
+            parent_run_id: None,
+            agent_name: "chat:Worker:thread-1".into(),
+            role: "Worker".into(),
+        }),
+        Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+            run_id: "run-2".into(),
+            parent_run_id: Some("chat-1".into()),
+            agent_name: "child".into(),
+            role: "Worker".into(),
+        }),
+        Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-2".into(),
+            from: event_bus::AgentRunPhase::Pending,
+            to: event_bus::AgentRunPhase::Running,
+            reason: None,
+        }),
+    ]);
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::ChatStopped {
+            thread_id: "thread-1".into(),
+            run_id: "chat-1".into(),
+            running_children: 1,
+        });
+    harness.run();
+    assert!(!harness.has_label("1 subagent still running — press Stop subagents to stop them"));
+    assert!(harness.has_label("Stop subagents"));
+    harness.click_label("Stop subagents");
+    harness.run();
+    assert_eq!(
+        harness.state().issued().last(),
+        Some(&WorkbenchCommand::StopChat {
+            thread_id: "thread-1".into()
+        })
+    );
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::ChatStopped {
+            thread_id: "thread-1".into(),
+            run_id: "chat-1".into(),
+            running_children: 0,
+        });
+    harness.run();
+    assert!(!harness.has_label("Stopped (resumable) — send a message or /continue to resume"));
+    assert!(!harness.has_label("Stop subagents"));
+    assert!(harness.has_label("Send"));
+    assert!(!harness.has_label("Discard"));
+}
+
+#[test]
+fn send_chat_carries_thread_model_preference() {
+    // Given
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness
+        .state_mut()
+        .set_thread_model_preference(Some(workspace_ui::ModelPreference {
+            profile: "local".into(),
+            model: Some("model-b".into()),
+            reasoning_effort: Some("high".into()),
+        }));
+    // When
+    submit(&mut harness, "selected model");
+    // Then
+    let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
+        panic!("expected chat");
+    };
+    assert_eq!(
+        chat.model_preference,
+        Some(runtime::ModelPreference {
+            profile: "local".into(),
+            model: Some("model-b".into()),
+            reasoning_effort: Some("high".into()),
+        })
+    );
+}
+
+#[test]
+fn chat_send_issues_send_chat_and_shows_user_line() {
+    // Given: an active thread with a configured provider.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    assert_eq!(
+        harness.state().provider_status(),
+        &ProviderStatus::Configured
+    );
+    // When: plain text is submitted.
+    submit(&mut harness, "hello agent");
+    // Then: the typed chat is issued in the thread's project and the user line is visible.
+    let project_root = harness.state().sidebar().projects[0].repo_root.clone();
+    let [WorkbenchCommand::SendChat(sent)] = harness.state().issued() else {
+        panic!("expected one chat: {:?}", harness.state().issued());
+    };
+    let submission_id = sent.submission_id.clone();
+    assert_eq!(
+        harness.state().issued(),
+        &[WorkbenchCommand::SendChat(ChatSubmission {
+            submission_id,
+            fork_seed: None,
+            project_root: Some(project_root),
+            composer_role: gui::model::composer::ComposerRole::Worker,
+            images: Vec::new(),
+            thread_id: "thread-1".into(),
+            text: "hello agent".into(),
+            model_preference: None,
+            skills: Vec::new(),
+        })]
+    );
+    assert!(harness.has_label("You: hello agent"));
+    assert!(harness.state().composer().input.is_empty());
+}
+
+#[test]
+fn chat_send_renders_agent_reply() {
+    // Given: a chat accepted by the fixture as chat-1.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "hello agent");
+    use crate::thread_root;
+    thread_root::bind_root(harness.state_mut(), "chat-1");
+    // When: the attributed reply arrives through the event fold.
+    harness
+        .state_mut()
+        .apply_events([Event::new(MessageEvent::MessageDelta {
+            delta: "Hi there".into(),
+            run_id: Some("chat-1".into()),
+        })]);
+    harness.run();
+    // Then: the reply is visible alongside the user message.
+    assert!(harness.has_label("Hi there"));
+    assert!(harness.has_label("You: hello agent"));
+    assert!(harness.state().transcripts().run("chat-1").is_some());
+}
+
+#[test]
+fn goal_command_reuses_goal_flow() {
+    // Given: an active thread without provider configuration.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::default());
+    // When: a goal command is submitted.
+    submit(&mut harness, "/goal implement issue #91");
+    // Then: only the existing goal command path runs.
+    let [WorkbenchCommand::SubmitGoal(goal)] = harness.state().issued() else {
+        panic!("expected exactly one SubmitGoal");
+    };
+    assert_eq!(goal.project_id, "demo");
+    assert_eq!(goal.thread_id, "thread-1");
+    assert_eq!(goal.goal, "implement issue #91");
+    assert_eq!(
+        harness.state().goal_form().last_accepted.as_deref(),
+        Some("goal-1")
+    );
+    assert!(harness.state().composer().input.is_empty());
+}
+
+#[test]
+fn new_command_creates_and_switches_thread() {
+    // Given: an active thread in a selected project.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    // When: the /new command is submitted.
+    submit(&mut harness, "/new");
+    // Then: a new thread is active and the composer is cleared.
+    let sidebar = harness.state().sidebar();
+    assert_eq!(sidebar.threads.len(), 2);
+    let created = sidebar.threads.last().expect("created thread").id.clone();
+    assert_eq!(sidebar.active_thread, Some(created));
+    assert!(harness.state().composer().input.is_empty());
+}
+
+#[test]
+fn team_command_carries_explicit_value_without_enabling_later_goals() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(
+        &mut harness,
+        "/team independent files | implement issue #91",
+    );
+    let WorkbenchCommand::SubmitGoal(goal) = &harness.state().issued()[0] else {
+        panic!("expected team goal");
+    };
+    assert_eq!(goal.delegation_value.as_deref(), Some("independent files"));
+    assert_eq!(goal.goal, "implement issue #91");
+    submit(&mut harness, "/goal ordinary work");
+    let WorkbenchCommand::SubmitGoal(goal) = &harness.state().issued()[1] else {
+        panic!("expected ordinary goal");
+    };
+    assert_eq!(goal.delegation_value, None);
+}
+
+#[test]
+fn team_command_rejects_missing_delegation_value() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "/team | implement issue #91");
+    assert!(harness.state().issued().is_empty());
+}
+
+#[test]
+fn goal_command_without_args_shows_usage_without_focusing_a_tab() {
+    // Given: an active thread.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::default());
+    let path = harness
+        .state()
+        .dock()
+        .find_tab(&PanelId::new("subagents-home"))
+        .expect("subagents tab");
+    let before = harness
+        .state()
+        .dock()
+        .leaf(path.node_path())
+        .expect("leaf")
+        .active;
+    // When: /goal has no arguments.
+    submit(&mut harness, "/goal");
+    // Then: usage is visible without changing tab focus or submitting.
+    assert!(harness.has_label("usage: /goal <text>"));
+    assert!(harness.state().issued().is_empty());
+    assert_eq!(
+        harness
+            .state()
+            .dock()
+            .leaf(path.node_path())
+            .expect("leaf")
+            .active,
+        before
+    );
+}
+
+#[test]
+fn help_command_lists_goal_and_help() {
+    // Given: an active thread.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::default());
+    // When: help is requested.
+    submit(&mut harness, "/help");
+    // Then: the command list is visible without issuing a command.
+    assert!(harness.has_label(&harness.state().composer().registry.help_text()));
+    assert!(harness.state().issued().is_empty());
+}
+
+#[test]
+fn chat_without_provider_shows_guidance_and_issues_nothing() {
+    // Given: the default, unconfigured provider status.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::default());
+    // When: chat is submitted.
+    submit(&mut harness, "hello");
+    // Then: the dispatch records a guidance notice in the transcript (the pane
+    // also renders the standing guidance line; UI visibility is covered by
+    // composer_ui_headless), nothing is issued, and the draft is preserved.
+    assert!(
+        harness
+            .state()
+            .transcripts()
+            .thread()
+            .entries()
+            .iter()
+            .any(
+                |entry| matches!(entry, TranscriptEntry::Notice { text } if text == PROVIDER_MISSING_GUIDANCE)
+            )
+    );
+    assert!(harness.state().issued().is_empty());
+    assert_eq!(harness.state().composer().input, "hello");
+    // When: local commands are submitted after the blocked chat.
+    submit(&mut harness, "/goal ok");
+    // Then: goal submission remains available.
+    assert!(
+        matches!(harness.state().issued(), [WorkbenchCommand::SubmitGoal(goal)] if goal.goal == "ok")
+    );
+    // When: help is requested.
+    submit(&mut harness, "/help");
+    // Then: help is appended without an additional command.
+    assert!(harness.has_label(&harness.state().composer().registry.help_text()));
+    assert_eq!(harness.state().issued().len(), 1);
+}
+
+#[test]
+fn unknown_command_shows_error_and_sends_nothing() {
+    // Given: a configured thread.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    // When: an unknown slash command is submitted.
+    submit(&mut harness, "/foo bar");
+    // Then: an error is visible and the input is preserved.
+    assert!(harness.has_label("unknown command /foo — type /help"));
+    assert!(harness.state().issued().is_empty());
+    assert_eq!(harness.state().composer().input, "/foo bar");
+}
+
+#[test]
+fn empty_input_is_noop() {
+    // Given: a configured thread, tested independently for each empty form.
+    let temp = tempfile::tempdir().expect("temp dir");
+    for input in ["", "  "] {
+        let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+        let before = harness.state().transcripts().thread().entries().to_vec();
+        // When: empty input is submitted.
+        submit(&mut harness, input);
+        // Then: no command, transcript entry, or input change occurs.
+        assert!(harness.state().issued().is_empty());
+        assert_eq!(harness.state().transcripts().thread().entries(), before);
+        assert_eq!(harness.state().composer().input, input);
+    }
+}
+
+#[test]
+fn chat_without_thread_shows_notice() {
+    // Given: no active project or thread, and the default missing provider.
+    let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("default state builds");
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    // When: chat is submitted.
+    submit(&mut harness, "hello");
+    // Then: thread selection takes precedence over provider configuration.
+    assert!(harness.has_label("Select or start a thread first"));
+    assert!(harness.state().issued().is_empty());
+    assert_eq!(harness.state().composer().input, "hello");
+}
+
+#[test]
+fn chat_rejected_event_renders_notice() {
+    // Given: a submitted chat (the fixture only accepts chats).
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "hello");
+    // When: a rejection is applied through the same loop-event API used by sinks.
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::ChatRejected {
+            thread_id: "thread-1".into(),
+            reason: "provider unavailable".into(),
+        });
+    harness.run();
+    // Then: the failure reason is visible in the conversation.
+    assert!(harness.has_label("chat failed: provider unavailable"));
+    assert_eq!(harness.state().issued().len(), 1);
+}
+
+// Given: chat and command rejections whose reasons are Japanese, known or not
+// When: they are applied through the loop-event API
+// Then: the notice reads in English and the original reason stays in its hover
+#[test]
+fn rejection_notices_read_in_english_and_keep_the_original_in_the_hover() {
+    use gui::model::transcript::TranscriptEntry;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "hello");
+    let known = "モデル呼び出しに失敗しました: HTTP 500";
+    let unknown = "未知の拒否理由: detail";
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::ChatRejected {
+            thread_id: "thread-1".into(),
+            reason: known.into(),
+        });
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::CommandRejected {
+            reason: unknown.into(),
+        });
+    harness.run();
+    let notices: Vec<(String, String)> = harness
+        .state()
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Diagnostic { text, hover, .. } => Some((text.clone(), hover.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        [
+            (
+                "chat failed: Model call failed: HTTP 500".to_owned(),
+                known.to_owned()
+            ),
+            (
+                format!("{}: detail", gui::model::failure_text::UNTRANSLATED),
+                unknown.to_owned()
+            ),
+        ]
+    );
+    assert!(harness.has_label("chat failed: Model call failed: HTTP 500"));
+}

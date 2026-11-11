@@ -100,14 +100,14 @@ GUI test-connection entry point. No real keychain or external service is require
 - crates/runtime/tests/web_mcp/mcp_scope_e2e.rs
 - crates/runtime/tests/web_mcp/mcp_scope_diagnostics/mod.rs
 
-## F1: crates/gui/tests/mcp_settings.rs
+## F1: crates/gui/tests/settings_ui/mcp_settings.rs
 
 - open_and_save_never_connect
 - imported_edits_write_complete_toml_override
 - disable_and_remove_override_are_distinct
 - render_thread_does_not_perform_io
 
-## F2: crates/gui/tests/mcp_actions.rs
+## F2: crates/gui/tests/settings_ui/mcp_actions.rs
 
 - approval_preview_rejects_stale_revision
 - unapproved_connection_test_is_refused

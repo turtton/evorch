@@ -13,8 +13,8 @@ with explicit paths. Shared API/Cargo/module changes must be requested from E.
 | C | crates/tools/src/mcp/{client,protocol,codec,headers}.rs; crates/tools/src/mcp/transport/http.rs; crates/tools/src/network_guard/{mcp,stream}.rs; crates/tools/tests/{mcp_client,mcp_session,mcp_protocol,mcp_http}.rs | T0 committed; no wire/search/mod.rs edits |
 | D | crates/tools/src/mcp/transport/stdio.rs; crates/sandbox/src/process.rs as needed; crates/tools/tests/mcp_stdio.rs; crates/tools/tests/support/mcp_server.rs; crates/tools/shared-test-support/mcp/mod.rs | T0 committed; C requests shared driver edits from D |
 | E (remaining implementation) | crates/tools/src/mcp/{registry,tool,names}.rs; crates/runtime/src/{compose,agent_loop,policy,restore,runtime}.rs + runtime MCP tests/integration; provider name conversion; crates/gui/src/bin/evorch-gui.rs; crates/evorch/src/headless.rs; existing executor/apply_patch_reserved_name/mcp_scope_e2e/mcp_scope_diagnostics tests | Pure names/snapshot after T0, live integration after A/B/C/D |
-| F1 | crates/gui/src/panes/project_dialog.rs; crates/gui/src/app/project_dialog.rs; new MCP editor/controller modules (exports via E); crates/gui/tests/mcp_settings.rs | T0 + A; then hand these files to F2 |
-| F2 | F1 files after explicit handoff; crates/gui/src/model/commands.rs; crates/gui/src/runtime_sink.rs; crates/gui/tests/mcp_actions.rs | F1 + B + E backend |
+| F1 | crates/gui/src/panes/project_dialog.rs; crates/gui/src/app/project_dialog.rs; new MCP editor/controller modules (exports via E); crates/gui/tests/settings_ui/mcp_settings.rs | T0 + A; then hand these files to F2 |
+| F2 | F1 files after explicit handoff; crates/gui/src/model/commands.rs; crates/gui/src/runtime_sink.rs; crates/gui/tests/settings_ui/mcp_actions.rs | F1 + B + E backend |
 | G | crates/runtime/tests/mcp_cache_e2e.rs; existing cache E2E extensions; scripts/contract-test-filters.sh; docs/mcp.md; docs/providers.md; related config docs | E integration + F2; docs included in same PR by operator exception |
 
 Protected unchanged files: crates/tools/src/search/{mcp,envelope}.rs and the four

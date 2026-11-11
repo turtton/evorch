@@ -184,8 +184,8 @@ shown up to 40 characters. The tab never sends input to the page.
 
 Use `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`.
 
-- `cargo test -p gui --test browser`
-- `cargo test -p gui --test agent_browser_workbench`
+- `cargo test -p gui --test workbench_shell -- browser::`
+- `cargo test -p gui --test workbench_shell -- agent_browser_workbench::`
 - `cargo test -p browser`
 - With installed Chromium: `cargo test -p browser --test agent_chromium -- --ignored`
 

@@ -35,4 +35,4 @@ nix develop -c env WGPU_BACKEND=vulkan cargo run -q -p gui --bin headless_captur
 - 解像度: 1280x720 PNG（RGBA8）
 - before 取得時点 SHA: `12e478f`
 - after 取得時点 SHA: `b6b846d`
-- ジオメトリの自動検証: `crates/gui/tests/theme_headless.rs` の `compact_row_is_dense_and_centers_status_dot` と `crates/gui/tests/sidebar_headless.rs` の `sidebar_rows_are_single_line_dense_rows` が行高・ドットサイズ・垂直中央揃え・単一行配置を assert する
+- ジオメトリの自動検証: `crates/gui/tests/theme_headless.rs` の `compact_row_is_dense_and_centers_status_dot` と `crates/gui/tests/workbench_shell/sidebar_headless.rs` の `sidebar_rows_are_single_line_dense_rows` が行高・ドットサイズ・垂直中央揃え・単一行配置を assert する
