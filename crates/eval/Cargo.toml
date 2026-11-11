@@ -34,7 +34,6 @@ tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "s
 toml = { workspace = true }
 tools = { path = "../tools" }
 tracing = { workspace = true }
-workspace-ui = { path = "../workspace-ui" }
 
 [dev-dependencies]
 mock-openai = { path = "../mock-openai" }

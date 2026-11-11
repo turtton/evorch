@@ -30,6 +30,8 @@ use crate::source::{ChatThread, OriginalThread};
 
 mod apply;
 mod groups;
+mod lifecycle;
+pub use lifecycle::EvaluationService;
 mod start;
 
 pub use groups::find_cli;
@@ -55,6 +57,11 @@ const COST_NOTE: &str = "repriced from current prices; requests older than the u
 
 /// What the host process does for the Evaluator's tools.
 pub trait EvaluatorHost: Send + Sync {
+    /// Authorize the initiating run, not the read-only evaluation sample.
+    fn authorize_run(&self, _run_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Deliver an evaluation's completion notice to the run that started it,
     /// or the conversation it belongs to, returning the run that received it.
     ///
@@ -91,6 +98,7 @@ struct Shared {
     context: EvaluatorContext,
     catalog: tokio::sync::OnceCell<Option<Arc<ModelCatalog>>>,
     groups: LaunchMonitor,
+    lifecycle: EvaluationService,
 }
 
 impl Shared {
@@ -142,11 +150,21 @@ pub fn tools(context: EvaluatorContext) -> Vec<Arc<dyn Tool>> {
 /// for an [`crate::inspection::EvaluationInspector`] that must tell a process
 /// this one started from one it did not.
 pub fn tools_with_monitor(context: EvaluatorContext) -> (Vec<Arc<dyn Tool>>, LaunchMonitor) {
+    let (tools, monitor, _) = tools_with_service(context);
+    (tools, monitor)
+}
+
+/// Host-owned variant: stop admission, kill/reap children, and join notices on shutdown.
+pub fn tools_with_service(
+    context: EvaluatorContext,
+) -> (Vec<Arc<dyn Tool>>, LaunchMonitor, EvaluationService) {
     let monitor = LaunchMonitor::default();
+    let lifecycle = EvaluationService::default();
     let shared = Arc::new(Shared {
         context,
         catalog: tokio::sync::OnceCell::new(),
         groups: monitor.clone(),
+        lifecycle: lifecycle.clone(),
     });
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ListThreads(Arc::clone(&shared))),
@@ -157,7 +175,7 @@ pub fn tools_with_monitor(context: EvaluatorContext) -> (Vec<Arc<dyn Tool>>, Lau
         Arc::new(ReadReport(Arc::clone(&shared))),
         Arc::new(apply::ApplyConfig(shared)),
     ];
-    (tools, monitor)
+    (tools, monitor, lifecycle)
 }
 
 /// Show `summary` to the user as an approval request and wait for the answer.

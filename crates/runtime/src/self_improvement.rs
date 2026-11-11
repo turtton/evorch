@@ -10,7 +10,10 @@ mod normalize;
 mod run_errors;
 
 pub(crate) use crash::compact_backtrace;
-pub use crash::{SpooledCrash, drain_crash_spool, install_crash_spool, spool_fault};
+pub use crash::{
+    CrashSpoolGuard, SpooledCrash, install_crash_spool, read_crash_spool, register_crash_spool,
+    spool_fault,
+};
 pub use drafts::{render_issue_draft, render_packet_draft};
 pub use normalize::normalize_variable_parts;
 
@@ -203,11 +206,15 @@ enum SelfImprovementError {
 
 pub struct ImprovementCollector {
     settings: ImprovementSettings,
+    observation_key: Option<String>,
 }
 
 impl ImprovementCollector {
     pub fn new(settings: ImprovementSettings) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            observation_key: None,
+        }
     }
 
     /// Synchronous intake. All persistence/draft/identity errors are warn-only.
@@ -293,110 +300,192 @@ impl ImprovementCollector {
             return;
         }
         for crash in crashes {
-            let code = crash
-                .code
-                .clone()
-                .unwrap_or_else(|| diagnostic_codes::CRASH_RECOVERED.into());
-            // A spooled fault bypasses the bus, so it must pass the same allowlist.
-            if known_class(&code) != Some(CandidateClass::HarnessImprovement) {
-                tracing::warn!(code, "ignoring spooled fault with a non-harness code");
-                continue;
+            if let Err(error) = self.ingest_crash(crash) {
+                tracing::warn!(%error, "crash intake failed; spool retained by its owner");
             }
-            let site = crash
-                .location
-                .as_deref()
-                .unwrap_or_else(|| first_line(&crash.message));
-            let (title_text, dedup_key) = if crash.code.is_some() {
-                (
-                    format!("{code}: {}", first_line(&crash.message)),
-                    format!("spool:{code}:{site}"),
-                )
-            } else {
-                (
-                    format!("Recovered crash: {}", first_line(&crash.message)),
-                    // The same panic site folds into one candidate's occurrences
-                    // instead of one candidate per spool file.
-                    format!("crash:{site}"),
-                )
-            };
-            self.intake("crash", NewImprovementCandidate {
-                id: String::new(),
-                source: ImprovementSource::Diagnostic,
-                code,
-                severity: ImprovementSeverity::Error,
-                title: title(&title_text),
-                evidence: self.json_evidence(json!({
-                    "file_name": crash.file_name,
-                    "message": bound_text(&crash.message, self.settings.policy.evidence_limit()),
-                    "location": crash.location, "thread": crash.thread,
-                    "timestamp_unix": crash.timestamp_unix,
-                    // The crashed build, which may differ from the recovering one.
-                    "build": crash.build.clone().unwrap_or_else(|| "unknown".into()),
-                    "backtrace": crash.backtrace,
-                })),
-                dedup_key,
-                run_id: None,
-            });
         }
     }
 
-    /// Broadcast lag is recorded as its own candidate and observation continues;
-    /// only bus closure ends this best-effort observer.
-    pub async fn run(self, mut receiver: EventReceiver) {
-        // One candidate write per lag episode, so recording cannot deepen the lag.
+    // Unlike live diagnostics, the spool owner needs a persistence acknowledgement.
+    // A durable receipt also covers a process exit or unlink failure after commit.
+    fn ingest_crash(&self, crash: SpooledCrash) -> Result<(), SelfImprovementError> {
+        use sha2::Digest;
+        let bytes = serde_json::to_vec(&crash).map_err(std::io::Error::other)?;
+        let mut hash = sha2::Sha256::new();
+        hash.update(b"crash-spool\0");
+        hash.update(bytes);
+        let collector = Self {
+            settings: self.settings.clone(),
+            observation_key: Some(format!("{:x}", hash.finalize())),
+        };
+        let code = crash
+            .code
+            .clone()
+            .unwrap_or_else(|| diagnostic_codes::CRASH_RECOVERED.into());
+        // A spooled fault bypasses the bus, so it must pass the same allowlist.
+        if known_class(&code) != Some(CandidateClass::HarnessImprovement) {
+            tracing::warn!(code, "ignoring spooled fault with a non-harness code");
+            return Ok(());
+        }
+        let site = crash
+            .location
+            .as_deref()
+            .unwrap_or_else(|| first_line(&crash.message));
+        let (title_text, dedup_key) = if crash.code.is_some() {
+            (
+                format!("{code}: {}", first_line(&crash.message)),
+                format!("spool:{code}:{site}"),
+            )
+        } else {
+            (
+                format!("Recovered crash: {}", first_line(&crash.message)),
+                // The same panic site folds into one candidate's occurrences
+                // instead of one candidate per spool file.
+                format!("crash:{site}"),
+            )
+        };
+        collector.record(NewImprovementCandidate {
+            id: new_id("crash")?,
+            source: ImprovementSource::Diagnostic,
+            code,
+            severity: ImprovementSeverity::Error,
+            title: title(&title_text),
+            evidence: self.json_evidence(json!({
+                "file_name": crash.file_name,
+                "message": bound_text(&crash.message, self.settings.policy.evidence_limit()),
+                "location": crash.location, "thread": crash.thread,
+                "timestamp_unix": crash.timestamp_unix,
+                // The crashed build, which may differ from the recovering one.
+                "build": crash.build.clone().unwrap_or_else(|| "unknown".into()),
+                "backtrace": crash.backtrace,
+            })),
+            dedup_key,
+            run_id: None,
+        })
+    }
+
+    /// Legacy observer, with the same intake as the managed host service.
+    pub async fn run(self, receiver: EventReceiver) {
+        if let Err(error) = self
+            .run_until(receiver, std::future::pending(), |_| true)
+            .await
+        {
+            tracing::warn!(%error, "self-improvement writer drain failed");
+        }
+    }
+
+    /// Stop after the producer drain, consume the bounded pending snapshot, then
+    /// acknowledge all queued writer commands. Subscribe before spawning this future.
+    pub async fn run_until(
+        self,
+        mut receiver: EventReceiver,
+        stopped: impl std::future::Future<Output = ()>,
+        accepts: impl Fn(&event_bus::Event) -> bool,
+    ) -> Result<(), storage::StorageError> {
+        tokio::pin!(stopped);
         let mut lagging = false;
         loop {
-            let received = receiver.recv().await;
-            if let Err(RecvError::Lagged(skipped)) = received {
-                if !lagging {
-                    self.handle_lag(skipped);
-                }
-                lagging = true;
-                continue;
-            }
-            lagging = false;
+            let received = tokio::select! {
+                biased;
+                () = &mut stopped => break,
+                received = receiver.recv() => received,
+            };
             match received {
-                Ok(event) => match event.kind {
-                    EventKind::Diagnostic(diagnostic) => {
-                        self.diagnostic_observed_at(&diagnostic, event.meta.wall_clock)
+                Ok(event) => {
+                    lagging = false;
+                    if accepts(&event) {
+                        self.observe(event);
                     }
-                    EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                        run_id,
-                        to: AgentRunPhase::Error,
-                        reason: Some(reason),
-                        ..
-                    }) if self.settings.policy.collect_diagnostics => {
-                        self.run_error_observed_at(&run_id, &reason, event.meta.wall_clock);
-                    }
-                    EventKind::Fault(FaultEvent::SkillDiagnostic {
-                        kind,
-                        skill,
-                        scope,
-                        detail,
-                    }) if self.settings.policy.collect_diagnostics => {
-                        // SkillDiagnosticKind has Debug, not Display; stable variant spellings.
-                        let kind = format!("{kind:?}");
-                        self.intake("diag", NewImprovementCandidate {
-                            id: String::new(),
-                            source: ImprovementSource::Diagnostic,
-                            code: format!("SkillDiagnostic:{kind}"),
-                            severity: ImprovementSeverity::Warning,
-                            title: title(&format!("Skill diagnostic: {skill}")),
-                            evidence: self.json_evidence(json!({
-                                "kind": kind, "skill": skill, "scope": scope,
-                                "detail": bound_text(&detail, self.settings.policy.evidence_limit()),
-                            })),
-                            dedup_key: format!("skill-diag:{skill}:{kind}"),
-                            run_id: None,
-                        });
-                    }
-                    _ => {}
-                },
-                Err(error) => {
-                    tracing::warn!(?error, "self-improvement observer stopped");
-                    break;
                 }
+                Err(RecvError::Lagged(skipped)) => {
+                    if !lagging {
+                        self.handle_lag(skipped);
+                    }
+                    lagging = true;
+                }
+                Err(RecvError::Closed) => break,
             }
+        }
+        let (events, lagged) = receiver.drain_pending_snapshot_counting_lag();
+        if lagged > 0 {
+            self.handle_lag(lagged);
+        }
+        for event in events {
+            if accepts(&event) {
+                self.observe(event);
+            }
+        }
+        self.settings.writer.flush_usage_now()
+    }
+
+    fn observe(&self, event: event_bus::Event) {
+        if !matches!(
+            &event.kind,
+            EventKind::Diagnostic(_)
+                | EventKind::Fault(FaultEvent::SkillDiagnostic { .. })
+                | EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    to: AgentRunPhase::Error,
+                    ..
+                })
+        ) {
+            return;
+        }
+        use sha2::Digest;
+        // Fingerprint the ORIGINAL immutable event, including provenance/timestamps,
+        // not the normalized candidate key: independent occurrences still count.
+        let bytes = match serde_json::to_vec(&event) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, "cannot identify improvement observation");
+                return;
+            }
+        };
+        let collector = Self {
+            settings: self.settings.clone(),
+            observation_key: Some(format!("{:x}", sha2::Sha256::digest(bytes))),
+        };
+        collector.observe_once(event);
+    }
+
+    fn observe_once(&self, event: event_bus::Event) {
+        match event.kind {
+            EventKind::Diagnostic(diagnostic) => {
+                self.diagnostic_observed_at(&diagnostic, event.meta.wall_clock)
+            }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: AgentRunPhase::Error,
+                reason: Some(reason),
+                ..
+            }) if self.settings.policy.collect_diagnostics => {
+                self.run_error_observed_at(&run_id, &reason, event.meta.wall_clock);
+            }
+            EventKind::Fault(FaultEvent::SkillDiagnostic {
+                kind,
+                skill,
+                scope,
+                detail,
+            }) if self.settings.policy.collect_diagnostics => {
+                // SkillDiagnosticKind has Debug, not Display; stable variant spellings.
+                let kind = format!("{kind:?}");
+                self.intake(
+                    "diag",
+                    NewImprovementCandidate {
+                        id: String::new(),
+                        source: ImprovementSource::Diagnostic,
+                        code: format!("SkillDiagnostic:{kind}"),
+                        severity: ImprovementSeverity::Warning,
+                        title: title(&format!("Skill diagnostic: {skill}")),
+                        evidence: self.json_evidence(json!({
+                            "kind": kind, "skill": skill, "scope": scope,
+                            "detail": bound_text(&detail, self.settings.policy.evidence_limit()),
+                        })),
+                        dedup_key: format!("skill-diag:{skill}:{kind}"),
+                        run_id: None,
+                    },
+                );
+            }
+            _ => {}
         }
     }
 
@@ -470,11 +559,19 @@ impl ImprovementCollector {
     }
 
     fn record(&self, candidate: NewImprovementCandidate) -> Result<(), SelfImprovementError> {
-        let outcome = self.settings.writer.record_improvement_candidate(
-            &self.settings.project,
-            candidate.clone(),
-            self.settings.policy.write_policy(),
-        )?;
+        let outcome = match &self.observation_key {
+            Some(key) => self.settings.writer.record_improvement_observation(
+                &self.settings.project,
+                candidate.clone(),
+                self.settings.policy.write_policy(),
+                key,
+            )?,
+            None => self.settings.writer.record_improvement_candidate(
+                &self.settings.project,
+                candidate.clone(),
+                self.settings.policy.write_policy(),
+            )?,
+        };
         if let ImprovementRecordOutcome::Stored { id } | ImprovementRecordOutcome::Reopened { id } =
             outcome
         {

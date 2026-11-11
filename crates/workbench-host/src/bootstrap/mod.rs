@@ -1,23 +1,20 @@
-//! GUI-free owner composition and reusable construction parts (ADR 0045 P8a).
-//! Lane/PR startup is shared with the transitional embedded GUI; MCP and
-//! metadata services have their own host factory.
+//! GUI-free owner composition and reusable construction parts (ADR 0045).
+//! Learning, evaluation supervision and passive improvement/crash intake use
+//! the same factories on core and legacy GUI. Every task has a stop/drain owner.
 //!
-//! Deliberate legacy GUI/core differences:
-//! - Core loads strict configuration from an explicit directory without env
-//!   overrides; GUI can recover from invalid configuration for its settings UI.
-//! - GUI wraps the same routed model in a live-reload switch; core uses Configured.
-//! - Unconfigured core exposes no tools; GUI/demo keeps production tools. GUI
-//!   evaluator tools are explicit host extensions, deferred on core until PR03.
-//! - GUI owns retention/index maintenance, fault spooling and a 60s bridge tick;
-//!   core only holds shared leases and keeps its 5s tick. Both share DB settings.
-//! - Saved project access is read-only here; live settings updates remain with
-//!   the existing GUI. No project configuration can manufacture trust.
-//! - MCP and catalog factories live in `host_services`; diagnostics/usage share
-//!   the owned storage bridge. Other PR03 services register their stop and
-//!   completion futures in `services`, never detach a storage-using task.
+//! Remaining GUI/core differences:
+//! - Core loads strict explicit configuration, without environment overrides.
+//! - Unconfigured core exposes no tools; GUI/demo keeps production tools.
+//! - GUI owns retention/index policy; core only executes confirmed reclaims.
+//! - GUI retains a 60s storage bridge tick; core retains its 5s tick.
+//! - Project declarations are read-only: saved state cannot manufacture trust.
 pub mod components;
+pub mod evaluation;
 mod host_services;
 pub mod lane_pr;
+pub mod learning;
+#[cfg(test)]
+mod learning_tests;
 pub mod models;
 mod project_models;
 pub mod services;
@@ -112,6 +109,8 @@ pub struct BootstrappedHost {
     pub services: services::BackgroundServices,
     pub mcp: runtime::mcp::McpHostServices,
     pub usage_pricing: recorder::pricing::SharedUsagePricing,
+    pub evaluator: Arc<evaluation::EvaluatorHost>,
+    evaluations: eval::evaluator::EvaluationService,
     #[cfg(any(test, feature = "test-support"))]
     pub composition: CompositionInventory,
     bridge: Option<OwnedStorageBridge>,
@@ -243,7 +242,8 @@ impl BootstrappedHost {
             components::BridgeOptions {
                 session_id: "evorch-core".into(),
                 flush_every: Duration::from_secs(5),
-                fault_spool: None,
+                fault_spool: learning::draft_dir(&config, &storage_config.db_path)
+                    .map(|d| d.join("crash-spool")),
             },
         )?;
         let credential_dir = options.config_dir.join("credentials");
@@ -254,6 +254,17 @@ impl BootstrappedHost {
             Some(mcp) => mcp,
             None => host_services::mcp(&options.config_dir).await?,
         };
+        let evaluator = Arc::new(evaluation::EvaluatorHost::default());
+        let (evaluation_tools, _, evaluations) =
+            eval::evaluator::tools_with_service(eval::evaluator::EvaluatorContext {
+                database: storage_config.db_path.clone(),
+                storage: handle.clone(),
+                user_config_dir: options.config_dir.clone(),
+                catalog_dir: None,
+                bus: bus.clone(),
+                host: evaluator.clone(),
+                cli: None,
+            });
         // Health stays available without providers, tools or a production sandbox.
         let components::ExecutionComponents {
             executor,
@@ -268,7 +279,7 @@ impl BootstrappedHost {
                 bus.clone(),
                 options.project_root.clone(),
                 &config,
-                Vec::new(),
+                evaluation_tools,
             )?
         };
         let (fixed_model, workspace) = match seams {
@@ -281,6 +292,49 @@ impl BootstrappedHost {
             ),
             None => (None, workspace),
         };
+        let production = models::ProductionModel {
+            load_options: config::LoadOptions {
+                user_config_dir: Some(options.config_dir.clone()),
+                project_dir: Some(options.project_root.clone()),
+                read_env: false,
+                ..Default::default()
+            },
+            credential_store: credentials.clone(),
+            bus: bus.clone(),
+            env: Arc::new(routing::ProcessEnv),
+            model_catalog_dir: None,
+        };
+        let live = if fixed_model.is_none() && !config.providers.is_empty() {
+            Some(Arc::new(runtime::compose::SwitchableModel::new(
+                models::compose_production_model(&config, &production)?,
+            )))
+        } else {
+            None
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        let routed_identity = live
+            .as_ref()
+            .map(|model| runtime::compose::ModelIdentity::Routed {
+                profiles: model
+                    .available_profiles()
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect(),
+                selected: [
+                    ("orchestrator", runtime::Role::Orchestrator),
+                    ("explorer", runtime::Role::Explorer),
+                    ("worker", runtime::Role::Worker),
+                    ("reviewer", runtime::Role::Reviewer),
+                ]
+                .into_iter()
+                .map(|(name, role)| {
+                    (
+                        name.to_owned(),
+                        runtime::AgentModel::selected_model(model.as_ref(), role, None),
+                    )
+                })
+                .collect(),
+            });
         let composed = runtime::compose_runtime(RuntimeComposition {
             config: &config,
             user_config_dir: Some(options.config_dir.clone()),
@@ -294,7 +348,7 @@ impl BootstrappedHost {
                 None if config.providers.is_empty() => {
                     ModelSource::Fixed(Arc::new(runtime::compose::UnconfiguredModel))
                 }
-                None => ModelSource::Configured,
+                None => ModelSource::Fixed(live.as_ref().unwrap().clone()),
             },
             workspace: Some(workspace),
         })?;
@@ -302,13 +356,19 @@ impl BootstrappedHost {
             options.config_dir.join("artifacts"),
             handle.clone(),
         )?);
-        let runtime = composed
-            .runtime
-            .with_mcp_service(mcp.runs.clone())
-            .with_project_models(project_models::resolver(&options, credentials, bus.clone()))
-            .with_sandbox_root(options.project_root.clone())
-            .with_run_store(RunStore::open(&storage_config, handle.clone())?)
-            .with_artifact_store(artifacts.clone());
+        let (project_models, reload_projects) =
+            project_models::resolver(&options, credentials, bus.clone());
+        let runtime = learning::configure(
+            composed.runtime.with_mcp_service(mcp.runs.clone()),
+            &config,
+            storage_config.clone(),
+            handle.clone(),
+            &options.project_root,
+        )
+        .with_project_models(project_models)
+        .with_sandbox_root(options.project_root.clone())
+        .with_run_store(RunStore::open(&storage_config, handle.clone())?)
+        .with_artifact_store(artifacts.clone());
         let guard = runtime::thread_retention::TombstoneGuard::new(tombstones);
         runtime
             .set_tombstone_guard(guard.clone())
@@ -322,6 +382,18 @@ impl BootstrappedHost {
             .set_tombstone_guard(guard)
             .map_err(|_| "owner tombstone guard already set")?;
         runtime.set_thread_scratch(owner.thread_scratch());
+        let _ = evaluator.runtime.set(runtime.downgrade());
+        let _ = evaluator.reload.set(Box::new(move || {
+            if let Some(live) = &live {
+                let config = config::Config::load_strict(&production.load_options)
+                    .map_err(|e| e.to_string())?;
+                live.replace(
+                    models::compose_production_model(&config, &production)
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            reload_projects()
+        }));
         let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current())
             .with_event_bus(bus.clone())
             .with_memory_storage(storage_config.clone())
@@ -345,15 +417,21 @@ impl BootstrappedHost {
         let composition = CompositionInventory {
             tools: executor.tool_specs(),
             storage: storage_config.clone(),
-            model: composed.model_identity,
+            model: routed_identity.unwrap_or(composed.model_identity),
         };
         let reclaim = runtime::thread_retention::ReclaimExecutor::spawn(
-            runtime::thread_retention::ExecutorConfig::new(handle, storage_config, Some(artifacts)),
+            runtime::thread_retention::ExecutorConfig::new(
+                handle,
+                storage_config.clone(),
+                Some(artifacts),
+            ),
         )?;
         let mut bootstrap = Self {
             host,
             runtime,
             owner,
+            evaluator,
+            evaluations: evaluations.clone(),
             config,
             services: services::BackgroundServices::default(),
             mcp,
@@ -373,6 +451,25 @@ impl BootstrappedHost {
             bootstrap.usage_pricing.clone(),
             bootstrap.mcp.clone(),
         );
+        bootstrap.services.start("evaluation", {
+            let evaluations = evaluations.clone();
+            |stop| async move {
+                let _ = stop.await;
+                evaluations.shutdown().await?;
+                Ok(())
+            }
+        });
+        if let Err(error) = learning::start(
+            &mut bootstrap.services,
+            &bootstrap.runtime,
+            bootstrap.owner.clone(),
+            &bootstrap.config,
+            &storage_config,
+            evaluations,
+        ) {
+            let _ = bootstrap.shutdown().await;
+            return Err(error);
+        }
         if let Some(observe) = observe {
             observe(&bootstrap.runtime);
         }
@@ -395,7 +492,8 @@ impl BootstrappedHost {
         // TODO(P9): once safe-point restart/auto-resume can restore an ordinary
         // chat's Waiting state, count that idle conversation as no work. Until
         // then retain all Waiting runs conservatively to avoid losing them.
-        self.runtime.pending_lane_stop_writes() != 0
+        self.evaluations.is_busy()
+            || self.runtime.pending_lane_stop_writes() != 0
             || !self.runtime.pending_lane_admissions().is_empty()
             || self.host.lock().unwrap().service().has_background_work()
             || self.runtime.list_agents().iter().any(|r| {

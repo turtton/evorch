@@ -120,7 +120,7 @@ max_bytes = 2097152
         .filter(|tool| !extension_names.contains(&tool.name))
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(core.composition.tools, common_tools);
+    assert_eq!(core.composition.tools, gui_tools);
     assert_eq!(gui_tools.len(), common_tools.len() + extension_names.len());
     assert!(common_tools.iter().any(|tool| tool.name == "shell"));
     assert!(common_tools.iter().any(|tool| tool.name == "web_fetch")); // Exposure is gated per run.
@@ -172,7 +172,7 @@ max_bytes = 2097152
         core.composition.model,
         runtime::compose::ModelIdentity::Routed { profiles, selected }
     );
-    // The GUI adds live reload via a fixed switchable model; core uses Configured.
+    // Both roots preserve the same routed selection inside a live-reload switch.
     let gui = compose_runtime(RuntimeComposition {
         config: &config,
         user_config_dir: Some(user_dir.clone()),

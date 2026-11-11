@@ -67,9 +67,13 @@ mod tests {
     use super::*;
 
     fn spooled(dir: &std::path::Path) -> Vec<Option<String>> {
-        runtime::self_improvement::drain_crash_spool(dir)
+        runtime::self_improvement::read_crash_spool(dir)
             .into_iter()
-            .map(|fault| fault.location)
+            .map(|fault| {
+                // This unit test consumes its inspected fixture, not production intake.
+                std::fs::remove_file(dir.join(&fault.file_name)).unwrap();
+                fault.location
+            })
             .collect()
     }
 

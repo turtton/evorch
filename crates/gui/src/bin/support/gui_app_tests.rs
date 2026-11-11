@@ -104,7 +104,7 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
         },
         executor: None,
         _storage: GuiStorageResources {
-            services: None,
+            background: None,
             _storage: bridge,
             ownership,
             _demo_directory: None,
@@ -194,7 +194,7 @@ fn dropping_the_running_app_stops_the_executor_before_the_locks_are_released() {
         },
         executor: Some(executor),
         _storage: GuiStorageResources {
-            services: None,
+            background: None,
             _storage: bridge,
             ownership,
             _demo_directory: None,

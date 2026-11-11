@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{ImprovementCollector, ImprovementSettings, drain_crash_spool};
+use super::{ImprovementCollector, ImprovementSettings, read_crash_spool};
 use crate::AgentRuntime;
 
 /// The receiver itself owns a bus sender, so dropping the bus cannot close it.
@@ -14,6 +14,10 @@ impl Drop for ObserverTask {
 }
 
 impl AgentRuntime {
+    pub fn self_improvement_settings(&self) -> Option<ImprovementSettings> {
+        self.shared.self_improvement.get().cloned()
+    }
+
     /// Opt in to passive collection. Reconfiguration is warn-ignored, not a panic.
     pub fn with_self_improvement(self, settings: ImprovementSettings) -> Self {
         if self.shared.self_improvement.set(settings).is_err() {
@@ -53,9 +57,10 @@ impl AgentRuntime {
         }
     }
 
-    /// Recover <resolved-draft-dir>/crash-spool. Returns the number drained, not
-    /// the number stored (dedup/rate limits still apply). Disabled intake leaves
-    /// the spool untouched. Composition resolves the default via from_config.
+    /// Recover <resolved-draft-dir>/crash-spool, unlinking only after a successful
+    /// writer acknowledgement. Returns the number removed, not the number stored
+    /// (dedup/rate limits still apply). Failed/disabled intake leaves files intact.
+    /// Composition resolves the default via from_config.
     pub fn ingest_spooled_crashes(&self) -> usize {
         let Some(settings) = self.shared.self_improvement.get() else {
             return 0;
@@ -67,9 +72,22 @@ impl AgentRuntime {
             tracing::warn!("self-improvement crash spool directory not resolved");
             return 0;
         };
-        let crashes = drain_crash_spool(&dir.join("crash-spool"));
-        let count = crashes.len();
-        ImprovementCollector::new(settings.clone()).ingest_crashes(crashes);
-        count
+        let spool = dir.join("crash-spool");
+        let collector = ImprovementCollector::new(settings.clone());
+        let mut removed = 0;
+        for crash in read_crash_spool(&spool) {
+            let path = spool.join(&crash.file_name);
+            if let Err(error) = collector.ingest_crash(crash) {
+                tracing::warn!(%error, "crash intake failed; spool retained");
+                continue;
+            }
+            match std::fs::remove_file(path) {
+                Ok(()) => removed += 1,
+                Err(error) => {
+                    tracing::warn!(%error, "acknowledged crash spool could not be removed")
+                }
+            }
+        }
+        removed
     }
 }

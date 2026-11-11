@@ -2395,7 +2395,6 @@ dependencies = [
  "tools",
  "tracing",
  "wiremock",
- "workspace-ui",
 ]
 
 [[package]]
@@ -8426,6 +8425,7 @@ dependencies = [
  "base64 0.22.1",
  "catalog",
  "config",
+ "eval",
  "event-bus",
  "image",
  "model",

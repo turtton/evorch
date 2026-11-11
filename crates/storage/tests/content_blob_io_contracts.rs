@@ -90,7 +90,10 @@ const C_GC: u64 = 24;
 // work: 377 frames with 100,000 rows); reserve 4 frames.
 // v57 rebuilds the empty lane_closes table (its schema pages, index and three triggers,
 // no row work: 391 frames with 100,000 rows); 14 frames and 4 reserved.
-const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4;
+// v58 adds one empty WITHOUT ROWID receipt table, with no backfill or secondary
+// index. Reserve 8 fixed schema frames; the independent VM-step comparison still
+// forbids scans proportional to existing rows.
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -306,7 +309,7 @@ fn tick_work_ignores_the_size_of_the_reference_table() {
     );
 }
 
-/// WAL frames of applying migrations v39 to the latest (v52) to a database at v38 holding `rows` rows.
+/// WAL frames of applying migrations v39 to the latest to a database at v38 holding `rows` rows.
 fn migration_cost(rows: i64) -> (u64, u64) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("io.db");
@@ -327,6 +330,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v58.sql"),
                     include_str!("../undo/undo_v57.sql"),
                     include_str!("../undo/undo_v56.sql"),
                     include_str!("../undo/undo_v55.sql"),
@@ -357,7 +361,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     drop(Database::open_unchecked(&config(&path)).unwrap());
     let frames = (wal_bytes(&path) - before) / (page + PAGE_OVERHEAD);
     let scanned = VM_STEPS.load(Ordering::Relaxed);
-    println!("migrations v39 to v54 with {rows} rows: {frames} frames, {scanned} VM steps");
+    println!("migrations v39 to latest with {rows} rows: {frames} frames, {scanned} VM steps");
     observer.execute_batch("COMMIT").unwrap();
     let version: i64 = observer
         .pragma_query_value(None, "user_version", |row| row.get(0))

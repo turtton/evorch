@@ -245,6 +245,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ("learning_claim_roots", Keep, "learning is kept"),
     ("improvement_candidates", Keep, "learning is kept"),
     ("improvement_intake", Keep, "learning is kept"),
+    (
+        "improvement_observations",
+        Keep,
+        "cross-owner replay receipts outlive threads and candidate retention",
+    ),
     ("memory_ledger", Keep, "learning is kept"),
     ("memory_entries", Keep, "learning is kept"),
     ("memory_fts", Keep, "learning is kept"),

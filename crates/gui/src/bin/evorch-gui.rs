@@ -1,5 +1,4 @@
 // allow: SIZE_OK - Existing GUI composition root; T3 only wires UI settings into startup, without restructuring runtime ownership.
-use config::agent_categories::CategoryId;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -19,7 +18,7 @@ use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::demo::DemoScriptModel;
 use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
 use gui::pty::ShellSpawner;
-use gui::runtime_sink::{RuntimeCommandSink, derive_repo_slug, new_stream_id};
+use gui::runtime_sink::{RuntimeCommandSink, new_stream_id};
 use gui::startup::{StartupMessage, StartupPrelude};
 use recorder::pricing::SharedUsagePricing;
 #[cfg(test)]
@@ -440,8 +439,6 @@ fn latest_thread_goals(
     snapshots.goals
 }
 
-type Reload = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
-
 fn reload_index_settings(
     handle: &storage::StorageHandle,
     options: &config::LoadOptions,
@@ -468,36 +465,7 @@ fn start_gui_index_owner(handle: &storage::StorageHandle) -> Result<(), storage:
     Ok(())
 }
 
-/// The Evaluator's tools are built before the runtime and the models they
-/// reach, so both are filled in once startup has composed them. The runtime
-/// owns these tools, so the host holds it weakly.
-#[derive(Default)]
-struct EvaluatorHost {
-    runtime: OnceLock<runtime::WeakAgentRuntime>,
-    reload: OnceLock<Reload>,
-}
-
-impl eval::evaluator::EvaluatorHost for EvaluatorHost {
-    fn deliver_notice(&self, run_id: &str, notice: &str) -> Result<String, String> {
-        let runtime = self
-            .runtime
-            .get()
-            .and_then(runtime::WeakAgentRuntime::upgrade)
-            .ok_or("the runtime is not running")?;
-        let run_id: runtime::RunId = run_id.parse().map_err(|error| format!("{error}"))?;
-        runtime
-            .deliver_notice(run_id, notice)
-            .map(|run| run.to_string())
-            .map_err(|error| error.to_string())
-    }
-
-    fn reload_config(&self) -> Result<(), String> {
-        self.reload
-            .get()
-            .ok_or_else(|| "the models are not composed yet".to_owned())
-            .and_then(|reload| reload())
-    }
-}
+use workbench_host::bootstrap::evaluation::EvaluatorHost;
 
 /// Proof that the runtime refuses deleted threads and runs; the restore functions
 /// below need it, so they cannot be called before the guard is installed.
@@ -933,12 +901,13 @@ fn build_workbench(
     // monitor the Evaluator's tools report them to, so it can tell which run.
     let evaluation_reads: std::cell::OnceCell<(PathBuf, eval::inspection::LaunchMonitor)> =
         std::cell::OnceCell::new();
+    let evaluation_service = std::cell::OnceCell::new();
     let evaluator_tools = |user_config_dir: Option<PathBuf>, catalog_dir: Option<PathBuf>| {
         user_config_dir
             .map(|user_config_dir| {
                 let root = user_config_dir.join("eval");
-                let (tools, monitor) =
-                    eval::evaluator::tools_with_monitor(eval::evaluator::EvaluatorContext {
+                let (tools, monitor, service) =
+                    eval::evaluator::tools_with_service(eval::evaluator::EvaluatorContext {
                         database: storage_config.db_path.clone(),
                         storage: storage.handle(),
                         user_config_dir,
@@ -948,6 +917,7 @@ fn build_workbench(
                             as Arc<dyn eval::evaluator::EvaluatorHost>,
                         cli: None,
                     });
+                let _ = evaluation_service.set(service);
                 let _ = evaluation_reads.set((root, monitor));
                 tools
             })
@@ -1068,39 +1038,13 @@ fn build_workbench(
             runtime
         }
     };
-    let quick_route = composition_config
-        .agents
-        .binding_for("worker", Some(CategoryId::Quick.as_str()))
-        .ok()
-        .and_then(|binding| {
-            let head = binding.models.into_iter().next()?;
-            let route = composition_config
-                .routing
-                .routes
-                .get(&head.route)?
-                .first()?;
-            Some((route, head.reasoning_effort))
-        });
-    // Each run's lessons are partitioned by the project it worked in.
-    let runtime = runtime.with_project_slugs(Arc::new(derive_repo_slug));
-    let runtime = match quick_route {
-        Some((route, reasoning_effort)) => {
-            runtime.with_learning(runtime::memory_queue::LearningSettings {
-                writer: storage.handle(),
-                storage: storage_config.clone(),
-                project: derive_repo_slug(&repo_root),
-                quick: runtime::ModelPreference {
-                    profile: route.profile.clone(),
-                    model: route.model.clone(),
-                    reasoning_effort,
-                },
-            })
-        }
-        None => {
-            tracing::warn!("post-run learning unavailable: configure a worker quick model route");
-            runtime
-        }
-    };
+    let runtime = workbench_host::bootstrap::learning::configure(
+        runtime,
+        &composition_config,
+        storage_config.clone(),
+        storage.handle(),
+        &repo_root,
+    );
 
     // A new bus event may wait for the coalescing window; work the pump is
     // already holding (backlog, retries) must not, so it gets an immediate hook.
@@ -1127,50 +1071,26 @@ fn build_workbench(
     )?;
 
     let self_improvement = &composition_config.self_improvement;
-    // Keep the disabled path inert: no path creation, collector, or panic hook.
-    let improvement_draft_dir = self_improvement.enabled.then(|| {
-        gui::model::self_improvement_settings::resolve_draft_dir(
-            self_improvement,
-            &storage_config.db_path,
-        )
-    });
-    let runtime = if let Some(drafts_dir) = &improvement_draft_dir {
-        let policy = runtime::self_improvement::ImprovementPolicy {
-            draft_dir: Some(drafts_dir.clone()),
-            evidence_max_bytes: self_improvement.evidence_max_bytes,
-            daily_limit: self_improvement.daily_limit,
-            duplicate_cooldown_secs: self_improvement.duplicate_cooldown_secs,
-            max_candidates: self_improvement.max_candidates,
-            collect_diagnostics: self_improvement.collect_diagnostics,
-            collect_lessons: self_improvement.collect_lessons,
-        };
-        let runtime =
-            runtime.with_self_improvement(runtime::self_improvement::ImprovementSettings {
-                writer: storage.handle(),
-                project: derive_repo_slug(&repo_root),
-                policy,
-            });
-        // The GUI thread is synchronous; enter the existing event-pump runtime
-        // so the observer's tokio::spawn runs on its continuously driven executor.
-        {
-            let _guard = handle.enter();
-            runtime.start_self_improvement();
-        }
-        runtime.ingest_spooled_crashes();
-        // The spool lives inside the resolved drafts directory, matching runtime intake.
-        let spool_dir = drafts_dir.join("crash-spool");
-        let directories =
-            std::fs::create_dir_all(drafts_dir).and_then(|()| std::fs::create_dir_all(&spool_dir));
-        match directories {
-            Ok(()) => runtime::self_improvement::install_crash_spool(spool_dir),
-            Err(error) => {
-                tracing::warn!(%error, "self-improvement crash spool unavailable; skipping panic hook");
-            }
-        }
-        runtime
-    } else {
-        runtime
+    let improvement_draft_dir = workbench_host::bootstrap::learning::draft_dir(
+        &composition_config,
+        &storage_config.db_path,
+    );
+    let evaluations = evaluation_service.into_inner().unwrap_or_default();
+    let mut background = GuiLearningServices {
+        services: Default::default(),
+        runtime: runtime.clone(),
+        handle: handle.clone(),
+        owner_drain: None,
     };
+    {
+        let _enter = handle.enter();
+        let evaluations = evaluations.clone();
+        background.services.start("evaluation", |stop| async move {
+            let _ = stop.await;
+            evaluations.shutdown().await?;
+            Ok(())
+        });
+    }
 
     // --demo は常に既定値を使い、非 demo のみ config 読み込みを試みる。
     let (mut provider_status, provider_settings) = match loaded_config.as_ref() {
@@ -1299,34 +1219,48 @@ fn build_workbench(
     // Deleted threads and runs are refused from here on. The set was read after the
     // start-up locks became shared, so no other process can add to it meanwhile.
     install_host_tombstones(&ownership, &prelude.tombstones);
+    background.owner_drain = Some((
+        workbench_host::bootstrap::lane_pr::RuntimeDrain::new(runtime.clone(), runtime_executor),
+        ownership.clone(),
+    ));
     // Install the retained host before any later fallible startup work. State
     // and command-sink locals may drop first, but cannot release this generation.
+    {
+        let _enter = handle.enter();
+        workbench_host::bootstrap::learning::start(
+            &mut background.services,
+            &runtime,
+            ownership.clone(),
+            &composition_config,
+            &storage_config,
+            evaluations,
+        )
+        .map_err(|error| GuiError::Startup(format!("learning services: {error}")))?;
+    }
     let mut storage = GuiStorageResources {
+        background: Some(background),
         _storage: storage,
         ownership: Arc::clone(&ownership),
         _demo_directory: demo_directory,
         _storage_fallback: storage_fallback,
-        services: None,
         _leases: prelude.leases,
     };
     // Recover durable lane intents under this host, never serialized authority.
     // Keep the retained storage/host guard alive before starting any root.
-    let mut services = workbench_host::bootstrap::services::BackgroundServices::default();
     let started = {
         let _enter = handle.enter();
         workbench_host::bootstrap::lane_pr::start(
-            &mut services,
+            &mut storage
+                .background
+                .as_mut()
+                .expect("background services installed")
+                .services,
             &runtime,
             &ownership,
             composition_config.pull_requests,
             Default::default(),
         )
     };
-    storage.services = Some((
-        handle.clone(),
-        workbench_host::bootstrap::lane_pr::RuntimeDrain::new(runtime.clone(), runtime_executor),
-        services,
-    ));
     started.map_err(|error| GuiError::Startup(format!("lane/PR services: {error}")))?;
     let owner_probe: gui::app::pull_requests::OwnerProbe = {
         let host = Arc::clone(&ownership);
@@ -1644,6 +1578,40 @@ impl Starting {
     }
 }
 
+/// Own service futures even when GUI startup fails after partial composition.
+struct GuiLearningServices {
+    services: workbench_host::bootstrap::services::BackgroundServices,
+    runtime: AgentRuntime,
+    handle: tokio::runtime::Handle,
+    owner_drain: Option<(
+        workbench_host::bootstrap::lane_pr::RuntimeDrain,
+        Arc<runtime::ownership::OwnerHost>,
+    )>,
+}
+impl Drop for GuiLearningServices {
+    fn drop(&mut self) {
+        self.handle.block_on(async {
+            if let Some((drain, owner)) = &self.owner_drain {
+                if let Err(error) = drain.stop_and_drain(&mut self.services, owner).await {
+                    tracing::warn!(%error, "background services drain failed");
+                }
+                return;
+            }
+            // Before ownership is opened no lane producer can have started.
+            self.services.request_stop();
+            for run in self.runtime.list_agents() {
+                let _ = self.runtime.stop(run.run_id, runtime::StopScope::Subtree);
+            }
+            for run in self.runtime.list_agents() {
+                let _ = self.runtime.wait(run.run_id).await;
+            }
+            if let Err(error) = self.services.shutdown().await {
+                tracing::warn!(%error, "learning services drain failed");
+            }
+        });
+    }
+}
+
 /// The running workbench.
 struct Ready {
     workbench: WorkbenchApp<AgentRuntime>,
@@ -1656,15 +1624,11 @@ struct Ready {
 // Retain the host across all other GUI/state drops. Its Drop releases owners,
 // which must happen only after queued generation-guarded events are durable.
 struct GuiStorageResources {
+    background: Option<GuiLearningServices>,
     _storage: OwnedStorageBridge,
     ownership: Arc<runtime::ownership::OwnerHost>,
     _demo_directory: Option<tempfile::TempDir>,
     _storage_fallback: Option<tempfile::TempDir>,
-    services: Option<(
-        tokio::runtime::Handle,
-        workbench_host::bootstrap::lane_pr::RuntimeDrain,
-        workbench_host::bootstrap::services::BackgroundServices,
-    )>,
     /// Last: the shared locks outlive every user of the database and the ownership root.
     _leases: SharedLeases,
 }
@@ -1673,22 +1637,18 @@ impl GuiStorageResources {
     fn handle(&self) -> storage::StorageHandle {
         self._storage.handle()
     }
+
+    fn drain_background(&mut self) {
+        if let Err(error) = self.ownership.begin_quiesce() {
+            tracing::warn!(%error, "failed to quiesce ownership before service drain");
+        }
+        drop(self.background.take());
+    }
 }
 
 impl Drop for GuiStorageResources {
     fn drop(&mut self) {
-        if let Err(error) = self.ownership.begin_quiesce() {
-            tracing::warn!(%error, "failed to quiesce ownership before storage drain");
-        }
-        if let Some((handle, drain, mut services)) = self.services.take()
-            && let Err(error) =
-                handle.block_on(drain.stop_and_drain(&mut services, &self.ownership))
-        {
-            tracing::warn!(%error, "failed to drain lane/PR services before storage drain");
-        }
-        if let Err(error) = self.ownership.begin_quiesce() {
-            tracing::warn!(%error, "failed to quiesce leases acquired during service drain");
-        }
+        self.drain_background();
         if let Err(error) = self._storage.flush() {
             tracing::warn!(%error, "failed to flush queued events before ownership release");
         }
@@ -1724,6 +1684,9 @@ impl eframe::App for Ready {
 impl Drop for Ready {
     fn drop(&mut self) {
         self.workbench.0.flush_composer_draft();
+        // The event pump owns the Tokio runtime. Drain while the workbench (and
+        // therefore its pump) is still alive, not after field destruction.
+        self._storage.drain_background();
         if let Some(executor) = self.executor.take() {
             executor.shutdown();
         }
@@ -2527,7 +2490,7 @@ mod storage_shutdown_tests {
         assert!(write_monitor.set(monitor.clone()).is_ok());
         let weak_host = Arc::downgrade(&host);
         let resources = GuiStorageResources {
-            services: None,
+            background: None,
             _storage: bridge,
             ownership: host.clone(),
             _demo_directory: None,

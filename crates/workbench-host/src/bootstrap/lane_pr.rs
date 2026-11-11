@@ -116,11 +116,13 @@ pub async fn stop_and_drain(
     if let Some(service) = runtime.pull_requests() {
         service.shutdown();
     }
-    services.request_stop();
+    // Only the lane producer may stop yet. Learning observers must remain
+    // subscribed until no recovery/admission can register another root.
     remember(&mut failure, services.join_named("lane-recovery").await);
     remember(&mut failure, runtime.drain_lane_admissions().await);
     // A recovery scan already in progress may have acquired another lease.
     remember(&mut failure, owner.begin_quiesce().map(|_| ()));
+    services.request_stop();
     let runs = runtime.list_agents();
     for run in &runs {
         if matches!(
