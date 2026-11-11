@@ -14,14 +14,52 @@ inputs:
 runs:
   using: composite
   steps:
+    # The download plus bzip2 extraction of the archive costs about 45 s in
+    # every job, so the installed layout is cached. The key is the hash of
+    # scripts/setup-cef.sh, which pins the archive and its sha256 and holds every
+    # post-processing step: changing any of them is a miss. A miss runs the
+    # script, which verifies the archive's pinned sha256 before it extracts
+    # anything, so only a verified install is ever saved. A hit is checked against
+    # a per-file sha256 manifest written next to the install on that verified
+    # run, and falls back to a fresh install when the files do not match it.
+    - id: cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ${{ runner.temp }}/cef-dist
+          ${{ runner.temp }}/cef-dist.sha256
+        key: cef-dist-${{ runner.os }}-${{ hashFiles('scripts/setup-cef.sh') }}
     - id: install
       shell: bash
       env:
         RUNTIME_PATH: ${{ inputs.runtime-path }}
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
       run: |
         set -euo pipefail
         dist="$RUNNER_TEMP/cef-dist"
-        scripts/setup-cef.sh "$dist"
+        manifest="$RUNNER_TEMP/cef-dist.sha256"
+        # The manifest lists every regular file; a restored tree must match it
+        # exactly (same files, same bytes, nothing extra).
+        restored_ok() {
+          [[ "$CACHE_HIT" == true && -d "$dist" && -f "$manifest" ]] || return 1
+          [[ -z "$(find "$dist" ! -type f ! -type d ! -type l -print -quit)" ]] || return 1
+          (cd "$dist" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | diff -q - "$manifest" > /dev/null)
+        }
+        if restored_ok; then
+          echo "setup-cef: restored the cached install; every file matches its manifest"
+          # cef-dll-sys re-runs when a file is newer than its cached output; keep
+          # the fixed old mtime scripts/setup-cef.sh gives a fresh install.
+          find "$dist" -exec touch -h -d '2000-01-01 00:00:00 UTC' {} +
+          echo "cef-installed=cache" >> "$GITHUB_OUTPUT"
+        else
+          if [[ "$CACHE_HIT" == true ]]; then
+            echo "::warning::cached CEF install failed its manifest check; reinstalling"
+          fi
+          rm -rf "$dist" "$manifest"
+          scripts/setup-cef.sh "$dist"
+          (cd "$dist" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$manifest"
+          echo "cef-installed=fresh" >> "$GITHUB_OUTPUT"
+        fi
         case "$RUNTIME_PATH" in
           full) lib="$dist" ;;
           libcef)
@@ -35,3 +73,11 @@ runs:
           echo "CEF_PATH=$dist"
           echo "LD_LIBRARY_PATH=$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         } >> "$GITHUB_ENV"
+    # Save only an install that scripts/setup-cef.sh just verified and extracted.
+    - if: steps.install.outputs.cef-installed == 'fresh'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ${{ runner.temp }}/cef-dist
+          ${{ runner.temp }}/cef-dist.sha256
+        key: cef-dist-${{ runner.os }}-${{ hashFiles('scripts/setup-cef.sh') }}

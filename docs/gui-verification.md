@@ -55,7 +55,10 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 環境変数: `EVORCH_REQUIRE_ADAPTER=1` (CI で必須化)、
   `EVORCH_METADATA_EVIDENCE` (model_metadata 証跡の出力先)、
   `WGPU_BACKEND=vulkan` (lavapipe 利用時の推奨指定)
-- CI ジョブ: `offscreen-gate` (アーティファクト `gui-evidence`)
+- CI ジョブ: ignored テスト一括は `offscreen-gate` (アーティファクト `gui-test-evidence`)、
+  証跡マトリクスは並列の `gui-evidence` (アーティファクト `gui-evidence`)。
+  マトリクスは `headless_capture` を 1 回だけビルドして直接起動し、
+  `GUI_EVIDENCE_JOBS` (既定は CPU 数、最大 4) 並列で撮影する
 
 ### L5: ブラウザ fake-source テスト
 
@@ -94,7 +97,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 環境変数: `GUI_QA_MODE` (`fixture` / `runtime`、既定 `fixture`)、
   `GUI_BIN` (モードに応じた既定バイナリを上書き)、
   `GUI_QA_OUTPUT_DIR` (位置引数を省略した場合の出力先)。
-- CI ジョブ: `offscreen-gate` (`gui-evidence` artifact の `native/`)
+- CI ジョブ: `gui-evidence` (`gui-evidence` artifact の `native/`)
 
 ### PR の代表画面プレビュー
 
