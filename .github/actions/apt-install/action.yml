@@ -1,16 +1,22 @@
 name: apt-install
 description: >-
-  Install Ubuntu packages without Recommends, reusing .deb downloads cached
-  across runs so a slow mirror costs only the index update.
+  Install Ubuntu packages without Recommends. The .debs of a completed install are
+  cached per package set and runner image; a cache hit installs them with dpkg and
+  never reaches an Ubuntu mirror, so a mirror or DNS outage cannot fail the job.
 inputs:
   packages:
     description: Space-separated package names.
     required: true
   save:
     description: >-
-      "true" to save the downloads. Only the job with the largest package set
-      saves, so every job shares one cache entry.
+      Ignored. Kept so callers written for the earlier shared cache still work:
+      every package set now has its own cache entry, saved after the first
+      completed install on a runner image.
     default: "false"
+  cache-version:
+    description: >-
+      Part of the cache key. Change it to discard every cached .deb set at once.
+    default: "1"
   timeout-seconds:
     description: Bound for each apt-get call on the fallback mirror.
     default: "600"
@@ -22,14 +28,31 @@ inputs:
 runs:
   using: composite
   steps:
-    # ImageOS is a runner environment variable, not part of the env context.
+    # The key is the package set plus the runner image version (ImageOS and
+    # ImageVersion are runner environment variables, not part of the env
+    # context). The cached .debs are exactly what apt downloaded on that image for
+    # that set, so they only fit a runner with the same image; another image
+    # version or another package set is a different key. Nothing pins the package
+    # versions beyond that: a new image version or a changed package list is what
+    # refreshes the cache.
     - id: key
       shell: bash
-      run: echo "prefix=apt-debs-${RUNNER_OS}-${ImageOS}-" >> "$GITHUB_OUTPUT"
-    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      env:
+        APT_PACKAGES: ${{ inputs.packages }}
+        CACHE_VERSION: ${{ inputs.cache-version }}
+      run: |
+        set -euo pipefail
+        # shellcheck disable=SC2086 # word splitting is the package list
+        set_hash=$(printf '%s\n' $APT_PACKAGES | LC_ALL=C sort -u | sha256sum | cut -c1-16)
+        base="apt-debs-v${CACHE_VERSION}-${RUNNER_OS}-${ImageOS:-unknown}-${set_hash}"
+        echo "prefix=${base}-" >> "$GITHUB_OUTPUT"
+        echo "exact=${base}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+    - id: cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ~/apt-archives
-        key: ${{ steps.key.outputs.prefix }}latest
+        key: ${{ steps.key.outputs.exact }}
+        # An earlier image's .debs only save downloads on the online path below.
         restore-keys: ${{ steps.key.outputs.prefix }}
     - id: install
       shell: bash
@@ -37,9 +60,33 @@ runs:
         APT_PACKAGES: ${{ inputs.packages }}
         APT_TIMEOUT: ${{ inputs.timeout-seconds }}
         APT_PRIMARY_TIMEOUT: ${{ inputs.primary-timeout-seconds }}
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
       run: |
         set -u
         archives="$HOME/apt-archives"
+
+        installed_ok() {
+          local p
+          for p in $APT_PACKAGES; do
+            dpkg-query -W -f='${Status}\n' "$p" 2> /dev/null | grep -qx 'install ok installed' || return 1
+          done
+        }
+
+        # Exactly this package set on exactly this image version: the cached
+        # .debs are the whole set apt had to download, so dpkg installs them
+        # without apt's package index or any network access.
+        if [ "$CACHE_HIT" = true ] && [ -n "${ImageVersion:-}" ] && compgen -G "$archives/*.deb" > /dev/null; then
+          echo "apt-install: installing $(ls "$archives"/*.deb | wc -l) cached .debs with dpkg (no mirror access)"
+          if sudo dpkg -i "$archives"/*.deb && installed_ok; then
+            echo "apt-install: installed from the cache"
+            echo "collected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::warning::the cached .debs did not install cleanly; falling back to apt-get"
+          # A failed unpack leaves dpkg half-configured.
+          sudo dpkg --configure -a || true
+        fi
+
         if compgen -G "$archives/*.deb" > /dev/null; then
           sudo cp "$archives"/*.deb /var/cache/apt/archives/
         fi
@@ -77,25 +124,31 @@ runs:
           status=0
           apt_install "$APT_TIMEOUT" || status=$?
         fi
-        if [ "$status" -eq 0 ]; then
-          # Drop superseded versions so the cache does not grow across updates.
-          sudo apt-get autoclean -y
+        if [ "$status" -ne 0 ]; then
+          echo "::error::apt-get failed or timed out (status $status)"
+          exit "$status"
         fi
-        # Keep whatever finished downloading, even after a timeout, so the
-        # next run resumes instead of starting over.
+        # Keep the .debs of the versions that are now installed and nothing else:
+        # an older leftover version of a package would make the dpkg install of
+        # the whole set above fail.
+        rm -rf "$archives"
         mkdir -p "$archives"
-        find "$archives" -name '*.deb' -delete
-        if compgen -G "/var/cache/apt/archives/*.deb" > /dev/null; then
-          cp /var/cache/apt/archives/*.deb "$archives/"
-        fi
+        for deb in /var/cache/apt/archives/*.deb; do
+          [ -f "$deb" ] || continue
+          pkg=$(dpkg-deb -f "$deb" Package)
+          ver=$(dpkg-deb -f "$deb" Version)
+          if dpkg-query -W -f='${Version}\n' "$pkg" 2> /dev/null | grep -qxF "$ver"; then
+            cp "$deb" "$archives/"
+          fi
+        done
         du -sh "$archives"
-        hash=$(find "$archives" -name '*.deb' -printf '%f\n' | sort | sha256sum | cut -c1-16)
-        echo "hash=$hash" >> "$GITHUB_OUTPUT"
-        [ "$status" -eq 0 ] || echo "::error::apt-get failed or timed out (status $status)"
-        exit "$status"
-    # A new key only when the set of .debs changed.
-    - if: ${{ (success() || failure()) && inputs.save == 'true' && steps.install.outputs.hash != '' }}
+        # Only a complete install is saved: a cache key cannot be rewritten, so a
+        # partial entry would make every later run fall back to the network.
+        if compgen -G "$archives/*.deb" > /dev/null; then
+          echo "collected=true" >> "$GITHUB_OUTPUT"
+        fi
+    - if: ${{ steps.install.outputs.collected == 'true' && steps.cache.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ~/apt-archives
-        key: ${{ steps.key.outputs.prefix }}${{ steps.install.outputs.hash }}
+        key: ${{ steps.key.outputs.exact }}
