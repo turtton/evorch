@@ -265,6 +265,8 @@ C が処理全体を所有し、A が transaction/event 契約、B が runtime �
 
 ## Phase 2 — 要対応・stall/nudge・検証付き close
 
+> **改訂注記（PR #559）**: Phase 2C の厳格な検証ゲート付き close は改訂され、close は管理上の正しさ（現在の lead root、attached/summary、management/request/brief revision の一致、現在 brief 向けの最新 Ready、非 detach）のみを必須とする lead の判断に戻された。`lane_verify`（独立 Reviewer）や成果物 revision・PR facts は任意の参考情報として close 記録に添付し、close を止めない（[ADR 0044 §9](../intents/evorch/decisions/0044-lane-threads.md#9-完了申告任意レビュー終結)・[§11](../intents/evorch/decisions/0044-lane-threads.md#11-監視と要対応一覧)）。
+
 ### 変更対象
 
 1b/1c の lane モジュールに加えて:

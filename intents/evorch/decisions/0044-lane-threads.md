@@ -78,7 +78,7 @@ lane root の `Run.parent` は `None` とする。管理関係は別の永続レ
 
 不変条件は次のとおり。
 
-- lead の再開・停止・終了は、lane の実行、質問、未検証 ready によってブロックされない。
+- lead の再開・停止・終了は、lane の実行、質問、未終結 ready によってブロックされない。
 - lead の Stop は lane を暗黙停止しない。
 - lane の live run や pending admission を、lead の restore conflict に含めない。
 - lane の未回答質問を、lead の直接 child の finish gate に含めない。
@@ -136,7 +136,7 @@ LaneReport
 | ready | 成果が揃ったという申告 |
 | failed | 実行・復帰等の失敗 |
 
-`ready`、run の `Done`、goal 完了、検証済み lane close は別概念とする。
+`ready`、run の `Done`、goal 完了、lane close（台帳上の終結）は別概念とする。
 
 台帳には少なくとも以下を保存する。
 
@@ -145,7 +145,7 @@ LaneReport
 - 現在の root run、実行 generation、lane scope
 - brief と revision、policy
 - Report 履歴と latest snapshot
-- 検証対象 revision・検証記録
+- close 記録と任意の検証（Reviewer）記録・対象 revision
 - 配送先・理由・wake 要否・ACK
 - stall/nudge/wake 抑止 episode
 
@@ -272,24 +272,53 @@ summary の質問はユーザー宛てなので、それだけでは lead を wa
 
 方針確定までの間、GUI 側の wake 往復（`frame.rs` / `actions.rs` / `restoration.rs` 等）の作り込みは最小限（コアから呼べる入口程度）にとどめ、runtime/storage 側（durable outbox、重複排除、受領記録、無進展往復 guard）を先行実装・検証する。
 
-### 9. 完了申告と検証
+### 9. 完了申告・任意レビュー・終結
 
-attached/summary の ready は申告であり、検証済み完了ではない。
+attached/summary の `ready` は完了申告であり、それ自体は台帳上の終結（close）ではない。close は成果物の物理的な不変性や品質のシステム保証ではなく、**lead（または人間）の管理上の判断**として記録する。
 
-lead は brief の完了条件に対応する証拠を確認し、close する。
+#### 変更の理由（運用で得た教訓）
 
-- 仕様適合・品質の独立判定は Reviewer が行う（[ADR 0035](0035-advisor-consultation-boundary.md)、[ADR 0040](0040-advisor-stuck-point-triggers.md)）。
-- PR/CI は完了条件に含まれる場合だけ使う（[ADR 0043](0043-pull-request-integration.md)）。
-- CI 成功だけで品質の受入判定を代替しない。
-- PR のない調査・設計・文書作業にも対応する。
-- Advisor の助言は受入判定ではない。
-- lead は Reviewer の判定に基づき、採否と close を統括する。
+commit hash（固定成果物 revision）、clean な checkout、Fresh な PR facts、独立 Reviewer の承認・正常終了をすべて揃えるシステム的な検証 gate は、`main` の進行や dirty な状態、worktree の削除、多数の thread の並行に弱く、実運用で lane が close できなくなった（`thread-mma4g2qa`、`thread-mbjqn30f`、`thread-x4awbhy9`）。そのため、システムで不変性を保証して close を止めるのではなく、close を lead の判断に戻し、検証や観測結果は補助情報として添える方針に変えた。
 
-検証記録は ready sequence、brief revision、成果物 revision／commit SHA に結び付ける。追加依頼・成果変更で古くなった記録は close に使えない。
+#### close の必須条件（管理上の正しさだけ）
 
-detached はこの管理から外れる。既存 goal checks や通常のレビュー運用は使えるが、元 lead による lane close を要求しない。
+lead による `lane_close` の必須条件は次の5つだけとする。
 
-detach は成功 close ではなく、管理関係の終了である。
+- 現在の lead root であること（dispatcher 由来の実行主体を close transaction の中で `threads.root_run_id` と照合する）
+- attached または summary であること
+- management／request／brief revision が一致すること
+- 最新の Ready であること（現在の brief より古い brief 向けの Ready は `stale_brief` で拒否し、警告では済ませない）
+- detach ではないこと（detach は管理関係の終了であり、close ではない）
+
+#### close を止めないものと close 記録（参考情報の添付）
+
+artifact revision の有無・一致、clean な checkout、PR facts（[ADR 0043](0043-pull-request-integration.md)）の Fresh 状態、Reviewer の承認・正常終了は close を止めない。`lane_close` は Git・GitHub・hash・Reviewer の run を一切呼ばない（再観測しない）。
+
+`lane_closes` には種別（`lead_closed` / `human_closed` / `discarded`。`verified_closed` は作らない）とともに、参考情報として次を添付・記録する。
+
+- **Ready の参照と revision**: 対象 `ready_seq`、Ready で報告されたままの `artifact_refs` / `artifact_revision`（close 時に再検証しない）、Ready が報告された `report_brief_revision`、および close 時点の `management_revision`・`request_revision`（`closed_revision`）・`brief_revision`。
+- **PR context（`pr_context`）**: close 時点で台帳が持つ PR の保存済み状態（`not_linked` / `no_snapshot` / `last_fetch_failed` / `available`（evidence つき））。レビューを省略した close にも付き、台帳からの読み出しだけで外部取得も gate もしない。
+- **レビューの派生状態（`review`、任意添付）**: 同じ lane の `verification_ref` を指定した場合、その時点の導出 `state`（`pending` / `submitted` / `completed` / `incomplete`）、`verdict`、結果参照・digest、`targets_this_ready`、`pr_evidence`、開始時の観測限界 `caveats` を添付する。`artifact_rechecked_at_close` は常に `false`。同じ lane の記録であれば任意の state を添付でき、別 lane や不明な ID は拒否する。
+- **`closed_by` の provenance（変更不能）**: lead は認可に使った thread と root run、人間は host が認証した surface と client。tool 引数やメッセージ本文からは決めず、runtime / host の provenance から埋める。
+- **lead／人間のメモ（`note`）**: 判断理由（必須・最大 2 KiB）。
+
+`close_id` は `(lane, kind, management_revision, request_revision, ready_seq)` から決まる。同じ引数の再送は同じ `close_id` と `already_closed` を返し、行も通知も増やさない（最初の close の記録が残る）。lane への新しい入力、新しい Report、brief／management の変更があれば現在の close は解除されて `request_revision` が進み、古い引数の再送は `stale_request` 等で拒否して現在の revision（`current`）を返す。
+
+#### `lane_verify`（任意の補助）
+
+- `lane_verify` は任意の判断補助とする。Ready に固定参照（フル commit SHA、PR URL、または 64 MiB 以下の単一通常ファイルの SHA-256 等）を付けるのは推奨にとどめ、必須にしない。
+- 仕様適合・品質の独立判定自体は Reviewer が行う（[ADR 0035](0035-advisor-consultation-boundary.md)、[ADR 0040](0040-advisor-stuck-point-triggers.md)）。CI 成功や Advisor の助言で受入判定は代替しないが、レビューの実施・承認は close の可否を決めない。PR のない調査・設計・文書作業にも対応する。
+- 成果物の観測や PR facts の取得に失敗・不一致があっても Reviewer は起動し、観測限界を `caveats` として記録して Reviewer に渡す。
+- Reviewer の提出（`submit_lane_verification`）は開始時の brief の acceptance criteria 件数に対して検証し、審査中に lane が先に進んでいても結果を捨てない。
+- Reviewer が `Done` 以外（失敗・取消）で終了したとき、または `Done` でも提出がないときは verification を `Incomplete` にする（不合格 `Rejected` とは区別する。operator の Stop は再開できるためそのまま）。書き戻し前に落ちた場合も、attention や close 添付時の状態は Reviewer 自身の run 記録（`run_contexts.terminal_phase`）から導出するため「実行中」のまま残らない（読み出し自体は状態を変更しない）。
+
+#### 人間による close と破棄
+
+- 人間による close（`human_closed`）と破棄（`discarded`）は、**台帳上の終結だけ**を行う（run の停止、thread／worktree の削除、detach は別の操作）。
+- verified close（設けない）や `lead_closed` とは区別して記録する（人間は Ready がない状態でも終結できる）。
+- agent の tool・MCP・dispatch や wire の `Command` からは到達できない、信頼された host 経路（`AgentRuntime::close_lane_from_host` / `CommandHost::close_lane_human` / `HumanLaneManagement::close_lane`、`Actor::Human` のみ許可）に限る。GUI の操作画面（および wire の `Command` 接続）は後続 PR で対応する。
+
+detached はこの管理から外れる。既存 goal checks や通常のレビュー運用は使えるが、元 lead による lane close を要求しない。detach は close ではなく、管理関係の終了である。
 
 ### 10. sidebar・family
 
@@ -328,7 +357,18 @@ immutable な作成元と、現在の表示親・管理親を分離する。GUI�
 
 stall episode ごとに nudge を重複抑制し、同じ状態に無期限反復しない。nudge は権限を与えず、会話末尾に追加する。
 
-横断一覧には、管理対象 lane の未解決質問、blocked、failed、復帰失敗、未検証 ready を表示する。通常の working 更新は警告にしない。
+横断一覧には、管理対象 lane の未解決質問、blocked、failed、復帰失敗、未終結 Ready（`ReadyUnclosed { ready_seq, readiness }`）を表示する。通常の working 更新は警告にしない。
+
+Ready なのに close されていない状態（`ReadyUnclosed`）は、作業の stall とは混同せず、`readiness`（`LaneReadyState`）で細分化する。
+
+- `no_evidence`: Ready に固定成果物 revision がなく、独立レビューもない
+- `unreviewed`: 固定成果物 revision はあるが、独立レビューがない
+- `review_in_progress`: Reviewer が起動され、まだ完了していない
+- `review_rejected`: 完了したレビューが Ready を不合格（`rejected`）とした
+- `review_incomplete`: Reviewer が提出完了せずに終了した（失敗・取消・停止・無提出終了）。不合格とは区別し、再度 Verify を選べる
+- `awaiting_close`: レビューが承認（`approved`）済みで、lead がまだ close していない
+
+いずれの `readiness` も参考情報であり、close を妨げない（Close は常に操作選択肢に入り、`review_in_progress`・`awaiting_close` 以外では Verify も提示する）。[ADR 0043](0043-pull-request-integration.md) の PR facts の Fresh 定義は維持するが、lane では強制 gate ではなく状態つきの参考情報（`pr_context` / `pr_evidence` と `caveats`）として使う。
 
 detached の質問・障害は通常 thread と同等に扱い、lead 通知、lane close 待ち、lead 向け監視には戻さない。
 
@@ -370,6 +410,14 @@ Phase 1b で、既存の「未回収の起動に対する進捗 credit」を chi
 
 同時 lane 数の固定上限は設けない。必要性が実測された場合にだけ検討する。
 
+#### 未回収の lane 進捗と新規作成の一時抑止（Phase 4B）
+
+共通 spawn credit とは独立して、完成済み成果を未回収のまま継続する新規 lane 作成を診断する。未回収とは、現在の lead の管理下にあり、latest Report が現行 brief/management revision の Ready または Failed で、モデルへの初回提示を観測していない lane である。基準となる未回収 lane 集合が残る間に成立した新規作成 intent を identity ごとに一度数え、初期閾値100に達した後の新規 lane_open だけを一時抑止する。既存 intent の冪等再試行、既存 lane の実行・回収・回答は続行する。
+
+成果が provider に提示された場合は当該 lane のみを基準集合から除き、集合が解消されたら連続作成区間を終了する。管理終了した lane も対象から除くが、detach 自体は completion 観測や共通 credit 回復ではない。別 lane の completion、Report 採番・heartbeat・通常 tool は古い集合と回数をリセットしない。running の数や経過時間だけでは抑止しない。
+
+これは lane 総数・同時数の上限ではなく、共通 credit 20 とその全回復の仕様は維持する。初期値100と20の比較は4Eで評価し、既定値を20へ変更するにはユーザーの追加確認を要する。
+
 ### 14. workspace
 
 workspace 衝突をシステムで強制排除しない（[ADR 0031](0031-remove-isolated-workspaces.md)）。
@@ -401,7 +449,7 @@ detach は management revision を更新し、以下を一つの管理遷移と�
 - lead の管理権限終了
 - 未配送 Report・wake の失効
 - 未回答質問のユーザー宛て切替
-- close 検証の管理上の失効
+- 進行中の検証や現在の close 状態の管理上の失効
 - トップレベル・独立 family への移動
 - lane 専用監視・close 待ちからの除外
 
@@ -448,7 +496,7 @@ detach は management revision を更新し、以下を一つの管理遷移と�
 - root Orchestrator 起動、通常の 2 段の delegate、汎用の保存・復元データ構造は維持する。
 - nested Orchestrator 前提の prompt・テスト・運用は変更が必要。
 - durable outbox と host による root 復元の往復が必要になる。
-- detached では lead の完了検証を受けず、ユーザーとの通常 thread 運用に戻る。
+- detached では lead による lane close 管理を受けず、ユーザーとの通常 thread 運用に戻る。
 - family 移動と複数 GUI の保存競合を扱う必要がある。
 - workspace 衝突と短い Report による情報不足は完全には防げない。
 - 10+ lane の正常イベントを、既存 wake の累積 20 回で止めない一方、無進展の往復を別途診断する。
@@ -459,7 +507,7 @@ detach は management revision を更新し、以下を一つの管理遷移と�
 - **lane を child run とする**：親の停止・復元・完了 gate と結合するため不採用。
 - **専用常駐 lead ロール**：通常 Orchestrator を維持する要件に反する。
 - **全会話の継続要約を lead へ送る**：文脈量が実行量に比例する。
-- **ready を完了とする**：自己申告と検証を分離できない。
+- **ready をそのまま完了（close）とする**：完了申告と lead の終結判断（および任意の独立レビュー）を分離できない。
 - **detached も close 管理する**：独立 thread という意味に反する。
 - **AUTO_WAKE_LIMIT を単に増やす**：正常な長期運用と暴走の区別にならない。
 - **lane 質問をすべて lead に継承する**：32 件制限・finish gate・provenance を誤用する。
@@ -480,7 +528,9 @@ detach は management revision を更新し、以下を一つの管理遷移と�
 |---|---|
 | fork/rewind 後の管理対象 | lane 作成不可 scope を維持。台帳が追う現行 root/version を一つに定める。未対応操作は明示拒否 |
 | stall/nudge 閾値 | configurable、episode 単位。作業時間制限にはしない |
-| PR/CI 証拠 adapter | [ADR 0043](0043-pull-request-integration.md) の実装状況を再確認。未完成なら独立 Reviewer 証拠を先行 |
+| PR/CI 証拠 adapter | [ADR 0043](0043-pull-request-integration.md) の Fresh 定義を維持し、lane では強制 gate ではなく状態つきの参考情報（`pr_context` / `pr_evidence` と `caveats`）として使う |
+| 人間による close／破棄の範囲 | 台帳上の終結（`human_closed` / `discarded`）のみを行い、run の停止、thread／worktree の削除、detach は別操作とする（GUI 操作画面の接続時にユーザー最終確認） |
+| 未回収 lane 進捗の抑止閾値 | Phase 4B の初期閾値は 100。初期値 100 と 20 の比較は Phase 4E で評価し、既定値を 20 へ変更するにはユーザーの追加確認を要する |
 | cursor 保持期間 | bounded な snapshot 保持と明示的 `stale_cursor`。現在の権限検査は省略しない |
 | 単一コア構成への移行 | [ADR 0024](0024-process-owner-claim.md) 廃止・コア集約（thread-9gkyvvvf）確定時の、`recover_unstarted_lanes` / `bind_lane_root` や wake 往復・NACK 処理のコア側移管 |
 | 導入タイミング | operator/orchestrator が旧 run の完了・停止状況を確認して決定 |
