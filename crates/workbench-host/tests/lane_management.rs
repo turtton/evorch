@@ -4,6 +4,7 @@ use runtime::{AgentRuntime, Role, RunConfig, RunId};
 use serde_json::json;
 use std::sync::Arc;
 use workbench_host::{CommandHost, commands::CommandService};
+use workbench_protocol::namespaces::{LanesCommand, LanesQuery, LanesReply};
 use workbench_protocol::{
     commands::{Command, CommandDisposition},
     envelope::Provenance,
@@ -100,7 +101,7 @@ impl Fixture {
         }
     }
     fn command(&self, id: &str, revision: u64, action: LaneManagementAction) -> Command {
-        Command::ManageLane(ManageLane {
+        Command::Lanes(LanesCommand::ManageLane(ManageLane {
             request: LaneManagementRequest {
                 operation_id: LaneManagementOperationId::new(id).unwrap(),
                 lane_id: workbench_protocol::lane_attention::LaneId::new(&self.lane.lane_id)
@@ -109,21 +110,21 @@ impl Fixture {
                 action,
             },
             expected_family_revision: None,
-        })
+        }))
     }
     fn state(&self) -> LaneManagementState {
         match self
             .host
             .handle_query(
                 &workbench_protocol::ids::SessionId::new("wire").unwrap(),
-                &Query::GetLaneManagement {
+                &Query::Lanes(LanesQuery::GetLaneManagement {
                     lane_id: workbench_protocol::lane_attention::LaneId::new(&self.lane.lane_id)
                         .unwrap(),
-                },
+                }),
             )
             .unwrap()
         {
-            QueryReply::LaneManagement(state) => state,
+            QueryReply::Lanes(LanesReply::LaneManagement(state)) => state,
             other => panic!("{other:?}"),
         }
     }
@@ -139,7 +140,7 @@ impl Fixture {
                 .unwrap(),
             },
         );
-        if let Command::ManageLane(input) = &mut command {
+        if let Command::Lanes(LanesCommand::ManageLane(input)) = &mut command {
             input.expected_family_revision = self.state().family_revision;
         }
         command
@@ -164,10 +165,7 @@ async fn wire_roundtrip_replay_stale_revision_and_restart_use_one_delivery_runti
             LaneManagementAction::SetPolicy { policy },
         );
         let reply = f.host.handle_command(cmd.clone(), common::web()).unwrap();
-        assert_eq!(
-            reply.lane_management.unwrap().management_revision,
-            Revision(rev + 1)
-        );
+        assert_eq!(lane_result(reply).management_revision, Revision(rev + 1));
         assert_eq!(
             f.host
                 .handle_command(cmd, common::web())
@@ -196,7 +194,7 @@ async fn wire_roundtrip_replay_stale_revision_and_restart_use_one_delivery_runti
         ErrorCode::PermissionDenied
     );
     let mut stale_family = attach.clone();
-    if let Command::ManageLane(i) = &mut stale_family {
+    if let Command::Lanes(LanesCommand::ManageLane(i)) = &mut stale_family {
         i.expected_family_revision.as_mut().unwrap().pin_revision.0 += 1;
     }
     assert_eq!(
@@ -209,9 +207,8 @@ async fn wire_roundtrip_replay_stale_revision_and_restart_use_one_delivery_runti
     let reply = f
         .host
         .handle_command(attach.clone(), common::web())
-        .unwrap()
-        .lane_management
         .unwrap();
+    let reply = lane_result(reply);
     assert_eq!(reply.policy, LaneManagementPolicy::Summary);
     assert!(
         reply.projection_pending,
@@ -369,4 +366,16 @@ async fn a_human_close_ends_only_the_ledger_entry_and_an_agent_cannot_reach_it()
     assert_eq!(f.state().policy, LaneManagementPolicy::Attached);
     assert!(f.runtime.inspect_agent(f.lane.root_run_id).is_ok());
     f.stop().await;
+}
+
+/// The lane management result a command answered with.
+fn lane_result(
+    reply: workbench_protocol::commands::CommandReply,
+) -> workbench_protocol::lane_management::LaneManagementResult {
+    match reply.result.map(|result| *result) {
+        Some(workbench_protocol::commands::CommandResult::Lanes(
+            workbench_protocol::namespaces::LanesResult::Managed(result),
+        )) => result,
+        other => panic!("expected a lane management result, got {other:?}"),
+    }
 }

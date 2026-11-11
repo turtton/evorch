@@ -1,6 +1,10 @@
 //! A disposable projection. Drafts and pending commands intentionally live
 //! outside this cache so replacing an epoch cannot erase unsent human input.
 use std::collections::BTreeMap;
+use workbench_protocol::namespaces::{
+    ApprovalsEvent, ConversationEvent, ExecutionEvent, LifecycleEvent, ProjectionEvent,
+    QuestionsEvent, WorkspaceEvent,
+};
 
 use workbench_protocol::{
     events::{CursorDecision, CursorTracker, EventCursor, EventEnvelope, SnapshotItem, UiEvent},
@@ -67,25 +71,25 @@ impl Cache {
             _ => return false,
         }
         match envelope.event {
-            UiEvent::CoreStatusChanged { .. } => (),
-            UiEvent::ThreadChanged { thread } => {
+            UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged { .. }) => (),
+            UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) => {
                 self.threads.insert(thread.id.to_string(), thread);
             }
-            UiEvent::RunChanged { run } => {
+            UiEvent::Execution(ExecutionEvent::RunChanged { run }) => {
                 self.runs.insert(run.id.to_string(), run);
             }
-            UiEvent::QuestionChanged { question } => {
+            UiEvent::Questions(QuestionsEvent::QuestionChanged { question }) => {
                 self.questions.insert(question.id.to_string(), question);
             }
-            UiEvent::ApprovalChanged { approval } => {
+            UiEvent::Approvals(ApprovalsEvent::ApprovalChanged { approval }) => {
                 self.approval_inputs.remove(approval.id.as_str());
                 self.approvals.insert(approval.id.to_string(), approval);
             }
-            UiEvent::InputReceiptChanged { receipt } => {
+            UiEvent::Conversation(ConversationEvent::InputReceiptChanged { receipt }) => {
                 self.receipts
                     .insert(receipt.submission_id.to_string(), receipt);
             }
-            UiEvent::MessageCommitted { message } => {
+            UiEvent::Conversation(ConversationEvent::MessageCommitted { message }) => {
                 let messages = self.history.entry(message.thread.to_string()).or_default();
                 if let Some(existing) = messages
                     .iter_mut()
@@ -96,7 +100,8 @@ impl Cache {
                     messages.push(message);
                 }
             }
-            UiEvent::ResyncRequired { .. } | UiEvent::SubscriptionClosed { .. } => unreachable!(),
+            UiEvent::Projection(ProjectionEvent::ResyncRequired { .. })
+            | UiEvent::Projection(ProjectionEvent::SubscriptionClosed { .. }) => unreachable!(),
         }
         true
     }

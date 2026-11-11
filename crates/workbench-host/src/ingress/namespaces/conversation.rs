@@ -4,14 +4,16 @@ use std::{collections::BTreeMap, io::Cursor, path::PathBuf};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use workbench_protocol::{
-    commands::{CommandDisposition, CommandReply, ImageRef, SendChat},
+    commands::{CommandReply, CommandResult, ContinueChat, ImageRef, SendChat},
     conversation::{ConversationCommand, ConversationResult},
     envelope::Provenance,
     errors::{ErrorCode, RetryAdvice, WorkbenchError},
     ids::{AttachmentId, ProjectId, ThreadId},
 };
 
-use super::CommandHost;
+use crate::commands::{ContinueInput, HostCommand};
+use crate::ingress::{CommandHost, composer_role, model_preference};
+use workbench_protocol::namespaces::ExecutionCommand;
 
 const MAX_ATTACHMENTS: usize = 32;
 const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
@@ -23,7 +25,7 @@ struct Attachment {
 }
 
 #[derive(Default)]
-pub(super) struct ConversationState {
+pub(in crate::ingress) struct ConversationState {
     attachments: BTreeMap<String, Attachment>,
     /// Only the composition root supplies these paths, never a wire request.
     legacy_import: Option<(PathBuf, PathBuf)>,
@@ -34,7 +36,7 @@ fn error(code: ErrorCode, message: &str) -> WorkbenchError {
 }
 
 impl ConversationState {
-    pub(super) fn images(
+    pub(in crate::ingress) fn images(
         &self,
         send: &SendChat,
     ) -> Result<Vec<runtime::DelegateImage>, WorkbenchError> {
@@ -146,12 +148,53 @@ impl CommandHost {
         self
     }
 
-    pub(super) fn conversation_command(
+    /// The conversation namespace: every operation reaches the runtime through
+    /// the same ownership check, submission ledger and command service as every
+    /// other namespace; this adapter only translates the wire form.
+    pub(in crate::ingress) fn conversation_command(
         &mut self,
         input: ConversationCommand,
         provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
         let result = match input {
+            ConversationCommand::SendChat(send) => return self.send_chat(&send, provenance),
+            ConversationCommand::WithdrawFollowUp(withdraw) => {
+                return self.withdraw_follow_up(&withdraw);
+            }
+            ConversationCommand::ContinueChat(ContinueChat {
+                project,
+                thread,
+                composer_role: role,
+                model_preference: preference,
+            }) => {
+                return self.run_host_command(
+                    HostCommand::ContinueChat(ContinueInput {
+                        project_root: Some(self.project_root(&project)?),
+                        thread_id: thread.as_str().to_owned(),
+                        composer_role: composer_role(role),
+                        model_preference: preference.as_ref().map(model_preference),
+                        // Automatic continuations are the core's own decision.
+                        automatic: false,
+                    }),
+                    provenance,
+                );
+            }
+            ConversationCommand::CompactChat(target) => {
+                return self.run_host_command(
+                    HostCommand::CompactChat {
+                        thread_id: target.thread.as_str().to_owned(),
+                    },
+                    provenance,
+                );
+            }
+            ConversationCommand::DeliverFollowUpsNextTurn(target) => {
+                return self.run_host_command(
+                    HostCommand::DeliverFollowUpsNextTurn {
+                        thread_id: target.thread.as_str().to_owned(),
+                    },
+                    provenance,
+                );
+            }
             ConversationCommand::ResolveProject { root } => {
                 let path = PathBuf::from(root);
                 if !path.is_absolute() {
@@ -186,7 +229,9 @@ impl CommandHost {
                 self.goal_input(&goal)?;
                 self.reserve_new_thread(&goal.project, &goal.thread)?;
                 return self.handle_command(
-                    workbench_protocol::commands::Command::SubmitGoal(goal),
+                    workbench_protocol::commands::Command::Execution(ExecutionCommand::SubmitGoal(
+                        goal,
+                    )),
                     provenance.clone(),
                 );
             }
@@ -211,14 +256,9 @@ impl CommandHost {
                 ConversationResult::AttachmentDiscarded
             }
         };
-        Ok(CommandReply {
-            conversation: Some(Box::new(result)),
-            lane_management: None,
-            disposition: CommandDisposition::Accepted,
-            submission_id: None,
-            run_id: None,
-            thread_revision: None,
-        })
+        Ok(CommandReply::with_result(CommandResult::Conversation(
+            result,
+        )))
     }
 
     fn check_thread_not_deleted(&self, thread: &ThreadId) -> Result<(), WorkbenchError> {

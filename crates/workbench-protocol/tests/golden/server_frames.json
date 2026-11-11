@@ -8,9 +8,12 @@
       },
       "event": {
         "payload": {
-          "reason": "cursor_too_old"
+          "payload": {
+            "reason": "cursor_too_old"
+          },
+          "type": "resync_required"
         },
-        "type": "resync_required"
+        "type": "projection"
       },
       "subscription_id": "sub-1"
     },

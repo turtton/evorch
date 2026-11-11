@@ -11,6 +11,7 @@ use std::sync::Arc;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::events::{CloseReason, ResyncReason, SubscriptionScope, UiEvent};
 use workbench_protocol::handshake::WireLimits;
+use workbench_protocol::namespaces::{ProjectionEvent, WorkspaceEvent};
 use workbench_web::{WebApp, WebServerConfig};
 
 fn router_with(config: WebServerConfig, backend: &Arc<FakeBackend>) -> (Router, WebApp) {
@@ -56,9 +57,9 @@ async fn snapshot_then_events_then_resync_ends_the_stream() {
     events
         .send(event(
             cursor(7, 13),
-            UiEvent::ResyncRequired {
+            UiEvent::Projection(ProjectionEvent::ResyncRequired {
                 reason: ResyncReason::CursorTooOld,
-            },
+            }),
         ))
         .await
         .unwrap();
@@ -88,14 +89,17 @@ async fn a_closed_subscription_ends_the_stream() {
     events
         .send(event(
             cursor(1, 1),
-            UiEvent::SubscriptionClosed {
+            UiEvent::Projection(ProjectionEvent::SubscriptionClosed {
                 reason: CloseReason::CoreShuttingDown,
-            },
+            }),
         ))
         .await
         .unwrap();
     let last = sse.next_event().await.unwrap();
-    assert_eq!(last.json()["event"]["type"], "subscription_closed");
+    assert_eq!(
+        last.json()["event"]["payload"]["type"],
+        "subscription_closed"
+    );
     assert!(sse.next_event().await.is_none());
 }
 
@@ -122,9 +126,12 @@ async fn an_epoch_change_mid_stream_asks_for_a_resync() {
 
     events.send(status_event(cursor(8, 1))).await.unwrap();
     let message = sse.next_event().await.unwrap();
-    assert_eq!(message.json()["event"]["type"], "resync_required");
     assert_eq!(
-        message.json()["event"]["payload"]["reason"],
+        message.json()["event"]["payload"]["type"],
+        "resync_required"
+    );
+    assert_eq!(
+        message.json()["event"]["payload"]["payload"]["reason"],
         "epoch_changed"
     );
     // The synthesized message has no id, so Last-Event-ID stays at 7:10.
@@ -258,8 +265,11 @@ async fn a_slow_client_gets_resync_required_and_is_cut_off() {
         last = Some(message);
     }
     let last = last.unwrap();
-    assert_eq!(last.json()["event"]["type"], "resync_required");
-    assert_eq!(last.json()["event"]["payload"]["reason"], "slow_subscriber");
+    assert_eq!(last.json()["event"]["payload"]["type"], "resync_required");
+    assert_eq!(
+        last.json()["event"]["payload"]["payload"]["reason"],
+        "slow_subscriber"
+    );
     assert_eq!(last.id, None);
     // Exactly: started, the 3 events the queue holds, and the resync.
     assert_eq!(
@@ -294,7 +304,7 @@ async fn a_byte_budget_overflow_is_also_slow() {
     let big = |sequence| {
         common::event(
             cursor(1, sequence),
-            UiEvent::ThreadChanged {
+            UiEvent::Workspace(WorkspaceEvent::ThreadChanged {
                 thread: workbench_protocol::views::ThreadSummary {
                     id: thread(),
                     project: workbench_protocol::ids::ProjectId::new("p").unwrap(),
@@ -304,7 +314,7 @@ async fn a_byte_budget_overflow_is_also_slow() {
                     revision: 1.into(),
                     updated_at: 1.into(),
                 },
-            },
+            }),
         )
     };
     for sequence in 1..=6 {
@@ -323,7 +333,7 @@ async fn a_byte_budget_overflow_is_also_slow() {
     }
     assert!(count <= 5, "{count}");
     assert_eq!(
-        last.unwrap().json()["event"]["payload"]["reason"],
+        last.unwrap().json()["event"]["payload"]["payload"]["reason"],
         "slow_subscriber"
     );
 }
@@ -457,7 +467,10 @@ async fn adapter_synthesized_resync_uses_backend_output_protection() {
     assert_eq!(started.json()["subscription_id"], "protected-id");
     events.send(status_event(cursor(8, 1))).await.unwrap();
     let terminal = sse.next_event().await.unwrap();
-    assert_eq!(terminal.json()["event"]["type"], "resync_required");
+    assert_eq!(
+        terminal.json()["event"]["payload"]["type"],
+        "resync_required"
+    );
     assert_eq!(terminal.json()["subscription_id"], "protected-id");
     assert!(
         terminal.id.is_none(),

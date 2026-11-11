@@ -1,3 +1,4 @@
+use workbench_protocol::namespaces::{ApprovalsQuery, ConversationQuery};
 use workbench_protocol::{
     handshake::{Capability, WireLimits},
     ids::ApprovalId,
@@ -36,17 +37,17 @@ fn approval_chunks_share_body_utf8_and_limit_contracts() {
     for max in [0, 3, 65_537] {
         q.max_bytes = max;
         assert!(
-            Query::GetApprovalInput(q.clone())
+            Query::Approvals(ApprovalsQuery::GetApprovalInput(q.clone()))
                 .validate(&WireLimits::default())
                 .is_err()
         );
     }
     q.max_bytes = 65_536;
     assert_eq!(
-        Query::GetApprovalInput(q.clone()).required_capability(),
+        Query::Approvals(ApprovalsQuery::GetApprovalInput(q.clone())).required_capability(),
         Capability::Approvals
     );
-    Query::GetApprovalInput(q.clone())
+    Query::Approvals(ApprovalsQuery::GetApprovalInput(q.clone()))
         .validate(&WireLimits::default())
         .unwrap();
     let largest = "a".repeat(1024 * 1024);
@@ -63,14 +64,17 @@ fn approval_chunks_share_body_utf8_and_limit_contracts() {
 #[test]
 fn omitted_history_direction_is_forward_and_backward_is_explicit() {
     let query: Query = serde_json::from_value(
-        serde_json::json!({"type":"read_committed_history","payload":{"thread":"t-1"}}),
+        serde_json::json!({"type":"conversation","payload":{"type":"read_committed_history","payload":{"thread":"t-1"}}}),
     )
     .unwrap();
-    let Query::ReadCommittedHistory(mut q) = query else {
+    let Query::Conversation(ConversationQuery::ReadCommittedHistory(mut q)) = query else {
         panic!()
     };
     assert_eq!(q.direction, HistoryDirection::Forward);
     q.direction = HistoryDirection::Backward;
-    let value = serde_json::to_value(Query::ReadCommittedHistory(q)).unwrap();
-    assert_eq!(value["payload"]["direction"], "backward");
+    let value = serde_json::to_value(Query::Conversation(
+        ConversationQuery::ReadCommittedHistory(q),
+    ))
+    .unwrap();
+    assert_eq!(value["payload"]["payload"]["direction"], "backward");
 }

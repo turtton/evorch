@@ -13,12 +13,11 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use std::fmt::Debug;
 use std::path::PathBuf;
-use workbench_protocol::commands::*;
 use workbench_protocol::envelope::*;
 use workbench_protocol::errors::*;
 use workbench_protocol::events::*;
 use workbench_protocol::handshake::*;
-use workbench_protocol::queries::*;
+use workbench_protocol::namespaces::{NAMESPACES, NamespaceInfo, ProjectionEvent};
 use workbench_protocol::views::*;
 use workbench_protocol::wire::*;
 
@@ -74,9 +73,35 @@ fn named<T: Serialize>(values: Vec<T>) -> Vec<(String, T)> {
     values.into_iter().map(|v| (type_of(&v), v)).collect()
 }
 
-fn assert_covers(sample_types: &[String], declared: &[&str]) {
+/// `<namespace>/<operation>`, the two levels a namespaced value is tagged with.
+fn qualified_type_of<T: Serialize>(value: &T) -> String {
+    let wire = serde_json::to_value(value).unwrap();
+    let level = |v: &Value| v["type"].as_str().expect("adjacently tagged").to_owned();
+    format!("{}/{}", level(&wire), level(&wire["payload"]))
+}
+
+fn named_in_namespaces<T: Serialize>(values: Vec<T>) -> Vec<(String, T)> {
+    values
+        .into_iter()
+        .map(|v| (qualified_type_of(&v), v))
+        .collect()
+}
+
+/// Every `<namespace>/<operation>` the protocol declares, per request kind.
+fn declared(operations: impl Fn(&NamespaceInfo) -> &'static [&'static str]) -> Vec<String> {
+    NAMESPACES
+        .iter()
+        .flat_map(|n| {
+            operations(n)
+                .iter()
+                .map(move |op| format!("{}/{op}", n.name))
+        })
+        .collect()
+}
+
+fn assert_covers(sample_types: &[String], declared: &[impl AsRef<str>]) {
     let mut sample: Vec<&str> = sample_types.iter().map(String::as_str).collect();
-    let mut declared = declared.to_vec();
+    let mut declared: Vec<&str> = declared.iter().map(AsRef::as_ref).collect();
     sample.sort_unstable();
     declared.sort_unstable();
     assert_eq!(
@@ -87,17 +112,17 @@ fn assert_covers(sample_types: &[String], declared: &[&str]) {
 
 #[test]
 fn commands_golden_covers_every_variant() {
-    let samples = named(commands());
+    let samples = named_in_namespaces(commands());
     let types: Vec<String> = samples.iter().map(|(n, _)| n.clone()).collect();
-    assert_covers(&types, &Command::TYPES);
+    assert_covers(&types, &declared(|n| n.commands));
     check("commands", samples);
 }
 
 #[test]
 fn queries_golden_covers_every_variant() {
-    let samples = named(queries());
+    let samples = named_in_namespaces(queries());
     let types: Vec<String> = samples.iter().map(|(n, _)| n.clone()).collect();
-    assert_covers(&types, &Query::TYPES);
+    assert_covers(&types, &declared(|n| n.queries));
     check("queries", samples);
 }
 
@@ -111,15 +136,15 @@ fn controls_golden_covers_every_variant() {
 
 #[test]
 fn ui_events_golden_covers_every_variant() {
-    let samples = named(ui_events());
+    let samples = named_in_namespaces(ui_events());
     let types: Vec<String> = samples.iter().map(|(n, _)| n.clone()).collect();
-    assert_covers(&types, &UiEvent::TYPES);
+    assert_covers(&types, &declared(|n| n.events));
     check("ui_events", samples);
 }
 
 #[test]
 fn query_replies_golden() {
-    check("query_replies", named(query_replies()));
+    check("query_replies", named_in_namespaces(query_replies()));
 }
 
 #[test]
@@ -181,9 +206,11 @@ fn server_frames_golden() {
             ),
             (
                 "event".into(),
-                ServerFrame::Event(Box::new(event_envelope(UiEvent::ResyncRequired {
-                    reason: ResyncReason::CursorTooOld,
-                }))),
+                ServerFrame::Event(Box::new(event_envelope(UiEvent::Projection(
+                    ProjectionEvent::ResyncRequired {
+                        reason: ResyncReason::CursorTooOld,
+                    },
+                )))),
             ),
         ],
     );

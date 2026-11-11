@@ -10,14 +10,15 @@ use workbench_protocol::events::{
     EventCursor, EventEnvelope, ResyncReason, SubscriptionStarted, UiEvent,
 };
 use workbench_protocol::ids::SubscriptionId;
+use workbench_protocol::namespaces::ProjectionEvent;
 
 /// Why a subscription stopped delivering events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionEnd {
-    /// The caller was not reading fast enough. A [`UiEvent::ResyncRequired`]
+    /// The caller was not reading fast enough. A [`UiEvent::Projection(ProjectionEvent::ResyncRequired)`]
     /// was delivered last; take a new snapshot.
     SlowSubscriber,
-    /// The core restarted under the stream. A [`UiEvent::ResyncRequired`] was
+    /// The core restarted under the stream. A [`UiEvent::Projection(ProjectionEvent::ResyncRequired)`] was
     /// delivered last; take a new snapshot.
     EpochChanged,
     /// The core ended it with `ResyncRequired` or `SubscriptionClosed`, which was delivered last.
@@ -108,7 +109,7 @@ pub(crate) struct SubscriptionParts {
 ///
 /// Events at or before the snapshot boundary (`started().high_water`) are
 /// dropped because the snapshot already contains them. When the stream cannot
-/// continue, a final [`UiEvent::ResyncRequired`] is delivered and then
+/// continue, a final [`UiEvent::Projection(ProjectionEvent::ResyncRequired)`] is delivered and then
 /// [`Subscription::next`] returns `None`; [`Subscription::end`] says why.
 pub struct Subscription {
     // Declared before `client` so the release is queued while the connection is still alive.
@@ -165,7 +166,7 @@ impl Subscription {
             subscription_id: self.started.subscription_id.clone(),
             cursor: self.last_cursor,
             caused_by_request_id: None,
-            event: UiEvent::ResyncRequired { reason },
+            event: UiEvent::Projection(ProjectionEvent::ResyncRequired { reason }),
         })
     }
 

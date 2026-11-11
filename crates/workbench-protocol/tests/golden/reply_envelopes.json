@@ -50,20 +50,23 @@
     "payload": {
       "payload": {
         "payload": {
-          "retention_reasons": [
-            "active_turn",
-            "connected_clients"
-          ],
-          "running": {
-            "clients": 3,
-            "shell_jobs": 1,
-            "tool_calls": 2,
-            "turns": 1,
-            "waiting_lanes": 0
+          "payload": {
+            "retention_reasons": [
+              "active_turn",
+              "connected_clients"
+            ],
+            "running": {
+              "clients": 3,
+              "shell_jobs": 1,
+              "tool_calls": 2,
+              "turns": 1,
+              "waiting_lanes": 0
+            },
+            "state": "ready"
           },
-          "state": "ready"
+          "type": "core_status"
         },
-        "type": "core_status"
+        "type": "lifecycle"
       },
       "type": "query"
     },

@@ -279,6 +279,8 @@ impl World {
     fn publish(&mut self, event: Value) {
         self.sequence += 1;
         let (epoch, sequence) = (self.epoch, self.sequence);
+        let event =
+            json!({"type": event_namespace(event["type"].as_str().unwrap()), "payload": event});
         self.subscribers.retain(|(id, tx)| {
             let envelope: EventEnvelope = serde_json::from_value(json!({
                 "subscription_id": id,
@@ -303,8 +305,40 @@ fn page(items: Vec<Value>, cursor: Option<String>) -> Value {
     page
 }
 
+/// The namespace the protocol routes an event through.
+fn event_namespace(event: &str) -> &'static str {
+    match event {
+        "thread_changed" => "workspace",
+        "run_changed" => "execution",
+        "question_changed" => "questions",
+        "approval_changed" => "approvals",
+        "input_receipt_changed" | "message_committed" => "conversation",
+        "core_status_changed" => "lifecycle",
+        "resync_required" | "subscription_closed" => "projection",
+        other => panic!("unknown event {other}"),
+    }
+}
+
+/// The namespace of a query reply.
+fn reply_namespace(reply: &str) -> &'static str {
+    match reply {
+        "projects" | "threads" | "thread" => "workspace",
+        "runs" => "execution",
+        "questions" => "questions",
+        "approvals" | "approval_input" => "approvals",
+        "input_receipts" | "committed_history" => "conversation",
+        "core_status" => "lifecycle",
+        "command_receipt" | "body" | "snapshot" => "projection",
+        "lane_management" => "lanes",
+        other => panic!("unknown reply {other}"),
+    }
+}
+
 fn query_reply(kind: &str, payload: Value) -> Value {
-    json!({"status": "success", "payload": {"type": "query", "payload": {"type": kind, "payload": payload}}})
+    json!({"status": "success", "payload": {"type": "query", "payload": {
+        "type": reply_namespace(kind),
+        "payload": {"type": kind, "payload": payload},
+    }}})
 }
 
 fn accepted() -> Value {
@@ -497,9 +531,12 @@ impl UiBackend {
 
     fn answer(&self, request: &Value, provenance: &Provenance) -> Value {
         let mut world = self.world.lock().unwrap();
-        let p = &request["payload"]["payload"];
+        let p = &request["payload"]["payload"]["payload"];
         let command = p.clone();
-        let kind = request["payload"]["type"].as_str().unwrap().to_owned();
+        let kind = request["payload"]["payload"]["type"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let reply = match kind.as_str() {
             "send_chat" if world.failing_sends > 0 => {
                 world.failing_sends -= 1;
@@ -585,8 +622,8 @@ impl UiBackend {
 
     fn query(&self, request: &Value) -> Value {
         let mut world = self.world.lock().unwrap();
-        let kind = request["payload"]["type"].as_str().unwrap();
-        let p = &request["payload"]["payload"];
+        let kind = request["payload"]["payload"]["type"].as_str().unwrap();
+        let p = &request["payload"]["payload"]["payload"];
         let thread_filter = |item: &Value, key: &str| {
             p["thread"].is_null() || item.pointer(key) == Some(&p["thread"])
         };
@@ -840,7 +877,7 @@ impl WorkbenchBackend for UiBackend {
         provenance: Provenance,
     ) -> ReplyEnvelope {
         let value = serde_json::to_value(&request).unwrap();
-        let held = value["payload"]["type"]
+        let held = value["payload"]["payload"]["type"]
             .as_str()
             .and_then(|kind| self.holds.lock().unwrap().get(kind).cloned());
         if let Some(hold) = held {

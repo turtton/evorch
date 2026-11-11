@@ -7,6 +7,10 @@ use std::{
 };
 use tokio::sync::mpsc;
 use workbench_client::{ClientError, Subscription, TransportError, WorkbenchClient};
+use workbench_protocol::namespaces::{
+    ApprovalsQuery, ApprovalsReply, ConversationQuery, ConversationReply, ProjectionQuery,
+    ProjectionReply,
+};
 use workbench_protocol::{
     commands::{Command, CommandReply},
     conversation::{ConversationCommand, ConversationResult},
@@ -105,13 +109,15 @@ pub async fn snapshot(
         if !visited.insert(cursor.to_string()) {
             return Err("snapshot cursor repeated".into());
         }
-        let next = client.query(Query::ReadSnapshot(ReadSnapshot {
-            snapshot_id: id.clone(),
-            page: PageRequest {
-                cursor: Some(cursor),
-                ..Default::default()
+        let next = client.query(Query::Projection(ProjectionQuery::ReadSnapshot(
+            ReadSnapshot {
+                snapshot_id: id.clone(),
+                page: PageRequest {
+                    cursor: Some(cursor),
+                    ..Default::default()
+                },
             },
-        }));
+        )));
         tokio::pin!(next);
         let reply = loop {
             tokio::select! {
@@ -128,7 +134,7 @@ pub async fn snapshot(
             }
         };
         match reply {
-            QueryReply::Snapshot(snapshot)
+            QueryReply::Projection(ProjectionReply::Snapshot(snapshot))
                 if snapshot.snapshot_id == id && snapshot.high_water == started.high_water =>
             {
                 page = snapshot.page
@@ -172,30 +178,32 @@ pub async fn serve(
         };
         for (request, pending) in std::mem::take(&mut uncertain) {
             match client
-                .query(Query::GetCommandReceipt {
+                .query(Query::Projection(ProjectionQuery::GetCommandReceipt {
                     request_id: request.clone(),
-                })
+                }))
                 .await
             {
-                Ok(QueryReply::CommandReceipt(receipt)) => match receipt.state {
-                    CommandReceiptState::Applied { reply } => {
-                        update(&shared, &ctx, |s| {
+                Ok(QueryReply::Projection(ProjectionReply::CommandReceipt(receipt))) => {
+                    match receipt.state {
+                        CommandReceiptState::Applied { reply } => {
+                            update(&shared, &ctx, |s| {
+                                s.outcome_unknown.remove(request.as_str());
+                            });
+                            accepted(&client, &shared, &ctx, reply, pending).await;
+                        }
+                        CommandReceiptState::Rejected { error } => update(&shared, &ctx, |s| {
                             s.outcome_unknown.remove(request.as_str());
-                        });
-                        accepted(&client, &shared, &ctx, reply, pending).await;
+                            pending.rejected(s);
+                            s.status = error.to_string();
+                        }),
+                        CommandReceiptState::Unknown => {
+                            update(&shared, &ctx, |s| {
+                                s.status = format!("OutcomeUnknown: {request}。再送していません。")
+                            });
+                            uncertain.push((request, pending));
+                        }
                     }
-                    CommandReceiptState::Rejected { error } => update(&shared, &ctx, |s| {
-                        s.outcome_unknown.remove(request.as_str());
-                        pending.rejected(s);
-                        s.status = error.to_string();
-                    }),
-                    CommandReceiptState::Unknown => {
-                        update(&shared, &ctx, |s| {
-                            s.status = format!("OutcomeUnknown: {request}。再送していません。")
-                        });
-                        uncertain.push((request, pending));
-                    }
-                },
+                }
                 result => {
                     update(&shared, &ctx, |s| {
                         s.status = format!("receipt 照合失敗（再送なし）: {result:?}")
@@ -266,16 +274,16 @@ pub async fn serve(
                             }
                             Action::History(thread, older) => {
                                 let cursor = if older { shared.lock().unwrap().cache.older.get(thread.as_str()).cloned().flatten() } else { None };
-                                let reply = client.query(Query::ReadCommittedHistory(ReadCommittedHistory {
+                                let reply = client.query(Query::Conversation(ConversationQuery::ReadCommittedHistory(ReadCommittedHistory {
                                     thread: thread.clone(), run: None, direction: HistoryDirection::Backward,
                                     page: PageRequest { cursor, ..Default::default() },
-                                })).await;
+                                }))).await;
                                 match reply {
-                                    Ok(QueryReply::CommittedHistory(page)) => update(&shared, &ctx, |s| s.cache.history_page(thread.as_str(), page, older)),
+                                    Ok(QueryReply::Conversation(ConversationReply::CommittedHistory(page))) => update(&shared, &ctx, |s| s.cache.history_page(thread.as_str(), page, older)),
                                     other => update(&shared, &ctx, |s| s.status = format!("履歴取得: {other:?}")),
                                 }
                                 let mut cursor = None;
-                                while let Ok(QueryReply::InputReceipts(page)) = client.query(Query::GetInputReceipts(workbench_protocol::queries::ThreadQuery { thread: thread.clone(), page: PageRequest { cursor, ..Default::default() } })).await {
+                                while let Ok(QueryReply::Conversation(ConversationReply::InputReceipts(page))) = client.query(Query::Conversation(ConversationQuery::GetInputReceipts(workbench_protocol::queries::ThreadQuery { thread: thread.clone(), page: PageRequest { cursor, ..Default::default() } }))).await {
                                     cursor = page.next_cursor;
                                     update(&shared, &ctx, |s| { for receipt in page.items { s.cache.receipts.insert(receipt.submission_id.to_string(), receipt); } });
                                     if cursor.is_none() { break; }
@@ -292,8 +300,8 @@ pub async fn serve(
                                 let mut text = String::new();
                                 loop {
                                     let query = workbench_protocol::queries::GetApprovalInput { approval_id: approval.id.clone(), core_epoch: approval.core_epoch, approval_revision: approval.revision, offset, max_bytes: 65536.min(client.server_hello().limits.max_body_chunk_bytes) };
-                                    match client.query(Query::GetApprovalInput(query)).await {
-                                        Ok(QueryReply::ApprovalInput(chunk)) if chunk.offset == offset && chunk.approval_id == approval.id && chunk.core_epoch == approval.core_epoch && chunk.approval_revision == approval.revision => {
+                                    match client.query(Query::Approvals(ApprovalsQuery::GetApprovalInput(query))).await {
+                                        Ok(QueryReply::Approvals(ApprovalsReply::ApprovalInput(chunk))) if chunk.offset == offset && chunk.approval_id == approval.id && chunk.core_epoch == approval.core_epoch && chunk.approval_revision == approval.revision => {
                                             text.push_str(&chunk.text);
                                             if text.len() > 1024 * 1024 { break; }
                                             match chunk.next_offset { Some(next) if next > offset => offset = next, None => { update(&shared, &ctx, |s| { s.cache.approval_inputs.insert(approval.id.to_string(), text); }); break; }, _ => break }
@@ -375,7 +383,8 @@ async fn accepted(
         let draft = match pending {
             Pending::Command(draft) => draft,
             Pending::Upload { thread, id } => {
-                if let Some(result) = reply.conversation.as_deref()
+                if let Some(workbench_protocol::commands::CommandResult::Conversation(result)) =
+                    reply.result.as_deref()
                     && let ConversationResult::ImageUploaded(reference) = result
                 {
                     if let Some(image) = s
@@ -464,14 +473,16 @@ async fn body(client: &WorkbenchClient, id: BodyId) -> Result<String, String> {
     let mut text = String::new();
     loop {
         match client
-            .query(Query::ReadBody(ReadBody {
+            .query(Query::Projection(ProjectionQuery::ReadBody(ReadBody {
                 body_id: id.clone(),
                 offset,
                 max_bytes: 65536.min(client.server_hello().limits.max_body_chunk_bytes),
-            }))
+            })))
             .await
         {
-            Ok(QueryReply::Body(chunk)) if chunk.body_id == id && chunk.offset == offset => {
+            Ok(QueryReply::Projection(ProjectionReply::Body(chunk)))
+                if chunk.body_id == id && chunk.offset == offset =>
+            {
                 if text.len() + chunk.text.len() > 4 * 1024 * 1024 {
                     return Err("本文は 4 MiB を超えています（Unsupported）".into());
                 }
@@ -503,9 +514,13 @@ mod tests {
         );
         shared.lock().unwrap().sending.insert("t".into());
         tx.send(Action::Command {
-            command: Command::StopChat(workbench_protocol::commands::ThreadTarget {
-                thread: ThreadId::new("t").unwrap(),
-            }),
+            command: Command::Execution(
+                workbench_protocol::namespaces::ExecutionCommand::StopChat(
+                    workbench_protocol::commands::ThreadTarget {
+                        thread: ThreadId::new("t").unwrap(),
+                    },
+                ),
+            ),
             draft: Some(("t".into(), 3)),
         })
         .await

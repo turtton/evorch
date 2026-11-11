@@ -15,6 +15,7 @@ use workbench_host::provenance::local_desktop;
 use workbench_host::receipts::Receipts;
 use workbench_protocol::commands::{Command, CommandDisposition};
 use workbench_protocol::errors::ErrorCode;
+use workbench_protocol::namespaces::ConversationCommand;
 
 #[test]
 fn after_a_restart_an_identical_resend_is_answered_with_the_original_run() {
@@ -23,7 +24,12 @@ fn after_a_restart_an_identical_resend_is_answered_with_the_original_run() {
     let (runtime, storage) = runtime_with_store(dir.path());
     let mut first = host_with_project(&rt, runtime.clone(), dir.path());
     let accepted = first
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
     let agents = runtime.list_agents().len();
 
@@ -31,7 +37,12 @@ fn after_a_restart_an_identical_resend_is_answered_with_the_original_run() {
     let restarted_runtime = runtime_on_store(dir.path(), &storage);
     let mut restarted = host_with_project(&rt, restarted_runtime.clone(), dir.path());
     let again = restarted
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
 
     assert_eq!(again.disposition, CommandDisposition::AlreadyApplied);
@@ -53,7 +64,12 @@ fn after_a_restart_every_difference_in_the_message_is_a_conflict() {
     let (runtime, storage) = runtime_with_store(dir.path());
     let mut first = host_with_two_projects(&rt, runtime, dir.path(), elsewhere.path());
     first
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
     let restarted_runtime = runtime_on_store(dir.path(), &storage);
     let mut restarted =
@@ -61,7 +77,10 @@ fn after_a_restart_every_difference_in_the_message_is_a_conflict() {
 
     for (field, message) in differing_messages("thread-1", "sub-1", "hello") {
         let error = restarted
-            .handle_command(Command::SendChat(message), web())
+            .handle_command(
+                Command::Conversation(ConversationCommand::SendChat(message)),
+                web(),
+            )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Conflict, "{field}");
     }
@@ -78,18 +97,36 @@ fn an_id_dropped_from_a_full_ledger_is_still_told_apart_by_its_stored_fingerprin
     let mut host = host_with_two_projects(&rt, runtime.clone(), dir.path(), elsewhere.path())
         .with_receipts(Receipts::with_capacity(1));
     let accepted = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
-    host.handle_command(Command::SendChat(send("thread-1", "sub-2", "more")), web())
-        .unwrap();
+    host.handle_command(
+        Command::Conversation(ConversationCommand::SendChat(send(
+            "thread-1", "sub-2", "more",
+        ))),
+        web(),
+    )
+    .unwrap();
     let agents = runtime.list_agents().len();
 
     let again = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
     for (field, message) in differing_messages("thread-1", "sub-1", "hello") {
         let error = host
-            .handle_command(Command::SendChat(message), web())
+            .handle_command(
+                Command::Conversation(ConversationCommand::SendChat(message)),
+                web(),
+            )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Conflict, "{field}");
     }
@@ -106,7 +143,12 @@ fn the_desktop_door_gets_the_same_answer_after_a_restart() {
     let (runtime, storage) = runtime_with_store(dir.path());
     let mut first = host_with_project(&rt, runtime, dir.path());
     let accepted = first
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
     let restarted_runtime = runtime_on_store(dir.path(), &storage);
     let mut restarted = host_with_project(&rt, restarted_runtime.clone(), dir.path());
@@ -163,7 +205,12 @@ fn an_input_receipt_without_a_stored_fingerprint_cannot_be_compared_and_is_refus
     let mut host = host_with_project(&rt, restarted_runtime.clone(), dir.path());
 
     let error = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap_err();
 
     assert_eq!(error.code, ErrorCode::Conflict);
@@ -186,10 +233,20 @@ fn a_fingerprint_that_could_not_be_stored_still_blocks_a_reapply_after_a_restart
         .unwrap();
     let mut host = host_with_project(&rt, runtime.clone(), dir.path());
     let accepted = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
     let same_host = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
     assert_eq!(same_host.run_id, accepted.run_id);
     assert_eq!(same_host.disposition, CommandDisposition::AlreadyApplied);
@@ -204,7 +261,12 @@ fn a_fingerprint_that_could_not_be_stored_still_blocks_a_reapply_after_a_restart
     let restarted_runtime = runtime_on_store(dir.path(), &storage);
     let mut restarted = host_with_project(&rt, restarted_runtime.clone(), dir.path());
     let error = restarted
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap_err();
 
     assert_eq!(error.code, ErrorCode::Conflict);

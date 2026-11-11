@@ -14,6 +14,28 @@ use crate::limits::{
     MAX_CONSTRAINT_BYTES, MAX_CONSTRAINTS, MAX_IMAGES, MAX_MIME_BYTES, MAX_NAME_BYTES,
     MAX_OBJECTIVE_BYTES, MAX_REFERENCE_BYTES, MAX_REFERENCES, MAX_SKILLS, MAX_TEXT_BYTES,
 };
+use crate::namespaces::{
+    approvals::{ApprovalsCommand, ApprovalsResult},
+    artifacts::{ArtifactsCommand, ArtifactsResult},
+    auth::{AuthCommand, AuthResult},
+    browser::{BrowserCommand, BrowserResult},
+    conversation::{ConversationCommand, ConversationResult},
+    diagnostics::{DiagnosticsCommand, DiagnosticsResult},
+    evaluation::{EvaluationCommand, EvaluationResult},
+    execution::{ExecutionCommand, ExecutionResult},
+    improvement::{ImprovementCommand, ImprovementResult},
+    lanes::{LanesCommand, LanesResult},
+    lifecycle::{LifecycleCommand, LifecycleResult},
+    maintenance::{MaintenanceCommand, MaintenanceResult},
+    mcp::{McpCommand, McpResult},
+    memory::{MemoryCommand, MemoryResult},
+    projection::{ProjectionCommand, ProjectionResult},
+    pull_requests::{PullRequestsCommand, PullRequestsResult},
+    questions::{QuestionsCommand, QuestionsResult},
+    settings::{SettingsCommand, SettingsResult},
+    teams::{TeamsCommand, TeamsResult},
+    workspace::{WorkspaceCommand, WorkspaceResult},
+};
 use crate::validation::{ValidationError, check_all, check_count, check_line, check_text};
 use crate::wire::{InstanceEpoch, MessageCount, Revision};
 use serde::{Deserialize, Serialize};
@@ -209,55 +231,65 @@ pub struct SetAgentWebToolsEnabled {
     pub enabled: bool,
 }
 
-/// Every state-changing request a client may send.
+/// Every state-changing request a client may send: one namespace, then one of
+/// its operations (`{"type": <namespace>, "payload": {"type": <operation>, ..}}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum Command {
-    Conversation(crate::conversation::ConversationCommand),
-    ManageLane(crate::lane_management::ManageLane),
-    SendChat(SendChat),
-    ContinueChat(ContinueChat),
-    CompactChat(ThreadTarget),
-    StopChat(ThreadTarget),
-    StopRun(StopRun),
-    DeliverFollowUpsNextTurn(ThreadTarget),
-    WithdrawFollowUp(WithdrawFollowUp),
-    SubmitGoal(SubmitGoal),
-    SetGoalReview(SetGoalReview),
-    SetGoalChecksPaused(SetGoalChecksPaused),
-    AnswerUserQuestion(AnswerUserQuestion),
-    DecideToolApproval(DecideToolApproval),
-    SetAgentWebToolsEnabled(SetAgentWebToolsEnabled),
+    Conversation(ConversationCommand),
+    Workspace(WorkspaceCommand),
+    Execution(ExecutionCommand),
+    Questions(QuestionsCommand),
+    Approvals(ApprovalsCommand),
+    Lanes(LanesCommand),
+    Lifecycle(LifecycleCommand),
+    Projection(ProjectionCommand),
+    Settings(SettingsCommand),
+    Auth(AuthCommand),
+    Mcp(McpCommand),
+    Teams(TeamsCommand),
+    Diagnostics(DiagnosticsCommand),
+    Memory(MemoryCommand),
+    Evaluation(EvaluationCommand),
+    Improvement(ImprovementCommand),
+    PullRequests(PullRequestsCommand),
+    Browser(BrowserCommand),
+    Artifacts(ArtifactsCommand),
+    Maintenance(MaintenanceCommand),
 }
 
 impl Command {
-    /// Wire names of every variant, for rejecting unknown ones precisely.
-    pub const TYPES: [&'static str; 15] = [
-        "conversation",
-        "manage_lane",
-        "send_chat",
-        "continue_chat",
-        "compact_chat",
-        "stop_chat",
-        "stop_run",
-        "deliver_follow_ups_next_turn",
-        "withdraw_follow_up",
-        "submit_goal",
-        "set_goal_review",
-        "set_goal_checks_paused",
-        "answer_user_question",
-        "decide_tool_approval",
-        "set_agent_web_tools_enabled",
-    ];
+    /// Wire names of every namespace, for rejecting unknown ones precisely.
+    pub const TYPES: [&'static str; 20] = crate::namespaces::NAMESPACE_NAMES;
 
     /// The capability a core must offer before this command may be sent.
     pub fn required_capability(&self) -> Capability {
         match self {
-            Self::Conversation(_) => Capability::Conversation,
-            Self::AnswerUserQuestion(_) => Capability::Questions,
-            Self::DecideToolApproval(_) => Capability::Approvals,
-            Self::SendChat(_) | Self::WithdrawFollowUp(_) => Capability::InputReceipts,
-            _ => Capability::Commands,
+            Self::Conversation(c) => c.required_capability(),
+            Self::Workspace(c) => c.required_capability(),
+            Self::Execution(c) => c.required_capability(),
+            Self::Questions(c) => c.required_capability(),
+            Self::Approvals(c) => c.required_capability(),
+            Self::Lanes(c) => c.required_capability(),
+            Self::Lifecycle(c) => c.required_capability(),
+            Self::Projection(c) => c.required_capability(),
+            Self::Settings(c) => c.required_capability(),
+            Self::Auth(c) => c.required_capability(),
+            Self::Mcp(c) => c.required_capability(),
+            Self::Teams(c) => c.required_capability(),
+            Self::Diagnostics(c) => c.required_capability(),
+            Self::Memory(c) => c.required_capability(),
+            Self::Evaluation(c) => c.required_capability(),
+            Self::Improvement(c) => c.required_capability(),
+            Self::PullRequests(c) => c.required_capability(),
+            Self::Browser(c) => c.required_capability(),
+            Self::Artifacts(c) => c.required_capability(),
+            Self::Maintenance(c) => c.required_capability(),
         }
     }
 
@@ -265,23 +297,25 @@ impl Command {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::Conversation(c) => c.validate(),
-            Self::ManageLane(_) => Ok(()),
-            Self::SendChat(c) => c.validate(),
-            Self::ContinueChat(c) => c
-                .model_preference
-                .as_ref()
-                .map_or(Ok(()), ModelPreference::validate),
-            Self::SubmitGoal(c) => c.validate(),
-            Self::AnswerUserQuestion(c) => check_text("answer", &c.answer, MAX_TEXT_BYTES, false),
-            Self::CompactChat(_)
-            | Self::StopChat(_)
-            | Self::StopRun(_)
-            | Self::DeliverFollowUpsNextTurn(_)
-            | Self::WithdrawFollowUp(_)
-            | Self::SetGoalReview(_)
-            | Self::SetGoalChecksPaused(_)
-            | Self::DecideToolApproval(_)
-            | Self::SetAgentWebToolsEnabled(_) => Ok(()),
+            Self::Workspace(c) => c.validate(),
+            Self::Execution(c) => c.validate(),
+            Self::Questions(c) => c.validate(),
+            Self::Approvals(c) => c.validate(),
+            Self::Lanes(c) => c.validate(),
+            Self::Lifecycle(c) => c.validate(),
+            Self::Projection(c) => c.validate(),
+            Self::Settings(c) => c.validate(),
+            Self::Auth(c) => c.validate(),
+            Self::Mcp(c) => c.validate(),
+            Self::Teams(c) => c.validate(),
+            Self::Diagnostics(c) => c.validate(),
+            Self::Memory(c) => c.validate(),
+            Self::Evaluation(c) => c.validate(),
+            Self::Improvement(c) => c.validate(),
+            Self::PullRequests(c) => c.validate(),
+            Self::Browser(c) => c.validate(),
+            Self::Artifacts(c) => c.validate(),
+            Self::Maintenance(c) => c.validate(),
         }
     }
 }
@@ -367,14 +401,44 @@ pub enum CommandDisposition {
     AlreadyApplied,
 }
 
-/// Success answer to a command.
+/// An operation's own answer, typed by the namespace it belongs to. Only
+/// operations that have something to say beyond the common receipt produce
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum CommandResult {
+    Conversation(ConversationResult),
+    Workspace(WorkspaceResult),
+    Execution(ExecutionResult),
+    Questions(QuestionsResult),
+    Approvals(ApprovalsResult),
+    Lanes(LanesResult),
+    Lifecycle(LifecycleResult),
+    Projection(ProjectionResult),
+    Settings(SettingsResult),
+    Auth(AuthResult),
+    Mcp(McpResult),
+    Teams(TeamsResult),
+    Diagnostics(DiagnosticsResult),
+    Memory(MemoryResult),
+    Evaluation(EvaluationResult),
+    Improvement(ImprovementResult),
+    PullRequests(PullRequestsResult),
+    Browser(BrowserResult),
+    Artifacts(ArtifactsResult),
+    Maintenance(MaintenanceResult),
+}
+
+/// Success answer to a command: the common receipt, plus the operation's typed
+/// result when it has one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandReply {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<Box<crate::conversation::ConversationResult>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lane_management: Option<Box<crate::lane_management::LaneManagementResult>>,
     pub disposition: CommandDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submission_id: Option<SubmissionId>,
@@ -383,4 +447,27 @@ pub struct CommandReply {
     /// Revision of the thread after the command, when it changed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_revision: Option<Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Box<CommandResult>>,
+}
+
+impl CommandReply {
+    /// An accepted command with no operation-specific result.
+    pub fn accepted() -> Self {
+        Self {
+            disposition: CommandDisposition::Accepted,
+            submission_id: None,
+            run_id: None,
+            thread_revision: None,
+            result: None,
+        }
+    }
+
+    /// An accepted command answering with `result`.
+    pub fn with_result(result: CommandResult) -> Self {
+        Self {
+            result: Some(Box::new(result)),
+            ..Self::accepted()
+        }
+    }
 }

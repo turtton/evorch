@@ -11,6 +11,10 @@ use workbench_protocol::errors::*;
 use workbench_protocol::framing::encode_frame;
 use workbench_protocol::handshake::*;
 use workbench_protocol::ids::*;
+use workbench_protocol::namespaces::{
+    ApprovalsCommand, ConversationCommand, ConversationQuery, ConversationReply, LifecycleReply,
+    ProjectionQuery, ProjectionReply, QuestionsCommand, QuestionsQuery, QuestionsReply,
+};
 use workbench_protocol::queries::*;
 use workbench_protocol::wire::*;
 
@@ -149,9 +153,9 @@ async fn reconnect_keeps_the_receipt_namespace_without_resending_a_lost_command(
     );
     let reconnected = reconnected.unwrap();
     assert_eq!(client.session_id(), reconnected.session_id());
-    let query = Query::GetCommandReceipt {
+    let query = Query::Projection(ProjectionQuery::GetCommandReceipt {
         request_id: original.request_id.clone(),
-    };
+    });
     let lookup = tokio::spawn({
         let client = reconnected.clone();
         let query = query.clone();
@@ -162,12 +166,12 @@ async fn reconnect_keeps_the_receipt_namespace_without_resending_a_lost_command(
     assert_eq!(request.session_id, original.session_id);
     assert_ne!(request.request_id, original.request_id);
     assert_eq!(request.body, RequestBody::Query(query));
-    let receipt = QueryReply::CommandReceipt(CommandReceipt {
+    let receipt = QueryReply::Projection(ProjectionReply::CommandReceipt(CommandReceipt {
         request_id: original.request_id,
         state: CommandReceiptState::Applied {
             reply: command_reply(),
         },
-    });
+    }));
     server.reply(
         &request.request_id,
         ok(ReplyPayload::Query(receipt.clone())),
@@ -183,9 +187,9 @@ async fn replies_may_arrive_in_any_order() {
             let client = client.clone();
             let request_id = RequestId::new(format!("probe-{n}")).unwrap();
             tokio::spawn(async move {
-                let query = Query::GetCommandReceipt {
+                let query = Query::Projection(ProjectionQuery::GetCommandReceipt {
                     request_id: request_id.clone(),
-                };
+                });
                 (request_id, client.query(query).await)
             })
         })
@@ -196,23 +200,25 @@ async fn replies_may_arrive_in_any_order() {
     }
     // Answer last-received first, echoing which probe each request asked about.
     for request in requests.iter().rev() {
-        let RequestBody::Query(Query::GetCommandReceipt { request_id: probe }) = &request.body
+        let RequestBody::Query(Query::Projection(ProjectionQuery::GetCommandReceipt {
+            request_id: probe,
+        })) = &request.body
         else {
             panic!("unexpected request {request:?}");
         };
         server.reply(
             &request.request_id,
-            ok(ReplyPayload::Query(QueryReply::CommandReceipt(
-                CommandReceipt {
+            ok(ReplyPayload::Query(QueryReply::Projection(
+                ProjectionReply::CommandReceipt(CommandReceipt {
                     request_id: probe.clone(),
                     state: CommandReceiptState::Unknown,
-                },
+                }),
             ))),
         );
     }
     for call in calls {
         let (probe, reply) = call.await.unwrap();
-        let Ok(QueryReply::CommandReceipt(receipt)) = reply else {
+        let Ok(QueryReply::Projection(ProjectionReply::CommandReceipt(receipt))) = reply else {
             panic!("{reply:?}")
         };
         assert_eq!(receipt.request_id, probe, "each caller gets its own reply");
@@ -306,7 +312,9 @@ async fn a_reply_of_the_wrong_type_is_a_protocol_violation() {
     let request = server.recv_request().await.unwrap();
     server.reply(
         &request.request_id,
-        ok(ReplyPayload::Query(QueryReply::CoreStatus(status()))),
+        ok(ReplyPayload::Query(QueryReply::Lifecycle(
+            LifecycleReply::CoreStatus(status()),
+        ))),
     );
     assert!(matches!(
         call.await.unwrap(),
@@ -356,22 +364,23 @@ async fn requests_that_break_rules_are_refused_before_they_are_sent() {
     hello.capabilities.retain(|c| *c != Capability::Approvals);
     let (client, mut server) = connected_with(hello).await;
 
-    let approval = Command::DecideToolApproval(DecideToolApproval {
+    let approval = Command::Approvals(ApprovalsCommand::DecideToolApproval(DecideToolApproval {
         approval_id: ApprovalId::new("ap-1").unwrap(),
         core_epoch: InstanceEpoch(7),
         approval_revision: Revision(1),
         decision: ApprovalDecision::Approve,
-    });
+    }));
     assert_eq!(
         client.command(approval).await,
         Err(ClientError::UnsupportedCapability(Capability::Approvals))
     );
-    let blank_answer = Command::AnswerUserQuestion(AnswerUserQuestion {
-        thread: thread(),
-        question_id: QuestionId::new("q").unwrap(),
-        answer: String::new(),
-        question_revision: Revision(1),
-    });
+    let blank_answer =
+        Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {
+            thread: thread(),
+            question_id: QuestionId::new("q").unwrap(),
+            answer: String::new(),
+            question_revision: Revision(1),
+        }));
     assert!(matches!(
         client.command(blank_answer).await,
         Err(ClientError::Invalid(_))
@@ -430,7 +439,7 @@ async fn too_many_requests_in_flight_are_refused_without_being_sent() {
 #[tokio::test]
 async fn an_oversized_request_is_refused_locally() {
     let (client, mut server) = connected_with(server_hello(small_limits())).await;
-    let chat = Command::SendChat(SendChat {
+    let chat = Command::Conversation(ConversationCommand::SendChat(SendChat {
         project: ProjectId::new("p").unwrap(),
         thread: thread(),
         submission_id: SubmissionId::new("s").unwrap(),
@@ -440,7 +449,7 @@ async fn an_oversized_request_is_refused_locally() {
         images: vec![],
         model_preference: None,
         fork_seed: None,
-    });
+    }));
     assert!(matches!(
         client.command(chat).await,
         Err(ClientError::Transport(TransportError::FrameTooLarge {
@@ -684,21 +693,23 @@ async fn ask(
 }
 
 fn read_body(max_bytes: u32) -> Query {
-    Query::ReadBody(ReadBody {
+    Query::Projection(ProjectionQuery::ReadBody(ReadBody {
         body_id: BodyId::new("b").unwrap(),
         offset: ByteOffset(0),
         max_bytes,
-    })
+    }))
 }
 
 fn chunk(len: usize) -> QueryReply {
-    QueryReply::Body(workbench_protocol::views::BodyChunk {
-        body_id: BodyId::new("b").unwrap(),
-        offset: ByteOffset(0),
-        text: "x".repeat(len),
-        total_bytes: ByteOffset(len as u64),
-        next_offset: None,
-    })
+    QueryReply::Projection(ProjectionReply::Body(
+        workbench_protocol::views::BodyChunk {
+            body_id: BodyId::new("b").unwrap(),
+            offset: ByteOffset(0),
+            text: "x".repeat(len),
+            total_bytes: ByteOffset(len as u64),
+            next_offset: None,
+        },
+    ))
 }
 
 #[tokio::test]
@@ -707,24 +718,32 @@ async fn replies_within_their_bounds_are_delivered() {
     let (_, result) = ask(read_body(65_536), chunk(max_chunk)).await;
     assert!(result.is_ok(), "{result:?}");
     let (_, result) = ask(
-        Query::ReadCommittedHistory(ReadCommittedHistory {
-            direction: Default::default(),
-            thread: thread(),
-            run: None,
-            page: PageRequest::default(),
-        }),
-        QueryReply::CommittedHistory(page_of(vec![history_message("x".into()); 200])),
+        Query::Conversation(ConversationQuery::ReadCommittedHistory(
+            ReadCommittedHistory {
+                direction: Default::default(),
+                thread: thread(),
+                run: None,
+                page: PageRequest::default(),
+            },
+        )),
+        QueryReply::Conversation(ConversationReply::CommittedHistory(page_of(
+            vec![history_message("x".into()); 200],
+        ))),
     )
     .await;
     assert!(result.is_ok(), "{result:?}");
     let (_, result) = ask(
-        Query::ReadCommittedHistory(ReadCommittedHistory {
-            direction: Default::default(),
-            thread: thread(),
-            run: None,
-            page: PageRequest::default(),
-        }),
-        QueryReply::CommittedHistory(page_of(vec![history_message("x".repeat(16 * 1024))])),
+        Query::Conversation(ConversationQuery::ReadCommittedHistory(
+            ReadCommittedHistory {
+                direction: Default::default(),
+                thread: thread(),
+                run: None,
+                page: PageRequest::default(),
+            },
+        )),
+        QueryReply::Conversation(ConversationReply::CommittedHistory(page_of(vec![
+            history_message("x".repeat(16 * 1024)),
+        ]))),
     )
     .await;
     assert!(result.is_ok(), "{result:?}");
@@ -733,12 +752,14 @@ async fn replies_within_their_bounds_are_delivered() {
 #[tokio::test]
 async fn a_reply_that_breaks_its_bounds_is_refused_and_closes_the_connection() {
     let history = || {
-        Query::ReadCommittedHistory(ReadCommittedHistory {
-            direction: Default::default(),
-            thread: thread(),
-            run: None,
-            page: PageRequest::default(),
-        })
+        Query::Conversation(ConversationQuery::ReadCommittedHistory(
+            ReadCommittedHistory {
+                direction: Default::default(),
+                thread: thread(),
+                run: None,
+                page: PageRequest::default(),
+            },
+        ))
     };
     let max_chunk = WireLimits::default().max_body_chunk_bytes as usize;
     let cases = [
@@ -750,23 +771,29 @@ async fn a_reply_that_breaks_its_bounds_is_refused_and_closes_the_connection() {
         (
             "page over 200 items",
             history(),
-            QueryReply::CommittedHistory(page_of(vec![history_message("x".into()); 201])),
+            QueryReply::Conversation(ConversationReply::CommittedHistory(page_of(
+                vec![history_message("x".into()); 201],
+            ))),
         ),
         (
             "inline message over 16 KiB",
             history(),
-            QueryReply::CommittedHistory(page_of(vec![history_message("x".repeat(16 * 1024 + 1))])),
+            QueryReply::Conversation(ConversationReply::CommittedHistory(page_of(vec![
+                history_message("x".repeat(16 * 1024 + 1)),
+            ]))),
         ),
         (
             "inconsistent chunk offsets",
             read_body(65_536),
-            QueryReply::Body(workbench_protocol::views::BodyChunk {
-                body_id: BodyId::new("b").unwrap(),
-                offset: ByteOffset(0),
-                text: "abc".into(),
-                total_bytes: ByteOffset(2),
-                next_offset: None,
-            }),
+            QueryReply::Projection(ProjectionReply::Body(
+                workbench_protocol::views::BodyChunk {
+                    body_id: BodyId::new("b").unwrap(),
+                    offset: ByteOffset(0),
+                    text: "abc".into(),
+                    total_bytes: ByteOffset(2),
+                    next_offset: None,
+                },
+            )),
         ),
     ];
     for (name, query, reply) in cases {
@@ -898,13 +925,17 @@ async fn an_oversized_rejection_is_a_protocol_violation() {
 #[tokio::test]
 async fn a_question_answer_over_256_kib_is_refused_on_reply_and_the_limit_passes() {
     let list = || {
-        Query::ListQuestions(PendingQuery {
+        Query::Questions(QuestionsQuery::ListQuestions(PendingQuery {
             thread: None,
             pending_only: false,
             page: PageRequest::default(),
-        })
+        }))
     };
-    let reply = |text: String| QueryReply::Questions(page_of(vec![answered_question(text)]));
+    let reply = |text: String| {
+        QueryReply::Questions(QuestionsReply::Questions(page_of(vec![answered_question(
+            text,
+        )])))
+    };
     let (_, ok_result) = ask(list(), reply("x".repeat(256 * 1024))).await;
     assert!(ok_result.is_ok(), "{ok_result:?}");
     let (_, refused) = ask(list(), reply("x".repeat(256 * 1024 + 1))).await;

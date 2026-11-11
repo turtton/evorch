@@ -11,6 +11,12 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
+use workbench_protocol::namespaces::{
+    ApprovalsEvent, ApprovalsQuery, ApprovalsReply, ConversationEvent, ConversationQuery,
+    ConversationReply, ExecutionEvent, ExecutionQuery, ExecutionReply, LifecycleEvent,
+    LifecycleQuery, LifecycleReply, ProjectionEvent, ProjectionQuery, ProjectionReply,
+    QuestionsEvent, QuestionsQuery, QuestionsReply, WorkspaceEvent, WorkspaceQuery, WorkspaceReply,
+};
 use workbench_protocol::{
     envelope::Provenance,
     errors::{ErrorCode, WorkbenchError},
@@ -116,9 +122,9 @@ impl State {
                         subscription_id: s.id,
                         cursor,
                         caused_by_request_id: None,
-                        event: UiEvent::ResyncRequired {
+                        event: UiEvent::Projection(ProjectionEvent::ResyncRequired {
                             reason: ResyncReason::EpochChanged,
-                        },
+                        }),
                     },
                     limits,
                 );
@@ -306,41 +312,45 @@ impl Projection {
         let mut changes = Vec::new();
         for (id, value) in &next.threads {
             if state.models.threads.get(id) != Some(value) {
-                changes.push(UiEvent::ThreadChanged {
+                changes.push(UiEvent::Workspace(WorkspaceEvent::ThreadChanged {
                     thread: value.summary.clone(),
-                });
+                }));
             }
         }
         for (id, value) in &next.runs {
             if state.models.runs.get(id) != Some(value) {
-                changes.push(UiEvent::RunChanged { run: value.clone() });
+                changes.push(UiEvent::Execution(ExecutionEvent::RunChanged {
+                    run: value.clone(),
+                }));
             }
         }
         for (id, value) in &next.questions {
             if state.models.questions.get(id) != Some(value) {
-                changes.push(UiEvent::QuestionChanged {
+                changes.push(UiEvent::Questions(QuestionsEvent::QuestionChanged {
                     question: value.clone(),
-                });
+                }));
             }
         }
         for (id, value) in &next.approvals {
             if state.models.approvals.get(id) != Some(value) {
-                changes.push(UiEvent::ApprovalChanged {
+                changes.push(UiEvent::Approvals(ApprovalsEvent::ApprovalChanged {
                     approval: value.clone(),
-                });
+                }));
             }
         }
         for (id, value) in &next.receipts {
             if state.models.receipts.get(id) != Some(value) {
-                changes.push(UiEvent::InputReceiptChanged {
-                    receipt: value.clone(),
-                });
+                changes.push(UiEvent::Conversation(
+                    ConversationEvent::InputReceiptChanged {
+                        receipt: value.clone(),
+                    },
+                ));
             }
         }
         if state.models.status() != next.status() {
-            changes.push(UiEvent::CoreStatusChanged {
+            changes.push(UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged {
                 status: next.status(),
-            });
+            }));
         }
         // An old snapshot/replay/queued DTO must never resurrect a deleted
         // subject, or retain a question after its routing scope changed.
@@ -382,7 +392,10 @@ impl Projection {
             .bodies
             .changes(&self.runtime, &mut scanner, &runs, |message| {
                 if initialized && state.models.threads.contains_key(message.thread.as_str()) {
-                    state.publish(UiEvent::MessageCommitted { message }, self.limits);
+                    state.publish(
+                        UiEvent::Conversation(ConversationEvent::MessageCommitted { message }),
+                        self.limits,
+                    );
                 }
             });
         state.scanner = scanner;
@@ -403,109 +416,227 @@ impl Projection {
                 .or_insert_with(|| provenance.clone());
         }
     }
+    /// Read-only queries the projection answers. Each namespace has its own
+    /// reader; a namespace this projection does not serve (the host answers
+    /// lane management, command receipts and approval inputs itself, the
+    /// reserved namespaces have no operations) is refused.
     pub fn query(&self, query: &Query) -> Result<QueryReply, WorkbenchError> {
         query.validate(&Default::default())?;
-        if let Query::ReadSnapshot(q) = query {
-            return Ok(QueryReply::Snapshot(self.read_snapshot(q)?));
+        match query {
+            Query::Conversation(q) => self
+                .conversation_query(query, q)
+                .map(QueryReply::Conversation),
+            Query::Workspace(q) => self.workspace_query(query, q).map(QueryReply::Workspace),
+            Query::Execution(q) => self.execution_query(query, q).map(QueryReply::Execution),
+            Query::Questions(q) => self.questions_query(query, q).map(QueryReply::Questions),
+            Query::Approvals(q) => self.approvals_query(query, q).map(QueryReply::Approvals),
+            Query::Lifecycle(q) => self.lifecycle_query(q).map(QueryReply::Lifecycle),
+            Query::Projection(q) => self.projection_query(q).map(QueryReply::Projection),
+            Query::Lanes(_) => Err(queries::error(
+                ErrorCode::UnsupportedCapability,
+                "lane management belongs to the host ingress",
+            )),
+            Query::Settings(q) => match *q {},
+            Query::Auth(q) => match *q {},
+            Query::Mcp(q) => match *q {},
+            Query::Teams(q) => match *q {},
+            Query::Diagnostics(q) => match *q {},
+            Query::Memory(q) => match *q {},
+            Query::Evaluation(q) => match *q {},
+            Query::Improvement(q) => match *q {},
+            Query::PullRequests(q) => match *q {},
+            Query::Browser(q) => match *q {},
+            Query::Artifacts(q) => match *q {},
+            Query::Maintenance(q) => match *q {},
         }
-        if let Query::ReadBody(q) = query {
-            return Ok(QueryReply::Body(self.bodies.read(&self.runtime, q)?));
-        }
-        if let Query::ReadCommittedHistory(q) = query {
-            return Ok(QueryReply::CommittedHistory(self.bodies.history(
-                &self.runtime,
-                &self.pager,
-                q,
-            )?));
-        }
+    }
+
+    /// Run `read` on the models after bringing them up to date.
+    fn with_models<T>(
+        &self,
+        read: impl FnOnce(&Models) -> Result<T, WorkbenchError>,
+    ) -> Result<T, WorkbenchError> {
         let mut state = self.state.lock().unwrap();
         self.refresh_locked(&mut state)?;
-        let m = &state.models;
-        macro_rules! page {
-            ($variant:ident, $values:expr, $request:expr) => {{
-                let values: Vec<_> = $values;
-                let mut key = query.clone();
-                // The cursor is excluded from the query identity.
-                match &mut key {
-                    Query::ListProjects(p) => p.cursor = None,
-                    Query::ListThreads(q) => q.page.cursor = None,
-                    Query::ListRuns(q) | Query::GetInputReceipts(q) => q.page.cursor = None,
-                    Query::ListQuestions(q) | Query::ListApprovals(q) => q.page.cursor = None,
-                    _ => {}
-                }
-                QueryReply::$variant(self.pager.page(
-                    &serde_json::to_string(&key).unwrap(),
-                    &values,
-                    $request,
-                    queries::revision(&values),
-                )?)
-            }};
+        read(&state.models)
+    }
+
+    /// One page of `values`, identified by `query` with its cursor left out.
+    fn page_of<T: Clone + serde::Serialize>(
+        &self,
+        query: &Query,
+        values: Vec<T>,
+        request: &PageRequest,
+    ) -> Result<Page<T>, WorkbenchError> {
+        let mut key = query.clone();
+        match &mut key {
+            Query::Workspace(WorkspaceQuery::ListProjects(p)) => p.cursor = None,
+            Query::Workspace(WorkspaceQuery::ListThreads(q)) => q.page.cursor = None,
+            Query::Execution(ExecutionQuery::ListRuns(q))
+            | Query::Conversation(ConversationQuery::GetInputReceipts(q)) => q.page.cursor = None,
+            Query::Questions(QuestionsQuery::ListQuestions(q))
+            | Query::Approvals(ApprovalsQuery::ListApprovals(q)) => q.page.cursor = None,
+            _ => {}
         }
-        Ok(match query {
-            Query::GetCoreStatus => QueryReply::CoreStatus(m.status()),
-            Query::ListProjects(p) => page!(Projects, m.projects.values().cloned().collect(), p),
-            Query::ListThreads(q) => page!(
-                Threads,
-                m.threads
-                    .values()
-                    .filter(|t| t.summary.project == q.project)
-                    .map(|t| t.summary.clone())
-                    .collect(),
-                &q.page
-            ),
-            Query::GetThread(q) => QueryReply::Thread(
-                m.threads
-                    .get(q.thread.as_str())
-                    .cloned()
-                    .ok_or_else(|| queries::error(ErrorCode::NotFound, "unknown thread"))?,
-            ),
-            Query::ListRuns(q) => page!(
-                Runs,
-                m.runs
-                    .values()
-                    .filter(|r| r.thread == q.thread)
-                    .cloned()
-                    .collect(),
-                &q.page
-            ),
-            Query::ListQuestions(q) => page!(
-                Questions,
-                m.questions
-                    .values()
-                    .filter(
-                        |v| q.thread.as_ref().is_none_or(|t| *t == v.requester.thread)
-                            && (!q.pending_only || v.answer.is_none())
-                    )
-                    .cloned()
-                    .collect(),
-                &q.page
-            ),
-            Query::ListApprovals(q) => page!(
-                Approvals,
-                m.approvals
-                    .values()
-                    .filter(|v| q.thread.as_ref().is_none_or(|t| *t == v.thread)
-                        && (!q.pending_only || v.state == ApprovalState::Pending))
-                    .cloned()
-                    .collect(),
-                &q.page
-            ),
-            Query::GetInputReceipts(q) => page!(
-                InputReceipts,
-                m.receipts
-                    .values()
-                    .filter(|r| r.thread == q.thread)
-                    .cloned()
-                    .collect(),
-                &q.page
-            ),
-            _ => {
-                return Err(queries::error(
-                    ErrorCode::UnsupportedCapability,
-                    "command receipt belongs to its ingress session",
-                ));
-            }
+        self.pager.page(
+            &serde_json::to_string(&key).unwrap(),
+            &values,
+            request,
+            queries::revision(&values),
+        )
+    }
+
+    fn conversation_query(
+        &self,
+        query: &Query,
+        q: &ConversationQuery,
+    ) -> Result<ConversationReply, WorkbenchError> {
+        match q {
+            ConversationQuery::ReadCommittedHistory(q) => Ok(ConversationReply::CommittedHistory(
+                self.bodies.history(&self.runtime, &self.pager, q)?,
+            )),
+            ConversationQuery::GetInputReceipts(q) => self.with_models(|m| {
+                Ok(ConversationReply::InputReceipts(
+                    self.page_of(
+                        query,
+                        m.receipts
+                            .values()
+                            .filter(|r| r.thread == q.thread)
+                            .cloned()
+                            .collect(),
+                        &q.page,
+                    )?,
+                ))
+            }),
+        }
+    }
+
+    fn workspace_query(
+        &self,
+        query: &Query,
+        q: &WorkspaceQuery,
+    ) -> Result<WorkspaceReply, WorkbenchError> {
+        self.with_models(|m| {
+            Ok(match q {
+                WorkspaceQuery::ListProjects(p) => WorkspaceReply::Projects(self.page_of(
+                    query,
+                    m.projects.values().cloned().collect(),
+                    p,
+                )?),
+                WorkspaceQuery::ListThreads(q) => WorkspaceReply::Threads(
+                    self.page_of(
+                        query,
+                        m.threads
+                            .values()
+                            .filter(|t| t.summary.project == q.project)
+                            .map(|t| t.summary.clone())
+                            .collect(),
+                        &q.page,
+                    )?,
+                ),
+                WorkspaceQuery::GetThread(q) => WorkspaceReply::Thread(
+                    m.threads
+                        .get(q.thread.as_str())
+                        .cloned()
+                        .ok_or_else(|| queries::error(ErrorCode::NotFound, "unknown thread"))?,
+                ),
+            })
         })
+    }
+
+    fn execution_query(
+        &self,
+        query: &Query,
+        q: &ExecutionQuery,
+    ) -> Result<ExecutionReply, WorkbenchError> {
+        let ExecutionQuery::ListRuns(q) = q;
+        self.with_models(|m| {
+            Ok(ExecutionReply::Runs(
+                self.page_of(
+                    query,
+                    m.runs
+                        .values()
+                        .filter(|r| r.thread == q.thread)
+                        .cloned()
+                        .collect(),
+                    &q.page,
+                )?,
+            ))
+        })
+    }
+
+    fn questions_query(
+        &self,
+        query: &Query,
+        q: &QuestionsQuery,
+    ) -> Result<QuestionsReply, WorkbenchError> {
+        let QuestionsQuery::ListQuestions(q) = q;
+        self.with_models(|m| {
+            Ok(QuestionsReply::Questions(
+                self.page_of(
+                    query,
+                    m.questions
+                        .values()
+                        .filter(|v| {
+                            q.thread.as_ref().is_none_or(|t| *t == v.requester.thread)
+                                && (!q.pending_only || v.answer.is_none())
+                        })
+                        .cloned()
+                        .collect(),
+                    &q.page,
+                )?,
+            ))
+        })
+    }
+
+    /// The approval input is read by the host, which owns the registry check.
+    fn approvals_query(
+        &self,
+        query: &Query,
+        q: &ApprovalsQuery,
+    ) -> Result<ApprovalsReply, WorkbenchError> {
+        match q {
+            ApprovalsQuery::ListApprovals(q) => self.with_models(|m| {
+                Ok(ApprovalsReply::Approvals(
+                    self.page_of(
+                        query,
+                        m.approvals
+                            .values()
+                            .filter(|v| {
+                                q.thread.as_ref().is_none_or(|t| *t == v.thread)
+                                    && (!q.pending_only || v.state == ApprovalState::Pending)
+                            })
+                            .cloned()
+                            .collect(),
+                        &q.page,
+                    )?,
+                ))
+            }),
+            ApprovalsQuery::GetApprovalInput(_) => Err(queries::error(
+                ErrorCode::UnsupportedCapability,
+                "approval input belongs to the host ingress",
+            )),
+        }
+    }
+
+    fn lifecycle_query(&self, q: &LifecycleQuery) -> Result<LifecycleReply, WorkbenchError> {
+        let LifecycleQuery::GetCoreStatus = q;
+        self.with_models(|m| Ok(LifecycleReply::CoreStatus(m.status())))
+    }
+
+    fn projection_query(&self, q: &ProjectionQuery) -> Result<ProjectionReply, WorkbenchError> {
+        match q {
+            ProjectionQuery::ReadSnapshot(q) => {
+                Ok(ProjectionReply::Snapshot(self.read_snapshot(q)?))
+            }
+            ProjectionQuery::ReadBody(q) => {
+                Ok(ProjectionReply::Body(self.bodies.read(&self.runtime, q)?))
+            }
+            ProjectionQuery::GetCommandReceipt { .. } => Err(queries::error(
+                ErrorCode::UnsupportedCapability,
+                "command receipt belongs to its ingress session",
+            )),
+        }
     }
     pub fn subscribe_with_snapshot(
         &self,
@@ -617,13 +748,13 @@ impl Projection {
                     subscription_id: subscriber.id.clone(),
                     cursor: terminal_cursor,
                     caused_by_request_id: None,
-                    event: UiEvent::ResyncRequired {
+                    event: UiEvent::Projection(ProjectionEvent::ResyncRequired {
                         reason: if after.core_epoch != cursor.core_epoch {
                             ResyncReason::EpochChanged
                         } else {
                             ResyncReason::CursorTooOld
                         },
-                    },
+                    }),
                 },
                 self.limits,
             );
@@ -694,9 +825,9 @@ impl Projection {
                         subscription_id: s.id,
                         cursor,
                         caused_by_request_id: None,
-                        event: UiEvent::SubscriptionClosed {
+                        event: UiEvent::Projection(ProjectionEvent::SubscriptionClosed {
                             reason: CloseReason::Unsubscribed,
-                        },
+                        }),
                     },
                     self.limits,
                 );
@@ -718,9 +849,9 @@ impl Drop for Projection {
                         subscription_id: subscriber.id,
                         cursor,
                         caused_by_request_id: None,
-                        event: UiEvent::SubscriptionClosed {
+                        event: UiEvent::Projection(ProjectionEvent::SubscriptionClosed {
                             reason: CloseReason::CoreShuttingDown,
-                        },
+                        }),
                     },
                     self.limits,
                 );
@@ -730,24 +861,37 @@ impl Drop for Projection {
 }
 fn thread_of(event: &UiEvent) -> Option<&ThreadId> {
     match event {
-        UiEvent::ThreadChanged { thread } => Some(&thread.id),
-        UiEvent::RunChanged { run } => Some(&run.thread),
-        UiEvent::QuestionChanged { question } => Some(&question.requester.thread),
-        UiEvent::ApprovalChanged { approval } => Some(&approval.thread),
-        UiEvent::InputReceiptChanged { receipt } => Some(&receipt.thread),
-        UiEvent::MessageCommitted { message } => Some(&message.thread),
+        UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) => Some(&thread.id),
+        UiEvent::Execution(ExecutionEvent::RunChanged { run }) => Some(&run.thread),
+        UiEvent::Questions(QuestionsEvent::QuestionChanged { question }) => {
+            Some(&question.requester.thread)
+        }
+        UiEvent::Approvals(ApprovalsEvent::ApprovalChanged { approval }) => Some(&approval.thread),
+        UiEvent::Conversation(ConversationEvent::InputReceiptChanged { receipt }) => {
+            Some(&receipt.thread)
+        }
+        UiEvent::Conversation(ConversationEvent::MessageCommitted { message }) => {
+            Some(&message.thread)
+        }
         _ => None,
     }
 }
 fn matches_scope(models: &Models, scope: &SubscriptionScope, event: &UiEvent) -> bool {
-    if event.ends_subscription() || matches!(event, UiEvent::CoreStatusChanged { .. }) {
+    if event.ends_subscription()
+        || matches!(
+            event,
+            UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged { .. })
+        )
+    {
         return true;
     }
     let routed = match event {
-        UiEvent::QuestionChanged { question } => match &question.target {
-            QuestionTarget::Lead { lead_thread, .. } => Some(lead_thread),
-            _ => None,
-        },
+        UiEvent::Questions(QuestionsEvent::QuestionChanged { question }) => {
+            match &question.target {
+                QuestionTarget::Lead { lead_thread, .. } => Some(lead_thread),
+                _ => None,
+            }
+        }
         _ => None,
     };
     let threads = [thread_of(event), routed];
@@ -787,9 +931,9 @@ fn snapshot_items(models: &Models, scope: &SubscriptionScope) -> Vec<SnapshotIte
                 matches_scope(
                     models,
                     scope,
-                    &UiEvent::ThreadChanged {
+                    &UiEvent::Workspace(WorkspaceEvent::ThreadChanged {
                         thread: t.summary.clone(),
-                    },
+                    }),
                 )
             })
             .map(|t| SnapshotItem::Thread(t.summary.clone())),
@@ -798,7 +942,13 @@ fn snapshot_items(models: &Models, scope: &SubscriptionScope) -> Vec<SnapshotIte
         models
             .runs
             .values()
-            .filter(|r| matches_scope(models, scope, &UiEvent::RunChanged { run: (*r).clone() }))
+            .filter(|r| {
+                matches_scope(
+                    models,
+                    scope,
+                    &UiEvent::Execution(ExecutionEvent::RunChanged { run: (*r).clone() }),
+                )
+            })
             .cloned()
             .map(SnapshotItem::Run),
     );
@@ -811,9 +961,9 @@ fn snapshot_items(models: &Models, scope: &SubscriptionScope) -> Vec<SnapshotIte
                     && matches_scope(
                         models,
                         scope,
-                        &UiEvent::QuestionChanged {
+                        &UiEvent::Questions(QuestionsEvent::QuestionChanged {
                             question: (*q).clone(),
-                        },
+                        }),
                     )
             })
             .cloned()
@@ -828,9 +978,9 @@ fn snapshot_items(models: &Models, scope: &SubscriptionScope) -> Vec<SnapshotIte
                     && matches_scope(
                         models,
                         scope,
-                        &UiEvent::ApprovalChanged {
+                        &UiEvent::Approvals(ApprovalsEvent::ApprovalChanged {
                             approval: (*a).clone(),
-                        },
+                        }),
                     )
             })
             .cloned()

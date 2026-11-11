@@ -8,10 +8,11 @@ use workbench_protocol::envelope::*;
 use workbench_protocol::events::*;
 use workbench_protocol::handshake::WireLimits;
 use workbench_protocol::ids::*;
+use workbench_protocol::namespaces::{ProjectionEvent, QuestionsEvent, WorkspaceEvent};
 
 fn title(envelope: &EventEnvelope) -> &str {
     match &envelope.event {
-        UiEvent::ThreadChanged { thread } => &thread.title,
+        UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) => &thread.title,
         other => panic!("not a thread event: {other:?}"),
     }
 }
@@ -53,9 +54,9 @@ async fn an_event_from_another_epoch_stops_the_stream_with_resync_required() {
     let last = sub.next().await.unwrap();
     assert_eq!(
         last.event,
-        UiEvent::ResyncRequired {
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::EpochChanged
-        }
+        })
     );
     assert_eq!(
         last.cursor,
@@ -98,9 +99,9 @@ async fn a_slow_subscriber_gets_resync_required_and_is_stopped() {
     let last = sub.next().await.unwrap();
     assert_eq!(
         last.event,
-        UiEvent::ResyncRequired {
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::SlowSubscriber
-        }
+        })
     );
     assert_eq!(sub.next().await, None);
     assert_eq!(sub.end(), Some(SubscriptionEnd::SlowSubscriber));
@@ -128,9 +129,9 @@ async fn a_subscriber_over_its_byte_budget_is_slow_too() {
     assert_eq!(delivered, 2, "8192 bytes hold two 3000-byte events");
     assert_eq!(
         last.unwrap().event,
-        UiEvent::ResyncRequired {
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::SlowSubscriber
-        }
+        })
     );
 }
 
@@ -158,18 +159,18 @@ async fn a_resync_from_the_core_is_delivered_and_ends_the_subscription() {
     server.event(event(
         "sub-1",
         cursor(7, 1),
-        UiEvent::ResyncRequired {
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::CursorTooOld,
-        },
+        }),
     ));
     server.event(thread_changed("sub-1", cursor(7, 2), "after the end"));
 
     let last = sub.next().await.unwrap();
     assert_eq!(
         last.event,
-        UiEvent::ResyncRequired {
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::CursorTooOld
-        }
+        })
     );
     assert_eq!(sub.next().await, None);
     assert_eq!(sub.end(), Some(SubscriptionEnd::EndedByCore));
@@ -433,9 +434,9 @@ async fn a_cursor_the_core_cannot_replay_falls_back_to_a_snapshot_in_the_new_epo
     assert_eq!(title(&sub.next().await.unwrap()), "after snapshot");
     assert_eq!(
         sub.next().await.unwrap().event,
-        UiEvent::ResyncRequired {
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::EpochChanged
-        }
+        })
     );
     assert_eq!(sub.next().await, None);
 }
@@ -506,13 +507,13 @@ async fn a_question_answer_over_256_kib_is_refused_in_a_snapshot_and_in_an_event
     server.event(event(
         "sub-1",
         cursor(7, 1),
-        UiEvent::QuestionChanged {
+        UiEvent::Questions(QuestionsEvent::QuestionChanged {
             question: answered_question("x".repeat(256 * 1024)),
-        },
+        }),
     ));
     assert!(matches!(
         sub.next().await.unwrap().event,
-        UiEvent::QuestionChanged { .. }
+        UiEvent::Questions(QuestionsEvent::QuestionChanged { .. })
     ));
 
     // One byte more is refused: on the snapshot...
@@ -545,9 +546,9 @@ async fn a_question_answer_over_256_kib_is_refused_in_a_snapshot_and_in_an_event
     server.event(event(
         "sub-1",
         cursor(7, 1),
-        UiEvent::QuestionChanged {
+        UiEvent::Questions(QuestionsEvent::QuestionChanged {
             question: answered_question("x".repeat(256 * 1024 + 1)),
-        },
+        }),
     ));
     assert!(matches!(
         client.closed().await,
@@ -575,13 +576,13 @@ async fn ended_then_reused(
     server.event(event(
         "sub-1",
         cursor(7, 1),
-        UiEvent::SubscriptionClosed {
+        UiEvent::Projection(ProjectionEvent::SubscriptionClosed {
             reason: CloseReason::ScopeRemoved,
-        },
+        }),
     ));
     assert!(matches!(
         old.next().await.unwrap().event,
-        UiEvent::SubscriptionClosed { .. }
+        UiEvent::Projection(ProjectionEvent::SubscriptionClosed { .. })
     ));
     assert_eq!(old.next().await, None);
     assert_eq!(old.end(), Some(SubscriptionEnd::EndedByCore));

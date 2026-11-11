@@ -22,10 +22,12 @@ import {
   compareDecimal,
   envelope,
   expectQuery,
+  flattenEvent,
   formatCursor,
   outcomeUnknown,
   parseCursor,
   parseReply,
+  query,
   uuidFromBytes,
 } from "../../assets/js/wire.js";
 
@@ -60,16 +62,40 @@ test("request envelope matches the golden shape", () => {
     request_id: "req-1",
     session_id: "sess-1",
     kind: "command",
-    payload: { type: "stop_chat", payload: { thread: "thr-1" } },
+    payload: { type: "execution", payload: { type: "stop_chat", payload: { thread: "thr-1" } } },
   });
-  eq(command("get_core_status").payload, { type: "get_core_status" });
+  eq(query("get_core_status").payload, { type: "lifecycle", payload: { type: "get_core_status" } });
+  eq(command("send_chat", { text: "hi" }).payload, {
+    type: "conversation",
+    payload: { type: "send_chat", payload: { text: "hi" } },
+  });
+  // An operation the protocol does not name has no namespace to travel in.
+  let refused = false;
+  try {
+    command("launch_missiles");
+  } catch {
+    refused = true;
+  }
+  assert(refused, "an unknown operation is refused before it is sent");
+});
+
+test("events are read from the namespaced wire form only", () => {
+  eq(flattenEvent({ type: "workspace", payload: { type: "thread_changed", payload: { x: 1 } } }), {
+    type: "thread_changed",
+    payload: { x: 1 },
+  });
+  eq(flattenEvent({ type: "thread_changed", payload: {} }).type, "unknown_event");
+  eq(flattenEvent(undefined).type, "unknown_event");
 });
 
 test("replies parse into success, error or transport failure", () => {
   const ok = parseReply({
     request_id: "req-1",
     status: "success",
-    payload: { type: "query", payload: { type: "threads", payload: { items: [], snapshot_revision: "1" } } },
+    payload: {
+      type: "query",
+      payload: { type: "workspace", payload: { type: "threads", payload: { items: [], snapshot_revision: "1" } } },
+    },
   });
   assert(ok.ok);
   eq(expectQuery(ok, "threads").value.items, []);
@@ -837,10 +863,11 @@ function harness() {
   return { stream, log, last, fire, pending };
 }
 
+const EVENT_NAMESPACE = { thread_changed: "workspace", resync_required: "projection", subscription_closed: "projection" };
 const ui = (sequence, type = "thread_changed", epoch = "7", payload = {}) => ({
   subscription_id: "1",
   cursor: { core_epoch: epoch, sequence: String(sequence) },
-  event: { type, payload },
+  event: { type: EVENT_NAMESPACE[type], payload: { type, payload } },
 });
 
 test("the stream applies new events and skips duplicates", () => {
@@ -952,7 +979,10 @@ const receipt = (state) => (body) => ({
   status: "success",
   payload: {
     type: "query",
-    payload: { type: "command_receipt", payload: { request_id: body.payload.payload.request_id, state } },
+    payload: {
+      type: "projection",
+      payload: { type: "command_receipt", payload: { request_id: body.payload.payload.payload.request_id, state } },
+    },
   },
 });
 
@@ -963,9 +993,12 @@ test("a lost command is checked before it is sent again with the same ids", asyn
   const result = await api.sendCommand(body, { requestId: "req-1" });
   assert(result.ok);
   eq(seen.map((r) => r.kind), ["command", "query", "command"]);
-  eq(seen[1].payload, { type: "get_command_receipt", payload: { request_id: "req-1" } });
+  eq(seen[1].payload, {
+    type: "projection",
+    payload: { type: "get_command_receipt", payload: { request_id: "req-1" } },
+  });
   eq(seen[2].request_id, "req-1");
-  eq(seen[2].payload.payload.submission_id, "sub-1");
+  eq(seen[2].payload.payload.payload.submission_id, "sub-1");
   eq(seen[0].session_id, "s-1");
 });
 
