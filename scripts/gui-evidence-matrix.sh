@@ -4,7 +4,8 @@
 # Usage: scripts/gui-evidence-matrix.sh [OUT]
 # HEADLESS_CAPTURE_BIN  a built headless_capture binary. Unset: build it once with
 #                       cargo and use it from ${CARGO_TARGET_DIR:-target}/debug.
-# GUI_EVIDENCE_JOBS     captures to run at once (default: the CPU count, at most 4).
+# GUI_EVIDENCE_JOBS     captures to run at once, a positive integer (default: the CPU
+#                       count, at most 4).
 #                       Every capture writes its own PNG and uses its own temporary
 #                       directories, so the order does not matter.
 set -euo pipefail
@@ -19,15 +20,31 @@ if [[ -z "${HEADLESS_CAPTURE_BIN:-}" ]]; then
 fi
 [[ -x "$HEADLESS_CAPTURE_BIN" ]] || { echo "headless_capture is not executable: $HEADLESS_CAPTURE_BIN" >&2; exit 1; }
 jobs_max=${GUI_EVIDENCE_JOBS:-$(( $(nproc) < 4 ? $(nproc) : 4 ))}
+[[ "$jobs_max" =~ ^[1-9][0-9]*$ ]] || { echo "GUI_EVIDENCE_JOBS must be a positive integer: $jobs_max" >&2; exit 2; }
 
+# Every capture's pid is kept and waited for exactly once, so no exit status is
+# lost, including that of a capture that already finished when it is reached.
+# At most $jobs_max run at once: starting capture N first waits for capture
+# N - $jobs_max, so the oldest unwaited captures are always the running ones.
+pids=()
+labels=()
 capture_failed=0
-# Start one capture in the background, keeping at most $jobs_max running. A failed
-# capture is remembered and fails the script once every capture has finished.
+reap() { # reap <index>
+    local status=0
+    wait "${pids[$1]}" || status=$?
+    if (( status != 0 )); then
+        echo "headless_capture failed with status $status: ${labels[$1]}" >&2
+        capture_failed=1
+    fi
+}
 capture() {
-    while (( $(jobs -rp | wc -l) >= jobs_max )); do
-        wait -n || capture_failed=1
-    done
+    local n=${#pids[@]}
+    if (( n >= jobs_max )); then
+        reap $(( n - jobs_max ))
+    fi
     "$HEADLESS_CAPTURE_BIN" "$@" &
+    pids+=("$!")
+    labels+=("$*")
 }
 
 for theme in graphite tokyo-night high-contrast; do
@@ -83,8 +100,8 @@ for theme in graphite tokyo-night high-contrast; do
     done
 done
 
-while (( $(jobs -rp | wc -l) > 0 )); do
-    wait -n || capture_failed=1
+for (( i = ${#pids[@]} > jobs_max ? ${#pids[@]} - jobs_max : 0; i < ${#pids[@]}; i++ )); do
+    reap "$i"
 done
 if (( capture_failed )); then
     echo 'At least one headless_capture run failed.' >&2

@@ -104,8 +104,10 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 `pull_request` の CI が成功すると、L4 の画面証跡から全体画面、Conversation、Tasks、
 Provider 設定、承認待ち、高コントラストの 6 枚を `gui-pr-preview` artifact に保存する。
 既定ブランチの `GUI PR evidence` workflow がその artifact と PR の head SHA を検証し、
-`gh pr comment --attach` で PR に画像を投稿する。全証跡は従来どおり
-`gui-evidence` artifact に残る。成功した PR の更新ごとに新しいコメントを投稿する。
+`gh pr comment --attach` で PR に画像を投稿する。証跡は 2 つの artifact に分かれて残る。
+`gui-evidence` (`gui-evidence` job) は証跡マトリクス全件と native / Wayland 検査の証跡、
+`gui-test-evidence` (`offscreen-gate` job) は ignored テストが書き出す PNG と
+model_metadata の証跡である。成功した PR の更新ごとに新しいコメントを投稿する。
 
 画像添付には、対象リポジトリへの書き込み権限があるユーザーの OAuth token または
 personal access token を Actions secret `GUI_EVIDENCE_TOKEN` に設定する必要がある。

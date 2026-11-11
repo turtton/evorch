@@ -62,6 +62,12 @@ jobs:
       # that Cargo.lock binds.
       - name: CEF pin consistency
         run: scripts/tests/test_setup_cef_pin.sh
+      # The cached CEF extraction is only used when it matches the pinned digest,
+      # and the evidence matrix must fail when any capture fails.
+      - name: CEF cache digest and GUI evidence matrix scripts
+        run: |
+          scripts/tests/test_cef_tree_digest.sh
+          scripts/tests/test_gui_evidence_matrix.sh
       # ADR 0045 §11: workbench-protocol stays free of workspace crates and
       # workbench-client depends only on it. gui and evorch may not gain
       # workspace dependencies beyond scripts/workbench-boundary-allowlist.txt.

@@ -10,6 +10,9 @@ value() { sed -n "s/^$1='\\(.*\\)'\$/\\1/p" scripts/setup-cef.sh; }
 archive=$(value archive)
 hash=$(value hash)
 sha1=$(value sha1)
+tree_sha256=$(value tree_sha256)
+[[ "$tree_sha256" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "setup-cef.sh must pin tree_sha256 (scripts/setup-cef.sh --print-tree-digest)" >&2; exit 1; }
 for item in "$archive" "$hash" "$sha1"; do
   [[ -n "$item" ]] || { echo "setup-cef.sh pin is missing" >&2; exit 1; }
   grep -qF -- "$item" flake.nix \
