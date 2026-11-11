@@ -95,6 +95,57 @@ fn exclusive_lock(path: &Path) -> rusqlite::Connection {
     connection
 }
 
+#[test]
+fn generation_guards_share_a_snapshot_when_a_writer_is_pending() {
+    let f = fixture();
+    let mut second = f.permit.clone();
+    second.thread_id = "thread-2".into();
+    let owner = ThreadOwner::new(second.thread_id.clone(), second.lease.clone());
+    Registry::open_existing(&f.path)
+        .unwrap()
+        .start(&owner)
+        .unwrap();
+
+    let mut guard = f.permit.mutation_guard().unwrap();
+    let writer = rusqlite::Connection::open(&f.path).unwrap();
+    writer.busy_timeout(Duration::ZERO).unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE thread_owners SET state = state")
+        .unwrap();
+    let blocked = writer.execute_batch("COMMIT").unwrap_err();
+    assert_eq!(
+        blocked.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy)
+    );
+    // COMMIT is now PENDING behind our first reader. A second connection
+    // cannot read until that first reader drops -- waiting/retrying deadlocks.
+    assert!(second.try_mutation_guard().unwrap().is_none());
+    guard.guard_generation(&second).expect("same snapshot");
+    let mut stale = second.clone();
+    stale.lease.generation += 1;
+    assert!(guard.guard_generation(&stale).unwrap_err().is_fenced());
+    drop(guard);
+    writer.execute_batch("COMMIT").unwrap();
+    assert!(matches!(
+        OwnerPermit::mutation_guards(&[f.permit.clone(), stale]),
+        Err(error) if error.is_fenced()
+    ));
+    let other = fixture();
+    assert_eq!(
+        OwnerPermit::mutation_guards(&[f.permit.clone(), other.permit])
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        OwnerPermit::mutation_guards(&[f.permit, second])
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(OwnerPermit::mutation_guards(&[]).unwrap().is_empty());
+}
+
 #[derive(Clone, Default)]
 struct Records(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
 

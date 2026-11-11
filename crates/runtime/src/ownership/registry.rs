@@ -212,19 +212,23 @@ impl Registry {
         }
     }
 
-    /// Begin the read transaction kept until this registry is dropped.
+    /// Validate a permit in the read transaction kept until this registry is
+    /// dropped. Further permits use that same snapshot: opening another reader
+    /// while a writer waits to commit this reader can deadlock behind PENDING.
     pub fn guard_generation(&mut self, permit: &super::OwnerPermit) -> Result<(), RegistryError> {
         let started = Instant::now();
         let site = self.site(DbOperation::Guard, &permit.thread_id, started, None);
-        self.connection
-            .execute_batch("BEGIN DEFERRED")
-            .map_err(|error| site.sql(DbPhase::Begin, error))?;
+        if self.guard.is_none() {
+            self.connection
+                .execute_batch("BEGIN DEFERRED")
+                .map_err(|error| site.sql(DbPhase::Begin, error))?;
+        }
         let owner = self.read_owner(&site)?;
         owner.validate(&permit.lease)?;
         if owner.state == super::OwnerState::Released {
             return Err(OwnershipError::Fenced.into());
         }
-        self.guard = Some(GuardHold {
+        self.guard.get_or_insert_with(|| GuardHold {
             thread_id: permit.thread_id.clone(),
             generation: permit.lease.generation,
             since: Instant::now(),

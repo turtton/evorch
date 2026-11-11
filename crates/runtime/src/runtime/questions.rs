@@ -413,6 +413,19 @@ impl AgentRuntime {
         id: &str,
         answer: &str,
     ) -> Result<AnswerOutcome, String> {
+        self.answer_user_question_if_pending_from_host(id, answer, None)
+    }
+
+    /// Like [`Self::answer_user_question_if_pending`], also fencing the submitting
+    /// host when the requester is offline. Caller and recipients share a single
+    /// generation snapshot per ownership registry; callers must not hold a
+    /// separate registry read guard around this operation.
+    pub fn answer_user_question_if_pending_from_host(
+        &self,
+        id: &str,
+        answer: &str,
+        caller: Option<&crate::ownership::OwnerPermit>,
+    ) -> Result<AnswerOutcome, String> {
         self.answer_question_with_mode(
             id,
             answer,
@@ -420,6 +433,7 @@ impl AgentRuntime {
                 channel: Default::default(),
             },
             AnswerMode::FirstOnly,
+            caller,
         )
     }
 
@@ -429,7 +443,7 @@ impl AgentRuntime {
         answer: &str,
         origin: AnswerOrigin,
     ) -> Result<UserQuestion, String> {
-        match self.answer_question_with_mode(id, answer, origin, AnswerMode::Idempotent)? {
+        match self.answer_question_with_mode(id, answer, origin, AnswerMode::Idempotent, None)? {
             AnswerOutcome::Recorded(question) => Ok(*question),
             AnswerOutcome::AlreadyAnswered => Err("question already answered".into()),
         }
@@ -441,6 +455,7 @@ impl AgentRuntime {
         answer: &str,
         origin: AnswerOrigin,
         mode: AnswerMode,
+        caller: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<AnswerOutcome, String> {
         // Only a host answer is the user's word and becomes review evidence; a
         // parent agent's answer never does, whatever it relays.
@@ -460,7 +475,7 @@ impl AgentRuntime {
                 .user_question_recipients(id)
                 .map_err(|e| e.to_string())?,
         )?;
-        let mut permits = Vec::new();
+        let mut permits: Vec<_> = caller.cloned().into_iter().collect();
         for recipient in &recipients {
             let run = crate::meta::parse_run_id(recipient)?;
             if let Ok(entry) = self.entry(run)
@@ -480,11 +495,8 @@ impl AgentRuntime {
                 permits.push(permit);
             }
         }
-        let guards = permits
-            .iter()
-            .map(|permit| permit.mutation_guard())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
+        let guards =
+            crate::ownership::OwnerPermit::mutation_guards(&permits).map_err(|e| e.to_string())?;
         // Serialize host evidence writes and resync with the same map fence as chat.
         let reviews = self
             .shared

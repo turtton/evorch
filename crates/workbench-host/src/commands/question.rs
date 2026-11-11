@@ -53,26 +53,13 @@ impl CommandService {
                 reason: runtime::ownership::OwnershipError::Fenced.to_string(),
             }];
         }
-        // Offline requesters have no live permit for the runtime to guard.
-        // Keep the submitting host's generation stable through durable storage.
-        let caller_guard = match permit.as_ref().map(|p| p.mutation_guard()).transpose() {
-            Ok(guard) => guard,
-            Err(error) => {
-                return vec![HostEvent::CommandRejected {
-                    kind: RejectKind::Fenced,
-                    reason: error.to_string(),
-                }];
-            }
-        };
-        if let Some(previous) = &question.answer {
-            return repeated_answer(question_id, previous == &answer);
-        }
         // The storage write decides who answered first, so two answers that arrive
         // together cannot both believe they saved it.
-        let question = match self
-            .runtime
-            .answer_user_question_if_pending(&question_id, &answer)
-        {
+        let question = match self.runtime.answer_user_question_if_pending_from_host(
+            &question_id,
+            &answer,
+            permit.as_ref(),
+        ) {
             Ok(AnswerOutcome::Recorded(question)) => *question,
             Ok(AnswerOutcome::AlreadyAnswered) => {
                 let same = matches!(
@@ -88,8 +75,6 @@ impl CommandService {
                 }];
             }
         };
-        // Resumption writes the ownership registry, so release its read guard first.
-        drop(caller_guard);
         let saved = HostEvent::UserAnswerSaved {
             question_id: question_id.clone(),
             newly_saved: true,
