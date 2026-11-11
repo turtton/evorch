@@ -14,9 +14,10 @@ set -euo pipefail
 dir="${1:?usage: cef-tree-digest.sh <dir>}"
 [[ -d "$dir" ]] || { echo "cef-tree-digest: $dir is not a directory" >&2; exit 2; }
 cd "$dir"
-# The line format below cannot represent these names unambiguously.
-if [[ -n "$(find . -name $'*\n*' -print -quit)" ]]; then
-  echo "cef-tree-digest: a path under $dir contains a newline" >&2
+# The line format below cannot represent these names or symlink targets
+# unambiguously.
+if [[ -n "$(find . \( -name $'*\n*' -o -lname $'*\n*' \) -print -quit)" ]]; then
+  echo "cef-tree-digest: a path or symlink target under $dir contains a newline" >&2
   exit 1
 fi
 {

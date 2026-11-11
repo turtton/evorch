@@ -51,6 +51,20 @@ expect_changed "added executable bit" chmod +x Release/libcef.so
 expect_changed "removed executable bit" chmod -x Release/tool
 expect_changed "added empty directory" mkdir include/empty
 
+# Names the digest's line format cannot represent are refused, not hashed.
+for what in file link-target; do
+  make_tree "$tree"
+  if [[ "$what" == file ]]; then
+    : > "$tree/include/$(printf 'a\nb')"
+  else
+    ln -s "$(printf 'a\nb')" "$tree/Release/newline.link"
+  fi
+  if "$digest" "$tree" > /dev/null 2>&1; then
+    echo "digest accepted a newline in a $what" >&2
+    exit 1
+  fi
+done
+
 # A cache that does not match the pin is discarded and never used.
 mkdir "$work/bin"
 printf '#!/bin/sh\nexit 22\n' > "$work/bin/curl"

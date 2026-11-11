@@ -35,9 +35,10 @@ for jobs in 1 4; do
 done
 
 # Captures that fail at once, so they are finished when the script reaches them:
-# the first ones started, a middle one and the last ones.
-for pattern in 'empty-1280x720@1.0' 'panel-tasks-main' 'modal-sandbox'; do
-  for jobs in 1 4; do
+# the first ones started, a middle one, and the very last one, which only the
+# final loop that collects what is still outstanding can see.
+for pattern in 'empty-1280x720@1.0' 'panel-tasks-main' 'modal-sandbox' 'high-contrast/edit-profile-1280x720@2.0'; do
+  for jobs in 1 2 4; do
     rm -rf "$work/bad"
     if FAKE_FAIL_PATTERN=$pattern GUI_EVIDENCE_JOBS=$jobs run "$work/bad"; then
       echo "matrix succeeded although captures matching '$pattern' fail ($jobs job(s))" >&2
