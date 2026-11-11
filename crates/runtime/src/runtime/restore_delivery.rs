@@ -304,6 +304,7 @@ impl AgentRuntime {
                 self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
             );
             restored.trigger = Some(queued.message.clone());
+            let question_notice = queued.question_notice().cloned();
             self.register_restored(
                 &mut runs,
                 &intents,
@@ -313,6 +314,9 @@ impl AgentRuntime {
                 &queued.message,
                 durable_parent,
             )?;
+            if let Some(notice) = question_notice {
+                notice.observe();
+            }
             return Ok(Some((
                 queued.message.message_id.clone(),
                 queued.message,
@@ -351,7 +355,7 @@ impl AgentRuntime {
     }
 }
 
-fn is_live(entry: &RunEntry) -> bool {
+pub(super) fn is_live(entry: &RunEntry) -> bool {
     !entry.mailbox.is_closed()
         && matches!(
             *entry.phase_rx.borrow(),

@@ -217,6 +217,13 @@ impl RunStore {
             .map_err(|e| StorageError::Io(e.to_string()))?
             .user_question(id)
     }
+    pub(crate) fn pending_questions(&self) -> Result<Vec<event_bus::UserQuestion>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .pending_user_questions()
+    }
+
     pub(crate) fn user_questions(
         &self,
         run: RunId,

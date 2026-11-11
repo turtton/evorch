@@ -8,7 +8,9 @@ use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
 
 mod completion;
+mod question;
 pub(crate) use completion::{CompletionNotice, QueuedMessage};
+pub(crate) use question::QuestionNotice;
 
 use event_bus::AgentMessage;
 use tokio::sync::watch;
@@ -125,7 +127,7 @@ impl RunMailbox {
     /// 取り出し後にバージョンを更新する。
     pub fn drain_all(&self) -> Vec<AgentMessage> {
         let mut queue = self.pending();
-        let drained: Vec<AgentMessage> = queue.drain(..).map(|queued| queued.message).collect();
+        let drained: Vec<AgentMessage> = queue.drain(..).map(QueuedMessage::into_message).collect();
         drop(queue);
         self.version.send_modify(|value| *value += 1);
         drained
@@ -134,12 +136,33 @@ impl RunMailbox {
     /// 条件に一致するすべてのメッセージを FIFO 順で取り出し、一致しないメッセージは
     /// 相対順序を保って残す。
     pub fn drain_where(&self, predicate: impl Fn(&AgentMessage) -> bool) -> Vec<AgentMessage> {
+        self.drain_queued_where(predicate)
+            .into_iter()
+            .map(QueuedMessage::into_message)
+            .collect()
+    }
+
+    pub(crate) fn drain_queued_where(
+        &self,
+        predicate: impl Fn(&AgentMessage) -> bool,
+    ) -> Vec<QueuedMessage> {
+        self.drain_queued_matching(|queued| predicate(&queued.message))
+    }
+
+    pub(crate) fn drain_question_notices(&self) -> Vec<QueuedMessage> {
+        self.drain_queued_matching(|queued| queued.question_notice().is_some())
+    }
+
+    fn drain_queued_matching(
+        &self,
+        predicate: impl Fn(&QueuedMessage) -> bool,
+    ) -> Vec<QueuedMessage> {
         let mut queue = self.pending();
         let mut matched = Vec::new();
         let mut remaining = VecDeque::with_capacity(queue.len());
         while let Some(queued) = queue.pop_front() {
-            if predicate(&queued.message) {
-                matched.push(queued.message);
+            if predicate(&queued) {
+                matched.push(queued);
             } else {
                 remaining.push_back(queued);
             }
@@ -160,7 +183,7 @@ impl RunMailbox {
         let index = queue.iter().position(|queued| predicate(&queued.message));
         let removed = index
             .and_then(|index| queue.remove(index))
-            .map(|queued| queued.message);
+            .map(QueuedMessage::into_message);
         drop(queue);
         if removed.is_some() {
             self.version.send_modify(|value| *value += 1);
@@ -206,7 +229,7 @@ impl RunMailbox {
         if !taken.is_empty() {
             self.version.send_modify(|value| *value += 1);
         }
-        taken.into_iter().map(|queued| queued.message).collect()
+        taken.into_iter().map(QueuedMessage::into_message).collect()
     }
 }
 

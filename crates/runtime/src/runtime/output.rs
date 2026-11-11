@@ -38,7 +38,7 @@ enum OutputStatus {
 /// A live interactive turn is distinct from a terminal run incarnation.
 pub(super) struct IdleTurn {
     output: Option<String>,
-    notice: std::sync::Arc<crate::mailbox::CompletionNotice>,
+    pub(in crate::runtime) notice: std::sync::Arc<crate::mailbox::CompletionNotice>,
 }
 
 impl AgentRuntime {
@@ -73,8 +73,13 @@ impl AgentRuntime {
                     .send_modify(|version| *version += 1);
             }
         }
+        let became_running = *to == AgentRunPhase::Running;
         phase_tx.send_replace(*to);
         self.shared.bus.emit(event_bus::Event::new(event));
+        drop(runs);
+        if became_running {
+            self.schedule_question_recovery(run);
+        }
     }
 
     /// Only output actually returned by a model-facing tool acknowledges a receipt.

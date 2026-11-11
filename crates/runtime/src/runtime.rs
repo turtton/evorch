@@ -24,6 +24,7 @@ pub use questions::{AnswerOutcome, RunWait};
 #[cfg(test)]
 mod handoff_tests;
 mod restore_delivery;
+use restore_delivery::is_live;
 mod run_panic;
 mod shell_handle_restore;
 use chat_restore::RunContinuation;
@@ -126,6 +127,7 @@ pub(crate) struct Shared {
     pub(crate) held_messages: Mutex<HashMap<RunId, Vec<crate::mailbox::QueuedMessage>>>,
     /// Automatic wakes per conversation root since the last user input.
     pub(crate) auto_wakes: Mutex<HashMap<RunId, u32>>,
+    pub(crate) question_delivery: Mutex<questions::delivery::QuestionDelivery>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) self_improvement: OnceLock<crate::self_improvement::ImprovementSettings>,
     pub(crate) self_improvement_task: OnceLock<crate::self_improvement::lifecycle::ObserverTask>,
@@ -767,6 +769,7 @@ impl AgentRuntime {
                 next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
+                question_delivery: Mutex::new(Default::default()),
                 topology: OnceLock::new(),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
@@ -1107,6 +1110,7 @@ impl AgentRuntime {
                 next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
+                question_delivery: Mutex::new(Default::default()),
                 bus,
                 executor: Mutex::new(executor),
                 model,
@@ -1719,8 +1723,36 @@ impl AgentRuntime {
                     _join: None,
                 },
             );
+            // The host wake may have been delayed while the question was answered.
+            // Recheck receipts at registration, without any storage read or prefix edit.
+            let automatic = self
+                .shared
+                .question_delivery
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .root_requests
+                .contains(&run_id);
+            if automatic {
+                let has_input = self
+                    .shared
+                    .held_messages
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&run_id)
+                    .is_some_and(|q| {
+                        q.iter().any(|m| {
+                            !m.observed()
+                                && m.question_notice()
+                                    .is_none_or(|n| !n.paused.load(Ordering::Acquire))
+                        })
+                    });
+                if !has_input && let Some(restored) = task.restored.as_mut() {
+                    restored.turn_completed = true;
+                }
+            }
             self.release_held_messages(run_id, &mailbox);
             drop(runs);
+            self.schedule_question_recovery(run_id);
         }
         if let Some(parent) = parent {
             // Admission and registration succeeded. Failed/pending admissions
@@ -3224,7 +3256,7 @@ impl AgentRuntime {
             });
         }
 
-        if reply_correlation.is_none() {
+        if reply_correlation.is_none() && message.sender_run_id != "runtime" {
             let sender = message.sender_run_id.parse().unwrap_or(sender);
             sent.insert(message_id.clone(), SentRecord { sender, recipient });
         }

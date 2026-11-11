@@ -77,6 +77,9 @@ impl AgentRuntime {
                 .and_then(|entry| entry.config.ownership.clone());
             self.reconcile_todo_or_report(run_id, ownership.as_ref());
             let first_line = panic.message.lines().next().unwrap_or_default();
+            if let Ok(mailbox) = self.run_mailbox(run_id) {
+                self.close_question_mailbox(run_id, &mailbox);
+            }
             self.publish_terminal(
                 run_id,
                 LifecycleEvent::AgentRunStateChanged {

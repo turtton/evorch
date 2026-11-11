@@ -131,6 +131,7 @@ pub(super) fn subagent_questions(
     };
     match runtime.subagent_questions(state.caller_run_id(), child) {
         Ok(questions) => {
+            runtime.observe_questions(questions.iter().map(|question| question.id.clone()));
             // Listing a question reports it, so a later wait does not wake for it.
             state.reported_questions.extend(
                 questions

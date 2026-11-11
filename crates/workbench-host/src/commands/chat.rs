@@ -9,16 +9,19 @@ use super::{ChatInput, CommandService, ComposerRole, HostEvent, NoticeOutcome, R
 
 impl CommandService {
     /// A user `/continue` renews the automatic-wake budget; a runtime-requested
-    /// resume only delivers the reports held for the root.
+    /// resume only delivers the reports/questions held for the root.
     pub(super) fn resume_chat(
         &self,
         run_id: RunId,
         authority: RunConfig,
-    ) -> Result<RunId, runtime::RuntimeError> {
+    ) -> Result<Option<RunId>, runtime::RuntimeError> {
         if self.automatic_resume {
-            self.runtime.wake_chat(run_id, authority)
+            if !self.runtime.prepare_held_wake(run_id, &authority)? {
+                return Ok(None);
+            }
+            self.runtime.wake_chat(run_id, authority).map(Some)
         } else {
-            self.runtime.resume_chat(run_id, authority)
+            self.runtime.resume_chat(run_id, authority).map(Some)
         }
     }
 
@@ -195,15 +198,23 @@ impl CommandService {
             } else {
                 self.runtime
                     .continue_goal(run_id, submission.text.clone(), authority)
+                    .map(Some)
             };
             match continuation {
-                Ok(run_id) => {
+                Ok(Some(run_id)) => {
                     self.bindings.chat_runs.insert(thread_id.clone(), run_id);
                     self.bindings.stop_marked.remove(&thread_id);
                     self.bindings.stopped_by_us.remove(&thread_id);
                     return vec![HostEvent::ChatAccepted {
                         thread_id,
                         run_id: run_id.to_string(),
+                    }];
+                }
+                Ok(None) => {
+                    return vec![HostEvent::ChatNotice {
+                        outcome: NoticeOutcome::NotApplied,
+                        thread_id,
+                        text: "Automatic continuation was not applied: the conversation is stopped or its pending report/question was already handled. Continue explicitly if needed.".into(),
                     }];
                 }
                 Err(error) if !resume_only && self.can_restart_stopped(&thread_id, &error) => {
@@ -276,14 +287,22 @@ impl CommandService {
             } else {
                 self.runtime
                     .continue_goal(run_id, submission.text.clone(), authority)
+                    .map(Some)
             };
             match continuation {
-                Ok(run_id) => {
+                Ok(Some(run_id)) => {
                     self.bindings.stop_marked.remove(&thread_id);
                     self.bindings.stopped_by_us.remove(&thread_id);
                     return vec![HostEvent::ChatAccepted {
                         thread_id,
                         run_id: run_id.to_string(),
+                    }];
+                }
+                Ok(None) => {
+                    return vec![HostEvent::ChatNotice {
+                        outcome: NoticeOutcome::NotApplied,
+                        thread_id,
+                        text: "Automatic continuation was not applied: the conversation is stopped or its pending report/question was already handled. Continue explicitly if needed.".into(),
                     }];
                 }
                 Err(error) if !resume_only && self.can_restart_stopped(&thread_id, &error) => {

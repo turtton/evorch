@@ -8,6 +8,7 @@ use storage::{AnswerMode, StorageError};
 mod tests;
 
 mod continuation;
+pub(super) mod delivery;
 mod forwarding;
 #[cfg(test)]
 #[path = "questions/lane_tests.rs"]
@@ -253,6 +254,7 @@ impl AgentRuntime {
             question
         };
         drop(guard);
+        self.queue_subagent_question(&question);
         self.shared
             .bus
             .emit(Event::new(ToolEvent::UserQuestionUpdated {
@@ -277,7 +279,17 @@ impl AgentRuntime {
         child: RunId,
     ) -> Result<Vec<UserQuestion>, String> {
         self.validate_question_parent(caller, child)?;
-        self.user_answers(child)
+        // Explicit parent resumption can precede lazy child restoration. The
+        // durable direct-parent check above authorizes this bounded lookup.
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or("question storage is not configured")?;
+        self.filter_handoff_questions(
+            child,
+            store.user_questions(child).map_err(|e| e.to_string())?,
+        )
     }
 
     /// Answer a direct child's question without granting any tool permission.
@@ -347,7 +359,19 @@ impl AgentRuntime {
             return Err("only an orchestrator can resolve subagent questions".into());
         }
         drop(parent);
-        if self.entry(child).map_err(|e| e.to_string())?.parent != Some(caller) {
+        let direct_parent = match self.entry(child) {
+            Ok(entry) => entry.parent,
+            Err(_) => self
+                .shared
+                .run_store
+                .get()
+                .ok_or("question storage is not configured")?
+                .restore_parent(child)
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .and_then(|id| id.parse().ok()),
+        };
+        if direct_parent != Some(caller) {
             return Err("question requester is not a direct child of this orchestrator".into());
         }
         Ok(())
@@ -579,6 +603,7 @@ impl AgentRuntime {
             }
             stored.map_err(|error| error.to_string())?;
         }
+        self.observe_questions([id.to_owned()]);
         drop(guards);
         let mut reflection_error = None;
         for (recipient, review) in &targets {

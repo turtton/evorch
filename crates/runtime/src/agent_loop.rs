@@ -1006,6 +1006,7 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            self.inject_question_notices();
             for notice in self
                 .shared
                 .executor
@@ -1705,7 +1706,7 @@ impl LoopState {
                     if self.task.mailbox.is_empty() {
                         continue;
                     }
-                    let messages = self.task.mailbox.drain_where(|_| true);
+                    let messages = self.task.mailbox.drain_queued_where(|_| true);
                     if messages.is_empty() {
                         continue;
                     }
@@ -1756,7 +1757,11 @@ impl LoopState {
                 runtime.close_artifact_page(&self.task.run_id.to_string());
             }
             self.channels.inbox_rx.close();
-            self.task.mailbox.close();
+            if let Some(runtime) = self.runtime() {
+                runtime.close_question_mailbox(self.task.run_id, &self.task.mailbox);
+            } else {
+                self.task.mailbox.close();
+            }
             // Public terminal state permits same-ID restoration. Publish only after
             // process teardown, final persistence, and workspace cleanup finish.
             self.pending_terminal = Some((previous, event));

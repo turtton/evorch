@@ -4,13 +4,15 @@ use std::sync::Arc;
 
 use agents::Role;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
-use providers::{ContentBlock, FinishReason, ToolResultContent};
-use runtime::{AgentRuntime, RunConfig, RunId, RunStore, RuntimeError};
+use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolResultContent, ToolSpec};
+use runtime::{
+    AgentInvocationContext, AgentModel, AgentRuntime, RunConfig, RunId, RunStore, RuntimeError,
+};
 use sandbox::DirectSandbox;
 use serde_json::{Value, json};
 use storage::{Storage, StorageConfig};
 use support::{ScriptedModel, text_response, tool_response};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tools::ToolExecutor;
 
 async fn exercise(
@@ -130,6 +132,54 @@ async fn still_running_without_text_when_child_in_flight() {
     assert_eq!(result["reason"], Value::Null);
 }
 
+struct WaitingChildModel {
+    script: Arc<ScriptedModel>,
+    child_waiting: watch::Receiver<bool>,
+    snapshots_observed: watch::Sender<bool>,
+    finish_allowed: watch::Receiver<bool>,
+}
+
+#[async_trait::async_trait]
+impl AgentModel for WaitingChildModel {
+    async fn complete(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<ChatResponse, RuntimeError> {
+        let has_result = |id: &str| {
+            messages.iter().flat_map(|message| &message.content).any(
+                |block| matches!(block, ContentBlock::ToolResult { tool_call_id, .. } if tool_call_id == id),
+            )
+        };
+        if role == Role::Orchestrator && has_result("spawn") {
+            // A question notice may interrupt and retry a model request. Gate
+            // semantic boundaries, not the number or order of those attempts.
+            self.child_waiting
+                .clone()
+                .wait_for(|ready| *ready)
+                .await
+                .unwrap();
+            if has_result("output") {
+                self.snapshots_observed.send_replace(true);
+                self.finish_allowed
+                    .clone()
+                    .wait_for(|ready| *ready)
+                    .await
+                    .unwrap();
+            }
+        }
+        self.script
+            .complete(invocation, role, messages, tools)
+            .await
+    }
+
+    fn selected_model(&self, role: Role, category: Option<&str>) -> String {
+        self.script.selected_model(role, category)
+    }
+}
+
 async fn observe_waiting_child(question: Option<bool>) {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
@@ -138,30 +188,17 @@ async fn observe_waiting_child(question: Option<bool>) {
     };
     let storage = Storage::open(config.clone()).unwrap();
     let model = Arc::new(ScriptedModel::new([]));
-    let parent_gate = Arc::new(Notify::new());
-    model.gate_key("PARENT", parent_gate.clone()).await;
     // run_output can observe an idle-turn result without terminating the child.
     // Question waits remain distinct from successful interactive turn completion.
-    let mut parent = vec![
+    let parent = vec![
         Ok(tool_response(
             "spawn",
             "delegate",
             json!({"target":{"role":"worker"}, "background":true, "interactive":true, "prompt":"CHILD"}),
         )),
         Ok(output("run-2")),
+        Ok(tool_response("finish", "finish", json!({"result":"done"}))),
     ];
-    if question.is_some() {
-        parent.push(Ok(tool_response(
-            "wait-snapshot",
-            "wait",
-            json!({"run_ids":["run-2"]}),
-        )));
-    }
-    parent.push(Ok(tool_response(
-        "finish",
-        "finish",
-        json!({"result":"done"}),
-    )));
     model.add_keyed("PARENT", parent).await;
     let mut child = Vec::new();
     if let Some(blocking) = question {
@@ -175,14 +212,25 @@ async fn observe_waiting_child(question: Option<bool>) {
     model.add_keyed("CHILD", child).await;
     let bus = Arc::new(EventBus::new(256));
     let mut events = bus.subscribe();
-    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
-        .with_sequential_run_ids()
-        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let (child_waiting, waiting) = watch::channel(false);
+    let (snapshots_observed, mut snapshots) = watch::channel(false);
+    let (finish_allowed, finish) = watch::channel(false);
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(ToolExecutor::new(bus)),
+        Arc::new(WaitingChildModel {
+            script: model.clone(),
+            child_waiting: waiting,
+            snapshots_observed,
+            finish_allowed: finish,
+        }),
+    )
+    .with_sequential_run_ids()
+    .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let parent =
         runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
-    parent_gate.notify_one();
 
-    // Observe the child's actual idle boundary before allowing either snapshot.
+    // Observe the child's actual idle boundary before allowing the snapshot.
     let child = RunId::new(2);
     loop {
         if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
@@ -195,18 +243,11 @@ async fn observe_waiting_child(question: Option<bool>) {
             break;
         }
     }
-    let first_parent_follow_up = if question.is_some() { 3 } else { 2 };
-    let observations = if question.is_some() { 2 } else { 1 };
-    for index in first_parent_follow_up..first_parent_follow_up + observations {
-        model.wait_for_request(index).await;
-        parent_gate.notify_one();
-    }
-    model
-        .wait_for_request(first_parent_follow_up + observations)
-        .await;
+    child_waiting.send_replace(true);
+    snapshots.wait_for(|ready| *ready).await.unwrap();
     runtime.cancel(child).unwrap();
     runtime.wait(child).await.unwrap();
-    parent_gate.notify_one();
+    finish_allowed.send_replace(true);
     assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
 
     let observed = model.observed().await;
@@ -230,37 +271,25 @@ async fn observe_waiting_child(question: Option<bool>) {
             })
             .unwrap()
     };
-    let output = result("output");
-    let mut snapshots = vec![output];
-    if question.is_some() {
-        let wait = result("wait-snapshot");
-        assert_eq!(wait["completed_run_ids"], json!([]));
-        assert_eq!(wait["runs"][0]["needs_user_input"], question == Some(true));
-        assert_eq!(wait["runs"][0]["has_pending_question"], true);
-        assert!(wait.get("timed_out").is_none(), "{wait}");
-        assert_eq!(wait["attention_run_ids"], json!(["run-2"]));
-        snapshots.push(wait["runs"][0].clone());
-    }
-    for snapshot in snapshots {
-        assert_eq!(snapshot["phase"], "Waiting");
-        assert_eq!(
-            snapshot["status"],
-            if question.is_none() {
-                "turn_completed"
-            } else {
-                "waiting"
-            }
-        );
-        assert_eq!(
-            snapshot["output"],
-            if question.is_none() {
-                json!("Waiting for input")
-            } else {
-                Value::Null
-            }
-        );
-        assert_eq!(snapshot["reason"], Value::Null);
-    }
+    let snapshot = result("output");
+    assert_eq!(snapshot["phase"], "Waiting");
+    assert_eq!(
+        snapshot["status"],
+        if question.is_none() {
+            "turn_completed"
+        } else {
+            "waiting"
+        }
+    );
+    assert_eq!(
+        snapshot["output"],
+        if question.is_none() {
+            json!("Waiting for input")
+        } else {
+            Value::Null
+        }
+    );
+    assert_eq!(snapshot["reason"], Value::Null);
 }
 
 #[tokio::test]

@@ -72,7 +72,10 @@ impl AgentRuntime {
             compaction_busy: Arc::clone(&compaction_busy),
             result_tx,
         };
-        if !history_only && trigger.kind != AgentMessageKind::Reply {
+        if !history_only
+            && trigger.kind != AgentMessageKind::Reply
+            && trigger.sender_run_id != "runtime"
+        {
             self.shared
                 .sent
                 .lock()
@@ -169,6 +172,7 @@ impl AgentRuntime {
         if let Some(entry) = runs.get(&run_id) {
             self.release_held_messages(run_id, &entry.mailbox);
         }
+        self.schedule_question_recovery(run_id);
         self.shared.bus.emit(Event::new(restored_event));
         self.shared
             .bus
