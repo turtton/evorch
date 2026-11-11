@@ -34,6 +34,27 @@ pub enum AnswerOutcome {
     AlreadyAnswered,
 }
 
+/// An answer failure, preserving ownership errors for host refusal classification.
+#[derive(Debug, thiserror::Error)]
+pub enum AnswerQuestionError {
+    #[error(transparent)]
+    Ownership(#[from] crate::ownership::RegistryError),
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl From<String> for AnswerQuestionError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+impl From<&str> for AnswerQuestionError {
+    fn from(reason: &str) -> Self {
+        Self::Failed(reason.into())
+    }
+}
+
 impl AgentRuntime {
     /// Waits for the run like [`AgentRuntime::wait`], but also returns when the run is
     /// `Waiting` with a blocking question unanswered: a host with no one to answer
@@ -414,18 +435,22 @@ impl AgentRuntime {
         answer: &str,
     ) -> Result<AnswerOutcome, String> {
         self.answer_user_question_if_pending_from_host(id, answer, None)
+            .map_err(|error| error.to_string())
     }
 
     /// Like [`Self::answer_user_question_if_pending`], also fencing the submitting
     /// host when the requester is offline. Caller and recipients share a single
     /// generation snapshot per ownership registry; callers must not hold a
     /// separate registry read guard around this operation.
+    ///
+    /// Ownership failures remain typed so the host can distinguish a refused
+    /// authority check from a question or persistence failure.
     pub fn answer_user_question_if_pending_from_host(
         &self,
         id: &str,
         answer: &str,
         caller: Option<&crate::ownership::OwnerPermit>,
-    ) -> Result<AnswerOutcome, String> {
+    ) -> Result<AnswerOutcome, AnswerQuestionError> {
         self.answer_question_with_mode(
             id,
             answer,
@@ -443,7 +468,10 @@ impl AgentRuntime {
         answer: &str,
         origin: AnswerOrigin,
     ) -> Result<UserQuestion, String> {
-        match self.answer_question_with_mode(id, answer, origin, AnswerMode::Idempotent, None)? {
+        match self
+            .answer_question_with_mode(id, answer, origin, AnswerMode::Idempotent, None)
+            .map_err(|error| error.to_string())?
+        {
             AnswerOutcome::Recorded(question) => Ok(*question),
             AnswerOutcome::AlreadyAnswered => Err("question already answered".into()),
         }
@@ -456,7 +484,7 @@ impl AgentRuntime {
         origin: AnswerOrigin,
         mode: AnswerMode,
         caller: Option<&crate::ownership::OwnerPermit>,
-    ) -> Result<AnswerOutcome, String> {
+    ) -> Result<AnswerOutcome, AnswerQuestionError> {
         // Only a host answer is the user's word and becomes review evidence; a
         // parent agent's answer never does, whatever it relays.
         let trusted_user = origin
@@ -495,8 +523,7 @@ impl AgentRuntime {
                 permits.push(permit);
             }
         }
-        let guards =
-            crate::ownership::OwnerPermit::mutation_guards(&permits).map_err(|e| e.to_string())?;
+        let guards = crate::ownership::OwnerPermit::mutation_guards(&permits)?;
         // Serialize host evidence writes and resync with the same map fence as chat.
         let reviews = self
             .shared
@@ -633,7 +660,7 @@ impl AgentRuntime {
         }
         drop(reviews);
         if let Some(error) = reflection_error {
-            return Err(error);
+            return Err(error.into());
         }
         let question = store
             .user_question(id)

@@ -68,10 +68,13 @@ impl CommandService {
                 );
                 return repeated_answer(question_id, same);
             }
-            Err(reason) => {
+            Err(error) => {
                 return vec![HostEvent::CommandRejected {
-                    kind: RejectKind::Failed,
-                    reason,
+                    kind: match &error {
+                        runtime::AnswerQuestionError::Ownership(_) => RejectKind::Fenced,
+                        runtime::AnswerQuestionError::Failed(_) => RejectKind::Failed,
+                    },
+                    reason: error.to_string(),
                 }];
             }
         };
@@ -140,5 +143,119 @@ fn repeated_answer(question_id: String, same: bool) -> Vec<HostEvent> {
             kind: RejectKind::AlreadyResolved,
             reason: "Question was already answered".into(),
         }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
+    use workbench_protocol::errors::{ErrorCode, RetryAdvice};
+
+    use super::*;
+
+    struct HeldModel;
+
+    #[async_trait::async_trait]
+    impl runtime::AgentModel for HeldModel {
+        async fn complete(
+            &self,
+            _: &runtime::AgentInvocationContext,
+            _: Role,
+            _: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+            std::future::pending().await
+        }
+
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "held".into()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_caller_guard_remains_a_permission_refusal_and_stores_no_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("answers.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let bus = Arc::new(event_bus::EventBus::new(64));
+        let runtime = runtime::AgentRuntime::new(
+            bus.clone(),
+            Arc::new(tools::ToolExecutor::new(bus)),
+            Arc::new(HeldModel),
+        )
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        let run = runtime
+            .delegate_chat("thread-1", Role::Worker, "Task".into(), Default::default())
+            .unwrap();
+        let question = runtime
+            .request_user_question(run, "Continue?".into(), vec![], false)
+            .unwrap();
+        runtime.cancel(run).unwrap();
+        runtime.wait(run).await.unwrap();
+
+        let registry_path = dir.path().join("owners.db");
+        let owner = ThreadOwner::new(
+            "thread-1".into(),
+            Lease {
+                owner_id: "owner".into(),
+                generation: 2,
+                expires_at: u64::MAX,
+            },
+        );
+        Registry::open(&registry_path)
+            .unwrap()
+            .start(&owner)
+            .unwrap();
+        let mut stale = OwnerPermit {
+            registry_path,
+            thread_id: owner.thread_id,
+            lease: owner.lease,
+            run_id: None,
+        };
+        stale.lease.generation = 1;
+        let mut unavailable = stale.clone();
+        unavailable.registry_path = dir.path().join("missing.db");
+        let mut service = CommandService::new(runtime, tokio::runtime::Handle::current());
+        // Start after ingress preflight: authority can change before the guarded
+        // write, including when the original requester is no longer running.
+        for permit in [stale, unavailable] {
+            let events = service.submit_authorized(
+                HostCommand::AnswerUserQuestion {
+                    thread_id: "thread-1".into(),
+                    question_id: question.id.clone(),
+                    answer: "yes".into(),
+                },
+                Some(permit),
+            );
+            let [HostEvent::CommandRejected { kind, reason }] = events.as_slice() else {
+                panic!("expected one refusal, got {events:?}");
+            };
+            assert_eq!(*kind, RejectKind::Fenced);
+            let error = crate::ingress::reject_error(*kind, reason);
+            assert_eq!(error.code, ErrorCode::PermissionDenied);
+            assert_eq!(error.retry, RetryAdvice::UserActionRequired);
+            assert_eq!(
+                service
+                    .runtime
+                    .user_question(&question.id)
+                    .unwrap()
+                    .unwrap()
+                    .answer,
+                None
+            );
+        }
+        assert!(matches!(
+            service.runtime.answer_user_question_if_pending_from_host(
+                "unknown-question",
+                "yes",
+                None
+            ),
+            Err(runtime::AnswerQuestionError::Failed(_))
+        ));
     }
 }

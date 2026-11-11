@@ -20,7 +20,7 @@ mod project;
 pub(crate) mod questions;
 mod saved_compaction;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
-pub use questions::{AnswerOutcome, RunWait};
+pub use questions::{AnswerOutcome, AnswerQuestionError, RunWait};
 #[cfg(test)]
 mod handoff_tests;
 mod restore_delivery;
