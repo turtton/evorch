@@ -2,7 +2,7 @@ use std::sync::{Arc, mpsc};
 
 use config::{MetadataSource, ModelEntryConfig, ModelPresetConfig};
 use egui_kittest::{Harness, kittest::Queryable};
-use gui::model::model_catalog::{CatalogBackend, CatalogRequest, CatalogState};
+use gui::model::model_catalog::{CatalogBackend, CatalogFetch, CatalogRequest, CatalogState};
 use gui::model::model_metadata::MetadataSources;
 use gui::model::provider_settings::OpenAiEditorModel;
 
@@ -147,7 +147,7 @@ impl CatalogBackend for FailedBackend {
         &self,
         request: CatalogRequest,
         _dir: &std::path::Path,
-    ) -> Result<catalog::ModelCatalog, String> {
+    ) -> Result<CatalogFetch, String> {
         self.0.send(request).unwrap();
         Err("offline fixture".into())
     }
@@ -319,4 +319,90 @@ fn cursor_rows_name_the_docs_or_api_equivalent_origin() {
     assert_eq!(composer[0], "200000 ctx (Cursor docs)");
     assert_eq!(composer[2], "$3/M input (Cursor docs)");
     assert_eq!(composer[3], "$15/M output (Cursor docs)");
+}
+
+struct ScriptedBackend(std::sync::Mutex<Option<Result<CatalogFetch, String>>>);
+
+#[async_trait::async_trait]
+impl CatalogBackend for ScriptedBackend {
+    async fn fetch(
+        &self,
+        _request: CatalogRequest,
+        _dir: &std::path::Path,
+    ) -> Result<CatalogFetch, String> {
+        self.0.lock().unwrap().take().unwrap()
+    }
+}
+
+fn run_to_completion(state: &mut CatalogState, request: CatalogRequest) {
+    state.start(request);
+    // The worker always finishes; a hang is caught by the test runner, not by a deadline here.
+    while state.is_busy() {
+        state.poll();
+        std::thread::yield_now();
+    }
+}
+
+fn scripted(fetch: Result<CatalogFetch, String>) -> CatalogState {
+    let dir = tempfile::tempdir().unwrap();
+    CatalogState::with_backend(
+        dir.path().into(),
+        Arc::new(ScriptedBackend(std::sync::Mutex::new(Some(fetch)))),
+    )
+}
+
+// Given: a forced refresh that fetched models.dev
+// When: whichever poll sees it (the toolbar may poll before the frame does)
+// Then: the new data is kept for exactly one hand-off to the running models.
+#[test]
+fn refreshed_catalog_is_handed_out_once_regardless_of_who_polled() {
+    let mut state = scripted(Ok(CatalogFetch::Refreshed(catalog())));
+    run_to_completion(&mut state, CatalogRequest::ForceRefresh);
+    assert!(state.error.is_none());
+    assert!(state.fetched_at.is_some());
+    let published = state.take_published().expect("refreshed data is published");
+    assert!(Arc::ptr_eq(&published, state.catalog.as_ref().unwrap()));
+    assert!(state.take_published().is_none());
+}
+
+// Given: a forced refresh that failed while a cache was readable
+// When: the outcome arrives / Then: the user is told, the cache keeps being shown and
+// nothing is published to the running models.
+#[test]
+fn retained_cache_is_reported_and_not_published() {
+    let mut state = scripted(Ok(CatalogFetch::CacheRetained {
+        catalog: catalog(),
+        reason: "catalog HTTP request failed: offline".into(),
+    }));
+    run_to_completion(&mut state, CatalogRequest::ForceRefresh);
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("offline") && error.contains("cached data"))
+    );
+    assert!(state.catalog.is_some());
+    assert!(state.take_published().is_none());
+}
+
+// Given: a plain cache read at startup / When: it arrives
+// Then: it is shown but not published: the models read the same cache themselves.
+#[test]
+fn loaded_cache_is_not_published() {
+    let mut state = scripted(Ok(CatalogFetch::Loaded(catalog())));
+    run_to_completion(&mut state, CatalogRequest::Load);
+    assert!(state.catalog.is_some());
+    assert!(state.take_published().is_none());
+}
+
+#[test]
+fn toolbar_states_that_a_refresh_only_applies_to_new_runs() {
+    let harness = Harness::new_ui_state(
+        gui::panes::model_metadata::catalog_toolbar,
+        CatalogState::with_backend(
+            tempfile::tempdir().unwrap().path().into(),
+            Arc::new(FailedBackend(mpsc::channel().0)),
+        ),
+    );
+    harness.get_by_label(gui::panes::model_metadata::APPLIES_TO_NEW_RUNS);
 }

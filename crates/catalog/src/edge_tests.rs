@@ -19,7 +19,7 @@ async fn held_file_lock_returns_stale_without_fetch() {
     let lock = cache::lock(dir.path()).await.unwrap();
     let server = MockServer::start().await;
 
-    let catalog = ModelCatalog::load_with(dir.path(), &server.uri(), false)
+    let catalog = ModelCatalog::load_with(dir.path(), &server.uri())
         .await
         .unwrap();
 
@@ -41,7 +41,7 @@ async fn background_failure_preserves_cache_and_releases_lock() {
         .mount(&server)
         .await;
 
-    let mut catalog = ModelCatalog::load_with(dir.path(), &server.uri(), false)
+    let mut catalog = ModelCatalog::load_with(dir.path(), &server.uri())
         .await
         .unwrap();
     let result = catalog.take_refresh().unwrap().await.unwrap();
@@ -63,9 +63,10 @@ async fn malformed_response_does_not_replace_cache() {
         .mount(&server)
         .await;
 
-    let catalog = ModelCatalog::load_with(dir.path(), &server.uri(), true)
+    let catalog = ModelCatalog::refresh_with(dir.path(), &server.uri())
         .await
-        .unwrap();
+        .unwrap()
+        .into_catalog();
 
     assert_eq!(catalog.fetched_at, 0);
     assert_eq!(
@@ -86,7 +87,7 @@ async fn corrupt_cache_is_replaced_by_successful_fetch() {
         .mount(&server)
         .await;
 
-    let catalog = ModelCatalog::load_with(dir.path(), &server.uri(), false)
+    let catalog = ModelCatalog::load_with(dir.path(), &server.uri())
         .await
         .unwrap();
 

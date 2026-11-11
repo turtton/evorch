@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::SystemTime;
 
-use catalog::ModelCatalog;
+use catalog::{ModelCatalog, RefreshOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogRequest {
@@ -10,19 +10,46 @@ pub enum CatalogRequest {
     ForceRefresh,
 }
 
+/// What a catalog request actually did, so callers need not infer it from the cache file.
+pub enum CatalogFetch {
+    /// Cached data was read; no refresh was forced. A stale cache schedules a background one.
+    Loaded(ModelCatalog),
+    /// models.dev was fetched and the cache replaced.
+    Refreshed(ModelCatalog),
+    /// The forced refresh failed or was busy; the existing cache keeps being used.
+    CacheRetained {
+        catalog: ModelCatalog,
+        reason: String,
+    },
+}
+
 #[async_trait::async_trait]
 pub trait CatalogBackend: Send + Sync {
-    async fn fetch(&self, request: CatalogRequest, dir: &Path) -> Result<ModelCatalog, String>;
+    async fn fetch(&self, request: CatalogRequest, dir: &Path) -> Result<CatalogFetch, String>;
 }
 
 struct ModelsDev;
 
 #[async_trait::async_trait]
 impl CatalogBackend for ModelsDev {
-    async fn fetch(&self, request: CatalogRequest, dir: &Path) -> Result<ModelCatalog, String> {
+    async fn fetch(&self, request: CatalogRequest, dir: &Path) -> Result<CatalogFetch, String> {
         match request {
-            CatalogRequest::Load => ModelCatalog::load_or_refresh(dir).await,
-            CatalogRequest::ForceRefresh => ModelCatalog::force_refresh(dir).await,
+            CatalogRequest::Load => ModelCatalog::load_or_refresh(dir)
+                .await
+                .map(CatalogFetch::Loaded),
+            CatalogRequest::ForceRefresh => {
+                ModelCatalog::force_refresh(dir)
+                    .await
+                    .map(|outcome| match outcome {
+                        RefreshOutcome::Refreshed(catalog) => CatalogFetch::Refreshed(catalog),
+                        RefreshOutcome::CacheRetained { catalog, reason } => {
+                            CatalogFetch::CacheRetained {
+                                catalog,
+                                reason: reason.to_string(),
+                            }
+                        }
+                    })
+            }
         }
         .map_err(|error| error.to_string())
     }
@@ -30,24 +57,28 @@ impl CatalogBackend for ModelsDev {
 
 struct Update {
     result: Result<Arc<ModelCatalog>, String>,
-    modified: Option<SystemTime>,
     busy: bool,
     warning: Option<String>,
+    /// New data that running models should learn about: a successful fetch, not a cache read.
+    publish: bool,
 }
 
 pub struct CatalogState {
     pub catalog: Option<Arc<ModelCatalog>>,
-    pub modified: Option<SystemTime>,
+    /// When the data in `catalog` was fetched from models.dev.
+    pub fetched_at: Option<SystemTime>,
     pub error: Option<String>,
     cache_dir: PathBuf,
     backend: Arc<dyn CatalogBackend>,
     rx: Option<mpsc::Receiver<Update>>,
+    /// Newly fetched data not yet handed to the models; kept by whichever poll saw it first.
+    published: Option<Arc<ModelCatalog>>,
 }
 
 impl std::fmt::Debug for CatalogState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CatalogState")
-            .field("modified", &self.modified)
+            .field("fetched_at", &self.fetched_at)
             .field("error", &self.error)
             .field("busy", &self.is_busy())
             .finish_non_exhaustive()
@@ -64,11 +95,12 @@ impl CatalogState {
     pub fn with_backend(cache_dir: PathBuf, backend: Arc<dyn CatalogBackend>) -> Self {
         Self {
             catalog: None,
-            modified: None,
+            fetched_at: None,
             error: None,
             cache_dir,
             backend,
             rx: None,
+            published: None,
         }
     }
 
@@ -86,37 +118,57 @@ impl CatalogState {
         self.rx = Some(rx);
         self.error = None;
         std::thread::spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .build()
-                .map_err(|error| error.to_string());
-            match result {
-                Ok(runtime) => runtime.block_on(async {
-                    let before = modified(&dir);
-                    match backend.fetch(request, &dir).await {
-                        Ok(mut catalog) => {
-                            let refresh = catalog.take_refresh();
-                            let after = modified(&dir);
-                            // force_refresh returns cached success when the fetch fails.
-                            let warning = (request == CatalogRequest::ForceRefresh && before.is_some() && before == after)
-                                .then(|| "Catalog was not updated; using cached data (fetch failed or refresh busy)".into());
-                            let _ = tx.send(Update { result: Ok(Arc::new(catalog)), modified: after, busy: refresh.is_some(), warning });
-                            if let Some(refresh) = refresh {
-                                let result = match refresh.await {
-                                    Ok(result) => result.map(Arc::new).map_err(|e| e.to_string()),
-                                    Err(error) => Err(error.to_string()),
-                                };
-                                let _ = tx.send(Update { result, modified: modified(&dir), busy: false, warning: None });
-                            }
-                        }
-                        Err(error) => { let _ = tx.send(Update { result: Err(error), modified: before, busy: false, warning: None }); }
+                .build();
+            let runtime = match runtime {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(Update::failed(error.to_string()));
+                    return;
+                }
+            };
+            runtime.block_on(async {
+                let (mut catalog, warning, publish) = match backend.fetch(request, &dir).await {
+                    Ok(CatalogFetch::Loaded(catalog)) => (catalog, None, false),
+                    Ok(CatalogFetch::Refreshed(catalog)) => (catalog, None, true),
+                    Ok(CatalogFetch::CacheRetained { catalog, reason }) => (
+                        catalog,
+                        Some(format!(
+                            "Catalog was not updated; using cached data ({reason})"
+                        )),
+                        false,
+                    ),
+                    Err(error) => {
+                        let _ = tx.send(Update::failed(error));
+                        return;
                     }
-                }),
-                Err(error) => { let _ = tx.send(Update { result: Err(error), modified: None, busy: false, warning: None }); }
-            }
+                };
+                let refresh = catalog.take_refresh();
+                let _ = tx.send(Update {
+                    result: Ok(Arc::new(catalog)),
+                    busy: refresh.is_some(),
+                    warning,
+                    publish,
+                });
+                if let Some(refresh) = refresh {
+                    let update = match refresh.await {
+                        Ok(Ok(catalog)) => Update {
+                            result: Ok(Arc::new(catalog)),
+                            busy: false,
+                            warning: None,
+                            publish: true,
+                        },
+                        Ok(Err(error)) => Update::failed(error.to_string()),
+                        Err(error) => Update::failed(error.to_string()),
+                    };
+                    let _ = tx.send(update);
+                }
+            });
         });
     }
 
+    /// Applies finished worker results. Returns whether anything changed.
     pub fn poll(&mut self) -> bool {
         let Some(rx) = self.rx.take() else {
             return false;
@@ -125,8 +177,11 @@ impl CatalogState {
             Ok(update) => {
                 match update.result {
                     Ok(catalog) => {
+                        self.fetched_at = Some(catalog.fetched_at());
+                        if update.publish {
+                            self.published = Some(Arc::clone(&catalog));
+                        }
                         self.catalog = Some(catalog);
-                        self.modified = update.modified;
                         self.error = update.warning;
                     }
                     Err(error) => self.error = Some(error),
@@ -146,11 +201,21 @@ impl CatalogState {
             }
         }
     }
+
+    /// Hands out newly fetched data exactly once, whichever poll noticed it, so the frame
+    /// can publish it to the running models even when the settings view has been closed.
+    pub fn take_published(&mut self) -> Option<Arc<ModelCatalog>> {
+        self.published.take()
+    }
 }
 
-fn modified(dir: &Path) -> Option<SystemTime> {
-    std::fs::metadata(dir.join("models-dev.json"))
-        .ok()?
-        .modified()
-        .ok()
+impl Update {
+    fn failed(error: String) -> Self {
+        Self {
+            result: Err(error),
+            busy: false,
+            warning: None,
+            publish: false,
+        }
+    }
 }

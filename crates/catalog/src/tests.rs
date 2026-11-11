@@ -39,7 +39,7 @@ async fn fresh_cache_is_used_without_fetch() {
     seed(dir.path(), now());
     let server = server(200, 0).await;
 
-    let catalog = ModelCatalog::load_with(dir.path(), &format!("{}/api.json", server.uri()), false)
+    let catalog = ModelCatalog::load_with(dir.path(), &format!("{}/api.json", server.uri()))
         .await
         .unwrap();
 
@@ -55,10 +55,9 @@ async fn stale_cache_triggers_refresh_but_returns_stale() {
     seed(dir.path(), 0);
     let server = server(200, 1).await;
 
-    let mut catalog =
-        ModelCatalog::load_with(dir.path(), &format!("{}/api.json", server.uri()), false)
-            .await
-            .unwrap();
+    let mut catalog = ModelCatalog::load_with(dir.path(), &format!("{}/api.json", server.uri()))
+        .await
+        .unwrap();
 
     assert_eq!(catalog.fetched_at, 0);
     let updated = catalog.refresh.take().unwrap().await.unwrap().unwrap();
@@ -73,10 +72,13 @@ async fn force_refresh_overwrites_cache_atomically() {
     let old_file = std::fs::File::open(dir.path().join("models-dev.json")).unwrap();
     let server = server(200, 1).await;
 
-    let catalog = ModelCatalog::load_with(dir.path(), &format!("{}/api.json", server.uri()), true)
+    let outcome = ModelCatalog::refresh_with(dir.path(), &format!("{}/api.json", server.uri()))
         .await
         .unwrap();
 
+    let RefreshOutcome::Refreshed(catalog) = outcome else {
+        panic!("a successful fetch must report Refreshed: {outcome:?}");
+    };
     assert!(catalog.fetched_at > 0);
     let old: serde_json::Value = serde_json::from_reader(old_file).unwrap();
     assert_eq!(old["fetched_at"], 0);
@@ -90,10 +92,14 @@ async fn fetch_failure_falls_back_to_stale_cache() {
     seed(dir.path(), 0);
     let server = server(503, 1).await;
 
-    let catalog = ModelCatalog::load_with(dir.path(), &format!("{}/api.json", server.uri()), true)
+    let outcome = ModelCatalog::refresh_with(dir.path(), &format!("{}/api.json", server.uri()))
         .await
         .unwrap();
 
+    let RefreshOutcome::CacheRetained { catalog, reason } = outcome else {
+        panic!("a failed fetch must not be reported as a refresh: {outcome:?}");
+    };
+    assert!(matches!(reason, CatalogError::Http(_)));
     assert_eq!(catalog.fetched_at, 0);
     let model = catalog.find("openai", "gpt-4o").unwrap();
     assert_eq!(model.context_window, Some(128_000));
@@ -101,12 +107,42 @@ async fn fetch_failure_falls_back_to_stale_cache() {
 }
 
 #[tokio::test]
-async fn fetch_failure_without_cache_is_error() {
+async fn busy_refresh_lock_retains_the_cache_without_fetching() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), 0);
+    let _held = cache::lock(dir.path()).await.unwrap();
+    let server = server(200, 0).await;
+
+    let outcome = ModelCatalog::refresh_with(dir.path(), &format!("{}/api.json", server.uri()))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        RefreshOutcome::CacheRetained {
+            reason: CatalogError::RefreshBusy,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn forced_refresh_failure_without_cache_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let server = server(503, 1).await;
 
     let result =
-        ModelCatalog::load_with(dir.path(), &format!("{}/api.json", server.uri()), false).await;
+        ModelCatalog::refresh_with(dir.path(), &format!("{}/api.json", server.uri())).await;
+
+    assert!(matches!(result, Err(CatalogError::Http(_))));
+}
+
+#[tokio::test]
+async fn fetch_failure_without_cache_is_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(503, 1).await;
+
+    let result = ModelCatalog::load_with(dir.path(), &format!("{}/api.json", server.uri())).await;
 
     assert!(matches!(result, Err(CatalogError::Http(_))));
     assert!(!dir.path().join("models-dev.json").exists());

@@ -248,7 +248,10 @@ pub struct RoutedModel {
     event_bus: Option<Arc<EventBus>>,
     provider_configs: BTreeMap<String, config::ProviderProfileConfig>,
     image_input: tokio::sync::OnceCell<BTreeMap<String, bool>>,
-    metadata_catalog: tokio::sync::OnceCell<Option<catalog::ModelCatalog>>,
+    /// Disk-backed models.dev data read once; context-window and image-input lookups use it.
+    metadata_catalog: tokio::sync::OnceCell<Option<Arc<catalog::ModelCatalog>>>,
+    /// Catalog generations for output limits, pinned per run and shared across reconfiguration.
+    output_limits: std::sync::RwLock<OutputLimitCatalogs>,
     /// models.dev cache directory; `None` uses [`catalog::default_cache_dir`].
     metadata_catalog_dir: Option<PathBuf>,
     model_presets: BTreeMap<String, config::ModelPresetConfig>,
@@ -307,6 +310,7 @@ impl RoutedModel {
             provider_configs: BTreeMap::new(),
             image_input: tokio::sync::OnceCell::new(),
             metadata_catalog: tokio::sync::OnceCell::new(),
+            output_limits: std::sync::RwLock::new(OutputLimitCatalogs::new()),
             metadata_catalog_dir: None,
             model_presets: BTreeMap::new(),
             edit_tools_by_run: Mutex::new(BTreeMap::new()),
@@ -867,7 +871,8 @@ impl RoutedModel {
                 max_tokens: if benchmark.is_some() {
                     generation.max_tokens.map(u64::from)
                 } else {
-                    self.output_limit(&route, generation.max_tokens).await
+                    self.output_limit(&invocation.run_id, &route, generation.max_tokens)
+                        .await
                 },
                 reasoning_effort: reasoning_effort.clone(),
                 service_tier: benchmark.map_or_else(
@@ -1136,7 +1141,7 @@ impl AgentModel for RoutedModel {
         let (_, speed) = config::types::provider::parse_model_speed(&route.model_id);
         let protocol = self.providers[&route.profile].profile.api_protocol;
         let max_tokens = self
-            .output_limit(&route, generation.max_tokens)
+            .output_limit(&invocation.run_id, &route, generation.max_tokens)
             .await
             .or_else(|| {
                 (protocol == model::ApiProtocol::AnthropicMessages)
@@ -1172,7 +1177,24 @@ impl AgentModel for RoutedModel {
         invocation: &AgentInvocationContext,
         role: Role,
     ) -> Result<(), RuntimeError> {
-        self.admit_candidates(invocation, role).await
+        self.pin_output_limits(&invocation.run_id);
+        self.admit_candidates(invocation, role).await?;
+        // Loads the pinned generation now, so a refresh landing after admission cannot
+        // change what this run's first request resolves.
+        self.pinned_catalog(&invocation.run_id).await;
+        Ok(())
+    }
+
+    fn publish_model_catalog(&self, catalog: Arc<catalog::ModelCatalog>) {
+        self.output_limit_state().publish(catalog);
+    }
+
+    fn output_limit_catalogs(&self) -> Option<OutputLimitCatalogs> {
+        Some(self.output_limit_state())
+    }
+
+    fn restore_output_limit_catalogs(&self, shared: &OutputLimitCatalogs) {
+        self.adopt_output_limit_state(shared);
     }
 
     async fn compact_context(
@@ -1221,7 +1243,9 @@ impl AgentModel for RoutedModel {
             messages: images::for_model(messages, &tools, accepts_images),
             tools,
             temperature: generation.temperature,
-            max_tokens: self.output_limit(&route, generation.max_tokens).await,
+            max_tokens: self
+                .output_limit(&invocation.run_id, &route, generation.max_tokens)
+                .await,
             reasoning_effort,
             service_tier: replay_service_tier(speed),
             output_schema: None,
@@ -1678,6 +1702,7 @@ mod live;
 mod structured;
 mod verification;
 pub use live::{SwitchableModel, UnconfiguredModel};
+pub use output_limits::OutputLimitCatalogs;
 
 /// Windows fixed by configuration: `[compaction.model_overrides]`, then each model's
 /// manual or preset window. The catalog and provider listings fill in the rest.

@@ -79,6 +79,18 @@ async fn supported_effort_is_sent_without_beta_headers() {
             Some(json!({"effort": "xhigh"})),
         ),
         (
+            "claude-fable-5-2",
+            "xhigh",
+            json!({"type": "adaptive", "display": "summarized"}),
+            Some(json!({"effort": "xhigh"})),
+        ),
+        (
+            "claude-fable-5-2-20261017",
+            "max",
+            json!({"type": "adaptive", "display": "summarized"}),
+            Some(json!({"effort": "max"})),
+        ),
+        (
             "claude-opus-4-5-20251101",
             "medium",
             json!({"type": "enabled", "budget_tokens": 4096}),

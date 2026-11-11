@@ -26,6 +26,33 @@ pub enum CatalogError {
     RefreshBusy,
 }
 
+/// Result of [`ModelCatalog::force_refresh`]. Callers apply new data only for
+/// [`Self::Refreshed`]; the retained cache is what they already had.
+#[derive(Debug)]
+pub enum RefreshOutcome {
+    /// Fetched from models.dev and saved atomically.
+    Refreshed(ModelCatalog),
+    /// The fetch failed or the refresh lock was busy; the readable cache is served.
+    CacheRetained {
+        catalog: ModelCatalog,
+        reason: CatalogError,
+    },
+}
+
+impl RefreshOutcome {
+    pub fn catalog(&self) -> &ModelCatalog {
+        match self {
+            Self::Refreshed(catalog) | Self::CacheRetained { catalog, .. } => catalog,
+        }
+    }
+
+    pub fn into_catalog(self) -> ModelCatalog {
+        match self {
+            Self::Refreshed(catalog) | Self::CacheRetained { catalog, .. } => catalog,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ModelCatalog {
     api: Api,
@@ -36,12 +63,14 @@ pub struct ModelCatalog {
 impl ModelCatalog {
     /// Returns cached data; stale data schedules one refresh on the current Tokio runtime.
     pub async fn load_or_refresh(cache_dir: &Path) -> Result<Self, CatalogError> {
-        Self::load_with(cache_dir, ENDPOINT, false).await
+        Self::load_with(cache_dir, ENDPOINT).await
     }
 
-    /// Fetches immediately, falling back to readable cached data on failure.
-    pub async fn force_refresh(cache_dir: &Path) -> Result<Self, CatalogError> {
-        Self::load_with(cache_dir, ENDPOINT, true).await
+    /// Fetches immediately. When the fetch fails or another process holds the refresh
+    /// lock, readable cached data keeps being served and the outcome says so; only a
+    /// failure without any readable cache is an error.
+    pub async fn force_refresh(cache_dir: &Path) -> Result<RefreshOutcome, CatalogError> {
+        Self::refresh_with(cache_dir, ENDPOINT).await
     }
 
     /// When the data was fetched from models.dev, which a stale cache keeps.
@@ -113,32 +142,46 @@ impl ModelCatalog {
             .is_some_and(|age| age < TTL.as_secs())
     }
 
-    async fn load_with(dir: &Path, endpoint: &str, force: bool) -> Result<Self, CatalogError> {
+    async fn load_with(dir: &Path, endpoint: &str) -> Result<Self, CatalogError> {
         let cached = match cache::read(dir).await.ok() {
-            Some(catalog) if !force && catalog.is_fresh() => return Ok(catalog),
+            Some(catalog) if catalog.is_fresh() => return Ok(catalog),
             other => other,
         };
         let lock = match cache::lock(dir).await {
             Ok(lock) => lock,
             Err(error) => return cached.ok_or(error),
         };
-        if !force {
-            let current = cache::read(dir).await.ok();
-            if let Some(current) = current.filter(Self::is_fresh) {
-                return Ok(current);
-            }
-            if let Some(mut stale) = cached {
-                let dir = dir.to_owned();
-                let endpoint = endpoint.to_owned();
-                stale.refresh = Some(tokio::spawn(async move {
-                    Self::fetch(&dir, &endpoint, lock).await
-                }));
-                return Ok(stale);
-            }
+        let current = cache::read(dir).await.ok();
+        if let Some(current) = current.filter(Self::is_fresh) {
+            return Ok(current);
         }
+        if let Some(mut stale) = cached {
+            let dir = dir.to_owned();
+            let endpoint = endpoint.to_owned();
+            stale.refresh = Some(tokio::spawn(async move {
+                Self::fetch(&dir, &endpoint, lock).await
+            }));
+            return Ok(stale);
+        }
+        Self::fetch(dir, endpoint, lock).await
+    }
+
+    async fn refresh_with(dir: &Path, endpoint: &str) -> Result<RefreshOutcome, CatalogError> {
+        let cached = cache::read(dir).await.ok();
+        let lock = match cache::lock(dir).await {
+            Ok(lock) => lock,
+            Err(reason) => return Self::retain(cached, reason),
+        };
         match Self::fetch(dir, endpoint, lock).await {
-            Ok(catalog) => Ok(catalog),
-            Err(error) => cached.ok_or(error),
+            Ok(catalog) => Ok(RefreshOutcome::Refreshed(catalog)),
+            Err(reason) => Self::retain(cached, reason),
+        }
+    }
+
+    fn retain(cached: Option<Self>, reason: CatalogError) -> Result<RefreshOutcome, CatalogError> {
+        match cached {
+            Some(catalog) => Ok(RefreshOutcome::CacheRetained { catalog, reason }),
+            None => Err(reason),
         }
     }
 

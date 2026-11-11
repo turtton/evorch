@@ -28,6 +28,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         )
     }
 
+    /// Hands newly fetched models.dev data to the running models, once, whichever poll saw it
+    /// (the settings toolbar or this frame). Only runs started afterwards use it; admitted
+    /// runs keep their output limits.
+    pub(super) fn publish_fetched_catalog(&mut self) -> bool {
+        let Some(catalog) = self.provider_settings.catalog.take_published() else {
+            return false;
+        };
+        crate::model::production::publish_model_catalog(
+            self.production_model.as_ref(),
+            self.project_models.as_ref(),
+            &catalog,
+        );
+        self.push_notice("Model catalog updated; runs started from now on use it");
+        true
+    }
+
     pub fn open_provider_settings(&mut self) {
         if self.settings_save_in_progress() {
             return;

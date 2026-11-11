@@ -78,6 +78,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.warn_stale_auto_candidates();
             ctx.request_repaint();
         }
+        if self.publish_fetched_catalog() {
+            ctx.request_repaint();
+        }
         if let Some(result) = self.folder_picker.poll() {
             self.apply_picked_folder(result);
             ctx.request_repaint();

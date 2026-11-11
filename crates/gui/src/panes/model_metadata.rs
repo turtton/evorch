@@ -4,6 +4,11 @@ use crate::model::model_catalog::{CatalogRequest, CatalogState};
 use crate::model::model_metadata::MetadataSources;
 use crate::theme::{text::muted, tokens::palette};
 
+/// A refresh changes output limits only for runs that start after it: the limit is part of a
+/// run's request settings, which must not change under a running conversation.
+pub const APPLIES_TO_NEW_RUNS: &str =
+    "Applies to runs started after a refresh. Runs already started are not changed.";
+
 pub fn catalog_toolbar(ui: &mut egui::Ui, state: &mut CatalogState) {
     state.poll();
     ui.horizontal_wrapped(|ui| {
@@ -16,19 +21,20 @@ pub fn catalog_toolbar(ui: &mut egui::Ui, state: &mut CatalogState) {
         if state.is_busy() {
             crate::theme::widgets::spinner(ui);
         }
-        match state.modified {
-            Some(modified) => {
+        match state.fetched_at {
+            Some(fetched_at) => {
                 ui.label(muted(format!(
                     "Last refresh: {}",
-                    crate::format::time_since(modified, std::time::SystemTime::now())
+                    crate::format::time_since(fetched_at, std::time::SystemTime::now())
                 )))
-                .on_hover_text(crate::format::utc_timestamp(modified.into()));
+                .on_hover_text(crate::format::utc_timestamp(fetched_at.into()));
             }
             None => {
                 ui.label(muted("Last refresh: not loaded"));
             }
         }
     });
+    ui.label(muted(APPLIES_TO_NEW_RUNS));
     if let Some(error) = &state.error {
         crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
