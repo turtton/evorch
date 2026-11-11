@@ -12,7 +12,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 例: `crates/gui/tests/transcript_cards/transcript.rs`、`crates/gui/tests/evidence_policy.rs`、
   `crates/gui/tests/models_usage/model_metadata.rs::config_roundtrip_with_preset_keeps_fields`
 - 環境変数: なし
-- CI ジョブ: `ci`
+- CI ジョブ: `tests (gui …)`
 
 ### L2: ヘッドレス kittest 振る舞いテスト
 
@@ -25,7 +25,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
   `crates/gui/tests/transcript_cards/composer_dispatch_headless.rs`、
   `crates/gui/tests/settings_ui/provider_settings_headless.rs`
 - 環境変数: なし
-- CI ジョブ: `ci`
+- CI ジョブ: `tests (gui …)`
 
 ### L3: サイズ x DPI ジオメトリマトリクス
 
@@ -37,7 +37,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 例: `crates/gui/tests/size_dpi_matrix.rs::demo_geometry_matrix`、
   `crates/gui/tests/size_dpi_matrix.rs::min_size_matches_real_app_viewport`
 - 環境変数: なし
-- CI ジョブ: `ci` (ワークスペーステストに含まれる)
+- CI ジョブ: `tests (gui …)` (ワークスペーステストに含まれる)
 
 ### L4: オフスクリーンレンダ証跡
 
@@ -65,7 +65,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - コマンド: `cargo test -j 1 -p gui --test workbench_shell -- browser:: agent_browser_workbench:: --test-threads=1`
 - 例: `crates/gui/tests/workbench_shell/browser.rs::a_closed_page_keeps_its_last_frame_and_says_so`
 - 環境変数: なし
-- CI ジョブ: `ci` (`cef` と `browser` は `gui` の既定 feature なので既定のワークスペーステストで実行される。`gui` は CEF なしのビルドを `compile_error!` で拒否し、ci は `--no-default-features` が拒否されることを確認する)
+- CI ジョブ: `tests (gui …)` (`cef` と `browser` は `gui` の既定 feature なので既定のワークスペーステストで実行される。`gui` は CEF なしのビルドを `compile_error!` で拒否し、`lint` ジョブは `--no-default-features` が拒否されることを確認する)
 
 ### L6: 実 Chromium E2E
 
