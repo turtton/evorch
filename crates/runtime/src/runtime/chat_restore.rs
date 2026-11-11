@@ -62,6 +62,7 @@ impl AgentRuntime {
     /// Other live runs are unchanged. Images and goal creation belong to a new
     /// human submission through `continue_goal`, not to this scheduling operation.
     pub fn resume_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
+        let _dispatch = self.dispatch_registration_guard()?;
         self.deny_deleted_run(&run_id.to_string())
             .map_err(|deleted| RuntimeError::RunRestoreFailed {
                 run_id: run_id.to_string(),
@@ -79,6 +80,7 @@ impl AgentRuntime {
         authority: RunConfig,
         observation: ChatResumeObservation,
     ) -> Result<RunId, RuntimeError> {
+        let _dispatch = self.dispatch_registration_guard()?;
         self.deny_deleted_run(&run_id.to_string())
             .map_err(|deleted| RuntimeError::RunRestoreFailed {
                 run_id: run_id.to_string(),
@@ -133,6 +135,7 @@ impl AgentRuntime {
     /// the messages held for it. Like [`Self::resume_chat`] it reuses saved
     /// history under current authority, but it is not user input.
     pub fn wake_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
+        let _dispatch = self.dispatch_registration_guard()?;
         self.resume(run_id, ChatContinuation::Wake, authority)
     }
 
@@ -157,6 +160,7 @@ impl AgentRuntime {
         prompt: String,
         authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        let _dispatch = self.dispatch_registration_guard()?;
         self.continue_chat(run_id, ChatContinuation::Followup(prompt), authority)
     }
 
@@ -176,6 +180,7 @@ impl AgentRuntime {
         mut authority: RunConfig,
         after_stop: Option<ResumeFence>,
     ) -> Result<RunId, RuntimeError> {
+        let _dispatch = self.dispatch_registration_guard()?;
         let resume_ownership = authority.ownership.clone();
         let prompt = continuation.prompt();
         // Only a new prompt takes mentions; a resume attaches nothing.
@@ -751,6 +756,7 @@ impl AgentRuntime {
         mut config: RunConfig,
         seed: Option<crate::restore::ChatForkSeed>,
     ) -> Result<RunId, RuntimeError> {
+        let _dispatch = self.dispatch_registration_guard()?;
         let deleted = |deleted| RuntimeError::RunRestoreFailed {
             run_id: format!("chat:{thread_id}"),
             reason: RunRestoreFailure::ThreadDeleted(deleted),

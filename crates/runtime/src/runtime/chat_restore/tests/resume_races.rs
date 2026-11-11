@@ -26,7 +26,15 @@ fn stopped(runtime: &AgentRuntime) -> bool {
 
 #[tokio::test]
 async fn resume_race_admission_save_failure_does_not_resume_delivery() {
-    let fixture = Fixture::new();
+    for admission in [false, true] {
+        resume_race_admission_save_failure_does_not_resume_delivery_with_admission(admission).await;
+    }
+}
+
+async fn resume_race_admission_save_failure_does_not_resume_delivery_with_admission(
+    admission: bool,
+) {
+    let fixture = Fixture::for_s2(admission);
     let runtime = &fixture.runtime;
     let (run, mut events) = waiting_chat(runtime).await;
     runtime.stop(run, StopScope::SelfOnly).unwrap();

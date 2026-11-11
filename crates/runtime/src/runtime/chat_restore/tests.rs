@@ -64,6 +64,12 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn for_s2(admission: bool) -> Self {
+        Self::with_model(Arc::new(registration::AdmissionModel {
+            admission,
+            reject: AtomicBool::new(false),
+        }))
+    }
     fn new() -> Self {
         Self::with_model(Arc::new(CompletingModel))
     }

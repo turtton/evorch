@@ -679,6 +679,16 @@ pub(super) fn run_writer_with_index(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::Recovery(command, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "recovery writes suspended".into(),
+                    ))
+                } else {
+                    crate::recovery::write(&state.conn, command)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::FlushResumeIntents(reply)) => {
                 let result = flush_usage(&mut state).and_then(|()| {
                     let (busy, frames, synced): (i64, i64, i64) =

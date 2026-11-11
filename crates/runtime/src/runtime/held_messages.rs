@@ -129,6 +129,13 @@ impl AgentRuntime {
 
     /// The user spoke to this conversation: automatic wakes may continue.
     pub(crate) fn reset_auto_wakes(&self, root: RunId) {
+        *self
+            .shared
+            .wake_reset_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(root)
+            .or_default() += 1;
         self.reset_question_wakes(root);
         self.schedule_question_recovery(root);
         self.shared
@@ -140,15 +147,18 @@ impl AgentRuntime {
 
     /// Wake `run` after its locks are released, unless the operator stopped it.
     pub(super) fn schedule_wake(&self, run: RunId) {
-        if self.operator_stopped(run) {
+        if self.operator_stopped(run) || !self.shared.quiesce.running() {
             return;
         }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             tracing::debug!(%run, "no async runtime to wake a held recipient");
             return;
         };
+        let Ok(dispatch) = self.dispatch_registration_guard() else {
+            return;
+        };
         let runtime = self.clone();
-        handle.spawn(async move { runtime.wake(run).await });
+        handle.spawn(dispatch.scope(async move { runtime.wake(run).await }));
     }
 
     pub(in crate::runtime) async fn wake(&self, run: RunId) {

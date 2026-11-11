@@ -303,6 +303,7 @@ async fn unfinished_response_resumes_without_ledger_memory_or_new_review_evidenc
 #[tokio::test]
 async fn pending_escalation_resume_preserves_seed_and_later_human_evidence() {
     let model = Arc::new(super::registration::AdmissionModel {
+        admission: true,
         reject: AtomicBool::new(false),
     });
     let fixture = Fixture::with_model(model.clone());

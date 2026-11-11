@@ -7,6 +7,8 @@ use tokio::sync::watch;
 
 #[cfg(test)]
 mod fixture;
+#[cfg(test)]
+mod recovery_06a_tests;
 pub(crate) mod runtime;
 mod safe_point;
 #[cfg(test)]
@@ -14,6 +16,10 @@ mod tests;
 
 mod schema;
 pub use schema::*;
+pub(crate) mod dispatch;
+pub use dispatch::DispatchDrainFence;
+mod recovery;
+pub use recovery::*;
 
 pub(crate) struct Coordinator {
     inner: Mutex<Inner>,

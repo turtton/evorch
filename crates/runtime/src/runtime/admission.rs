@@ -467,8 +467,11 @@ impl AgentRuntime {
             .expect("reserved admission has one completion sender");
         let goal_stamp = self.goal_input_stamp(run_id);
         let lane_execution = Arc::clone(&execution);
+        let dispatch = self
+            .dispatch_registration_guard()
+            .expect("admission caller holds a registration guard until handoff");
         let runtime = self.clone();
-        let task = async move {
+        let task = dispatch.scope(async move {
             let handoff = matches!(
                 &continuation,
                 RunContinuation::Handoff(_)
@@ -489,16 +492,12 @@ impl AgentRuntime {
             let model = runtime.shared.model_for(&config);
             let mut cancellation = execution.cancel_tx.subscribe();
             let admission = crate::panic_capture::catch_panic(async {
-            if lane_root {
                 tokio::select! {
                     biased;
                     _ = cancellation.wait_for(|signal| matches!(signal, RunInterrupt::Stop | RunInterrupt::Cancel)) =>
                         Err(RuntimeError::RunTerminated { run_id: run_id.to_string() }),
                     result = model.admit(&invocation, role) => result,
                 }
-            } else {
-                model.admit(&invocation, role).await
-            }
             }).await;
             let admission_panicked = admission.is_err();
             let mut admitted = admission.unwrap_or_else(|panic| {
@@ -669,7 +668,7 @@ impl AgentRuntime {
             if admitted.is_err() {
                 result.send_replace(Some(admitted));
             }
-        };
+        });
         if lane_root {
             self.shared
                 .lane_admissions
@@ -725,6 +724,55 @@ impl AgentRuntime {
             }
         }
         Ok(())
+    }
+}
+
+impl AgentRuntime {
+    pub(crate) fn dispatch_pending_admissions(&self) -> Vec<RunId> {
+        self.shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, a)| a.result.borrow().is_none())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+    pub(crate) async fn join_dispatch_admissions(&self) -> Result<(), RuntimeError> {
+        let pending: Vec<_> = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|a| a.result.borrow().is_none())
+            .map(|a| a.result.clone())
+            .collect();
+        for mut result in pending {
+            result
+                .wait_for(Option::is_some)
+                .await
+                .map_err(|_| RuntimeError::Model {
+                    reason: "dispatch admission ended without receipt".into(),
+                })?;
+        }
+        Ok(())
+    }
+    pub(crate) fn try_seal_dispatch(&self, restart: bool) -> bool {
+        // Same registration order. tails is innermost and never held over A/R acquisition.
+        let admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runs = lock_runs(&self.shared.runs);
+        if !restart
+            && (admissions.values().any(|a| a.result.borrow().is_none())
+                || runs.values().any(is_live))
+        {
+            return false;
+        }
+        self.shared.dispatch_tails.try_close()
     }
 }
 

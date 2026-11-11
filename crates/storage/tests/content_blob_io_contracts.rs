@@ -97,7 +97,13 @@ const C_GC: u64 = 24;
 // replaces one outbox trigger (schema pages only, no row work); 22 frames and 4 reserved.
 // v60 adds the resume intent table and fences: carry its independent 32 fixed
 // schema-frame allowance. Keep VM-step scaling and collection budgets unchanged.
-const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32;
+// v61 adds only graph schema: the complete probe measured 309/466 frames for
+// 10/100,000 rows (135196 VM steps each on the final schema), versus the
+// prior ceiling of 464.
+// Add 4 fixed schema frames: the measured 2-frame increment plus 2 frames of
+// schema/pointer-map placement headroom. recovery_06a_io independently checks
+// v60 -> v61 row independence; the assertions below remain unchanged.
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -334,6 +340,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v61.sql"),
                     include_str!("../undo/undo_v60.sql"),
                     include_str!("../undo/undo_v59.sql"),
                     include_str!("../undo/undo_v58.sql"),

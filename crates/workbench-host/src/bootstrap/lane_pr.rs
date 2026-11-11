@@ -112,17 +112,13 @@ pub async fn stop_and_drain(
     executor: &tools::ToolExecutor,
 ) -> Result<(), BootstrapError> {
     let mut failure = None;
-    remember(&mut failure, owner.begin_quiesce().map(|_| ()));
-    if let Some(service) = runtime.pull_requests() {
-        service.shutdown();
+    // Reuse the established 03b prefix; no restart quiesce in operator drain.
+    let fence = runtime
+        .fence_dispatch_shutdown(|| stop_dispatch_producers(services, runtime, owner))
+        .await;
+    if let Err(error) = &fence {
+        remember(&mut failure, Err::<(), _>(error.clone()));
     }
-    // Only the lane producer may stop yet. Learning observers must remain
-    // subscribed until no recovery/admission can register another root.
-    remember(&mut failure, services.join_named("lane-recovery").await);
-    remember(&mut failure, runtime.drain_lane_admissions().await);
-    // A recovery scan already in progress may have acquired another lease.
-    remember(&mut failure, owner.begin_quiesce().map(|_| ()));
-    services.request_stop();
     let runs = runtime.list_agents();
     for run in &runs {
         if matches!(
@@ -146,7 +142,31 @@ pub async fn stop_and_drain(
         );
     }
     remember(&mut failure, runtime.drain_lane_admissions().await);
+    if let Ok(fence) = fence {
+        remember(&mut failure, runtime.drain_dispatch_tails(&fence).await);
+    }
     remember(&mut failure, runtime.drain_lane_stop_writes().await);
     remember(&mut failure, services.shutdown().await);
+    failure.map_or(Ok(()), Err)
+}
+
+/// The existing lane producer/admission/service stop order is the fence receipt.
+async fn stop_dispatch_producers(
+    services: &mut BackgroundServices,
+    runtime: &AgentRuntime,
+    owner: &OwnerHost,
+) -> Result<(), BootstrapError> {
+    let mut failure = None;
+    remember(&mut failure, owner.begin_quiesce().map(|_| ()));
+    if let Some(service) = runtime.pull_requests() {
+        service.shutdown();
+    }
+    // Only the lane producer may stop yet. Learning observers must remain
+    // subscribed until no recovery/admission can register another root.
+    remember(&mut failure, services.join_named("lane-recovery").await);
+    remember(&mut failure, runtime.drain_lane_admissions().await);
+    // A recovery scan already in progress may have acquired another lease.
+    remember(&mut failure, owner.begin_quiesce().map(|_| ()));
+    services.request_stop();
     failure.map_or(Ok(()), Err)
 }

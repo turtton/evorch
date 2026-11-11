@@ -252,10 +252,19 @@ async fn stopping_registered_pending_run_is_terminal_and_distinct_from_cancel() 
 
 #[tokio::test]
 async fn stop_cancels_pending_admission_for_self_and_subtree() {
+    for admission in [false, true] {
+        stop_cancels_pending_admission_for_self_and_subtree_with_admission(admission).await;
+    }
+}
+
+async fn stop_cancels_pending_admission_for_self_and_subtree_with_admission(admission: bool) {
     for scope in [StopScope::SelfOnly, StopScope::Subtree] {
-        let runtime = fixture();
+        let runtime = s2_fixture(admission);
         let root =
             runtime.delegate_background(Role::Orchestrator, "root".into(), RunConfig::default());
+        if admission {
+            runtime.wait_admission(root).await.unwrap();
+        }
         let pending = runtime.reserve_child_run_id(root).unwrap();
         runtime.seed_spawn_intent(pending, &root.to_string());
         runtime.reserve_admission(pending, Some(root), None);
@@ -405,4 +414,34 @@ async fn observing_old_snapshot_keeps_explicit_messages_and_same_id_new_completi
     assert_eq!(runtime.run_mailbox(parent).unwrap().len(), 1);
     runtime.observe_completion(&new);
     assert!(runtime.run_mailbox(parent).unwrap().is_empty());
+}
+
+struct S2PendingModel {
+    admission: bool,
+}
+#[async_trait::async_trait]
+impl AgentModel for S2PendingModel {
+    fn requires_admission(&self) -> bool {
+        self.admission
+    }
+    async fn complete(
+        &self,
+        c: &crate::AgentInvocationContext,
+        r: Role,
+        m: &[providers::Message],
+        t: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, RuntimeError> {
+        PendingModel.complete(c, r, m, t).await
+    }
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "pending".into()
+    }
+}
+fn s2_fixture(admission: bool) -> AgentRuntime {
+    let bus = Arc::new(EventBus::new(128));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        bus.clone(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+    ));
+    AgentRuntime::new(bus, executor, Arc::new(S2PendingModel { admission }))
 }

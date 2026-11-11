@@ -174,6 +174,7 @@ fn fixture_with_model(
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),
         durable_task: None,
         pending_terminal: None,
+        terminal_dispatch: None,
         scratch: None,
         allowed_directories: None,
         thread_read_dirs: Vec::new(),

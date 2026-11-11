@@ -44,8 +44,14 @@ pub(super) async fn waiting_chat(runtime: &AgentRuntime) -> (RunId, event_bus::E
 
 #[tokio::test]
 async fn continue_after_stop_diagnostic_starts_a_new_incarnation() {
+    for admission in [false, true] {
+        continue_after_stop_diagnostic_starts_a_new_incarnation_with_admission(admission).await;
+    }
+}
+
+async fn continue_after_stop_diagnostic_starts_a_new_incarnation_with_admission(admission: bool) {
     for revoke in ["continue", "stop", "cancel", "late-cancel"] {
-        let fixture = Fixture::new();
+        let fixture = Fixture::for_s2(admission);
         let runtime = &fixture.runtime;
         let (run, mut events) = waiting_chat(runtime).await;
         let old = runtime.execution_snapshot(run).unwrap();
@@ -138,7 +144,13 @@ async fn continue_after_stop_diagnostic_starts_a_new_incarnation() {
 
 #[tokio::test]
 async fn deferred_continue_save_failure_is_not_accepted() {
-    let fixture = Fixture::new();
+    for admission in [false, true] {
+        deferred_continue_save_failure_is_not_accepted_with_admission(admission).await;
+    }
+}
+
+async fn deferred_continue_save_failure_is_not_accepted_with_admission(admission: bool) {
+    let fixture = Fixture::for_s2(admission);
     let runtime = &fixture.runtime;
     let (run, _) = waiting_chat(runtime).await;
     let old = runtime.execution_snapshot(run).unwrap();
@@ -158,7 +170,13 @@ async fn deferred_continue_save_failure_is_not_accepted() {
 
 #[tokio::test]
 async fn continue_during_hard_cancel_does_not_resume_lane_delivery() {
-    let fixture = Fixture::new();
+    for admission in [false, true] {
+        continue_during_hard_cancel_does_not_resume_lane_delivery_with_admission(admission).await;
+    }
+}
+
+async fn continue_during_hard_cancel_does_not_resume_lane_delivery_with_admission(admission: bool) {
+    let fixture = Fixture::for_s2(admission);
     let runtime = &fixture.runtime;
     let (run, mut events) = waiting_chat(runtime).await;
     runtime.stop(run, StopScope::SelfOnly).unwrap();

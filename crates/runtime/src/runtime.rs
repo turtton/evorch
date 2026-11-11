@@ -14,6 +14,7 @@ mod child_renewal;
 mod completion_relay;
 mod held_messages;
 mod host_prompt;
+mod recovery_graph;
 pub(crate) use host_prompt::HostPrompt;
 mod nested_orchestrator;
 mod output;
@@ -104,6 +105,7 @@ type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(
 
 pub(crate) struct Shared {
     pub(crate) quiesce: crate::quiesce::Coordinator,
+    pub(crate) dispatch_tails: Arc<crate::quiesce::dispatch::DispatchTails>,
     pub(crate) thread_goals: Mutex<crate::thread_goals::ThreadGoals>,
     /// Pull request tracking (ADR 0043), once the host started it.
     pub(crate) pull_requests: OnceLock<crate::pull_requests::PullRequestService>,
@@ -118,7 +120,7 @@ pub(crate) struct Shared {
     admissions: admission::Admissions,
     lane_admissions: admission::LaneAdmissions,
     #[cfg(test)]
-    admission_registration_hook: Mutex<Option<admission::RegistrationHook>>,
+    pub(crate) admission_registration_hook: Mutex<Option<admission::RegistrationHook>>,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
     #[cfg(test)]
     execution_hooks: cancellation::TestHooks,
@@ -134,6 +136,7 @@ pub(crate) struct Shared {
     pub(crate) held_messages: Mutex<HashMap<RunId, Vec<crate::mailbox::QueuedMessage>>>,
     /// Automatic wakes per conversation root since the last user input.
     pub(crate) auto_wakes: Mutex<HashMap<RunId, u32>>,
+    pub(crate) wake_reset_generations: Mutex<HashMap<RunId, u64>>,
     pub(crate) question_delivery: Mutex<questions::delivery::QuestionDelivery>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) self_improvement: OnceLock<crate::self_improvement::ImprovementSettings>,
@@ -764,6 +767,7 @@ impl AgentRuntime {
                 turn_version: watch::channel(0).0,
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 quiesce: Default::default(),
+                dispatch_tails: Arc::new(Default::default()),
                 admissions: Mutex::new(HashMap::new()),
                 lane_admissions: Default::default(),
                 #[cfg(test)]
@@ -777,6 +781,7 @@ impl AgentRuntime {
                 next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
+                wake_reset_generations: Mutex::new(HashMap::new()),
                 question_delivery: Mutex::new(Default::default()),
                 topology: OnceLock::new(),
                 learning: OnceLock::new(),
@@ -1106,6 +1111,7 @@ impl AgentRuntime {
                 question_version: watch::channel(0).0,
                 turn_version: watch::channel(0).0,
                 quiesce: Default::default(),
+                dispatch_tails: Arc::new(Default::default()),
                 admissions: Mutex::new(HashMap::new()),
                 lane_admissions: Default::default(),
                 #[cfg(test)]
@@ -1119,6 +1125,7 @@ impl AgentRuntime {
                 next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
+                wake_reset_generations: Mutex::new(HashMap::new()),
                 question_delivery: Mutex::new(Default::default()),
                 bus,
                 executor: Mutex::new(executor),
@@ -1351,6 +1358,7 @@ impl AgentRuntime {
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
     ) -> Result<RunAdmission, RuntimeError> {
+        let _dispatch = self.dispatch_registration_guard()?;
         // Every spawn path ends here: an infallible entry point (`spawn_reserved`)
         // still cannot start a child Orchestrator. Its admission fails instead.
         if let Err(error) = crate::policy::authorize_child_role(parent, role) {
@@ -1967,7 +1975,7 @@ impl AgentRuntime {
                             &task.publication.incarnation(),
                             crate::quiesce::StopReason::Terminal,
                         );
-                        runtime.publish_terminal(
+                        let _dispatch = runtime.publish_terminal(
                             task.run_id,
                             LifecycleEvent::AgentRunStateChanged {
                                 run_id: task.run_id.to_string(),
@@ -2010,15 +2018,19 @@ impl AgentRuntime {
     ) {
         let run_id = task.run_id;
         match crate::panic_capture::catch_panic(run_agent(weak.clone(), task, channels)).await {
-            Ok(()) => {
+            Ok(dispatch) => {
                 if let Some(learning) = learning {
-                    learning.complete(weak, run_id).await;
+                    if let Some(dispatch) = dispatch {
+                        dispatch.scope(learning.complete(weak, run_id)).await;
+                    } else {
+                        tracing::warn!(%run_id, "learning skipped without terminal dispatch lineage");
+                    }
                 }
             }
             // No lessons from a run whose loop state is unknown.
             Err(panic) => {
                 if let Some(shared) = weak.upgrade() {
-                    AgentRuntime { shared }.run_panicked(run_id, panic).await;
+                    let _dispatch = AgentRuntime { shared }.run_panicked(run_id, panic).await;
                 }
             }
         }
@@ -2031,6 +2043,9 @@ impl AgentRuntime {
         prompt: String,
         config: RunConfig,
     ) -> Result<(), String> {
+        let _dispatch = self
+            .dispatch_registration_guard()
+            .map_err(|e| e.to_string())?;
         self.bind_thread_root(thread_id, run_id)?;
         crate::thread_lineage::record_chat_root(
             self,
@@ -3257,6 +3272,7 @@ impl AgentRuntime {
         content: impl Into<String>,
         reply_to: Option<String>,
     ) -> Result<String, RuntimeError> {
+        let _dispatch = self.dispatch_registration_guard()?;
         self.validate_run_mutation(sender)?;
         let live = lock_runs(&self.shared.runs)
             .get(&recipient)

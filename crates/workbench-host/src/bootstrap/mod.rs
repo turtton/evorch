@@ -17,6 +17,9 @@ pub mod learning;
 mod learning_tests;
 pub mod models;
 mod project_models;
+pub mod recovery;
+#[cfg(test)]
+mod recovery_06a_tests;
 pub mod services;
 #[cfg(test)]
 mod tests;
@@ -535,6 +538,12 @@ impl BootstrappedHost {
         for task in tasks {
             lane_pr::remember(&mut failure, task.await.map(|_| ()));
         }
+        // A failed dispatch/persistence drain is not permission to flush or
+        // release ownership; keep those resources for explicit recovery.
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let mut failure = None;
         if let Some(reclaim) = self.reclaim.take() {
             reclaim.shutdown();
         }
