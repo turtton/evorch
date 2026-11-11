@@ -362,3 +362,37 @@ fn modes_without_fast_cost_have_no_fast_pricing() {
         assert_eq!(catalog.find("openai", id).unwrap().fast_pricing, None);
     }
 }
+
+// Given: a readable cache and a successful fetch whose result cannot be saved
+// When: a refresh is forced / Then: it is not reported as a refresh, the cache is untouched,
+// and the lock is released for the next attempt.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_save_is_not_a_refresh_and_keeps_the_cache() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), 0);
+    drop(cache::lock(dir.path()).await.unwrap());
+    let original = std::fs::read(dir.path().join("models-dev.json")).unwrap();
+    let server = server(200, 1).await;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let outcome =
+        ModelCatalog::refresh_with(dir.path(), &format!("{}/api.json", server.uri())).await;
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let outcome = outcome.unwrap();
+    assert!(matches!(
+        outcome,
+        RefreshOutcome::CacheRetained {
+            reason: CatalogError::Io(_),
+            ..
+        }
+    ));
+    assert_eq!(outcome.catalog().fetched_at, 0);
+    assert_eq!(
+        std::fs::read(dir.path().join("models-dev.json")).unwrap(),
+        original
+    );
+    assert!(cache::lock(dir.path()).await.is_ok());
+}

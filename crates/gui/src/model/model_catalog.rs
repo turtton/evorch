@@ -173,7 +173,26 @@ impl CatalogState {
         let Some(rx) = self.rx.take() else {
             return false;
         };
-        match rx.try_recv() {
+        let received = rx.try_recv();
+        if matches!(received, Err(mpsc::TryRecvError::Empty)) {
+            self.rx = Some(rx);
+            return false;
+        }
+        self.receive(rx, received.map_err(|_| mpsc::RecvError));
+        true
+    }
+
+    /// Blocks until the running request, including a background refresh it scheduled, has
+    /// been applied. For callers without a frame loop (tests, tools); the GUI uses `poll`.
+    pub fn wait_until_idle(&mut self) {
+        while let Some(rx) = self.rx.take() {
+            let received = rx.recv();
+            self.receive(rx, received);
+        }
+    }
+
+    fn receive(&mut self, rx: mpsc::Receiver<Update>, received: Result<Update, mpsc::RecvError>) {
+        match received {
             Ok(update) => {
                 match update.result {
                     Ok(catalog) => {
@@ -189,15 +208,9 @@ impl CatalogState {
                 if update.busy {
                     self.rx = Some(rx);
                 }
-                true
             }
-            Err(mpsc::TryRecvError::Empty) => {
-                self.rx = Some(rx);
-                false
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
+            Err(mpsc::RecvError) => {
                 self.error = Some("Catalog worker stopped without a result".into());
-                true
             }
         }
     }

@@ -44,6 +44,12 @@ impl ClaudeReasoningControls {
 }
 
 impl ClaudeWireProfile {
+    /// Whether the model thinks on every request, so only the default temperature is valid
+    /// whatever effort is (or is not) selected.
+    pub fn always_thinks(&self, model: &str) -> bool {
+        model_mode(model).is_some_and(ModelMode::requires_thinking)
+    }
+
     pub fn requires_default_temperature(&self, model: &str) -> bool {
         model_mode(model).is_some_and(|mode| mode.supports_xhigh() || mode.requires_thinking())
     }

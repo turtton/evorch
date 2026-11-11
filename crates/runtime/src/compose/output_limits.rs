@@ -228,3 +228,63 @@ impl RoutedModel {
         .max_output_tokens
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn catalog() -> Arc<catalog::ModelCatalog> {
+        let directory = tempfile::tempdir().unwrap();
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            directory.path().join("models-dev.json"),
+            serde_json::json!({"fetched_at": fetched_at, "api": {}}).to_string(),
+        )
+        .unwrap();
+        Arc::new(
+            catalog::ModelCatalog::load_or_refresh(directory.path())
+                .await
+                .unwrap(),
+        )
+    }
+
+    // Given: a run pinned to the initial generation whose load is still in flight
+    // When: a refresh is published before that load completes
+    // Then: the late load finishes for its own run only; it does not replace the published
+    // generation, and runs pinned afterwards get the published one.
+    #[tokio::test]
+    async fn a_slow_initial_load_never_overwrites_a_later_publish() {
+        let shared = OutputLimitCatalogs::new();
+        let initial = catalog().await;
+        let published = catalog().await;
+        let generation = shared.pin("run-a");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let load = tokio::spawn({
+            let initial = Arc::clone(&initial);
+            async move {
+                generation
+                    .catalog(async move {
+                        started_tx.send(()).unwrap();
+                        release_rx.await.unwrap();
+                        Some(initial)
+                    })
+                    .await
+            }
+        });
+        started_rx.await.unwrap();
+
+        shared.publish(Arc::clone(&published));
+        release_tx.send(()).unwrap();
+        let loaded = load.await.unwrap().unwrap();
+
+        assert!(Arc::ptr_eq(&loaded, &initial));
+        assert!(Arc::ptr_eq(&shared.current_catalog().unwrap(), &published));
+        assert_eq!(shared.is_pinned_to_current("run-a"), Some(false));
+        shared.pin("run-b");
+        assert_eq!(shared.is_pinned_to_current("run-b"), Some(true));
+    }
+}

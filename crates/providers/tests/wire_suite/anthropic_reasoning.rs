@@ -184,12 +184,19 @@ async fn unsupported_model_or_effort_is_not_sent() {
     ] {
         let mut input = request(model, Some(effort));
         input.max_tokens = Some(max_tokens);
-        input.temperature = Some(0.2);
+        // An always-thinking model accepts only the default temperature, whatever the effort
+        // (see `always_thinking_models_require_the_default_temperature_without_an_effort`).
+        let sampling = (model != "claude-mythos-preview").then_some(0.2);
+        input.temperature = sampling;
         let (body, _) = send(&input).await.unwrap();
         for field in ["thinking", "output_config", "context_management"] {
             assert!(body.get(field).is_none(), "{model} {effort}: {field}");
         }
-        assert_eq!(body["temperature"], 0.2, "{model} {effort}");
+        assert_eq!(
+            body.get("temperature").and_then(Value::as_f64),
+            sampling,
+            "{model} {effort}"
+        );
     }
 }
 
@@ -203,4 +210,33 @@ async fn enabled_thinking_requires_the_default_temperature() {
     input.temperature = Some(1.0);
     let (body, _) = send(&input).await.unwrap();
     assert!(body.get("temperature").is_none());
+}
+
+// Given: a model that always thinks (Fable 5.2, Opus 5.5) / When: no effort is selected
+// Then: a custom temperature is rejected before sending, the default one is omitted, and a
+// model that can switch thinking off keeps the caller's temperature.
+#[tokio::test]
+async fn always_thinking_models_require_the_default_temperature_without_an_effort() {
+    for model in [
+        "claude-fable-5-2",
+        "claude-fable-5-2-20261017",
+        "claude-opus-5-5",
+    ] {
+        let mut input = request(model, None);
+        input.temperature = Some(0.2);
+        assert!(
+            matches!(send(&input).await, Err(ProviderError::Request(_))),
+            "{model}"
+        );
+        input.temperature = Some(1.0);
+        let (body, _) = send(&input).await.unwrap();
+        assert!(body.get("temperature").is_none(), "{model}");
+        for field in ["thinking", "output_config", "context_management"] {
+            assert!(body.get(field).is_none(), "{model}: {field}");
+        }
+    }
+    let mut input = request("claude-opus-4-7", None);
+    input.temperature = Some(0.2);
+    let (body, _) = send(&input).await.unwrap();
+    assert_eq!(body["temperature"], 0.2);
 }

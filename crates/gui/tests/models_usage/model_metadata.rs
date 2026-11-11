@@ -336,11 +336,7 @@ impl CatalogBackend for ScriptedBackend {
 
 fn run_to_completion(state: &mut CatalogState, request: CatalogRequest) {
     state.start(request);
-    // The worker always finishes; a hang is caught by the test runner, not by a deadline here.
-    while state.is_busy() {
-        state.poll();
-        std::thread::yield_now();
-    }
+    state.wait_until_idle();
 }
 
 fn scripted(fetch: Result<CatalogFetch, String>) -> CatalogState {
