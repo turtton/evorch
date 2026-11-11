@@ -88,7 +88,7 @@ fn items(
                         && r.brief_revision == l.brief_revision
                 })
         {
-            let mut can_close = false;
+            let mut readiness = None;
             let kind = match report.status {
                 LaneStatus::Blocked => Some(LaneAttentionKind::Blocked {
                     report_seq: report.report_seq,
@@ -113,16 +113,34 @@ fn items(
                             .transpose()?;
                         let current = verification
                             .filter(|v| target(conn, &lane_id).is_ok_and(|t| v.target == t));
-                        can_close = current.as_ref().is_some_and(|v| {
-                            v.state == LaneVerificationState::Completed
-                                && v.submission
-                                    .as_ref()
-                                    .is_some_and(|s| s.verdict == LaneVerificationVerdict::Approved)
-                        });
-                        let state = current.map(|v| v.state);
-                        Some(LaneAttentionKind::ReadyUnverified {
+                        // Informative only; no state here stops the lead from closing.
+                        let state = match current {
+                            Some(v) => match (derived_state(conn, &v)?, v.submission.as_ref()) {
+                                (
+                                    LaneVerificationState::Pending
+                                    | LaneVerificationState::Submitted,
+                                    _,
+                                ) => LaneReadyState::ReviewInProgress,
+                                (LaneVerificationState::Incomplete, _) => {
+                                    LaneReadyState::ReviewIncomplete
+                                }
+                                (LaneVerificationState::Completed, Some(s))
+                                    if s.verdict == LaneVerificationVerdict::Approved
+                                        && s.checks.iter().all(|c| c.passed) =>
+                                {
+                                    LaneReadyState::AwaitingClose
+                                }
+                                _ => LaneReadyState::ReviewRejected,
+                            },
+                            None if report.artifact_revision.is_none() => {
+                                LaneReadyState::NoEvidence
+                            }
+                            None => LaneReadyState::Unreviewed,
+                        };
+                        readiness = Some(state);
+                        Some(LaneAttentionKind::ReadyUnclosed {
                             ready_seq: report.report_seq,
-                            verification_state: state,
+                            readiness: state,
                         })
                     }
                 }
@@ -130,14 +148,17 @@ fn items(
             };
             if let Some(kind) = kind {
                 let actions = if report.status == LaneStatus::Ready {
-                    vec![
-                        if can_close {
-                            LaneAttentionAction::Close
-                        } else {
-                            LaneAttentionAction::Verify
-                        },
-                        LaneAttentionAction::Inspect,
-                    ]
+                    // Close is always the lead's choice; a review is offered unless one
+                    // is already running or has approved.
+                    let mut actions = vec![LaneAttentionAction::Close];
+                    if !matches!(
+                        readiness,
+                        Some(LaneReadyState::ReviewInProgress | LaneReadyState::AwaitingClose)
+                    ) {
+                        actions.push(LaneAttentionAction::Verify);
+                    }
+                    actions.push(LaneAttentionAction::Inspect);
+                    actions
                 } else {
                     vec![LaneAttentionAction::Inspect, LaneAttentionAction::Continue]
                 };

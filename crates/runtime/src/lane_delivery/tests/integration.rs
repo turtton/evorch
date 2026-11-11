@@ -343,7 +343,7 @@ async fn run_scale() {
     assert_eq!(
         attention(&f)
             .iter()
-            .filter(|i| matches!(i.kind, LaneAttentionKind::ReadyUnverified { .. }))
+            .filter(|i| matches!(i.kind, LaneAttentionKind::ReadyUnclosed { .. }))
             .count(),
         12
     );
@@ -457,7 +457,7 @@ async fn run_scale() {
     assert_eq!(
         attention(&f)
             .iter()
-            .filter(|i| matches!(i.kind, LaneAttentionKind::ReadyUnverified { .. }))
+            .filter(|i| matches!(i.kind, LaneAttentionKind::ReadyUnclosed { .. }))
             .count(),
         12
     );

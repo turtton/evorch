@@ -350,7 +350,7 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
     let ready = result(&h, "journey-ready");
     assert!(attention(&config).iter().any(|i| matches!(
         i.kind,
-        event_bus::lane::LaneAttentionKind::ReadyUnverified { .. }
+        event_bus::lane::LaneAttentionKind::ReadyUnclosed { .. }
     )));
     assert!(
         !attention(&config)
@@ -399,8 +399,8 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
     let verified = result(&h, "journey-verify");
     assert!(attention(&config).iter().any(|i| matches!(
         i.kind,
-        event_bus::lane::LaneAttentionKind::ReadyUnverified {
-            verification_state: Some(event_bus::lane::LaneVerificationState::Pending),
+        event_bus::lane::LaneAttentionKind::ReadyUnclosed {
+            readiness: event_bus::lane::LaneReadyState::ReviewInProgress,
             ..
         }
     )));
@@ -429,7 +429,13 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
             call(
                 "journey-close",
                 "lane_close",
-                json!({"lane_id":lane_id,"ready_seq":ready_seq,"verification_ref":reference}),
+                json!({
+                    "lane_id":lane_id,"ready_seq":ready_seq,
+                    "expected_management_revision":verified["management_revision"],
+                    "expected_request_revision":verified["request_revision"],
+                    "note":"reviewed and accepted by the lead",
+                    "verification_ref":reference
+                }),
             ),
             text_response("closed with evidence"),
         ],

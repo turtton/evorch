@@ -30,6 +30,35 @@ impl HumanLaneManagement {
     ) -> Self {
         Self { runtime, ownership }
     }
+    /// A human ends a lane's ledger entry (ADR 0044): `human_closed`, or `discarded` when
+    /// the request says so. Only the ledger changes: no run is stopped, no thread or
+    /// worktree deleted, and the lane stays attached. Callers must already have checked
+    /// that the actor is a human (see [`CommandHost::close_lane_human`]).
+    pub fn close_lane(
+        &self,
+        request: runtime::lane_close::HumanLaneCloseRequest,
+    ) -> Result<event_bus::lane::LaneCloseResult, WorkbenchError> {
+        let lane = read_lane(&self.runtime, &request.lane_id)?;
+        let mut threads = vec![lane.thread_id];
+        threads.extend(lane.lead_thread_id);
+        threads.sort();
+        threads.dedup();
+        let owner = self
+            .ownership
+            .as_ref()
+            .ok_or_else(|| failure("ownership_lost"))?;
+        let permits = threads
+            .iter()
+            .map(|thread| {
+                owner
+                    .owned_permit(thread)
+                    .map_err(|_| failure("ownership_lost"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.runtime
+            .close_lane_from_host(rt::LaneHumanContext, request, &permits)
+            .map_err(|e| failure(e.code))
+    }
     /// Caller holds the authoritative family lock through this call and any save.
     pub fn apply(
         &self,
@@ -63,7 +92,12 @@ impl HumanLaneManagement {
 }
 fn failure(code: &str) -> WorkbenchError {
     let kind = match code {
-        "stale_management_revision" | "stale_family_revision" => ErrorCode::StaleRevision,
+        "stale_management_revision"
+        | "stale_family_revision"
+        | "stale_management"
+        | "stale_request"
+        | "stale_ready"
+        | "stale_brief" => ErrorCode::StaleRevision,
         "ownership_lost" | "not_current_lead" | "human_action_required" => {
             ErrorCode::PermissionDenied
         }
@@ -219,6 +253,36 @@ fn family(
     Ok((revision, guard))
 }
 impl CommandHost {
+    /// Human close or discard of a lane's ledger entry, for the desktop and core host
+    /// to call from a verified human action. This is deliberately not a wire
+    /// `Command` variant, and no agent tool, MCP method or agent dispatch reaches it: an
+    /// agent provenance is refused, so a claimed human actor in a message cannot close.
+    pub fn close_lane_human(
+        &mut self,
+        request: runtime::lane_close::HumanLaneCloseRequest,
+        provenance: &Provenance,
+    ) -> Result<event_bus::lane::LaneCloseResult, WorkbenchError> {
+        if provenance.actor != Actor::Human {
+            return Err(failure("human_action_required"));
+        }
+        let mut request = request;
+        // The record names the surface and client the host authenticated, not what the
+        // caller put in the request.
+        request.surface = serde_json::to_value(provenance.surface)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into());
+        request.client_id = provenance.client_id.as_ref().map(|c| c.as_str().to_owned());
+        let adapter = HumanLaneManagement::new(
+            self.service().runtime().clone(),
+            self.service().ownership().cloned(),
+        );
+        let result = adapter.close_lane(request)?;
+        if let Err(error) = self.projection().refresh() {
+            tracing::warn!(?error.code, "lane projection refresh failed");
+        }
+        Ok(result)
+    }
     pub fn with_lane_sidebar_path(mut self, path: PathBuf) -> Self {
         self.lane_sidebar_path = Some(path);
         self

@@ -56,6 +56,10 @@ impl StorageHandle {
     ) -> Result<Option<LaneCloseResult>, StorageError> {
         self.lane_job(false, move |c| ledger::current_close(c, &lane_id))
     }
+    /// Current revisions a close compares; read only.
+    pub fn lane_close_context(&self, lane_id: String) -> Result<LaneCloseContext, StorageError> {
+        self.lane_job(false, move |c| ledger::close_context(c, &lane_id))
+    }
     pub fn lane_verification_target(
         &self,
         lane_id: String,
@@ -81,6 +85,16 @@ impl StorageHandle {
     ) -> Result<Option<LaneVerification>, StorageError> {
         self.lane_job(false, move |c| ledger::verification(c, id))
     }
+    /// The Reviewer ended without a complete submission; a completed review is unchanged.
+    pub fn incomplete_lane_verification(
+        &self,
+        id: VerificationId,
+        run_id: String,
+    ) -> Result<LaneVerification, StorageError> {
+        self.lane_job(true, move |c| {
+            ledger::incomplete_verification(c, id, &run_id)
+        })
+    }
     /// Runtime supplies the authenticated run ID, never a tool argument.
     pub fn submit_lane_verification(
         &self,
@@ -102,7 +116,8 @@ impl StorageHandle {
             ledger::complete_verification(c, id, &run_id, at_ns)
         })
     }
-    /// Runtime re-observes external artifacts and freshness before this CAS.
+    /// The close transaction compares the lane's revisions, latest Ready and brief, and
+    /// the caller's root. It reads no artifact, Git or GitHub state.
     pub fn close_lane(&self, request: CloseLane) -> Result<LaneCloseResult, StorageError> {
         self.lane_job(true, move |c| ledger::close_lane(c, request))
     }

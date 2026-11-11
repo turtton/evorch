@@ -34,8 +34,7 @@ impl Tool for ReadGate {
     }
 }
 #[tokio::test]
-async fn reviewer_results_close_success_and_stale_rejection_preserve_prefix_after_toolset_boundary()
-{
+async fn reviewer_results_attach_to_a_lead_close_that_no_review_state_blocks_and_preserve_prefix() {
     let (tx, mut reads) = tokio::sync::mpsc::unbounded_channel();
     let mut h = harness_with_read(
         vec![text_response("lead ready")],
@@ -134,7 +133,13 @@ async fn reviewer_results_close_success_and_stale_rejection_preserve_prefix_afte
                 call(
                     &close_call,
                     "lane_close",
-                    json!({"lane_id":lane_id,"ready_seq":1,"verification_ref":reference}),
+                    json!({
+                        "lane_id":lane_id,"ready_seq":1,
+                        "expected_management_revision":verification["management_revision"],
+                        "expected_request_revision":verification["request_revision"],
+                        "note":"closing on my own judgement",
+                        "verification_ref":reference
+                    }),
                 ),
                 text_response("close result observed"),
             ],
@@ -143,29 +148,37 @@ async fn reviewer_results_close_success_and_stale_rejection_preserve_prefix_afte
         .await;
         let closed = result(&h, &close_call);
         if approved {
-            assert_eq!(closed["outcome"], "closed");
+            // The first close stands whatever the later review says.
+            assert_eq!(closed["outcome"], "already_closed");
             std::fs::write(&artifact, b"changed after review").unwrap();
             input(
                 &mut h,
                 lead,
-                "try old evidence after artifact change",
+                "retry after the artifact changed",
                 vec![
                     call(
-                        "stale-close",
+                        "retry-close",
                         "lane_close",
-                        json!({"lane_id":lane_id,"ready_seq":1,"verification_ref":reference}),
+                        json!({
+                            "lane_id":lane_id,"ready_seq":1,
+                            "expected_management_revision":verification["management_revision"],
+                            "expected_request_revision":verification["request_revision"],
+                            "note":"closing on my own judgement",
+                            "verification_ref":reference
+                        }),
                     ),
-                    text_response("stale evidence rejected"),
+                    text_response("retry observed"),
                 ],
                 &mut events,
             )
             .await;
-            assert_eq!(
-                result(&h, "stale-close")["error"]["code"],
-                "artifact_changed"
-            );
+            // A close never re-observes the artifact.
+            assert_eq!(result(&h, "retry-close")["outcome"], "already_closed");
         } else {
-            assert_eq!(closed["error"]["code"], "verification_rejected");
+            // A rejected review is attached for reference and does not block the close.
+            assert_eq!(closed["outcome"], "closed");
+            assert_eq!(closed["kind"], "lead_closed");
+            assert_eq!(closed["review"]["verdict"], "rejected");
         }
     }
     input(
@@ -211,7 +224,7 @@ async fn reviewer_results_close_success_and_stale_rejection_preserve_prefix_afte
     assert!(
         roots.last().unwrap()["messages"]
             .to_string()
-            .contains("artifact_changed")
+            .contains("already_closed")
     );
     assert!(
         roots.last().unwrap()["messages"]

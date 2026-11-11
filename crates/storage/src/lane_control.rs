@@ -17,16 +17,60 @@ pub struct BeginLaneVerification {
     pub target: LaneVerificationTarget,
     pub reviewer_run_id: String,
     pub pr_evidence: Option<LanePrEvidence>,
+    /// What could not be observed when the review was started (bounded, informational).
+    pub caveats: Vec<String>,
     pub at_ns: i64,
 }
+/// Who asks for the close. The lead's identity is the runtime's trusted fact, never
+/// a tool argument; storage compares it with the lane in the close transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneCloser {
+    /// The current lead thread and the root run that is running it right now.
+    Lead {
+        thread_id: String,
+        root_run_id: String,
+    },
+    /// A human host operation. Only runtime's human context can construct this; the
+    /// surface and client are the host's authenticated provenance.
+    Human {
+        surface: String,
+        client_id: Option<String>,
+    },
+}
+/// A close is a judgement of the lead (or a human) about management of the lane.
+/// Nothing here observes artifacts, Git, GitHub or the Reviewer's run.
 #[derive(Debug, Clone)]
 pub struct CloseLane {
-    pub lead_thread_id: String,
-    pub target: LaneVerificationTarget,
-    pub verification_id: VerificationId,
-    pub pr_evidence: Option<LanePrEvidence>,
+    pub closer: LaneCloser,
+    pub kind: LaneCloseKind,
+    pub lane_id: String,
+    /// Required for a lead close. A human may close without a Ready.
+    pub ready_seq: Option<u64>,
+    pub expected_management_revision: u64,
+    pub expected_request_revision: u64,
+    /// The closer's reason (non-empty, bounded).
+    pub note: String,
+    /// Optional Reviewer record attached for reference only.
+    pub verification_id: Option<VerificationId>,
     pub at_ns: i64,
 }
+/// The revisions a close compares, as they are now. Returned so a closer whose
+/// observation went stale can look again; it is not an authority to close.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaneCloseContext {
+    pub lane_id: String,
+    pub management_revision: u64,
+    pub request_revision: u64,
+    pub brief_revision: u64,
+    /// The latest report's sequence when it is a Ready for the current management.
+    pub latest_ready_seq: Option<u64>,
+    /// The brief revision that Ready was reported for.
+    pub ready_brief_revision: Option<u64>,
+}
+/// Longest note a close accepts, in bytes.
+pub const LANE_CLOSE_NOTE_MAX_BYTES: usize = 2048;
+/// Most review caveats a verification or close snapshot keeps, each at most 256 bytes.
+pub const LANE_CAVEATS_MAX: usize = 16;
 /// B supplies an owned observation. Storage never decides timer eligibility.
 #[derive(Debug, Clone)]
 pub struct ObserveLaneStall {

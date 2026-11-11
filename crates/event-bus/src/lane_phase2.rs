@@ -1,5 +1,5 @@
 //! Phase 2 domain values; no DB rows, leases, permits or wire adapters.
-use super::QuestionResponder;
+use super::{ArtifactRevision, QuestionResponder};
 use serde::{Deserialize, Serialize};
 pub const LANE_ATTENTION_MAX: usize = 20;
 pub const LANE_ATTENTION_BYTES: usize = 16 * 1024;
@@ -23,6 +23,10 @@ pub enum LaneOperationError {
     NotAttached,
     StaleManagement,
     StaleReady,
+    /// The latest Ready was reported for an older brief revision.
+    StaleBrief,
+    /// New requests or reports arrived after the revision the closer observed.
+    StaleRequest,
     StaleVerification,
     ArtifactChanged,
     VerificationMissing,
@@ -46,6 +50,8 @@ impl LaneOperationError {
             Self::NotAttached => "not_attached",
             Self::StaleManagement => "stale_management",
             Self::StaleReady => "stale_ready",
+            Self::StaleBrief => "stale_brief",
+            Self::StaleRequest => "stale_request",
             Self::StaleVerification => "stale_verification",
             Self::ArtifactChanged => "artifact_changed",
             Self::VerificationMissing => "verification_missing",
@@ -160,6 +166,14 @@ pub struct LaneVerification {
     pub reviewer_run_id: String,
     pub state: LaneVerificationState,
     pub pr_evidence: Option<LanePrEvidence>,
+    /// Number of acceptance criteria of the brief the Reviewer was started with. A
+    /// later brief revision does not change what this review is checked against.
+    #[serde(default)]
+    pub criteria_count: Option<u32>,
+    /// Observations that could not be made (or did not match) when the review was
+    /// started: informational, never a reason to refuse the review or a close.
+    #[serde(default)]
+    pub caveats: Vec<String>,
     pub submission: Option<LaneVerificationSubmission>,
     pub created_at_ns: i64,
     pub submitted_at_ns: Option<i64>,
@@ -171,14 +185,136 @@ pub enum LaneCloseOutcome {
     Closed,
     AlreadyClosed,
 }
+/// Who ended the lane's management, and on whose judgement. Every kind only ends the
+/// ledger entry: none of them stops a run or deletes a thread or worktree, and none
+/// is a quality guarantee made by the system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneCloseKind {
+    /// The current lead judged the lane done.
+    LeadClosed,
+    /// A human judged the lane done (host operation, never an agent tool).
+    HumanClosed,
+    /// A human ended the lane without claiming it is done.
+    Discarded,
+}
+impl LaneCloseKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LeadClosed => "lead_closed",
+            Self::HumanClosed => "human_closed",
+            Self::Discarded => "discarded",
+        }
+    }
+}
+/// Who decided a close, from the runtime's trusted facts at the time of the close; never
+/// from tool arguments or message text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaneCloseActor {
+    /// The lead thread and the root run that was running it when it closed.
+    Lead {
+        thread_id: String,
+        root_run_id: String,
+    },
+    /// A human, through the host's authenticated surface.
+    Human {
+        surface: String,
+        client_id: Option<String>,
+    },
+}
+/// What the ledger holds about the lane's PR when the close was decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanePrContextStatus {
+    NotLinked,
+    /// Linked, with no stored facts yet.
+    NoSnapshot,
+    /// The latest fetch failed; any evidence is from an earlier success.
+    LastFetchFailed,
+    Available,
+}
+/// Stored PR facts as they were when the close was decided: read from the ledger,
+/// never fetched, and never a condition of the close.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneClosePrContext {
+    pub status: LanePrContextStatus,
+    pub evidence: Option<LanePrEvidence>,
+}
+/// Reviewer record attached to a close for reference, as it was when the close
+/// was decided. It is not an observation made at close time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneCloseReview {
+    pub verification_id: VerificationId,
+    pub reviewer_run_id: String,
+    pub state: LaneVerificationState,
+    pub verdict: Option<LaneVerificationVerdict>,
+    pub result_ref: Option<String>,
+    pub result_digest: Option<String>,
+    /// The review was started for the Ready and brief that this close targets.
+    pub targets_this_ready: bool,
+    pub pr_evidence: Option<LanePrEvidence>,
+    /// What was (not) observed when the review started.
+    pub caveats: Vec<String>,
+    /// Artifacts are never re-observed by a close.
+    pub artifact_rechecked_at_close: bool,
+}
+/// The close record as decided. Artifact fields are the Ready report's own and are
+/// not re-verified by the close.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneCloseResult {
     pub lane_id: String,
     pub close_id: String,
-    pub verification_ref: VerificationId,
-    pub ready_seq: u64,
+    pub kind: LaneCloseKind,
+    /// The Ready this close is about; `None` for a human close without one.
+    #[serde(default)]
+    pub ready_seq: Option<u64>,
+    /// The request revision observed by the closer.
     pub closed_revision: u64,
+    #[serde(default)]
+    pub management_revision: u64,
+    #[serde(default)]
+    pub brief_revision: u64,
+    /// The brief revision the Ready was reported for.
+    #[serde(default)]
+    pub report_brief_revision: Option<u64>,
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
+    #[serde(default)]
+    pub artifact_revision: Option<ArtifactRevision>,
+    /// The judgement of the lead or human, as written.
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub review: Option<LaneCloseReview>,
+    /// Stored PR facts as the ledger held them; present for every close.
+    #[serde(default)]
+    pub pr_context: Option<LaneClosePrContext>,
+    /// Who decided it. Absent only for a close migrated from before it was recorded.
+    #[serde(default)]
+    pub closed_by: Option<LaneCloseActor>,
+    #[serde(default)]
+    pub at_ns: i64,
     pub outcome: LaneCloseOutcome,
+}
+/// Why a Ready is still waiting for the lead's decision. Informative only: none of
+/// these blocks a close, and none of them is a stall of the work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneReadyState {
+    /// The report carries no immutable artifact revision and nothing was reviewed.
+    NoEvidence,
+    /// A fixed artifact is named but no independent review exists.
+    Unreviewed,
+    /// A Reviewer was started and has not finished.
+    ReviewInProgress,
+    /// The finished review rejected the Ready.
+    ReviewRejected,
+    /// The Reviewer ended without a complete submission (failed, cancelled, stopped or
+    /// finished silently). Not a rejection: the lead may start another review.
+    ReviewIncomplete,
+    /// The review approved; the lead has not closed.
+    AwaitingClose,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -201,9 +337,10 @@ pub enum LaneAttentionKind {
         attempts: u32,
         suppressed: bool,
     },
-    ReadyUnverified {
+    /// The lane reported Ready and the lead has not closed it. Not a stall.
+    ReadyUnclosed {
         ready_seq: u64,
-        verification_state: Option<LaneVerificationState>,
+        readiness: LaneReadyState,
     },
     QuestionCapacityBlocked {
         capacity: LaneQuestionCapacity,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::lane_close::BEFORE_CLOSE_COMMIT;
 use crate::lane_management::*;
 
 fn request(f: &Fixture, rev: u64, action: LaneManagementAction) -> LaneManagementRequest {

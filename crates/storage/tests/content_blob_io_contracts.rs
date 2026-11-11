@@ -88,7 +88,9 @@ const C_GC: u64 = 24;
 // 100,000 rows (22 above v52), so budget 24 fixed schema frames.
 // v56 adds one column to the empty limit-event table (a schema page rewrite and no row
 // work: 377 frames with 100,000 rows); reserve 4 frames.
-const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4;
+// v57 rebuilds the empty lane_closes table (its schema pages, index and three triggers,
+// no row work: 391 frames with 100,000 rows); 14 frames and 4 reserved.
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -325,6 +327,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v57.sql"),
                     include_str!("../undo/undo_v56.sql"),
                     include_str!("../undo/undo_v55.sql"),
                     include_str!("../undo/undo_v54.sql"),

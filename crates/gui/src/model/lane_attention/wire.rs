@@ -108,12 +108,12 @@ fn kind(kind: &domain::LaneAttentionKind) -> Result<wire::LaneAttentionKind, Wir
             attempts: *attempts,
             suppressed: *suppressed,
         },
-        D::ReadyUnverified {
+        D::ReadyUnclosed {
             ready_seq,
-            verification_state,
-        } => W::ReadyUnverified {
+            readiness,
+        } => W::ReadyUnclosed {
             ready_seq: Sequence(*ready_seq),
-            verification: verification_state.map(verification_state_of),
+            readiness: ready_state_of(*readiness),
         },
         D::QuestionCapacityBlocked { capacity, limit } => W::QuestionCapacityBlocked {
             capacity: match capacity {
@@ -167,14 +167,14 @@ fn kind(kind: &domain::LaneAttentionKind) -> Result<wire::LaneAttentionKind, Wir
     })
 }
 
-const fn verification_state_of(
-    state: domain::LaneVerificationState,
-) -> wire::LaneVerificationState {
+const fn ready_state_of(state: domain::LaneReadyState) -> wire::LaneReadyState {
     match state {
-        domain::LaneVerificationState::Pending => wire::LaneVerificationState::Pending,
-        domain::LaneVerificationState::Submitted => wire::LaneVerificationState::Submitted,
-        domain::LaneVerificationState::Completed => wire::LaneVerificationState::Completed,
-        domain::LaneVerificationState::Incomplete => wire::LaneVerificationState::Incomplete,
+        domain::LaneReadyState::NoEvidence => wire::LaneReadyState::NoEvidence,
+        domain::LaneReadyState::Unreviewed => wire::LaneReadyState::Unreviewed,
+        domain::LaneReadyState::ReviewInProgress => wire::LaneReadyState::ReviewInProgress,
+        domain::LaneReadyState::ReviewRejected => wire::LaneReadyState::ReviewRejected,
+        domain::LaneReadyState::ReviewIncomplete => wire::LaneReadyState::ReviewIncomplete,
+        domain::LaneReadyState::AwaitingClose => wire::LaneReadyState::AwaitingClose,
     }
 }
 
@@ -240,9 +240,9 @@ mod tests {
                 attempts: 3,
                 suppressed: true,
             },
-            D::ReadyUnverified {
+            D::ReadyUnclosed {
                 ready_seq: 8,
-                verification_state: Some(domain::LaneVerificationState::Completed),
+                readiness: domain::LaneReadyState::AwaitingClose,
             },
             D::QuestionCapacityBlocked {
                 capacity: domain::LaneQuestionCapacity::Global,
@@ -293,8 +293,8 @@ mod tests {
         ));
         assert!(matches!(
             kinds[4],
-            W::ReadyUnverified {
-                verification: Some(wire::LaneVerificationState::Completed),
+            W::ReadyUnclosed {
+                readiness: wire::LaneReadyState::AwaitingClose,
                 ..
             }
         ));

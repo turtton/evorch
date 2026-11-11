@@ -52,13 +52,13 @@ fn every_kind() -> Vec<LaneAttentionKind> {
             attempts: 3,
             suppressed: true,
         },
-        LaneAttentionKind::ReadyUnverified {
+        LaneAttentionKind::ReadyUnclosed {
             ready_seq: Sequence(7),
-            verification: Some(LaneVerificationState::Submitted),
+            readiness: LaneReadyState::ReviewInProgress,
         },
-        LaneAttentionKind::ReadyUnverified {
+        LaneAttentionKind::ReadyUnclosed {
             ready_seq: Sequence(8),
-            verification: None,
+            readiness: LaneReadyState::NoEvidence,
         },
         LaneAttentionKind::QuestionCapacityBlocked {
             capacity: LaneQuestionCapacity::Global,
