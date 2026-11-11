@@ -14,7 +14,7 @@ import { backoffDelay, EventStream, MAX_BACKOFF_MS } from "../../assets/js/sse.j
 import { composerRoleFor, createStore } from "../../assets/js/store.js";
 import { fetchAllPages } from "../../assets/js/paging.js";
 import { RereadScheduler } from "../../assets/js/reread.js";
-import { coreChanged } from "../../assets/js/format.js";
+import { coreChanged, PROTOCOL_VERSION, protocolMismatch } from "../../assets/js/format.js";
 import { threadView } from "../../assets/js/views.js";
 import {
   classifyCursor,
@@ -137,6 +137,14 @@ test("a new build, core or epoch counts as a restart", () => {
   assert(!coreChanged(hello, structuredClone(hello)));
   assert(coreChanged(hello, { ...hello, instance_epoch: "8" }));
   assert(coreChanged(hello, { ...hello, server_build: { ...hello.server_build, revision: "b" } }));
+});
+
+test("a core on this page's protocol version is not a mismatch", () => {
+  assert(PROTOCOL_VERSION === 2);
+  assert(protocolMismatch({ protocol_version: 2 }) === null);
+  const v1 = protocolMismatch({ protocol_version: 1 });
+  assert(v1 !== null && v1.includes("v2") && v1.includes("v1"));
+  assert(protocolMismatch({ protocol_version: 3 }) !== null);
 });
 
 // ---- store ------------------------------------------------------------------

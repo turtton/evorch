@@ -1,7 +1,9 @@
 //! Request, reply and server-push frames.
 //!
 //! Wire shape of a request:
-//! `{"request_id":"..","session_id":"..","kind":"command","payload":{"type":"send_chat","payload":{..}}}`.
+//! `{"request_id":"..","session_id":"..","kind":"command","payload":{"type":"conversation","payload":{"type":"send_chat","payload":{..}}}}`.
+//! The payload is a namespace (`conversation`) wrapping one operation
+//! (`send_chat`); see [`crate::namespaces`].
 //! A reply is `{"request_id":"..","status":"success"|"error","payload":..}`.
 
 use crate::commands::{Command, CommandReply};
@@ -224,9 +226,7 @@ pub fn decode_request(
             // malformed. Only the names are read; no input is echoed.
             let payload = probe.get("payload");
             let classified = match (probe.get("kind").and_then(|k| k.as_str()), payload) {
-                (Some("command"), Some(payload)) => {
-                    Some(namespaces::classify(payload, |n| n.commands))
-                }
+                (Some("command"), Some(payload)) => Some(namespaces::classify_command(payload)),
                 (Some("query"), Some(payload)) => {
                     Some(namespaces::classify(payload, |n| n.queries))
                 }

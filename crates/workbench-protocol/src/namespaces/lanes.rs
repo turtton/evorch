@@ -9,6 +9,16 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const COMMAND_OPERATIONS: &[&str] = &["manage_lane"];
+/// `manage_lane`'s `request.action.type` values: the wire names of
+/// [`LaneManagementAction`](crate::lane_management::LaneManagementAction)'s
+/// variants (a test keeps the two in step).
+pub const MANAGE_LANE_ACTIONS: &[&str] = &["set_policy", "detach", "reattach"];
+/// The tagged choice inside a command's payload that classification names.
+pub const NESTED_COMMANDS: &[super::NestedOperation] = &[super::NestedOperation {
+    operation: "manage_lane",
+    pointer: "/request/action/type",
+    known: MANAGE_LANE_ACTIONS,
+}];
 pub const QUERY_OPERATIONS: &[&str] = &["get_lane_management"];
 pub const EVENT_TYPES: &[&str] = &[];
 

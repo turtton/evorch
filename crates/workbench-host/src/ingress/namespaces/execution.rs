@@ -39,3 +39,14 @@ impl CommandHost {
         self.run_host_command(host_command, provenance)
     }
 }
+
+impl CommandHost {
+    /// Run listings are read from the projection.
+    pub(in crate::ingress) fn execution_query(
+        &self,
+        query: &workbench_protocol::queries::Query,
+        _namespace_query: &workbench_protocol::namespaces::ExecutionQuery,
+    ) -> Result<workbench_protocol::queries::QueryReply, WorkbenchError> {
+        self.projection.query(query)
+    }
+}

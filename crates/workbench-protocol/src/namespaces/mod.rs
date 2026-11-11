@@ -156,16 +156,35 @@ pub struct NamespaceInfo {
     pub commands: &'static [&'static str],
     pub queries: &'static [&'static str],
     pub events: &'static [&'static str],
+    /// Operations whose payload itself names a tagged choice (a lane
+    /// management action, say) that classification must look into.
+    pub nested_commands: &'static [NestedOperation],
+}
+
+/// A command whose payload contains a tagged choice: `pointer` locates the
+/// choice's `type` inside the operation's payload and `known` lists the
+/// choices this protocol names.
+#[derive(Debug, Clone, Copy)]
+pub struct NestedOperation {
+    pub operation: &'static str,
+    /// JSON pointer, relative to the operation's `payload`, of the choice's
+    /// `type` string.
+    pub pointer: &'static str,
+    pub known: &'static [&'static str],
 }
 
 macro_rules! info {
     ($name:literal, $status:ident, $module:ident) => {
+        info!($name, $status, $module, &[])
+    };
+    ($name:literal, $status:ident, $module:ident, $nested:expr) => {
         NamespaceInfo {
             name: $name,
             status: NamespaceStatus::$status,
             commands: $module::COMMAND_OPERATIONS,
             queries: $module::QUERY_OPERATIONS,
             events: $module::EVENT_TYPES,
+            nested_commands: $nested,
         }
     };
 }
@@ -177,7 +196,7 @@ pub const NAMESPACES: [NamespaceInfo; 20] = [
     info!("execution", Implemented, execution),
     info!("questions", Implemented, questions),
     info!("approvals", Implemented, approvals),
-    info!("lanes", Implemented, lanes),
+    info!("lanes", Implemented, lanes, lanes::NESTED_COMMANDS),
     info!("lifecycle", Implemented, lifecycle),
     info!("projection", Implemented, projection),
     info!("settings", Reserved, settings),
@@ -262,6 +281,45 @@ pub fn classify(
         Some(_) => Classified::UnknownOperation,
         None => Classified::Malformed,
     }
+}
+
+/// [`classify`] for a command: besides the namespace and operation, a tagged
+/// choice inside the operation's payload (`manage_lane`'s action) is named too,
+/// so an unknown choice is unsupported rather than malformed. Only the
+/// choice's name is read.
+pub fn classify_command(payload: &serde_json::Value) -> Classified {
+    let classified = classify(payload, |n| n.commands);
+    if classified != Classified::KnownOperation {
+        return classified;
+    }
+    let (Some(info), Some(operation)) = (
+        payload
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .and_then(namespace),
+        payload
+            .pointer("/payload/type")
+            .and_then(serde_json::Value::as_str),
+    ) else {
+        return classified;
+    };
+    for nested in info
+        .nested_commands
+        .iter()
+        .filter(|n| n.operation == operation)
+    {
+        let choice = payload
+            .pointer("/payload/payload")
+            .and_then(|operation_payload| operation_payload.pointer(nested.pointer))
+            .and_then(serde_json::Value::as_str);
+        // A missing or non-string choice is a malformed known operation.
+        if let Some(choice) = choice
+            && !nested.known.contains(&choice)
+        {
+            return Classified::UnknownOperation;
+        }
+    }
+    classified
 }
 
 /// The error for a client that names a namespace or operation this core does

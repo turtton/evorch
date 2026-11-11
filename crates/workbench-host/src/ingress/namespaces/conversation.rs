@@ -422,3 +422,14 @@ impl CommandHost {
         Ok(())
     }
 }
+
+impl CommandHost {
+    /// Input receipts and committed history are read from the projection.
+    pub(in crate::ingress) fn conversation_query(
+        &self,
+        query: &workbench_protocol::queries::Query,
+        _namespace_query: &workbench_protocol::namespaces::ConversationQuery,
+    ) -> Result<workbench_protocol::queries::QueryReply, WorkbenchError> {
+        self.projection.query(query)
+    }
+}

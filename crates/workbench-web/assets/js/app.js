@@ -2,7 +2,7 @@
 
 import { Api } from "./api.js";
 import { replaceChildren, h } from "./dom.js";
-import { coreChanged } from "./format.js";
+import { coreChanged, protocolMismatch } from "./format.js";
 import { EventStream } from "./sse.js";
 import { createStore } from "./store.js";
 import { homeView, inboxView, projectView, threadView } from "./views.js";
@@ -227,8 +227,9 @@ async function checkHealth() {
   clearBanner("unreachable");
   if (!firstHello) {
     firstHello = hello;
-    if (hello.protocol_version !== 1) {
-      showBanner("incompatible", `このページは protocol v1 用です（コアは v${hello.protocol_version}）。再読み込みしてください。`, {
+    const mismatch = protocolMismatch(hello);
+    if (mismatch) {
+      showBanner("incompatible", mismatch, {
         label: "再読み込み",
         run: () => location.reload(),
       });

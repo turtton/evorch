@@ -5,16 +5,31 @@
 //! runs them through the shared machinery in `ingress` (ownership check,
 //! submission ledger, [`crate::commands::CommandService`]). A later PR that adds
 //! operations to a namespace edits that namespace's protocol module and its
-//! adapter here, not this dispatch. The reserved namespaces have no
-//! operations: their types are empty, so they are unreachable here and the
-//! compiler, not a runtime check, refuses them.
+//! adapter here, not this dispatch. The reserved namespaces have an adapter
+//! file each too, with no operations: their types are empty, so the compiler,
+//! not a runtime check, refuses them, and the PR that implements one fills in
+//! its own file.
 
 mod approvals;
+mod artifacts;
+mod auth;
+mod browser;
 pub(super) mod conversation;
+mod diagnostics;
+mod evaluation;
 mod execution;
+mod improvement;
 mod lanes;
+mod lifecycle;
+mod maintenance;
+mod mcp;
+mod memory;
 mod projection;
+mod pull_requests;
 mod questions;
+mod settings;
+mod teams;
+mod workspace;
 
 use workbench_protocol::commands::{Command, CommandReply};
 use workbench_protocol::envelope::Provenance;
@@ -33,25 +48,25 @@ impl CommandHost {
     ) -> Result<CommandReply, WorkbenchError> {
         match command {
             Command::Conversation(c) => self.conversation_command(c, provenance),
+            Command::Workspace(c) => self.workspace_command(c, provenance),
             Command::Execution(c) => self.execution_command(c, provenance),
             Command::Questions(c) => self.questions_command(c, provenance),
             Command::Approvals(c) => self.approvals_command(c, provenance),
             Command::Lanes(c) => self.lanes_command(c, provenance),
-            Command::Workspace(c) => match c {},
-            Command::Lifecycle(c) => match c {},
-            Command::Projection(c) => match c {},
-            Command::Settings(c) => match c {},
-            Command::Auth(c) => match c {},
-            Command::Mcp(c) => match c {},
-            Command::Teams(c) => match c {},
-            Command::Diagnostics(c) => match c {},
-            Command::Memory(c) => match c {},
-            Command::Evaluation(c) => match c {},
-            Command::Improvement(c) => match c {},
-            Command::PullRequests(c) => match c {},
-            Command::Browser(c) => match c {},
-            Command::Artifacts(c) => match c {},
-            Command::Maintenance(c) => match c {},
+            Command::Lifecycle(c) => self.lifecycle_command(c, provenance),
+            Command::Projection(c) => self.projection_command(c, provenance),
+            Command::Settings(c) => self.settings_command(c, provenance),
+            Command::Auth(c) => self.auth_command(c, provenance),
+            Command::Mcp(c) => self.mcp_command(c, provenance),
+            Command::Teams(c) => self.teams_command(c, provenance),
+            Command::Diagnostics(c) => self.diagnostics_command(c, provenance),
+            Command::Memory(c) => self.memory_command(c, provenance),
+            Command::Evaluation(c) => self.evaluation_command(c, provenance),
+            Command::Improvement(c) => self.improvement_command(c, provenance),
+            Command::PullRequests(c) => self.pull_requests_command(c, provenance),
+            Command::Browser(c) => self.browser_command(c, provenance),
+            Command::Artifacts(c) => self.artifacts_command(c, provenance),
+            Command::Maintenance(c) => self.maintenance_command(c, provenance),
         }
     }
 
@@ -64,26 +79,26 @@ impl CommandHost {
         query: &Query,
     ) -> Result<QueryReply, WorkbenchError> {
         match query {
-            Query::Lanes(q) => self.lanes_query(q),
+            Query::Conversation(q) => self.conversation_query(query, q),
+            Query::Workspace(q) => self.workspace_query(query, q),
+            Query::Execution(q) => self.execution_query(query, q),
+            Query::Questions(q) => self.questions_query(query, q),
             Query::Approvals(q) => self.approvals_query(query, q),
+            Query::Lanes(q) => self.lanes_query(q),
+            Query::Lifecycle(q) => self.lifecycle_query(query, q),
             Query::Projection(q) => self.projection_query(session, query, q),
-            Query::Conversation(_)
-            | Query::Workspace(_)
-            | Query::Execution(_)
-            | Query::Questions(_)
-            | Query::Lifecycle(_) => self.projection.query(query),
-            Query::Settings(q) => match *q {},
-            Query::Auth(q) => match *q {},
-            Query::Mcp(q) => match *q {},
-            Query::Teams(q) => match *q {},
-            Query::Diagnostics(q) => match *q {},
-            Query::Memory(q) => match *q {},
-            Query::Evaluation(q) => match *q {},
-            Query::Improvement(q) => match *q {},
-            Query::PullRequests(q) => match *q {},
-            Query::Browser(q) => match *q {},
-            Query::Artifacts(q) => match *q {},
-            Query::Maintenance(q) => match *q {},
+            Query::Settings(q) => self.settings_query(query, q),
+            Query::Auth(q) => self.auth_query(query, q),
+            Query::Mcp(q) => self.mcp_query(query, q),
+            Query::Teams(q) => self.teams_query(query, q),
+            Query::Diagnostics(q) => self.diagnostics_query(query, q),
+            Query::Memory(q) => self.memory_query(query, q),
+            Query::Evaluation(q) => self.evaluation_query(query, q),
+            Query::Improvement(q) => self.improvement_query(query, q),
+            Query::PullRequests(q) => self.pull_requests_query(query, q),
+            Query::Browser(q) => self.browser_query(query, q),
+            Query::Artifacts(q) => self.artifacts_query(query, q),
+            Query::Maintenance(q) => self.maintenance_query(query, q),
         }
     }
 }

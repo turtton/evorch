@@ -370,10 +370,40 @@ fn nested_lane_management_is_classified_like_every_other_operation() {
         )),
         ErrorCode::InvalidRequest
     );
-    assert_eq!(
-        code_of(manage(json!({"type": "teleport"}), None)),
-        ErrorCode::InvalidRequest
-    );
+    // An action this protocol does not name is unsupported (a newer client),
+    // not malformed; the diagnostic never echoes it.
+    let unknown = decode(manage(
+        json!({"type": "teleport", "payload": {"secret": "s3cr3t"}}),
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(unknown.error.code, ErrorCode::UnsupportedCapability);
+    assert!(!format!("{unknown:?}").contains("teleport"));
+    assert!(!format!("{unknown:?}").contains("s3cr3t"));
+    // A known action with a missing field, a wrong type or an unknown field is
+    // malformed.
+    for malformed in [
+        json!({"type": "set_policy"}),
+        json!({"type": "set_policy", "payload": {}}),
+        json!({"type": "set_policy", "payload": {"policy": 7}}),
+        json!({"type": "set_policy", "payload": {"policy": "summary", "extra": 1}}),
+        json!({"type": "reattach", "payload": {"lead_thread_id": "t"}}),
+        json!({"type": "detach", "payload": {"extra": 1}}),
+        json!({"payload": {"policy": "summary"}}),
+        json!({"type": 5}),
+    ] {
+        assert_eq!(code_of(manage(malformed, None)), ErrorCode::InvalidRequest);
+    }
+    // Every action name the classifier knows decodes; the list tracks the enum.
+    for action in workbench_protocol::namespaces::lanes::MANAGE_LANE_ACTIONS {
+        let full = match *action {
+            "set_policy" => json!({"type": "set_policy", "payload": {"policy": "summary"}}),
+            "reattach" => json!({"type": "reattach", "payload": {
+                "lead_thread_id": "t", "expected_lead_root_run_id": "r"}}),
+            _ => json!({"type": action}),
+        };
+        decode(manage(full, None)).unwrap();
+    }
     decode(request(
         "query",
         json!({"type": "lanes", "payload": {"type": "get_lane_management", "payload": {"lane_id": "lane-1"}}}),

@@ -2084,6 +2084,15 @@ async fn web_workbench_main_flows_in_chromium() {
     .await;
     ui.screenshot("10-thread-desktop").await;
 
+    // A core on the page's own protocol version raises no mismatch banner.
+    let banner_hidden = ui
+        .eval(r##"document.querySelector("#banner").hidden"##)
+        .await;
+    assert_eq!(
+        banner_hidden, true,
+        "no banner on a healthy protocol v2 core"
+    );
+
     // ---- a core restart: reconnect, then prompt to reload ----
     eprintln!("step: a core restart: reconnect, then prompt to reload");
     // The history read that rebuilds the thread after the new snapshot is
