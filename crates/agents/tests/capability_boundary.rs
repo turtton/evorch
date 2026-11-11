@@ -160,7 +160,7 @@ fn worker_allows_exactly_adr_0002_tools() {
 
 #[test]
 fn worker_allows_mutation_tools() {
-    // Given: Worker ロール (mutation を担う唯一のロール)
+    // Given: Worker ロール (ファイル編集ツールを持つ唯一のロール)
     // When: write / edit / apply_patch / shell の使用可否を問い合わせる
     // Then: すべて Allowed になる
     let caps = Role::Worker.capabilities();
@@ -209,7 +209,7 @@ fn orchestrator_denies_escalate() {
 fn reviewer_allows_exactly_adr_0002_tools() {
     // Given: Reviewer ロール (生成と独立したレビュー役)
     // When: ケイパビリティのツール集合と全ツールの判定を検査する
-    // Then: ツール集合 (read / grep / git_diff) と完全一致し、全ツールが Allowed になる
+    // Then: ツール集合 (read / grep / shell / git_diff / run_js ほか) と完全一致し、全ツールが Allowed になる
     let caps = Role::Reviewer.capabilities();
     assert_eq!(caps.allowed_tools, tool_set(REVIEWER_TOOLS));
     for &tool in REVIEWER_TOOLS {
@@ -233,9 +233,21 @@ fn reviewer_allows_git_diff() {
 }
 
 #[test]
-fn reviewer_denies_mutation_and_messaging_tools() {
-    // Given: Reviewer ロール (レビュー対象を自分で書き換えず、メッセージ交換もしない)
-    // When: edit / send / wait_reply / inbox の使用可否を問い合わせる
+fn reviewer_allows_shell_for_diff_and_targeted_test_runs() {
+    // Given: Reviewer ロール (差分・ログの確認と対象を絞ったテスト実行に shell を使う)
+    // When: shell の使用可否を問い合わせる
+    // Then: Allowed になる
+    let caps = Role::Reviewer.capabilities();
+    assert_eq!(
+        caps.check_tool("Reviewer", "shell"),
+        CapabilityDecision::Allowed
+    );
+}
+
+#[test]
+fn reviewer_denies_direct_edit_tools_and_messaging() {
+    // Given: Reviewer ロール (write / edit / apply_patch は持たず、メッセージ交換もしない)
+    // When: write / edit / apply_patch / send / wait_reply / inbox の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Reviewer.capabilities();
     for tool in [
