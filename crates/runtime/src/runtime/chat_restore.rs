@@ -3,6 +3,9 @@ use crate::RunRestoreFailure;
 use crate::restore::{RestoredState, RunRestoreDescriptor};
 pub(crate) use reservation::SnapshotReservation;
 
+mod deferred_resume;
+pub use deferred_resume::ChatResumeObservation;
+pub(super) use deferred_resume::ResumeFence;
 mod renewal;
 mod reservation;
 #[cfg(test)]
@@ -21,6 +24,7 @@ pub(super) enum RunContinuation {
     Resume {
         restored: Box<RestoredState>,
         handoff: Option<RunHandoff>,
+        after_stop: Option<ResumeFence>,
     },
 }
 
@@ -54,15 +58,74 @@ impl ChatContinuation {
 impl AgentRuntime {
     /// Restore a stopped chat using only its saved history and current authority.
     /// A completed turn returns to input waiting; an unfinished turn continues.
-    /// Already live runs are unchanged. Images and goal creation belong to a new
+    /// A Continue during graceful Stop is durably queued for the terminal snapshot.
+    /// Other live runs are unchanged. Images and goal creation belong to a new
     /// human submission through `continue_goal`, not to this scheduling operation.
     pub fn resume_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
-        // An explicit continue renews the automatic-wake budget.
+        self.deny_deleted_run(&run_id.to_string())
+            .map_err(|deleted| RuntimeError::RunRestoreFailed {
+                run_id: run_id.to_string(),
+                reason: RunRestoreFailure::ThreadDeleted(deleted),
+            })?;
+        let observation = self.observe_chat_resume(run_id);
+        self.resume_chat_observed(run_id, authority, observation)
+    }
+
+    /// Resume only the execution observed by the host before its live-run guard.
+    /// A later interrupt or replacement rejects this action, not a fresh action.
+    pub fn resume_chat_observed(
+        &self,
+        run_id: RunId,
+        authority: RunConfig,
+        observation: ChatResumeObservation,
+    ) -> Result<RunId, RuntimeError> {
+        self.deny_deleted_run(&run_id.to_string())
+            .map_err(|deleted| RuntimeError::RunRestoreFailed {
+                run_id: run_id.to_string(),
+                reason: RunRestoreFailure::ThreadDeleted(deleted),
+            })?;
+        let result = (|| {
+            if self.defer_chat_resume(run_id, &authority, &observation)? {
+                return Ok(run_id);
+            }
+            self.resume_chat_fenced(run_id, authority, Some(ResumeFence::observed(observation)))
+        })();
+        if let Err(error) = &result {
+            self.deferred_resume_diagnostic(run_id, &error.to_string());
+        }
+        result
+    }
+
+    fn resume_chat_fenced(
+        &self,
+        run_id: RunId,
+        mut authority: RunConfig,
+        after_stop: Option<ResumeFence>,
+    ) -> Result<RunId, RuntimeError> {
         self.reset_auto_wakes(run_id);
-        let ownership = authority.ownership.clone();
-        let resumed = self.resume(run_id, ChatContinuation::Resume, authority)?;
-        self.explicitly_resume_lane_delivery(run_id, ownership.as_ref())?;
-        Ok(resumed)
+        authority.images.clear();
+        authority.initial_thread_goal = None;
+        self.continue_chat_fenced(run_id, ChatContinuation::Resume, authority, after_stop)
+    }
+
+    // Called with StopGate retained from validation through admission and commit.
+    // G serializes Cancel; I revalidates the accepted incarnation before writing.
+    fn commit_chat_resume(
+        &self,
+        run: RunId,
+        execution: &Arc<ExecutionControl>,
+        ownership: Option<&crate::ownership::OwnerPermit>,
+    ) -> Result<(), RuntimeError> {
+        execution.commit_resume(run, || {
+            if !Arc::ptr_eq(execution, &self.execution_snapshot(run)?) {
+                return Err(RuntimeError::RunTerminated {
+                    run_id: run.to_string(),
+                });
+            }
+            self.explicitly_resume_lane_delivery(run, ownership)?;
+            self.lift_operator_stops(run);
+            Ok(())
+        })
     }
 
     /// Resume a root the runtime asked the host to wake
@@ -94,18 +157,26 @@ impl AgentRuntime {
         prompt: String,
         authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
-        let ownership = authority.ownership.clone();
-        let resumed = self.continue_chat(run_id, ChatContinuation::Followup(prompt), authority)?;
-        self.explicitly_resume_lane_delivery(run_id, ownership.as_ref())?;
-        Ok(resumed)
+        self.continue_chat(run_id, ChatContinuation::Followup(prompt), authority)
     }
 
     fn continue_chat(
         &self,
         run_id: RunId,
         continuation: ChatContinuation,
-        mut authority: RunConfig,
+        authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        self.continue_chat_fenced(run_id, continuation, authority, None)
+    }
+
+    fn continue_chat_fenced(
+        &self,
+        run_id: RunId,
+        continuation: ChatContinuation,
+        mut authority: RunConfig,
+        after_stop: Option<ResumeFence>,
+    ) -> Result<RunId, RuntimeError> {
+        let resume_ownership = authority.ownership.clone();
         let prompt = continuation.prompt();
         // Only a new prompt takes mentions; a resume attaches nothing.
         let mentions = std::mem::take(&mut authority.skill_mentions);
@@ -136,6 +207,28 @@ impl AgentRuntime {
         let _stop_guard = stop_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(fence) = &after_stop {
+            let intents = self
+                .shared
+                .spawn_intents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let admissions = self
+                .shared
+                .admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let runs = lock_runs(&self.shared.runs);
+            let execution =
+                super::cancellation::current_execution(run_id, &intents, &admissions, &runs);
+            if !fence.is_current(execution.as_ref(), intents.get(&run_id)) {
+                return Err(RuntimeError::RunTerminated {
+                    run_id: run_id.to_string(),
+                });
+            }
+        }
+        #[cfg(test)]
+        let source_execution = self.execution_snapshot(run_id).ok();
         // Management commits share restore_gate. Validate inside that gate, and
         // retain it through registration/admission: a pre-restore read alone
         // lets detach commit between checking a claim and scheduling its root.
@@ -183,6 +276,13 @@ impl AgentRuntime {
             ))
         ) {
             let Some(prompt) = prompt else {
+                if operator_resume {
+                    self.commit_chat_resume(
+                        run_id,
+                        &self.execution_snapshot(run_id)?,
+                        resume_ownership.as_ref(),
+                    )?;
+                }
                 return Ok(run_id);
             };
             let project_root = lock_runs(&self.shared.runs)
@@ -199,6 +299,13 @@ impl AgentRuntime {
                 authority.initial_thread_goal,
                 prompt_id,
             )?;
+            if operator_resume {
+                self.commit_chat_resume(
+                    run_id,
+                    &self.execution_snapshot(run_id)?,
+                    resume_ownership.as_ref(),
+                )?;
+            }
             return Ok(run_id);
         }
         let store = store.ok_or_else(|| fail(RunRestoreFailure::StorageNotConfigured))?;
@@ -506,6 +613,7 @@ impl AgentRuntime {
             RunContinuation::Resume {
                 restored: Box::new(restored),
                 handoff,
+                after_stop,
             }
         } else if let Some(mut handoff) = handoff {
             handoff.restored = Some(restored);
@@ -563,9 +671,8 @@ impl AgentRuntime {
                     .resume_handoff_start(run_id.to_string())
                     .map_err(|e| fail(RunRestoreFailure::CorruptContext(e.to_string())))?;
             }
-            self.lift_operator_stops(run_id);
         }
-        Ok(self.spawn_run_with_handoff(
+        let admission = self.try_spawn_run_with_handoff(
             run_id,
             None,
             role,
@@ -573,7 +680,15 @@ impl AgentRuntime {
             config,
             continuation,
             review_seed,
-        ))
+        )?;
+        #[cfg(test)]
+        if let Some(execution) = source_execution {
+            self.execution_hook(super::cancellation::HookPoint::ResumeRegistered, &execution);
+        }
+        if operator_resume {
+            self.commit_chat_resume(run_id, &admission.execution, resume_ownership.as_ref())?;
+        }
+        Ok(admission.run)
     }
 
     /// Resolve a thread's latest saved chat root without starting a new run.

@@ -285,11 +285,22 @@ impl AgentRuntime {
                 .map_err(|error| {
                     fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))
                 })?;
-            let saved = store.handle.save_snapshot_bundle(&write).map_err(|error| {
-                fail(RunRestoreFailure::SnapshotConsumeFailed(
-                    crate::restore::provenance::save_failure_reason(error),
-                ))
-            })?;
+            let (_, saved) = self
+                .admit_intent_with_snapshot(
+                    recipient,
+                    execution.publication().incarnation(),
+                    parent,
+                    role,
+                    &queued.message.content,
+                    &config,
+                    false,
+                    false,
+                    Some(&write),
+                )
+                .map_err(|error| {
+                    fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))
+                })?;
+            let saved = saved.expect("atomic restore admission returns a snapshot receipt");
             restored.snapshot_revision.commit(saved.snapshot_revision);
             Self::install_restored_execution(
                 recipient,
@@ -313,6 +324,7 @@ impl AgentRuntime {
                 restored,
                 &queued.message,
                 durable_parent,
+                true,
             )?;
             if let Some(notice) = question_notice {
                 notice.observe();

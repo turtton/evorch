@@ -64,6 +64,24 @@ pub struct AgentInvocationContext {
 /// (routing profiles) がモデル解決に使う引数である。
 #[async_trait]
 pub trait AgentModel: Send + Sync {
+    /// Exact last provider input, not a reconstruction from current settings.
+    /// Models that cannot expose it cannot produce restart-safe checkpoints.
+    fn checkpoint_provider_input(&self, _run_id: &str) -> Option<crate::quiesce::ProviderInput> {
+        None
+    }
+
+    /// Rehydrate only observational provider state; this grants no run/tool authority.
+    /// Preserve the old editing interface to distinguish a real settings switch
+    /// from a reconnect carrying an opaque provider compaction item.
+    fn restore_checkpoint_provider_state(
+        &self,
+        _run_id: &str,
+        _role: Role,
+        _category: Option<&str>,
+        _input: &crate::quiesce::ProviderInput,
+    ) {
+    }
+
     /// Whether request assembly selects editing tools separately for each candidate.
     /// Legacy/fixed implementations keep edit/write via the runtime call boundary.
     fn narrows_edit_tools(&self) -> bool {

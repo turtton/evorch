@@ -63,6 +63,7 @@ pub(crate) use tool_calls::{
 };
 
 pub(crate) struct RunTask {
+    pub(crate) startup_failure: Option<String>,
     pub(crate) publication: crate::runtime::PublicationToken,
     pub(crate) run_id: RunId,
     pub(crate) role: Role,
@@ -152,6 +153,9 @@ fn unobserved_jobs_reminder(jobs: &[String]) -> String {
 }
 
 pub(crate) struct LoopState {
+    pub(crate) last_provider_input: Option<crate::quiesce::ProviderInput>,
+    pub(crate) provider_request_started: bool,
+    pub(crate) consumed_intent_inputs: Vec<String>,
     /// One harness episode per execution incarnation, never per model report.
     lane_failure_episode: String,
     pub(crate) thread_id: Option<String>,
@@ -249,6 +253,9 @@ impl LoopState {
             ..Default::default()
         };
         Self {
+            last_provider_input: None,
+            provider_request_started: false,
+            consumed_intent_inputs: Vec::new(),
             lane_failure_episode: providers::RequestTurnContext::unattributed(false).prompt_id,
             thread_id: None,
             turn: task.turn.clone(),
@@ -472,6 +479,18 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         }
     };
     let mut state = LoopState::new(task, loop_shared, channels, context, image_model, policy);
+    state.last_provider_input = state
+        .runtime()
+        .and_then(|runtime| runtime.shared.quiesce.provider_input(state.task.run_id));
+    state.provider_request_started = state.last_provider_input.is_some();
+    if let Some(input) = &state.last_provider_input {
+        state.shared.model.restore_checkpoint_provider_state(
+            &state.task.run_id.to_string(),
+            state.task.role,
+            state.task.config.category.as_deref(),
+            input,
+        );
+    }
     state.inherited_mcp_snapshot = mcp_snapshot;
     state.budget.spawn_credits = state.task.config.spawn_credits.clone();
     state.thread_id = thread_id;
@@ -508,6 +527,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     }
     // Every setup/execute return flows through one finalization boundary.
     async {
+        if let Some(error) = state.task.startup_failure.take() {
+            state.finish_error(error);
+            return;
+        }
         if state.cancelled()
             || state
                 .runtime()
@@ -970,6 +993,12 @@ impl LoopState {
 
     async fn execute(&mut self) {
         loop {
+            if !self
+                .quiesce_safe_point(crate::checkpoint::CheckpointBoundary::BeforeModelRequest)
+                .await
+            {
+                return;
+            }
             if let Some(kind) = self.interrupted() {
                 self.finish_interrupted(kind);
                 return;
@@ -1229,6 +1258,13 @@ impl LoopState {
                 .model
                 .invocation_snapshot()
                 .unwrap_or_else(|| Arc::clone(&self.shared.model));
+            if !self
+                .quiesce_safe_point(crate::checkpoint::CheckpointBoundary::BeforeModelRequest)
+                .await
+            {
+                return;
+            }
+            self.provider_request_started = true;
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
@@ -1247,6 +1283,11 @@ impl LoopState {
                     &self.context.responses_replay,
                 ) => result,
             };
+            if let Some(input) =
+                invocation_model.checkpoint_provider_input(&self.task.run_id.to_string())
+            {
+                self.last_provider_input = Some(input);
+            }
             self.activity(event_bus::RunActivity::Idle);
             let response = match completion {
                 Ok(response) => {
@@ -1419,6 +1460,12 @@ impl LoopState {
             self.activity(event_bus::RunActivity::Tools);
             if !self
                 .execute_tools(tool_uses, &invocation, invocation_model.as_ref())
+                .await
+            {
+                return;
+            }
+            if !self
+                .quiesce_safe_point(crate::checkpoint::CheckpointBoundary::ToolsApplied)
                 .await
             {
                 return;
@@ -1656,9 +1703,17 @@ impl LoopState {
                     context_len,
                 }));
         }
+        let mut quiesce = runtime.shared.quiesce.subscribe();
         loop {
+            if !self
+                .quiesce_safe_point(crate::checkpoint::CheckpointBoundary::BeforeModelRequest)
+                .await
+            {
+                return false;
+            }
             tokio::select! {
                 biased;
+                _ = quiesce.changed() => { continue; }
                 changed = self.channels.cancel_rx.changed() => {
                     if changed.is_ok() && let Some(kind) = self.interrupted() {
                         self.finish_interrupted(kind);
@@ -1919,7 +1974,7 @@ impl LoopState {
         self.interrupted() == Some(InterruptKind::Cancel)
     }
 
-    fn finish_interrupted(&mut self, kind: InterruptKind) {
+    pub(crate) fn finish_interrupted(&mut self, kind: InterruptKind) {
         match kind {
             InterruptKind::Cancel => self.finish_cancelled(),
             InterruptKind::Stop => self.finish_stopped(),

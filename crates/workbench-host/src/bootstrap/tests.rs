@@ -206,3 +206,32 @@ async fn core_catalog_prices_usage_and_diagnostics_are_flushed_once() {
     assert_eq!(usage[0].record.request_id, "core-priced");
     assert!((usage[0].record.cost_usd.unwrap() - 0.00028).abs() < f64::EPSILON);
 }
+
+#[tokio::test]
+async fn restart_quiesce_keeps_owner_alive_until_explicit_operator_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut boot = BootstrappedHost::open(BootstrapOptions {
+        config_dir: root.clone(),
+        project_root: root.clone(),
+        ownership_root: root.join("owners"),
+    })
+    .await
+    .unwrap();
+    let permit = boot.owner.start("restart").unwrap();
+    boot.quiesce_for_restart().await.unwrap();
+    assert_eq!(
+        boot.runtime.quiesce_state(),
+        runtime::quiesce::QuiesceState::Checkpointed
+    );
+    assert_ne!(
+        boot.owner.attach("restart").unwrap().state,
+        runtime::ownership::OwnerState::Released
+    );
+    permit.validate_generation().unwrap();
+    boot.shutdown().await.unwrap();
+    assert_eq!(
+        boot.owner.attach("restart").unwrap().state,
+        runtime::ownership::OwnerState::Released
+    );
+}

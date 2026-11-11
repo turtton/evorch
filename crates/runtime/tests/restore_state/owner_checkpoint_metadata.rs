@@ -235,7 +235,7 @@ async fn runtime_continues_with_none_for_missing_failed_and_suspended_stores() {
             providers::FinishReason::Stop,
         ))]));
         let executor = Arc::new(tools::ToolExecutor::new(bus.clone()));
-        let mut runtime = AgentRuntime::new(bus, executor, model);
+        let mut runtime = AgentRuntime::new(bus, executor, model.clone());
         let mut config = storage::StorageConfig {
             db_path: directory.path().join("events.db"),
             ..Default::default()
@@ -261,10 +261,7 @@ async fn runtime_continues_with_none_for_missing_failed_and_suspended_stores() {
                 ..Default::default()
             },
         );
-        let phase = tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(run))
-            .await
-            .unwrap()
-            .unwrap();
+        let phase = runtime.wait(run).await.unwrap();
         assert_eq!(
             phase,
             if mode == "terminal-owner-failure" || mode == "suspended" {
@@ -278,7 +275,13 @@ async fn runtime_continues_with_none_for_missing_failed_and_suspended_stores() {
         let snapshot = &checkpoint.runs[&run.to_string()].snapshot;
         match mode {
             "absent" => assert_eq!(*snapshot, Reference::none(Reason::NoRunStore)),
-            "trigger" | "suspended" => assert_eq!(*snapshot, Reference::none(Reason::WriteFailed)),
+            "trigger" => assert_eq!(*snapshot, Reference::none(Reason::WriteFailed)),
+            "suspended" => {
+                // Durable admission rejects a suspended writer before a model
+                // request or snapshot attempt, so no failed snapshot exists.
+                assert_eq!(*snapshot, Reference::none(Reason::Skipped));
+                assert!(model.observed().await.is_empty());
+            }
             "written" => {
                 let saved = storage::Database::open(&config)
                     .unwrap()

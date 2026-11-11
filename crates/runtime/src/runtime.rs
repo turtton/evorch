@@ -9,6 +9,7 @@ mod cancellation;
 pub(crate) use cancellation::HookPoint;
 pub(crate) use cancellation::{ExecutionControl, PublicationToken};
 mod chat_restore;
+pub use chat_restore::ChatResumeObservation;
 mod child_renewal;
 mod completion_relay;
 mod held_messages;
@@ -73,6 +74,11 @@ pub use user_inbox::{FollowUpStatus, FollowUpWithdrawalError};
 
 const INBOX_CAPACITY: usize = 32;
 
+struct RunAdmission {
+    run: RunId,
+    execution: Arc<ExecutionControl>,
+}
+
 /// Tokio タスクとして AgentRun を実行するランタイム。
 ///
 /// 呼び出し側は [`AgentRuntime::new`] に渡した同一の `Arc<EventBus>` を共有することで
@@ -97,6 +103,7 @@ impl WeakAgentRuntime {
 type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>;
 
 pub(crate) struct Shared {
+    pub(crate) quiesce: crate::quiesce::Coordinator,
     pub(crate) thread_goals: Mutex<crate::thread_goals::ThreadGoals>,
     /// Pull request tracking (ADR 0043), once the host started it.
     pub(crate) pull_requests: OnceLock<crate::pull_requests::PullRequestService>,
@@ -756,6 +763,7 @@ impl AgentRuntime {
                 question_version: watch::channel(0).0,
                 turn_version: watch::channel(0).0,
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
+                quiesce: Default::default(),
                 admissions: Mutex::new(HashMap::new()),
                 lane_admissions: Default::default(),
                 #[cfg(test)]
@@ -1097,6 +1105,7 @@ impl AgentRuntime {
                 benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
                 turn_version: watch::channel(0).0,
+                quiesce: Default::default(),
                 admissions: Mutex::new(HashMap::new()),
                 lane_admissions: Default::default(),
                 #[cfg(test)]
@@ -1313,15 +1322,41 @@ impl AgentRuntime {
         parent: Option<RunId>,
         role: Role,
         prompt: String,
-        mut config: RunConfig,
+        config: RunConfig,
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
     ) -> RunId {
+        self.try_spawn_run_with_handoff(
+            run_id,
+            parent,
+            role,
+            prompt,
+            config,
+            continuation,
+            review_seed,
+        )
+        .map(|admission| admission.run)
+        .unwrap_or(run_id)
+    }
+
+    // Keep host provenance explicit at this installation boundary.
+    #[allow(clippy::too_many_arguments)]
+    fn try_spawn_run_with_handoff(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
+        mut config: RunConfig,
+        continuation: RunContinuation,
+        review_seed: Option<ReviewSeed>,
+    ) -> Result<RunAdmission, RuntimeError> {
         // Every spawn path ends here: an infallible entry point (`spawn_reserved`)
         // still cannot start a child Orchestrator. Its admission fails instead.
         if let Err(error) = crate::policy::authorize_child_role(parent, role) {
+            let reason = error.to_string();
             self.fail_admission(run_id, parent, &config, error);
-            return run_id;
+            return Err(RuntimeError::Model { reason });
         }
         if let Some(store) = self.shared.run_store.get() {
             let edges = parent
@@ -1336,8 +1371,9 @@ impl AgentRuntime {
             if !edges.is_empty()
                 && let Err(error) = store.handle.record_review_lineage_edge(&edges)
             {
-                self.fail_review_admission(run_id, parent, &config, error.to_string());
-                return run_id;
+                let reason = error.to_string();
+                self.fail_review_admission(run_id, parent, &config, reason.clone());
+                return Err(RuntimeError::Model { reason });
             }
         }
         config.lane_scope = parent
@@ -1353,6 +1389,25 @@ impl AgentRuntime {
             .spawn_intents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let RunContinuation::Resume {
+            after_stop: Some(fence),
+            ..
+        } = &continuation
+        {
+            let admissions = self
+                .shared
+                .admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let runs = lock_runs(&self.shared.runs);
+            let current = cancellation::current_execution(run_id, &intents, &admissions, &runs);
+            if !fence.is_current(current.as_ref(), intents.get(&run_id)) {
+                drop(intents);
+                return Err(RuntimeError::RunTerminated {
+                    run_id: run_id.to_string(),
+                });
+            }
+        }
         // An explicitly validated conversation restore starts a new generation of
         // this root. Keep old descendants fenced, but preserve discard-then-resume
         // in place; fresh/in-flight spawns must still inherit cancellation.
@@ -1372,6 +1427,11 @@ impl AgentRuntime {
             .get(&run_id)
             .and_then(|intent| intent.parent)
             .or(parent);
+        if self.shared.quiesce.active(run_id) {
+            return Err(RuntimeError::Model {
+                reason: "durable intent is still active".into(),
+            });
+        }
         // Pre-admission reservations and registration share a single execution.
         // An explicit resume or replacement of a registered run starts a new one.
         let execution =
@@ -1386,14 +1446,65 @@ impl AgentRuntime {
         } else {
             execution
         };
+        let cancellation_generation = intents
+            .get(&run_id)
+            .map(|intent| Arc::clone(&intent.cancellation_generation))
+            .unwrap_or_default();
         intents.insert(
             run_id,
             cancellation::SpawnIntent {
                 parent: owner,
                 cancelled,
+                cancellation_generation,
                 execution: Some(Arc::clone(&execution)),
             },
         );
+        match self.admit_intent(
+            run_id,
+            execution.publication().incarnation(),
+            parent,
+            role,
+            &prompt,
+            &config,
+            matches!(&continuation, RunContinuation::Resume { .. }),
+            true,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.reserve_admission_for(
+                    run_id,
+                    parent,
+                    config.ownership.clone(),
+                    Arc::clone(&execution),
+                    parent.is_none() && config.lane_scope == Some(event_bus::LaneScope::Lane),
+                );
+                return Ok(RunAdmission {
+                    run: run_id,
+                    execution,
+                });
+            }
+            Err(error) => {
+                // Register only an Error diagnostic incarnation, never provider
+                // admission or an executing turn. Infallible callers still receive
+                // the terminal lifecycle event when persistence is unavailable.
+                *execution
+                    .startup_failure
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+                self.register_without_admission(
+                    run_id,
+                    parent,
+                    role,
+                    prompt,
+                    config,
+                    continuation,
+                    review_seed,
+                    execution,
+                    &intents,
+                );
+                return Err(error);
+            }
+        }
         let run = if self.shared.model_for(&config).requires_admission() {
             self.admit_run(
                 run_id,
@@ -1421,7 +1532,7 @@ impl AgentRuntime {
         };
         drop(intents);
 
-        run
+        Ok(RunAdmission { run, execution })
     }
 
     // Keep host provenance explicit at this installation boundary.
@@ -1465,7 +1576,9 @@ impl AgentRuntime {
                 (Some(handoff), restored)
             }
             RunContinuation::Restored(restored) => (None, Some(restored)),
-            RunContinuation::Resume { restored, handoff } => (handoff, Some(*restored)),
+            RunContinuation::Resume {
+                restored, handoff, ..
+            } => (handoff, Some(*restored)),
         };
         let ancestry = crate::request_turn::RequestAncestry::new(
             parent,
@@ -1653,6 +1766,11 @@ impl AgentRuntime {
         };
         self.bind_approval_owner(run_id, &config, &execution);
         let task = RunTask {
+            startup_failure: execution
+                .startup_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
             publication: execution.publication(),
             ancestry,
             turn,
@@ -1844,6 +1962,11 @@ impl AgentRuntime {
                         {
                             runtime.host_input_diagnostic(task.run_id, &error.to_string());
                         }
+                        runtime.end_intent(
+                            task.run_id,
+                            &task.publication.incarnation(),
+                            crate::quiesce::StopReason::Terminal,
+                        );
                         runtime.publish_terminal(
                             task.run_id,
                             LifecycleEvent::AgentRunStateChanged {
@@ -2269,12 +2392,24 @@ impl AgentRuntime {
             if trusted_user {
                 self.goal_user_input(run_id, &host.typed);
             }
+            let input_id = prompt_id
+                .clone()
+                .unwrap_or_else(|| providers::RequestTurnContext::unattributed(false).prompt_id);
+            self.queue_intent_input(
+                run_id,
+                crate::quiesce::DurableInput {
+                    id: input_id.clone(),
+                    text: host.prompt.clone(),
+                    images: images.clone(),
+                    trusted_user,
+                },
+            )?;
             let enqueue = |seq| {
                 permit.send((
                     host.prompt.clone(),
                     images,
                     trusted_user,
-                    prompt_id.clone(),
+                    Some(input_id.clone()),
                     seq,
                 ));
                 Ok::<_, RuntimeError>(())
@@ -2584,6 +2719,18 @@ impl AgentRuntime {
             if applied.is_empty() {
                 return Err(user_inbox::FollowUpWithdrawalError::AlreadyConsumed.into());
             }
+            let execution = self.execution_snapshot(run_id)?;
+            self.shared
+                .quiesce
+                .update(
+                    run_id,
+                    &execution.publication().incarnation(),
+                    Some(store),
+                    |intent| {
+                        intent.inputs.retain(|input| input.id != prompt_id);
+                    },
+                )
+                .map_err(crate::quiesce::runtime::error)?;
             Ok(())
         })
     }
@@ -2621,11 +2768,19 @@ impl AgentRuntime {
             .collect::<Vec<_>>();
         // Renewals take only their own gate. Sort subtree stops so overlapping
         // stops agree on lock order, without waiting for unrelated chat storage.
-        let _restore_guards = gates
+        let _restore_guards = targets
             .iter()
-            .map(|gate| {
-                gate.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .zip(&gates)
+            .map(|(_target, gate)| {
+                #[cfg(test)]
+                {
+                    self.lock_stop_test_gate(*_target, gate)
+                }
+                #[cfg(not(test))]
+                {
+                    gate.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                }
             })
             .collect::<Vec<_>>();
         for target in &targets {
@@ -2665,7 +2820,22 @@ impl AgentRuntime {
             {
                 admission.cancelled = true;
                 admission.execution.stop_admission();
+                let incarnation = admission.execution.publication().incarnation();
+                let queued = self.note_intent_stop(
+                    target,
+                    &incarnation,
+                    crate::quiesce::StopReason::OperatorStopped,
+                );
+                if queued {
+                    admission.finish_queued(target);
+                }
             } else if let Some(entry) = runs.get(&target) {
+                entry.execution.clear_deferred_resume();
+                self.note_intent_stop(
+                    target,
+                    &entry.execution.publication().incarnation(),
+                    crate::quiesce::StopReason::OperatorStopped,
+                );
                 entry.execution.cancel_tx.send_replace(RunInterrupt::Stop);
                 entry.execution.approvals.close();
             } else {
@@ -2714,6 +2884,13 @@ impl AgentRuntime {
         let gate = Arc::new(Mutex::new(()));
         gates.insert(run, Arc::downgrade(&gate));
         gate
+    }
+
+    /// Whether the current execution carries a graceful Stop request.
+    /// Remains true after it stops, until a new execution replaces it.
+    pub fn graceful_stop_requested(&self, run_id: RunId) -> bool {
+        self.execution_snapshot(run_id)
+            .is_ok_and(|execution| matches!(*execution.cancel_tx.borrow(), RunInterrupt::Stop))
     }
 
     /// Whether the operator stopped this run and has not resumed its thread root since.
@@ -2772,10 +2949,26 @@ impl AgentRuntime {
                     && Arc::ptr_eq(&admission.execution, &execution)
                 {
                     admission.cancelled = true;
+                    let queued = self.note_intent_stop(
+                        target,
+                        &execution.publication().incarnation(),
+                        crate::quiesce::StopReason::Cancelled,
+                    );
+                    if queued {
+                        admission.finish_queued(target);
+                    }
+                } else {
+                    self.note_intent_stop(
+                        target,
+                        &execution.publication().incarnation(),
+                        crate::quiesce::StopReason::Cancelled,
+                    );
                 }
                 cancellations.push(execution);
             }
-            intents.entry(target).or_default().cancelled = true;
+            let intent = intents.entry(target).or_default();
+            intent.cancelled = true;
+            intent.cancellation_generation = Arc::new(());
         }
         drop(runs);
         drop(admissions);

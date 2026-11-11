@@ -505,7 +505,15 @@ impl BootstrappedHost {
             })
     }
 
-    /// ADR 0024 drain: quiesce, await runtime checkpoints, flush, then release.
+    /// Planned restart preparation (ADR 0045 §8), separate from operator stop.
+    /// Success parks runs and leaves services, ownership and the bridge alive;
+    /// the restart transaction in PR 07 owns handoff/exit. Never call shutdown
+    /// as a fallback when this fails or is still waiting for a provider/tool.
+    pub async fn quiesce_for_restart(&self) -> Result<(), BootstrapError> {
+        self.runtime.quiesce().await.map_err(Into::into)
+    }
+
+    /// Operator-stop drain (ADR 0024); not a planned safe-point restart.
     pub async fn shutdown(&mut self) -> Result<(), BootstrapError> {
         let mut failure = None;
         let tasks = self
