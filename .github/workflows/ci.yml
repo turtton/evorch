@@ -304,7 +304,7 @@ jobs:
   # offscreen-gate and gui-evidence. It does not run the normal
   # nextest suite (the doctests above do run).
   cache-save:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request' # TEMP-MEASURE
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -534,10 +534,13 @@ jobs:
   gui-evidence:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
+    # into its key, so a different set restores nothing. CARGO_TARGET_DIR is set on
+    # the steps that run cargo only.
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-      CARGO_TARGET_DIR: target/ci-shared
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -565,6 +568,8 @@ jobs:
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence
       - name: Build the evidence binaries
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: cargo build --locked -p gui --bin headless_capture --bin native_qa_window
       - name: Capture size and DPI evidence matrix
         run: scripts/gui-evidence-matrix.sh
