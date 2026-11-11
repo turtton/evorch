@@ -1454,3 +1454,46 @@ fn policy_edit_invalidates_filtered_cursor_without_leaking_changed_member() {
     summary.policy = Some(LanePolicy::Summary);
     assert_eq!(ids(&h.lane_list(summary).unwrap()), vec!["lane-003"]);
 }
+
+#[test]
+fn creation_lookup_and_internal_membership_are_read_only_and_policy_independent() {
+    let fixture = Fixture::new();
+    let handle = fixture.handle();
+    let pending = handle.create_lane(new_lane(1, 1)).unwrap().lane;
+    let mut detached = new_lane(2, 2);
+    detached.brief.report_policy = LanePolicy::Detached;
+    let detached = handle.create_lane(detached).unwrap().lane;
+    assert_eq!(
+        handle.lane_by_creation_key("lead", "call-001").unwrap(),
+        Some(pending.clone())
+    );
+    assert_eq!(
+        handle.lane_by_creation_key("lead", "call-002").unwrap(),
+        Some(detached.clone())
+    );
+    assert!(
+        handle
+            .lane_by_creation_key("other", "call-001")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        handle
+            .lane_by_creation_key("lead", "missing")
+            .unwrap()
+            .is_none()
+    );
+    let before: i64 = fixture
+        .sql()
+        .query_row("SELECT count(*) FROM lane_list_snapshots", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(handle.managed_lanes("lead").unwrap(), vec![pending.clone()]);
+    assert!(handle.managed_lanes("other").unwrap().is_empty());
+    let after: i64 = fixture
+        .sql()
+        .query_row("SELECT count(*) FROM lane_list_snapshots", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(handle.lane(&pending.lane_id).unwrap(), Some(pending));
+    assert_eq!(handle.lane(&detached.lane_id).unwrap(), Some(detached));
+}

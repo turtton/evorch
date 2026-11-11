@@ -228,6 +228,45 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Internal ledger scan, never an observation or a completion-credit signal.
+    /// Uses the live management relation and current brief/management revisions.
+    pub(crate) fn lane_collection_state(
+        &self,
+        caller: RunId,
+    ) -> Result<
+        (
+            std::collections::BTreeSet<String>,
+            std::collections::BTreeSet<String>,
+        ),
+        LaneError,
+    > {
+        let (lead, _) = self.lane_lead(caller)?;
+        let store = self.shared.run_store.get().ok_or_else(|| {
+            LaneError::new("storage_unavailable", "lane ledger is not configured")
+        })?;
+        let mut managed = std::collections::BTreeSet::new();
+        let mut terminal = std::collections::BTreeSet::new();
+        for current in store.handle.managed_lanes(&lead)? {
+            managed.insert(current.lane_id.clone());
+            let reports = store.handle.lane_reports(
+                &current.lane_id,
+                current.latest_report_seq.saturating_sub(1),
+                1,
+            )?;
+            if let Some(report) = reports.first()
+                && matches!(
+                    report.status,
+                    event_bus::LaneStatus::Ready | event_bus::LaneStatus::Failed
+                )
+                && report.management_revision == current.management_revision
+                && report.brief_revision == current.brief_revision
+            {
+                terminal.insert(current.lane_id);
+            }
+        }
+        Ok((managed, terminal))
+    }
+
     /// The key is supplied by the runtime tool-call envelope, not by the model.
     pub fn open_lane(
         &self,

@@ -1254,7 +1254,7 @@ impl LoopState {
                     // routing or the provider. Only a successful request proves
                     // the post-compaction details reached the model. Refund
                     // before dispatching this response's tool calls.
-                    if self.budget.observe_lane_presentations(&visible_messages) {
+                    if self.observe_lane_presentations(&visible_messages) {
                         self.boundary_pending = true;
                     }
                     self.context.harness_notice_pending = false;
