@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-use super::connection::{Connection, Event};
+use super::connection::{Connection, Event, SessionMessage};
 use super::proxy::Proxy;
 use super::tabs::Registry;
 use super::{
@@ -469,7 +469,7 @@ async fn prepare(page: Arc<TabPage>, keep: bool) {
 }
 
 async fn pump(
-    mut events: mpsc::UnboundedReceiver<Event>,
+    mut events: mpsc::UnboundedReceiver<SessionMessage>,
     counts: watch::Sender<Loads>,
     activity: watch::Sender<PageEvents>,
     page: Arc<TabPage>,
@@ -477,7 +477,10 @@ async fn pump(
 ) {
     // In-flight request ids, with the loader of the document that sent each.
     let mut requests: HashMap<String, String> = HashMap::new();
-    while let Some(event) = events.recv().await {
+    while let Some(message) = events.recv().await {
+        let Some(event) = message.into_event() else {
+            continue;
+        };
         let main_frame = event.params["frameId"].as_str() == Some(page.target.as_str());
         let request = || event.params["requestId"].as_str().map(str::to_owned);
         let counted = match event.method.as_str() {

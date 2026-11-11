@@ -18,6 +18,33 @@ pub(super) struct Event {
 
 type Reply = oneshot::Sender<Result<Value, String>>;
 
+struct Pending {
+    reply: Reply,
+    session: Option<mpsc::UnboundedSender<SessionMessage>>,
+}
+
+/// Events and command replies share a queue, so a reply cannot overtake
+/// navigation events that were received before it on the CDP connection.
+pub(super) enum SessionMessage {
+    Event(Event),
+    Reply {
+        reply: Reply,
+        outcome: Result<Value, String>,
+    },
+}
+
+impl SessionMessage {
+    pub fn into_event(self) -> Option<Event> {
+        match self {
+            Self::Event(event) => Some(event),
+            Self::Reply { reply, outcome } => {
+                let _ = reply.send(outcome);
+                None
+            }
+        }
+    }
+}
+
 /// A CDP client of its own on the browser endpoint. chromiumoxide resumes
 /// every target it attaches as soon as it sees it, so a new tab would load
 /// before anyone could enable Fetch on it; this connection auto-attaches
@@ -25,8 +52,8 @@ type Reply = oneshot::Sender<Result<Value, String>>;
 pub(super) struct Connection {
     outgoing: mpsc::UnboundedSender<String>,
     next_id: AtomicU64,
-    pending: Mutex<HashMap<u64, Reply>>,
-    sessions: Mutex<HashMap<String, mpsc::UnboundedSender<Event>>>,
+    pending: Mutex<HashMap<u64, Pending>>,
+    sessions: Mutex<HashMap<String, mpsc::UnboundedSender<SessionMessage>>>,
 }
 
 impl Connection {
@@ -95,7 +122,17 @@ impl Connection {
                         .map(Value::take)
                         .unwrap_or_default()),
                 };
-                let _ = reply.send(outcome);
+                match reply.session {
+                    Some(session) => {
+                        let _ = session.send(SessionMessage::Reply {
+                            reply: reply.reply,
+                            outcome,
+                        });
+                    }
+                    None => {
+                        let _ = reply.reply.send(outcome);
+                    }
+                }
             }
             return;
         }
@@ -112,7 +149,7 @@ impl Connection {
         match message.get("sessionId").and_then(Value::as_str) {
             Some(session) => {
                 if let Some(events) = lock(&self.sessions).get(session) {
-                    let _ = events.send(event);
+                    let _ = events.send(SessionMessage::Event(event));
                 }
             }
             None => on_event(self, Some(event)),
@@ -120,7 +157,8 @@ impl Connection {
     }
 
     /// Sends `method` to `session`, or to the browser with `None`, when
-    /// called rather than when first polled, so commands keep call order.
+    /// called rather than when first polled, so commands keep call order. A
+    /// session reply resolves only after its preceding events are processed.
     pub fn call(
         &self,
         session: Option<&str>,
@@ -133,7 +171,14 @@ impl Connection {
             message["sessionId"] = json!(session);
         }
         let (reply, response) = oneshot::channel();
-        lock(&self.pending).insert(id, reply);
+        let events = session.and_then(|session| lock(&self.sessions).get(session).cloned());
+        lock(&self.pending).insert(
+            id,
+            Pending {
+                reply,
+                session: events,
+            },
+        );
         let sent = self.outgoing.send(message.to_string()).is_ok();
         if !sent {
             lock(&self.pending).remove(&id);
@@ -154,7 +199,7 @@ impl Connection {
         }
     }
 
-    pub fn subscribe(&self, session: &str) -> mpsc::UnboundedReceiver<Event> {
+    pub fn subscribe(&self, session: &str) -> mpsc::UnboundedReceiver<SessionMessage> {
         let (events, receiver) = mpsc::unbounded_channel();
         lock(&self.sessions).insert(session.to_owned(), events);
         receiver
@@ -169,4 +214,94 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connection() -> (Arc<Connection>, mpsc::UnboundedReceiver<String>) {
+        let (outgoing, commands) = mpsc::unbounded_channel();
+        let connection = Arc::new(Connection {
+            outgoing,
+            next_id: AtomicU64::new(1),
+            pending: Mutex::default(),
+            sessions: Mutex::default(),
+        });
+        (connection, commands)
+    }
+
+    #[tokio::test]
+    async fn session_reply_waits_for_preceding_navigation_events() {
+        let (connection, mut commands) = connection();
+        let mut events = connection.subscribe("page");
+        let reply = connection.call(Some("page"), "Page.navigateToHistoryEntry", json!({}));
+        tokio::pin!(reply);
+        let command: Value = serde_json::from_str(&commands.recv().await.unwrap()).unwrap();
+        connection.dispatch(
+            &json!({
+                "sessionId": "page", "method": "Page.navigatedWithinDocument",
+                "params": {"frameId": "frame", "url": "https://example.test/#details"}
+            })
+            .to_string(),
+            &mut |_, _| unreachable!(),
+        );
+        connection.dispatch(
+            &json!({"id": command["id"], "sessionId": "page", "result": {}}).to_string(),
+            &mut |_, _| unreachable!(),
+        );
+
+        assert!(
+            futures_util::poll!(reply.as_mut()).is_pending(),
+            "the command must not complete while its navigation event is still queued"
+        );
+        assert_eq!(
+            events.recv().await.unwrap().into_event().unwrap().method,
+            "Page.navigatedWithinDocument"
+        );
+        assert!(futures_util::poll!(reply.as_mut()).is_pending());
+        assert!(events.recv().await.unwrap().into_event().is_none());
+        assert_eq!(reply.await.unwrap(), json!({}));
+    }
+
+    #[tokio::test]
+    async fn session_errors_are_delivered_and_a_closed_session_cancels_its_reply() {
+        let (connection, mut commands) = connection();
+        let mut events = connection.subscribe("page");
+        let reply = connection.call(Some("page"), "Page.navigate", json!({}));
+        let command: Value = serde_json::from_str(&commands.recv().await.unwrap()).unwrap();
+        connection.dispatch(
+            &json!({"id": command["id"], "error": {"message": "navigation refused"}}).to_string(),
+            &mut |_, _| unreachable!(),
+        );
+        assert!(events.recv().await.unwrap().into_event().is_none());
+        assert!(matches!(
+            reply.await,
+            Err(AgentError::Cdp { detail, .. }) if detail == "navigation refused"
+        ));
+
+        let reply = connection.call(Some("page"), "Page.navigate", json!({}));
+        let command: Value = serde_json::from_str(&commands.recv().await.unwrap()).unwrap();
+        drop(events);
+        connection.dispatch(
+            &json!({"id": command["id"], "result": {}}).to_string(),
+            &mut |_, _| unreachable!(),
+        );
+        assert!(matches!(
+            reply.await,
+            Err(AgentError::Cdp { detail, .. }) if detail == "the browser connection closed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn browser_reply_needs_no_session_event_pump() {
+        let (connection, mut commands) = connection();
+        let reply = connection.call(None, "Target.closeTarget", json!({}));
+        let command: Value = serde_json::from_str(&commands.recv().await.unwrap()).unwrap();
+        connection.dispatch(
+            &json!({"id": command["id"], "result": {"success": true}}).to_string(),
+            &mut |_, _| unreachable!(),
+        );
+        assert_eq!(reply.await.unwrap(), json!({"success": true}));
+    }
 }
