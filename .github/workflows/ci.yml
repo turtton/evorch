@@ -300,11 +300,10 @@ jobs:
   # other jobs need, with each of their own package and feature selections:
   # the workspace check (lint), the doctests and the schema example
   # (docs-schema), the otel-exporter build (otel) and the test binaries of
-  # every group in scripts/ci-test-groups.json, plus the gui binaries of
-  # offscreen-gate and gui-evidence. It does not run the normal
+  # every group in scripts/ci-test-groups.json. It does not run the normal
   # nextest suite (the doctests above do run).
   cache-save:
-    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request' # TEMP-MEASURE
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -339,10 +338,6 @@ jobs:
           cargo test --workspace --doc --locked
           cargo build --locked -p config --example dump_schema
           cargo nextest list -p event-bus --features otel-exporter --locked > /dev/null
-          # offscreen-gate (ignored gui tests) and gui-evidence select -p gui alone,
-          # a feature set the group builds below do not cover.
-          cargo nextest list -p gui --tests --locked > /dev/null
-          cargo build --locked -p gui --bin headless_capture --bin native_qa_window
           for group in $(jq -r '.groups | keys[]' scripts/ci-test-groups.json); do
             echo "::group::build the test binaries of $group"
             scripts/run-contract-tests.sh --group "$group" --list default > /dev/null
@@ -484,8 +479,8 @@ jobs:
         with:
           toolchain: 1.99.0
       # The shared dependency cache of the ci jobs (written by cache-save on main
-      # pushes); this job builds with the same profile and RUSTFLAGS, so it reuses
-      # those dependency artifacts.
+      # pushes). Its key hashes the job-level CARGO_* / RUSTFLAGS env, so this job
+      # sets exactly cache-save's.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ runner.os }}-ci-workspace
@@ -509,7 +504,14 @@ jobs:
           tool: cargo-nextest
       # The ignored html_preview tests start a real CEF; the cef-e2e job runs them.
       - name: Run all ignored GUI tests (required real render)
-        run: cargo nextest run -p gui --tests --test-threads 1 --run-ignored only -E 'not (package(=gui) & kind(lib) & test(/^html_preview::tests::/))' --success-output immediate --no-tests fail
+        # Selects the packages and features of the gui test group, which cache-save
+        # builds (scripts/ci-test-groups.json): rust-cache only reuses dependency
+        # artifacts whose feature resolution matches, and `-p gui` alone resolves
+        # differently. The filter keeps the gui package's tests that the earlier
+        # `-p gui --tests` run selected.
+        run: |
+          sel=$(jq -r '.groups.gui | [(.packages[] | "-p " + .), (.features[]? | "-F " + .)] | join(" ")' scripts/ci-test-groups.json)
+          cargo nextest run --locked $sel --test-threads 1 --run-ignored only -E 'package(=gui) & not (kind(lib) & test(/^html_preview::tests::/))' --success-output immediate --no-tests fail
         env:
           CARGO_TARGET_DIR: target/ci-shared
           EVORCH_REQUIRE_ADAPTER: "1"
@@ -547,8 +549,8 @@ jobs:
         with:
           toolchain: 1.99.0
       # The shared dependency cache of the ci jobs (written by cache-save on main
-      # pushes); this job builds with the same profile and RUSTFLAGS, so it reuses
-      # those dependency artifacts.
+      # pushes). Its key hashes the job-level CARGO_* / RUSTFLAGS env, so this job
+      # sets exactly cache-save's.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ runner.os }}-ci-workspace
@@ -570,7 +572,13 @@ jobs:
       - name: Build the evidence binaries
         env:
           CARGO_TARGET_DIR: target/ci-shared
-        run: cargo build --locked -p gui --bin headless_capture --bin native_qa_window
+        # Same selection as offscreen-gate, for the same cache reason. Naming one
+        # small integration test makes Cargo resolve features with the dev
+        # dependencies, as the gui group's test build does, without building every
+        # test binary.
+        run: |
+          sel=$(jq -r '.groups.gui | [(.packages[] | "-p " + .), (.features[]? | "-F " + .)] | join(" ")' scripts/ci-test-groups.json)
+          cargo build --locked $sel --bin headless_capture --bin native_qa_window --test evidence_policy
       - name: Capture size and DPI evidence matrix
         run: scripts/gui-evidence-matrix.sh
         env:
