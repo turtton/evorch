@@ -44,8 +44,17 @@ impl AgentModel for Model {
         let mut content = vec![ContentBlock::Text {
             text: "idle".into(),
         }];
-        if let Some(last) = messages.last() {
-            for block in &last.content {
+        // A batch's tool results may arrive as several messages: read everything after
+        // the model's last answer.
+        let start = messages
+            .iter()
+            .rposition(|message| matches!(message.role, providers::Role::Assistant))
+            .map_or(0, |index| index + 1);
+        {
+            for block in messages[start..]
+                .iter()
+                .flat_map(|message| &message.content)
+            {
                 match block {
                     ContentBlock::Text { text } if text.starts_with("open:") => {
                         let mut brief = brief();
@@ -55,6 +64,25 @@ impl AgentModel for Model {
                             name: "lane_open".into(),
                             input: json!({"brief":brief}),
                         }];
+                    }
+                    // The same lane_open as `open:<n>` (same creation key and brief), then a
+                    // gated read the test holds to stop the turn after the intent is durable.
+                    ContentBlock::Text { text } if text.starts_with("open-gate:") => {
+                        let id = text.replacen("open-gate:", "open:", 1);
+                        let mut brief = brief();
+                        brief["objective"] = json!(format!("independent artifact {id}"));
+                        content = vec![
+                            ContentBlock::ToolUse {
+                                id,
+                                name: "lane_open".into(),
+                                input: json!({"brief":brief}),
+                            },
+                            ContentBlock::ToolUse {
+                                id: "gate".into(),
+                                name: "read".into(),
+                                input: json!({"index":0}),
+                            },
+                        ];
                     }
                     ContentBlock::Text { text } if text == "collect" => {
                         content = vec![ContentBlock::ToolUse {
@@ -69,11 +97,13 @@ impl AgentModel for Model {
                         ..
                     } => {
                         for part in content {
-                            if let providers::ToolResultContent::Text { text } = part {
-                                self.results.lock().unwrap().push((
-                                    tool_call_id.clone(),
-                                    serde_json::from_str(text).unwrap(),
-                                ));
+                            if let providers::ToolResultContent::Text { text } = part
+                                && let Ok(value) = serde_json::from_str(text)
+                            {
+                                self.results
+                                    .lock()
+                                    .unwrap()
+                                    .push((tool_call_id.clone(), value));
                             }
                         }
                     }
@@ -257,24 +287,61 @@ async fn more_than_a_hundred_nonterminal_lanes_are_not_a_quantity_limit() {
     exercise_creation_boundary(false).await;
 }
 
-fn stored_runtime(
-    config: &storage::StorageConfig,
-) -> (
+/// A read the test can hold: it reports its arrival and waits for the release. Without a
+/// sender it returns at once.
+struct GateRead(Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>);
+
+#[async_trait::async_trait]
+impl tools::Tool for GateRead {
+    fn name(&self) -> &'static str {
+        "read"
+    }
+    fn schema(&self) -> Value {
+        json!({"type":"object","properties":{"index":{"type":"integer"}},"required":["index"]})
+    }
+    fn permissions(&self) -> tools::Permissions {
+        tools::Permissions::read_only()
+    }
+    fn execution_mode(&self) -> tools::ToolExecutionMode {
+        tools::ToolExecutionMode::Shared
+    }
+    async fn execute(&self, _: Value) -> Result<tools::ToolResult, tools::ToolError> {
+        unreachable!("context required")
+    }
+    async fn execute_with_context(
+        &self,
+        _: &tools::ToolExecutionContext,
+        _: Value,
+    ) -> Result<tools::ToolResult, tools::ToolError> {
+        if let Some(arrived) = &self.0 {
+            let (release, released) = tokio::sync::oneshot::channel();
+            arrived.send(release).unwrap();
+            released.await.unwrap();
+        }
+        Ok(tools::ToolResult::success("read"))
+    }
+}
+
+type Fixture = (
     storage::Storage,
     Arc<Model>,
     AgentRuntime,
     event_bus::EventReceiver,
-) {
+);
+
+fn stored_runtime(config: &storage::StorageConfig) -> Fixture {
+    stored_runtime_with(config, GateRead(None))
+}
+
+fn stored_runtime_with(config: &storage::StorageConfig, read: GateRead) -> Fixture {
     let store = storage::Storage::open(config.clone()).unwrap();
     let bus = Arc::new(EventBus::new(4096));
     let events = bus.subscribe();
     let model = Arc::new(Model::default());
-    let runtime = AgentRuntime::new(
-        bus.clone(),
-        Arc::new(tools::ToolExecutor::new(bus)),
-        model.clone(),
-    )
-    .with_run_store(runtime::RunStore::open(config, store.handle()).unwrap());
+    let mut executor = tools::ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(read)).unwrap();
+    let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone())
+        .with_run_store(runtime::RunStore::open(config, store.handle()).unwrap());
     (store, model, runtime, events)
 }
 
@@ -441,4 +508,134 @@ async fn restored_existing_intent_without_a_credit_marker_does_not_count_as_new(
 #[tokio::test]
 async fn failed_admission_intent_is_counted_once_across_a_new_runtime_and_run_store() {
     retry_after_runtime_restart(true).await;
+}
+
+/// The creation count is saved with the turn, after the tool batch, while the lane
+/// intent is durable as soon as `lane_open` returns. The test stops the turn between the
+/// two with a held read, takes the database as a crash at that instant would leave it
+/// (SQLite's online backup), and restores the lead in a new runtime from that image.
+///
+/// Contract pinned here: the intent is not lost or duplicated (the same envelope finds
+/// the existing lane, `created:false`), and it is not counted either: a restored retry is
+/// never a new open and is not used to repair crash bookkeeping. A crash in this window
+/// therefore lets exactly one more open through before the suppression, which is
+/// accepted for a safety valve that is not a lane-count limit. The live path of the same
+/// scenario counts the intent, so the difference is the lost count alone.
+#[tokio::test]
+async fn a_crash_between_the_durable_intent_and_the_saved_count_loses_exactly_that_one_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("live.db"),
+        ..Default::default()
+    };
+    let (arrived_tx, mut arrived) = tokio::sync::mpsc::unbounded_channel();
+    let (store, model, runtime, mut events) =
+        stored_runtime_with(&config, GateRead(Some(arrived_tx)));
+    let lead = runtime
+        .delegate_chat(
+            "progress-lead",
+            Role::Orchestrator,
+            "coordinate".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                conversation: true,
+                spawn_credits: serde_json::from_value(json!({
+                    "spawned": [],
+                    "observed": [],
+                    "unobserved": 20,
+                    "uncollected_lane_open_count": 99,
+                    "uncollected_lane_ids": ["uncollected"]
+                }))
+                .unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    waiting(&mut events, lead).await;
+    seed_uncollected(&store, lead, true);
+
+    runtime
+        .send_message(lead, "open-gate:victim".into())
+        .unwrap();
+    let release = arrived.recv().await.unwrap();
+    let crash_dir = dir.path().join("crash");
+    std::fs::create_dir(&crash_dir).unwrap();
+    let crash_config = storage::StorageConfig {
+        db_path: crash_dir.join("live.db"),
+        ..Default::default()
+    };
+    {
+        let source = rusqlite::Connection::open(&config.db_path).unwrap();
+        let mut image = rusqlite::Connection::open(&crash_config.db_path).unwrap();
+        rusqlite::backup::Backup::new(&source, &mut image)
+            .unwrap()
+            .run_to_completion(256, std::time::Duration::ZERO, None)
+            .unwrap();
+        let durable: u32 = image
+            .query_row(
+                "SELECT count(*) FROM lanes WHERE creation_key LIKE '%:open:victim'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(durable, 1, "the crash image holds the durable intent");
+    }
+    release.send(()).unwrap();
+    waiting(&mut events, lead).await;
+
+    // Without the crash the same intent is counted: the next open is suppressed.
+    let victim = model
+        .results
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(id, _)| id == "open:victim")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(victim["created"], true, "{victim}");
+    let live_next = command(&runtime, &model, &mut events, lead, "open:next").await;
+    assert_eq!(live_next["code"], "lane_creation_suppressed", "{live_next}");
+    assert_eq!(live_next["uncollected_lane_open_count"], 100);
+    let victim_root: RunId = victim["root_run_id"].as_str().unwrap().parse().unwrap();
+    for run in [victim_root, lead] {
+        runtime.cancel(run).unwrap();
+    }
+    for run in [victim_root, lead] {
+        runtime.wait(run).await.unwrap();
+    }
+
+    let (_store, model, runtime, mut events) = stored_runtime(&crash_config);
+    runtime
+        .resume_chat(
+            lead,
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    waiting(&mut events, lead).await;
+    let retried = command(&runtime, &model, &mut events, lead, "open:victim").await;
+    assert_eq!(retried["created"], false, "{retried}");
+    assert_eq!(retried["lane_id"], victim["lane_id"], "no second lane");
+    let next = command(&runtime, &model, &mut events, lead, "open:next").await;
+    assert_eq!(
+        next["created"], true,
+        "the count lost to the crash is not repaired by the retry: {next}"
+    );
+    let blocked = command(&runtime, &model, &mut events, lead, "open:blocked").await;
+    assert_eq!(blocked["code"], "lane_creation_suppressed", "{blocked}");
+    assert_eq!(blocked["uncollected_lane_open_count"], 100);
+    let next_root: RunId = next["root_run_id"].as_str().unwrap().parse().unwrap();
+    for run in [next_root, lead] {
+        runtime.cancel(run).unwrap();
+    }
+    for run in [next_root, lead] {
+        runtime.wait(run).await.unwrap();
+    }
 }
