@@ -102,7 +102,7 @@ impl NudgeFixture {
         );
         self.f.h.runtime.wait(self.f.lead).await.unwrap();
     }
-    fn failures(&self) -> usize {
+    pub(super) fn failures(&self) -> usize {
         self.f
             .events
             .iter()
@@ -111,7 +111,7 @@ impl NudgeFixture {
             )
             .count()
     }
-    async fn next_failure(&mut self, previous: usize) {
+    pub(super) async fn next_failure(&mut self, previous: usize) {
         while self.failures() <= previous {
             self.f.events.push(self.f.h.receiver.recv().await.unwrap());
         }

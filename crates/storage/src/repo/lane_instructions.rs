@@ -279,15 +279,18 @@ pub(crate) fn delivery(
     lane_id: &str,
     seq: u64,
 ) -> Result<Option<LaneInstructionDelivery>, StorageError> {
-    let state: Option<String> = c
+    let row: Option<(String, bool)> = c
         .query_row(
-            "SELECT n.state FROM lane_instructions i JOIN lane_notifications n ON n.notification_id=i.notification_id WHERE i.lane_id=?1 AND i.instruction_seq=?2",
+            "SELECT n.state,n.receipt_prompt_id IS NOT NULL FROM lane_instructions i JOIN lane_notifications n ON n.notification_id=i.notification_id WHERE i.lane_id=?1 AND i.instruction_seq=?2",
             params![lane_id, to_i64(seq)?],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    Ok(state.map(|state| match state.as_str() {
+    // The conversation snapshot and the receipt commit together; the ACK is a later
+    // step that can fail or be lost, so the receipt, not the ACK, proves delivery.
+    Ok(row.map(|(state, received)| match state.as_str() {
         "acked" => LaneInstructionDelivery::Delivered,
+        _ if received => LaneInstructionDelivery::Delivered,
         "obsolete" => LaneInstructionDelivery::Withdrawn,
         _ => LaneInstructionDelivery::Queued,
     }))

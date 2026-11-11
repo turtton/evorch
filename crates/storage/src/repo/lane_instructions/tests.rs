@@ -412,3 +412,58 @@ fn detach_keeps_accepted_instructions_for_the_lane_and_fences_the_old_lead() {
     );
     assert_eq!(f.count("lane_instructions"), 1);
 }
+
+fn ready_report() -> LaneReportInput {
+    LaneReportInput {
+        status: LaneStatus::Ready,
+        summary: "done".into(),
+        artifact_refs: vec![],
+        artifact_revision: None,
+        failure_episode: None,
+        needs_human: false,
+        question_refs: vec![],
+        reason_code: None,
+        producer: LaneReportProducer::LaneAgent,
+    }
+}
+fn report_revision(f: &Fixture, at: i64) -> u64 {
+    let management = f.lane().management_revision;
+    crate::repo::lanes::append_report(f.c(), "lane", management, &ready_report(), at)
+        .unwrap()
+        .report
+        .brief_revision
+}
+/// What the lane's conversation holds is proven by the receipt, which commits with the
+/// snapshot; the ACK is a later step that may be lost.
+fn receive(f: &Fixture, seq: u64) {
+    f.c()
+        .execute(
+            "UPDATE lane_notifications SET receipt_prompt_id='receipt-'||notification_id WHERE notification_id=(SELECT notification_id FROM lane_instructions WHERE lane_id='lane' AND instruction_seq=?1)",
+            [seq],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_report_is_bound_to_the_brief_revision_the_lane_has_received() {
+    let f = Fixture::started();
+    assert_eq!(report_revision(&f, 5), 1);
+    apply(f.c(), &request("v2", 1, 1, revise("second")), &lead(), 10).unwrap();
+    apply(f.c(), &request("v3", 1, 2, revise("third")), &lead(), 11).unwrap();
+    assert_eq!(f.lane().brief_revision, 3);
+    // Neither revision is in the conversation: the lane still answers the first brief.
+    assert_eq!(report_revision(&f, 12), 1);
+    // Delivery is in order: a received first revision leaves the second unseen. The ACK
+    // was never sent, yet the receipt counts.
+    receive(&f, 1);
+    assert_eq!(report_revision(&f, 13), 2);
+    assert_eq!(
+        delivery(f.c(), "lane", 1).unwrap(),
+        Some(LaneInstructionDelivery::Delivered)
+    );
+    receive(&f, 2);
+    assert_eq!(report_revision(&f, 14), 3);
+    // A supplement changes no revision, whether or not it was received.
+    apply(f.c(), &request("s1", 1, 3, supplement("note")), &lead(), 15).unwrap();
+    assert_eq!(report_revision(&f, 16), 3);
+}
