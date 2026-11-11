@@ -1,9 +1,9 @@
 //! Failure/suppression/Resume is not a provider-cache reset boundary.
 use super::*;
-struct FailingHost {
-    inner: Arc<Host>,
-    fail: AtomicBool,
-    attempts: AtomicUsize,
+pub(super) struct FailingHost {
+    pub(super) inner: Arc<Host>,
+    pub(super) fail: AtomicBool,
+    pub(super) attempts: AtomicUsize,
 }
 impl LaneDeliveryHost for FailingHost {
     fn resolve(

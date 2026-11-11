@@ -115,6 +115,47 @@ impl AgentRuntime {
         )
     }
 
+    /// The authenticated lead for a model-callable lane operation: live, a lane-external
+    /// root Orchestrator, and the thread's durable current root. The caller holds the
+    /// restore gate; the storage transaction re-validates the same facts.
+    pub(crate) fn lane_lead_actor(
+        &self,
+        store: &crate::RunStore,
+        caller: RunId,
+    ) -> Result<(LaneManagementActor, crate::RunConfig), LaneError> {
+        if !self.inspect_agent(caller).is_ok_and(|r| {
+            matches!(
+                r.phase,
+                event_bus::AgentRunPhase::Pending
+                    | event_bus::AgentRunPhase::Running
+                    | event_bus::AgentRunPhase::Waiting
+            )
+        }) {
+            return Err(LaneError::new("not_current_lead", "caller is not live"));
+        }
+        let (thread, config) = self
+            .lane_lead(caller)
+            .map_err(|e| LaneError::new("not_current_lead", e))?;
+        if store
+            .thread(&thread)?
+            .and_then(|t| t.root_run_id)
+            .as_deref()
+            != Some(&caller.to_string())
+        {
+            return Err(LaneError::new(
+                "not_current_lead",
+                "caller is not the current root",
+            ));
+        }
+        Ok((
+            LaneManagementActor::Lead {
+                thread_id: thread,
+                root_run_id: caller.to_string(),
+            },
+            config,
+        ))
+    }
+
     fn manage_lane_with_permits(
         &self,
         context: LaneManagementContext,
@@ -133,38 +174,8 @@ impl AgentRuntime {
         let (actor, config) = match context {
             LaneManagementContext::User(_) => (LaneManagementActor::User, None),
             LaneManagementContext::Run(caller) => {
-                if !self.inspect_agent(caller).is_ok_and(|r| {
-                    matches!(
-                        r.phase,
-                        event_bus::AgentRunPhase::Pending
-                            | event_bus::AgentRunPhase::Running
-                            | event_bus::AgentRunPhase::Waiting
-                    )
-                }) {
-                    return Err(LaneError::new("not_current_lead", "caller is not live"));
-                }
-                let (thread, config) = self
-                    .lane_lead(caller)
-                    .map_err(|e| LaneError::new("not_current_lead", e))?;
-                // Durable current-root validation also happens inside the transaction.
-                if store
-                    .thread(&thread)?
-                    .and_then(|t| t.root_run_id)
-                    .as_deref()
-                    != Some(&caller.to_string())
-                {
-                    return Err(LaneError::new(
-                        "not_current_lead",
-                        "caller is not the current root",
-                    ));
-                }
-                (
-                    LaneManagementActor::Lead {
-                        thread_id: thread,
-                        root_run_id: caller.to_string(),
-                    },
-                    Some(config),
-                )
+                let (actor, config) = self.lane_lead_actor(store, caller)?;
+                (actor, Some(config))
             }
         };
         let authority = config

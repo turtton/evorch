@@ -610,6 +610,7 @@ pub(crate) fn append_report_in_transaction(
     }
     let seq = lane.latest_report_seq + 1;
     let seq_param = to_i64(seq, "report sequence")?;
+    let observed_brief_revision = observed_brief_revision(tx, &lane)?;
     // The limit is on the report as stored and returned, identity and counters included.
     LaneReport {
         artifact_revision: input.artifact_revision.clone(),
@@ -624,7 +625,7 @@ pub(crate) fn append_report_in_transaction(
         reason_code: input.reason_code.clone(),
         producer: input.producer,
         management_revision: lane.management_revision,
-        brief_revision: lane.brief_revision,
+        brief_revision: observed_brief_revision,
         created_at_ns: at_ns,
     }
     .validate_size()
@@ -645,7 +646,7 @@ pub(crate) fn append_report_in_transaction(
             input.reason_code,
             input.producer.as_str(),
             to_i64(lane.management_revision, "management revision")?,
-            to_i64(lane.brief_revision, "brief revision")?,
+            to_i64(observed_brief_revision, "brief revision")?,
             at_ns,
             input
                 .artifact_revision
@@ -674,6 +675,33 @@ pub(crate) fn append_report_in_transaction(
     Ok(LaneReportAppended { lane, report })
 }
 
+/// The brief revision the lane's conversation holds when it reports.
+///
+/// A report answers what the lane has read, not what the lead has since stored. With
+/// no revision awaiting delivery that is the current revision; otherwise it is the
+/// revision before the oldest undelivered revision, because delivery is in order. The
+/// delivery receipt (committed with the conversation snapshot) decides, never the ACK,
+/// which can be lost after the lane already holds the text. Receipts are written only
+/// between provider requests, so a response already in flight when a revision is
+/// delivered still reports the revision it was produced under. A report bound to a
+/// revision older than the current one is not the current brief's Ready, so it can
+/// never be closed as if it answered the revision.
+fn observed_brief_revision(tx: &Transaction<'_>, lane: &LaneRecord) -> Result<u64, StorageError> {
+    let undelivered: Option<i64> = tx
+        .query_row(
+            "SELECT i.brief_revision_before FROM lane_instructions i \
+             JOIN lane_notifications n ON n.notification_id = i.notification_id \
+             WHERE i.lane_id = ?1 AND i.kind = 'brief_revision' AND n.receipt_prompt_id IS NULL \
+             ORDER BY i.instruction_seq LIMIT 1",
+            [&lane.lane_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    undelivered.map_or(Ok(lane.brief_revision), |before| {
+        u64::try_from(before).map_err(|_| StorageError::OutOfRange("brief revision"))
+    })
+}
+
 pub(crate) fn revise_brief(
     conn: &Connection,
     lane_id: &str,
@@ -681,10 +709,24 @@ pub(crate) fn revise_brief(
     brief: &LaneBrief,
     at_ns: i64,
 ) -> Result<LaneUpdate, StorageError> {
+    let tx = immediate(conn)?;
+    let update = revise_brief_in(&tx, lane_id, expected_revision, brief, at_ns)?;
+    tx.commit()?;
+    Ok(update)
+}
+
+/// The brief replacement inside the caller's transaction, which owns the commit. An
+/// instruction acceptance needs the brief and its delivery reservation in one commit.
+pub(crate) fn revise_brief_in(
+    tx: &Transaction<'_>,
+    lane_id: &str,
+    expected_revision: u64,
+    brief: &LaneBrief,
+    at_ns: i64,
+) -> Result<LaneUpdate, StorageError> {
     brief.validate().map_err(StorageError::LaneInvalid)?;
     guard_texts("lane_brief", brief.guarded_texts())?;
-    let tx = immediate(conn)?;
-    let lane = require(&tx, lane_id)?;
+    let lane = require(tx, lane_id)?;
     if lane.brief_revision != expected_revision {
         return Err(StorageError::StaleRevision {
             kind: "brief",
@@ -711,9 +753,8 @@ pub(crate) fn revise_brief(
             updated_at_ns = max(updated_at_ns, ?3) WHERE lane_id = ?1",
         params![lane_id, brief_json, at_ns],
     )?;
-    bump_revision(&tx)?;
-    let lane = require(&tx, lane_id)?;
-    tx.commit()?;
+    bump_revision(tx)?;
+    let lane = require(tx, lane_id)?;
     Ok(LaneUpdate {
         lane,
         changed: true,

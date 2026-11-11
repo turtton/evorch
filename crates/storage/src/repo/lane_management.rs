@@ -42,7 +42,7 @@ fn actor_key(a: &LaneManagementActor) -> Result<String, StorageError> {
     }
 }
 /// A live, lane-external root Orchestrator. Thread and run pointers must agree.
-fn root(c: &Connection, thread: &str, run: &str) -> Result<bool, StorageError> {
+pub(crate) fn root(c: &Connection, thread: &str, run: &str) -> Result<bool, StorageError> {
     Ok(c.query_row(
         "SELECT EXISTS(SELECT 1 FROM threads t JOIN run_contexts r ON r.run_id=t.root_run_id
         WHERE t.thread_id=?1 AND t.root_run_id=?2 AND t.chat_role='Orchestrator'

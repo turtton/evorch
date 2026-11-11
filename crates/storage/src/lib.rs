@@ -72,6 +72,7 @@ pub mod improvement;
 pub mod inspect;
 pub mod lane_control;
 pub mod lane_delivery;
+pub mod lane_instructions;
 pub mod lane_management;
 pub mod lanes;
 mod learning;

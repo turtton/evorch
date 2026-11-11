@@ -62,6 +62,12 @@ fn table() -> BTreeMap<&'static str, Guard> {
             "lane_delivery.rs::resume_lane_deliveries",
             Guarded { via: &[] },
         ),
+        (
+            "lane_instructions.rs::send_lane_instruction",
+            Exempt(
+                "the caller must be a live root run (a deleted run is never live); the ledger write is fenced for tombstoned lane threads",
+            ),
+        ),
         ("thread_goals.rs::restore_thread_goal", Guarded { via: &[] }),
         ("thread_todos.rs::restore_thread_todo", Guarded { via: &[] }),
         (

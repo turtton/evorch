@@ -8,6 +8,7 @@ fn chat_authority() -> RunConfig {
         ..Default::default()
     }
 }
+mod instructions;
 mod nudge;
 mod recovery;
 struct Host {

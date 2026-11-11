@@ -1,6 +1,6 @@
 //! Destination single flight, lease fencing and durable receipt/ACK repair.
 use super::*;
-pub(crate) const LIVE_NOTICE: &str = "n.source_kind='lane' AND (n.event_kind='answer' OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))";
+pub(crate) const LIVE_NOTICE: &str = "n.source_kind='lane' AND (n.event_kind IN ('answer','instruction') OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))";
 pub(crate) fn inbox(
     conn: &Connection,
     destination: &str,
@@ -385,15 +385,17 @@ impl OutboxNotice for LaneNotification {
     const RECEIPT_PREFIX: &'static str = "lane-notification:";
     const PROVENANCE_KIND: &'static str = "lane_notification";
     const ELIGIBLE_QUERY: &'static str = "WITH eligible AS NOT MATERIALIZED (
-           SELECT n.payload,n.notification_id,n.event_kind FROM lane_notifications n
+           SELECT n.payload,n.notification_id,n.event_kind,COALESCE(i.instruction_seq,0) AS seq FROM lane_notifications n
            JOIN lanes l ON l.lane_id=n.lane_id
-           WHERE n.destination_thread_id=?1 AND n.state='pending' AND n.source_kind='lane' AND (n.event_kind='answer' OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))
+           LEFT JOIN lane_instructions i ON i.notification_id=n.notification_id
+           WHERE n.destination_thread_id=?1 AND n.state='pending' AND n.source_kind='lane' AND (n.event_kind IN ('answer','instruction') OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))
              AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0)
+             AND (n.event_kind<>'instruction' OR i.instruction_seq=(SELECT MIN(p.instruction_seq) FROM lane_instructions p JOIN lane_notifications pn ON pn.notification_id=p.notification_id WHERE p.lane_id=n.lane_id AND pn.state='pending'))
          )
          SELECT payload FROM eligible
-         WHERE ?2 OR EXISTS(SELECT 1 FROM eligible WHERE event_kind IN ('question','ready','failed','answer','nudge'))
-         ORDER BY CASE WHEN ?2 OR event_kind IN ('question','ready','failed','answer','nudge') THEN 0 ELSE 1 END,
-                  notification_id LIMIT 20";
+         WHERE ?2 OR EXISTS(SELECT 1 FROM eligible WHERE event_kind IN ('question','ready','failed','answer','nudge','instruction'))
+         ORDER BY CASE WHEN ?2 OR event_kind IN ('question','ready','failed','answer','nudge','instruction') THEN 0 ELSE 1 END,
+                  seq, notification_id LIMIT 20";
     fn notification_id(&self) -> &str {
         &self.notification_id
     }
@@ -414,7 +416,10 @@ impl OutboxNotice for LaneNotification {
         }
         // Accepted Answer provenance may outlive the old lead; the requester
         // and current lane/destination/claim remain authoritative.
-        if !matches!(self.kind, LaneNotificationKind::Answer { .. }) {
+        if !matches!(
+            self.kind,
+            LaneNotificationKind::Answer { .. } | LaneNotificationKind::Instruction { .. }
+        ) {
             live_thread(conn, &self.source_thread_id)?;
         }
         let current = lane(conn, &self.lane_id)?;
@@ -443,7 +448,11 @@ impl OutboxNotice for LaneNotification {
             resolve_recovery_destination(conn, &self.destination_thread_id)?;
         }
         let source = lane(conn, &self.lane_id)?;
-        if source.thread_id == self.destination_thread_id {
+        // An instruction is neither new work nor a reason to retire evidence: the brief
+        // trigger already did that at acceptance. Receipt alone is not progress.
+        if source.thread_id == self.destination_thread_id
+            && !matches!(self.kind, LaneNotificationKind::Instruction { .. })
+        {
             crate::repo::lane_control::input_progress(
                 conn,
                 &self.lane_id,
