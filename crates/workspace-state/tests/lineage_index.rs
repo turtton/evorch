@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use workspace_ui::{
+use workspace_state::{
     ForkPoint, LineageIndex, LineageKind, ProjectId, ThreadId, ThreadLineage, ThreadRecord,
     ThreadRunPhase, normalize_versions, show_version,
 };
@@ -11,7 +11,7 @@ use workspace_ui::{
 mod oracle {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use workspace_ui::{ForkPoint, ProjectId, ThreadId, ThreadRecord, ThreadRunPhase};
+    use workspace_state::{ForkPoint, ProjectId, ThreadId, ThreadRecord, ThreadRunPhase};
 
     fn find<'a>(threads: &'a [ThreadRecord], id: &ThreadId) -> Option<&'a ThreadRecord> {
         threads.iter().find(|thread| &thread.id == id)
@@ -325,7 +325,7 @@ fn assert_matches_oracle(threads: &[ThreadRecord]) {
                 "point_versions of {id} at {point:?}"
             );
             assert_eq!(
-                workspace_ui::point_versions(threads, id, point),
+                workspace_state::point_versions(threads, id, point),
                 oracle::point_versions(threads, id, point)
             );
         }
@@ -341,7 +341,7 @@ fn assert_matches_oracle(threads: &[ThreadRecord]) {
         );
         // The free functions are thin wrappers over the same index.
         assert_eq!(
-            workspace_ui::display_parent(threads, id),
+            workspace_state::display_parent(threads, id),
             oracle::display_parent(threads, id)
         );
     }
@@ -496,7 +496,7 @@ fn a_reply_in_a_child_lifts_the_whole_family_above_newer_roots() {
         let (main, _) = ThreadRecord::partition_for_project(threads, &project, &BTreeMap::new());
         let roots: Vec<_> = main
             .into_iter()
-            .filter(|thread| workspace_ui::display_parent(threads, &thread.id).is_none())
+            .filter(|thread| workspace_state::display_parent(threads, &thread.id).is_none())
             .map(|thread| thread.id.to_string())
             .collect();
         roots
