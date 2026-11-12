@@ -44,6 +44,27 @@ impl StopSignal {
     }
 }
 
+/// A task that is aborted when this handle is dropped, so the supervisor that
+/// owns it can never leave it running when the supervisor itself is aborted.
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 struct Entry {
     task: JoinHandle<()>,
 }
@@ -71,7 +92,8 @@ impl Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         // Emergency teardown only (a failed start-up); a normal stop always
-        // goes through `AreaTasks::shutdown`, which joins.
+        // goes through `AreaTasks::shutdown`, which joins. Aborting a
+        // supervisor drops the task it owns, so nothing is left running.
         self.stop.send_replace(true);
         for entry in std::mem::take(&mut self.state().tasks) {
             entry.task.abort();
@@ -114,7 +136,9 @@ impl AreaTasks {
             return Err(SpawnError::Full);
         }
         let future = task(StopSignal(self.0.stop.subscribe()));
-        let inner = self.0.runtime.spawn(future);
+        // The task is owned by its supervisor (and aborted with it), so the
+        // registry's own handle is the only one there is to stop.
+        let inner = AbortOnDrop(self.0.runtime.spawn(future));
         let shared = Arc::downgrade(&self.0);
         // Supervising task: records how `name` ended, so a failure that
         // happens before shutdown is not lost when the entry is pruned.
@@ -198,6 +222,33 @@ mod tests {
         b.await.unwrap();
         assert_eq!(tasks.active(), 0);
         tasks.shutdown().await.unwrap();
+    }
+
+    /// Tells the test when the future holding it is dropped.
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            let _ = self.0.take().unwrap().send(());
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_registry_drops_the_real_tasks_too() {
+        let tasks = tasks();
+        let (dropped, task_dropped) = oneshot::channel();
+        tasks
+            .spawn("held", |mut stop| async move {
+                let _held = DropSignal(Some(dropped));
+                // Never returns on its own: only the teardown can end it.
+                std::future::pending::<()>().await;
+                stop.stopped().await;
+                Ok(())
+            })
+            .unwrap();
+        drop(tasks);
+        // The future itself was dropped (aborted), not only a supervisor.
+        task_dropped.await.unwrap();
     }
 
     #[tokio::test]

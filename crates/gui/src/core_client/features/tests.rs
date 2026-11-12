@@ -1,29 +1,42 @@
 use super::*;
+use std::sync::{Arc, Mutex};
 use workbench_protocol::{
     handshake::{ActivityCounts, CoreState, CoreStatus},
-    ids::{RunId, ThreadId},
+    ids::RunId,
     namespaces::{ExecutionEvent, LifecycleEvent, LifecycleQuery, LifecycleReply},
     queries::QueryReply,
     views::{RunPhase, RunRole, RunSummary},
     wire::Revision,
 };
 
-/// Records what the registry hands it, and asks for one query per render.
-struct Recorder {
+type Log = Arc<Mutex<Vec<String>>>;
+
+/// Records what the registry hands it, asks for one query per render and may
+/// draw the selector.
+pub(crate) struct Recorder {
     id: FeatureId,
     availability: Availability,
-    events: Vec<String>,
-    replies: Vec<u64>,
+    selector: bool,
+    log: Log,
 }
 
 impl Recorder {
-    fn new(id: FeatureId, availability: Availability) -> Self {
-        Self {
+    pub(crate) fn new(id: FeatureId, availability: Availability, log: &Log) -> Box<Self> {
+        Box::new(Self {
             id,
             availability,
-            events: vec![],
-            replies: vec![],
-        }
+            selector: false,
+            log: log.clone(),
+        })
+    }
+
+    fn with_selector(mut self: Box<Self>) -> Box<Self> {
+        self.selector = true;
+        self
+    }
+
+    fn note(&self, line: String) {
+        self.log.lock().unwrap().push(line);
     }
 }
 
@@ -37,15 +50,37 @@ impl Feature for Recorder {
     fn availability(&self) -> Availability {
         self.availability
     }
-    fn event(&mut self, event: &UiEvent) {
-        self.events.push(event.namespace().to_owned());
+    fn reset(&mut self) {
+        self.note("reset".into());
     }
-    fn reply(&mut self, tag: u64, _reply: FeatureReply) {
-        self.replies.push(tag);
+    fn event(&mut self, event: &UiEvent) {
+        self.note(format!("event {}", event.namespace()));
+    }
+    fn reply(&mut self, tag: u64, reply: FeatureReply) {
+        let outcome = match reply {
+            FeatureReply::Command(Ok(_)) | FeatureReply::Query(Ok(_)) => "ok",
+            FeatureReply::Command(Err(_)) | FeatureReply::Query(Err(_)) => "err",
+        };
+        self.note(format!("reply {tag} {outcome}"));
     }
     fn render(&mut self, _ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
         ctx.query(7, Query::Lifecycle(LifecycleQuery::GetCoreStatus));
     }
+    fn render_selector(&mut self, _ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) -> bool {
+        if self.selector {
+            let project = ctx.selection().project.clone().unwrap();
+            ctx.navigate(Navigation::NewConversation(project));
+        }
+        self.selector
+    }
+}
+
+pub(crate) fn log() -> Log {
+    Log::default()
+}
+
+pub(crate) fn lines(log: &Log) -> Vec<String> {
+    log.lock().unwrap().clone()
 }
 
 fn run_ui(f: impl FnOnce(&mut egui::Ui)) {
@@ -62,7 +97,7 @@ const NEEDS_QUERIES: Availability = Availability::Implemented {
     required: &[Capability::Queries],
 };
 
-fn status() -> CoreStatus {
+pub(crate) fn status() -> CoreStatus {
     CoreStatus {
         state: CoreState::Ready,
         retention_reasons: vec![],
@@ -70,46 +105,104 @@ fn status() -> CoreStatus {
     }
 }
 
+fn view<'a>(
+    connected: bool,
+    capabilities: &'a [Capability],
+    cache: &'a Cache,
+    selection: &'a Selection,
+) -> FeatureView<'a> {
+    FeatureView {
+        connected,
+        capabilities,
+        cache,
+        selection,
+    }
+}
+
 #[test]
-fn the_shipped_placeholders_are_never_offered_or_rendered() {
+fn the_shipped_placeholders_are_never_offered_rendered_or_replacing_the_selector() {
     let mut features = Features::default();
+    let (cache, selection) = (Cache::default(), Selection::default());
     assert!(
         features
             .available(true, &Capability::IMPLEMENTED)
             .is_empty()
     );
     run_ui(|ui| {
-        let sent = features.render(ui, true, &Capability::IMPLEMENTED);
-        assert!(sent.is_empty());
+        let v = view(true, &Capability::IMPLEMENTED, &cache, &selection);
+        let frame = features.render(ui, v);
+        assert!(frame.actions.is_empty() && frame.navigation.is_empty());
+        // The built-in selector stays: nothing replaced it and nothing was drawn.
+        assert!(features.render_selector(ui, v).is_none());
     });
 }
 
 #[test]
 fn an_implemented_feature_renders_only_while_connected_with_its_capabilities() {
-    let mut feature = Recorder::new(FeatureId::Mcp, NEEDS_QUERIES);
-    let mut all: [&mut dyn Feature; 1] = [&mut feature];
+    let log = log();
+    let mut features = Features::default();
+    features.install(Recorder::new(FeatureId::Mcp, NEEDS_QUERIES, &log));
     assert_eq!(
-        available_ids(&mut all, true, &[Capability::Queries]),
+        features.available(true, &[Capability::Queries]),
         [FeatureId::Mcp]
     );
-    assert!(available_ids(&mut all, false, &[Capability::Queries]).is_empty());
-    assert!(available_ids(&mut all, true, &[Capability::Commands]).is_empty());
+    assert!(features.available(false, &[Capability::Queries]).is_empty());
+    assert!(features.available(true, &[Capability::Commands]).is_empty());
 
+    let (cache, selection) = (Cache::default(), Selection::default());
     run_ui(|ui| {
-        let sent = render_all(&mut all, ui, true, &[Capability::Queries]);
+        let frame = features.render(ui, view(true, &[Capability::Queries], &cache, &selection));
         // The request leaves typed, tagged for the feature that made it.
-        assert_eq!(sent.len(), 1);
-        assert_eq!((sent[0].feature, sent[0].tag), (FeatureId::Mcp, 7));
-        assert!(matches!(sent[0].request, FeatureRequest::Query(_)));
-        assert!(render_all(&mut all, ui, false, &[Capability::Queries]).is_empty());
+        assert_eq!(frame.actions.len(), 1);
+        assert_eq!(
+            (frame.actions[0].feature, frame.actions[0].tag),
+            (FeatureId::Mcp, 7)
+        );
+        assert!(matches!(frame.actions[0].request, FeatureRequest::Query(_)));
+        let none = features.render(ui, view(false, &[Capability::Queries], &cache, &selection));
+        assert!(none.actions.is_empty());
+    });
+}
+
+#[test]
+fn only_an_available_feature_may_replace_the_selector_and_its_navigation_is_typed() {
+    let log = log();
+    let project = ProjectId::new("p").unwrap();
+    let selection = Selection {
+        project: Some(project.clone()),
+        thread: None,
+    };
+    let cache = Cache::default();
+    let mut features = Features::default();
+    features.install(Recorder::new(FeatureId::Workspace, NEEDS_QUERIES, &log).with_selector());
+    run_ui(|ui| {
+        // Not connected: the feature is not available, the built-in selector stays.
+        assert!(
+            features
+                .render_selector(ui, view(false, &[Capability::Queries], &cache, &selection))
+                .is_none()
+        );
+        let frame = features
+            .render_selector(ui, view(true, &[Capability::Queries], &cache, &selection))
+            .expect("the feature replaced the selector");
+        assert_eq!(frame.navigation, [Navigation::NewConversation(project)]);
     });
 }
 
 #[test]
 fn events_reach_only_the_feature_owning_their_namespace() {
-    let mut workspace = Recorder::new(FeatureId::Workspace, NEEDS_QUERIES);
-    let mut execution = Recorder::new(FeatureId::Execution, NEEDS_QUERIES);
-    let mut all: [&mut dyn Feature; 2] = [&mut workspace, &mut execution];
+    let (workspace_log, execution_log) = (log(), log());
+    let mut features = Features::default();
+    features.install(Recorder::new(
+        FeatureId::Workspace,
+        NEEDS_QUERIES,
+        &workspace_log,
+    ));
+    features.install(Recorder::new(
+        FeatureId::Execution,
+        NEEDS_QUERIES,
+        &execution_log,
+    ));
     let run = RunSummary {
         id: RunId::new("run-1").unwrap(),
         thread: ThreadId::new("t").unwrap(),
@@ -118,46 +211,54 @@ fn events_reach_only_the_feature_owning_their_namespace() {
         phase: RunPhase::Running,
         revision: Revision(1),
     };
-    route_event(
-        &mut all,
-        &UiEvent::Execution(ExecutionEvent::RunChanged { run }),
-    );
-    route_event(
-        &mut all,
-        &UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged { status: status() }),
-    );
-    assert!(workspace.events.is_empty());
-    assert_eq!(execution.events, ["execution"]);
+    features.event(&UiEvent::Execution(ExecutionEvent::RunChanged { run }));
+    features.event(&UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged {
+        status: status(),
+    }));
+    assert!(lines(&workspace_log).is_empty());
+    assert_eq!(lines(&execution_log), ["event execution"]);
 }
 
 #[test]
 fn a_reply_returns_to_the_feature_that_asked_and_a_refusal_is_a_failed_reply() {
-    let mut workspace = Recorder::new(FeatureId::Workspace, NEEDS_QUERIES);
-    let mut lanes = Recorder::new(FeatureId::Lanes, NEEDS_QUERIES);
-    {
-        let mut all: [&mut dyn Feature; 2] = [&mut workspace, &mut lanes];
-        route_reply(
-            &mut all,
-            FeatureId::Lanes,
-            41,
-            FeatureReply::Query(Ok(QueryReply::Lifecycle(LifecycleReply::CoreStatus(
-                status(),
-            )))),
-        );
-    }
-    assert!(workspace.replies.is_empty());
-    assert_eq!(lanes.replies, [41]);
+    let (workspace_log, lanes_log) = (log(), log());
+    let mut features = Features::default();
+    features.install(Recorder::new(
+        FeatureId::Workspace,
+        NEEDS_QUERIES,
+        &workspace_log,
+    ));
+    features.install(Recorder::new(FeatureId::Lanes, NEEDS_QUERIES, &lanes_log));
+    features.reply(
+        FeatureId::Lanes,
+        41,
+        FeatureReply::Query(Ok(QueryReply::Lifecycle(LifecycleReply::CoreStatus(
+            status(),
+        )))),
+    );
+    assert!(lines(&workspace_log).is_empty());
+    assert_eq!(lines(&lanes_log), ["reply 41 ok"]);
 
-    let query = FeatureAction {
+    let refused = FeatureAction {
         feature: FeatureId::Workspace,
         tag: 9,
         request: FeatureRequest::Query(Query::Lifecycle(LifecycleQuery::GetCoreStatus)),
     };
-    assert!(matches!(
-        query.refused("queue full"),
-        FeatureReply::Query(Err(FeatureError {
-            outcome_unknown: false,
-            ..
-        }))
-    ));
+    features.refuse(&refused, "queue full");
+    assert_eq!(lines(&workspace_log), ["reply 9 err"]);
+}
+
+#[test]
+fn a_session_resets_first_then_delivers_events_and_the_held_replies() {
+    let log = log();
+    let mut features = Features::default();
+    features.install(Recorder::new(FeatureId::Lanes, NEEDS_QUERIES, &log));
+    let held = vec![HeldReply {
+        feature: FeatureId::Lanes,
+        tag: 3,
+        reply: FeatureReply::Command(Err(FeatureError::new("rejected"))),
+    }];
+    features.begin_session(&[], held);
+    // A reset never discards a held reply: it comes after it.
+    assert_eq!(lines(&log), ["reset", "reply 3 err"]);
 }

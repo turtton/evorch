@@ -3,6 +3,7 @@
 pub mod cache;
 pub mod connection;
 pub mod features;
+use features::{FeatureFrame, FeatureView, Navigation, Selection};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use connection::Action;
@@ -97,6 +98,25 @@ impl Shared {
                 images.len() - 1
             });
         &mut images[position]
+    }
+
+    /// A snapshot cut arrived (connect, reconnect or resync): replace the
+    /// projection, then restart the features on it. Features see their reset
+    /// first, then the events that arrived during the cut, then the `held`
+    /// replies (resolved outcomes of commands whose reply was lost), so a reset
+    /// never discards a resolved reply.
+    pub fn begin_session(
+        &mut self,
+        cache: cache::Cache,
+        capabilities: Vec<Capability>,
+        delivered: &[workbench_protocol::events::UiEvent],
+        held: Vec<features::HeldReply>,
+    ) {
+        self.replace_projection(cache);
+        self.capabilities = capabilities;
+        self.features.begin_session(delivered, held);
+        self.connected = true;
+        self.status = "core-client: 接続済み".into();
     }
 
     /// Replace a disposable cut without discarding human input or uncertainty.
@@ -199,6 +219,40 @@ impl Drop for CoreClientApp {
     }
 }
 
+/// Apply what the features asked for in a frame: send their requests and make
+/// the selection changes they named, as a click on the built-in selector would.
+fn apply_frame(
+    tx: &tokio::sync::mpsc::Sender<Action>,
+    shared: &mut Shared,
+    project: &mut Option<ProjectId>,
+    selected: &mut Option<ThreadId>,
+    frame: FeatureFrame,
+) {
+    for action in frame.actions {
+        enqueue(tx, shared, Action::Feature(action));
+    }
+    for navigation in frame.navigation {
+        match navigation {
+            Navigation::SelectProject(id) => {
+                *project = Some(id);
+                *selected = None;
+            }
+            Navigation::SelectThread {
+                project: id,
+                thread,
+            } => {
+                *project = Some(id);
+                *selected = Some(thread.clone());
+                enqueue(tx, shared, Action::History(thread, false));
+            }
+            Navigation::NewConversation(id) => {
+                *project = Some(id);
+                *selected = Some(ThreadId::new(uuid::Uuid::new_v4().to_string()).unwrap());
+            }
+        }
+    }
+}
+
 /// Register local input before making it visible to the asynchronous actor.
 pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, action: Action) {
     match &action {
@@ -269,11 +323,27 @@ impl eframe::App for CoreClientApp {
                 format!("OutcomeUnknown: {request}（再送していません）"),
             );
         }
-        let capabilities = shared.capabilities.clone();
-        let connected = shared.connected;
-        for action in shared.features.render(ui, connected, &capabilities) {
-            enqueue(&self.actions, &mut shared, Action::Feature(action));
-        }
+        let frame = {
+            let selection = Selection {
+                project: self.project.clone(),
+                thread: self.selected.clone(),
+            };
+            let s = &mut *shared;
+            let view = FeatureView {
+                connected: s.connected,
+                capabilities: &s.capabilities,
+                cache: &s.cache,
+                selection: &selection,
+            };
+            s.features.render(ui, view)
+        };
+        apply_frame(
+            &self.actions,
+            &mut shared,
+            &mut self.project,
+            &mut self.selected,
+            frame,
+        );
         ui.collapsing("未移行の機能 — Unsupported", |ui| {
             ui.label("設定変更・モデル設定・project 追加・lane 管理・PR 管理・ファイル/terminal/browser・fork/rewind・削除/アーカイブ等はこのモードでは使用できません。直接 DB を開いて補完しません。");
         });
@@ -281,6 +351,27 @@ impl eframe::App for CoreClientApp {
             ui.label("コアへの接続が必要です。embedded runtime へは fallback しません。");
         }
         ui.add_enabled_ui(shared.connected, |ui| {
+            // A feature may draw the selector (the workspace one, once implemented);
+            // while none does, the built-in selector below is unchanged.
+            let replaced = {
+                let selection = Selection {
+                    project: self.project.clone(),
+                    thread: self.selected.clone(),
+                };
+                let s = &mut *shared;
+                let view = FeatureView {
+                    connected: s.connected,
+                    capabilities: &s.capabilities,
+                    cache: &s.cache,
+                    selection: &selection,
+                };
+                s.features.render_selector(ui, view)
+            };
+            let builtin_selector = replaced.is_none();
+            if let Some(frame) = replaced {
+                apply_frame(&self.actions, &mut shared, &mut self.project, &mut self.selected, frame);
+            }
+            if builtin_selector {
             ui.horizontal(|ui| {
                 let projects: Vec<_> = shared.cache.projects.values().cloned().collect();
                 if self.project.is_none() { self.project = projects.first().map(|p| p.id.clone()); }
@@ -299,6 +390,7 @@ impl eframe::App for CoreClientApp {
                     }
                 }
             });
+            }
             let (Some(thread), Some(project)) = (self.selected.clone(), self.project.clone()) else { return };
             ui.horizontal(|ui| {
                 if ui.button("履歴更新").clicked() { enqueue(&self.actions, &mut shared, Action::History(thread.clone(), false)); }
@@ -507,5 +599,66 @@ mod upload_regressions {
         release.send(()).unwrap();
         reply.await.unwrap();
         assert_eq!(state.image_drafts["t"].len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+
+    fn ids() -> (ProjectId, ThreadId) {
+        (ProjectId::new("p").unwrap(), ThreadId::new("t").unwrap())
+    }
+
+    #[test]
+    fn navigation_changes_the_selection_like_the_built_in_selector() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut shared = Shared::default();
+        let (id, thread) = ids();
+        let (mut project, mut selected) = (None, None);
+        let frame = |navigation| FeatureFrame {
+            actions: vec![],
+            navigation: vec![navigation],
+        };
+
+        apply_frame(
+            &tx,
+            &mut shared,
+            &mut project,
+            &mut selected,
+            frame(Navigation::SelectThread {
+                project: id.clone(),
+                thread: thread.clone(),
+            }),
+        );
+        assert_eq!(
+            (project.as_ref(), selected.as_ref()),
+            (Some(&id), Some(&thread))
+        );
+        // Selecting a thread loads its history, as the built-in selector does.
+        assert!(matches!(rx.try_recv(), Ok(Action::History(t, false)) if t == thread));
+
+        apply_frame(
+            &tx,
+            &mut shared,
+            &mut project,
+            &mut selected,
+            frame(Navigation::SelectProject(id.clone())),
+        );
+        assert_eq!((project.as_ref(), selected.as_ref()), (Some(&id), None));
+
+        apply_frame(
+            &tx,
+            &mut shared,
+            &mut project,
+            &mut selected,
+            frame(Navigation::NewConversation(id.clone())),
+        );
+        assert_eq!(project.as_ref(), Some(&id));
+        assert!(selected.is_some() && selected != Some(thread));
+        assert!(
+            rx.try_recv().is_err(),
+            "only selecting a thread sends anything"
+        );
     }
 }
