@@ -69,6 +69,16 @@ fn closing_window(dir: &Path) -> (WorkbenchState<DemoSource>, Storage, AgentRunt
 }
 
 fn report_ready(storage: &Storage, summary: &str, at_ns: i64) {
+    report_ready_with(storage, summary, vec![], None, at_ns);
+}
+
+fn report_ready_with(
+    storage: &Storage,
+    summary: &str,
+    artifact_refs: Vec<String>,
+    artifact_revision: Option<event_bus::lane::ArtifactRevision>,
+    at_ns: i64,
+) {
     storage
         .handle()
         .append_lane_report(
@@ -77,12 +87,12 @@ fn report_ready(storage: &Storage, summary: &str, at_ns: i64) {
             LaneReportInput {
                 status: LaneStatus::Ready,
                 summary: summary.into(),
-                artifact_refs: vec![],
+                artifact_refs,
                 needs_human: false,
                 question_refs: vec![],
                 reason_code: None,
                 producer: LaneReportProducer::LaneAgent,
-                artifact_revision: None,
+                artifact_revision,
                 failure_episode: None,
             },
             at_ns,
@@ -295,4 +305,44 @@ async fn the_confirmation_is_drawn_with_its_meaning_and_confirm_waits_for_a_reas
     window.run();
     assert_eq!(standing(&storage).unwrap().kind, LaneCloseKind::HumanClosed);
     assert!(!window.has_label("Close lane (unverified)"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_artifacts_a_ready_names_are_listed_collapsed_and_capped_as_reference_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ui, storage, _runtime) = closing_window(dir.path());
+    let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
+    let sha = "a".repeat(40);
+    let refs: Vec<String> = (1..=8)
+        .map(|n| format!("https://github.com/turtton/evorch/pull/{n}"))
+        .collect();
+    report_ready_with(
+        &storage,
+        "all done",
+        refs,
+        Some(event_bus::lane::ArtifactRevision::CommitSha(sha.clone())),
+        5,
+    );
+    window.state_mut().refresh_lane_attention();
+    window.run();
+    settle(window.state_mut());
+    let item = listed_ready(window.state());
+    choose(window.state_mut(), item, CloseChoice::Complete);
+    window.run();
+
+    // Collapsed by default: the revision and each reference are behind the header.
+    assert!(window.has_label("Artifact references (9)"));
+    assert!(!window.has_label(&format!("revision (commit): {sha}")));
+    window.click_label("Artifact references (9)");
+    window.run();
+    assert!(window.has_label(&format!("revision (commit): {sha}")));
+    assert!(window.has_label("https://github.com/turtton/evorch/pull/1"));
+    assert!(window.has_label("https://github.com/turtton/evorch/pull/5"));
+    assert!(!window.has_label("https://github.com/turtton/evorch/pull/6"));
+    assert!(window.has_label("… and 3 more"));
+
+    // Reference only: the confirmation still waits for a reason and nothing else.
+    type_reason(window.state_mut(), "checked the pull requests by hand");
+    window.run();
+    assert_eq!(window.label_enabled("Close lane"), Some(true));
 }

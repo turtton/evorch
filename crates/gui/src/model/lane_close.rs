@@ -108,6 +108,55 @@ pub fn pr_line(context: &LaneClosePrContext) -> String {
     }
 }
 
+/// Most artifact references the confirmation lists; the rest are only counted.
+pub const ARTIFACT_REFS_SHOWN: usize = 5;
+/// Longest reference shown, in characters.
+const ARTIFACT_REF_CHARS: usize = 200;
+
+/// The artifact the Ready names, exactly as the lane reported it: the fixed revision, then at
+/// most [`ARTIFACT_REFS_SHOWN`] references (a pull request URL, a commit SHA, a file), then
+/// how many more there are. Nothing is checked or fetched, and nothing here decides whether the
+/// person may close.
+#[must_use]
+pub fn artifact_lines(ready: &event_bus::lane::LaneReport) -> Vec<String> {
+    use event_bus::lane::ArtifactRevision;
+    let mut lines = Vec::new();
+    match &ready.artifact_revision {
+        Some(ArtifactRevision::CommitSha(value)) => {
+            lines.push(format!("revision (commit): {}", clipped(value)));
+        }
+        Some(ArtifactRevision::Sha256(value)) => {
+            lines.push(format!("revision (sha256): {}", clipped(value)));
+        }
+        None => {}
+    }
+    lines.extend(
+        ready
+            .artifact_refs
+            .iter()
+            .take(ARTIFACT_REFS_SHOWN)
+            .map(|reference| clipped(reference)),
+    );
+    let rest = ready
+        .artifact_refs
+        .len()
+        .saturating_sub(ARTIFACT_REFS_SHOWN);
+    if rest > 0 {
+        lines.push(format!("… and {rest} more"));
+    }
+    lines
+}
+
+fn clipped(text: &str) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(ARTIFACT_REF_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 /// The artifact the Ready names, in a sentence.
 #[must_use]
 pub fn evidence_line(ready: &event_bus::lane::LaneReport) -> String {
@@ -190,6 +239,58 @@ mod tests {
             at_ns: 0,
             outcome: LaneCloseOutcome::Closed,
         }
+    }
+
+    fn ready_with(
+        refs: &[&str],
+        revision: Option<event_bus::lane::ArtifactRevision>,
+    ) -> event_bus::lane::LaneReport {
+        event_bus::lane::LaneReport {
+            artifact_revision: revision,
+            failure_episode: None,
+            lane_id: "lane".into(),
+            report_seq: 1,
+            status: event_bus::lane::LaneStatus::Ready,
+            summary: "done".into(),
+            artifact_refs: refs.iter().map(|r| (*r).to_owned()).collect(),
+            needs_human: false,
+            question_refs: vec![],
+            reason_code: None,
+            producer: event_bus::lane::LaneReportProducer::LaneAgent,
+            management_revision: 1,
+            brief_revision: 1,
+            created_at_ns: 0,
+        }
+    }
+
+    #[test]
+    fn the_artifacts_are_shown_as_reported_capped_and_clipped() {
+        use event_bus::lane::ArtifactRevision;
+        assert!(artifact_lines(&ready_with(&[], None)).is_empty());
+
+        let few = artifact_lines(&ready_with(
+            &["https://example.test/pull/1"],
+            Some(ArtifactRevision::Sha256("b".repeat(64))),
+        ));
+        assert_eq!(
+            few,
+            [
+                format!("revision (sha256): {}", "b".repeat(64)),
+                "https://example.test/pull/1".to_owned()
+            ]
+        );
+
+        let many: Vec<String> = (0..ARTIFACT_REFS_SHOWN + 3)
+            .map(|n| format!("ref-{n}"))
+            .collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let lines = artifact_lines(&ready_with(&many, None));
+        assert_eq!(lines.len(), ARTIFACT_REFS_SHOWN + 1);
+        assert_eq!(lines.last().unwrap(), "… and 3 more");
+
+        let long = "x".repeat(500);
+        let clipped = artifact_lines(&ready_with(&[&long], None));
+        assert!(clipped[0].chars().count() <= 201 && clipped[0].ends_with('…'));
     }
 
     #[test]

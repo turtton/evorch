@@ -363,11 +363,28 @@ async fn a_human_close_ends_only_the_ledger_entry_and_an_agent_cannot_reach_it()
             .is_none()
     );
     let discard = request(&f, true);
+    let live = |f: &Fixture| {
+        (
+            f.runtime.inspect_agent(f.lane.root_run_id).unwrap().phase,
+            f.runtime.inspect_agent(f.lead).unwrap().phase,
+        )
+    };
+    let before = live(&f);
+    let running = |phase| {
+        matches!(
+            phase,
+            event_bus::AgentRunPhase::Pending
+                | event_bus::AgentRunPhase::Running
+                | event_bus::AgentRunPhase::Waiting
+        )
+    };
+    assert!(running(before.0) && running(before.1), "{before:?}");
     let closed = f.host.close_lane_human(discard, &common::web()).unwrap();
     assert_eq!(closed.kind, LaneCloseKind::Discarded);
-    // Nothing else changed: the lane is still attached to its lead and its run is alive.
+    // Nothing else changed: the lane is still attached to its lead, and neither the lane's
+    // run nor the lead's was stopped or finished by the close.
     assert_eq!(f.state().policy, LaneManagementPolicy::Attached);
-    assert!(f.runtime.inspect_agent(f.lane.root_run_id).is_ok());
+    assert_eq!(live(&f), before);
     f.stop().await;
 }
 

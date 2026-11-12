@@ -63,6 +63,26 @@ pub fn lane_close_dialog(
                                 ui.label(medium(format!("Latest Ready (#{})", ready.report_seq)));
                                 ui.add(egui::Label::new(&ready.summary).wrap());
                                 ui.label(muted(lane_close::evidence_line(ready)));
+                                let artifacts = lane_close::artifact_lines(ready);
+                                if !artifacts.is_empty() {
+                                    egui::CollapsingHeader::new(format!(
+                                        "Artifact references ({})",
+                                        ready.artifact_refs.len()
+                                            + usize::from(ready.artifact_revision.is_some())
+                                    ))
+                                    .id_salt("lane-close-artifacts")
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        for line in artifacts {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(line).monospace(),
+                                                )
+                                                .wrap(),
+                                            );
+                                        }
+                                    });
+                                }
                             }
                             None => {
                                 ui.label(medium("No Ready report"));
