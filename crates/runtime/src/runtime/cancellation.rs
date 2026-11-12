@@ -375,6 +375,7 @@ pub(crate) enum HookPoint {
     SubtreeCollected,
     AdmissionRegistered,
     LaneOwnershipValidated,
+    LaneStopWriteStarted,
     LaneStopWriteFailed,
     LaneStopPersisted,
     AdmissionFailed,
@@ -404,12 +405,7 @@ type ExecutionHook = (HookPoint, Weak<ExecutionControl>, Box<dyn FnOnce() + Send
 pub(super) struct TestHooks(Mutex<Vec<ExecutionHook>>);
 #[cfg(test)]
 impl AgentRuntime {
-    pub(crate) fn lane_stop_write_hook(&self, run: RunId, persisted: bool) {
-        let point = if persisted {
-            HookPoint::LaneStopPersisted
-        } else {
-            HookPoint::LaneStopWriteFailed
-        };
+    pub(crate) fn lane_stop_write_hook(&self, run: RunId, point: HookPoint) {
         if let Ok(execution) = self.execution_snapshot(run) {
             self.execution_hook(point, &execution);
         }
