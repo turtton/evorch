@@ -5,7 +5,8 @@
 //! Remaining GUI/core differences:
 //! - Core loads strict explicit configuration, without environment overrides.
 //! - Unconfigured core exposes no tools; GUI/demo keeps production tools.
-//! - GUI owns retention/index policy; core only executes confirmed reclaims.
+//! - The core confirms and executes retention deletions (`retention`); a legacy
+//!   GUI runs its own phase only when it holds the exclusive leases.
 //! - GUI retains a 60s storage bridge tick; core retains its 5s tick.
 //! - Project declarations are read-only: saved state cannot manufacture trust.
 pub mod components;
@@ -20,6 +21,7 @@ mod project_models;
 pub mod recovery;
 #[cfg(test)]
 mod recovery_06a_tests;
+pub mod retention;
 pub mod services;
 #[cfg(test)]
 mod tests;
@@ -220,13 +222,17 @@ impl BootstrappedHost {
         })?;
         let bus = Arc::new(EventBus::new(4096));
         let db_path = options.config_dir.join("evorch-events.db");
-        // P7a is an additional owner, not the sidebar's retention authority.
-        // Do not interpret/migrate GUI sidebar state or confirm new deletions.
-        // Shared leases prevent another process doing exclusive maintenance.
-        let lease_db = db_path.clone();
-        let lease_root = options.ownership_root.clone();
+        // The core confirms the deletion of expired archived threads (see
+        // `retention`): exclusive leases for the phase, then shared for its life.
+        let plan = retention::RetentionPlan {
+            db_path: db_path.clone(),
+            ownership_root: options.ownership_root.clone(),
+            sidebar_path: options.config_dir.join("sidebar.json"),
+            artifacts_dir: Some(options.config_dir.join("artifacts")),
+            policy: runtime::thread_retention::policy_from_config(&config.storage),
+        };
         let leases = tokio::task::spawn_blocking(move || {
-            storage::shared_with_wait(&lease_db, &lease_root, Duration::from_secs(30))
+            retention::acquire_leases(&plan, Duration::from_secs(30))
         })
         .await??;
         let storage_config = components::storage_config(&config, db_path);
