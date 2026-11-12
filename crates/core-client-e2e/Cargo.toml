@@ -25,6 +25,7 @@ core-launcher = { path = "../core-launcher" }
 workbench-protocol = { path = "../workbench-protocol" }
 workbench-host = { path = "../workbench-host", features = ["test-support"] }
 egui_kittest = { workspace = true }
+workspace-state = { path = "../workspace-state" }
 workbench-web = { path = "../workbench-web" }
 runtime = { path = "../runtime" }
 event-bus = { path = "../event-bus" }

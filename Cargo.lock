@@ -1503,6 +1503,7 @@ dependencies = [
  "workbench-host",
  "workbench-protocol",
  "workbench-web",
+ "workspace-state",
 ]
 
 [[package]]

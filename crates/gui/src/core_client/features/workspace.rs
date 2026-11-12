@@ -430,7 +430,10 @@ impl Feature for WorkspaceFeature {
 
     fn reset(&mut self) {
         self.model = SidebarModel::default();
-        self.outbox.clear();
+        // Replies can queue reads between frames. Keep those not-yet-sent
+        // requests with their tags, otherwise want_detail/want_access would
+        // wait forever for a request discarded here. A command in this outbox
+        // has never left the feature; sent commands are never queued again.
         self.refreshing = false;
         // The tags in flight and the intent behind them stay.
         self.stale = true;
@@ -932,6 +935,74 @@ mod tests {
         assert!(
             matches!(command, WorkspaceCommand::RenameThread(r) if r.expected_revision == Revision(9))
         );
+    }
+
+    #[test]
+    fn reconnect_between_a_family_reply_and_the_next_frame_does_not_lose_reads() {
+        let mut feature = WorkspaceFeature::default();
+        feature
+            .model
+            .details
+            .insert("t1".into(), detail("t1", 1, "t1"));
+        feature.want_access("p1");
+        let access_tag = match feature.take_outbox().remove(0) {
+            Outgoing::Query(tag, _) => tag,
+            other => panic!("{other:?}"),
+        };
+        feature.reply(
+            access_tag,
+            FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::ProjectAccess(
+                Box::new(ProjectAccessView {
+                    project: workbench_protocol::ids::ProjectId::new("p1").unwrap(),
+                    name: "repo".into(),
+                    root: "/repo".into(),
+                    trust: TrustLevel::Approved,
+                    allowed_directories: vec![],
+                    revision: Revision(1),
+                }),
+            )))),
+        );
+        feature.stale = true;
+        feature.refresh_if_stale();
+        let tag = match feature.take_outbox().remove(0) {
+            Outgoing::Query(tag, _) => tag,
+            other => panic!("{other:?}"),
+        };
+        // The family reply queues detail/access reads for the next frame.
+        feature.reply(tag, families(vec![family("t1", 0, 0)]));
+        feature.reset(); // A reconnect snapshot arrives before that frame.
+        feature.want_detail("t1");
+        feature.want_access("p1");
+        let reads = feature.take_outbox();
+        assert_eq!(
+            reads.len(),
+            2,
+            "every pending read must still be sent: {reads:?}"
+        );
+        assert!(reads.iter().any(|r| matches!(
+            r,
+            Outgoing::Query(_, Query::Workspace(WorkspaceQuery::GetThreadDetail(_)))
+        )));
+        assert!(reads.iter().any(|r| matches!(
+            r,
+            Outgoing::Query(_, Query::Workspace(WorkspaceQuery::GetProjectAccess(_)))
+        )));
+    }
+
+    #[test]
+    fn a_reset_keeps_an_unsent_command_once_without_replaying_a_sent_one() {
+        let mut feature = WorkspaceFeature::default();
+        feature
+            .model
+            .details
+            .insert("t1".into(), detail("t1", 1, "t1"));
+        feature.ask("t1", Intent::Rename("new title".into()));
+        feature.reset();
+        feature.reset();
+        let (_, command) = only_command(feature.take_outbox());
+        assert!(matches!(command, WorkspaceCommand::RenameThread(r) if r.title == "new title"));
+        feature.reset();
+        assert!(feature.take_outbox().is_empty());
     }
 
     #[test]
