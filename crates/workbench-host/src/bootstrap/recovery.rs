@@ -25,7 +25,7 @@ pub fn prepare(
 
 pub fn release(
     runtime: &AgentRuntime,
-    component: runtime::PausedRecoveryComponent,
+    component: &runtime::PausedRecoveryComponent,
     reason: &str,
 ) -> Result<(), BootstrapError> {
     Ok(runtime.release_prepared_component(component, reason)?)
