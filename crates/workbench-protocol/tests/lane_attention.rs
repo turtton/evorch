@@ -61,7 +61,7 @@ fn every_kind() -> Vec<LaneAttentionKind> {
             readiness: LaneReadyState::NoEvidence,
         },
         LaneAttentionKind::QuestionCapacityBlocked {
-            capacity: LaneQuestionCapacity::Global,
+            capacity: LaneQuestionCapacity::Requester,
             limit: 40,
         },
         LaneAttentionKind::WakeSuppressed {

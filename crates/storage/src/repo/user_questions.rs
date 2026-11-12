@@ -25,20 +25,9 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
         ));
     }
     let count = requester_question_count(conn, &question.run_id)?;
-    if count >= 32 {
+    if count >= u64::from(crate::lane_delivery::QuestionCapacity::Requester.limit()) {
         return Err(StorageError::QuestionCapacity(
             crate::lane_delivery::QuestionCapacity::Requester,
-        ));
-    }
-    let pending: i64 = conn.query_row(
-        "SELECT count(*) FROM user_questions WHERE answered=0 \
-         AND ((run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=user_questions.id AND l.run_id != user_questions.run_id AND l.run_id NOT IN (SELECT run_id FROM run_tombstones)))",
-        [],
-        |row| row.get(0),
-    )?;
-    if pending >= 1024 {
-        return Err(StorageError::QuestionCapacity(
-            crate::lane_delivery::QuestionCapacity::Global,
         ));
     }
     let payload = serde_json::to_string(question).map_err(|e| invalid(&e.to_string()))?;
@@ -48,14 +37,20 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
     Ok(())
 }
 
-/// Creation and attention must use the same recipient set, including answered
-/// questions: answering does not free a per-recipient historical quota slot.
+/// Unanswered questions that count against one recipient's quota: those the run
+/// owns plus those it inherited through `user_question_links`. Answering frees a
+/// slot. Questions that are no longer visible (owner run or root tombstoned, with
+/// no live inherited recipient), the same set `get` and the pending listings use,
+/// are not counted. Creation and attention must use this same count.
 pub(super) fn requester_question_count(
     conn: &Connection,
     run_id: &str,
 ) -> Result<u64, StorageError> {
     Ok(conn.query_row(
-        "SELECT count(*) FROM user_questions q WHERE run_id=?1 OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id=?1)",
+        "SELECT count(*) FROM user_questions q WHERE q.answered=0 \
+         AND (q.run_id=?1 OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id=?1)) \
+         AND ((q.run_id NOT IN (SELECT run_id FROM run_tombstones) AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones)) \
+              OR EXISTS (SELECT 1 FROM user_question_links l2 WHERE l2.question_id=q.id AND l2.run_id != q.run_id AND l2.run_id NOT IN (SELECT run_id FROM run_tombstones)))",
         [run_id], |row| row.get(0),
     )?)
 }
@@ -295,7 +290,7 @@ pub fn recipients(conn: &Connection, id: &str) -> Result<Vec<String>, StorageErr
 pub fn pending(conn: &Connection) -> Result<Vec<UserQuestion>, StorageError> {
     list(
         conn,
-        "SELECT payload FROM user_questions WHERE answered=0 AND ?1='' AND ((run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=user_questions.id AND l.run_id != user_questions.run_id AND l.run_id NOT IN (SELECT run_id FROM run_tombstones))) ORDER BY rowid DESC LIMIT 1024",
+        "SELECT payload FROM user_questions WHERE answered=0 AND ?1='' AND ((run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=user_questions.id AND l.run_id != user_questions.run_id AND l.run_id NOT IN (SELECT run_id FROM run_tombstones))) ORDER BY rowid DESC",
         "",
     )
 }

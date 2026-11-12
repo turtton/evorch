@@ -141,7 +141,8 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
   Chat continuation and Worker-to-Orchestrator escalation persist explicit question
   recipients before starting the new run; failed inheritance prevents startup.
 - The first answer is final; retries of the same answer are idempotent. At most 32
-  questions per run and 1024 globally pending questions are permitted. Storage or
+  unanswered questions per run are permitted (answering frees a slot); there is no
+  workbench-wide limit. Storage or
   secret-guard failures are surfaced. No answer grants tool permission.
 - The GUI shows questions in their owning conversation. A storage acknowledgement
   clears an answered card even if an old run's event fence rejects its event.

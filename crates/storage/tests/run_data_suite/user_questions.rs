@@ -127,36 +127,53 @@ fn first_answer_wins_and_same_answer_is_idempotent_across_reopen() {
 }
 
 #[test]
-fn question_limits_prevent_invisible_pending_questions() {
+fn pending_questions_have_no_workbench_wide_cap() {
     let (_dir, storage, database, _config) = fixture();
-    for id in 0..1024 {
+    for id in 0..1100 {
         storage
             .handle()
             .create_user_question(&question(id))
             .unwrap();
     }
+    assert_eq!(database.pending_user_questions().unwrap().len(), 1100);
+}
+
+#[test]
+fn answered_questions_free_requester_slots_beyond_the_cumulative_total() {
+    let (_dir, storage, database, _config) = fixture();
+    let host = AnswerOrigin::Host {
+        channel: Default::default(),
+    };
+    let ask = |id: u64| {
+        let mut q = question(id);
+        q.run_id = "run-1".into();
+        storage.handle().create_user_question(&q)
+    };
+    for id in 0..32 {
+        ask(id).unwrap();
+    }
     assert!(matches!(
-        storage.handle().create_user_question(&question(1024)),
+        ask(32),
         Err(StorageError::QuestionCapacity(
-            storage::lane_delivery::QuestionCapacity::Global
+            storage::lane_delivery::QuestionCapacity::Requester
         ))
     ));
-    assert_eq!(database.pending_user_questions().unwrap().len(), 1024);
-    storage
-        .handle()
-        .answer_user_question(
-            "question-0",
-            "A",
-            &AnswerOrigin::Host {
-                channel: Default::default(),
-            },
-        )
-        .unwrap();
-    storage
-        .handle()
-        .create_user_question(&question(1024))
-        .unwrap();
-    assert_eq!(database.pending_user_questions().unwrap().len(), 1024);
+    // Far more than 32 questions are created over the run's lifetime as long as
+    // no more than 32 are unanswered at once.
+    for id in 0..100 {
+        storage
+            .handle()
+            .answer_user_question(&format!("question-{id}"), "A", &host)
+            .unwrap();
+        ask(32 + id).unwrap();
+        assert_eq!(database.pending_user_questions().unwrap().len(), 32);
+    }
+    assert!(matches!(
+        ask(1000),
+        Err(StorageError::QuestionCapacity(
+            storage::lane_delivery::QuestionCapacity::Requester
+        ))
+    ));
 }
 
 #[test]

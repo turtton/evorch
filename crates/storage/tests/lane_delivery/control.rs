@@ -1602,7 +1602,8 @@ fn inherited_question_quota_attention_uses_the_same_recipient_set_as_creation() 
             })
     };
     assert!(blocked());
-    // Answering does not free historical per-recipient capacity (unlike the global pending cap).
+    // Answering frees an inherited slot: only unanswered questions count, for both
+    // creation and attention.
     f.h()
         .answer_user_question(
             &ids[0],
@@ -1612,21 +1613,27 @@ fn inherited_question_quota_attention_uses_the_same_recipient_set_as_creation() 
             },
         )
         .unwrap();
-    assert!(blocked());
+    assert!(!blocked());
     assert!(matches!(
         f.create(1, 100, LaneDeliveryBinding::Unbound),
+        LaneQuestionCreated::Created(_)
+    ));
+    // The quota is full again (31 inherited + 1 own), so both sides report it again.
+    assert!(blocked());
+    assert!(matches!(
+        f.create(1, 101, LaneDeliveryBinding::Unbound),
         LaneQuestionCreated::CapacityBlocked(_)
     ));
-    // Retention/unlinking a recipient entry really removes it from the creation set.
+    // Retention/unlinking an unanswered recipient entry really removes it from the creation set.
     f.sql()
         .execute(
             "DELETE FROM user_question_links WHERE run_id='run-1' AND question_id=?1",
-            [&ids[0]],
+            [&ids[1]],
         )
         .unwrap();
     assert!(!blocked());
     assert!(matches!(
-        f.create(1, 101, LaneDeliveryBinding::Unbound),
+        f.create(1, 102, LaneDeliveryBinding::Unbound),
         LaneQuestionCreated::Created(_)
     ));
 }

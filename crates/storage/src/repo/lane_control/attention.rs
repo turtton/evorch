@@ -181,9 +181,13 @@ fn items(
         }
         if let Some(d) = crate::repo::lane_delivery::capacity_diagnostic(conn, &lane_id)? {
             let limit = d.capacity.limit();
-            let count:u64=match d.capacity {
-                crate::lane_delivery::QuestionCapacity::Global=>conn.query_row("SELECT COUNT(*) FROM user_questions WHERE answered=0 AND run_id NOT IN (SELECT run_id FROM run_tombstones)",[],|r|r.get(0))?,
-                crate::lane_delivery::QuestionCapacity::Requester => crate::repo::user_questions::requester_question_count(conn, &d.requester_run_id)?,
+            let count = match d.capacity {
+                crate::lane_delivery::QuestionCapacity::Requester => {
+                    crate::repo::user_questions::requester_question_count(
+                        conn,
+                        &d.requester_run_id,
+                    )?
+                }
             };
             if count >= u64::from(limit) {
                 result.push(item(
@@ -195,9 +199,6 @@ fn items(
                         capacity: match d.capacity {
                             crate::lane_delivery::QuestionCapacity::Requester => {
                                 LaneQuestionCapacity::Requester
-                            }
-                            crate::lane_delivery::QuestionCapacity::Global => {
-                                LaneQuestionCapacity::Global
                             }
                         },
                         limit,

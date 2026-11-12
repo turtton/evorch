@@ -843,25 +843,34 @@ fn capacity_boundaries_are_typed_and_diagnostic_is_bounded() {
             .attempts,
         4
     );
-    for n in 2..=32 {
+    // There is no workbench-wide cap: other requesters are unaffected by a full one,
+    // however many unanswered questions exist overall.
+    for n in 2..=33 {
         for q in 0..32 {
             f.h().create_user_question(&question(n, q)).unwrap();
         }
     }
-    assert_eq!(f.count("user_questions"), 1024);
+    assert_eq!(f.count("user_questions"), 33 * 32);
+    f.lane(34, LanePolicy::Attached);
     assert!(matches!(
-        f.h().create_user_question(&question(33, 0)),
-        Err(StorageError::QuestionCapacity(QuestionCapacity::Global))
+        f.create(34, 0, LaneDeliveryBinding::Bound),
+        LaneQuestionCreated::Created(_)
     ));
-    f.lane(33, LanePolicy::Attached);
+    // Answering one frees exactly one slot of a full (non-lane) requester.
+    f.h()
+        .answer_user_question(
+            &question(2, 0).id,
+            "A",
+            &event_bus::AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
+        .unwrap();
+    f.h().create_user_question(&question(2, 32)).unwrap();
     assert!(matches!(
-        f.create(33, 0, LaneDeliveryBinding::Bound),
-        LaneQuestionCreated::CapacityBlocked(QuestionCapacityBlocked {
-            capacity: QuestionCapacity::Global,
-            ..
-        })
+        f.h().create_user_question(&question(2, 33)),
+        Err(StorageError::QuestionCapacity(QuestionCapacity::Requester))
     ));
-    assert_eq!(f.count("user_questions"), 1024);
 }
 #[test]
 fn lease_expiry_nack_and_owner_epochs_fence_old_claimants() {
