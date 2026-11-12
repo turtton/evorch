@@ -831,15 +831,15 @@ pub struct DeleteSecret {
 )]
 pub enum McpCommand {
     Refresh(Refresh),
-    SaveOverride(SaveOverride),
+    SaveOverride(Box<SaveOverride>),
     SetEnabled(SetEnabled),
     PreviewApproval(PreviewApproval),
     ConfirmApproval(ConfirmApproval),
     RevokeApproval(RevokeApproval),
     TestConnection(TestConnection),
     CancelOperation(CancelOperation),
-    SaveSecret(SaveSecret),
-    DeleteSecret(DeleteSecret),
+    SaveSecret(Box<SaveSecret>),
+    DeleteSecret(Box<DeleteSecret>),
 }
 
 impl McpCommand {
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn a_secret_has_no_readable_debug_output_anywhere_it_is_embedded() {
-        let command = McpCommand::SaveSecret(SaveSecret {
+        let command = McpCommand::SaveSecret(Box::new(SaveSecret {
             operation_id: McpOperationId::new("op").unwrap(),
             scope: McpScope {
                 project: ProjectId::new("p").unwrap(),
@@ -1008,7 +1008,7 @@ mod tests {
             mutation: McpMutation::Disable {
                 server_id: "s".into(),
             },
-        });
+        }));
         assert!(!format!("{command:?}").contains("sentinel-secret-value"));
         assert!(
             !format!("{:?}", McpSecretValue::new("sentinel-secret-value")).contains("sentinel")

@@ -344,7 +344,7 @@ impl Area {
         server: &str,
         definition: McpServerDefinition,
     ) -> McpCommand {
-        McpCommand::SaveOverride(SaveOverride {
+        McpCommand::SaveOverride(Box::new(SaveOverride {
             operation_id: self.id("save"),
             project: project(),
             expected_revision: revision.clone(),
@@ -352,7 +352,7 @@ impl Area {
                 server_id: server.into(),
                 definition,
             },
-        })
+        }))
     }
 
     /// Preview and confirm an approval for `server` at `revision`.
@@ -562,14 +562,14 @@ async fn add_approve_test_revoke_delete_goes_through_the_same_approval_path() {
     // Delete the override again.
     let id = area.id("remove");
     let done = area
-        .run(McpCommand::SaveOverride(SaveOverride {
+        .run(McpCommand::SaveOverride(Box::new(SaveOverride {
             operation_id: id,
             project: project(),
             expected_revision: revision,
             mutation: McpMutation::RemoveOverride {
                 server_id: "copy".into(),
             },
-        }))
+        })))
         .await;
     assert!(
         matches!(done.state, McpOperationState::Succeeded { .. }),
@@ -677,14 +677,14 @@ async fn a_client_that_disconnected_reads_the_outcome_and_a_resend_runs_nothing_
     assert_eq!(disposition, CommandDisposition::AlreadyApplied);
     assert_eq!(again, finished);
     // The same id with a different request is a conflict.
-    let other = McpCommand::SaveOverride(SaveOverride {
+    let other = McpCommand::SaveOverride(Box::new(SaveOverride {
         operation_id: id,
         project: project(),
         expected_revision: settings.revision,
         mutation: McpMutation::Disable {
             server_id: "fixture".into(),
         },
-    });
+    }));
     assert_eq!(area.submit(other).unwrap_err().code, ErrorCode::Conflict);
 }
 
@@ -718,7 +718,7 @@ async fn a_failed_keychain_write_changes_nothing_and_a_failed_delete_is_partial(
         }
     };
     let save_secret = |area: &mut Area, revision: &McpRevision, value: &str| {
-        McpCommand::SaveSecret(SaveSecret {
+        McpCommand::SaveSecret(Box::new(SaveSecret {
             operation_id: area.id("secret"),
             scope: scope("fixture"),
             logical_name: "api".into(),
@@ -728,7 +728,7 @@ async fn a_failed_keychain_write_changes_nothing_and_a_failed_delete_is_partial(
                 server_id: "fixture".into(),
                 definition: with_key.clone(),
             },
-        })
+        }))
     };
     // The keychain refuses: the save fails and the configuration is untouched.
     area.keychain.fail_set.store(true, Ordering::SeqCst);
@@ -758,7 +758,7 @@ async fn a_failed_keychain_write_changes_nothing_and_a_failed_delete_is_partial(
     area.keychain.fail_delete.store(true, Ordering::SeqCst);
     let id = area.id("delete");
     let done = area
-        .run(McpCommand::DeleteSecret(DeleteSecret {
+        .run(McpCommand::DeleteSecret(Box::new(DeleteSecret {
             operation_id: id,
             scope: scope("fixture"),
             logical_name: "api".into(),
@@ -767,7 +767,7 @@ async fn a_failed_keychain_write_changes_nothing_and_a_failed_delete_is_partial(
                 server_id: "fixture".into(),
                 definition: definition.clone(),
             },
-        }))
+        })))
         .await;
     let McpOperationState::Partial { keychain_error, .. } = done.state else {
         panic!("a partial success was expected: {done:?}");
@@ -805,7 +805,7 @@ async fn a_secret_appears_in_no_event_reply_receipt_snapshot_or_log() {
         },
         ..definition
     };
-    let command = McpCommand::SaveSecret(SaveSecret {
+    let command = McpCommand::SaveSecret(Box::new(SaveSecret {
         operation_id: area.id("secret"),
         scope: scope("fixture"),
         logical_name: "api".into(),
@@ -815,7 +815,7 @@ async fn a_secret_appears_in_no_event_reply_receipt_snapshot_or_log() {
             server_id: "fixture".into(),
             definition: with_key,
         },
-    });
+    }));
     assert!(!format!("{command:?}").contains(SECRET));
     let id = command.operation_id().clone();
     let done = area.run(command).await;

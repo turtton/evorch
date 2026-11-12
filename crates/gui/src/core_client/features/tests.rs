@@ -144,10 +144,11 @@ fn view<'a>(
 fn the_shipped_placeholders_are_never_offered_rendered_or_replacing_the_selector() {
     let mut features = Features::default();
     let (cache, selection) = (Cache::default(), Selection::default());
-    assert!(
-        features
-            .available(true, &Capability::IMPLEMENTED)
-            .is_empty()
+    // Only implemented areas are offered; MCP is the one shipped so far, and
+    // without a selected project it asks for nothing.
+    assert_eq!(
+        features.available(true, &Capability::IMPLEMENTED),
+        [FeatureId::Mcp]
     );
     run_ui(|ui| {
         let v = view(true, &Capability::IMPLEMENTED, &cache, &selection);

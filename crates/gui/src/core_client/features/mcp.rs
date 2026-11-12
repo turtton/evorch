@@ -788,12 +788,12 @@ impl McpFeature {
     ) {
         let operation = self.fresh_operation();
         self.queue_command(
-            McpCommand::SaveOverride(SaveOverride {
+            McpCommand::SaveOverride(Box::new(SaveOverride {
                 operation_id: operation.clone(),
                 project: project.clone(),
                 expected_revision: settings.revision.clone(),
                 mutation,
-            }),
+            })),
             operation,
         );
     }
@@ -1035,14 +1035,14 @@ impl McpFeature {
                 let operation = self.fresh_operation();
                 let server = definition.0.clone();
                 self.queue_command(
-                    McpCommand::SaveSecret(SaveSecret {
+                    McpCommand::SaveSecret(Box::new(SaveSecret {
                         operation_id: operation.clone(),
                         scope: Self::scope(project, &server),
                         logical_name: name,
                         value: McpSecretValue::new(value),
                         expected_revision: settings.revision.clone(),
                         mutation,
-                    }),
+                    })),
                     operation,
                 );
                 self.working(project, &server, McpOperationKind::SaveSecret);
@@ -1099,7 +1099,7 @@ impl McpFeature {
         };
         let operation = self.fresh_operation();
         self.queue_command(
-            McpCommand::DeleteSecret(DeleteSecret {
+            McpCommand::DeleteSecret(Box::new(DeleteSecret {
                 operation_id: operation.clone(),
                 scope: Self::scope(project, &server),
                 logical_name: name,
@@ -1108,7 +1108,7 @@ impl McpFeature {
                     server_id: server.clone(),
                     definition: wire_definition(&definition),
                 },
-            }),
+            })),
             operation,
         );
         self.working(project, &server, McpOperationKind::DeleteSecret);
@@ -1150,5 +1150,214 @@ fn pairs(ui: &mut Ui, label: &str, rows: &mut Vec<crate::mcp_settings::DraftPair
     }
     if ui.small_button(format!("Add to {label}")).clicked() {
         rows.push(crate::mcp_settings::DraftPair::empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use workbench_protocol::commands::CommandReply;
+
+    fn project() -> ProjectId {
+        ProjectId::new("p").unwrap()
+    }
+
+    fn view(
+        id: &McpOperationId,
+        kind: McpOperationKind,
+        state: McpOperationState,
+    ) -> McpOperationView {
+        McpOperationView {
+            operation_id: id.clone(),
+            project: project(),
+            kind,
+            server_id: Some("fixture".into()),
+            state,
+        }
+    }
+
+    fn completed(view: McpOperationView) -> UiEvent {
+        UiEvent::Mcp(McpEvent::OperationCompleted { operation: view })
+    }
+
+    fn started(feature: &mut McpFeature, kind: McpOperationKind) -> McpOperationId {
+        let id = feature.fresh_operation();
+        feature
+            .operations
+            .insert(id.clone(), view(&id, kind, McpOperationState::Running));
+        id
+    }
+
+    fn note(feature: &McpFeature) -> Option<&RowNote> {
+        feature.notes.get(&("p".to_owned(), "fixture".to_owned()))
+    }
+
+    #[test]
+    fn a_completion_event_of_my_operation_sets_the_row_note_and_others_are_ignored() {
+        let mut feature = McpFeature::default();
+        let mine = started(&mut feature, McpOperationKind::TestConnection);
+        let foreign = McpOperationId::new("someone-else").unwrap();
+        feature.event(&completed(view(
+            &foreign,
+            McpOperationKind::TestConnection,
+            McpOperationState::Succeeded {
+                outcome: McpOutcome::Tested {
+                    status: McpServerStatus::Ready,
+                },
+            },
+        )));
+        assert_eq!(note(&feature), None);
+        feature.event(&completed(view(
+            &mine,
+            McpOperationKind::TestConnection,
+            McpOperationState::Succeeded {
+                outcome: McpOutcome::Tested {
+                    status: McpServerStatus::Ready,
+                },
+            },
+        )));
+        assert_eq!(
+            note(&feature),
+            Some(&RowNote::Tested(McpServerStatus::Ready))
+        );
+    }
+
+    #[test]
+    fn a_stale_confirmation_asks_for_a_new_review_and_a_conflict_reloads() {
+        let mut feature = McpFeature::default();
+        let confirm = started(&mut feature, McpOperationKind::ConfirmApproval);
+        feature.event(&completed(view(
+            &confirm,
+            McpOperationKind::ConfirmApproval,
+            McpOperationState::Failed {
+                error: McpErrorCode::StalePreview,
+            },
+        )));
+        assert!(matches!(feature.review, Some((_, Review::Stale))));
+        let save = started(&mut feature, McpOperationKind::SaveOverride);
+        feature.event(&completed(view(
+            &save,
+            McpOperationKind::SaveOverride,
+            McpOperationState::Failed {
+                error: McpErrorCode::ConfigConflict,
+            },
+        )));
+        assert_eq!(feature.notice, Some(Notice::Conflict));
+        assert!(
+            feature.outbox.iter().any(|out| matches!(
+                out,
+                Outgoing::Command(Command::Mcp(McpCommand::Refresh(_)), _)
+            )),
+            "the list is read again, nothing is resent"
+        );
+    }
+
+    #[test]
+    fn a_partial_secret_delete_is_reported_as_partial_and_never_as_success() {
+        let mut feature = McpFeature::default();
+        let id = started(&mut feature, McpOperationKind::DeleteSecret);
+        feature.event(&completed(view(
+            &id,
+            McpOperationKind::DeleteSecret,
+            McpOperationState::Partial {
+                outcome: McpOutcome::Settings {
+                    revision: workbench_protocol::namespaces::mcp::McpRevision::new("0".repeat(64))
+                        .unwrap(),
+                },
+                keychain_error: McpErrorCode::SecretDenied,
+            },
+        )));
+        assert_eq!(
+            feature.notice,
+            Some(Notice::SecretDeletePartial {
+                name: "fixture".into(),
+                reason: McpErrorCode::SecretDenied
+            })
+        );
+    }
+
+    #[test]
+    fn a_command_with_an_unknown_outcome_is_looked_up_after_a_reconnect_and_never_resent() {
+        let mut feature = McpFeature::default();
+        let id = started(&mut feature, McpOperationKind::SaveOverride);
+        feature.pending.insert(
+            7,
+            Pending::Command {
+                operation: id.clone(),
+            },
+        );
+        feature.reply(
+            7,
+            FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+        );
+        assert_eq!(feature.notice, Some(Notice::Unknown));
+        feature.reset();
+        assert_eq!(feature.outbox.len(), 1);
+        let Outgoing::Query(Query::Mcp(McpQuery::GetOperation { operation_id }), _) =
+            &feature.outbox[0]
+        else {
+            panic!("the operation is asked for, not the command resent");
+        };
+        assert_eq!(operation_id, &id);
+        // The core answers with the finished operation: the lookup is settled.
+        let tag = feature.tag();
+        feature.pending.insert(
+            tag,
+            Pending::Lookup {
+                operation: id.clone(),
+            },
+        );
+        feature.reply(
+            tag,
+            FeatureReply::Query(Ok(QueryReply::Mcp(McpReply::Operation(view(
+                &id,
+                McpOperationKind::SaveOverride,
+                McpOperationState::Failed {
+                    error: McpErrorCode::ConfigConflict,
+                },
+            ))))),
+        );
+        assert!(!feature.unknown.contains(&id));
+        assert_eq!(feature.notice, Some(Notice::Conflict));
+    }
+
+    #[test]
+    fn a_lookup_the_core_does_not_know_means_the_request_was_not_applied() {
+        let mut feature = McpFeature::default();
+        let id = started(&mut feature, McpOperationKind::SaveOverride);
+        feature.unknown.insert(id.clone());
+        feature.pending.insert(
+            3,
+            Pending::Lookup {
+                operation: id.clone(),
+            },
+        );
+        feature.reply(
+            3,
+            FeatureReply::Query(Err(FeatureError::new("unknown operation"))),
+        );
+        assert!(!feature.unknown.contains(&id));
+        assert!(matches!(feature.notice, Some(Notice::Failed(_))));
+    }
+
+    #[test]
+    fn an_accepted_command_reply_records_the_running_operation() {
+        let mut feature = McpFeature::default();
+        let id = feature.fresh_operation();
+        feature.pending.insert(
+            1,
+            Pending::Command {
+                operation: id.clone(),
+            },
+        );
+        let running = view(&id, McpOperationKind::Refresh, McpOperationState::Running);
+        feature.reply(
+            1,
+            FeatureReply::Command(Ok(CommandReply::with_result(CommandResult::Mcp(
+                McpResult::Operation(running.clone()),
+            )))),
+        );
+        assert_eq!(feature.operations.get(&id), Some(&running));
+        assert!(!feature.pending.contains_key(&1));
     }
 }

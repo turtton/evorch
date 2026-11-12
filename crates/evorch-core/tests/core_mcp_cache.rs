@@ -263,7 +263,7 @@ async fn core_mcp_cache_e2e_area_commands_change_new_runs_and_never_the_old_pref
     let id = operation("save");
     send(
         &core,
-        McpCommand::SaveOverride(SaveOverride {
+        McpCommand::SaveOverride(Box::new(SaveOverride {
             operation_id: id.clone(),
             project: scope.project.clone(),
             expected_revision: settings.revision.clone(),
@@ -271,7 +271,7 @@ async fn core_mcp_cache_e2e_area_commands_change_new_runs_and_never_the_old_pref
                 server_id: "fixture".into(),
                 definition,
             },
-        }),
+        })),
     );
     let McpOperationState::Succeeded {
         outcome: McpOutcome::Settings { revision },

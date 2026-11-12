@@ -169,12 +169,12 @@ pub fn samples() -> AreaSamples {
                 operation_id: op("op-1"),
                 project: project(),
             })),
-            Command::Mcp(McpCommand::SaveOverride(SaveOverride {
+            Command::Mcp(McpCommand::SaveOverride(Box::new(SaveOverride {
                 operation_id: op("op-2"),
                 project: project(),
                 expected_revision: revision(),
                 mutation: upsert(),
-            })),
+            }))),
             Command::Mcp(McpCommand::SetEnabled(SetEnabled {
                 operation_id: op("op-3"),
                 scope: scope(),
@@ -205,15 +205,15 @@ pub fn samples() -> AreaSamples {
             Command::Mcp(McpCommand::CancelOperation(CancelOperation {
                 operation_id: op("op-7"),
             })),
-            Command::Mcp(McpCommand::SaveSecret(SaveSecret {
+            Command::Mcp(McpCommand::SaveSecret(Box::new(SaveSecret {
                 operation_id: op("op-8"),
                 scope: scope(),
                 logical_name: "docs-token".into(),
                 value: McpSecretValue::new("placeholder-not-a-real-secret"),
                 expected_revision: revision(),
                 mutation: upsert(),
-            })),
-            Command::Mcp(McpCommand::DeleteSecret(DeleteSecret {
+            }))),
+            Command::Mcp(McpCommand::DeleteSecret(Box::new(DeleteSecret {
                 operation_id: op("op-9"),
                 scope: scope(),
                 logical_name: "docs-token".into(),
@@ -222,7 +222,7 @@ pub fn samples() -> AreaSamples {
                     server_id: "docs".into(),
                     definition: stdio_definition(),
                 },
-            })),
+            }))),
         ],
         queries: vec![
             Query::Mcp(McpQuery::GetSettings { project: project() }),
