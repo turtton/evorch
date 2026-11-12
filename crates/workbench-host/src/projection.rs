@@ -51,6 +51,8 @@ struct State {
     scanner: queries::CommitScanner,
     initialized: bool,
     projects: Vec<(ProjectId, PathBuf)>,
+    /// The names saved with the projects; an id stands in for a missing one.
+    project_names: std::collections::BTreeMap<String, String>,
     models: Models,
     replay: VecDeque<Replay>,
     replay_bytes: usize,
@@ -174,6 +176,7 @@ impl Projection {
                 scanner: queries::CommitScanner::default(),
                 initialized: false,
                 projects: vec![],
+                project_names: Default::default(),
                 models: Models::default(),
                 replay: VecDeque::new(),
                 replay_bytes: 0,
@@ -211,6 +214,18 @@ impl Projection {
     }
     pub(crate) fn configure(&self, projects: Vec<(ProjectId, PathBuf)>) {
         self.state.lock().unwrap().projects = projects;
+    }
+    /// Sets the project directory and the names shown for it, and reads the
+    /// models again so that a listing reflects them at once.
+    pub(crate) fn configure_projects(
+        &self,
+        projects: Vec<(ProjectId, PathBuf)>,
+        names: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), WorkbenchError> {
+        let mut state = self.state.lock().unwrap();
+        state.projects = projects;
+        state.project_names = names;
+        self.refresh_locked(&mut state)
     }
     /// Epoch used by the handshake and subscription cursors.
     pub fn instance_epoch(&self) -> InstanceEpoch {
@@ -263,8 +278,8 @@ impl Projection {
         state: &mut State,
         observed: Option<&sandbox::approval::ApprovalId>,
     ) -> Result<(), WorkbenchError> {
-        let mut next =
-            queries::collect(&self.runtime, &state.projects).map_err(queries::storage_error)?;
+        let mut next = queries::collect(&self.runtime, &state.projects, &state.project_names)
+            .map_err(queries::storage_error)?;
         for (id, provenance) in &state.answer_provenance {
             if let Some(answer) = next.questions.get_mut(id).and_then(|q| q.answer.as_mut()) {
                 answer.answered_by = Some(provenance.clone());

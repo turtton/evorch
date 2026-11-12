@@ -121,6 +121,15 @@ pub struct RenameThread {
     pub expected_revision: Revision,
 }
 
+/// Which family a pin or archive was decided for: its key and the membership
+/// period (epoch) the key was valid in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FamilyIdentity {
+    pub key: ThreadId,
+    pub membership_epoch: u64,
+}
+
 /// Archive or restore a whole conversation family. The family is the unit:
 /// `thread` may be any member and the state is kept once, for the family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +137,9 @@ pub struct RenameThread {
 pub struct SetFamilyArchived {
     pub thread: ThreadId,
     pub archived: bool,
+    /// The family and membership period the caller saw. A lane detached or
+    /// attached since then changes the family, and the command is refused.
+    pub expected_family: FamilyIdentity,
     /// The family's `archive_revision` as listed by `list_families`.
     pub expected_revision: Revision,
 }
@@ -137,6 +149,8 @@ pub struct SetFamilyArchived {
 pub struct SetFamilyPinned {
     pub thread: ThreadId,
     pub pinned: bool,
+    /// As for [`SetFamilyArchived::expected_family`].
+    pub expected_family: FamilyIdentity,
     /// The family's `pin_revision` as listed by `list_families`.
     pub expected_revision: Revision,
 }
@@ -229,6 +243,10 @@ pub enum WorkspaceRejection {
     Tombstoned,
     /// The entity does not exist.
     NotFound,
+    /// The family of the thread is not the one the caller saw (a lane was
+    /// detached or attached), or the ledger repair of the family is not
+    /// complete. Read the families again.
+    FamilyChanged { reason: String },
     /// A path was refused: not absolute, not a directory, too broad, nested,
     /// protected (the core's own configuration or database) or a symlink loop.
     InvalidPath { reason: String },
@@ -401,6 +419,9 @@ pub struct RetentionEntry {
 pub struct FamilyView {
     /// The family's top ancestor.
     pub key: ThreadId,
+    /// The membership period of `key` (changes when a lane is detached or
+    /// attached).
+    pub membership_epoch: u64,
     pub members: u32,
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

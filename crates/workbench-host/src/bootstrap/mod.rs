@@ -438,6 +438,12 @@ impl BootstrappedHost {
             tasks: area_tasks.clone(),
             projection: command_host.projection().clone(),
         })?;
+        // What the saved sidebar grants (trust, allowed directories, the
+        // read-only directories of threads) is declared before any run starts
+        // or recovers, so a restart does not lose a permission the user gave.
+        areas.workspace.declare_saved().map_err(|error| {
+            format!("the saved workspace access could not be declared: {error:?}")
+        })?;
         let host = Arc::new(Mutex::new(command_host.with_areas(areas)));
         #[cfg(any(test, feature = "test-support"))]
         let composition = CompositionInventory {

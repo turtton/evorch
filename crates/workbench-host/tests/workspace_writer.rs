@@ -86,6 +86,20 @@ fn fixture(threads: Vec<ThreadRecord>) -> Fixture {
     }
 }
 
+fn identity(key: &str, epoch: u64) -> FamilyIdentity {
+    FamilyIdentity {
+        key: wire_thread(key),
+        membership_epoch: epoch,
+    }
+}
+
+fn identity_of(family: &FamilyView) -> FamilyIdentity {
+    FamilyIdentity {
+        key: family.key.clone(),
+        membership_epoch: family.membership_epoch,
+    }
+}
+
 fn wire_thread(id: &str) -> WireThread {
     WireThread::new(id).unwrap()
 }
@@ -302,6 +316,7 @@ fn a_deleted_thread_is_tombstoned_and_never_comes_back() {
         f.send(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
             thread: wire_thread("t1"),
             archived: true,
+            expected_family: identity("t1", 0),
             expected_revision: Revision(0),
         })),
         WorkspaceResult::Rejected(WorkspaceRejection::Tombstoned)
@@ -556,6 +571,7 @@ fn archive_and_pin_apply_to_the_whole_family_and_are_conflict_checked() {
         f.send(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
             thread: wire_thread("fork"),
             archived: true,
+            expected_family: identity_of(family),
             expected_revision: family.archive_revision,
         })),
     );
@@ -568,6 +584,7 @@ fn archive_and_pin_apply_to_the_whole_family_and_are_conflict_checked() {
             f.send(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
                 thread: wire_thread("root"),
                 archived: false,
+                expected_family: identity_of(family),
                 expected_revision: family.archive_revision,
             }))
         ),
@@ -576,6 +593,7 @@ fn archive_and_pin_apply_to_the_whole_family_and_are_conflict_checked() {
     let pinned = applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
         thread: wire_thread("root"),
         pinned: true,
+        expected_family: identity_of(family),
         expected_revision: family.pin_revision,
     })));
     assert!(pinned.changed);
@@ -652,12 +670,14 @@ fn archive_and_pin_of_a_family_are_projected_into_the_threads_table() {
         f.send(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
             thread: wire_thread("fork"),
             archived: true,
+            expected_family: identity_of(&family),
             expected_revision: family.archive_revision,
         })),
     );
     applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
         thread: wire_thread("root"),
         pinned: true,
+        expected_family: identity_of(&family),
         expected_revision: family.pin_revision,
     })));
     storage.close();
@@ -677,4 +697,149 @@ fn archive_and_pin_of_a_family_are_projected_into_the_threads_table() {
         None,
         "a thread outside the family is untouched"
     );
+}
+
+/// The ledger says a lane is detached while the saved sidebar still holds it
+/// under its lead: a pin must be applied to the repaired family, and a pin
+/// decided for the old family must be refused.
+#[test]
+fn a_pin_after_a_detach_is_applied_to_the_repaired_family_only() {
+    use storage::lane_management::{
+        LaneManagementAction, LaneManagementActor, LaneManagementRequest,
+    };
+    use storage::lanes::{LaneBrief, LanePolicy, NewLane};
+    let mut f = fixture(vec![thread("lead"), thread("lane-thread")]);
+    let storage = storage::Storage::open(storage::StorageConfig {
+        db_path: f.config.join("host.db"),
+        ..storage::StorageConfig::default()
+    })
+    .unwrap();
+    let handle = storage.handle();
+    handle
+        .upsert_run_context(&storage::RunContextRecord {
+            run_id: "run-1".into(),
+            role: "Orchestrator".into(),
+            name: "chat:Orchestrator:lead".into(),
+            parent_run_id: None,
+            config_json: "{}".into(),
+            messages_json: "[]".into(),
+            checkpoints_json: "[]".into(),
+            terminal_phase: "Done".into(),
+            restorable: true,
+            updated_at_ns: 1,
+            host_inputs_json: "[]".into(),
+        })
+        .unwrap();
+    handle
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "lead".into(),
+            project_id: Some("p1".into()),
+            project_root: Some(f.root.to_string_lossy().into_owned()),
+            root_run_id: Some("run-1".into()),
+            chat_role: Some("Orchestrator".into()),
+            ..Default::default()
+        }])
+        .unwrap();
+    let lane = handle
+        .create_lane(NewLane {
+            lane_id: "lane".into(),
+            thread_id: "lane-thread".into(),
+            origin_thread_id: "lead".into(),
+            origin_run_id: "run-1".into(),
+            creation_key: "open".into(),
+            brief: LaneBrief {
+                verification_requirements: Default::default(),
+                objective: "implement".into(),
+                inputs: vec![],
+                deliverables: vec!["patch".into()],
+                acceptance_criteria: vec!["tests".into()],
+                constraints: vec![],
+                workspace: Default::default(),
+                report_policy: LanePolicy::Attached,
+            },
+            start_seed: "seed".into(),
+            project_id: Some("p1".into()),
+            project_root: Some(f.root.to_string_lossy().into_owned()),
+            title: Some("lane".into()),
+            at_ns: 1,
+        })
+        .unwrap()
+        .lane;
+    f.area = WorkspaceArea::with_store(
+        SidebarStore::new(f.config.join("sidebar.json")),
+        None,
+        vec![f.config.clone()],
+        None,
+        |_| false,
+    )
+    .with_mirror(handle.clone());
+    // The lane is attached under its lead in the saved file.
+    {
+        let mut document = f.on_disk();
+        document
+            .sidebar
+            .set_lane_link(
+                &ThreadId::new("lane-thread"),
+                workspace_state::LaneLink {
+                    lane_id: lane.lane_id.clone(),
+                    origin_thread_id: ThreadId::new("lead"),
+                    lead_thread_id: Some(ThreadId::new("lead")),
+                    policy: workspace_state::LanePolicy::Attached,
+                    management_revision: lane.management_revision,
+                    detached_since_management_revision: None,
+                },
+            )
+            .unwrap();
+        document.sidebar.refresh_derived();
+        let lock = f.store.lock().unwrap();
+        f.store.write(&lock, &document).unwrap();
+    }
+    let before = f
+        .families()
+        .into_iter()
+        .find(|family| family.members == 2)
+        .expect("the lane is one family with its lead");
+    // The ledger detaches the lane; the file is not told.
+    handle
+        .apply_lane_management_transition(
+            LaneManagementRequest {
+                operation_id: "detach-1".into(),
+                lane_id: "lane".into(),
+                expected_management_revision: lane.management_revision,
+                action: LaneManagementAction::Detach,
+            },
+            LaneManagementActor::User,
+            None,
+            20,
+        )
+        .unwrap();
+    // A pin decided for the old family is refused, nothing is written.
+    let saved = std::fs::read(f.store.path()).unwrap();
+    assert!(matches!(
+        rejected(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
+            thread: wire_thread("lane-thread"),
+            pinned: true,
+            expected_family: identity_of(&before),
+            expected_revision: before.pin_revision,
+        }))),
+        WorkspaceRejection::FamilyChanged { .. }
+    ));
+    assert_eq!(std::fs::read(f.store.path()).unwrap(), saved);
+    // The families as read now are the repaired ones.
+    let families = f.families();
+    assert!(families.iter().all(|family| family.members == 1));
+    let lane_family = families
+        .iter()
+        .find(|family| family.key.as_str() == "lane-thread")
+        .expect("the detached lane is its own family");
+    let pinned = applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
+        thread: wire_thread("lane-thread"),
+        pinned: true,
+        expected_family: identity_of(lane_family),
+        expected_revision: lane_family.pin_revision,
+    })));
+    assert!(pinned.changed);
+    assert!(f.detail("lane-thread").pinned);
+    assert!(!f.detail("lead").pinned);
+    storage.close();
 }

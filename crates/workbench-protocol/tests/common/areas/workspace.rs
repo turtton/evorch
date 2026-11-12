@@ -61,11 +61,19 @@ pub fn samples() -> AreaSamples {
             ws(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
                 thread: thread(),
                 archived: true,
+                expected_family: FamilyIdentity {
+                    key: thread(),
+                    membership_epoch: 1,
+                },
                 expected_revision: Revision(2),
             })),
             ws(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
                 thread: thread(),
                 pinned: true,
+                expected_family: FamilyIdentity {
+                    key: thread(),
+                    membership_epoch: 1,
+                },
                 expected_revision: Revision(0),
             })),
             ws(WorkspaceCommand::SetThreadExtraReadDirs(
@@ -105,6 +113,7 @@ pub fn samples() -> AreaSamples {
             QueryReply::Workspace(WorkspaceReply::Families(Page {
                 items: vec![FamilyView {
                     key: thread(),
+                    membership_epoch: 1,
                     members: 2,
                     archived: true,
                     archived_at: Some(1_700_000_000),

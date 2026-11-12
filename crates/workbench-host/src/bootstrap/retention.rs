@@ -10,10 +10,12 @@
 //! and deletes nothing, as before.
 //!
 //! What a family may lose is decided in `storage`, not here: pinned, evaluation
-//! sample and running families, a family with a member of a committed and not
-//! superseded recovery manifest and one with a prepared recovery claim are never
-//! confirmed (the closure of 06b). A sidebar the core cannot read, or one whose
-//! families are not resolved, confirms nothing.
+//! sample and running families and a family with a prepared recovery claim are
+//! never confirmed. A component that a committed, not superseded recovery
+//! manifest depends on is never split: when the whole component can be deleted
+//! it is deleted whole, otherwise none of it is (the closure of 06b). A sidebar
+//! the core cannot read, or one whose families are not resolved, confirms
+//! nothing.
 
 use std::path::PathBuf;
 use std::time::Duration;

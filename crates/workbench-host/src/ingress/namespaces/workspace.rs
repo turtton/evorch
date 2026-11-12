@@ -15,7 +15,17 @@ impl CommandHost {
         command: WorkspaceCommand,
         provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
-        self.areas.workspace.command(command, provenance)
+        let changes_projects = matches!(
+            command,
+            WorkspaceCommand::RegisterProject(_) | WorkspaceCommand::RenameProject(_)
+        );
+        let reply = self.areas.workspace.command(command, provenance)?;
+        if changes_projects {
+            // The sidebar is saved. The directory the commands resolve project
+            // ids with, and the projection that lists them, follow it.
+            self.sync_projects()?;
+        }
+        Ok(reply)
     }
 
     pub(in crate::ingress) fn workspace_query(

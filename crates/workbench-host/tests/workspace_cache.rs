@@ -196,11 +196,19 @@ fn trust_and_sidebar_changes_do_not_rewrite_what_was_already_sent_to_the_provide
     command(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
         thread: thread.clone(),
         pinned: true,
+        expected_family: FamilyIdentity {
+            key: family.key.clone(),
+            membership_epoch: family.membership_epoch,
+        },
         expected_revision: family.pin_revision,
     }));
     command(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
         thread: thread.clone(),
         archived: true,
+        expected_family: FamilyIdentity {
+            key: family.key.clone(),
+            membership_epoch: family.membership_epoch,
+        },
         expected_revision: family.archive_revision,
     }));
 

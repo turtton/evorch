@@ -20,13 +20,20 @@ use workbench_protocol::{
     namespaces::{
         WorkspaceEvent, WorkspaceQuery, WorkspaceReply,
         workspace::{
-            FamilyView, ProjectAccessView, RenameThread, SetFamilyArchived, SetFamilyPinned,
-            SetProjectTrust, ThreadDetail, TrustLevel, WorkspaceCommand, WorkspaceRejection,
-            WorkspaceResult,
+            FamilyIdentity, FamilyView, ProjectAccessView, RenameThread, SetFamilyArchived,
+            SetFamilyPinned, SetProjectTrust, ThreadDetail, TrustLevel, WorkspaceCommand,
+            WorkspaceRejection, WorkspaceResult,
         },
     },
     queries::{PageRequest, Query, QueryReply},
 };
+
+fn family_identity(family: &FamilyView) -> FamilyIdentity {
+    FamilyIdentity {
+        key: family.key.clone(),
+        membership_epoch: family.membership_epoch,
+    }
+}
 
 /// How many detail queries may wait for an answer at once.
 const DETAILS_IN_FLIGHT: usize = 16;
@@ -95,6 +102,10 @@ pub struct WorkspaceFeature {
     refreshing: bool,
     notice: Option<String>,
     renaming: Option<(String, String)>,
+    /// The pages of the family list read so far, until the last one arrives.
+    family_pages: Vec<FamilyView>,
+    /// Archived conversations are listed (with a way to restore them).
+    show_archived: bool,
 }
 
 impl WorkspaceFeature {
@@ -208,10 +219,11 @@ impl WorkspaceFeature {
     }
 
     fn send_intent(&mut self, thread: &str) {
-        let (Some(intent), Some(detail)) = (
-            self.intents.remove(thread),
-            self.model.details.get(thread).cloned(),
-        ) else {
+        // The intent stays until the detail it is decided on is known.
+        let Some(detail) = self.model.details.get(thread).cloned() else {
+            return;
+        };
+        let Some(intent) = self.intents.remove(thread) else {
             return;
         };
         let command = match intent {
@@ -230,6 +242,7 @@ impl WorkspaceFeature {
                 WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
                     thread: detail.thread.clone(),
                     archived,
+                    expected_family: family_identity(family),
                     expected_revision: family.archive_revision,
                 })
             }
@@ -242,6 +255,7 @@ impl WorkspaceFeature {
                 WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
                     thread: detail.thread.clone(),
                     pinned,
+                    expected_family: family_identity(family),
                     expected_revision: family.pin_revision,
                 })
             }
@@ -258,10 +272,15 @@ impl WorkspaceFeature {
         }
         self.stale = false;
         self.refreshing = true;
+        self.family_pages.clear();
+        self.request_families(PageRequest::default());
+    }
+
+    fn request_families(&mut self, page: PageRequest) {
         let tag = self.tag(Inflight::Families);
         self.outbox.push(Outgoing::Query(
             tag,
-            Query::Workspace(WorkspaceQuery::ListFamilies(PageRequest::default())),
+            Query::Workspace(WorkspaceQuery::ListFamilies(page)),
         ));
     }
 
@@ -279,9 +298,17 @@ impl WorkspaceFeature {
                 Inflight::Families,
                 FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::Families(page)))),
             ) => {
+                self.family_pages.extend(page.items);
+                if let Some(cursor) = page.next_cursor {
+                    // The list goes on: follow the cursor to the last page.
+                    self.request_families(PageRequest {
+                        cursor: Some(cursor),
+                        ..PageRequest::default()
+                    });
+                    return;
+                }
                 self.refreshing = false;
-                self.model.families = page
-                    .items
+                self.model.families = std::mem::take(&mut self.family_pages)
                     .into_iter()
                     .map(|f| (f.key.to_string(), f))
                     .collect();
@@ -358,6 +385,7 @@ impl WorkspaceFeature {
 
     fn failed(&mut self, what: &Inflight, error: &FeatureError) {
         if matches!(what, Inflight::Families) {
+            self.family_pages.clear();
             self.refreshing = false;
             self.stale = true;
         }
@@ -376,6 +404,7 @@ fn rejection_text(rejection: &WorkspaceRejection) -> String {
         }
         WorkspaceRejection::Tombstoned => "the conversation was deleted".into(),
         WorkspaceRejection::NotFound => "no longer exists".into(),
+        WorkspaceRejection::FamilyChanged { reason } => reason.clone(),
         WorkspaceRejection::InvalidPath { reason }
         | WorkspaceRejection::Invalid { reason }
         | WorkspaceRejection::PermissionDenied { reason }
@@ -476,12 +505,18 @@ impl Feature for WorkspaceFeature {
                     }
                 });
             }
-            if ui.small_button("New conversation").clicked() {
-                navigations.push(Navigation::NewConversation(project.clone()));
-            }
+            ui.horizontal(|ui| {
+                if ui.small_button("New conversation").clicked() {
+                    navigations.push(Navigation::NewConversation(project.clone()));
+                }
+                ui.checkbox(&mut self.show_archived, "Show archived");
+            });
             let mut visible: Vec<_> = threads
                 .iter()
-                .filter(|t| &t.project == project && !self.model.archived(t.id.as_str()))
+                .filter(|t| {
+                    &t.project == project
+                        && (self.show_archived || !self.model.archived(t.id.as_str()))
+                })
                 .collect();
             visible.sort_by_key(|t| {
                 (
@@ -509,9 +544,14 @@ impl Feature for WorkspaceFeature {
                         return;
                     }
                     let pinned = if self.model.pinned(id) { "📌 " } else { "" };
+                    let archived = if self.model.archived(id) {
+                        "(archived) "
+                    } else {
+                        ""
+                    };
                     let selected = selection.thread.as_ref() == Some(&thread.id);
                     if ui
-                        .selectable_label(selected, format!("{pinned}{title}"))
+                        .selectable_label(selected, format!("{pinned}{archived}{title}"))
                         .clicked()
                     {
                         navigations.push(Navigation::SelectThread {
@@ -526,7 +566,11 @@ impl Feature for WorkspaceFeature {
                     if ui.small_button(if pin { "Pin" } else { "Unpin" }).clicked() {
                         asks.push((id.to_owned(), Intent::Pin(pin)));
                     }
-                    if ui.small_button("Archive").clicked() {
+                    if self.model.archived(id) {
+                        if ui.small_button("Restore").clicked() {
+                            asks.push((id.to_owned(), Intent::Archive(false)));
+                        }
+                    } else if ui.small_button("Archive").clicked() {
                         asks.push((id.to_owned(), Intent::Archive(true)));
                     }
                 });
@@ -593,6 +637,7 @@ mod tests {
     fn family(key: &str, archive: u64, pin: u64) -> FamilyView {
         FamilyView {
             key: thread(key),
+            membership_epoch: 0,
             members: 1,
             archived: false,
             archived_at: None,
@@ -727,6 +772,74 @@ mod tests {
             panic!("{command:?}")
         };
         assert_eq!(pin.expected_revision, Revision(7));
+    }
+
+    #[test]
+    fn every_page_of_the_family_list_is_read() {
+        let mut feature = WorkspaceFeature {
+            stale: true,
+            ..WorkspaceFeature::default()
+        };
+        feature.refresh_if_stale();
+        let Outgoing::Query(first, Query::Workspace(WorkspaceQuery::ListFamilies(page))) =
+            feature.take_outbox().remove(0)
+        else {
+            panic!()
+        };
+        assert!(page.cursor.is_none());
+        let cursor = workbench_protocol::ids::PageCursor::new("next").unwrap();
+        feature.reply(
+            first,
+            FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::Families(Page {
+                items: (0..50).map(|n| family(&format!("a{n}"), 0, 0)).collect(),
+                next_cursor: Some(cursor.clone()),
+                snapshot_revision: Revision(1),
+            })))),
+        );
+        // The first page does not settle the model: the next one is asked for.
+        assert!(feature.model.families.is_empty());
+        let Outgoing::Query(second, Query::Workspace(WorkspaceQuery::ListFamilies(page))) =
+            feature.take_outbox().remove(0)
+        else {
+            panic!()
+        };
+        assert_eq!(page.cursor, Some(cursor));
+        feature.reply(
+            second,
+            families((0..3).map(|n| family(&format!("b{n}"), 0, 0)).collect()),
+        );
+        assert_eq!(feature.model.families.len(), 53);
+        assert!(feature.take_outbox().is_empty());
+    }
+
+    #[test]
+    fn an_archived_family_is_restored_with_the_archive_counter_and_identity() {
+        let mut feature = WorkspaceFeature::default();
+        let mut view = family("root", 5, 7);
+        view.membership_epoch = 3;
+        view.archived = true;
+        feature.model.families.insert("root".into(), view);
+        let mut archived = detail("t1", 1, "root");
+        archived.archived = true;
+        feature.model.details.insert("t1".into(), archived);
+        feature.ask("t1", Intent::Archive(false));
+        let (_, command) = only_command(feature.take_outbox());
+        let WorkspaceCommand::SetFamilyArchived(restore) = command else {
+            panic!("{command:?}")
+        };
+        assert!(!restore.archived);
+        assert_eq!(restore.expected_revision, Revision(5));
+        assert_eq!(restore.expected_family.membership_epoch, 3);
+        assert_eq!(restore.expected_family.key, thread("root"));
+    }
+
+    #[test]
+    fn an_intent_survives_until_its_detail_is_known() {
+        let mut feature = WorkspaceFeature::default();
+        feature.intents.insert("t1".into(), Intent::Pin(true));
+        feature.send_intent("t1");
+        assert!(feature.take_outbox().is_empty());
+        assert!(feature.intents.contains_key("t1"));
     }
 
     #[test]

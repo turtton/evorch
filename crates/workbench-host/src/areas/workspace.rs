@@ -62,6 +62,23 @@ struct Service {
     tombstones: Box<Tombstones>,
     pager: Pager,
     changes: AtomicU64,
+    /// Threads the core already registered (or found) in the sidebar, so that
+    /// a follow-up message does not take the file lock again.
+    registered: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+/// A conversation the core created, to be listed in the sidebar.
+pub struct NewThread<'a> {
+    pub project: &'a WireProject,
+    pub thread: &'a WireThread,
+    /// The first line of what the user said; empty keeps a placeholder title.
+    pub title_hint: &'a str,
+    /// The root directory the project directory knows, for a project that the
+    /// sidebar does not list yet.
+    pub project_root: Option<PathBuf>,
+    pub orchestrator: bool,
+    /// The run and message count a fork starts after.
+    pub fork: Option<(String, u64)>,
 }
 
 /// The `workspace` service, reached from `ingress/namespaces/workspace.rs` as
@@ -189,6 +206,7 @@ impl WorkspaceArea {
                 }),
                 pager: Pager::default(),
                 changes: AtomicU64::new(0),
+                registered: Default::default(),
             }),
         })
     }
@@ -213,8 +231,46 @@ impl WorkspaceArea {
                 tombstones: Box::new(move || Ok(Arc::new(deleted.clone()))),
                 pager: Pager::default(),
                 changes: AtomicU64::new(0),
+                registered: Default::default(),
             }),
         }
+    }
+
+    /// Lists a conversation the core just created in the sidebar and the
+    /// `threads` table, under the same lock and file as every other sidebar
+    /// write. A thread that is listed already is left alone, so a follow-up
+    /// message, or a desktop that listed it itself, changes nothing.
+    ///
+    /// # Errors
+    /// The sidebar could not be locked, read or written.
+    pub fn register_thread(&self, new: &NewThread<'_>) -> Result<(), WorkbenchError> {
+        let Some(service) = self.inner.as_ref() else {
+            return Ok(());
+        };
+        service
+            .register_thread(new)
+            .map_err(|reason| internal(&reason))
+    }
+
+    /// The projects of the sidebar: id, root directory and the name saved.
+    ///
+    /// # Errors
+    /// The sidebar could not be read.
+    pub fn project_entries(&self) -> Result<Vec<(WireProject, PathBuf, String)>, WorkbenchError> {
+        let service = self.inner.as_ref().ok_or_else(unwired)?;
+        let document = service.read().map_err(|e| internal(&e))?;
+        Ok(document
+            .sidebar
+            .projects
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    WireProject::new(p.id.to_string()).ok()?,
+                    p.repo_root.clone(),
+                    p.name.clone(),
+                ))
+            })
+            .collect())
     }
 
     /// Projects the archive and pin state of the family of every thread into
@@ -299,6 +355,108 @@ fn not_found(text: &str) -> WorkbenchError {
 }
 
 impl Service {
+    fn register_thread(&self, new: &NewThread<'_>) -> Result<(), String> {
+        let id = ThreadId::new(new.thread.as_str());
+        if self
+            .registered
+            .lock()
+            .unwrap()
+            .contains(new.thread.as_str())
+        {
+            return Ok(());
+        }
+        let deleted = (self.tombstones)()?;
+        if deleted(new.thread.as_str()) {
+            return Ok(());
+        }
+        let lock = self.store.lock().map_err(|e| e.to_string())?;
+        let mut document = self.store.read(&lock).map_err(|e| e.to_string())?;
+        document.prune_threads(&*deleted);
+        if document.sidebar.threads.iter().any(|t| t.id == id) {
+            self.registered
+                .lock()
+                .unwrap()
+                .insert(new.thread.as_str().to_owned());
+            return Ok(());
+        }
+        let project = workspace_state::ProjectId::new(new.project.as_str());
+        if !document.sidebar.projects.iter().any(|p| p.id == project) {
+            let root = new
+                .project_root
+                .as_ref()
+                .ok_or_else(|| "the project is not in the sidebar".to_owned())?;
+            let name = root.file_name().map_or_else(
+                || "project".to_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            document
+                .sidebar
+                .add_project(project.clone(), &name, root)
+                .map_err(|e| e.to_string())?;
+        }
+        let title = new.title_hint.lines().next().unwrap_or("").trim();
+        let title: String = title.chars().take(80).collect();
+        document
+            .sidebar
+            .create_thread(
+                id.clone(),
+                project,
+                if title.is_empty() {
+                    "New conversation"
+                } else {
+                    &title
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let parent = new.fork.as_ref().and_then(|(run, _)| {
+            self.runtime
+                .as_ref()?
+                .with_storage_reader(|db| db.thread_of_run(run))
+                .ok()
+                .flatten()
+                .and_then(|row| row.map(|row| row.thread_id))
+        });
+        let now = now_seconds();
+        if let Some(record) = document.sidebar.threads.iter_mut().find(|t| t.id == id) {
+            record.title_is_placeholder = title.is_empty();
+            record.created_at = now;
+            record.chat_role = Some(if new.orchestrator {
+                ThreadChatRole::Orchestrator
+            } else {
+                ThreadChatRole::Worker
+            });
+            if let (Some(parent), Some((run, context_len))) = (parent, &new.fork) {
+                record.parent_thread_id = Some(ThreadId::new(parent));
+                record.lineage = Some(workspace_state::ThreadLineage {
+                    kind: LineageKind::Fork,
+                    point: Some(workspace_state::ForkPoint {
+                        run_id: run.clone(),
+                        context_len: *context_len,
+                    }),
+                });
+            }
+        }
+        document.sidebar.refresh_derived();
+        self.store
+            .write(&lock, &document)
+            .map_err(|e| e.to_string())?;
+        drop(lock);
+        self.mirror_family(&document, new.thread);
+        self.registered
+            .lock()
+            .unwrap()
+            .insert(new.thread.as_str().to_owned());
+        self.publish(&Done {
+            applied: Applied {
+                revision: Revision(0),
+                changed: true,
+                project: None,
+            },
+            access: false,
+        });
+        Ok(())
+    }
+
     fn deleted(&self) -> Result<Deleted, WorkspaceRejection> {
         (self.tombstones)().map_err(|reason| WorkspaceRejection::StorageFailed { reason })
     }
@@ -307,7 +465,62 @@ impl Service {
         let mut document = self.store.read_unlocked().map_err(|e| e.to_string())?;
         let deleted = (self.tombstones)()?;
         document.prune_threads(&*deleted);
+        self.repair_membership(&mut document.sidebar)?;
         Ok(document)
+    }
+
+    /// Applies the lane ledger to `sidebar` before a family is resolved: the
+    /// membership of every lane and the revision floors of the `threads`
+    /// table (the ledger is authoritative, a file written before a lane
+    /// changed is repaired). A ledger that cannot be read is an error, never a
+    /// guess: nothing is edited on top of an unrepaired family.
+    fn repair_membership(&self, sidebar: &mut workspace_state::SidebarState) -> Result<(), String> {
+        let Some(mirror) = &self.mirror else {
+            return Ok(());
+        };
+        let snapshot = mirror
+            .sidebar_projection_snapshot(sidebar.threads.iter().map(|t| t.id.to_string()).collect())
+            .map_err(|error| format!("the lane ledger could not be read: {error}"))?;
+        for lane in &snapshot.lanes {
+            sidebar
+                .set_lane_link(&ThreadId::new(&lane.thread_id), lane_link(lane))
+                .map_err(|error| format!("the lane ledger could not be applied: {error}"))?;
+        }
+        // Obsolete membership states go first: an old epoch may carry much
+        // higher revisions, but must not mask the reset of a new one.
+        sidebar.refresh_derived();
+        sidebar.raise_family_revisions(
+            &|id| {
+                snapshot
+                    .revision_floors
+                    .get(&id.to_string())
+                    .copied()
+                    .unwrap_or_default()
+            },
+            false,
+        );
+        sidebar.refresh_derived();
+        Ok(())
+    }
+
+    fn check_family(
+        sidebar: &workspace_state::SidebarState,
+        id: &ThreadId,
+        expected: &FamilyIdentity,
+    ) -> Result<workspace_state::lane_management::FamilyRevision, WorkspaceRejection> {
+        let current = sidebar.lane_family_revision(id).map_err(|error| {
+            WorkspaceRejection::FamilyChanged {
+                reason: error.to_string(),
+            }
+        })?;
+        if current.key.to_string() != expected.key.as_str()
+            || current.membership_epoch != expected.membership_epoch
+        {
+            return Err(WorkspaceRejection::FamilyChanged {
+                reason: "the family membership changed; read the families again".into(),
+            });
+        }
+        Ok(current)
     }
 
     fn protected(&self, path: &Path) -> Result<(), WorkspaceRejection> {
@@ -340,6 +553,13 @@ impl Service {
         let mut document = self.store.read(&lock).map_err(store_rejection)?;
         document.prune_threads(&*deleted);
         let before = document.sidebar.clone();
+        if matches!(
+            command,
+            WorkspaceCommand::SetFamilyArchived(_) | WorkspaceCommand::SetFamilyPinned(_)
+        ) {
+            self.repair_membership(&mut document.sidebar)
+                .map_err(|reason| WorkspaceRejection::StorageFailed { reason })?;
+        }
         let done = self.apply(command, &mut document, &*deleted)?;
         if document.sidebar != before {
             self.store
@@ -498,9 +718,8 @@ impl Service {
             }
             WorkspaceCommand::SetFamilyArchived(c) => {
                 let id = Self::family_member(document, &c.thread, deleted)?;
-                let current = document.sidebar.resolve_states();
-                let actual = current.get(&id).map_or(0, |s| s.archive_revision);
-                check_expected(c.expected_revision, Revision(actual))?;
+                let current = Self::check_family(&document.sidebar, &id, &c.expected_family)?;
+                check_expected(c.expected_revision, Revision(current.archive_revision))?;
                 let changed = document
                     .sidebar
                     .set_family_archived(&id, c.archived, now_seconds())
@@ -517,9 +736,8 @@ impl Service {
             }
             WorkspaceCommand::SetFamilyPinned(c) => {
                 let id = Self::family_member(document, &c.thread, deleted)?;
-                let current = document.sidebar.resolve_states();
-                let actual = current.get(&id).map_or(0, |s| s.pin_revision);
-                check_expected(c.expected_revision, Revision(actual))?;
+                let current = Self::check_family(&document.sidebar, &id, &c.expected_family)?;
+                check_expected(c.expected_revision, Revision(current.pin_revision))?;
                 let changed = document
                     .sidebar
                     .set_family_pinned(&id, c.pinned)
@@ -689,6 +907,10 @@ impl Service {
                 .entry(key.to_string())
                 .or_insert_with(|| FamilyView {
                     key: WireThread::new(key.to_string()).expect("a stored thread id is valid"),
+                    membership_epoch: document
+                        .sidebar
+                        .lane_family_revision(&thread.id)
+                        .map_or(0, |revision| revision.membership_epoch),
                     members: 0,
                     archived: state.archived,
                     archived_at: state.archived_at,
@@ -758,6 +980,22 @@ impl Service {
             pinned: state.is_some_and(|s| s.pinned),
             revision: thread_revision(record),
         })
+    }
+}
+
+fn lane_link(record: &storage::lanes::LaneRecord) -> workspace_state::LaneLink {
+    use event_bus::lane::LanePolicy as Ledger;
+    workspace_state::LaneLink {
+        lane_id: record.lane_id.clone(),
+        origin_thread_id: ThreadId::new(record.origin_thread_id.clone()),
+        lead_thread_id: record.lead_thread_id.clone().map(ThreadId::new),
+        policy: match record.policy {
+            Ledger::Attached => workspace_state::LanePolicy::Attached,
+            Ledger::Summary => workspace_state::LanePolicy::Summary,
+            Ledger::Detached => workspace_state::LanePolicy::Detached,
+        },
+        management_revision: record.management_revision,
+        detached_since_management_revision: record.detached_since_management_revision,
     }
 }
 

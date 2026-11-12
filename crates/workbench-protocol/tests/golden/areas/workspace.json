@@ -35,6 +35,10 @@
     "payload": {
       "payload": {
         "archived": true,
+        "expected_family": {
+          "key": "thr-1",
+          "membership_epoch": 1
+        },
         "expected_revision": "2",
         "thread": "thr-1"
       },
@@ -45,6 +49,10 @@
   "command/workspace/set_family_pinned": {
     "payload": {
       "payload": {
+        "expected_family": {
+          "key": "thr-1",
+          "membership_epoch": 1
+        },
         "expected_revision": "0",
         "pinned": true,
         "thread": "thr-1"
@@ -140,6 +148,7 @@
             "archived_at": 1700000000,
             "key": "thr-1",
             "members": 2,
+            "membership_epoch": 1,
             "pin_revision": "0",
             "pinned": false
           }
