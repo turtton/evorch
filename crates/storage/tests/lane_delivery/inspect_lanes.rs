@@ -26,7 +26,7 @@ fn first_lane(section: &Value) -> &Value {
     &section["lanes"]["items"][0]
 }
 fn kinds(lane: &Value) -> Vec<String> {
-    lane["attention"]
+    lane["attention"]["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -86,7 +86,7 @@ fn a_stalled_lane_shows_its_episode_nudge_state_and_the_actions_open_to_the_lead
     assert_eq!(shown["notification_id"], json!(nudge.notification_id));
     assert_eq!(kinds(lane), ["stall"]);
     assert_eq!(
-        lane["attention"][0]["kind"]["episode_id"],
+        lane["attention"]["items"][0]["kind"]["episode_id"],
         shown["episode_id"]
     );
 }
@@ -105,7 +105,7 @@ fn ready_close_and_instructions_are_shown_as_sequences_and_revisions_without_tex
     assert_eq!(lane["ready"]["report_brief_revision"], 1);
     assert_eq!(kinds(lane), ["ready_unclosed"]);
     assert_eq!(lane["close"], Value::Null);
-    assert_eq!(lane["instructions"]["count"], 0);
+    assert_eq!(lane["instructions"]["latest"], Value::Null);
 
     f.h()
         .apply_lane_instruction(
@@ -129,13 +129,16 @@ fn ready_close_and_instructions_are_shown_as_sequences_and_revisions_without_tex
 
     let closed = section(&f, "lead-root");
     let lane = first_lane(&closed);
-    assert_eq!(lane["instructions"]["count"], 1);
     assert_eq!(lane["instructions"]["latest"]["instruction_seq"], 1);
-    assert_eq!(lane["instructions"]["latest"]["kind"], "supplement");
-    assert_eq!(lane["instructions"]["latest"]["delivery"], "queued");
-    assert_eq!(lane["close"]["kind"], "lead_closed");
-    assert_eq!(lane["close"]["ready_seq"], 1);
-    assert_eq!(lane["close"]["stands_for_current_management"], true);
+    assert_eq!(
+        lane["instructions"]["latest"]["accepted_management_revision"],
+        1
+    );
+    assert_eq!(lane["instructions"]["latest"]["brief_revision_after"], 1);
+    assert_eq!(
+        lane["close"],
+        json!({"ready_seq": 1, "closed_revision": lane["request_revision"], "management_revision": 1, "brief_revision": 1})
+    );
     assert!(kinds(lane).is_empty(), "a closed lane needs nothing more");
     let text = closed.to_string();
     for private in [
@@ -207,7 +210,7 @@ fn a_suppressed_wake_guard_and_restore_episode_are_shown_with_counts_and_actions
             "wake_suppressed"
         ]
     );
-    let restore = lane["attention"]
+    let restore = lane["attention"]["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -344,4 +347,70 @@ fn the_current_state_of_a_stored_uncollected_cohort_follows_the_ledger() {
     assert_eq!(ready["terminal_count"], 1);
     assert_eq!(ready["lanes"][0]["terminal_for_current_management"], true);
     assert_eq!(ready["lanes"][0]["latest_report_status"], "ready");
+}
+
+#[test]
+fn everything_read_in_one_snapshot_comes_from_one_commit() {
+    let f = Fixture::new();
+    started(&f);
+    lead_run(&f);
+    let db = Database::open_read_only(&f.config.db_path).unwrap();
+
+    let (before, during) = db
+        .read_snapshot(|db| {
+            let before = db.inspect_lane_diagnostics("lead-root", &[])?;
+            // A writer on its own connection commits while the snapshot is open.
+            f.h()
+                .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
+                .unwrap();
+            let during = db.inspect_lane_diagnostics("lead-root", &[])?;
+            Ok((before, during))
+        })
+        .unwrap();
+
+    assert_eq!(first_lane(&before)["latest_report"], Value::Null);
+    assert_eq!(
+        before, during,
+        "the commit made inside the snapshot leaked in"
+    );
+    let after = db.inspect_lane_diagnostics("lead-root", &[]).unwrap();
+    assert_eq!(first_lane(&after)["latest_report"]["status"], "ready");
+}
+
+#[test]
+fn attention_is_cut_at_the_list_limit_and_says_so() {
+    let f = Fixture::new();
+    started(&f);
+    lead_run(&f);
+    for question in 0..25 {
+        f.create(1, question, LaneDeliveryBinding::Bound);
+    }
+
+    let section = section(&f, "lead-root");
+
+    let attention = &first_lane(&section)["attention"];
+    assert_eq!(attention["eligible"], true);
+    assert_eq!(
+        attention["shown"],
+        storage::inspect::LANE_DIAGNOSTICS_LIST_MAX
+    );
+    assert_eq!(attention["truncated"], true);
+    assert_eq!(
+        attention["items"].as_array().unwrap().len(),
+        storage::inspect::LANE_DIAGNOSTICS_LIST_MAX
+    );
+}
+
+#[test]
+fn a_detached_lane_has_no_attention_or_close_to_read() {
+    let f = Fixture::new();
+    f.lane(1, LanePolicy::Detached);
+    lane_run(&f, "run-1");
+
+    let section = section(&f, "run-1");
+
+    let lane = first_lane(&section);
+    assert_eq!(lane["attention"]["eligible"], false);
+    assert_eq!(lane["attention"]["items"], json!([]));
+    assert_eq!(lane["close"], Value::Null);
 }

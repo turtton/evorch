@@ -12,11 +12,13 @@ use event_bus::event::diagnostic_codes::{
 };
 use runtime::budget_tracker::{StoredUncollectedLanes, stored_uncollected_lanes};
 use serde_json::{Value, json};
-use storage::Database;
 use storage::inspect::LANE_DIAGNOSTICS_LIST_MAX;
+use storage::{Database, StorageError};
 
-/// Adds `lane_diagnostics` to the `inspect run` document `result`.
-pub(super) fn attach(db: &Database, run_id: &str, result: &mut Value) -> Result<(), String> {
+/// Adds `lane_diagnostics` to the `inspect run` document `result`. Call it inside the
+/// database's read snapshot, with the run document read in the same one, so the stored
+/// marker, the events and the ledger describe one moment.
+pub(super) fn attach(db: &Database, run_id: &str, result: &mut Value) -> Result<(), StorageError> {
     let stored = match result.get("context").filter(|context| !context.is_null()) {
         Some(context) => {
             stored_uncollected_lanes(&context["config_json"]).map_err(|error| error.to_string())
@@ -24,9 +26,7 @@ pub(super) fn attach(db: &Database, run_id: &str, result: &mut Value) -> Result<
         None => Err("the run has no stored snapshot".to_owned()),
     };
     let ids: &[String] = stored.as_ref().map_or(&[], |marker| &marker.lane_ids);
-    let mut section = db
-        .inspect_lane_diagnostics(run_id, ids)
-        .map_err(|error| error.to_string())?;
+    let mut section = db.inspect_lane_diagnostics(run_id, ids)?;
     if section.is_null() {
         result["lane_diagnostics"] = Value::Null;
         return Ok(());
@@ -49,6 +49,23 @@ fn diagnostics_of(result: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Whether the stored marker still suppresses `lane_open`, the way the runtime decides
+/// it: the creation count reached the threshold and some lane of the cohort is a
+/// terminal one for its current management. `None` when the evidence cannot settle it:
+/// no terminal lane was found among the lanes that were evaluated, but some were not.
+fn suppresses_creation_now(marker: &StoredUncollectedLanes, current: &Value) -> Option<bool> {
+    if marker.uncollected_lane_open_count < marker.default_threshold {
+        return Some(false);
+    }
+    if current["evaluated"] != true {
+        return None;
+    }
+    if current["terminal_count"].as_u64()? > 0 {
+        return Some(true);
+    }
+    current["evaluation_complete"].as_bool()?.then_some(false)
+}
+
 fn uncollected(stored: &Result<StoredUncollectedLanes, String>, current: Value) -> Value {
     match stored {
         Err(reason) => json!({
@@ -57,12 +74,9 @@ fn uncollected(stored: &Result<StoredUncollectedLanes, String>, current: Value) 
             "stored_marker_suppresses_creation_now": Value::Null,
         }),
         Ok(marker) => {
-            let terminal = current["terminal_count"].as_u64();
             // The snapshot does not record an injected threshold, so this is the
             // default threshold's verdict.
-            let suppresses = terminal.map(|terminal| {
-                marker.uncollected_lane_open_count >= marker.default_threshold && terminal > 0
-            });
+            let suppresses = suppresses_creation_now(marker, &current);
             json!({
                 "stored": {
                     "available": true,
@@ -92,7 +106,8 @@ fn detail_fields(detail: &str) -> BTreeMap<&str, &str> {
 
 /// Links the lane diagnostics persisted for the run to the state they describe: a
 /// creation-suppression event to the cohort marker the snapshot stores, a
-/// restore-retry-suppression event to the recovery episode in the ledger.
+/// restore-retry-suppression event to the recovery episode in the ledger. At most
+/// [`LANE_DIAGNOSTICS_LIST_MAX`] events are listed, with the total.
 fn related_diagnostics(
     events: &[Value],
     stored: &Result<StoredUncollectedLanes, String>,
@@ -109,8 +124,13 @@ fn related_diagnostics(
                 .flatten()
         })
         .collect();
+    let stored_cohort = stored
+        .as_ref()
+        .ok()
+        .and_then(|marker| marker.cohort_id.as_deref());
     let mut related = Vec::new();
-    let mut uncollected_events = 0_usize;
+    let mut total = 0_usize;
+    let mut event_for_stored_cohort = false;
     for event in events {
         let payload = &event["payload"]["payload"];
         let (Some(code), Some(detail)) = (payload["code"].as_str(), payload["detail"].as_str())
@@ -121,13 +141,11 @@ fn related_diagnostics(
         let identity = fields.get("identity").copied();
         let correlation = match code {
             LANE_UNCOLLECTED_CREATION_SUPPRESSED => {
-                uncollected_events += 1;
+                event_for_stored_cohort |= stored_cohort.is_some() && stored_cohort == identity;
                 let marker = stored.as_ref().ok();
                 json!({
-                    "stored_cohort_id": marker.and_then(|m| m.cohort_id.clone()),
-                    "matches_stored_cohort": marker
-                        .and_then(|m| m.cohort_id.as_deref())
-                        .map(|cohort| Some(cohort) == identity),
+                    "stored_cohort_id": stored_cohort,
+                    "matches_stored_cohort": stored_cohort.map(|cohort| Some(cohort) == identity),
                     "stored_suppression_reported": marker.map(|m| m.suppression_reported),
                 })
             }
@@ -149,20 +167,26 @@ fn related_diagnostics(
             }
             _ => continue,
         };
-        related.push(json!({
-            "event_id": event["id"],
-            "wall_clock_ns": event["wall_clock_ns"],
-            "code": code,
-            "identity": identity,
-            "action": fields.get("action"),
-            "correlation": correlation,
-        }));
+        total += 1;
+        if related.len() < LANE_DIAGNOSTICS_LIST_MAX {
+            related.push(json!({
+                "event_id": event["id"],
+                "wall_clock_ns": event["wall_clock_ns"],
+                "code": code,
+                "identity": identity,
+                "action": fields.get("action"),
+                "correlation": correlation,
+            }));
+        }
     }
     let marker_reported = stored.as_ref().ok().map(|m| m.suppression_reported);
     json!({
+        "total": total,
+        "shown": related.len(),
+        "truncated": total > related.len(),
         "events": related,
-        "stored_marker_reported_without_event": marker_reported
-            .map(|reported| reported && uncollected_events == 0),
+        "stored_marker_reported_without_event_for_its_cohort": marker_reported
+            .map(|reported| reported && !event_for_stored_cohort),
     })
 }
 

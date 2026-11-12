@@ -58,7 +58,10 @@ fn a_creation_event_is_matched_to_the_cohort_the_snapshot_stores() {
     );
     assert_eq!(related["events"][0]["identity"], "cohort-1");
     assert_eq!(related["events"][0]["action"], "suppress_lane_open");
-    assert_eq!(related["stored_marker_reported_without_event"], false);
+    assert_eq!(
+        related["stored_marker_reported_without_event_for_its_cohort"],
+        false
+    );
 }
 
 #[test]
@@ -68,9 +71,15 @@ fn a_reported_marker_without_any_event_is_called_out() {
     let related = related_diagnostics(&[], &stored, &json!({}));
 
     assert_eq!(related["events"], json!([]));
-    assert_eq!(related["stored_marker_reported_without_event"], true);
+    assert_eq!(
+        related["stored_marker_reported_without_event_for_its_cohort"],
+        true
+    );
     let unreported = related_diagnostics(&[], &Ok(marker("cohort-1", false, 3)), &json!({}));
-    assert_eq!(unreported["stored_marker_reported_without_event"], false);
+    assert_eq!(
+        unreported["stored_marker_reported_without_event_for_its_cohort"],
+        false
+    );
 }
 
 #[test]
@@ -98,7 +107,10 @@ fn a_restore_event_is_matched_to_the_recovery_episode_in_the_ledger() {
     assert_eq!(found["episode_in_ledger"]["state"], "suppressed");
     assert_eq!(found["episode_in_ledger"]["attempts"], 3);
     assert_eq!(related["events"][1]["correlation"]["found"], false);
-    assert_eq!(related["stored_marker_reported_without_event"], Value::Null);
+    assert_eq!(
+        related["stored_marker_reported_without_event_for_its_cohort"],
+        Value::Null
+    );
 }
 
 #[test]
@@ -124,7 +136,7 @@ fn an_unreadable_stored_marker_is_reported_as_unavailable_never_as_zero() {
 fn the_stored_marker_suppresses_only_while_a_terminal_lane_remains_and_the_count_is_reached() {
     let at_threshold = marker("c", true, 100);
     let with_terminal = json!({"evaluated": true, "terminal_count": 1});
-    let collected = json!({"evaluated": true, "terminal_count": 0});
+    let collected = json!({"evaluated": true, "terminal_count": 0, "evaluation_complete": true});
 
     let suppressing = uncollected(&Ok(at_threshold.clone()), with_terminal.clone());
     let lifted = uncollected(&Ok(at_threshold), collected);
@@ -143,4 +155,79 @@ fn the_stored_marker_suppresses_only_while_a_terminal_lane_remains_and_the_count
     );
     assert_eq!(suppressing["stored"]["cohort_id"], "c");
     assert_eq!(suppressing["stored"]["lane_ids_total"], 2);
+}
+
+#[test]
+fn an_event_of_another_cohort_does_not_account_for_the_stored_markers_report() {
+    let stored = Ok(marker("cohort-now", true, 100));
+
+    let related = related_diagnostics(&[creation_event("cohort-before")], &stored, &json!({}));
+
+    assert_eq!(
+        related["events"][0]["correlation"]["matches_stored_cohort"],
+        false
+    );
+    assert_eq!(
+        related["stored_marker_reported_without_event_for_its_cohort"],
+        true
+    );
+}
+
+#[test]
+fn related_events_are_listed_up_to_the_limit_with_their_total() {
+    let events: Vec<Value> = (0..LANE_DIAGNOSTICS_LIST_MAX + 5)
+        .map(|n| {
+            let mut event = creation_event("cohort-1");
+            event["id"] = json!(n);
+            event
+        })
+        .collect();
+
+    let related = related_diagnostics(&events, &Ok(marker("cohort-1", true, 100)), &json!({}));
+
+    assert_eq!(related["total"], LANE_DIAGNOSTICS_LIST_MAX + 5);
+    assert_eq!(related["shown"], LANE_DIAGNOSTICS_LIST_MAX);
+    assert_eq!(related["truncated"], true);
+    assert_eq!(
+        related["events"].as_array().unwrap().len(),
+        LANE_DIAGNOSTICS_LIST_MAX
+    );
+}
+
+#[test]
+fn an_incomplete_evaluation_without_a_terminal_lane_is_unknown_not_lifted() {
+    let at_threshold = marker("c", true, 100);
+    let none_found_but_partial = json!({
+        "evaluated": true,
+        "terminal_count": 0,
+        "evaluation_complete": false,
+    });
+    let found_in_the_part = json!({
+        "evaluated": true,
+        "terminal_count": 1,
+        "evaluation_complete": false,
+    });
+    let none_found_in_all = json!({
+        "evaluated": true,
+        "terminal_count": 0,
+        "evaluation_complete": true,
+    });
+
+    assert_eq!(
+        suppresses_creation_now(&at_threshold, &none_found_but_partial),
+        None
+    );
+    assert_eq!(
+        suppresses_creation_now(&at_threshold, &found_in_the_part),
+        Some(true)
+    );
+    assert_eq!(
+        suppresses_creation_now(&at_threshold, &none_found_in_all),
+        Some(false)
+    );
+    assert_eq!(
+        suppresses_creation_now(&marker("c", false, 99), &none_found_but_partial),
+        Some(false),
+        "below the threshold nothing is suppressed whatever was evaluated"
+    );
 }

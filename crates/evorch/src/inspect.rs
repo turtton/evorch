@@ -281,11 +281,12 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
                 None if full => storage::inspect::RunDetail::Full,
                 None => storage::inspect::RunDetail::Summary,
             };
-            let mut document = db
-                .inspect_run_detail(&run_id, detail)
-                .map_err(|error| error.to_string())?;
-            lanes::attach(&db, &run_id, &mut document)?;
-            document
+            db.read_snapshot(|db| {
+                let mut document = db.inspect_run_detail(&run_id, detail)?;
+                lanes::attach(db, &run_id, &mut document)?;
+                Ok(document)
+            })
+            .map_err(|error| error.to_string())?
         }
         InspectCommand::Events {
             scope,

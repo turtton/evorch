@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use event_bus::{LaneStatus, lane::LaneAttentionFilter};
+use event_bus::LaneStatus;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -130,7 +130,6 @@ fn diagnostics(
             |row| row.get(0),
         )?
         .collect::<Result<_, _>>()?;
-    let mut attention = Attention::default();
     let mut lanes = Vec::new();
     let mut lane_thread_leads = BTreeSet::new();
     for id in &ids {
@@ -154,7 +153,7 @@ fn diagnostics(
         if lane.origin_run_id == run_id {
             relations.push("opened_by_this_run");
         }
-        lanes.push(lane_json(conn, &lane, &relations, &mut attention)?);
+        lanes.push(lane_json(conn, &lane, &relations)?);
     }
     let mut destinations = Vec::new();
     let in_lane_root = lanes.iter().any(|lane| {
@@ -170,6 +169,7 @@ fn diagnostics(
     for destination in destination_ids.iter().take(LANE_DIAGNOSTICS_LIST_MAX) {
         destinations.push(destination_json(conn, destination, run_id)?);
     }
+    let destinations_total = destination_ids.len();
     Ok(json!({
         "run_id": run_id,
         "scope": {
@@ -186,56 +186,76 @@ fn diagnostics(
             "items": lanes,
         },
         "delivery": {
+            "total": destinations_total,
+            "shown": destinations.len(),
+            "truncated": destinations_total > destinations.len(),
             "destinations": destinations,
         },
         "uncollected_current": uncollected_json(conn, lead_thread.as_deref(), uncollected)?,
     }))
 }
 
-#[derive(Default)]
-struct Attention {
-    by_lead: std::collections::BTreeMap<String, Vec<event_bus::lane::LaneAttentionItem>>,
+/// Pending questions read per lane for the attention list: one more than is shown, so
+/// that a longer list is known to be longer without reading the rest.
+const ATTENTION_QUESTIONS_READ: i64 = 21;
+
+/// Whether the lane has a live lead the attention read model and the close record are
+/// defined for (the same condition `lane_attention` lists a lane under).
+fn has_live_lead(conn: &Connection, lane: &LaneRecord) -> Result<bool, StorageError> {
+    let Some(lead) = lane
+        .lead_thread_id
+        .as_deref()
+        .filter(|_| lane.policy.is_managed())
+    else {
+        return Ok(false);
+    };
+    let deleted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id = ?1)",
+        [lead],
+        |row| row.get(0),
+    )?;
+    Ok(!deleted)
 }
 
-impl Attention {
-    fn for_lane(
-        &mut self,
-        conn: &Connection,
-        lane: &LaneRecord,
-    ) -> Result<Vec<Value>, StorageError> {
-        let Some(lead) = lane
-            .lead_thread_id
-            .as_ref()
-            .filter(|_| lane.policy.is_managed())
-        else {
-            return Ok(Vec::new());
-        };
-        if !self.by_lead.contains_key(lead) {
-            let items = crate::repo::lane_control::items(
-                conn,
-                &LaneAttentionFilter {
-                    lead_thread_id: lead.clone(),
-                    project_id: None,
-                },
-            )?;
-            self.by_lead.insert(lead.clone(), items);
-        }
-        self.by_lead[lead]
-            .iter()
-            .filter(|item| item.lane_id == lane.lane_id)
-            .take(LANE_DIAGNOSTICS_LIST_MAX)
-            .map(|item| {
-                Ok(json!({
-                    "id": item.id,
-                    "kind": to_value(&item.kind)?,
-                    "since_at_ns": item.since_at_ns,
-                    "revision": item.revision,
-                    "management_revision": item.management_revision,
-                    "available_actions": to_value(&item.available_actions)?,
-                }))
-            })
-            .collect()
+/// What the lead can act on for this lane now, from the same derivation as the lane
+/// attention list, read for this one lane and cut at [`LANE_DIAGNOSTICS_LIST_MAX`].
+fn attention_json(conn: &Connection, lane: &LaneRecord) -> Result<Value, StorageError> {
+    if !has_live_lead(conn, lane)? {
+        return Ok(json!({"eligible": false, "shown": 0, "truncated": false, "items": []}));
     }
+    let mut items = Vec::new();
+    crate::repo::lane_control::lane_items(
+        conn,
+        &lane.lane_id,
+        ATTENTION_QUESTIONS_READ,
+        &mut items,
+    )?;
+    items.sort_by(|a, b| {
+        b.since_at_ns
+            .cmp(&a.since_at_ns)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let truncated = items.len() > LANE_DIAGNOSTICS_LIST_MAX;
+    items.truncate(LANE_DIAGNOSTICS_LIST_MAX);
+    let shown = items
+        .iter()
+        .map(|item| {
+            Ok(json!({
+                "id": item.id,
+                "kind": to_value(&item.kind)?,
+                "since_at_ns": item.since_at_ns,
+                "revision": item.revision,
+                "management_revision": item.management_revision,
+                "available_actions": to_value(&item.available_actions)?,
+            }))
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+    Ok(json!({
+        "eligible": true,
+        "shown": shown.len(),
+        "truncated": truncated,
+        "items": shown,
+    }))
 }
 
 fn report_json(lane: &LaneRecord, report: &LaneReport) -> Value {
@@ -259,7 +279,6 @@ fn lane_json(
     conn: &Connection,
     lane: &LaneRecord,
     relations: &[&str],
-    attention: &mut Attention,
 ) -> Result<Value, StorageError> {
     let latest = crate::repo::lanes::reports(
         conn,
@@ -269,10 +288,10 @@ fn lane_json(
     )?
     .into_iter()
     .next();
-    let (request_revision, progress_epoch, close_id): (u64, u64, Option<String>) = conn.query_row(
-        "SELECT request_revision, progress_epoch, current_close_id FROM lanes WHERE lane_id = ?1",
+    let (request_revision, progress_epoch): (u64, u64) = conn.query_row(
+        "SELECT request_revision, progress_epoch FROM lanes WHERE lane_id = ?1",
         [&lane.lane_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let guard_text: String = conn.query_row(
         "SELECT wake_guard_json FROM lanes WHERE lane_id = ?1",
@@ -306,78 +325,56 @@ fn lane_json(
             "brief_revision": lane.brief_revision,
             "management_revision": lane.management_revision,
         })),
-        "close": close_json(conn, lane, close_id.as_deref())?,
+        "close": close_json(conn, lane)?,
         "instructions": instructions_json(conn, lane)?,
         "wake_guard": to_value(&guard)?,
         "stall": stall_json(conn, &lane.lane_id)?,
-        "attention": attention.for_lane(conn, lane)?,
+        "attention": attention_json(conn, lane)?,
     }))
 }
 
-fn close_json(
-    conn: &Connection,
-    lane: &LaneRecord,
-    close_id: Option<&str>,
-) -> Result<Value, StorageError> {
-    let Some(close_id) = close_id else {
+/// The close that stands for the lane now, through the ledger's own read of it (the one
+/// behind `Database::current_lane_close`), reduced to the Ready it is about and the
+/// revisions it compared.
+fn close_json(conn: &Connection, lane: &LaneRecord) -> Result<Value, StorageError> {
+    if !has_live_lead(conn, lane)? {
         return Ok(Value::Null);
-    };
-    let payload: String = conn.query_row(
-        "SELECT payload FROM lane_closes WHERE close_id = ?1",
-        [close_id],
-        |row| row.get(0),
-    )?;
-    let close: event_bus::lane::LaneCloseResult = decode(&payload, "lane close")?;
-    Ok(json!({
-        "close_id": close.close_id,
-        "kind": close.kind.as_str(),
-        "ready_seq": close.ready_seq,
-        "closed_revision": close.closed_revision,
-        "management_revision": close.management_revision,
-        "brief_revision": close.brief_revision,
-        "at_ns": close.at_ns,
-        "stands_for_current_management": close.management_revision == lane.management_revision,
-    }))
+    }
+    Ok(
+        crate::repo::lane_control::current_close(conn, &lane.lane_id)?.map_or(
+            Value::Null,
+            |close| {
+                json!({
+                    "ready_seq": close.ready_seq,
+                    "closed_revision": close.closed_revision,
+                    "management_revision": close.management_revision,
+                    "brief_revision": close.brief_revision,
+                })
+            },
+        ),
+    )
 }
 
+/// The latest accepted instruction as a sequence number and the revisions it was
+/// accepted against; no kind, delivery state or text.
 fn instructions_json(conn: &Connection, lane: &LaneRecord) -> Result<Value, StorageError> {
-    let count: u64 = conn.query_row(
-        "SELECT COUNT(*) FROM lane_instructions WHERE lane_id = ?1",
-        [&lane.lane_id],
-        |row| row.get(0),
-    )?;
-    let latest: Option<(u64, String, u64, u64, u64)> = conn
+    let latest: Option<(u64, u64, u64, u64)> = conn
         .query_row(
-            "SELECT instruction_seq, kind, accepted_management_revision, brief_revision_before,
+            "SELECT instruction_seq, accepted_management_revision, brief_revision_before,
                     brief_revision_after
              FROM lane_instructions WHERE lane_id = ?1 ORDER BY instruction_seq DESC LIMIT 1",
             [&lane.lane_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
-    let latest = match latest {
-        Some((seq, kind, management, before, after)) => {
-            let delivery = crate::repo::lane_instructions::delivery(conn, &lane.lane_id, seq)?;
-            json!({
-                "instruction_seq": seq,
-                "kind": kind,
-                "accepted_management_revision": management,
-                "brief_revision_before": before,
-                "brief_revision_after": after,
-                "delivery": delivery.map(|delivery| to_value(&delivery)).transpose()?,
-            })
-        }
-        None => Value::Null,
-    };
-    Ok(json!({ "count": count, "latest": latest }))
+    Ok(json!({
+        "latest": latest.map(|(seq, management, before, after)| json!({
+            "instruction_seq": seq,
+            "accepted_management_revision": management,
+            "brief_revision_before": before,
+            "brief_revision_after": after,
+        })),
+    }))
 }
 
 fn stall_json(conn: &Connection, lane_id: &str) -> Result<Value, StorageError> {
@@ -533,9 +530,11 @@ fn uncollected_json(
         "lead_thread_id": lead,
         "stored_lane_ids": ids.len(),
         "evaluated_lane_ids": evaluated.len(),
+        "evaluation_complete": evaluated.len() == ids.len(),
         "managed_count": managed,
         "terminal_count": terminal,
         "lanes_shown": lanes.len(),
+        "lanes_truncated": evaluated.len() > lanes.len(),
         "lanes": lanes,
     }))
 }

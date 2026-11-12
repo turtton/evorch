@@ -339,20 +339,38 @@ impl SpawnCredits {
     }
 }
 
+/// Fields `SpawnCredits` always serializes (it skips only the optional cohort identity,
+/// the reported flag and empty presentations), so a stored value without them was not
+/// written with the uncollected marker and is not read as an empty one.
+const STORED_UNCOLLECTED_FIELDS: [&str; 2] =
+    ["uncollected_lane_open_count", "uncollected_lane_ids"];
+
 /// Reads the uncollected-lane marker out of a stored run configuration document
 /// (`run_contexts.config_json`, resolved). It decodes `spawn_credits` with the
 /// type the runtime serializes it from, so the stored form and this reader cannot
 /// drift apart unnoticed.
 ///
 /// # Errors
-/// [`StoredSpawnCreditsError`] when the document has no `spawn_credits` or it does
-/// not decode; never a zero value in their place.
+/// [`StoredSpawnCreditsError`] when the document has no `spawn_credits`, it does
+/// not decode, or it lacks a field that is always stored; never a zero value in
+/// their place.
 pub fn stored_uncollected_lanes(
     run_config: &serde_json::Value,
 ) -> Result<StoredUncollectedLanes, StoredSpawnCreditsError> {
     let credits = run_config
         .get("spawn_credits")
         .ok_or(StoredSpawnCreditsError::Missing)?;
+    let object = credits.as_object().ok_or_else(|| {
+        StoredSpawnCreditsError::Malformed("spawn_credits is not an object".into())
+    })?;
+    if let Some(field) = STORED_UNCOLLECTED_FIELDS
+        .iter()
+        .find(|field| !object.contains_key(**field))
+    {
+        return Err(StoredSpawnCreditsError::Malformed(format!(
+            "spawn_credits has no {field}"
+        )));
+    }
     let credits: SpawnCredits = serde_json::from_value(credits.clone())
         .map_err(|error| StoredSpawnCreditsError::Malformed(error.to_string()))?;
     Ok(credits.stored_uncollected_lanes())
