@@ -15,8 +15,11 @@ use std::sync::{Arc, Mutex};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-#[derive(Default)]
 struct Oracle {
+    /// The `max_tokens` the run sending the next request must carry.
+    expected_max_tokens: u64,
+    /// Identity metadata of each request (the subscription transport derives it from the run).
+    metadata: Vec<Value>,
     requests: Vec<Value>,
     model_inputs: Vec<Value>,
     prompts: Vec<Vec<u8>>,
@@ -24,6 +27,21 @@ struct Oracle {
     searches: Vec<Value>,
     /// API-key requests must never carry subscription-only transport headers.
     api_key_header_leaks: Vec<String>,
+}
+
+impl Default for Oracle {
+    fn default() -> Self {
+        Self {
+            expected_max_tokens: 128_000,
+            metadata: Vec::new(),
+            requests: Vec::new(),
+            model_inputs: Vec::new(),
+            prompts: Vec::new(),
+            cached: Vec::new(),
+            searches: Vec::new(),
+            api_key_header_leaks: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -72,7 +90,15 @@ impl Respond for ClaudeEndpoint {
                 "usage":{"input_tokens":31,"output_tokens":7,"server_tool_use":{"web_search_requests":1}}
             }));
         }
-        assert_eq!(body["max_tokens"], 128_000);
+        let expected_max_tokens = self.0.lock().unwrap().expected_max_tokens;
+        assert_eq!(body["max_tokens"], expected_max_tokens);
+        // The turn of the sending run: tool calls on its first two, an answer on the third.
+        let turn = model_input["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .count();
         let mut normalized = model_input.clone();
         // Normalize only the moving Anthropic breakpoint, not nested arguments.
         for message in normalized["messages"].as_array_mut().unwrap() {
@@ -99,28 +125,28 @@ impl Respond for ClaudeEndpoint {
             .max()
             .unwrap_or(0) as u64;
         let total = prompt.len() as u64;
-        let index = oracle.requests.len();
-        let tool_name = match (index, oauth) {
+        let tool_name = match (turn, oauth) {
             (0, true) => "_read",
             (0, false) => "read",
             (_, true) => "_mcp__evorch__inspect_run",
             (_, false) => "inspect_run",
         };
-        let tool_input = if index == 0 {
+        let tool_input = if turn == 0 {
             json!({"path":"report.txt","offset":1,"limit":20})
         } else {
             json!({"run_id":"run-1","path":"custom-path"})
         };
+        oracle.metadata.push(model_input["metadata"].clone());
         oracle.requests.push(body);
         oracle.model_inputs.push(model_input);
         oracle.prompts.push(prompt);
         oracle.cached.push(cached);
-        let block = if index < 2 {
-            json!({"type":"tool_use", "id":format!("call-{index}"), "name":tool_name, "input":tool_input})
+        let block = if turn < 2 {
+            json!({"type":"tool_use", "id":format!("call-{turn}"), "name":tool_name, "input":tool_input})
         } else {
             json!({"type":"text", "text":"done"})
         };
-        let reason = if index < 2 { "tool_use" } else { "end_turn" };
+        let reason = if turn < 2 { "tool_use" } else { "end_turn" };
         let events = [
             (
                 "message_start",
@@ -132,7 +158,7 @@ impl Respond for ClaudeEndpoint {
             ),
             (
                 "content_block_delta",
-                json!({"type":"content_block_delta", "index":0,"delta":{"type":"thinking_delta","thinking":format!("reasoning-{index}")}}),
+                json!({"type":"content_block_delta", "index":0,"delta":{"type":"thinking_delta","thinking":format!("reasoning-{turn}")}}),
             ),
             (
                 "content_block_delta",
@@ -140,7 +166,7 @@ impl Respond for ClaudeEndpoint {
             ),
             (
                 "content_block_delta",
-                json!({"type":"content_block_delta", "index":0,"delta":{"type":"signature_delta","signature":format!("signature-{index}")}}),
+                json!({"type":"content_block_delta", "index":0,"delta":{"type":"signature_delta","signature":format!("signature-{turn}")}}),
             ),
             (
                 "content_block_stop",
@@ -148,7 +174,7 @@ impl Respond for ClaudeEndpoint {
             ),
             (
                 "content_block_start",
-                json!({"type":"content_block_start", "index":1,"content_block":{"type":"redacted_thinking","data":format!("opaque-{index}")}}),
+                json!({"type":"content_block_start", "index":1,"content_block":{"type":"redacted_thinking","data":format!("opaque-{turn}")}}),
             ),
             (
                 "content_block_stop",
@@ -186,11 +212,56 @@ struct Harness {
     model: Arc<runtime::compose::RoutedModel>,
     bus: Arc<EventBus>,
     _credentials: tempfile::TempDir,
+    _catalog: Option<tempfile::TempDir>,
+}
+
+/// Where the model's `max_tokens` comes from.
+#[derive(Clone, Copy)]
+enum Limit {
+    /// An explicit preset; a catalog refresh cannot change it.
+    Preset(u64),
+    /// The models.dev catalog cache, which a refresh replaces for later runs.
+    Catalog(u64),
+}
+
+/// Writes a fresh models.dev cache that gives Claude Sonnet 4.6 the output limit `limit`.
+fn write_catalog(dir: &std::path::Path, limit: u64) {
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        dir.join("models-dev.json"),
+        json!({"fetched_at": fetched_at, "api": {"anthropic": {"models": {
+            "claude-sonnet-4-6": {"id": "claude-sonnet-4-6", "limit": {"output": limit}}
+        }}}})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+async fn refreshed_catalog(limit: u64) -> Arc<catalog::ModelCatalog> {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(dir.path(), limit);
+    Arc::new(
+        catalog::ModelCatalog::load_or_refresh(dir.path())
+            .await
+            .unwrap(),
+    )
 }
 
 /// Mounts the Claude endpoint and composes the production routed model against it.
 /// `effort_levels` is the model's explicit `effort_levels` configuration, if any.
 async fn harness(oauth: bool, effort_levels: Option<Vec<String>>, posts: u64) -> Harness {
+    harness_with_limit(oauth, effort_levels, posts, Limit::Preset(128_000)).await
+}
+
+async fn harness_with_limit(
+    oauth: bool,
+    effort_levels: Option<Vec<String>>,
+    posts: u64,
+    limit: Limit,
+) -> Harness {
     let server = MockServer::start().await;
     let oracle = Arc::new(Mutex::new(Oracle::default()));
     let token = TOKEN;
@@ -247,15 +318,26 @@ async fn harness(oauth: bool, effort_levels: Option<Vec<String>>, posts: u64) ->
             edit_tool: None,
         },
     );
-    config.providers.get_mut("claude").unwrap().models[0].preset = Some("output-limit".into());
     config.providers.get_mut("claude").unwrap().models[0].effort_levels = effort_levels;
-    config.model_presets.insert(
-        "output-limit".into(),
-        config::ModelPresetConfig {
-            max_output_tokens: Some(128_000),
-            ..Default::default()
-        },
-    );
+    let (catalog_dir, catalog) = match limit {
+        Limit::Preset(tokens) => {
+            config.providers.get_mut("claude").unwrap().models[0].preset =
+                Some("output-limit".into());
+            config.model_presets.insert(
+                "output-limit".into(),
+                config::ModelPresetConfig {
+                    max_output_tokens: Some(tokens),
+                    ..Default::default()
+                },
+            );
+            (test_support::model_catalog_dir(), None)
+        }
+        Limit::Catalog(tokens) => {
+            let dir = tempfile::tempdir().unwrap();
+            write_catalog(dir.path(), tokens);
+            (dir.path().to_owned(), Some(dir))
+        }
+    };
     let bus = Arc::new(EventBus::new(128));
     let model = runtime::compose::compose_routed_model(
         &config,
@@ -266,7 +348,7 @@ async fn harness(oauth: bool, effort_levels: Option<Vec<String>>, posts: u64) ->
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
-        Some(test_support::model_catalog_dir()),
+        Some(catalog_dir),
     )
     .unwrap();
     Harness {
@@ -275,6 +357,7 @@ async fn harness(oauth: bool, effort_levels: Option<Vec<String>>, posts: u64) ->
         model,
         bus,
         _credentials: dir,
+        _catalog: catalog,
     }
 }
 
@@ -287,6 +370,7 @@ async fn exercise(oauth: bool, effort: Option<&str>) {
         model,
         bus,
         _credentials,
+        _catalog,
     } = harness(oauth, levels, 5).await;
     let mut events = bus.subscribe();
     let invocation = AgentInvocationContext {
@@ -571,6 +655,7 @@ async fn claude_api_key_effort_change_is_a_boundary_and_the_new_setting_is_reuse
         model,
         bus,
         _credentials,
+        _catalog,
     } = harness(false, Some(levels), 4).await;
     let mut events = bus.subscribe();
     let mut messages = vec![
@@ -716,4 +801,202 @@ async fn claude_api_key_effort_change_is_a_boundary_and_the_new_setting_is_reuse
     assert!(events.iter().all(
         |event| !matches!(&event.kind, EventKind::Diagnostic(d) if d.code == "CacheRegression")
     ));
+}
+
+fn refresh_tools() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: "read".into(),
+            description: "Read a bounded UTF-8 file range".into(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+        },
+        ToolSpec {
+            name: "inspect_run".into(),
+            description: "Inspect a run".into(),
+            input_schema: json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"]}),
+        },
+    ]
+}
+
+/// One run's conversation, advanced a streamed turn at a time.
+struct Conversation {
+    invocation: AgentInvocationContext,
+    messages: Vec<Message>,
+}
+
+impl Conversation {
+    fn new(run_id: &str) -> Self {
+        Self {
+            invocation: AgentInvocationContext {
+                run_id: run_id.into(),
+                model_preference: Some(ModelPreference {
+                    profile: "claude".into(),
+                    model: Some("claude-sonnet-4-6".into()),
+                    reasoning_effort: None,
+                }),
+                ..Default::default()
+            },
+            messages: vec![
+                Message {
+                    role: MessageRole::System,
+                    content: vec![ContentBlock::Text {
+                        text: "Stable instructions. ".repeat(50),
+                    }],
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Read twice".into(),
+                    }],
+                },
+            ],
+        }
+    }
+
+    /// Sends the next request, expecting the wire to carry `max_tokens`.
+    async fn turn(&mut self, harness: &Harness, tools: &[ToolSpec], max_tokens: u64) {
+        harness.oracle.lock().unwrap().expected_max_tokens = max_tokens;
+        let response = harness
+            .model
+            .complete_streaming(
+                &self.invocation,
+                Role::Worker,
+                &self.messages,
+                tools,
+                &harness.bus,
+            )
+            .await
+            .unwrap();
+        self.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: response.message.content.clone(),
+        });
+        let call = response
+            .message
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            });
+        self.messages.push(Message {
+            role: MessageRole::User,
+            content: vec![match call {
+                Some(tool_call_id) => ContentBlock::ToolResult {
+                    tool_call_id,
+                    content: vec![ToolResultContent::Text {
+                        text: "result\n".repeat(2_000),
+                    }],
+                    is_error: false,
+                },
+                None => ContentBlock::Text {
+                    text: "continue".into(),
+                },
+            }],
+        });
+    }
+}
+
+// Given: run A has a tool turn in flight and its output limit comes from the models.dev catalog
+// When: the catalog is refreshed to a lower limit between A's turns, and a new run B starts
+// Then: every request of A keeps its limit, prefix, settings and affinity (the mock cache is
+// derived from the received bytes, `assert_append_only` is an independent oracle), while B starts
+// with the refreshed limit and keeps its own prefix afterwards.
+async fn refresh_between_tool_turns(oauth: bool) {
+    let harness = harness_with_limit(oauth, None, 6, Limit::Catalog(128_000)).await;
+    let tools = refresh_tools();
+    let mut events = harness.bus.subscribe();
+    let mut run_a = Conversation::new("refresh-run-a");
+    let mut run_b = Conversation::new("refresh-run-b");
+
+    harness
+        .model
+        .admit(&run_a.invocation, Role::Worker)
+        .await
+        .unwrap();
+    run_a.turn(&harness, &tools, 128_000).await;
+
+    harness
+        .model
+        .publish_model_catalog(refreshed_catalog(64_000).await);
+
+    harness
+        .model
+        .admit(&run_b.invocation, Role::Worker)
+        .await
+        .unwrap();
+    run_b.turn(&harness, &tools, 64_000).await;
+    run_a.turn(&harness, &tools, 128_000).await;
+    run_b.turn(&harness, &tools, 64_000).await;
+    run_a.turn(&harness, &tools, 128_000).await;
+    run_b.turn(&harness, &tools, 64_000).await;
+
+    // Requests were sent in the order A0, B0, A1, B1, A2, B2.
+    let oracle = harness.oracle.lock().unwrap();
+    let (a, b) = ([0, 2, 4], [1, 3, 5]);
+    assert_eq!(oracle.requests.len(), 6);
+    for (position, request) in oracle.requests.iter().enumerate() {
+        let expected = if position % 2 == 0 { 128_000 } else { 64_000 };
+        assert_eq!(request["max_tokens"], expected, "request {position}");
+    }
+    for run in [a, b] {
+        for pair in run.windows(2) {
+            mock_openai::cache_contract::assert_append_only(
+                mock_openai::cache_contract::CacheProtocol::Anthropic,
+                &oracle.model_inputs[pair[0]],
+                &oracle.model_inputs[pair[1]],
+            )
+            .unwrap();
+            assert!(oracle.cached[pair[1]] >= oracle.prompts[pair[0]].len() as u64);
+        }
+    }
+    // Everything but the limit is identical across both runs and every request.
+    // The subscription billing block carries a per-body checksum that follows `max_tokens`.
+    let settings = |request: &Value| {
+        let mut settings = [
+            "model",
+            "system",
+            "tools",
+            "thinking",
+            "output_config",
+            "context_management",
+        ]
+        .map(|field| request[field].clone());
+        if let Some(system) = settings[1].as_array_mut() {
+            system.retain(|block| {
+                !block["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("x-anthropic-billing-header"))
+            });
+        }
+        settings
+    };
+    for request in &oracle.requests {
+        assert_eq!(settings(request), settings(&oracle.requests[0]));
+    }
+    // The cache identity of a run never moves, and the two runs do not share one.
+    for run in [a, b] {
+        for position in run {
+            assert_eq!(oracle.metadata[position], oracle.metadata[run[0]]);
+        }
+    }
+    if oauth {
+        assert_ne!(oracle.metadata[a[0]], oracle.metadata[b[0]]);
+    } else {
+        assert_eq!(oracle.api_key_header_leaks, Vec::<String>::new());
+    }
+    drop(oracle);
+    assert!(events.drain_pending_snapshot().iter().all(
+        |event| !matches!(&event.kind, EventKind::Diagnostic(d) if d.code == "CacheRegression")
+    ));
+}
+
+#[tokio::test]
+async fn claude_api_key_catalog_refresh_keeps_admitted_runs_and_applies_to_new_runs() {
+    refresh_between_tool_turns(false).await;
+}
+
+#[tokio::test]
+async fn claude_oauth_catalog_refresh_keeps_admitted_runs_and_applies_to_new_runs() {
+    refresh_between_tool_turns(true).await;
 }

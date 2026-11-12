@@ -25,6 +25,7 @@ mod image_generation;
 mod live;
 mod model_kinds;
 mod official_compaction;
+mod output_limit_refresh;
 mod output_limits;
 mod preference;
 mod responses_replay;

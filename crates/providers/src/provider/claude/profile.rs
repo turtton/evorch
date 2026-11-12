@@ -44,6 +44,12 @@ impl ClaudeReasoningControls {
 }
 
 impl ClaudeWireProfile {
+    /// Whether the model thinks on every request, so only the default temperature is valid
+    /// whatever effort is (or is not) selected.
+    pub fn always_thinks(&self, model: &str) -> bool {
+        model_mode(model).is_some_and(ModelMode::requires_thinking)
+    }
+
     pub fn requires_default_temperature(&self, model: &str) -> bool {
         model_mode(model).is_some_and(|mode| mode.supports_xhigh() || mode.requires_thinking())
     }
@@ -262,8 +268,10 @@ fn model_mode(model: &str) -> Option<ModelMode> {
         ("claude-sonnet-5-5", ModelMode::AdaptiveRequiredXhigh),
         ("claude-fable-5", ModelMode::AdaptiveRequiredXhigh),
         ("claude-fable-5-1", ModelMode::AdaptiveRequiredXhigh),
+        ("claude-fable-5-2", ModelMode::AdaptiveRequiredXhigh),
         ("claude-mythos-5", ModelMode::AdaptiveRequiredXhigh),
         ("claude-mythos-5-1", ModelMode::AdaptiveRequiredXhigh),
+        ("claude-mythos-5-2", ModelMode::AdaptiveRequiredXhigh),
         ("claude-mythos-preview", ModelMode::AdaptiveRequired),
         ("claude-opus-4-5", ModelMode::ManualEffort),
         ("claude-sonnet-4-5", ModelMode::Manual),
