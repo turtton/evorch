@@ -1,4 +1,6 @@
 //! Prepared adoption exercises the production writer proof, not invented IDs.
+#[path = "recovery_model_tests.rs"]
+mod models;
 use super::*;
 use crate::CurrentRecoveryAuthority;
 

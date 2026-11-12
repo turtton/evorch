@@ -11,7 +11,9 @@ mod adopt;
 mod cleanup;
 pub use activate::CurrentRecoveryAuthority;
 pub use cleanup::{RecoveryClaimHandle, RecoveryCleanupHandle, RecoveryCleanupState};
+mod models;
 mod relations;
+pub use models::RecoveryModels;
 
 struct RecoverySource {
     record: RunRecoveryRecord,

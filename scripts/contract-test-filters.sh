@@ -33,6 +33,7 @@ CACHE_CONTRACT_FILTER='
       binary(=cache_preservation_e2e)
       | (kind(lib) & test(agent_loop::tools_waiting))
       | (kind(lib) & test(quiesce::recovery_cache_tests))
+      | (kind(lib) & test(quiesce::recovery_06b_tests::prepared_adoption::models))
       | binary(=claude_cache_e2e)
       | binary(=mcp_cache_e2e)
       | binary(=claude_compaction_cache)

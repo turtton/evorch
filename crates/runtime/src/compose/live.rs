@@ -49,6 +49,25 @@ impl SwitchableModel {
 
 #[async_trait]
 impl AgentModel for SwitchableModel {
+    fn recovery_snapshot(&self) -> Option<crate::RecoveryModelSnapshot> {
+        let current = self.current();
+        let snapshot =
+            current
+                .recovery_snapshot()
+                .unwrap_or_else(|| crate::RecoveryModelSnapshot {
+                    generation: Arc::clone(&current),
+                    model: current,
+                });
+        let model = if snapshot.model.narrows_edit_tools() {
+            snapshot.model
+        } else {
+            Arc::new(Self::new(snapshot.model))
+        };
+        Some(crate::RecoveryModelSnapshot {
+            generation: snapshot.generation,
+            model,
+        })
+    }
     fn validate_checkpoint_compatibility(
         &self,
         invocation: &AgentInvocationContext,

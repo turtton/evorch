@@ -127,6 +127,7 @@ impl AgentRuntime {
         }
         let task = restored.attach_to(RunTask {
             startup_failure: None,
+            recovery_model: None,
             publication: execution.publication(),
             ancestry,
             turn,

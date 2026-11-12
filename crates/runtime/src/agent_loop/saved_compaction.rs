@@ -27,6 +27,7 @@ impl LoopState {
             .unwrap_or_else(|| providers::RequestTurnContext::unattributed(false));
         let task = RunTask {
             startup_failure: None,
+            recovery_model: None,
             publication: crate::runtime::ExecutionControl::new(false).publication(),
             run_id,
             role,

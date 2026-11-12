@@ -19,7 +19,7 @@ mod recovery_graph;
 pub(crate) use host_prompt::HostPrompt;
 pub use recovery_activation::{
     CurrentRecoveryAuthority, PausedRecoveryComponent, RecoveryClaimHandle, RecoveryCleanupHandle,
-    RecoveryCleanupState,
+    RecoveryCleanupState, RecoveryModels,
 };
 mod nested_orchestrator;
 mod output;
@@ -1913,6 +1913,7 @@ impl AgentRuntime {
             }
         };
         let task = RunTask {
+            recovery_model: None,
             startup_failure: execution
                 .startup_failure
                 .lock()
@@ -2148,7 +2149,10 @@ impl AgentRuntime {
                     return;
                 };
                 let runtime = AgentRuntime { shared };
-                let model = runtime.shared.model_for(&task.config);
+                let model = task
+                    .recovery_model
+                    .clone()
+                    .unwrap_or_else(|| runtime.shared.model_for(&task.config));
                 if model.requires_admission() {
                     let invocation = crate::AgentInvocationContext {
                         btw: None,

@@ -12,6 +12,19 @@ impl AgentRuntime {
         ownership_root: &std::path::Path,
         authority: &CurrentRecoveryAuthority,
     ) -> Result<PausedRecoveryComponent, RuntimeError> {
+        let models = self.pin_recovery_models(authority);
+        self.adopt_prepared_claim_with_models(proof, startup, ownership_root, authority, &models)
+    }
+
+    /// Use the same models on which the current startup catalogs were published.
+    pub fn adopt_prepared_claim_with_models(
+        &self,
+        proof: ValidatedPreparedClaim,
+        startup: storage::RecoveryStartupComplete,
+        ownership_root: &std::path::Path,
+        authority: &CurrentRecoveryAuthority,
+        models: &RecoveryModels,
+    ) -> Result<PausedRecoveryComponent, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
         if !self
             .shared
@@ -49,11 +62,12 @@ impl AgentRuntime {
         if authority.members.keys().copied().collect::<BTreeSet<_>>() != resume {
             return Err(error("current authority membership mismatch"));
         }
+        models.validate_members(self, &resume)?;
         for source in &sources {
             if let Some(config) = authority.members.get(&source.record.run_id) {
                 self.validate_recovery_authority(source, config)?;
-                self.shared
-                    .model_for(config)
+                models
+                    .current(self, source.record.run_id, config)?
                     .validate_checkpoint_compatibility(
                         &crate::AgentInvocationContext {
                             run_id: source.record.run_id.to_string(),
