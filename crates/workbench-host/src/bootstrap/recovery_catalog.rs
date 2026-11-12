@@ -98,6 +98,11 @@ mod tests {
     struct Model(Mutex<Vec<Arc<catalog::ModelCatalog>>>);
     #[async_trait::async_trait]
     impl AgentModel for Model {
+        fn narrows_edit_tools(&self) -> bool {
+            // This tool-free fixture already represents a concrete execution
+            // context; no additional edit-tool wrapper is required.
+            true
+        }
         fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
             "test/model".into()
         }
@@ -144,7 +149,8 @@ mod tests {
         assert!(services.names().next().is_none());
         let default = Arc::new(Model::default());
         let project = Arc::new(Model::default());
-        let selected = project.clone();
+        let switchable = Arc::new(runtime::compose::SwitchableModel::new(project.clone()));
+        let selected = switchable.clone();
         let bus = Arc::new(event_bus::EventBus::new(32));
         let runtime = AgentRuntime::new(
             bus.clone(),
@@ -184,6 +190,16 @@ mod tests {
             );
         }
         let _renewed = catalog.pin(&runtime, &authority);
+        assert_eq!(project.0.lock().unwrap().len(), 1);
+        let replacement = Arc::new(Model::default());
+        switchable.replace(replacement.clone());
+        let repinned = catalog.pin(&runtime, &authority);
+        let current: Arc<dyn AgentModel> = replacement.clone();
+        assert!(Arc::ptr_eq(
+            &repinned.model(RunId::new(1)).unwrap(),
+            &current
+        ));
+        assert_eq!(replacement.0.lock().unwrap().len(), 1);
         assert_eq!(project.0.lock().unwrap().len(), 1);
         services.shutdown().await.unwrap();
     }

@@ -127,6 +127,31 @@ impl AgentRuntime {
             .collect()
     }
 
+    /// Core coordinator phase check: RunStore/high-watermarks must already be
+    /// attached and the current DB/root must match this process-local evidence.
+    pub fn validate_recovery_startup(
+        &self,
+        startup: &storage::RecoveryStartupComplete,
+        ownership_root: &std::path::Path,
+    ) -> Result<(), RuntimeError> {
+        if !self
+            .shared
+            .recovery_message_ids_safe
+            .load(Ordering::Acquire)
+        {
+            return Err(error("run store must precede startup recovery"));
+        }
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or_else(|| error("no run store"))?;
+        store
+            .handle
+            .validate_recovery_startup(startup, &store.db_path, ownership_root)
+            .map_err(error)
+    }
+
     /// Prepare only the currently validated component, after the exclusive
     /// startup phase. Saved recipes never manufacture a RunConfig or permit.
     pub fn prepare_component(
@@ -308,9 +333,45 @@ impl AgentRuntime {
         })
     }
 
+    /// Core startup must retain current generation authority across a release
+    /// transaction too. Authority-free release is restricted to crate unit tests;
+    /// production host wrappers must enter through this current-generation fence.
+    pub fn release_prepared_component_with_authority(
+        &self,
+        paused: &PausedRecoveryComponent,
+        authority: &CurrentRecoveryAuthority,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        if !Weak::ptr_eq(&paused.runtime, &Arc::downgrade(&self.shared)) {
+            return Err(error("foreign paused recovery component"));
+        }
+        let expected = paused
+            .controls
+            .iter()
+            .map(|(run, _)| *run)
+            .collect::<BTreeSet<_>>();
+        if authority.members.keys().copied().collect::<BTreeSet<_>>() != expected {
+            return Err(error("release authority membership mismatch"));
+        }
+        for source in &paused.sources {
+            if let Some(config) = authority.members.get(&source.record.run_id) {
+                self.validate_recovery_authority(source, config)?;
+            }
+        }
+        // Keep Stop -> publication -> index -> ownership lock ordering. Taking
+        // registry guards outside release_indexed_recovery would invert Stop.
+        let indexed = paused
+            .members
+            .iter()
+            .map(|intent| intent.run_id)
+            .collect::<BTreeSet<_>>();
+        self.release_indexed_recovery(&paused.claim.claim_id, reason, Some(&indexed), true)
+    }
+
     /// Only an unactivated claim may be released. A failed/uncertain ACK retains
     /// the index unless a read-only claim read proves that release committed.
-    pub fn release_prepared_component(
+    #[cfg(test)]
+    pub(crate) fn release_prepared_component(
         &self,
         paused: &PausedRecoveryComponent,
         reason: &str,

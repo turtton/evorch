@@ -3,6 +3,8 @@
 //! authorities and register the entire graph before activating any component.
 #[path = "recovery_authority.rs"]
 pub mod authority;
+#[path = "recovery_bindings.rs"]
+pub mod bindings;
 #[path = "recovery_catalog.rs"]
 pub mod catalog;
 #[path = "recovery_current.rs"]
@@ -32,9 +34,10 @@ pub fn prepare(
 pub fn release(
     runtime: &AgentRuntime,
     component: &runtime::PausedRecoveryComponent,
+    authority: &runtime::CurrentRecoveryAuthority,
     reason: &str,
 ) -> Result<(), BootstrapError> {
-    Ok(runtime.release_prepared_component(component, reason)?)
+    Ok(runtime.release_prepared_component_with_authority(component, authority, reason)?)
 }
 
 /// Current authority is supplied explicitly; startup planning never calls this.

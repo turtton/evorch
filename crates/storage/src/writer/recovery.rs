@@ -1,6 +1,16 @@
 use super::{Command, StorageHandle};
 use crate::{StorageError, recovery::*};
 impl StorageHandle {
+    /// Validate process-local shared startup evidence without reserving a claim.
+    pub fn validate_recovery_startup(
+        &self,
+        startup: &crate::RecoveryStartupComplete,
+        db_path: &std::path::Path,
+        ownership_root: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        startup.validate(&self.2.db_path, ownership_root)?;
+        startup.validate(db_path, ownership_root)
+    }
     pub fn prepare_recovery_manifest(
         &self,
         record: RecoveryManifestRecord,
