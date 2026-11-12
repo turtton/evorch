@@ -19,7 +19,31 @@ sandbox の PATH には dev shell のツール (cargo fork, rustc, cmake, gcc, n
 .agents/skills/sandbox-build/scripts/with-dev-env.sh cargo nextest run --offline -p providers
 ```
 
-別 worktree からは wrapper を絶対パスで呼ぶ (wrapper は cwd の git ルートを対象にする)。
+wrapper は cwd の git ルート (ビルド対象) を対象にし、wrapper 自体の置き場所には依存しない。
+そのため、ビルドする worktree の中に wrapper が無くても、別の場所の wrapper を絶対パスで呼べる。
+
+### worktree 内に wrapper が見つからないとき
+
+古い commit から作られた worktree には `scripts/with-dev-env.sh` が存在しない
+(`No such file or directory`)。ここで `nix` や `/nix/store` を探し回らない。
+main clone (全 worktree が共有する `.git` を持つ元のプロジェクト root) の wrapper を、
+ビルドする worktree を cwd にしたまま絶対パスで呼ぶ。
+
+```sh
+# worktree 内で実行する。--git-common-dir は main clone の .git を指す。
+main_clone="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+"$main_clone/.agents/skills/sandbox-build/scripts/with-dev-env.sh" cargo nextest run --offline -p providers
+```
+
+main clone 側にも無い (古いブランチを checkout している) 場合は、`origin/main` から
+`$TMPDIR` へ取り出して呼ぶ。
+
+```sh
+git show origin/main:.agents/skills/sandbox-build/scripts/with-dev-env.sh > "$TMPDIR/with-dev-env.sh"
+bash "$TMPDIR/with-dev-env.sh" cargo nextest run --offline -p providers
+```
+
+どちらの場合も cwd はビルドする worktree のままにする (wrapper が `git rev-parse --show-toplevel` で対象を決める)。
 
 wrapper は `nix print-dev-env --offline` で flake の default dev shell 環境を生成して
 `$TMPDIR` にキャッシュ (flake.nix / flake.lock / rust-toolchain.toml のハッシュ単位) し、読み込んで `exec` する。

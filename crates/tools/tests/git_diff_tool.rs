@@ -348,3 +348,33 @@ mod external_diff {
         assert_stops(helper.trim()).await;
     }
 }
+
+// Given: 変更済みファイルのあるリポジトリ / When: path に空文字・空白のみを渡す / Then: 未指定として扱われリポジトリ全体の差分が返る
+#[tokio::test]
+async fn git_diff_treats_blank_path_as_omitted() {
+    // Given: ステージ済みファイルを変更したリポジトリ
+    let repo = init_repo();
+    let file = repo.path().join("alpha.txt");
+    std::fs::write(&file, "alpha original\n").unwrap();
+    run_git(repo.path(), &["add", "alpha.txt"]);
+    std::fs::write(&file, "alpha modified\n").unwrap();
+
+    for blank in ["", "  ", "\t\n"] {
+        // When: path が空または空白のみの git_diff を実行
+        let result = git_diff()
+            .execute(serde_json::json!({
+                "cwd": repo.path().to_string_lossy(),
+                "path": blank,
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("path={blank:?} が失敗: {error:?}"));
+
+        // Then: path 未指定と同じく全体の差分が返る
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("alpha modified"),
+            "path={blank:?}: {}",
+            result.content
+        );
+    }
+}

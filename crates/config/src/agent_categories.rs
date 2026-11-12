@@ -119,7 +119,7 @@ define_categories! {
         role: "worker",
         settings_visible: true,
         delegation: Delegation::Public {
-            guidance: "multi-step implementation requiring codebase investigation, dependent edits, or broad verification.",
+            guidance: "multi-step implementation requiring codebase investigation, dependent edits, or broad verification; use high-reasoning when concurrency, invariants, or cross-process consistency is the core.",
         },
         overlay_preset: "category-deep",
         overlay_body: include_str!("../assets/presets/category-deep.md"),
@@ -129,7 +129,7 @@ define_categories! {
         role: "worker",
         settings_visible: true,
         delegation: Delegation::Public {
-            guidance: "subtle invariants, hard debugging, or competing designs where reasoning is the bottleneck, even with few files; use deep when breadth is the main challenge.",
+            guidance: "subtle invariants (concurrency, state shared across processes), hard debugging, or competing designs where reasoning is the bottleneck, even with few files; use deep when breadth is the main challenge.",
         },
         overlay_preset: "category-high-reasoning",
         overlay_body: include_str!("../assets/presets/category-high-reasoning.md"),
