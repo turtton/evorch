@@ -32,6 +32,7 @@ pub use persist::{
 };
 pub use project::{AllowedDirectory, Membership, ProjectId, ProjectRecord, TrustState};
 pub use sidebar::{SIDEBAR_SCHEMA_VERSION, SidebarState};
+pub use store::{SidebarDocument, SidebarLock, SidebarStore, StoreError};
 pub use thread::{
     ForkPoint, LineageKind, ModelPreference, ThreadChatRole, ThreadId, ThreadLineage, ThreadRecord,
     ThreadRunPhase, ThreadState,
