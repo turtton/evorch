@@ -41,7 +41,8 @@ use workspace_state::{
     ThreadError, ThreadId, ThreadRecord, TrustState,
 };
 
-type Tombstones = dyn Fn() -> Result<Arc<dyn Fn(&str) -> bool + Send + Sync>, String> + Send + Sync;
+type Deleted = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+type Tombstones = dyn Fn() -> Result<Deleted, String> + Send + Sync;
 
 struct Service {
     store: SidebarStore,
@@ -268,7 +269,7 @@ fn not_found(text: &str) -> WorkbenchError {
 }
 
 impl Service {
-    fn deleted(&self) -> Result<Arc<dyn Fn(&str) -> bool + Send + Sync>, WorkspaceRejection> {
+    fn deleted(&self) -> Result<Deleted, WorkspaceRejection> {
         (self.tombstones)().map_err(|reason| WorkspaceRejection::StorageFailed { reason })
     }
 
