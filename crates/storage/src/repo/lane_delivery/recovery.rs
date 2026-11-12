@@ -47,6 +47,20 @@ pub(crate) fn latest_recovery(
 ) -> Result<Option<LaneRecoveryEpisode>, StorageError> {
     Ok(conn.query_row(&format!("SELECT {COLUMNS} FROM lane_recovery_episodes WHERE destination_thread_id=?1 ORDER BY sequence DESC LIMIT 1"), [destination], row).optional()?)
 }
+/// The newest episodes of one destination, newest first. Read only.
+pub(crate) fn recent_recoveries(
+    conn: &Connection,
+    destination: &str,
+    limit: usize,
+) -> Result<Vec<LaneRecoveryEpisode>, StorageError> {
+    let mut statement = conn.prepare(&format!("SELECT {COLUMNS} FROM lane_recovery_episodes WHERE destination_thread_id=?1 ORDER BY sequence DESC LIMIT ?2"))?;
+    Ok(statement
+        .query_map(
+            params![destination, i64::try_from(limit).unwrap_or(i64::MAX)],
+            row,
+        )?
+        .collect::<Result<_, _>>()?)
+}
 pub(crate) fn resolve_recovery_destination(
     conn: &Connection,
     destination: &str,

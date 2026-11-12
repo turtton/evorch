@@ -322,15 +322,22 @@ async fn cancellation_hardening_during_writeback_is_not_erased_or_left_after_dra
     let contention = f
         .interrupt_contended_admission(RunInterrupt::Stop, false)
         .await;
-    let (busy, release) = pause_clock(&contention.clock);
+    contention.lock.execute_batch("ROLLBACK").unwrap();
+    // The virtual clock only coordinates the deliberately blocked admission.
+    // Heartbeat writes run on a real OS thread; advancing a whole retry budget
+    // instantly can exhaust the drain before that writer releases SQLite.
+    drop(contention._clock);
+    let execution = f.runtime.execution_snapshot(f.run).unwrap();
+    // Stop this exact writeback after capturing the immutable Stop request,
+    // rather than an arbitrary reader that sleeps on the shared clock.
+    let (writing, release) = pause(&f.runtime, HookPoint::LaneStopWriteStarted, &execution);
     let runtime = f.runtime.clone();
     let drain = tokio::spawn(async move { runtime.drain_lane_stop_writes().await });
-    busy.recv().unwrap();
+    writing.recv().unwrap();
     assert!(matches!(
         f.runtime.cancel(f.run),
         Err(RuntimeError::LaneCancellationPending { .. })
     ));
-    contention.lock.execute_batch("ROLLBACK").unwrap();
     release.send(()).unwrap();
     drain.await.unwrap().unwrap();
     assert_eq!(f.runtime.pending_lane_stop_writes(), 0);

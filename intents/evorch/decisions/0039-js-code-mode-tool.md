@@ -198,6 +198,7 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 ### 提供する範囲と既定値
 
 - 付与できるロールの上限は、`run_js` を capability に持つロールである。Worker と、読み取りのロール（Explorer、Reviewer、Advisor、Planner、WebResearcher）がこれにあたる。コードから呼べるツールは、そのロールに許可されたものに限られる（`crates/agents/src/role.rs`）。そのため、読み取りのロールでは読み取りだけになる。
+  - 追記（2026-11-12、PR #567）: Reviewer には `shell` が追加され、許可ツールは `read` / `grep` / `shell` / `git_diff` / `run_js` となった（`write` / `edit` / `apply_patch` は持たない）。Reviewer で `run_js` を有効にした場合は `tools.shell` も呼べる。read-only は指示による運用で技術的強制ではない。
 - Orchestrator には付与しない（ADR 0002）。Evaluator と MultimodalLooker にも付与しない。設定の `scopes` に書いても出ない。
 - 設定で有効にしたときだけ付与する。既定は無効とし、評価の結果で既定を見直す。
 - 有効にしても、出す先は `[tools.run_js] scopes` で絞る（user 層のみ）。要素は `"<role>"`（そのロールの全カテゴリとカテゴリ無し）か `"<role>:<category>"` で、表記は `agents.<role>` と `agents.<role>.categories.<name>` に合わせる。不正な要素は strict 検証でエラーにする。既定は `["worker:deep", "worker:high-reasoning"]` である。

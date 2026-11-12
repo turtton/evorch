@@ -29,6 +29,7 @@ Accepted（2026-10-13）。利用者との設計相談で方針に合意した�
 ### アクセス権は role に従う
 
 - アクセス権は role の権限に従う。書き込み権限を持つ role（Worker など）は読み書き、それ以外は読み取り専用とする。isolated workspace は [ADR 0031](0031-remove-isolated-workspaces.md) で廃止するので、run の種類による特例は設けない。
+  - 実装では `ExecutionPolicy::allowed_access` が `write` / `edit` / `apply_patch` / `shell` のいずれかを持つ role を `ReadWrite` と導出する。PR #567（2026-11-12）で Reviewer に `shell` を追加したため、通常の Reviewer の許可ディレクトリも `ReadWrite` になる（内部用途の `ThreadGoalReview` / `LaneVerification` / `LessonReview` は目的別ツール集合で上書きされ `shell` を持たないため `ReadOnly` のまま）。Reviewer がワークスペースや許可ディレクトリを変更しない read-only 運用は指示によるもので、技術的強制ではない。
 - shell では bwrap のマウントに含める。読み取り専用なら `ro_bind`、読み書きなら `bind`。今のマウントの一覧は run の sandbox を作った時点で固定される（`factory.build`）。許可ディレクトリの分はこれを改め、コマンドを実行するたびにその時点の一覧から組み立てる。これで、変更は次のコマンドから効く。ただし、実行中のバックグラウンドの shell ジョブは、開始時のマウントのまま終了まで動く。
 - 許可ディレクトリの中で worktree を使って作業したい場合は、プロジェクトルートと同じく、エージェントが skill の手順でその許可ディレクトリの中に worktree を作る。読み書き可の許可ディレクトリであれば、sandbox の中から作れる。
 
