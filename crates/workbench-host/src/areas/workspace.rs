@@ -53,6 +53,9 @@ struct Service {
     store: SidebarStore,
     runtime: Option<AgentRuntime>,
     retention: Option<RetentionSource>,
+    /// Where the archive and pin state of a family is projected into the
+    /// `threads` table. The sidebar is the source; the projection only follows.
+    mirror: Option<storage::StorageHandle>,
     /// Directories that hold the core's own configuration and databases.
     protected: Vec<PathBuf>,
     source: Option<ProjectionSource>,
@@ -169,6 +172,7 @@ impl WorkspaceArea {
             inner: Some(Service {
                 store: SidebarStore::new(handles.config_dir.join("sidebar.json")),
                 runtime: Some(runtime),
+                mirror: Some(handles.storage.clone()),
                 retention: Some(RetentionSource {
                     ownership_root: handles.ownership_root.clone(),
                     sidebar_path: handles.config_dir.join("sidebar.json"),
@@ -203,6 +207,7 @@ impl WorkspaceArea {
                 store,
                 runtime,
                 retention: None,
+                mirror: None,
                 protected: protected.iter().map(|p| canonical(p)).collect(),
                 source,
                 tombstones: Box::new(move || Ok(Arc::new(deleted.clone()))),
@@ -210,6 +215,16 @@ impl WorkspaceArea {
                 changes: AtomicU64::new(0),
             }),
         }
+    }
+
+    /// Projects the archive and pin state of the family of every thread into
+    /// `handle` (the `threads` table).
+    #[must_use]
+    pub fn with_mirror(mut self, handle: storage::StorageHandle) -> Self {
+        if let Some(service) = self.inner.as_mut() {
+            service.mirror = Some(handle);
+        }
+        self
     }
 
     /// Declares trust, allowed directories and read-only directories of the
@@ -334,6 +349,12 @@ impl Service {
         drop(lock);
         if done.access {
             self.declare(&document);
+        }
+        if done.applied.changed
+            && let WorkspaceCommand::SetFamilyArchived(SetFamilyArchived { thread, .. })
+            | WorkspaceCommand::SetFamilyPinned(SetFamilyPinned { thread, .. }) = command
+        {
+            self.mirror_family(&document, thread);
         }
         Ok(done)
     }
@@ -905,5 +926,60 @@ impl Service {
             page,
             revision(&entries),
         )
+    }
+}
+
+impl Service {
+    /// Projects the family state of `thread` into the `threads` table for
+    /// every member. The family state of the sidebar stays the source: a
+    /// failure here leaves the file as it was written and is only logged, and
+    /// the next archive or pin of the family projects it again.
+    fn mirror_family(&self, document: &SidebarDocument, thread: &WireThread) {
+        let Some(mirror) = &self.mirror else {
+            return;
+        };
+        let states = document.sidebar.resolve_states();
+        let id = ThreadId::new(thread.as_str());
+        let Some(family) = states.get(&id).and_then(|s| s.family.as_ref().ok()) else {
+            return;
+        };
+        let upserts: Vec<storage::threads::ThreadUpsert> = document
+            .sidebar
+            .threads
+            .iter()
+            .filter(|t| {
+                states
+                    .get(&t.id)
+                    .and_then(|s| s.family.as_ref().ok())
+                    .is_some_and(|key| key == family)
+            })
+            .filter_map(|t| {
+                let state = states.get(&t.id).filter(|s| s.is_resolved())?;
+                let root = document
+                    .sidebar
+                    .projects
+                    .iter()
+                    .find(|p| p.id == t.project_id)
+                    .and_then(|p| p.repo_root.canonicalize().ok())
+                    .map(|p| path_text(&p));
+                Some(storage::threads::ThreadUpsert {
+                    thread_id: t.id.to_string(),
+                    project_id: Some(t.project_id.to_string()),
+                    project_root: root,
+                    title: Some(t.title.clone()),
+                    archived: Some(state.archived),
+                    archived_at_ns: state.archived_at.map(|at| at.saturating_mul(1_000_000_000)),
+                    pinned: Some(state.pinned),
+                    archive_revision: state.archive_revision,
+                    pin_revision: state.pin_revision,
+                    created_at_ns: t.created_at.saturating_mul(1_000_000_000),
+                    updated_at_ns: t.last_activity().saturating_mul(1_000_000_000),
+                    ..storage::threads::ThreadUpsert::default()
+                })
+            })
+            .collect();
+        if let Err(error) = mirror.upsert_threads_host(&upserts) {
+            tracing::warn!(%error, "the family state was saved but not projected into the threads table");
+        }
     }
 }

@@ -621,3 +621,60 @@ fn a_command_that_changes_nothing_leaves_the_file_byte_identical() {
     assert!(!same.changed);
     assert_eq!(std::fs::read(f.store.path()).unwrap(), before);
 }
+
+#[test]
+fn archive_and_pin_of_a_family_are_projected_into_the_threads_table() {
+    let mut f = fixture(vec![
+        thread("root"),
+        fork_of("fork", "root"),
+        thread("other"),
+    ]);
+    let db_path = f.config.join("host.db");
+    let storage = storage::Storage::open(storage::StorageConfig {
+        db_path: db_path.clone(),
+        ..storage::StorageConfig::default()
+    })
+    .unwrap();
+    f.area = WorkspaceArea::with_store(
+        SidebarStore::new(f.config.join("sidebar.json")),
+        None,
+        vec![f.config.clone()],
+        None,
+        |_| false,
+    )
+    .with_mirror(storage.handle());
+    let family = f
+        .families()
+        .into_iter()
+        .find(|family| family.members == 2)
+        .unwrap();
+    applied(
+        f.send(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
+            thread: wire_thread("fork"),
+            archived: true,
+            expected_revision: family.archive_revision,
+        })),
+    );
+    applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
+        thread: wire_thread("root"),
+        pinned: true,
+        expected_revision: family.pin_revision,
+    })));
+    storage.close();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let row = |id: &str| -> Option<(bool, bool)> {
+        conn.query_row(
+            "SELECT archived, pinned FROM threads WHERE thread_id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()
+    };
+    assert_eq!(row("root"), Some((true, true)));
+    assert_eq!(row("fork"), Some((true, true)));
+    assert_eq!(
+        row("other"),
+        None,
+        "a thread outside the family is untouched"
+    );
+}
