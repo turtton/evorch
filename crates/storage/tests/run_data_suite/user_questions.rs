@@ -177,6 +177,74 @@ fn answered_questions_free_requester_slots_beyond_the_cumulative_total() {
 }
 
 #[test]
+fn history_past_the_unanswered_capacity_stays_readable_and_inheritable() {
+    let (_dir, storage, database, _config) = fixture();
+    let host = AnswerOrigin::Host {
+        channel: Default::default(),
+    };
+    let ask = |id: u64| {
+        let mut q = question(id);
+        q.run_id = "run-1".into();
+        storage.handle().create_user_question(&q)
+    };
+    for id in 0..32 {
+        ask(id).unwrap();
+    }
+    storage
+        .handle()
+        .answer_user_question("question-0", "A", &host)
+        .unwrap();
+    ask(32).unwrap();
+    // 33 questions in the run's history, 32 of them unanswered.
+    let history = database.user_questions_for_run("run-1").unwrap();
+    assert_eq!(history.len(), 33);
+    assert_eq!(history.iter().filter(|q| q.answer.is_some()).count(), 1);
+
+    // The lifetime total keeps growing; every answer stays readable in order.
+    for id in 1..100 {
+        storage
+            .handle()
+            .answer_user_question(&format!("question-{id}"), "A", &host)
+            .unwrap();
+        ask(32 + id).unwrap();
+    }
+    let history = database.user_questions_for_run("run-1").unwrap();
+    assert_eq!(history.len(), 132);
+    assert_eq!(history.iter().filter(|q| q.answer.is_none()).count(), 32);
+    assert_eq!(history[0].id, "question-0");
+    assert_eq!(history[0].answer.as_deref(), Some("A"));
+    assert_eq!(history[131].id, "question-131");
+
+    // A continuation inherits the whole history, answered or not.
+    let ids = history.iter().map(|q| q.id.clone()).collect::<Vec<_>>();
+    storage
+        .handle()
+        .bind_user_questions("run-1", "run-2000", &ids)
+        .unwrap();
+    let inherited = database.user_questions_for_run("run-2000").unwrap();
+    assert_eq!(inherited.len(), 132);
+    assert_eq!(inherited.iter().filter(|q| q.answer.is_none()).count(), 32);
+    // Its capacity is the same unanswered count: full until one is answered.
+    let mut own = question(3000);
+    own.run_id = "run-2000".into();
+    assert!(matches!(
+        storage.handle().create_user_question(&own),
+        Err(StorageError::QuestionCapacity(
+            storage::lane_delivery::QuestionCapacity::Requester
+        ))
+    ));
+    storage
+        .handle()
+        .answer_user_question("question-131", "A", &host)
+        .unwrap();
+    storage.handle().create_user_question(&own).unwrap();
+    assert_eq!(
+        database.user_questions_for_run("run-2000").unwrap().len(),
+        133
+    );
+}
+
+#[test]
 fn per_run_metadata_and_utf8_byte_limits_are_enforced() {
     let (_dir, storage, database, _config) = fixture();
     for id in 0..32 {

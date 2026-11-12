@@ -329,7 +329,7 @@ pub(super) fn ask_user(name: &str) -> ToolSpec {
 pub(super) fn user_answers(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Return up to 32 questions created by this run or explicitly inherited from its resumed conversation, with pending/answered state and original requester provenance. This read does not consume answers. Answers are also injected automatically into the run, so use this for recovery or inspection rather than repeated polling. An unconfigured store returns an empty list; unknown arguments or durable storage read failures return an error.",
+        "Return the questions created by this run or explicitly inherited from its resumed conversation, with pending/answered state and original requester provenance: every unanswered question and the 32 most recent answered ones, oldest first. This read does not consume answers. Answers are also injected automatically into the run, so use this for recovery or inspection rather than repeated polling. An unconfigured store returns an empty list; unknown arguments or durable storage read failures return an error.",
         json!({}),
         &[],
         true,

@@ -142,7 +142,10 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
   recipients before starting the new run; failed inheritance prevents startup.
 - The first answer is final; retries of the same answer are idempotent. At most 32
   unanswered questions per run are permitted (answering frees a slot); there is no
-  workbench-wide limit. Storage or
+  workbench-wide limit. A run's answer history is not capped: reading, answer
+  injection and continuation keep working past 32 lifetime questions, and the
+  `user_answers` tool lists every unanswered question plus the 32 most recent
+  answered ones. Storage or
   secret-guard failures are surfaced. No answer grants tool permission.
 - The GUI shows questions in their owning conversation. A storage acknowledgement
   clears an answered card even if an old run's event fence rejects its event.
