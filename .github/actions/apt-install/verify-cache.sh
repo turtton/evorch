@@ -13,8 +13,9 @@
 #
 # verify checks, in this order:
 #   1. each lists/*InRelease verifies against the Ubuntu archive keyring and is not
-#      older than APT_VERIFY_MAX_AGE_DAYS (an old signed snapshot cannot be replayed
-#      indefinitely);
+#      older than the same InRelease in the runner image's own lists, when the image
+#      has one (a signed snapshot older than the image cannot be replayed; the
+#      release pocket's InRelease is never refreshed, so there is no absolute age);
 #   2. each Packages index (decompressed) has the sha256 that a verified InRelease
 #      lists for a Packages file; any other index is ignored;
 #   3. the sha256 of every *.deb is among the SHA256 fields of those indexes.
@@ -22,19 +23,16 @@
 # for, makes verify fail, and the caller then installs through apt as usual.
 #
 # Environment (all optional; the defaults are the runner's):
-#   APT_LISTS_DIR              /var/lib/apt/lists (collect only)
+#   APT_LISTS_DIR              /var/lib/apt/lists (collect: the source of the indexes;
+#                              verify: the image's InRelease files for the age check)
 #   APT_VERIFY_KEYRINGS        space-separated keyrings, default the Ubuntu archive ones
 #   APT_HELPER                 /usr/lib/apt/apt-helper (reads compressed indexes)
-#   APT_VERIFY_MAX_AGE_DAYS    60
-#   APT_VERIFY_NOW             epoch seconds to treat as now
 set -euo pipefail
 
 mode="${1:?usage: verify-cache.sh collect|verify <cache-dir>}"
 cache="${2:?usage: verify-cache.sh collect|verify <cache-dir>}"
 lists_dir="${APT_LISTS_DIR:-/var/lib/apt/lists}"
 helper="${APT_HELPER:-/usr/lib/apt/apt-helper}"
-max_age_days="${APT_VERIFY_MAX_AGE_DAYS:-60}"
-now="${APT_VERIFY_NOW:-$(date +%s)}"
 
 fail() { echo "apt-install verify: $*" >&2; exit 1; }
 
@@ -89,32 +87,43 @@ case "$mode" in
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
     : > "$tmp/trusted-index-hashes"
+    releases_total=0
+    releases_ok=0
     for release in "$cache"/lists/*InRelease; do
       [[ -f "$release" ]] || continue
+      releases_total=$((releases_total + 1))
       gpgv "${keyring_args[@]}" --output "$tmp/release" "$release" 2> /dev/null || continue
-      released="$(sed -n 's/^Date: //p' "$tmp/release" | head -n 1)"
-      released_at="$(date -d "$released" +%s 2> /dev/null)" || continue
-      (( released_at <= now + 86400 && now - released_at <= max_age_days * 86400 )) || continue
+      released_at="$(date -d "$(sed -n 's/^Date: //p' "$tmp/release" | head -n 1)" +%s 2> /dev/null)" || continue
+      image_release="$lists_dir/${release##*/}"
+      if [[ -f "$image_release" ]]; then
+        image_at="$(date -d "$(sed -n 's/^Date: //p' "$image_release" | head -n 1)" +%s 2> /dev/null)" || image_at=0
+        (( released_at >= image_at )) || continue
+      fi
+      releases_ok=$((releases_ok + 1))
       awk '/^SHA256:/ { in_hashes = 1; next } /^[^ ]/ { in_hashes = 0 } in_hashes && $3 ~ /(^|\/)Packages$/ { print $1 }' \
         "$tmp/release" >> "$tmp/trusted-index-hashes"
     done
     [[ -s "$tmp/trusted-index-hashes" ]] || fail "no InRelease verified against the Ubuntu archive keyring"
 
     : > "$tmp/deb-hashes"
+    indexes_total=0
+    indexes_ok=0
     for index in "$cache"/lists/*Packages*; do
       [[ -f "$index" ]] || continue
+      indexes_total=$((indexes_total + 1))
       index_content "$index" > "$tmp/index"
       index_hash="$(sha256sum "$tmp/index" | cut -d' ' -f1)"
       grep -qxF "$index_hash" "$tmp/trusted-index-hashes" || continue
+      indexes_ok=$((indexes_ok + 1))
       awk '/^SHA256: / { print $2 }' "$tmp/index" >> "$tmp/deb-hashes"
     done
     [[ -s "$tmp/deb-hashes" ]] || fail "no Packages index is vouched for by a verified InRelease"
 
     for deb in "${debs[@]}"; do
       deb_hash="$(sha256sum "$deb" | cut -d' ' -f1)"
-      grep -qxF "$deb_hash" "$tmp/deb-hashes" || fail "${deb##*/} is not an archive package listed by a verified index"
+      grep -qxF "$deb_hash" "$tmp/deb-hashes" || fail "${deb##*/} is not listed by a verified index (InRelease verified: $releases_ok/$releases_total, Packages vouched for: $indexes_ok/$indexes_total)"
     done
-    echo "apt-install verify: ${#debs[@]} .debs match the signed Ubuntu archive indexes"
+    echo "apt-install verify: ${#debs[@]} .debs match the signed Ubuntu archive indexes (InRelease verified: $releases_ok/$releases_total, Packages vouched for: $indexes_ok/$indexes_total)"
     ;;
   *) fail "unknown mode: $mode" ;;
 esac

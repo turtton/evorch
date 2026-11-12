@@ -102,8 +102,16 @@ make_repo "$repo" trusted "$fresh"
 cp "$repo/InRelease.txt" "$repo/lists/archive.invalid_dists_resolute_InRelease"
 expect_rejected "an unsigned InRelease" "$repo"
 
+# The release pocket's InRelease is never refreshed, so age alone proves nothing.
 make_repo "$repo" trusted "$(date -u -R -d '200 days ago')"
-expect_rejected "an old signed snapshot" "$repo"
+expect_ok "an old but signed snapshot when the image has no newer one" "$repo"
+
+# A signed snapshot older than the InRelease the runner image itself has is a rollback.
+mkdir -p "$work/image-lists"
+printf 'Origin: Ubuntu\nDate: %s\n' "$(date -u -R -d '100 days ago')" > "$work/image-lists/archive.invalid_dists_resolute_InRelease"
+APT_LISTS_DIR="$work/image-lists" expect_rejected "a snapshot older than the image's own InRelease" "$repo"
+make_repo "$repo" trusted "$(date -u -R -d '50 days ago')"
+APT_LISTS_DIR="$work/image-lists" expect_ok "a snapshot newer than the image's InRelease" "$repo"
 
 make_repo "$repo" trusted "$fresh"
 rm -rf "$repo/lists"
