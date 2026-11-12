@@ -12,6 +12,25 @@ pub fn plan(runtime: &AgentRuntime) -> Result<RecoveryPlan, BootstrapError> {
     Ok(runtime.recovery_plan()?)
 }
 
+/// Explicit only: a read-only startup plan must never admit a provider task.
+/// PR 06c supplies the lease-bound evidence after exclusive startup is complete.
+pub fn prepare(
+    runtime: &AgentRuntime,
+    component: &runtime::quiesce::RecoveryComponent,
+    startup: storage::RecoveryStartupComplete,
+    ownership_root: &std::path::Path,
+) -> Result<runtime::PausedRecoveryComponent, BootstrapError> {
+    Ok(runtime.prepare_component(component, startup, ownership_root)?)
+}
+
+pub fn release(
+    runtime: &AgentRuntime,
+    component: runtime::PausedRecoveryComponent,
+    reason: &str,
+) -> Result<(), BootstrapError> {
+    Ok(runtime.release_prepared_component(component, reason)?)
+}
+
 /// `capture_id` is unique per attempt, including retries. Components commit
 /// independently; on error inspect durable manifests before a fresh-ID retry.
 /// After restart drain closes dispatch, the caller must exit, not fall back to

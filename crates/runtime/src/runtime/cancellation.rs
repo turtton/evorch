@@ -51,6 +51,13 @@ impl ExecutionControl {
     pub(crate) fn publication(&self) -> PublicationToken {
         self.publication.clone()
     }
+    pub(super) fn publication_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.publication
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     pub(super) fn cancelled(&self) -> bool {
         self.publication.0.cancelled.load(Ordering::Acquire)
     }
@@ -130,6 +137,7 @@ pub(super) struct SpawnIntent {
     // An opaque allocation avoids generation wraparound/ABA while tokens exist.
     pub(super) cancellation_generation: Arc<()>,
     pub(super) execution: Option<Arc<ExecutionControl>>,
+    pub(super) paused_recovery: Option<super::recovery_activation::PausedRecoveryIndex>,
 }
 
 pub(super) fn current_execution(
@@ -198,6 +206,15 @@ impl AgentRuntime {
                 drop(intents);
                 drop(gate);
                 continue;
+            }
+            if let Some(paused) = intents.get(&run).and_then(|i| i.paused_recovery.as_ref()) {
+                let old = paused.old_incarnation.clone();
+                drop(runs);
+                drop(admissions);
+                drop(intents);
+                execution.forbid_publication();
+                self.fence_paused_stop(run, &old, crate::quiesce::StopReason::Cancelled)?;
+                return Ok(());
             }
             let ownership = Self::pending_lane_cancellation_ownership(run, &runs, &admissions);
             if let Some(admission) = admissions.get_mut(&run)
@@ -269,6 +286,14 @@ impl AgentRuntime {
         parent: Option<RunId>,
         intents: &HashMap<RunId, SpawnIntent>,
     ) -> Result<Arc<ExecutionControl>, RuntimeError> {
+        if intents
+            .get(&run)
+            .is_some_and(|i| i.paused_recovery.is_some())
+        {
+            return Err(RuntimeError::Model {
+                reason: "run belongs to a paused recovery component".into(),
+            });
+        }
         if intents.get(&run).is_some_and(|i| i.cancelled)
             || parent
                 .and_then(|p| intents.get(&p))

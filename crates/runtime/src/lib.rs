@@ -121,7 +121,8 @@ pub use run::{
 pub use run_store::RunStore;
 pub use runtime::{
     AgentRuntime, AnswerOutcome, AnswerQuestionError, ChatResumeObservation, FollowUpStatus,
-    FollowUpWithdrawalError, ProjectModelResolver, ProjectSlugResolver, RunWait, SandboxFactory,
+    FollowUpWithdrawalError, PausedRecoveryComponent, ProjectModelResolver, ProjectSlugResolver,
+    RunWait, SandboxFactory,
     WeakAgentRuntime, WorkspaceMounts, production_executor, production_executor_with_config,
     production_executor_with_host_tools,
 };
