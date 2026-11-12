@@ -296,6 +296,15 @@ fn a_lock_held_elsewhere_is_busy_and_the_file_is_untouched() {
         f.rename("t1", "x", revision),
         WorkspaceResult::Rejected(WorkspaceRejection::Busy)
     );
+    let error = f
+        .area
+        .query(&WorkspaceQuery::ListFamilies(PageRequest::default()))
+        .unwrap_err();
+    assert_eq!(error.code, workbench_protocol::errors::ErrorCode::Busy);
+    assert_eq!(
+        error.retry,
+        workbench_protocol::errors::RetryAdvice::SameRequest
+    );
     drop(held);
     assert_eq!(std::fs::read(f.store.path()).unwrap(), before);
     applied(f.rename("t1", "x", revision));
@@ -694,13 +703,13 @@ fn archive_and_pin_of_a_family_are_projected_into_the_threads_table() {
     assert_eq!(row("fork"), Some((true, true)));
     assert_eq!(
         row("other"),
-        None,
+        Some((false, false)),
         "a thread outside the family is untouched"
     );
 }
 
 #[test]
-fn a_failed_database_projection_keeps_the_sidebar_and_converges_on_the_next_read() {
+fn a_failed_database_projection_converges_after_restart_without_an_edit() {
     let mut f = fixture(vec![thread("root"), fork_of("fork", "root")]);
     let db_path = f.config.join("host.db");
     let storage = storage::Storage::open(storage::StorageConfig {
@@ -749,12 +758,42 @@ fn a_failed_database_projection_keeps_the_sidebar_and_converges_on_the_next_read
     let count: i64 = conn
         .query_row("SELECT count(*) FROM threads", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count, 0, "the failure really prevented database projection");
+    assert_eq!(count, 2);
+    for id in ["root", "fork"] {
+        let flags: (bool, bool) = conn
+            .query_row(
+                "SELECT archived, pinned FROM threads WHERE thread_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            flags,
+            (false, false),
+            "the failure prevented projection of the edit"
+        );
+    }
     let bytes = std::fs::read(f.store.path()).unwrap();
     conn.execute_batch("DROP TRIGGER fail_workspace_projection;")
         .unwrap();
-    // A read repairs the projection from the latest saved state; no edit retry.
-    let _ = f.detail("root");
+    // Lose the service and its retry flag, close/reopen the actual writer, and
+    // use the same startup entry point as bootstrap. No read/edit triggers it.
+    drop(f.area);
+    storage.close();
+    let storage = storage::Storage::open(storage::StorageConfig {
+        db_path: db_path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    f.area = WorkspaceArea::with_store(
+        SidebarStore::new(f.config.join("sidebar.json")),
+        None,
+        vec![f.config.clone()],
+        None,
+        |_| false,
+    )
+    .with_mirror(storage.handle());
+    f.area.declare_saved().unwrap();
     for id in ["root", "fork"] {
         let state: (bool, bool) = conn
             .query_row(
@@ -776,11 +815,7 @@ fn a_failed_database_projection_keeps_the_sidebar_and_converges_on_the_next_read
 /// The ledger says a lane is detached while the saved sidebar still holds it
 /// under its lead: a pin must be applied to the repaired family, and a pin
 /// decided for the old family must be refused.
-#[test]
-fn a_pin_after_a_detach_is_applied_to_the_repaired_family_only() {
-    use storage::lane_management::{
-        LaneManagementAction, LaneManagementActor, LaneManagementRequest,
-    };
+fn attached_lane_fixture() -> (Fixture, storage::Storage, storage::lanes::LaneRecord) {
     use storage::lanes::{LaneBrief, LanePolicy, NewLane};
     let mut f = fixture(vec![thread("lead"), thread("lane-thread")]);
     let storage = storage::Storage::open(storage::StorageConfig {
@@ -868,6 +903,16 @@ fn a_pin_after_a_detach_is_applied_to_the_repaired_family_only() {
         let lock = f.store.lock().unwrap();
         f.store.write(&lock, &document).unwrap();
     }
+    (f, storage, lane)
+}
+
+#[test]
+fn a_pin_after_a_detach_is_applied_to_the_repaired_family_only() {
+    use storage::lane_management::{
+        LaneManagementAction, LaneManagementActor, LaneManagementRequest,
+    };
+    let (f, storage, lane) = attached_lane_fixture();
+    let handle = storage.handle();
     let before = f
         .families()
         .into_iter()
@@ -899,21 +944,342 @@ fn a_pin_after_a_detach_is_applied_to_the_repaired_family_only() {
         WorkspaceRejection::FamilyChanged { .. }
     ));
     assert_eq!(std::fs::read(f.store.path()).unwrap(), saved);
-    // The families as read now are the repaired ones.
-    let families = f.families();
-    assert!(families.iter().all(|family| family.members == 1));
-    let lane_family = families
-        .iter()
-        .find(|family| family.key.as_str() == "lane-thread")
-        .expect("the detached lane is its own family");
-    let pinned = applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
+    assert_eq!(
+        handle
+            .pending_lane_management_projections(20)
+            .unwrap()
+            .len(),
+        1
+    );
+    // Submit directly before any read can repair/ACK it. Detach raised the SQL
+    // floor to 1; repairing the new period raises both sidebar series to 2.
+    let detached = identity("lane-thread", 2);
+    applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
         thread: wire_thread("lane-thread"),
         pinned: true,
-        expected_family: identity_of(lane_family),
-        expected_revision: lane_family.pin_revision,
+        expected_family: detached.clone(),
+        expected_revision: Revision(2),
     })));
-    assert!(pinned.changed);
+    assert!(
+        handle
+            .pending_lane_management_projections(20)
+            .unwrap()
+            .is_empty()
+    );
     assert!(f.detail("lane-thread").pinned);
     assert!(!f.detail("lead").pinned);
+    applied(
+        f.send(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
+            thread: wire_thread("lane-thread"),
+            archived: true,
+            expected_family: detached.clone(),
+            expected_revision: Revision(2),
+        })),
+    );
+    applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
+        thread: wire_thread("lane-thread"),
+        pinned: false,
+        expected_family: detached,
+        expected_revision: Revision(3),
+    })));
+    assert!(
+        handle
+            .pending_lane_management_projections(20)
+            .unwrap()
+            .is_empty()
+    );
+    let saved = f.on_disk();
+    storage.close();
+    assert_detached_retention_deletes_only_the_lane(&f, &saved);
+}
+
+fn assert_detached_retention_deletes_only_the_lane(f: &Fixture, saved: &SidebarDocument) {
+    use storage::thread_retention::*;
+    let db_path = f.config.join("host.db");
+    let owners = f.config.join("owners");
+    let exclusive = storage::try_exclusive(&db_path, &owners).unwrap().unwrap();
+    let db = storage::Database::open(&storage::StorageConfig {
+        db_path: db_path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let states = saved.sidebar.resolve_states();
+    let threads: Vec<_> = saved
+        .sidebar
+        .threads
+        .iter()
+        .map(|t| {
+            let state = &states[&t.id];
+            SidebarThread {
+                thread_id: t.id.to_string(),
+                archived: state.archived,
+                archived_at_s: state.archived_at,
+                pinned: state.pinned,
+                updated_at_s: t.last_activity(),
+                created_at_s: t.created_at,
+                archive_revision: Some(state.archive_revision),
+                pin_revision: Some(state.pin_revision),
+            }
+        })
+        .collect();
+    // Fixture time is relative to the saved archive/activity, never a deadline.
+    let latest = threads
+        .iter()
+        .map(|t| t.updated_at_s.max(t.archived_at_s.unwrap_or(0)))
+        .max()
+        .unwrap();
+    let input = RetentionInput {
+        threads,
+        sidebar_path: f.store.path().to_string_lossy().into_owned(),
+        ownership_root: owners.to_string_lossy().into_owned(),
+        now_ns: latest.saturating_mul(1_000_000_000) + 30 * NANOS_PER_DAY,
+    };
+    let policy = ThreadRetentionPolicy {
+        archived_delete_after_days: 1,
+        ..Default::default()
+    };
+    let settled = loop {
+        let result = db
+            .retention_explore(&input, &policy, ExploreBudget { max_edges: 128 })
+            .unwrap();
+        if result
+            .iter()
+            .all(|(_, s)| !matches!(s, FamilyState::Exploring { .. }))
+        {
+            break result;
+        }
+    };
+    let (key, _) = settled
+        .iter()
+        .find(|(_, state)| {
+            matches!(state,
+                FamilyState::Explored { threads, .. } if threads == &["lane-thread".to_owned()]
+            )
+        })
+        .unwrap_or_else(|| panic!("ACK must release retention: {settled:?}"));
+    let result = db
+        .retention_finalize(
+            key,
+            &input,
+            &policy,
+            &Default::default(),
+            &BindingInput {
+                sidebar_path: input.sidebar_path.clone(),
+                ownership_root: input.ownership_root.clone(),
+            },
+            FinalizeBudget { max_edges: 1024 },
+        )
+        .unwrap();
+    assert!(
+        matches!(result, FinalizeOutcome::Confirmed(_)),
+        "{result:?}"
+    );
+    assert!(db.tombstones().unwrap().contains_thread("lane-thread"));
+    assert!(!db.tombstones().unwrap().contains_thread("lead"));
+    drop(db);
+    drop(exclusive);
+    let storage = storage::Storage::open(storage::StorageConfig {
+        db_path,
+        ..Default::default()
+    })
+    .unwrap();
+    loop {
+        let p = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        assert_eq!(p.last_error, None);
+        if p.jobs_db_pending == 0 {
+            break;
+        }
+    }
+    storage.close();
+    let sql = rusqlite::Connection::open(f.config.join("host.db")).unwrap();
+    let exists = |id: &str| {
+        sql.query_row(
+            "SELECT count(*) FROM threads WHERE thread_id=?1",
+            [id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(exists("lane-thread"), 0);
+    assert_eq!(exists("lead"), 1);
+}
+
+fn projection_rows(document: &SidebarDocument) -> Vec<storage::threads::ThreadUpsert> {
+    let states = document.sidebar.resolve_states();
+    document
+        .sidebar
+        .threads
+        .iter()
+        .map(|t| {
+            let state = &states[&t.id];
+            storage::threads::ThreadUpsert {
+                thread_id: t.id.to_string(),
+                title: Some(t.title.clone()),
+                archived: Some(state.archived),
+                pinned: Some(state.pinned),
+                archived_at_ns: state.archived_at.map(|s| s * 1_000_000_000),
+                archive_revision: state.archive_revision,
+                pin_revision: state.pin_revision,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_legacy_save_and_delayed_mirror_cannot_ack_old_membership_or_roll_back_core_edits() {
+    use storage::lane_management::{
+        LaneManagementAction, LaneManagementActor, LaneManagementRequest,
+    };
+    let (f, storage, lane) = attached_lane_fixture();
+    let handle = storage.handle();
+    let old = f.on_disk();
+    let old_snapshot = handle
+        .sidebar_projection_snapshot(vec!["lead".into(), "lane-thread".into()])
+        .unwrap();
+    let mut old_rows = projection_rows(&old);
+    for row in &mut old_rows {
+        row.pin_revision = 999;
+        row.archive_revision = 999;
+    }
+    handle
+        .apply_lane_management_transition(
+            LaneManagementRequest {
+                operation_id: "detach-concurrent".into(),
+                lane_id: lane.lane_id,
+                expected_management_revision: lane.management_revision,
+                action: LaneManagementAction::Detach,
+            },
+            LaneManagementActor::User,
+            None,
+            20,
+        )
+        .unwrap();
+    assert!(matches!(
+        handle.project_sidebar_threads(old_rows.clone(), old_snapshot.fence.clone(), true),
+        Err(storage::StorageError::LaneManagement(
+            storage::lane_management::LaneManagementError::StaleManagementRevision
+        ))
+    ));
+    assert_eq!(
+        handle
+            .pending_lane_management_projections(20)
+            .unwrap()
+            .len(),
+        1,
+        "a stale legacy snapshot cannot ACK the new membership"
+    );
+    let detached = identity("lane-thread", 2);
+    applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
+        thread: wire_thread("lane-thread"),
+        pinned: true,
+        expected_family: detached.clone(),
+        expected_revision: Revision(0),
+    })));
+    assert!(matches!(
+        handle.project_sidebar_threads(old_rows, old_snapshot.fence, true),
+        Err(storage::StorageError::LaneManagement(
+            storage::lane_management::LaneManagementError::StaleManagementRevision
+        ))
+    ));
+    assert!(f.detail("lane-thread").pinned);
+
+    let base = f.on_disk().sidebar;
+    let mut local = base.clone();
+    local
+        .threads
+        .iter_mut()
+        .find(|t| t.id == ThreadId::new("lane-thread"))
+        .unwrap()
+        .title = "legacy rename".into();
+    let store = f.store.clone();
+    let gui = handle.clone();
+    let (saved_tx, saved_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let legacy = scope.spawn(move || {
+            let lock = store.lock().unwrap();
+            let mut document = store.read(&lock).unwrap();
+            document.sidebar =
+                workspace_state::SidebarState::merge_three_way(&base, &local, &document.sidebar);
+            // The GUI checks membership under the same file lock before saving.
+            let snapshot = gui
+                .sidebar_projection_snapshot(
+                    document
+                        .sidebar
+                        .threads
+                        .iter()
+                        .map(|t| t.id.to_string())
+                        .collect(),
+                )
+                .unwrap();
+            assert!(
+                snapshot
+                    .lanes
+                    .iter()
+                    .all(|l| document.sidebar.threads.iter().any(|t| {
+                        t.id.to_string() == l.thread_id
+                            && t.lane.as_ref().is_some_and(|link| {
+                                link.management_revision == l.management_revision
+                            })
+                    }))
+            );
+            store.write(&lock, &document).unwrap();
+            drop(lock);
+            let rows = projection_rows(&document);
+            saved_tx.send(()).unwrap();
+            // Core edits land between the GUI's durable save and its SQL mirror.
+            resume_rx.recv().unwrap();
+            gui.project_sidebar_threads(rows.clone(), snapshot.fence.clone(), true)
+                .unwrap();
+            gui.project_sidebar_threads(rows, snapshot.fence, true)
+                .unwrap();
+        });
+        saved_rx.recv().unwrap();
+        applied(
+            f.send(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
+                thread: wire_thread("lane-thread"),
+                archived: true,
+                expected_family: detached.clone(),
+                expected_revision: Revision(0),
+            })),
+        );
+        applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
+            thread: wire_thread("lane-thread"),
+            pinned: false,
+            expected_family: detached,
+            expected_revision: Revision(1),
+        })));
+        resume_tx.send(()).unwrap();
+        legacy.join().unwrap();
+    });
+    assert!(
+        handle
+            .pending_lane_management_projections(20)
+            .unwrap()
+            .is_empty()
+    );
+    let sql = rusqlite::Connection::open(f.config.join("host.db")).unwrap();
+    let row: (String, bool, bool, u64, u64) = sql.query_row(
+        "SELECT title,archived,pinned,archive_revision,pin_revision FROM threads WHERE thread_id='lane-thread'", [],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    ).unwrap();
+    assert_eq!(row, ("legacy rename".into(), true, false, 1, 2));
+    let revision: u64 = sql
+        .query_row(
+            "SELECT management_revision FROM lanes WHERE lane_id='lane'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        revision, 2,
+        "mirror/ACK must not replay the management transition"
+    );
+    let detail = f.detail("lane-thread");
+    assert!(detail.archived && !detail.pinned);
     storage.close();
 }

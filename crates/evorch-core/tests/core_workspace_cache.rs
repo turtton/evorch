@@ -9,8 +9,8 @@ use event_bus::AgentRunPhase;
 use sandbox::CredentialStore;
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
 use workbench_host::provenance::local_desktop;
-use workbench_protocol::commands::{Command, CommandResult, ThreadTarget};
-use workbench_protocol::ids::{ProjectId, SessionId, ThreadId};
+use workbench_protocol::commands::{Command, CommandResult, ComposerRole, SendChat, ThreadTarget};
+use workbench_protocol::ids::{ProjectId, SessionId, SubmissionId, ThreadId};
 use workbench_protocol::namespaces::workspace::*;
 use workbench_protocol::namespaces::{WorkspaceQuery, WorkspaceReply};
 use workbench_protocol::queries::{PageRequest, Query, QueryReply};
@@ -166,7 +166,44 @@ async fn trust_and_sidebar_changes_keep_the_sent_prefix_on_the_production_wire()
             receiver: core.runtime.event_bus().subscribe(),
         };
         provider.enqueue(vec![cache::answer()]);
-        let run = cache::start(&h);
+        let run: runtime::RunId = {
+            let send = SendChat {
+                project: ProjectId::new("p").unwrap(),
+                thread: ThreadId::new("t1").unwrap(),
+                // The production Claude transport requires a UUID prompt identity.
+                submission_id: SubmissionId::new("00000000-0000-4000-8000-000000000009").unwrap(),
+                composer_role: ComposerRole::Worker,
+                text: cache::GOAL.into(),
+                skills: vec![],
+                images: vec![],
+                model_preference: None,
+                fork_seed: None,
+            };
+            let mut host = core.host.lock().unwrap();
+            host.reserve_new_chat_thread(&send).unwrap();
+            host.handle_command(
+                Command::Conversation(
+                    workbench_protocol::namespaces::ConversationCommand::SendChat(send),
+                ),
+                local_desktop(),
+            )
+            .unwrap()
+            .run_id
+            .unwrap()
+            .as_str()
+            .parse()
+            .unwrap()
+        };
+        let thread = core
+            .runtime
+            .with_storage_reader(|db| db.thread("t1"))
+            .unwrap()
+            .flatten()
+            .unwrap();
+        assert_eq!(
+            thread.root_run_id.as_deref(),
+            Some(run.to_string().as_str())
+        );
         cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
 
         // Everything the workspace area can change, while the run is open.

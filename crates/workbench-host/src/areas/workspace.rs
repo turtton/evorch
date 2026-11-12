@@ -8,7 +8,8 @@
 //! what was read, the expected revision is compared with the entity as read,
 //! the edit is applied, the file is written atomically, and only then are the
 //! live runtime declarations, the event and the projection updated. A failure
-//! at any step leaves the file as it was.
+//! before the durable save leaves the file as it was. Projection failures after
+//! that boundary are retried without replaying the edit.
 //!
 //! Interim state (until PR 19a): desktops that still hold a sidebar in memory
 //! merge the file with their own three-way merge, so this writer and a legacy
@@ -29,7 +30,7 @@ use runtime::thread_retention::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use storage::thread_retention::{BlockReason, RetentionStatus, SidebarThread};
 use workbench_protocol::commands::{CommandReply, CommandResult};
 use workbench_protocol::envelope::Provenance;
@@ -65,9 +66,9 @@ struct Service {
     /// Threads the core already registered (or found) in the sidebar, so that
     /// a follow-up message does not take the file lock again.
     registered: std::sync::Mutex<std::collections::BTreeSet<String>>,
-    /// Threads whose family state is saved in the sidebar but did not reach the
-    /// `threads` table. They are projected again with the next write or read.
-    unprojected: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Reproject all saved state at startup too: a failed mirror may have been
+    /// followed by a crash, leaving no in-memory retry information.
+    needs_projection: AtomicBool,
 }
 
 /// A conversation the core created, to be listed in the sidebar.
@@ -210,7 +211,7 @@ impl WorkspaceArea {
                 pager: Pager::default(),
                 changes: AtomicU64::new(0),
                 registered: Default::default(),
-                unprojected: Default::default(),
+                needs_projection: AtomicBool::new(true),
             }),
         })
     }
@@ -236,7 +237,7 @@ impl WorkspaceArea {
                 pager: Pager::default(),
                 changes: AtomicU64::new(0),
                 registered: Default::default(),
-                unprojected: Default::default(),
+                needs_projection: AtomicBool::new(true),
             }),
         }
     }
@@ -263,7 +264,7 @@ impl WorkspaceArea {
     /// The sidebar could not be read.
     pub fn project_entries(&self) -> Result<Vec<(WireProject, PathBuf, String)>, WorkbenchError> {
         let service = self.inner.as_ref().ok_or_else(unwired)?;
-        let document = service.read().map_err(|e| internal(&e))?;
+        let document = service.read()?;
         Ok(document
             .sidebar
             .projects
@@ -294,10 +295,7 @@ impl WorkspaceArea {
     /// not made a live permission (the runtime skips it).
     pub fn declare_saved(&self) -> Result<(), WorkbenchError> {
         let service = self.inner.as_ref().ok_or_else(unwired)?;
-        let document = service
-            .store
-            .read_unlocked()
-            .map_err(|e| internal(&e.to_string()))?;
+        let document = service.read()?;
         service.declare(&document);
         Ok(())
     }
@@ -324,8 +322,7 @@ impl WorkspaceArea {
     ) -> Result<WorkspaceReply, WorkbenchError> {
         use workbench_protocol::namespaces::WorkspaceQuery as Q;
         let service = self.inner.as_ref().ok_or_else(unwired)?;
-        let document = service.read().map_err(|e| internal(&e))?;
-        service.retry_unprojected(&document);
+        let document = service.read()?;
         match query {
             Q::GetProjectAccess(target) => service
                 .access_view(&document, &target.project)
@@ -443,11 +440,12 @@ impl Service {
             }
         }
         document.sidebar.refresh_derived();
+        let snapshot = self.repair_membership(&mut document.sidebar)?;
         self.store
             .write(&lock, &document)
             .map_err(|e| e.to_string())?;
+        self.project_saved(&lock, &mut document, snapshot);
         drop(lock);
-        self.project_family(&document, new.thread);
         self.registered
             .lock()
             .unwrap()
@@ -467,11 +465,37 @@ impl Service {
         (self.tombstones)().map_err(|reason| WorkspaceRejection::StorageFailed { reason })
     }
 
-    fn read(&self) -> Result<SidebarDocument, String> {
-        let mut document = self.store.read_unlocked().map_err(|e| e.to_string())?;
-        let deleted = (self.tombstones)()?;
+    fn read(&self) -> Result<SidebarDocument, WorkbenchError> {
+        let lock = self.store.lock().map_err(|error| match error {
+            StoreError::Busy => WorkbenchError::new(
+                ErrorCode::Busy,
+                "the shared sidebar is being saved; read it again",
+                RetryAdvice::SameRequest,
+            ),
+            error => internal(&error.to_string()),
+        })?;
+        let mut document = self
+            .store
+            .read(&lock)
+            .map_err(|e| internal(&e.to_string()))?;
+        let before = document.clone();
+        let deleted = (self.tombstones)().map_err(|e| internal(&e))?;
         document.prune_threads(&*deleted);
-        self.repair_membership(&mut document.sidebar)?;
+        let snapshot = self
+            .repair_membership(&mut document.sidebar)
+            .map_err(|e| internal(&e))?;
+        let repaired = document != before;
+        if repaired {
+            self.store
+                .write(&lock, &document)
+                .map_err(|e| internal(&e.to_string()))?;
+        }
+        if repaired
+            || self.needs_projection.load(Ordering::Relaxed)
+            || snapshot.as_ref().is_some_and(|s| s.projection_pending)
+        {
+            self.project_saved(&lock, &mut document, snapshot);
+        }
         Ok(document)
     }
 
@@ -480,9 +504,12 @@ impl Service {
     /// table (the ledger is authoritative, a file written before a lane
     /// changed is repaired). A ledger that cannot be read is an error, never a
     /// guess: nothing is edited on top of an unrepaired family.
-    fn repair_membership(&self, sidebar: &mut workspace_state::SidebarState) -> Result<(), String> {
+    fn repair_membership(
+        &self,
+        sidebar: &mut workspace_state::SidebarState,
+    ) -> Result<Option<storage::sidebar_projection::SidebarProjectionSnapshot>, String> {
         let Some(mirror) = &self.mirror else {
-            return Ok(());
+            return Ok(None);
         };
         let snapshot = mirror
             .sidebar_projection_snapshot(sidebar.threads.iter().map(|t| t.id.to_string()).collect())
@@ -506,7 +533,7 @@ impl Service {
             false,
         );
         sidebar.refresh_derived();
-        Ok(())
+        Ok(Some(snapshot))
     }
 
     fn check_family(
@@ -559,31 +586,20 @@ impl Service {
         let mut document = self.store.read(&lock).map_err(store_rejection)?;
         document.prune_threads(&*deleted);
         let before = document.sidebar.clone();
-        if matches!(
-            command,
-            WorkspaceCommand::SetFamilyArchived(_) | WorkspaceCommand::SetFamilyPinned(_)
-        ) {
-            self.repair_membership(&mut document.sidebar)
-                .map_err(|reason| WorkspaceRejection::StorageFailed { reason })?;
-        }
+        let snapshot = self
+            .repair_membership(&mut document.sidebar)
+            .map_err(|reason| WorkspaceRejection::StorageFailed { reason })?;
         let done = self.apply(command, &mut document, &*deleted)?;
         if document.sidebar != before {
             self.store
                 .write(&lock, &document)
                 .map_err(store_rejection)?;
         }
+        self.project_saved(&lock, &mut document, snapshot);
         drop(lock);
         if done.access {
             self.declare(&document);
         }
-        if done.applied.changed
-            && let WorkspaceCommand::SetFamilyArchived(SetFamilyArchived { thread, .. })
-            | WorkspaceCommand::SetFamilyPinned(SetFamilyPinned { thread, .. })
-            | WorkspaceCommand::RenameThread(RenameThread { thread, .. }) = command
-        {
-            self.project_family(&document, thread);
-        }
-        self.retry_unprojected(&document);
         Ok(done)
     }
 
@@ -1088,8 +1104,8 @@ fn retention_state(status: RetentionStatus) -> RetentionState {
 /// closed, or none at all, changes nothing about it.
 ///
 /// Recovery is taken into account by the storage side: a family whose run is a
-/// member of a committed, not superseded recovery manifest is not confirmed,
-/// and one with a prepared recovery claim reads as blocked.
+/// member of a recovery component is never split from that component; a prepared
+/// recovery claim blocks confirmation of the component.
 ///
 /// # Errors
 /// A message when the database, the ownership registry or the binding cannot
@@ -1176,54 +1192,67 @@ impl Service {
 }
 
 impl Service {
-    /// Projects the family state of `thread` into the `threads` table for
-    /// every member. The family state of the sidebar stays the source: a
-    /// failure here leaves the file as it was written and is only logged, and
-    /// the next archive or pin of the family projects it again.
-    fn project_family(&self, document: &SidebarDocument, thread: &WireThread) {
-        if self.mirror_family(document, thread) {
-            self.unprojected.lock().unwrap().remove(thread.as_str());
-        } else {
-            self.unprojected
-                .lock()
-                .unwrap()
-                .insert(thread.as_str().to_owned());
-        }
-    }
-
-    /// Projects again every family whose projection failed before.
-    fn retry_unprojected(&self, document: &SidebarDocument) {
-        let pending: Vec<String> = self.unprojected.lock().unwrap().iter().cloned().collect();
-        for thread in pending {
-            match WireThread::new(&thread) {
-                Ok(thread) => self.project_family(document, &thread),
-                Err(_) => {
-                    self.unprojected.lock().unwrap().remove(&thread);
+    /// Mirror and ACK only membership durably saved under this file lock.
+    /// A stale fence is never ACKed: repair/save again without replaying the edit.
+    fn project_saved(
+        &self,
+        lock: &workspace_state::SidebarLock,
+        document: &mut SidebarDocument,
+        mut snapshot: Option<storage::sidebar_projection::SidebarProjectionSnapshot>,
+    ) {
+        let Some(mirror) = &self.mirror else {
+            return;
+        };
+        self.needs_projection.store(true, Ordering::Relaxed);
+        // Management need not take the sidebar lock. Bound contention here; a
+        // still-pending projection is retried by the next read or by startup.
+        for _ in 0..3 {
+            let Some(current) = snapshot.take() else {
+                return;
+            };
+            let states = document.sidebar.resolve_states();
+            let can_ack = current.lanes.iter().all(|lane| {
+                states
+                    .get(&ThreadId::new(&lane.thread_id))
+                    .is_some_and(|s| s.is_resolved())
+            });
+            match mirror.project_sidebar_threads(Self::upserts(document), current.fence, can_ack) {
+                Ok(_) => {
+                    self.needs_projection.store(!can_ack, Ordering::Relaxed);
+                    return;
+                }
+                Err(storage::StorageError::LaneManagement(
+                    storage::lane_management::LaneManagementError::StaleManagementRevision,
+                )) => {
+                    let before = document.clone();
+                    snapshot = match self.repair_membership(&mut document.sidebar) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            tracing::warn!(%error, "sidebar membership repair is deferred");
+                            return;
+                        }
+                    };
+                    if document != &before
+                        && let Err(error) = self.store.write(lock, document)
+                    {
+                        tracing::warn!(%error, "sidebar membership save is deferred; not ACKed");
+                        return;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "saved sidebar projection is deferred; not ACKed");
+                    return;
                 }
             }
         }
     }
 
-    /// Whether the family reached the `threads` table (or there is no table).
-    fn mirror_family(&self, document: &SidebarDocument, thread: &WireThread) -> bool {
-        let Some(mirror) = &self.mirror else {
-            return true;
-        };
+    fn upserts(document: &SidebarDocument) -> Vec<storage::threads::ThreadUpsert> {
         let states = document.sidebar.resolve_states();
-        let id = ThreadId::new(thread.as_str());
-        let Some(family) = states.get(&id).and_then(|s| s.family.as_ref().ok()) else {
-            return true;
-        };
-        let upserts: Vec<storage::threads::ThreadUpsert> = document
+        document
             .sidebar
             .threads
             .iter()
-            .filter(|t| {
-                states
-                    .get(&t.id)
-                    .and_then(|s| s.family.as_ref().ok())
-                    .is_some_and(|key| key == family)
-            })
             .filter_map(|t| {
                 let state = states.get(&t.id).filter(|s| s.is_resolved())?;
                 let root = document
@@ -1248,11 +1277,62 @@ impl Service {
                     ..storage::threads::ThreadUpsert::default()
                 })
             })
-            .collect();
-        if let Err(error) = mirror.upsert_threads_host(&upserts) {
-            tracing::warn!(%error, "the family state was saved but not projected into the threads table; it is retried");
-            return false;
-        }
-        true
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_global_fence_is_repaired_and_retried_under_the_file_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("host.db");
+        let storage = storage::Storage::open(storage::StorageConfig {
+            db_path: path.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        let store = SidebarStore::new(temp.path().join("sidebar.json"));
+        let mut document = SidebarDocument::default();
+        document
+            .sidebar
+            .add_project(workspace_state::ProjectId::new("p"), "p", temp.path())
+            .unwrap();
+        document.sidebar.threads.push(ThreadRecord::new(
+            ThreadId::new("t"),
+            workspace_state::ProjectId::new("p"),
+            "t",
+        ));
+        document.sidebar.refresh_derived();
+        let lock = store.lock().unwrap();
+        store.write(&lock, &document).unwrap();
+        let area = WorkspaceArea::with_store(store, None, vec![], None, |_| false)
+            .with_mirror(storage.handle());
+        let service = area.inner.as_ref().unwrap();
+        let snapshot = service.repair_membership(&mut document.sidebar).unwrap();
+        // Deterministically interleave a management topology commit after the
+        // snapshot, just as a change to a lane outside this sidebar would do.
+        rusqlite::Connection::open(path).unwrap().execute(
+            "UPDATE lane_state SET family_topology_revision=family_topology_revision+1 WHERE id=1", [],
+        ).unwrap();
+        service.project_saved(&lock, &mut document, snapshot);
+        assert!(
+            !service.needs_projection.load(Ordering::Relaxed),
+            "CAS rejection must be repaired and retried, not ACKed or forgotten"
+        );
+        let count: i64 = rusqlite::Connection::open(temp.path().join("host.db"))
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM threads WHERE thread_id='t'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(service.store.read(&lock).unwrap(), document);
+        drop(lock);
+        storage.close();
     }
 }
