@@ -219,6 +219,22 @@ pub(crate) fn managed_lanes(
         .map_err(Into::into)
 }
 
+/// Lanes of `lead` whose ledger entry currently stands closed (`lead_closed`,
+/// `human_closed` or `discarded`). A later input, report or brief/management change
+/// clears the close, so a reopened lane drops out of this set again.
+pub(crate) fn closed_lane_ids(
+    conn: &Connection,
+    lead: &str,
+) -> Result<std::collections::BTreeSet<String>, StorageError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT lane_id FROM lanes WHERE lead_thread_id = ?1 AND current_close_id IS NOT NULL AND {LIVE}"
+    ))?;
+    statement
+        .query_map([lead], |row| row.get(0))?
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
+}
+
 /// Identity lookup deliberately ignores current lead/policy: detached intents
 /// still own their original creation key.
 pub(crate) fn get_by_creation_key(

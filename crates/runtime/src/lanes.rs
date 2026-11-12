@@ -246,7 +246,15 @@ impl AgentRuntime {
         })?;
         let mut managed = std::collections::BTreeSet::new();
         let mut terminal = std::collections::BTreeSet::new();
+        // A lane whose ledger entry stands closed (by its lead, a human or a discard) is
+        // ended, not awaiting collection: the lead named its Ready to close it, or was
+        // notified of the close. Like a detached lane it leaves the cohort; a later input
+        // or report clears the close and makes it a candidate again.
+        let closed = store.handle.closed_lane_ids(&lead)?;
         for current in store.handle.managed_lanes(&lead)? {
+            if closed.contains(&current.lane_id) {
+                continue;
+            }
             managed.insert(current.lane_id.clone());
             let reports = store.handle.lane_reports(
                 &current.lane_id,
