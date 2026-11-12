@@ -149,10 +149,15 @@ pub struct SpawnCredits {
     #[serde(default)]
     uncollected_lane_ids: BTreeSet<String>,
     /// Identity of the current uncollected cohort: a digest of the lane IDs it was
-    /// seeded with, so a restored run names the same cohort. Absent in a snapshot
-    /// that predates it; derived from the remaining IDs when first needed.
+    /// seeded with and of `uncollected_cohort_generation`, so a restored run names the
+    /// same cohort while a later cohort of the same lanes is a different one. Absent in
+    /// a snapshot that predates it; derived from the remaining IDs when first needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     uncollected_cohort_id: Option<String>,
+    /// How many cohorts this lead has seeded. A cohort that resolved and later forms
+    /// again from the same lane IDs (a closed lane that reports anew) is a new episode.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    uncollected_cohort_generation: u32,
     /// The suppression of `uncollected_cohort_id` was already reported as a diagnostic.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     uncollected_suppression_reported: bool,
@@ -165,9 +170,14 @@ pub struct SpawnCredits {
 /// Not a lane-count limit; only further model-authored creation is suppressed.
 pub(crate) const UNCOLLECTED_LANE_OPEN_LIMIT: u32 = 100;
 
-fn cohort_identity(ids: &BTreeSet<String>) -> String {
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn cohort_identity(ids: &BTreeSet<String>, generation: u32) -> String {
     use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();
+    hash.update(generation.to_le_bytes());
     for id in ids {
         hash.update(id.as_bytes());
         hash.update([0]);
@@ -231,8 +241,16 @@ impl SpawnCredits {
                 .filter(|id| !self.observed.contains(&format!("lane:{id}")))
                 .cloned()
                 .collect();
-            self.uncollected_cohort_id = (!self.uncollected_lane_ids.is_empty())
-                .then(|| cohort_identity(&self.uncollected_lane_ids));
+            if self.uncollected_lane_ids.is_empty() {
+                self.uncollected_cohort_id = None;
+            } else {
+                self.uncollected_cohort_generation =
+                    self.uncollected_cohort_generation.saturating_add(1);
+                self.uncollected_cohort_id = Some(cohort_identity(
+                    &self.uncollected_lane_ids,
+                    self.uncollected_cohort_generation,
+                ));
+            }
             self.uncollected_suppression_reported = false;
         }
         self.uncollected_lane_open_count >= limit
@@ -262,10 +280,13 @@ impl SpawnCredits {
         if self.uncollected_suppression_reported || self.uncollected_lane_ids.is_empty() {
             return None;
         }
-        let ids = &self.uncollected_lane_ids;
+        let (ids, generation) = (
+            &self.uncollected_lane_ids,
+            self.uncollected_cohort_generation,
+        );
         let cohort_id = self
             .uncollected_cohort_id
-            .get_or_insert_with(|| cohort_identity(ids))
+            .get_or_insert_with(|| cohort_identity(ids, generation))
             .clone();
         self.uncollected_suppression_reported = true;
         Some(UncollectedSuppression {
