@@ -89,3 +89,88 @@ pub(super) fn intent(
         revision,
     })
 }
+
+/// Called only inside the recovery writer's FULL transaction. No incarnation is
+/// learned as authority from the current row: it must be the claim's new one.
+pub(super) fn stop_quarantined(
+    conn: &Connection,
+    claim_id: &str,
+    expected: &[(ResumeIntentRecord, u64)],
+    stopped: &[ResumeIntentRecord],
+) -> Result<(), StorageError> {
+    let claim = super::claim(conn, claim_id)?;
+    let ids = expected
+        .iter()
+        .map(|(r, _)| r.run_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let claimed = claim
+        .members
+        .iter()
+        .map(|m| m.run_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let supplied = stopped
+        .iter()
+        .map(|r| r.run_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if ids.is_empty()
+        || ids != claimed
+        || ids != supplied
+        || ids.len() != expected.len()
+        || ids.len() != stopped.len()
+    {
+        return Err(invalid("quarantine Stop membership mismatch"));
+    }
+    for (before, revision) in expected {
+        let member = claim
+            .members
+            .iter()
+            .find(|m| m.run_id == before.run_id)
+            .ok_or_else(|| invalid("quarantine Stop member missing"))?;
+        let after = stopped
+            .iter()
+            .find(|r| r.run_id == before.run_id)
+            .ok_or_else(|| invalid("quarantine Stop payload missing"))?;
+        let current = intent(conn, &before.run_id)?;
+        if before.incarnation != member.new_incarnation
+            || after.incarnation != before.incarnation
+            || current.intent.as_ref() != Some(before)
+            || current.revision != Some(*revision)
+        {
+            return Err(invalid(
+                "quarantine Stop identity/revision/payload conflict",
+            ));
+        }
+        let mut payload = exact_json(&before.payload)?;
+        if payload.get("run_id").and_then(serde_json::Value::as_str) != Some(before.run_id.as_str())
+            || payload
+                .get("incarnation")
+                .and_then(serde_json::Value::as_str)
+                != Some(before.incarnation.as_str())
+        {
+            return Err(invalid("quarantine Stop payload identity mismatch"));
+        }
+        let requested = exact_json(&after.payload)?;
+        let reason = requested
+            .get("stop_reason")
+            .and_then(serde_json::Value::as_str);
+        if !matches!(reason, Some("operator_stopped" | "cancelled")) {
+            return Err(invalid("quarantine Stop requires explicit Stop/Cancel"));
+        }
+        let fields = payload
+            .as_object_mut()
+            .ok_or_else(|| invalid("invalid quarantine Stop payload"))?;
+        fields.insert("active".into(), false.into());
+        fields.insert("resume_requested".into(), false.into());
+        fields.insert("stop_reason".into(), reason.unwrap().into());
+        if payload != requested {
+            return Err(invalid("quarantine Stop changes unrelated intent fields"));
+        }
+        crate::resume_intent::save_with_revision(
+            conn,
+            after,
+            Some(&before.incarnation),
+            Some(*revision),
+        )?;
+    }
+    Ok(())
+}

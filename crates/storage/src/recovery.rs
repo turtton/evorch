@@ -87,7 +87,15 @@ pub(crate) enum Write {
     Validate(String),
     InspectPrepared(String),
     Activate(RecoveryActivationRequest),
-    Release { claim_id: String, reason: String },
+    Release {
+        claim_id: String,
+        reason: String,
+    },
+    StopQuarantined {
+        claim_id: String,
+        expected: Vec<(crate::resume_intent::ResumeIntentRecord, u64)>,
+        stopped: Vec<crate::resume_intent::ResumeIntentRecord>,
+    },
 }
 #[derive(Debug)]
 pub(crate) enum Written {
@@ -284,6 +292,14 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
             }
             Write::InspectPrepared(id) => {
                 Written::Validated(Box::new(prepared::inspect(&tx, &id)?))
+            }
+            Write::StopQuarantined {
+                claim_id,
+                expected,
+                stopped,
+            } => {
+                inspection::stop_quarantined(&tx, &claim_id, &expected, &stopped)?;
+                Written::Saved
             }
             Write::Validate(id) => {
                 validate_claim(&tx, &id)?;

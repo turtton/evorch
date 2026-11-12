@@ -7,6 +7,8 @@ use storage::{
 
 #[path = "recovery_06b/prepared.rs"]
 mod prepared;
+#[path = "recovery_06b/quarantine.rs"]
+mod quarantine;
 #[path = "recovery_06b/retention.rs"]
 mod retention;
 

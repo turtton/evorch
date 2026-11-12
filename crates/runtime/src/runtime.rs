@@ -17,7 +17,10 @@ mod host_prompt;
 mod recovery_activation;
 mod recovery_graph;
 pub(crate) use host_prompt::HostPrompt;
-pub use recovery_activation::{CurrentRecoveryAuthority, PausedRecoveryComponent};
+pub use recovery_activation::{
+    CurrentRecoveryAuthority, PausedRecoveryComponent, RecoveryClaimHandle, RecoveryCleanupHandle,
+    RecoveryCleanupState,
+};
 mod nested_orchestrator;
 mod output;
 mod project;

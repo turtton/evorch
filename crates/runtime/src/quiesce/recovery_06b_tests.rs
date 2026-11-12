@@ -1,6 +1,8 @@
 use super::{fixture::Fixture, *};
 use crate::{AgentRuntime, Role, RunConfig, StopScope};
 use event_bus::EventBus;
+#[path = "recovery_06c_tests.rs"]
+mod prepared_adoption;
 use std::{collections::BTreeMap, sync::Arc, sync::atomic::Ordering};
 
 async fn saved(f: &Fixture) -> RunId {

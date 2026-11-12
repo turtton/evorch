@@ -248,6 +248,12 @@ impl AgentRuntime {
             )));
         }
         #[cfg(test)]
+        if paused.lose_activation_ack {
+            return Err(error(
+                "activation ACK lost after committed FULL transaction",
+            ));
+        }
+        #[cfg(test)]
         self.execution_hook(
             cancellation::HookPoint::RecoveryActivated,
             &paused.controls[0].1,
@@ -297,7 +303,7 @@ impl AgentRuntime {
         Ok(resume.into_iter().collect())
     }
 
-    fn validate_recovery_authority(
+    pub(super) fn validate_recovery_authority(
         &self,
         source: &RecoverySource,
         config: &RunConfig,

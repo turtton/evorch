@@ -7,7 +7,10 @@ use std::collections::BTreeSet;
 use storage::recovery::RecoveryClaimRequest;
 
 mod activate;
+mod adopt;
+mod cleanup;
 pub use activate::CurrentRecoveryAuthority;
+pub use cleanup::{RecoveryClaimHandle, RecoveryCleanupHandle, RecoveryCleanupState};
 mod relations;
 
 struct RecoverySource {
@@ -34,8 +37,14 @@ pub struct PausedRecoveryComponent {
     relations: Option<relations::PreparedRelations>,
     _reservations: Vec<SnapshotReservation>,
     _startup: storage::RecoveryStartupComplete,
+    #[cfg(test)]
+    lose_activation_ack: bool,
 }
 impl PausedRecoveryComponent {
+    #[cfg(test)]
+    pub(crate) fn lose_activation_ack_for_test(&mut self) {
+        self.lose_activation_ack = true;
+    }
     pub fn claim(&self) -> &RecoveryClaim {
         &self.claim
     }
@@ -52,6 +61,38 @@ impl AgentRuntime {
         old: &str,
         reason: crate::quiesce::StopReason,
     ) -> Result<(), RuntimeError> {
+        // A consumed activation handle may still leave the old local index.
+        // Never turn diagnostic readback of Activated/mixed/new into Stop rights.
+        let claim = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run)
+            .and_then(|i| i.paused_recovery.as_ref())
+            .map(|p| p.claim_id.clone());
+        if let Some(claim) = claim {
+            let store = self
+                .shared
+                .run_store
+                .get()
+                .ok_or_else(|| error("no run store"))?;
+            let snapshot = store
+                .with_database(|db| db.recovery_claim_snapshot(&claim))
+                .map_err(error)?;
+            if !matches!(snapshot.claim.state, RecoveryClaimState::Prepared)
+                || snapshot
+                    .intents
+                    .iter()
+                    .find(|i| i.run_id == run.to_string())
+                    .and_then(|i| i.intent.as_ref())
+                    .is_none_or(|i| i.incarnation != old)
+            {
+                return Err(error(
+                    "paused recovery requires quarantine cleanup, not Stop",
+                ));
+            }
+        }
         self.shared
             .quiesce
             .update(run, old, self.shared.run_store.get(), |intent| {
@@ -246,6 +287,8 @@ impl AgentRuntime {
             relations: None,
             _reservations: reservations,
             _startup: startup,
+            #[cfg(test)]
+            lose_activation_ack: false,
         })
     }
 
@@ -379,9 +422,49 @@ impl AgentRuntime {
             .values()
             .filter_map(|i| i.paused_recovery.as_ref().map(|p| p.claim_id.clone()))
             .collect::<BTreeSet<_>>();
+        let mut failure = None;
         for claim in claims {
-            self.release_indexed_recovery(&claim, "shutdown", None)?;
+            let store = self
+                .shared
+                .run_store
+                .get()
+                .ok_or_else(|| error("no run store"))?;
+            let prepared = store
+                .with_database(|db| db.recovery_claim_snapshot(&claim))
+                .is_ok_and(|s| matches!(s.claim.state, RecoveryClaimState::Prepared));
+            let result = if prepared {
+                let mut members = self
+                    .shared
+                    .spawn_intents
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .filter_map(|(id, index)| {
+                        (index.execution.is_some()
+                            && index
+                                .paused_recovery
+                                .as_ref()
+                                .is_some_and(|p| p.claim_id == claim))
+                        .then_some(*id)
+                    })
+                    .collect::<Vec<_>>();
+                members.sort_unstable();
+                members
+                    .into_iter()
+                    .try_for_each(|id| self.stop(id, crate::StopScope::SelfOnly))
+                    .and_then(|()| self.release_indexed_recovery(&claim, "shutdown", None))
+            } else {
+                self.recovery_cleanup_handle(&claim)
+                    .and_then(|h| self.cleanup_recovery_claim(&h))
+            };
+            if let Err(err) = result {
+                // End local control even when durable terminality is unproven.
+                if let Ok(handle) = self.recovery_cleanup_handle(&claim) {
+                    let _ = self.cleanup_recovery_claim(&handle);
+                }
+                failure.get_or_insert(err);
+            }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }

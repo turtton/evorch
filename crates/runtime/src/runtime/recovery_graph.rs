@@ -18,7 +18,7 @@ fn snapshot_receipt(intent: &ResumeIntent) -> Option<storage::RunContextReceipt>
             _ => None,
         })
 }
-fn edges(records: &[RunRecoveryRecord]) -> Vec<RecoveryEdge> {
+pub(super) fn edges(records: &[RunRecoveryRecord]) -> Vec<RecoveryEdge> {
     let mut edges = BTreeSet::new();
     let captured: BTreeSet<_> = records.iter().map(|record| record.run_id).collect();
     for r in records {

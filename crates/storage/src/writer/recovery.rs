@@ -83,6 +83,22 @@ impl StorageHandle {
             _ => unreachable!("release command reply"),
         }
     }
+    /// The caller must hold current ownership mutation guards and its local
+    /// unpublished-control fences. Every payload/revision/claim identity is CAS
+    /// checked together; a conflict never counts as a successful Stop.
+    pub fn stop_quarantined_recovery_intents(
+        &self,
+        claim_id: String,
+        expected: Vec<(crate::resume_intent::ResumeIntentRecord, u64)>,
+        stopped: Vec<crate::resume_intent::ResumeIntentRecord>,
+    ) -> Result<(), StorageError> {
+        self.recovery_write(Write::StopQuarantined {
+            claim_id,
+            expected,
+            stopped,
+        })
+        .map(|_| ())
+    }
     fn recovery_write(&self, write: Write) -> Result<Written, StorageError> {
         self.request(|reply| Command::Recovery(write, reply))
     }
