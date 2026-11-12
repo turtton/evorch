@@ -153,7 +153,7 @@ async fn paused_stop_cancel_and_subtree_cancel_fence_the_old_incarnation() {
                 .any(|s| s.reason == RecoveryReason::IntentRevisionConflict)
         );
         runtime
-            .release_prepared_component(paused, "operator aborted recovery")
+            .release_prepared_component(&paused, "operator aborted recovery")
             .unwrap();
         assert!(!runtime.has_paused_recovery());
         assert!(!runtime.shared.quiesce.lock().intents.contains_key(&run));
@@ -170,8 +170,18 @@ async fn released_claim_never_rolls_back_revision_or_blocks_manual_registration_
     runtime.spawn_reserved(run, None, Role::Worker, "not allowed", RunConfig::default());
     assert!(runtime.list_agents().is_empty());
     let revision = paused.claim().members[0].reserved_revision;
+    assert!(runtime.release_prepared_component(&paused, "").is_err());
+    assert!(runtime.has_paused_recovery());
+    assert_eq!(
+        storage::Database::open(&f.config)
+            .unwrap()
+            .recovery_claims()
+            .unwrap()[0]
+            .state,
+        RecoveryClaimState::Prepared
+    );
     runtime
-        .release_prepared_component(paused, "retry manually")
+        .release_prepared_component(&paused, "retry manually")
         .unwrap();
     let db = storage::Database::open(&f.config).unwrap();
     assert_eq!(
@@ -190,4 +200,111 @@ async fn released_claim_never_rolls_back_revision_or_blocks_manual_registration_
     );
     // Do not run the old task in the original process after its snapshot was
     // deliberately claimed by this simulated new process.
+}
+
+#[tokio::test]
+async fn activation_history_is_skipped_and_adopt_does_not_write_the_new_intent_twice() {
+    let f = Fixture::new(0);
+    let run = saved(&f).await;
+    let runtime = new_process(&f);
+    let paused = prepare(&f, &runtime);
+    let db = storage::Database::open(&f.config).unwrap();
+    let claim = paused.claim().clone();
+    let mut intent =
+        ResumeIntent::decode(db.resume_intent(&run.to_string()).unwrap().unwrap()).unwrap();
+    let manifest = db.recovery_manifests().unwrap().remove(0).record.unwrap();
+    let record = db.run_context(&run.to_string()).unwrap().unwrap();
+    intent.incarnation = claim.members[0].new_incarnation.clone();
+    let before = claim.members[0].reserved_revision;
+    f._storage
+        .handle()
+        .activate_recovery_claim(storage::recovery::RecoveryActivationRequest {
+            claim_id: claim.claim_id.clone(),
+            intents: vec![storage::resume_intent::ResumeIntentRecord {
+                run_id: run.to_string(),
+                incarnation: intent.incarnation.clone(),
+                payload: serde_json::to_string(&intent).unwrap(),
+            }],
+            snapshots: vec![storage::recovery::RecoverySnapshotExpectation {
+                run_id: run.to_string(),
+                receipt: manifest.members[0].snapshot.clone().unwrap(),
+                config_json: record.config_json.clone(),
+            }],
+        })
+        .unwrap();
+    assert_eq!(
+        db.resume_intent_revision(&run.to_string()).unwrap(),
+        Some(before + 1)
+    );
+    let plan = new_process(&f).recovery_plan().unwrap();
+    assert!(plan.components.is_empty());
+    assert!(plan.report.blocked.is_empty(), "{plan:?}");
+    assert!(
+        plan.report
+            .skipped
+            .iter()
+            .any(|s| s.reason == RecoveryReason::SupersededManifest)
+    );
+    assert!(
+        plan.report
+            .skipped
+            .iter()
+            .any(|s| s.reason == RecoveryReason::NoCommittedManifest)
+    );
+    assert!(
+        runtime
+            .release_prepared_component(&paused, "not permitted after activation")
+            .is_err()
+    );
+    assert!(runtime.has_paused_recovery());
+    let coordinator = Coordinator::default();
+    coordinator.adopt([intent.clone()], true);
+    assert_eq!(
+        db.resume_intent_revision(&run.to_string()).unwrap(),
+        Some(before + 1)
+    );
+    coordinator
+        .update(
+            run,
+            &intent.incarnation,
+            runtime.shared.run_store.get(),
+            |next| {
+                next.boundary_pending = !next.boundary_pending;
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        db.resume_intent_revision(&run.to_string()).unwrap(),
+        Some(before + 2)
+    );
+    assert_eq!(
+        db.run_context(&run.to_string())
+            .unwrap()
+            .unwrap()
+            .config_json,
+        record.config_json
+    );
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn planned_restart_does_not_release_or_publish_a_paused_component() {
+    let f = Fixture::new(0);
+    let run = saved(&f).await;
+    let runtime = new_process(&f);
+    let paused = prepare(&f, &runtime);
+    let fence = runtime.fence_dispatch_restart().await.unwrap();
+    runtime.drain_dispatch_tails(&fence).await.unwrap();
+    let db = storage::Database::open(&f.config).unwrap();
+    assert_eq!(
+        db.recovery_claims().unwrap()[0].state,
+        RecoveryClaimState::Prepared
+    );
+    assert!(runtime.has_paused_recovery());
+    assert!(runtime.list_agents().is_empty());
+    assert_eq!(
+        db.resume_intent_revision(&run.to_string()).unwrap(),
+        Some(paused.claim().members[0].reserved_revision)
+    );
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
 }

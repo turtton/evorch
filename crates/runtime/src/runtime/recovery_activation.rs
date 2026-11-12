@@ -18,6 +18,7 @@ pub struct PausedRecoveryComponent {
     runtime: Weak<Shared>,
     claim: RecoveryClaim,
     members: Vec<ResumeIntent>,
+    _controls: Vec<(RunId, Arc<ExecutionControl>)>,
     _reservations: Vec<SnapshotReservation>,
     _startup: storage::RecoveryStartupComplete,
 }
@@ -183,6 +184,14 @@ impl AgentRuntime {
             .iter()
             .map(|(_, intent, _, _, _)| intent.clone())
             .collect::<Vec<_>>();
+        let controls = sources
+            .iter()
+            .filter_map(|(record, _, _, _, execution)| {
+                execution
+                    .as_ref()
+                    .map(|execution| (record.run_id, execution.clone()))
+            })
+            .collect();
         self.shared.quiesce.adopt(members.clone(), true);
         for (record, intent, _, _, execution) in sources {
             let index = indexes.entry(record.run_id).or_default();
@@ -197,6 +206,7 @@ impl AgentRuntime {
             runtime: Arc::downgrade(&self.shared),
             claim,
             members,
+            _controls: controls,
             _reservations: reservations,
             _startup: startup,
         })
@@ -206,7 +216,7 @@ impl AgentRuntime {
     /// the index unless a read-only claim read proves that release committed.
     pub fn release_prepared_component(
         &self,
-        paused: PausedRecoveryComponent,
+        paused: &PausedRecoveryComponent,
         reason: &str,
     ) -> Result<(), RuntimeError> {
         if !Weak::ptr_eq(&paused.runtime, &Arc::downgrade(&self.shared)) {
