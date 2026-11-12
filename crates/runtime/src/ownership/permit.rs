@@ -87,6 +87,24 @@ impl OwnerPermit {
         )
     }
 
+    /// Hold one read transaction per registry, validating every permit in its
+    /// snapshot. Multiple readers of one rollback-journal database can deadlock
+    /// if a writer obtains PENDING between their acquisitions.
+    pub(crate) fn mutation_guards(permits: &[Self]) -> Result<Vec<Registry>, RegistryError> {
+        let mut guards = std::collections::BTreeMap::new();
+        for permit in permits {
+            match guards.entry(permit.registry_path.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(permit.mutation_guard()?);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    authority::observe(permit, entry.get_mut().guard_generation(permit))?;
+                }
+            }
+        }
+        Ok(guards.into_values().collect())
+    }
+
     /// Attempt a generation guard without waiting for a SQLite writer. None
     /// means contention, which callers must retry after releasing other guards;
     /// an error means authority could not be established and fails closed.

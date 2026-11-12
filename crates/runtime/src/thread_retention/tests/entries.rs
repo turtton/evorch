@@ -124,6 +124,16 @@ fn table() -> BTreeMap<&'static str, Guard> {
         (
             "runtime/questions.rs::answer_user_question_if_pending",
             Guarded {
+                via: &[
+                    "answer_user_question_if_pending_from_host",
+                    "answer_question_with_mode",
+                    "handoff_answer_recipients",
+                ],
+            },
+        ),
+        (
+            "runtime/questions.rs::answer_user_question_if_pending_from_host",
+            Guarded {
                 via: &["answer_question_with_mode", "handoff_answer_recipients"],
             },
         ),

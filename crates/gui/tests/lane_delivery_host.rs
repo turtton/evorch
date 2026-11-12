@@ -636,8 +636,8 @@ async fn a_lead_answer_restores_the_finished_lane_through_the_gui_host_and_the_l
         .all_phase(&[lead, lane.root_run_id], AgentRunPhase::Waiting)
         .await;
     // Both deliveries finished their runs; their drivers are the barrier before the ACKs.
-    world.drive(LEAD).await;
-    world.drive(&lane.thread_id).await;
+    let lead_delivery = world.drive(LEAD).await;
+    let lane_delivery = world.drive(&lane.thread_id).await;
 
     let stored = world.runtime.user_question(&question.id).unwrap().unwrap();
     assert!(matches!(
@@ -650,14 +650,41 @@ async fn a_lead_answer_restores_the_finished_lane_through_the_gui_host_and_the_l
             .any(|request| request.contains("agent task-scope decision")),
         "the restored lane could read the stored answer"
     );
-    assert!(
-        world
-            .storage
-            .handle()
-            .pending_lane_delivery_destinations(String::new())
-            .unwrap()
-            .is_empty(),
-        "both notifications were acknowledged"
+    // The recovery scan also includes ACKed but not yet presented snapshots.
+    // It is not an ACK barrier: check the two question-specific outbox rows.
+    let connection = rusqlite::Connection::open(&world.config.db_path).unwrap();
+    let mut notifications = connection
+        .prepare("SELECT payload, state FROM lane_notifications")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(|row| {
+            let (payload, state) = row.unwrap();
+            let notification: event_bus::lane::LaneNotification =
+                serde_json::from_str(&payload).unwrap();
+            (notification, state)
+        })
+        .filter_map(|(notification, state)| match &notification.kind {
+            event_bus::lane::LaneNotificationKind::Question { question_id, .. }
+            | event_bus::lane::LaneNotificationKind::Answer { question_id, .. }
+                if question_id == &question.id =>
+            {
+                Some((notification.destination_thread_id, state))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    notifications.sort();
+    let mut expected = vec![
+        (LEAD.to_owned(), "acked".to_owned()),
+        (lane.thread_id.clone(), "acked".to_owned()),
+    ];
+    expected.sort();
+    assert_eq!(
+        notifications, expected,
+        "both notifications were acknowledged: lead={lead_delivery:?}, lane={lane_delivery:?}"
     );
 }
 
