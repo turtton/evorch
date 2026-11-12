@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub const COMMAND_OPERATIONS: &[&str] = &[];
 pub const QUERY_OPERATIONS: &[&str] = &["get_core_status"];
 pub const EVENT_TYPES: &[&str] = &["core_status_changed"];
+/// Tagged choices inside a command's payload that classification names (none).
+pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
 no_commands!(LifecycleCommand);
 no_results!(LifecycleResult);

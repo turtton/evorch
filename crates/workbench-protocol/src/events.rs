@@ -155,29 +155,43 @@ impl UiEvent {
     /// Wire names of every namespace.
     pub const TYPES: [&'static str; 20] = crate::namespaces::NAMESPACE_NAMES;
 
-    /// Whether the subscription is over after this event.
+    /// Whether the subscription is over after this event. Only the projection
+    /// namespace's control notices end one; no other namespace may, so a
+    /// namespace gaining events never changes this.
     pub fn ends_subscription(&self) -> bool {
         match self {
             Self::Projection(e) => e.ends_subscription(),
-            Self::Conversation(_)
-            | Self::Workspace(_)
-            | Self::Execution(_)
-            | Self::Questions(_)
-            | Self::Approvals(_)
-            | Self::Lifecycle(_) => false,
-            Self::Lanes(e) => match *e {},
-            Self::Settings(e) => match *e {},
-            Self::Auth(e) => match *e {},
-            Self::Mcp(e) => match *e {},
-            Self::Teams(e) => match *e {},
-            Self::Diagnostics(e) => match *e {},
-            Self::Memory(e) => match *e {},
-            Self::Evaluation(e) => match *e {},
-            Self::Improvement(e) => match *e {},
-            Self::PullRequests(e) => match *e {},
-            Self::Browser(e) => match *e {},
-            Self::Artifacts(e) => match *e {},
-            Self::Maintenance(e) => match *e {},
+            _ => false,
+        }
+    }
+
+    /// The wire name of the namespace this event belongs to.
+    pub fn namespace(&self) -> &'static str {
+        crate::namespaces::NAMESPACE_NAMES[self.namespace_index()]
+    }
+
+    fn namespace_index(&self) -> usize {
+        match self {
+            Self::Conversation(_) => 0,
+            Self::Workspace(_) => 1,
+            Self::Execution(_) => 2,
+            Self::Questions(_) => 3,
+            Self::Approvals(_) => 4,
+            Self::Lanes(_) => 5,
+            Self::Lifecycle(_) => 6,
+            Self::Projection(_) => 7,
+            Self::Settings(_) => 8,
+            Self::Auth(_) => 9,
+            Self::Mcp(_) => 10,
+            Self::Teams(_) => 11,
+            Self::Diagnostics(_) => 12,
+            Self::Memory(_) => 13,
+            Self::Evaluation(_) => 14,
+            Self::Improvement(_) => 15,
+            Self::PullRequests(_) => 16,
+            Self::Browser(_) => 17,
+            Self::Artifacts(_) => 18,
+            Self::Maintenance(_) => 19,
         }
     }
 }

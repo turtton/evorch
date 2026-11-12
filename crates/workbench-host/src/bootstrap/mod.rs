@@ -23,6 +23,7 @@ mod recovery_06a_tests;
 pub mod services;
 #[cfg(test)]
 mod tests;
+use crate::areas::{AreaHandles, AreaTasks, Areas};
 use crate::projects::ProjectDirectory;
 use crate::{CommandHost, commands::CommandService, projects::StaticProjects};
 use event_bus::{AgentRunPhase, EventBus};
@@ -111,6 +112,7 @@ pub struct BootstrappedHost {
     pub config: config::Config,
     pub services: services::BackgroundServices,
     pub mcp: runtime::mcp::McpHostServices,
+    area_tasks: AreaTasks,
     pub usage_pricing: recorder::pricing::SharedUsagePricing,
     pub evaluator: Arc<evaluation::EvaluatorHost>,
     evaluations: eval::evaluator::EvaluationService,
@@ -407,15 +409,29 @@ impl BootstrappedHost {
         for (root, access) in projects.access {
             access.apply(&runtime, root);
         }
-        let host = Arc::new(Mutex::new(
-            CommandHost::new(service)
-                .with_projects(projects.directory)
-                .with_legacy_import(
-                    options.ownership_root.clone(),
-                    options.config_dir.join("sidebar.json"),
-                )
-                .with_lane_sidebar_path(options.config_dir.join("sidebar.json")),
-        ));
+        let command_host = CommandHost::new(service)
+            .with_projects(projects.directory)
+            .with_legacy_import(
+                options.ownership_root.clone(),
+                options.config_dir.join("sidebar.json"),
+            )
+            .with_lane_sidebar_path(options.config_dir.join("sidebar.json"));
+        // The area services get the handles built above, never new ones, and
+        // start their background work only through `area_tasks`, which the
+        // shutdown below stops and drains.
+        let area_tasks = AreaTasks::new(tokio::runtime::Handle::current());
+        let areas = Areas::new(&AreaHandles {
+            runtime: runtime.clone(),
+            config: Arc::new(config.clone()),
+            config_dir: options.config_dir.clone(),
+            project_root: options.project_root.clone(),
+            bus: bus.clone(),
+            storage: handle.clone(),
+            mcp: mcp.clone(),
+            tasks: area_tasks.clone(),
+            projection: command_host.projection().clone(),
+        })?;
+        let host = Arc::new(Mutex::new(command_host.with_areas(areas)));
         #[cfg(any(test, feature = "test-support"))]
         let composition = CompositionInventory {
             tools: executor.tool_specs(),
@@ -437,6 +453,7 @@ impl BootstrappedHost {
             evaluations: evaluations.clone(),
             config,
             services: services::BackgroundServices::default(),
+            area_tasks,
             mcp,
             usage_pricing: pricing,
             #[cfg(any(test, feature = "test-support"))]
@@ -519,6 +536,9 @@ impl BootstrappedHost {
     /// Operator-stop drain (ADR 0024); not a planned safe-point restart.
     pub async fn shutdown(&mut self) -> Result<(), BootstrapError> {
         let mut failure = None;
+        // Area tasks stop producing before the runtime drains; they are joined
+        // below, with the other host-owned tasks.
+        self.area_tasks.request_stop();
         let tasks = self
             .host
             .lock()
@@ -538,7 +558,10 @@ impl BootstrappedHost {
         for task in tasks {
             lane_pr::remember(&mut failure, task.await.map(|_| ()));
         }
+        // Whether the runtime drained decides if the owner may be released; an
+        // area task failing is reported but does not keep the owner.
         let drained = failure.is_none();
+        lane_pr::remember(&mut failure, self.area_tasks.shutdown().await);
         if let Some(reclaim) = self.reclaim.take() {
             reclaim.shutdown();
         }

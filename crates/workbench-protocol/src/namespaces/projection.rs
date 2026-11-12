@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 pub const COMMAND_OPERATIONS: &[&str] = &[];
 pub const QUERY_OPERATIONS: &[&str] = &["get_command_receipt", "read_body", "read_snapshot"];
 pub const EVENT_TYPES: &[&str] = &["resync_required", "subscription_closed"];
+/// Tagged choices inside a command's payload that classification names (none).
+pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
 no_commands!(ProjectionCommand);
 no_results!(ProjectionResult);

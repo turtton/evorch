@@ -27,6 +27,21 @@
 //! advertised, and a peer naming one is refused as
 //! [`ErrorCode::UnsupportedCapability`](crate::ErrorCode). There is no generic
 //! `serde_json::Value` operation and no free-form method name anywhere.
+//!
+//! ## Implementing a namespace
+//!
+//! A namespace is whatever its module declares. Replace the module's
+//! `reserved_namespace!` (or extend its operations) with real types and list
+//! the wire names in `COMMAND_OPERATIONS`, `QUERY_OPERATIONS` and
+//! `EVENT_TYPES` (and `NESTED_COMMANDS` for a tagged choice inside a payload).
+//! [`NamespaceInfo::status`] follows from those lists, so it flips from
+//! `Reserved` to `Implemented` without touching this file, `Command`, `Query`,
+//! `QueryReply`, `CommandResult` or `UiEvent`, which only delegate to the
+//! namespace's own types. Each operation names the capability it needs
+//! (`required_capability`); it must be one of [`crate::Capability::IMPLEMENTED`]
+//! (the protocol tests enforce this), so an operation never advertises more than
+//! the core offers. Only the `projection` namespace's control notices end a
+//! subscription.
 
 /// An empty command enum: the namespace has no commands (yet).
 macro_rules! no_commands {
@@ -93,9 +108,6 @@ macro_rules! no_events {
             pub fn validate(&self) -> Result<(), crate::validation::ValidationError> {
                 match *self {}
             }
-            pub fn ends_subscription(&self) -> bool {
-                match *self {}
-            }
         }
     };
 }
@@ -115,6 +127,8 @@ macro_rules! reserved_namespace {
         pub const QUERY_OPERATIONS: &[&str] = &[];
         /// Wire names of the namespace's events (none).
         pub const EVENT_TYPES: &[&str] = &[];
+        /// Tagged choices inside a command's payload that classification names (none).
+        pub const NESTED_COMMANDS: &[$crate::namespaces::NestedOperation] = &[];
     };
 }
 
@@ -173,69 +187,74 @@ pub struct NestedOperation {
     pub known: &'static [&'static str],
 }
 
+/// How far a namespace is implemented, from what its module declares: a
+/// namespace that names no operation at all is reserved, whatever else it
+/// contains. Nothing else decides it, so giving a reserved namespace its first
+/// operation (in its own module) is all it takes to implement it.
+const fn status_of(commands: &[&str], queries: &[&str], events: &[&str]) -> NamespaceStatus {
+    if commands.is_empty() && queries.is_empty() && events.is_empty() {
+        NamespaceStatus::Reserved
+    } else {
+        NamespaceStatus::Implemented
+    }
+}
+
+/// A namespace's declaration, read from its module: every module exports
+/// `COMMAND_OPERATIONS`, `QUERY_OPERATIONS`, `EVENT_TYPES` and
+/// `NESTED_COMMANDS`.
 macro_rules! info {
-    ($name:literal, $status:ident, $module:ident) => {
-        info!($name, $status, $module, &[])
-    };
-    ($name:literal, $status:ident, $module:ident, $nested:expr) => {
+    ($name:literal, $module:ident) => {
         NamespaceInfo {
             name: $name,
-            status: NamespaceStatus::$status,
+            status: status_of(
+                $module::COMMAND_OPERATIONS,
+                $module::QUERY_OPERATIONS,
+                $module::EVENT_TYPES,
+            ),
             commands: $module::COMMAND_OPERATIONS,
             queries: $module::QUERY_OPERATIONS,
             events: $module::EVENT_TYPES,
-            nested_commands: $nested,
+            nested_commands: $module::NESTED_COMMANDS,
         }
     };
 }
 
 /// Every namespace, in the order `Command`, `Query` and `UiEvent` list them.
+/// The status of each follows from its module (see [`status_of`]); this table
+/// only lists the namespaces.
 pub const NAMESPACES: [NamespaceInfo; 20] = [
-    info!("conversation", Implemented, conversation),
-    info!("workspace", Implemented, workspace),
-    info!("execution", Implemented, execution),
-    info!("questions", Implemented, questions),
-    info!("approvals", Implemented, approvals),
-    info!("lanes", Implemented, lanes, lanes::NESTED_COMMANDS),
-    info!("lifecycle", Implemented, lifecycle),
-    info!("projection", Implemented, projection),
-    info!("settings", Reserved, settings),
-    info!("auth", Reserved, auth),
-    info!("mcp", Reserved, mcp),
-    info!("teams", Reserved, teams),
-    info!("diagnostics", Reserved, diagnostics),
-    info!("memory", Reserved, memory),
-    info!("evaluation", Reserved, evaluation),
-    info!("improvement", Reserved, improvement),
-    info!("pull_requests", Reserved, pull_requests),
-    info!("browser", Reserved, browser),
-    info!("artifacts", Reserved, artifacts),
-    info!("maintenance", Reserved, maintenance),
+    info!("conversation", conversation),
+    info!("workspace", workspace),
+    info!("execution", execution),
+    info!("questions", questions),
+    info!("approvals", approvals),
+    info!("lanes", lanes),
+    info!("lifecycle", lifecycle),
+    info!("projection", projection),
+    info!("settings", settings),
+    info!("auth", auth),
+    info!("mcp", mcp),
+    info!("teams", teams),
+    info!("diagnostics", diagnostics),
+    info!("memory", memory),
+    info!("evaluation", evaluation),
+    info!("improvement", improvement),
+    info!("pull_requests", pull_requests),
+    info!("browser", browser),
+    info!("artifacts", artifacts),
+    info!("maintenance", maintenance),
 ];
 
-/// Wire names of every namespace.
-pub const NAMESPACE_NAMES: [&str; 20] = [
-    "conversation",
-    "workspace",
-    "execution",
-    "questions",
-    "approvals",
-    "lanes",
-    "lifecycle",
-    "projection",
-    "settings",
-    "auth",
-    "mcp",
-    "teams",
-    "diagnostics",
-    "memory",
-    "evaluation",
-    "improvement",
-    "pull_requests",
-    "browser",
-    "artifacts",
-    "maintenance",
-];
+/// Wire names of every namespace, taken from [`NAMESPACES`].
+pub const NAMESPACE_NAMES: [&str; 20] = {
+    let mut names = [""; 20];
+    let mut i = 0;
+    while i < names.len() {
+        names[i] = NAMESPACES[i].name;
+        i += 1;
+    }
+    names
+};
 
 /// The namespace named `name` on the wire.
 pub fn namespace(name: &str) -> Option<&'static NamespaceInfo> {

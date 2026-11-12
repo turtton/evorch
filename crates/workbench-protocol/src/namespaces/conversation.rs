@@ -39,6 +39,8 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
 pub const QUERY_OPERATIONS: &[&str] = &["get_input_receipts", "read_committed_history"];
 /// Wire names of the namespace's events.
 pub const EVENT_TYPES: &[&str] = &["input_receipt_changed", "message_committed"];
+/// Tagged choices inside a command's payload that classification names (none).
+pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(

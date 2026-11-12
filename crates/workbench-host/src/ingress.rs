@@ -42,6 +42,8 @@ pub struct CommandHost {
     receipts: Receipts,
     projects: Box<dyn ProjectDirectory>,
     projection: std::sync::Arc<crate::projection::Projection>,
+    /// The services behind the namespaces that later PRs fill in; see [`crate::areas`].
+    pub(crate) areas: crate::areas::Areas,
 }
 
 /// What the host knows about a submission id.
@@ -112,6 +114,7 @@ impl CommandHost {
             conversation: Default::default(),
             lane_sidebar_path: None,
             projection,
+            areas: Default::default(),
             receipts: Receipts::default(),
             projects: Box::new(StaticProjects::default()),
         }
@@ -120,6 +123,13 @@ impl CommandHost {
     pub fn with_projects(mut self, projects: impl ProjectDirectory + 'static) -> Self {
         self.projection.configure(projects.entries());
         self.projects = Box::new(projects);
+        self
+    }
+
+    /// Install the area services, constructed from the bootstrap's handles
+    /// (the projection they publish through is [`Self::projection`]).
+    pub fn with_areas(mut self, areas: crate::areas::Areas) -> Self {
+        self.areas = areas;
         self
     }
 

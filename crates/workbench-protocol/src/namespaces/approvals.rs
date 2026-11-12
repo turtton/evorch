@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 pub const COMMAND_OPERATIONS: &[&str] = &["decide_tool_approval"];
 pub const QUERY_OPERATIONS: &[&str] = &["list_approvals", "get_approval_input"];
 pub const EVENT_TYPES: &[&str] = &["approval_changed"];
+/// Tagged choices inside a command's payload that classification names (none).
+pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(

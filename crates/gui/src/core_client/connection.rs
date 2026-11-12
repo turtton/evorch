@@ -14,7 +14,7 @@ use workbench_protocol::namespaces::{
 use workbench_protocol::{
     commands::{Command, CommandReply},
     conversation::{ConversationCommand, ConversationResult},
-    events::{EventEnvelope, Subscribe, SubscriptionScope},
+    events::{EventEnvelope, Subscribe, SubscriptionScope, UiEvent},
     ids::{BodyId, ProjectId, RequestId, ThreadId},
     queries::{
         CommandReceiptState, HistoryDirection, PageRequest, Query, QueryReply, ReadBody,
@@ -23,7 +23,11 @@ use workbench_protocol::{
     wire::ByteOffset,
 };
 
-use super::{Shared, cache::Cache};
+use super::{
+    Shared,
+    cache::Cache,
+    features::{FeatureAction, FeatureError, FeatureId, FeatureReply, FeatureRequest, HeldReply},
+};
 
 pub enum Action {
     Command {
@@ -39,6 +43,9 @@ pub enum Action {
         mime: String,
         data: String,
     },
+    /// A request of a feature (`features/`): typed, tagged, answered through
+    /// `Shared::features`. The feature gets no connection of its own.
+    Feature(FeatureAction),
     Reconnect,
     Shutdown,
 }
@@ -59,11 +66,17 @@ fn update(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, f: impl FnOnce(&mut 
 enum Pending {
     Command(Option<(String, u64)>),
     Upload { thread: String, id: uuid::Uuid },
+    Feature { feature: FeatureId, tag: u64 },
 }
 
 impl Pending {
-    fn rejected(&self, state: &mut Shared) {
+    fn rejected(&self, state: &mut Shared, error: &str) {
         match self {
+            Self::Feature { feature, tag } => state.features.reply(
+                *feature,
+                *tag,
+                FeatureReply::Command(Err(FeatureError::new(error))),
+            ),
             Self::Command(Some((thread, _))) => {
                 state.sending.remove(thread);
             }
@@ -86,10 +99,22 @@ impl Pending {
 const SNAPSHOT_BUFFER_EVENTS: usize = 256;
 const SNAPSHOT_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 
+/// The projection at the snapshot cut.
 pub async fn snapshot(
     client: &WorkbenchClient,
     subscription: &mut Subscription,
 ) -> Result<Cache, String> {
+    snapshot_delivering(client, subscription)
+        .await
+        .map(|(cache, _)| cache)
+}
+
+/// [`snapshot`], and the events that arrived while it was being read and apply
+/// after it (the features rebuild from them).
+async fn snapshot_delivering(
+    client: &WorkbenchClient,
+    subscription: &mut Subscription,
+) -> Result<(Cache, Vec<UiEvent>), String> {
     let started = subscription.started().clone();
     let mut cache = Cache::default();
     let Some(id) = started.snapshot_id else {
@@ -143,12 +168,13 @@ pub async fn snapshot(
         }
     }
     cache.at(started.high_water);
+    let mut delivered = Vec::new();
     for event in buffered {
-        if !cache.event(event) {
+        if !cache.event_delivering(event, |event| delivered.push(event.clone())) {
             return Err("snapshot epoch changed; resync required".into());
         }
     }
-    Ok(cache)
+    Ok((cache, delivered))
 }
 
 pub async fn serve(
@@ -158,6 +184,9 @@ pub async fn serve(
     ctx: egui::Context,
 ) {
     let mut uncertain = Vec::<(RequestId, Pending)>::new();
+    // Resolved outcomes for features, held until the next snapshot has replaced
+    // the projection and reset the features (see `features`).
+    let mut held = Vec::<HeldReply>::new();
     loop {
         update(&shared, &ctx, |s| {
             s.connected = false;
@@ -176,42 +205,7 @@ pub async fn serve(
                 continue;
             }
         };
-        for (request, pending) in std::mem::take(&mut uncertain) {
-            match client
-                .query(Query::Projection(ProjectionQuery::GetCommandReceipt {
-                    request_id: request.clone(),
-                }))
-                .await
-            {
-                Ok(QueryReply::Projection(ProjectionReply::CommandReceipt(receipt))) => {
-                    match receipt.state {
-                        CommandReceiptState::Applied { reply } => {
-                            update(&shared, &ctx, |s| {
-                                s.outcome_unknown.remove(request.as_str());
-                            });
-                            accepted(&client, &shared, &ctx, reply, pending).await;
-                        }
-                        CommandReceiptState::Rejected { error } => update(&shared, &ctx, |s| {
-                            s.outcome_unknown.remove(request.as_str());
-                            pending.rejected(s);
-                            s.status = error.to_string();
-                        }),
-                        CommandReceiptState::Unknown => {
-                            update(&shared, &ctx, |s| {
-                                s.status = format!("OutcomeUnknown: {request}。再送していません。")
-                            });
-                            uncertain.push((request, pending));
-                        }
-                    }
-                }
-                result => {
-                    update(&shared, &ctx, |s| {
-                        s.status = format!("receipt 照合失敗（再送なし）: {result:?}")
-                    });
-                    uncertain.push((request, pending));
-                }
-            }
-        }
+        reconcile_uncertain(&client, &shared, &ctx, &mut uncertain, &mut held).await;
         let mut resync = true;
         let mut reconnect_requested = false;
         'session: while resync {
@@ -229,11 +223,10 @@ pub async fn serve(
                     break;
                 }
             };
-            match snapshot(&client, &mut stream).await {
-                Ok(cache) => update(&shared, &ctx, |s| {
-                    s.replace_projection(cache);
-                    s.connected = true;
-                    s.status = "core-client: 接続済み".into();
+            let capabilities = client.server_hello().capabilities.clone();
+            match snapshot_delivering(&client, &mut stream).await {
+                Ok((cache, delivered)) => update(&shared, &ctx, |s| {
+                    s.begin_session(cache, capabilities, &delivered, std::mem::take(&mut held));
                 }),
                 Err(error) => {
                     update(&shared, &ctx, |s| s.status = error);
@@ -252,7 +245,7 @@ pub async fn serve(
                     event = stream.next() => {
                         let Some(event) = event else { break };
                         let mut valid = false;
-                        update(&shared, &ctx, |s| valid = s.cache.event(event));
+                        update(&shared, &ctx, |s| valid = s.cache.event_delivering(event, |e| s.features.event(e)));
                         if !valid { resync = true; break; }
                     }
                     action = actions.recv() => {
@@ -261,17 +254,17 @@ pub async fn serve(
                         if matches!(action, Action::Shutdown) { discard_unused(&client, &shared).await; return; }
                         match action {
                             Action::Command { command, draft } => {
-                                let pending = Pending::Command(draft);
-                                match client.command(command).await {
-                                    Ok(reply) => accepted(&client, &shared, &ctx, reply, pending).await,
-                                    Err(ClientError::Transport(TransportError::OutcomeUnknown { request_id })) => {
-                                        uncertain.push((request_id.clone(), pending.clone()));
-                                        update(&shared, &ctx, |s| { s.outcome_unknown.insert(request_id.to_string()); });
-                                        update(&shared, &ctx, |s| s.status = format!("OutcomeUnknown: {request_id}。再接続後 receipt を照合します。"));
-                                    }
-                                    Err(e) => update(&shared, &ctx, |s| { pending.rejected(s); s.status = e.to_string(); }),
-                                }
+                                send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Command(draft)).await;
                             }
+                            Action::Feature(FeatureAction { feature, tag, request }) => match request {
+                                FeatureRequest::Command(command) => {
+                                    send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Feature { feature, tag }).await;
+                                }
+                                FeatureRequest::Query(query) => {
+                                    let result = client.query(query).await.map_err(|e| FeatureError::new(e.to_string()));
+                                    update(&shared, &ctx, |s| s.features.reply(feature, tag, FeatureReply::Query(result)));
+                                }
+                            },
                             Action::History(thread, older) => {
                                 let cursor = if older { shared.lock().unwrap().cache.older.get(thread.as_str()).cloned().flatten() } else { None };
                                 let reply = client.query(Query::Conversation(ConversationQuery::ReadCommittedHistory(ReadCommittedHistory {
@@ -332,7 +325,7 @@ pub async fn serve(
                                             s.status = format!("OutcomeUnknown: {request_id}。画像は再割当てせず receipt を照合します。");
                                         });
                                     }
-                                    Err(e) => update(&shared, &ctx, |s| { pending.rejected(s); s.status = e.to_string(); }),
+                                    Err(e) => update(&shared, &ctx, |s| { pending.rejected(s, &e.to_string()); s.status = e.to_string(); }),
                                 }
                             }
                             Action::Reconnect | Action::Shutdown => unreachable!(),
@@ -348,6 +341,106 @@ pub async fn serve(
         if !wait_reconnect(&mut actions, &shared, &ctx).await {
             return;
         }
+    }
+}
+
+/// Ask the core what became of every command whose reply was lost, never
+/// resending any. What a feature's command came to is held (not delivered):
+/// the snapshot that follows resets the features, and the reply has to come
+/// after that reset.
+async fn reconcile_uncertain(
+    client: &WorkbenchClient,
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &egui::Context,
+    uncertain: &mut Vec<(RequestId, Pending)>,
+    held: &mut Vec<HeldReply>,
+) {
+    for (request, pending) in std::mem::take(uncertain) {
+        match client
+            .query(Query::Projection(ProjectionQuery::GetCommandReceipt {
+                request_id: request.clone(),
+            }))
+            .await
+        {
+            Ok(QueryReply::Projection(ProjectionReply::CommandReceipt(receipt))) => {
+                match receipt.state {
+                    CommandReceiptState::Applied { reply } => {
+                        update(shared, ctx, |s| {
+                            s.outcome_unknown.remove(request.as_str());
+                        });
+                        match pending {
+                            Pending::Feature { feature, tag } => held.push(HeldReply {
+                                feature,
+                                tag,
+                                reply: FeatureReply::Command(Ok(reply)),
+                            }),
+                            pending => accepted(client, shared, ctx, reply, pending).await,
+                        }
+                    }
+                    CommandReceiptState::Rejected { error } => update(shared, ctx, |s| {
+                        s.outcome_unknown.remove(request.as_str());
+                        match &pending {
+                            Pending::Feature { feature, tag } => held.push(HeldReply {
+                                feature: *feature,
+                                tag: *tag,
+                                reply: FeatureReply::Command(Err(FeatureError::new(
+                                    error.to_string(),
+                                ))),
+                            }),
+                            pending => pending.rejected(s, &error.to_string()),
+                        }
+                        s.status = error.to_string();
+                    }),
+                    CommandReceiptState::Unknown => {
+                        update(shared, ctx, |s| {
+                            s.status = format!("OutcomeUnknown: {request}。再送していません。")
+                        });
+                        uncertain.push((request, pending));
+                    }
+                }
+            }
+            result => {
+                update(shared, ctx, |s| {
+                    s.status = format!("receipt 照合失敗（再送なし）: {result:?}")
+                });
+                uncertain.push((request, pending));
+            }
+        }
+    }
+}
+
+/// Send one command. A lost reply is reconciled after the next connect through
+/// its receipt, never replayed.
+async fn send_command(
+    client: &WorkbenchClient,
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &egui::Context,
+    uncertain: &mut Vec<(RequestId, Pending)>,
+    command: Command,
+    pending: Pending,
+) {
+    match client.command(command).await {
+        Ok(reply) => accepted(client, shared, ctx, reply, pending).await,
+        Err(ClientError::Transport(TransportError::OutcomeUnknown { request_id })) => {
+            uncertain.push((request_id.clone(), pending.clone()));
+            update(shared, ctx, |s| {
+                s.outcome_unknown.insert(request_id.to_string());
+                s.status = format!("OutcomeUnknown: {request_id}。再接続後 receipt を照合します。");
+                if let Pending::Feature { feature, tag } = &pending {
+                    s.features.reply(
+                        *feature,
+                        *tag,
+                        FeatureReply::Command(Err(FeatureError::outcome_unknown(format!(
+                            "OutcomeUnknown: {request_id}"
+                        )))),
+                    );
+                }
+            });
+        }
+        Err(e) => update(shared, ctx, |s| {
+            pending.rejected(s, &e.to_string());
+            s.status = e.to_string();
+        }),
     }
 }
 
@@ -382,6 +475,11 @@ async fn accepted(
     update(shared, ctx, |s| {
         let draft = match pending {
             Pending::Command(draft) => draft,
+            Pending::Feature { feature, tag } => {
+                s.features
+                    .reply(feature, tag, FeatureReply::Command(Ok(reply.clone())));
+                None
+            }
             Pending::Upload { thread, id } => {
                 if let Some(workbench_protocol::commands::CommandResult::Conversation(result)) =
                     reply.result.as_deref()
@@ -459,6 +557,7 @@ async fn wait_reconnect(
                 } => {
                     s.image_draft(thread.as_str(), mime, data).uploading = false;
                 }
+                Action::Feature(action) => s.features.refuse(&action, "disconnected"),
                 _ => (),
             }
             s.status =
@@ -540,5 +639,161 @@ mod tests {
         assert!(!state.sending.contains("t"));
         assert_eq!(state.image_drafts["t"][0].data, "retained local bytes");
         assert!(state.image_drafts["t"][0].reference.is_none());
+    }
+
+    /// Remembers what the features were told, in order.
+    struct Probe(Arc<Mutex<Vec<String>>>);
+
+    impl super::super::features::Feature for Probe {
+        fn id(&self) -> FeatureId {
+            FeatureId::Mcp
+        }
+        fn title(&self) -> &'static str {
+            "probe"
+        }
+        fn reset(&mut self) {
+            self.0.lock().unwrap().push("reset".into());
+        }
+        fn reply(&mut self, tag: u64, reply: FeatureReply) {
+            let outcome = match reply {
+                FeatureReply::Command(Ok(_)) => "applied",
+                FeatureReply::Command(Err(e)) if e.outcome_unknown => "unknown",
+                _ => "other",
+            };
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("reply {tag} {outcome}"));
+        }
+    }
+
+    async fn connect() -> (WorkbenchClient, workbench_client::fake::FakeServer) {
+        use workbench_protocol::handshake::{
+            ActivityCounts, BuildInfo, Capability, CoreState, CoreStatus, ProtocolVersion,
+            ServerHello, WireLimits,
+        };
+        let hello = ServerHello {
+            protocol_version: ProtocolVersion::CURRENT,
+            capabilities: Capability::IMPLEMENTED.to_vec(),
+            server_build: BuildInfo {
+                name: "test".into(),
+                version: "0".into(),
+                revision: None,
+            },
+            core: workbench_protocol::ids::CoreIdentity::new("core-1").unwrap(),
+            instance_epoch: workbench_protocol::wire::InstanceEpoch(7),
+            limits: WireLimits::default(),
+            status: CoreStatus {
+                state: CoreState::Ready,
+                retention_reasons: vec![],
+                running: ActivityCounts::default(),
+            },
+        };
+        let (transport, mut core) = workbench_client::fake::FakeTransport::pair();
+        let (client, _) = tokio::join!(
+            async {
+                WorkbenchClient::connect(transport, super::super::client_config())
+                    .await
+                    .unwrap()
+            },
+            core.handshake(&hello),
+        );
+        (client, core)
+    }
+
+    #[tokio::test]
+    async fn a_resolved_feature_reply_survives_the_reset_after_reconnect_and_nothing_is_resent() {
+        use workbench_protocol::{
+            envelope::{ReplyPayload, ReplyResult, RequestBody},
+            queries::CommandReceipt,
+        };
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared
+            .lock()
+            .unwrap()
+            .features
+            .install(Box::new(Probe(log.clone())));
+        let ctx = egui::Context::default();
+        let (mut uncertain, mut held) = (Vec::new(), Vec::new());
+
+        // The core receives the command and the connection drops before the reply.
+        let (client, mut core) = connect().await;
+        let command =
+            Command::Execution(workbench_protocol::namespaces::ExecutionCommand::StopChat(
+                workbench_protocol::commands::ThreadTarget {
+                    thread: ThreadId::new("t").unwrap(),
+                },
+            ));
+        let (_, request_id) = tokio::join!(
+            send_command(
+                &client,
+                &shared,
+                &ctx,
+                &mut uncertain,
+                command,
+                Pending::Feature {
+                    feature: FeatureId::Mcp,
+                    tag: 5
+                },
+            ),
+            async {
+                let request = core.recv_request().await.unwrap();
+                core.close();
+                request.request_id
+            },
+        );
+        assert_eq!(uncertain.len(), 1);
+        assert_eq!(uncertain[0].0, request_id);
+        assert_eq!(*log.lock().unwrap(), ["reply 5 unknown"]);
+
+        // After reconnecting, the receipt is asked for; the outcome is held, not delivered.
+        let (client, mut core) = connect().await;
+        let (_, requests) = tokio::join!(
+            reconcile_uncertain(&client, &shared, &ctx, &mut uncertain, &mut held),
+            async {
+                let request = core.recv_request().await.unwrap();
+                core.reply(
+                    &request.request_id,
+                    ReplyResult::Success(ReplyPayload::Query(QueryReply::Projection(
+                        ProjectionReply::CommandReceipt(CommandReceipt {
+                            request_id: request_id.clone(),
+                            state: CommandReceiptState::Applied {
+                                reply: CommandReply::accepted(),
+                            },
+                        }),
+                    ))),
+                );
+                vec![request.body]
+            },
+        );
+        assert!(uncertain.is_empty());
+        assert_eq!(held.len(), 1);
+        assert_eq!(*log.lock().unwrap(), ["reply 5 unknown"]);
+        assert!(shared.lock().unwrap().outcome_unknown.is_empty());
+
+        // The snapshot resets the features, and only then the held reply arrives.
+        shared.lock().unwrap().begin_session(
+            Cache::default(),
+            vec![],
+            &[],
+            std::mem::take(&mut held),
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["reply 5 unknown", "reset", "reply 5 applied"]
+        );
+
+        // The only thing sent on the new connection was the receipt query: the
+        // command itself was never resent.
+        drop(client);
+        core.close();
+        assert!(core.recv_request().await.is_none());
+        assert!(matches!(
+            requests.as_slice(),
+            [RequestBody::Query(Query::Projection(
+                ProjectionQuery::GetCommandReceipt { .. }
+            ))]
+        ));
     }
 }

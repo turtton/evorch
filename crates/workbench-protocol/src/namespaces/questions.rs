@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 pub const COMMAND_OPERATIONS: &[&str] = &["answer_user_question"];
 pub const QUERY_OPERATIONS: &[&str] = &["list_questions"];
 pub const EVENT_TYPES: &[&str] = &["question_changed"];
+/// Tagged choices inside a command's payload that classification names (none).
+pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(

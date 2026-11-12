@@ -113,7 +113,12 @@ fn assert_covers(sample_types: &[String], declared: &[impl AsRef<str>]) {
 #[test]
 fn commands_golden_covers_every_variant() {
     let samples = named_in_namespaces(commands());
-    let types: Vec<String> = samples.iter().map(|(n, _)| n.clone()).collect();
+    let mut types: Vec<String> = samples.iter().map(|(n, _)| n.clone()).collect();
+    types.extend(
+        named_in_namespaces(areas::commands())
+            .into_iter()
+            .map(|(n, _)| n),
+    );
     assert_covers(&types, &declared(|n| n.commands));
     check("commands", samples);
 }
@@ -121,7 +126,12 @@ fn commands_golden_covers_every_variant() {
 #[test]
 fn queries_golden_covers_every_variant() {
     let samples = named_in_namespaces(queries());
-    let types: Vec<String> = samples.iter().map(|(n, _)| n.clone()).collect();
+    let mut types: Vec<String> = samples.iter().map(|(n, _)| n.clone()).collect();
+    types.extend(
+        named_in_namespaces(areas::queries())
+            .into_iter()
+            .map(|(n, _)| n),
+    );
     assert_covers(&types, &declared(|n| n.queries));
     check("queries", samples);
 }
@@ -137,9 +147,61 @@ fn controls_golden_covers_every_variant() {
 #[test]
 fn ui_events_golden_covers_every_variant() {
     let samples = named_in_namespaces(ui_events());
-    let types: Vec<String> = samples.iter().map(|(n, _)| n.clone()).collect();
+    let mut types: Vec<String> = samples.iter().map(|(n, _)| n.clone()).collect();
+    types.extend(
+        named_in_namespaces(areas::ui_events())
+            .into_iter()
+            .map(|(n, _)| n),
+    );
     assert_covers(&types, &declared(|n| n.events));
     check("ui_events", samples);
+}
+
+/// The operations each area added are pinned in `golden/areas/<area>.json`, so
+/// an area's PR changes only its own golden file (the shared groups above hold
+/// the operations that predate the areas). Names are `<kind>/<namespace>/<operation>`.
+#[test]
+fn area_samples_golden() {
+    fn wires<T: Serialize + DeserializeOwned + PartialEq + Debug>(
+        kind: &str,
+        values: Vec<T>,
+        out: &mut Map<String, Value>,
+    ) {
+        for value in values {
+            let wire = serde_json::to_value(&value).unwrap();
+            let back: T = serde_json::from_value(wire.clone())
+                .unwrap_or_else(|e| panic!("{kind} sample does not parse back: {e}"));
+            assert_eq!(back, value, "{kind} round trip");
+            let name = format!("{kind}/{}", qualified_type_of(&value));
+            assert!(out.insert(name.clone(), wire).is_none(), "duplicate {name}");
+        }
+    }
+    for area in areas::all() {
+        let mut actual = Map::new();
+        wires("command", area.commands, &mut actual);
+        wires("query", area.queries, &mut actual);
+        wires("ui_event", area.ui_events, &mut actual);
+        wires("query_reply", area.query_replies, &mut actual);
+        let actual = Value::Object(actual);
+        let path = golden_path(&format!("areas/{}", area.name));
+        if std::env::var_os("WORKBENCH_UPDATE_GOLDEN").is_some() {
+            let mut text = serde_json::to_string_pretty(&actual).unwrap();
+            text.push('\n');
+            std::fs::write(&path, text).unwrap();
+        }
+        let expected: Value = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("missing golden {}: {e}", path.display())),
+        )
+        .unwrap();
+        assert_eq!(
+            actual,
+            expected,
+            "{} differs from {}",
+            area.name,
+            path.display()
+        );
+    }
 }
 
 #[test]

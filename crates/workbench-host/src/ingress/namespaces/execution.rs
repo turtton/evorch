@@ -41,12 +41,18 @@ impl CommandHost {
 }
 
 impl CommandHost {
-    /// Run listings are read from the projection.
+    /// Run listings are read from the projection. An operation the execution
+    /// area adds later gets its own arm, answered by `self.areas.execution`;
+    /// the compiler asks for it.
     pub(in crate::ingress) fn execution_query(
         &self,
         query: &workbench_protocol::queries::Query,
-        _namespace_query: &workbench_protocol::namespaces::ExecutionQuery,
+        namespace_query: &workbench_protocol::namespaces::ExecutionQuery,
     ) -> Result<workbench_protocol::queries::QueryReply, WorkbenchError> {
-        self.projection.query(query)
+        match namespace_query {
+            workbench_protocol::namespaces::ExecutionQuery::ListRuns(_) => {
+                self.projection.query(query)
+            }
+        }
     }
 }

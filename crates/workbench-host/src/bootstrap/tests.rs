@@ -235,3 +235,96 @@ async fn restart_quiesce_keeps_owner_alive_until_explicit_operator_shutdown() {
         runtime::ownership::OwnerState::Released
     );
 }
+
+#[tokio::test]
+async fn area_tasks_are_stopped_and_drained_by_the_bootstrap_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut boot = BootstrappedHost::open(BootstrapOptions {
+        config_dir: root.clone(),
+        project_root: root.clone(),
+        ownership_root: root.join("owners"),
+    })
+    .await
+    .unwrap();
+    let (drained, completed) = tokio::sync::oneshot::channel();
+    boot.area_tasks
+        .spawn("probe", |mut stop| async move {
+            stop.stopped().await;
+            drained.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(boot.area_tasks.active(), 1);
+    boot.shutdown().await.unwrap();
+    // The task ran its drain before shutdown returned, and nothing new starts.
+    completed.await.unwrap();
+    assert_eq!(boot.area_tasks.active(), 0);
+    assert_eq!(
+        boot.area_tasks
+            .spawn("late", |_| async { Ok(()) })
+            .unwrap_err(),
+        crate::areas::SpawnError::Closed
+    );
+}
+
+#[tokio::test]
+async fn a_failing_area_task_is_reported_but_the_drain_flush_and_owner_release_still_happen() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut boot = BootstrappedHost::open(BootstrapOptions {
+        config_dir: root.clone(),
+        project_root: root.clone(),
+        ownership_root: root.join("owners"),
+    })
+    .await
+    .unwrap();
+    let _permit = boot.owner.start("owned").unwrap();
+    let (drained, completed) = tokio::sync::oneshot::channel();
+    boot.area_tasks
+        .spawn("failing", |mut stop| async move {
+            stop.stopped().await;
+            Err("area failed".into())
+        })
+        .unwrap();
+    boot.area_tasks
+        .spawn("healthy", |mut stop| async move {
+            stop.stopped().await;
+            drained.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    // An event the bridge still has to flush when the shutdown runs.
+    boot.runtime
+        .event_bus()
+        .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+            source: "area-test".into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
+            code: "area.failure.flush".into(),
+            detail: "Persisted although an area task failed".into(),
+            run_id: None,
+            thread_id: None,
+            call_id: None,
+        }));
+
+    let error = boot.shutdown().await.unwrap_err().to_string();
+    assert_eq!(error, "failing: area failed");
+    // The other task was joined, the bridge flushed, and the owner released.
+    completed.await.unwrap();
+    let db = storage::Database::open(&boot.composition.storage).unwrap();
+    assert_eq!(
+        db.events_all_ordered()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(
+                &event.event.kind,
+                event_bus::EventKind::Diagnostic(d) if d.code == "area.failure.flush"
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        boot.owner.attach("owned").unwrap().state,
+        runtime::ownership::OwnerState::Released
+    );
+}

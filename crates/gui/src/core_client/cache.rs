@@ -59,6 +59,17 @@ impl Cache {
 
     /// False means this projection cannot be continued and needs a fresh cut.
     pub fn event(&mut self, envelope: EventEnvelope) -> bool {
+        self.event_delivering(envelope, |_| {})
+    }
+
+    /// Like [`Self::event`], and hands a delivered (not duplicate) event to
+    /// `deliver` too, so the features (`features/`) see each event exactly
+    /// once and in the order the cache does.
+    pub fn event_delivering(
+        &mut self,
+        envelope: EventEnvelope,
+        deliver: impl FnOnce(&UiEvent),
+    ) -> bool {
         if envelope.event.ends_subscription() {
             return false;
         }
@@ -67,7 +78,7 @@ impl Cache {
         };
         match cursor.observe(envelope.cursor) {
             CursorDecision::Duplicate => return true,
-            CursorDecision::Deliver => (),
+            CursorDecision::Deliver => deliver(&envelope.event),
             _ => return false,
         }
         match envelope.event {
@@ -102,6 +113,10 @@ impl Cache {
             }
             UiEvent::Projection(ProjectionEvent::ResyncRequired { .. })
             | UiEvent::Projection(ProjectionEvent::SubscriptionClosed { .. }) => unreachable!(),
+            // Events of a namespace a feature owns (and later events of the
+            // namespaces above) are applied by the feature, not by this cache.
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
         true
     }

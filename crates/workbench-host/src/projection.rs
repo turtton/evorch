@@ -220,6 +220,27 @@ impl Projection {
     pub fn approval_registry(&self) -> &Arc<ApprovalRegistry> {
         &self.registry
     }
+
+    /// A [`ProjectionSource`] for the events of `namespace`. The `projection`
+    /// namespace is the projection's own control channel and has no source.
+    ///
+    /// # Errors
+    /// `InvalidRequest` for the `projection` namespace or a name that is no
+    /// namespace.
+    pub fn source(self: &Arc<Self>, namespace: &str) -> Result<ProjectionSource, WorkbenchError> {
+        let info = workbench_protocol::namespaces::namespace(namespace)
+            .filter(|info| info.name != "projection")
+            .ok_or_else(|| {
+                queries::error(
+                    ErrorCode::InvalidRequest,
+                    "no event source for this namespace",
+                )
+            })?;
+        Ok(ProjectionSource {
+            projection: Arc::downgrade(self),
+            namespace: info.name,
+        })
+    }
     pub fn invalidate(&self) {
         self.state.lock().unwrap().invalidate(self.limits);
     }
@@ -418,8 +439,8 @@ impl Projection {
     }
     /// Read-only queries the projection answers. Each namespace has its own
     /// reader; a namespace this projection does not serve (the host answers
-    /// lane management, command receipts and approval inputs itself, the
-    /// reserved namespaces have no operations) is refused.
+    /// lane management, command receipts and approval inputs itself, and the
+    /// other namespaces through their area services) is refused.
     pub fn query(&self, query: &Query) -> Result<QueryReply, WorkbenchError> {
         query.validate(&Default::default())?;
         match query {
@@ -432,22 +453,22 @@ impl Projection {
             Query::Approvals(q) => self.approvals_query(query, q).map(QueryReply::Approvals),
             Query::Lifecycle(q) => self.lifecycle_query(q).map(QueryReply::Lifecycle),
             Query::Projection(q) => self.projection_query(q).map(QueryReply::Projection),
-            Query::Lanes(_) => Err(queries::error(
-                ErrorCode::UnsupportedCapability,
-                "lane management belongs to the host ingress",
-            )),
-            Query::Settings(q) => match *q {},
-            Query::Auth(q) => match *q {},
-            Query::Mcp(q) => match *q {},
-            Query::Teams(q) => match *q {},
-            Query::Diagnostics(q) => match *q {},
-            Query::Memory(q) => match *q {},
-            Query::Evaluation(q) => match *q {},
-            Query::Improvement(q) => match *q {},
-            Query::PullRequests(q) => match *q {},
-            Query::Browser(q) => match *q {},
-            Query::Artifacts(q) => match *q {},
-            Query::Maintenance(q) => match *q {},
+            // Every other namespace is answered by the host's area service for
+            // it (lane management, MCP, teams, ...), never by this projection;
+            // a namespace gaining operations does not change this match.
+            Query::Lanes(_)
+            | Query::Settings(_)
+            | Query::Auth(_)
+            | Query::Mcp(_)
+            | Query::Teams(_)
+            | Query::Diagnostics(_)
+            | Query::Memory(_)
+            | Query::Evaluation(_)
+            | Query::Improvement(_)
+            | Query::PullRequests(_)
+            | Query::Browser(_)
+            | Query::Artifacts(_)
+            | Query::Maintenance(_) => Err(area_owned()),
         }
     }
 
@@ -511,6 +532,10 @@ impl Projection {
         }
     }
 
+    // Operations the workspace area adds later are answered by its host service
+    // and never routed here; the fallthrough keeps this reader compiling when
+    // the namespace gains a variant.
+    #[allow(unreachable_patterns)]
     fn workspace_query(
         &self,
         query: &Query,
@@ -540,16 +565,22 @@ impl Projection {
                         .cloned()
                         .ok_or_else(|| queries::error(ErrorCode::NotFound, "unknown thread"))?,
                 ),
+                _ => return Err(area_owned()),
             })
         })
     }
 
+    // As for `workspace_query`: the execution area's later operations belong to
+    // its host service.
+    #[allow(irrefutable_let_patterns)]
     fn execution_query(
         &self,
         query: &Query,
         q: &ExecutionQuery,
     ) -> Result<ExecutionReply, WorkbenchError> {
-        let ExecutionQuery::ListRuns(q) = q;
+        let ExecutionQuery::ListRuns(q) = q else {
+            return Err(area_owned());
+        };
         self.with_models(|m| {
             Ok(ExecutionReply::Runs(
                 self.page_of(
@@ -859,6 +890,57 @@ impl Drop for Projection {
         }
     }
 }
+fn area_owned() -> WorkbenchError {
+    queries::error(
+        ErrorCode::UnsupportedCapability,
+        "this operation belongs to its area service",
+    )
+}
+
+/// How an area service feeds events of its own namespace into the single
+/// publication boundary of the projection: they get the next cursor, enter the
+/// replay buffer and reach every subscriber like any other event. Obtain one
+/// with [`Projection::source`]; it holds the projection weakly, so a source kept
+/// by a service never keeps the projection alive.
+///
+/// An event that names no thread (everything an area adds, until a namespace
+/// defines how its events map to threads) reaches `All`-scope subscribers only.
+#[derive(Clone)]
+pub struct ProjectionSource {
+    projection: std::sync::Weak<Projection>,
+    namespace: &'static str,
+}
+
+impl ProjectionSource {
+    pub fn namespace(&self) -> &'static str {
+        self.namespace
+    }
+
+    /// Publish `event`, which must belong to this source's namespace.
+    ///
+    /// # Errors
+    /// `InvalidRequest` when the event fails its own validation or belongs to
+    /// another namespace, `Draining` when the projection is gone.
+    pub fn publish(&self, event: UiEvent) -> Result<(), WorkbenchError> {
+        if event.namespace() != self.namespace {
+            return Err(queries::error(
+                ErrorCode::InvalidRequest,
+                "event belongs to another namespace",
+            ));
+        }
+        event.validate()?;
+        let projection = self.projection.upgrade().ok_or_else(|| {
+            queries::error(ErrorCode::Draining, "the projection is shutting down")
+        })?;
+        projection
+            .state
+            .lock()
+            .unwrap()
+            .publish(event, projection.limits);
+        Ok(())
+    }
+}
+
 fn thread_of(event: &UiEvent) -> Option<&ThreadId> {
     match event {
         UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) => Some(&thread.id),

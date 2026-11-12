@@ -381,3 +381,43 @@ fn backward_pages_respect_encoded_byte_and_item_limits_without_gaps() {
     assert!(empty.items.is_empty());
     assert!(empty.next_cursor.is_none());
 }
+
+#[tokio::test]
+async fn an_area_source_publishes_only_its_own_namespace_through_the_one_boundary() {
+    let (p, _) = make(&tokio::runtime::Handle::current(), 64, Default::default());
+    let mut subscriber = p.subscribe_with_snapshot(&all(None)).unwrap();
+    let after = subscriber.started.high_water;
+
+    // The projection's own control channel and names that are no namespace
+    // have no source.
+    for refused in ["projection", "no_such_namespace"] {
+        assert_eq!(
+            p.source(refused).err().map(|e| e.code),
+            Some(ErrorCode::InvalidRequest),
+            "{refused}"
+        );
+    }
+
+    // An event of another namespace is refused and never published.
+    let workspace = p.source("workspace").unwrap();
+    assert_eq!(
+        workspace.publish(event(1)).unwrap_err().code,
+        ErrorCode::InvalidRequest
+    );
+
+    // An event of its own namespace gets the next cursor and reaches the
+    // subscriber like any other event.
+    let lifecycle = p.source("lifecycle").unwrap();
+    lifecycle.publish(event(2)).unwrap();
+    let delivered = subscriber.recv().await.unwrap();
+    assert_eq!(delivered.event, event(2));
+    assert_eq!(delivered.cursor.sequence.get(), after.sequence.get() + 1);
+
+    // A source keeps nothing alive: once the projection is gone it reports so.
+    drop(subscriber);
+    drop(p);
+    assert_eq!(
+        lifecycle.publish(event(3)).unwrap_err().code,
+        ErrorCode::Draining
+    );
+}
