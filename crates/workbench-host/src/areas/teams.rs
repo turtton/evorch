@@ -4,10 +4,10 @@
 //! and with the team configuration's own owner.
 use std::collections::BTreeMap;
 
+use event_bus::RecvError;
 use event_bus::{EventKind, MessageEvent};
 use runtime::AgentRuntime;
 use runtime::team::{ClaimState, TeamTask};
-use tokio::sync::broadcast::error::RecvError;
 use workbench_protocol::errors::{ErrorCode, WorkbenchError};
 use workbench_protocol::events::UiEvent;
 use workbench_protocol::ids::{RunId, ThreadId};

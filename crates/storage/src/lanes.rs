@@ -290,6 +290,18 @@ impl crate::Database {
         crate::repo::lanes::get_by_thread(&self.conn, thread_id)
     }
 
+    /// The lanes `lead_thread_id` currently manages, in lane ID order. A read
+    /// only membership scan: unlike `lane_list` it stores no cursor listing.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn managed_lanes(
+        &self,
+        lead_thread_id: &str,
+    ) -> Result<Vec<LaneRecord>, crate::StorageError> {
+        crate::repo::lanes::managed_lanes(&self.conn, lead_thread_id)
+    }
+
     /// Reports of a lane after `after_seq`, oldest first, at most
     /// [`LANE_REPORTS_PAGE_MAX`].
     ///

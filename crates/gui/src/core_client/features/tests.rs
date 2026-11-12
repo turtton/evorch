@@ -144,11 +144,18 @@ fn view<'a>(
 fn only_the_implemented_workspace_is_offered_and_the_other_placeholders_stay_silent() {
     let mut features = Features::default();
     let (cache, selection) = (Cache::default(), Selection::default());
-    // Only implemented areas are offered: the workspace and MCP (in slot
-    // order). Without a selected project MCP asks for nothing.
+    // Only implemented areas are offered, in slot order: the workspace, MCP
+    // and the execution, teams and lanes screens. Without a selected project
+    // they ask for nothing.
     assert_eq!(
         features.available(true, &Capability::IMPLEMENTED),
-        [FeatureId::Workspace, FeatureId::Mcp]
+        [
+            FeatureId::Workspace,
+            FeatureId::Mcp,
+            FeatureId::Execution,
+            FeatureId::Teams,
+            FeatureId::Lanes
+        ]
     );
     assert!(
         features
@@ -176,6 +183,9 @@ fn only_the_implemented_workspace_is_offered_and_the_other_placeholders_stay_sil
 fn an_implemented_feature_renders_only_while_connected_with_its_capabilities() {
     let log = log();
     let mut features = Features::default();
+    for id in [FeatureId::Execution, FeatureId::Teams, FeatureId::Lanes] {
+        features.install(Recorder::new(id, Availability::Placeholder, &log));
+    }
     features.install(Recorder::new(FeatureId::Mcp, NEEDS_QUERIES, &log));
     assert_eq!(
         features.available(true, &[Capability::Queries]),

@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use workbench_protocol::namespaces::{
     ApprovalsCommand, ApprovalsEvent, ConversationCommand, ConversationEvent, ConversationQuery,
-    QuestionsCommand, QuestionsQuery, QuestionsReply,
+    ExecutionQuery, ExecutionReply, LanesQuery, QuestionsCommand, QuestionsQuery, QuestionsReply,
+    execution::{RunDetailsQuery, RunScope},
+    lanes::ListLanes,
+    teams::TeamsQuery,
 };
 
 use event_bus::{EventBus, EventKind, ProviderEvent};
@@ -13,6 +16,7 @@ use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
+use workbench_host::areas::{Areas, execution::ExecutionArea, lanes::LanesArea, teams::TeamsArea};
 use workbench_host::{CommandHost, commands::CommandService, projects::StaticProjects};
 use workbench_protocol::{commands::*, envelope::*, events::*, handshake::*, ids::*, queries::*};
 use workbench_web::{WebServer, WebServerConfig};
@@ -29,6 +33,34 @@ fn send(thread: &str, submission: &str, text: &str) -> Command {
         model_preference: None,
         fork_seed: None,
     }))
+}
+
+/// Read-only queries a screen sends to show runs, the team board and lanes. They are
+/// asked between two turns: the next provider request must still extend the first.
+fn display_queries() -> Vec<Query> {
+    let thread = ThreadId::new("thread").unwrap();
+    vec![
+        Query::Execution(ExecutionQuery::ListRunDetails(RunDetailsQuery {
+            thread: thread.clone(),
+            scope: RunScope::Roots,
+            page: Default::default(),
+        })),
+        Query::Execution(ExecutionQuery::GetThreadExecution(ThreadTarget {
+            thread: thread.clone(),
+        })),
+        Query::Teams(TeamsQuery::GetTeam(ThreadTarget {
+            thread: thread.clone(),
+        })),
+        Query::Teams(TeamsQuery::ListTeamTasks(ThreadQuery {
+            thread: thread.clone(),
+            page: Default::default(),
+        })),
+        Query::Lanes(LanesQuery::ListLanes(ListLanes {
+            lead_thread: thread,
+            policy: None,
+            page: Default::default(),
+        })),
+    ]
 }
 
 async fn turn(events: &mut event_bus::EventReceiver, run: runtime::RunId) {
@@ -159,8 +191,16 @@ context_window_tokens = 1000000
         .with_ownership(owner.clone());
     let mut projects = StaticProjects::default();
     projects.insert(&ProjectId::new("project").unwrap(), dir.path().into());
+    let areas = Areas {
+        execution: ExecutionArea::with_runtime(runtime.clone()),
+        teams: TeamsArea::with_runtime(runtime.clone()),
+        lanes: LanesArea::with_runtime(runtime.clone()),
+        ..Areas::default()
+    };
     let host = Arc::new(Mutex::new(
-        CommandHost::new(service).with_projects(projects),
+        CommandHost::new(service)
+            .with_projects(projects)
+            .with_areas(areas),
     ));
     let instance = Instance::acquire(
         &evorch_core::instance::LaunchGuard::acquire(
@@ -215,6 +255,17 @@ context_window_tokens = 1000000
             page: Default::default(),
         },
     ));
+    let display = display_queries();
+    let QueryReply::Execution(ExecutionReply::RunDetails(runs)) =
+        client.query(display[0].clone()).await.unwrap()
+    else {
+        panic!("run details reply")
+    };
+    assert_eq!(runs.items.len(), 1, "the thread's one root run is listed");
+    for query in &display[1..] {
+        // A thread without a team or lanes answers an error; reading is all that matters.
+        let _ = client.query(query.clone()).await;
+    }
     let history = client.query(query.clone()).await.unwrap();
     let serialized = serde_json::to_string(&history).unwrap();
     assert!(serialized.contains("hello"));
@@ -249,6 +300,20 @@ context_window_tokens = 1000000
             .status()
             .is_success()
     );
+    for (n, query) in display.iter().enumerate() {
+        let response = http
+            .post(format!("{root}/api/v1/request"))
+            .header("Origin", &root)
+            .json(&RequestEnvelope {
+                request_id: RequestId::new(format!("web-display-{n}")).unwrap(),
+                session_id: SessionId::new("web-test").unwrap(),
+                body: RequestBody::Query(query.clone()),
+            })
+            .send()
+            .await
+            .unwrap();
+        let _: ReplyEnvelope = response.json().await.unwrap();
+    }
     let request = RequestEnvelope {
         request_id: RequestId::new("web-two").unwrap(),
         session_id: SessionId::new("web-test").unwrap(),

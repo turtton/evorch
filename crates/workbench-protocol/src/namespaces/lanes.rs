@@ -298,7 +298,7 @@ impl LanesQuery {
 pub enum LanesReply {
     LaneManagement(LaneManagementState),
     Lanes(Page<LaneSummary>),
-    Lane(LaneDetail),
+    Lane(Box<LaneDetail>),
 }
 
 impl LanesReply {

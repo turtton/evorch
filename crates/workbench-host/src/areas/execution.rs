@@ -7,9 +7,9 @@
 //! for here reaches a provider: the service only reads.
 use std::collections::{BTreeMap, BTreeSet};
 
+use event_bus::RecvError;
 use event_bus::{AgentRunPhase, EventKind, OrchestratorEvent, ThreadGoalPhase, ThreadTodoStatus};
 use runtime::AgentRuntime;
-use tokio::sync::broadcast::error::RecvError;
 use workbench_protocol::errors::{ErrorCode, WorkbenchError};
 use workbench_protocol::events::UiEvent;
 use workbench_protocol::ids::{GoalId, RunId, ThreadId};
@@ -96,15 +96,15 @@ impl ExecutionArea {
             }
             ExecutionQuery::GetRun(RunRef { thread, run }) => {
                 let runs = thread_runs(runtime, thread)?;
-                ExecutionReply::Run(
+                ExecutionReply::Run(Box::new(
                     runs.into_iter()
                         .find(|detail| detail.summary.id == *run)
                         .ok_or_else(|| error(ErrorCode::NotFound, "unknown run"))?,
-                )
+                ))
             }
-            ExecutionQuery::GetThreadExecution(target) => {
-                ExecutionReply::ThreadExecution(thread_execution(runtime, &target.thread)?)
-            }
+            ExecutionQuery::GetThreadExecution(target) => ExecutionReply::ThreadExecution(
+                Box::new(thread_execution(runtime, &target.thread)?),
+            ),
         };
         Ok(QueryReply::Execution(reply))
     }

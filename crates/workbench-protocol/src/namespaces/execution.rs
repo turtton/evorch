@@ -357,8 +357,8 @@ impl ExecutionQuery {
 pub enum ExecutionReply {
     Runs(Page<RunSummary>),
     RunDetails(Page<RunDetail>),
-    Run(RunDetail),
-    ThreadExecution(ThreadExecution),
+    Run(Box<RunDetail>),
+    ThreadExecution(Box<ThreadExecution>),
 }
 
 impl ExecutionReply {

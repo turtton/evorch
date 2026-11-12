@@ -9,14 +9,14 @@
 //! revision the lane had received when it reported.
 use std::sync::Arc;
 
+use event_bus::RecvError;
 use event_bus::lane::{
     LaneAttentionAction as StoredAction, LaneAttentionFilter, LaneAttentionKind as StoredKind,
     LanePolicy, LaneReadyState as StoredReady, LaneStatus,
 };
 use event_bus::{EventKind, LedgerEvent};
 use runtime::AgentRuntime;
-use storage::lanes::{LaneListRequest, LaneRecord};
-use tokio::sync::broadcast::error::RecvError;
+use storage::lanes::LaneRecord;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::events::UiEvent;
 use workbench_protocol::ids::{RunId, ThreadId};
@@ -96,7 +96,9 @@ impl LanesArea {
                 ));
             }
             LanesQuery::ListLanes(list) => LanesReply::Lanes(self.list(runtime, query, list)?),
-            LanesQuery::GetLane { lane_id } => LanesReply::Lane(lane_detail(runtime, lane_id)?),
+            LanesQuery::GetLane { lane_id } => {
+                LanesReply::Lane(Box::new(lane_detail(runtime, lane_id)?))
+            }
         };
         Ok(QueryReply::Lanes(reply))
     }
@@ -114,25 +116,20 @@ impl LanesArea {
         let lead = list.lead_thread.as_str().to_owned();
         let items = runtime
             .with_storage_reader(|db| {
-                let mut out = Vec::new();
-                let mut cursor = None;
-                loop {
-                    let page = db.lane_list(LaneListRequest {
-                        lead_thread_id: lead.clone(),
-                        policy,
-                        cursor: cursor.take(),
-                        limit: usize::MAX,
-                    })?;
-                    for item in page.items {
-                        if let Some(record) = db.lane(&item.lane_id)?
-                            && let Some(summary) = summary_of(&record, item.latest_report.as_ref())
-                        {
-                            out.push(summary);
-                        }
-                    }
-                    cursor = page.next_cursor;
-                    if cursor.is_none() {
-                        break;
+                let mut records = db.managed_lanes(&lead)?;
+                records.retain(|record| policy.is_none_or(|policy| record.policy == policy));
+                // Newest activity first, ties by lane id: a stable order for paging.
+                records.sort_by(|left, right| {
+                    right
+                        .last_activity_at_ns
+                        .cmp(&left.last_activity_at_ns)
+                        .then_with(|| left.lane_id.cmp(&right.lane_id))
+                });
+                let mut out = Vec::with_capacity(records.len());
+                for record in &records {
+                    let report = latest_report(db, record)?;
+                    if let Some(summary) = summary_of(record, report.as_ref()) {
+                        out.push(summary);
                     }
                 }
                 Ok(out)
