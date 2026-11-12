@@ -169,6 +169,7 @@ fn fail_recovery_source(
     if token.as_deref() == Some(&attempt.token) {
         return Ok(LaneRecoveryFailure {
             episode: e,
+            newly_suppressed: false,
             report: None,
         });
     }
@@ -229,7 +230,11 @@ fn fail_recovery_source(
     }
     tx.execute("UPDATE lane_recovery_episodes SET attempts=?2,last_attempt_at_ns=?3,state=?4,last_failure_class='restore_failed',revision=?5,failure_report_ref=?6,last_attempt_token=?7 WHERE episode_id=?1", params![e.episode_id, e.attempts, now, if e.state == LaneRecoveryState::Suppressed {"suppressed"} else {"retryable"}, e.revision, e.failure_report_ref, attempt.token])?;
     tx.commit()?;
-    Ok(LaneRecoveryFailure { episode: e, report })
+    Ok(LaneRecoveryFailure {
+        newly_suppressed: e.state == LaneRecoveryState::Suppressed,
+        episode: e,
+        report,
+    })
 }
 pub(crate) fn resolve_recovery(
     conn: &Connection,

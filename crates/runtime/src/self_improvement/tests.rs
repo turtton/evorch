@@ -107,6 +107,8 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("ToolArgumentsMalformed", TransientOrExternal),
         ("OwnershipRegistryWait", TransientOrExternal),
         ("CompactionFailed", TransientOrExternal),
+        ("LaneUncollectedCreationSuppressed", HarnessImprovement),
+        ("LaneRestoreRetrySuppressed", TransientOrExternal),
         ("ContextCheckpointSaved", Ignored),
         ("mcp.owner_drained", Ignored),
         ("EvaluationFinished", Ignored),
@@ -1021,6 +1023,10 @@ fn packet_acceptance_criteria_are_specific_to_the_code() {
         ("IdenticalToolCalls", "Reproduce identical tool calls"),
         ("BudgetExhausted", "Reproduce budget exhaustion"),
         (
+            "LaneUncollectedCreationSuppressed",
+            "Reproduce the suppression using evidence.fields cohort",
+        ),
+        (
             "RunError:storage_busy",
             "Reproduce the run failure using evidence.reason",
         ),
@@ -1341,6 +1347,93 @@ async fn bus_diagnostics_record_their_wall_clock_and_split_by_emitter() {
         draft.contains(&format!("Recorded by: {}\n", build_info())),
         "{draft}"
     );
+}
+
+fn lane_suppression(code: &str, thread: &str, identity: &str, count: u32) -> DiagnosticEvent {
+    DiagnosticEvent {
+        source: "budget_tracker".into(),
+        severity: DiagnosticSeverity::Warning,
+        code: code.into(),
+        detail: format!(
+            "action=suppress_lane_open\nidentity={identity}\ncohort={identity}\nuncollected_lane_open_count={count}\nthreshold=100"
+        ),
+        run_id: Some("run-lead".into()),
+        thread_id: Some(thread.into()),
+        call_id: None,
+    }
+}
+
+async fn observe_all(f: &Fixture, events: Vec<DiagnosticEvent>) {
+    let bus = EventBus::new(64);
+    let receiver = bus.subscribe();
+    for event in events {
+        bus.emit(Event::new(event));
+    }
+    // An already-resolved stop future consumes the pending snapshot and returns.
+    f.collector()
+        .run_until(receiver, async {}, |_| true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn uncollected_suppression_observations_are_keyed_by_lead_thread_and_cohort() {
+    use diagnostic_codes::LANE_UNCOLLECTED_CREATION_SUPPRESSED as CODE;
+    let f = Fixture::new();
+    // The same cohort re-emitted after a restore, with a later timestamp and a
+    // different count, is one observation, not a second occurrence.
+    observe_all(
+        &f,
+        vec![
+            lane_suppression(CODE, "lead-1", "cohort-a", 100),
+            lane_suppression(CODE, "lead-1", "cohort-a", 101),
+        ],
+    )
+    .await;
+    let candidates = f.candidates();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].code, CODE);
+    assert_eq!(candidates[0].occurrences, 1);
+    assert_eq!(
+        candidates[0].dedup_key,
+        format!("diag:budget_tracker:{CODE}")
+    );
+    let packet = render_packet_draft(&candidates[0]);
+    assert!(packet.contains("uncollected_lane_open_count"), "{packet}");
+
+    // Another cohort of the same lead, and the same cohort name under another lead
+    // thread, are independent occurrences of the same candidate.
+    observe_all(
+        &f,
+        vec![
+            lane_suppression(CODE, "lead-1", "cohort-b", 100),
+            lane_suppression(CODE, "lead-2", "cohort-a", 100),
+        ],
+    )
+    .await;
+    let candidates = f.candidates();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].occurrences, 3);
+}
+
+#[tokio::test]
+async fn restore_retry_suppression_is_evidence_and_never_a_candidate() {
+    let f = Fixture::new();
+    observe_all(
+        &f,
+        vec![DiagnosticEvent {
+            source: "lane_delivery".into(),
+            thread_id: None,
+            ..lane_suppression(
+                diagnostic_codes::LANE_RESTORE_RETRY_SUPPRESSED,
+                "",
+                "lr-episode",
+                0,
+            )
+        }],
+    )
+    .await;
+    assert!(f.candidates().is_empty());
 }
 
 #[test]

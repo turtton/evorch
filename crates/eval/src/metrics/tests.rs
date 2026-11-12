@@ -335,3 +335,39 @@ fn the_timeline_summarizes_events_and_keeps_both_ends_of_long_runs() {
             .contains("IdenticalToolCalls: read repeated")
     );
 }
+
+#[test]
+fn lane_suppressions_are_notable_in_the_timeline() {
+    // Given: a root run whose lane creation and restore retries were suppressed.
+    let mut events = vec![started("root", None, "orchestrator")];
+    for code in [
+        diagnostic_codes::LANE_UNCOLLECTED_CREATION_SUPPRESSED,
+        diagnostic_codes::LANE_RESTORE_RETRY_SUPPRESSED,
+    ] {
+        events.push(Event::new(DiagnosticEvent {
+            source: "runtime".into(),
+            severity: DiagnosticSeverity::Warning,
+            code: code.into(),
+            detail: "action=suppress".into(),
+            run_id: Some("root".into()),
+            thread_id: None,
+            call_id: None,
+        }));
+    }
+
+    // When: the timeline is built.
+    let lines = timeline(&recorded(&events, vec![]));
+
+    // Then: both suppressions appear against the root's role.
+    for code in [
+        diagnostic_codes::LANE_UNCOLLECTED_CREATION_SUPPRESSED,
+        diagnostic_codes::LANE_RESTORE_RETRY_SUPPRESSED,
+    ] {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("[orchestrator] {code}: action=suppress"))),
+            "{lines:?}"
+        );
+    }
+}

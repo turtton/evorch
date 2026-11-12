@@ -80,12 +80,37 @@ pub(super) fn open(state: &mut LoopState, runtime: &AgentRuntime, input: Value) 
         Ok(view) => view,
         Err(e) => return failure(e),
     };
+    let limit = runtime
+        .shared
+        .uncollected_lane_open_limit
+        .get()
+        .copied()
+        .unwrap_or(crate::budget_tracker::UNCOLLECTED_LANE_OPEN_LIMIT);
     let suppressed = state
         .budget
         .spawn_credits
-        .reconcile_uncollected_lanes(&managed, &terminal);
+        .reconcile_uncollected_lanes_at(&managed, &terminal, limit);
     if existing.is_none() && suppressed {
-        return error(state.budget.spawn_credits.uncollected_lane_rejection());
+        if let Some(suppression) = state
+            .budget
+            .spawn_credits
+            .take_uncollected_suppression(limit)
+        {
+            runtime
+                .shared
+                .bus
+                .emit(Event::new(event_bus::DiagnosticEvent {
+                    source: "budget_tracker".into(),
+                    severity: event_bus::DiagnosticSeverity::Warning,
+                    code: event_bus::event::diagnostic_codes::LANE_UNCOLLECTED_CREATION_SUPPRESSED
+                        .into(),
+                    detail: suppression.detail(&thread),
+                    run_id: Some(state.caller_run_id().to_string()),
+                    thread_id: Some(thread.clone()),
+                    call_id: None,
+                }));
+        }
+        return error(state.budget.spawn_credits.uncollected_lane_rejection(limit));
     }
     let opened = runtime.open_lane(state.caller_run_id(), &key, args.brief);
     // Count only an intent that became durable in this attempt. An old snapshot

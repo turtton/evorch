@@ -258,5 +258,8 @@ pub struct LaneRecoveryAttempt {
 #[derive(Debug, Clone)]
 pub struct LaneRecoveryFailure {
     pub episode: LaneRecoveryEpisode,
+    /// This call moved the episode to `Suppressed`. False when it was already
+    /// suppressed and the same attempt token is replayed.
+    pub newly_suppressed: bool,
     pub report: Option<crate::lanes::LaneReportAppended>,
 }

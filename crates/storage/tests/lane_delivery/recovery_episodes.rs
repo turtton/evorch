@@ -11,16 +11,23 @@ fn setup() -> Fixture {
 fn failure(f: &Fixture, at: i64) -> LaneRecoveryEpisode {
     let c = claim(&f.h(), at);
     let attempt = f.h().prepare_lane_recovery(c.clone(), at).unwrap();
-    let e = f
+    let first = f
         .h()
         .record_lane_recovery_failure(c.clone(), attempt.clone(), at + 1)
-        .unwrap()
-        .episode;
+        .unwrap();
+    let e = first.episode;
+    // Only the call that makes the episode Suppressed says so; the idempotent
+    // replay of the same attempt returns the suppressed episode without repeating it.
+    assert_eq!(
+        first.newly_suppressed,
+        e.state == LaneRecoveryState::Suppressed
+    );
     let retry = f
         .h()
         .record_lane_recovery_failure(c.clone(), attempt, at + 1)
         .unwrap();
     assert_eq!(retry.episode, e);
+    assert!(!retry.newly_suppressed);
     assert!(retry.report.is_none());
     f.h()
         .nack_lane_delivery(c, LaneDeliveryNack::RestoreFailed, at + 2)

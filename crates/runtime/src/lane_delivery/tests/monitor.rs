@@ -1240,6 +1240,38 @@ async fn ordinary_restore_failures_stop_at_three_across_runtime_restart_and_expl
                 .unwrap();
             assert_eq!(episode.attempts, 3);
             assert_eq!(episode.state, LaneRecoveryState::Suppressed);
+            // Six drives and three real attempts: one diagnostic, at the third failure,
+            // visible on the saved root run and naming the episode.
+            let suppressed: Vec<_> = f
+                .events
+                .drain_pending_snapshot()
+                .into_iter()
+                .filter_map(|event| {
+                    match event.kind {
+                    event_bus::EventKind::Diagnostic(d)
+                        if d.code
+                            == event_bus::event::diagnostic_codes::LANE_RESTORE_RETRY_SUPPRESSED =>
+                    {
+                        Some(d)
+                    }
+                    _ => None,
+                }
+                })
+                .collect();
+            assert_eq!(suppressed.len(), 1, "{suppressed:?}");
+            assert_eq!(
+                suppressed[0].run_id.as_deref(),
+                Some(episode.saved_root_run_id.as_str())
+            );
+            assert_eq!(suppressed[0].thread_id, None);
+            assert!(
+                suppressed[0]
+                    .detail
+                    .contains(&format!("identity={episode_id}\n")),
+                "{}",
+                suppressed[0].detail
+            );
+            assert!(suppressed[0].detail.contains("attempts=3\nlimit=3\n"));
             let bus = Arc::new(EventBus::new(1024));
             let restarted = AgentRuntime::new(
                 bus.clone(),

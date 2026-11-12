@@ -507,10 +507,23 @@ pub mod diagnostic_codes {
     /// A nudge input receipt committed; re-query the lane state.
     pub const LANE_NUDGE_ACCEPTED: &str = "lane_nudge_accepted";
 
+    /// A lead's `lane_open` was refused because its uncollected-lane cohort reached
+    /// the creation threshold. Only further model-authored lane creation is
+    /// suppressed: existing lanes, collection and answers keep working, and no
+    /// run is stopped. Emitted once per cohort, with the lead's thread and run.
+    pub const LANE_UNCOLLECTED_CREATION_SUPPRESSED: &str = "LaneUncollectedCreationSuppressed";
+    /// The same stored restore target failed to restore the configured number of
+    /// times, so automatic restore retries for that recovery episode stopped.
+    /// Emitted once when the episode becomes suppressed; an explicit resume or a
+    /// repaired target starts a new evaluation.
+    pub const LANE_RESTORE_RETRY_SUPPRESSED: &str = "LaneRestoreRetrySuppressed";
+
     /// Every code above.
     pub const ALL: &[&str] = &[
         LANE_STALL_CHANGED,
         LANE_NUDGE_ACCEPTED,
+        LANE_UNCOLLECTED_CREATION_SUPPRESSED,
+        LANE_RESTORE_RETRY_SUPPRESSED,
         BUDGET_WARNING,
         BUDGET_EXHAUSTED,
         NO_PROGRESS,

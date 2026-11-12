@@ -161,6 +161,8 @@ pub(crate) struct Shared {
     pub(crate) lanes: crate::lanes::LaneRuntime,
     /// Contention budget of ownership checkpoints and turn starts; unset is the default.
     pub(crate) ownership_retry: OnceLock<crate::ownership::RetryPolicy>,
+    /// Test-injected uncollected-lane creation threshold; unset is the default.
+    pub(crate) uncollected_lane_open_limit: OnceLock<u32>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) comment_checker: OnceLock<config::CommentCheckerConfig>,
     pub(crate) orchestration: OnceLock<config::OrchestrationConfig>,
@@ -804,6 +806,7 @@ impl AgentRuntime {
                 run_store: OnceLock::new(),
                 lanes: crate::lanes::LaneRuntime::default(),
                 ownership_retry: OnceLock::new(),
+                uncollected_lane_open_limit: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
@@ -873,6 +876,16 @@ impl AgentRuntime {
     #[doc(hidden)]
     pub fn with_ownership_retry_policy(self, policy: crate::ownership::RetryPolicy) -> Self {
         let _ = self.shared.ownership_retry.set(policy);
+        self
+    }
+
+    /// Override the uncollected-lane creation threshold
+    /// (`UNCOLLECTED_LANE_OPEN_LIMIT`, 100). For tests only, so they can compare
+    /// thresholds without 100 real lanes. Production keeps the default. First
+    /// setting wins.
+    #[doc(hidden)]
+    pub fn with_uncollected_lane_open_limit(self, limit: u32) -> Self {
+        let _ = self.shared.uncollected_lane_open_limit.set(limit);
         self
     }
 
@@ -1142,6 +1155,7 @@ impl AgentRuntime {
                 run_store: OnceLock::new(),
                 lanes: crate::lanes::LaneRuntime::default(),
                 ownership_retry: OnceLock::new(),
+                uncollected_lane_open_limit: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),

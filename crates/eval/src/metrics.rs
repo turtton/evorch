@@ -34,12 +34,14 @@ const NETWORK_ERRORS: [&str; 10] = [
     "failed to connect to",
     "connection timed out",
 ];
-const NOTABLE_DIAGNOSTICS: [&str; 5] = [
+const NOTABLE_DIAGNOSTICS: [&str; 7] = [
     diagnostic_codes::NO_PROGRESS,
     diagnostic_codes::IDENTICAL_TOOL_CALLS,
     diagnostic_codes::DELEGATION_RETRACTED,
     diagnostic_codes::BUDGET_EXHAUSTED,
     diagnostic_codes::TOOL_ARGUMENTS_MALFORMED,
+    diagnostic_codes::LANE_UNCOLLECTED_CREATION_SUPPRESSED,
+    diagnostic_codes::LANE_RESTORE_RETRY_SUPPRESSED,
 ];
 
 /// The persisted record of one replay. A replay that never started has none.

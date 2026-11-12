@@ -867,6 +867,22 @@ impl AgentRuntime {
                     self.schedule_lane_deliveries(&lead);
                 }
             }
+            if failure.newly_suppressed {
+                // Carries the saved root run, not the thread, so it is a visible
+                // diagnostic rather than a lane-view refresh signal.
+                self.shared
+                    .bus
+                    .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+                        source: "lane_delivery".into(),
+                        severity: event_bus::DiagnosticSeverity::Warning,
+                        code: event_bus::event::diagnostic_codes::LANE_RESTORE_RETRY_SUPPRESSED
+                            .into(),
+                        detail: restore_suppressed_detail(&failure.episode),
+                        run_id: Some(failure.episode.saved_root_run_id.clone()),
+                        thread_id: None,
+                        call_id: None,
+                    }));
+            }
             self.lane_state_changed(
                 &thread,
                 event_bus::DiagnosticSeverity::Warning,
@@ -1127,6 +1143,25 @@ impl AgentRuntime {
                 call_id: None,
             }));
     }
+}
+
+/// `key=value` lines naming the suppressed episode. Identifiers and counts only:
+/// no error text, brief or snapshot content.
+fn restore_suppressed_detail(episode: &storage::lane_delivery::LaneRecoveryEpisode) -> String {
+    let mut detail = format!(
+        "action=suppress_restore_retry\nidentity={episode_id}\nepisode={episode_id}\ndestination_thread_id={thread}\nsaved_root_run_id={root}\nattempts={attempts}\nlimit={limit}\nrevision={revision}",
+        episode_id = episode.episode_id,
+        thread = episode.destination_thread_id,
+        root = episode.saved_root_run_id,
+        attempts = episode.attempts,
+        limit = storage::lane_delivery::LANE_RESTORE_FAILURE_LIMIT,
+        revision = episode.revision,
+    );
+    if let Some(report) = &episode.failure_report_ref {
+        detail.push_str("\nfailure_report_ref=");
+        detail.push_str(report);
+    }
+    detail
 }
 
 impl AgentRuntime {
