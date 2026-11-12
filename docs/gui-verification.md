@@ -55,7 +55,10 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 環境変数: `EVORCH_REQUIRE_ADAPTER=1` (CI で必須化)、
   `EVORCH_METADATA_EVIDENCE` (model_metadata 証跡の出力先)、
   `WGPU_BACKEND=vulkan` (lavapipe 利用時の推奨指定)
-- CI ジョブ: `offscreen-gate` (アーティファクト `gui-evidence`)
+- CI ジョブ: ignored テスト一括は `offscreen-gate` (アーティファクト `gui-test-evidence`)、
+  証跡マトリクスは並列の `gui-evidence` (アーティファクト `gui-evidence`)。
+  マトリクスは `headless_capture` を 1 回だけビルドして直接起動し、
+  `GUI_EVIDENCE_JOBS` (既定は CPU 数、最大 4) 並列で撮影する
 
 ### L5: ブラウザ fake-source テスト
 
@@ -94,15 +97,17 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 環境変数: `GUI_QA_MODE` (`fixture` / `runtime`、既定 `fixture`)、
   `GUI_BIN` (モードに応じた既定バイナリを上書き)、
   `GUI_QA_OUTPUT_DIR` (位置引数を省略した場合の出力先)。
-- CI ジョブ: `offscreen-gate` (`gui-evidence` artifact の `native/`)
+- CI ジョブ: `gui-evidence` (`gui-evidence` artifact の `native/`)
 
 ### PR の代表画面プレビュー
 
 `pull_request` の CI が成功すると、L4 の画面証跡から全体画面、Conversation、Tasks、
 Provider 設定、承認待ち、高コントラストの 6 枚を `gui-pr-preview` artifact に保存する。
 既定ブランチの `GUI PR evidence` workflow がその artifact と PR の head SHA を検証し、
-`gh pr comment --attach` で PR に画像を投稿する。全証跡は従来どおり
-`gui-evidence` artifact に残る。成功した PR の更新ごとに新しいコメントを投稿する。
+`gh pr comment --attach` で PR に画像を投稿する。証跡は 2 つの artifact に分かれて残る。
+`gui-evidence` (`gui-evidence` job) は証跡マトリクス全件と native / Wayland 検査の証跡、
+`gui-test-evidence` (`offscreen-gate` job) は ignored テストが書き出す PNG と
+model_metadata の証跡である。成功した PR の更新ごとに新しいコメントを投稿する。
 
 画像添付には、対象リポジトリへの書き込み権限があるユーザーの OAuth token または
 personal access token を Actions secret `GUI_EVIDENCE_TOKEN` に設定する必要がある。

@@ -14,6 +14,18 @@ inputs:
 runs:
   using: composite
   steps:
+    # Downloading and bzip2-extracting the archive costs about 45 s in every job,
+    # so the extracted tree is cached. The cache is not trusted: setup-cef.sh uses
+    # it only when its digest equals the tree_sha256 pinned in the checked-out
+    # scripts/setup-cef.sh (files, symlinks and their targets, executable bits),
+    # and otherwise discards it and fetches the archive, whose pinned sha256 it
+    # checks before extracting. A fresh extraction is saved only after it matched
+    # that pin. The key hashes the script, so a new pin or archive is a new entry.
+    - id: cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/cef-src
+        key: cef-src-${{ runner.os }}-${{ hashFiles('scripts/setup-cef.sh', 'scripts/cef-tree-digest.sh') }}
     - id: install
       shell: bash
       env:
@@ -21,7 +33,11 @@ runs:
       run: |
         set -euo pipefail
         dist="$RUNNER_TEMP/cef-dist"
-        scripts/setup-cef.sh "$dist"
+        src="$RUNNER_TEMP/cef-src"
+        scripts/setup-cef.sh "$dist" --src-cache "$src"
+        if [[ -e "$src.fresh" ]]; then
+          echo "save=true" >> "$GITHUB_OUTPUT"
+        fi
         case "$RUNTIME_PATH" in
           full) lib="$dist" ;;
           libcef)
@@ -35,3 +51,8 @@ runs:
           echo "CEF_PATH=$dist"
           echo "LD_LIBRARY_PATH=$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         } >> "$GITHUB_ENV"
+    - if: steps.install.outputs.save == 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/cef-src
+        key: cef-src-${{ runner.os }}-${{ hashFiles('scripts/setup-cef.sh', 'scripts/cef-tree-digest.sh') }}
