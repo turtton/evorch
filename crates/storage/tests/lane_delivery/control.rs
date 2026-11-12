@@ -5,6 +5,8 @@ use super::*;
 mod close;
 #[path = "forward_return.rs"]
 mod forward_return;
+#[path = "inspect_lanes.rs"]
+mod inspect_lanes;
 #[path = "management.rs"]
 mod management;
 use storage::lane_control::*;

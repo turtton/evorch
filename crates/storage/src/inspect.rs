@@ -19,12 +19,14 @@ use crate::repo::event::select::{
 use crate::{Database, StorageError};
 
 mod bodies;
+mod lanes;
 mod open;
 mod storage_summary;
 pub use bodies::{
     BLOB_PREVIEW_BYTES, BlobOptions, BodyCheckScope, DEFAULT_REFERENCES_LISTED,
     MAX_REFERENCES_LISTED, MIN_BLOB_PREFIX_DIGITS,
 };
+pub use lanes::{LANE_DIAGNOSTICS_LIST_MAX, LANE_DIAGNOSTICS_UNCOLLECTED_EVALUATED_MAX};
 pub use open::InspectedDatabase;
 pub use storage_summary::{DEFAULT_TOP_THREADS, StorageSummaryOptions};
 
@@ -146,6 +148,19 @@ impl Database {
         Self::checked(conn)
     }
 
+    /// Runs `body` in one read snapshot: every `inspect_*` call made through the database
+    /// handed to it sees the same commit, so facts from different tables and from
+    /// the events of one run cannot come from different moments.
+    ///
+    /// # Errors
+    /// Whatever `body` or SQLite returns.
+    pub fn read_snapshot<T>(
+        &self,
+        body: impl FnOnce(&Self) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        crate::repo::run_messages::read_snapshot(&self.conn, || body(self))
+    }
+
     fn checked(conn: Connection) -> Result<Self, StorageError> {
         conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         let found = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
@@ -196,10 +211,16 @@ impl Database {
         match scope {
             EventScope::Run(run_id) if tombstones.contains_run(run_id) => {}
             EventScope::Run(run_id) => {
-                let transaction = self.conn.unchecked_transaction()?;
+                // Inside a caller's read snapshot the rows come from that snapshot too.
+                let owned = self
+                    .conn
+                    .is_autocommit()
+                    .then(|| self.conn.unchecked_transaction())
+                    .transpose()?;
+                let transaction: &Connection = owned.as_deref().unwrap_or(&self.conn);
                 let mut candidates = Vec::new();
                 push_ids(
-                    &transaction,
+                    transaction,
                     IDS_BY_RUN_SQL,
                     [run_id],
                     false,
@@ -207,7 +228,7 @@ impl Database {
                 )?;
                 // Task progress names its run in a field the column does not carry.
                 push_ids(
-                    &transaction,
+                    transaction,
                     "SELECT id FROM events WHERE kind = 'Orchestrator'",
                     [],
                     true,
@@ -218,15 +239,15 @@ impl Database {
                 // payload no longer decodes are blank, and are always scanned.
                 let needle = Value::String(run_id.into()).to_string();
                 push_ids(
-                    &transaction,
+                    transaction,
                     IDS_BLANK_MENTIONING_SQL,
                     [&needle],
                     true,
                     &mut candidates,
                 )?;
-                if has_unbackfilled(&transaction)? {
+                if has_unbackfilled(transaction)? {
                     push_ids(
-                        &transaction,
+                        transaction,
                         IDS_UNCONVERTED_MENTIONING_SQL,
                         [&needle],
                         true,
@@ -240,7 +261,7 @@ impl Database {
                 for candidate in normalize(candidates).iter().rev() {
                     let mut rows = statement.query([candidate.id])?;
                     let Some(row) = rows.next()? else { continue };
-                    let (event, resolved) = event_row(&transaction, row, options)?;
+                    let (event, resolved) = event_row(transaction, row, options)?;
                     if hidden(&tombstones, &resolved, row.get::<_, Option<String>>(5)?) {
                         continue;
                     }

@@ -290,6 +290,92 @@ impl SpawnCredits {
     }
 }
 
+/// The uncollected-lane marker of a stored run snapshot, as a diagnostic reads it
+/// (`evorch inspect run`). A value stored in the snapshot, not the ledger's current
+/// state: the cohort may have been collected since.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StoredUncollectedLanes {
+    /// Identity of the cohort the suppression diagnostic names. When the snapshot
+    /// predates the stored identity it is derived from the remaining IDs
+    /// (`cohort_id_derived`), which may differ from the one reported earlier.
+    pub cohort_id: Option<String>,
+    pub cohort_id_derived: bool,
+    /// Successful creation intents while the cohort remained uncollected.
+    pub uncollected_lane_open_count: u32,
+    pub lane_ids: Vec<String>,
+    /// The cohort's suppression diagnostic was already emitted.
+    pub suppression_reported: bool,
+    /// The creation threshold of a normal runtime; a test may inject another, which
+    /// the snapshot does not record.
+    pub default_threshold: u32,
+}
+
+/// Why the uncollected-lane marker of a stored run configuration cannot be shown.
+/// A snapshot without the marker is never read as "nothing uncollected".
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StoredSpawnCreditsError {
+    #[error("the stored run configuration has no spawn_credits")]
+    Missing,
+    #[error("the stored spawn_credits cannot be read: {0}")]
+    Malformed(String),
+}
+
+impl SpawnCredits {
+    /// The uncollected-lane marker, for diagnosis. Read only.
+    #[must_use]
+    pub fn stored_uncollected_lanes(&self) -> StoredUncollectedLanes {
+        let derived = self.uncollected_cohort_id.is_none() && !self.uncollected_lane_ids.is_empty();
+        StoredUncollectedLanes {
+            cohort_id: self.uncollected_cohort_id.clone().or_else(|| {
+                (!self.uncollected_lane_ids.is_empty())
+                    .then(|| cohort_identity(&self.uncollected_lane_ids))
+            }),
+            cohort_id_derived: derived,
+            uncollected_lane_open_count: self.uncollected_lane_open_count,
+            lane_ids: self.uncollected_lane_ids.iter().cloned().collect(),
+            suppression_reported: self.uncollected_suppression_reported,
+            default_threshold: UNCOLLECTED_LANE_OPEN_LIMIT,
+        }
+    }
+}
+
+/// Fields `SpawnCredits` always serializes (it skips only the optional cohort identity,
+/// the reported flag and empty presentations), so a stored value without them was not
+/// written with the uncollected marker and is not read as an empty one.
+const STORED_UNCOLLECTED_FIELDS: [&str; 2] =
+    ["uncollected_lane_open_count", "uncollected_lane_ids"];
+
+/// Reads the uncollected-lane marker out of a stored run configuration document
+/// (`run_contexts.config_json`, resolved). It decodes `spawn_credits` with the
+/// type the runtime serializes it from, so the stored form and this reader cannot
+/// drift apart unnoticed.
+///
+/// # Errors
+/// [`StoredSpawnCreditsError`] when the document has no `spawn_credits`, it does
+/// not decode, or it lacks a field that is always stored; never a zero value in
+/// their place.
+pub fn stored_uncollected_lanes(
+    run_config: &serde_json::Value,
+) -> Result<StoredUncollectedLanes, StoredSpawnCreditsError> {
+    let credits = run_config
+        .get("spawn_credits")
+        .ok_or(StoredSpawnCreditsError::Missing)?;
+    let object = credits.as_object().ok_or_else(|| {
+        StoredSpawnCreditsError::Malformed("spawn_credits is not an object".into())
+    })?;
+    if let Some(field) = STORED_UNCOLLECTED_FIELDS
+        .iter()
+        .find(|field| !object.contains_key(**field))
+    {
+        return Err(StoredSpawnCreditsError::Malformed(format!(
+            "spawn_credits has no {field}"
+        )));
+    }
+    let credits: SpawnCredits = serde_json::from_value(credits.clone())
+        .map_err(|error| StoredSpawnCreditsError::Malformed(error.to_string()))?;
+    Ok(credits.stored_uncollected_lanes())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LanePresentation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
