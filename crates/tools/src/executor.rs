@@ -1140,7 +1140,13 @@ fn absolute_root(cwd: std::path::PathBuf) -> std::path::PathBuf {
     std::path::absolute(&cwd).unwrap_or(cwd)
 }
 
-/// Rename str_replace-style `old_str`/`new_str` to edit's names, at the top level and in `edits`.
+/// Rename str_replace-style `old_str`/`new_str` to edit's names, at the top level and in `edits`,
+/// and read an `edits` array serialized as a JSON string as that array.
+///
+/// Some models send a nested array parameter as a string holding its JSON text
+/// (`"edits": "[{\"old_string\": ...}]"`) however clearly the schema says `array`. A
+/// string that parses to a JSON array is unambiguous, so it is decoded; anything else is
+/// left alone and fails schema validation as before.
 ///
 /// Models trained on `str_replace` tools send these names. They stay out of the schema
 /// because models that fill every listed property would then send both names. A name next
@@ -1159,6 +1165,12 @@ fn canonicalize_edit_names(args: &mut serde_json::Value) {
         return;
     };
     rename(object);
+    if let Some(serde_json::Value::String(text)) = object.get("edits")
+        && text.trim_start().starts_with('[')
+        && let Ok(decoded @ serde_json::Value::Array(_)) = serde_json::from_str(text)
+    {
+        object.insert("edits".into(), decoded);
+    }
     if let Some(edits) = object
         .get_mut("edits")
         .and_then(serde_json::Value::as_array_mut)
