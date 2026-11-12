@@ -76,6 +76,10 @@ jobs:
         run: |
           scripts/tests/test_verify_test_inventory.sh
           scripts/verify-test-inventory.sh --check-config
+      # The cached .debs of apt-install are only installed after they verify against
+      # the runner's Ubuntu archive keyring.
+      - name: apt-install cache verification
+        run: scripts/tests/test_apt_verify_cache.sh
 
   # Whole-workspace lint. `gui` enables CEF by default, so the build links
   # libcef.so (setup-cef); nothing here starts CEF.
