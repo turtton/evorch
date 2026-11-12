@@ -332,6 +332,9 @@ impl AgentRuntime {
         config: &RunConfig,
     ) -> Result<(), RuntimeError> {
         let record = &source.record;
+        if record.recipe.settings_reference != crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE {
+            return Err(error("unknown current settings selector"));
+        }
         if !matches!(
             record.recipe.policy,
             crate::quiesce::ResumePolicy::CoreOwned

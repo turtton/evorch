@@ -244,7 +244,8 @@ impl AgentRuntime {
             if !matches!(
                 record.recipe.policy,
                 crate::quiesce::ResumePolicy::CoreOwned
-            ) || record.recipe.settings_reference.trim().is_empty()
+            ) || record.recipe.settings_reference
+                != crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE
             {
                 return Err(error("prepared member requires current core authority"));
             }

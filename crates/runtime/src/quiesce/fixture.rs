@@ -155,6 +155,9 @@ impl Fixture {
         Self::with_admission(count, false)
     }
     pub(super) fn with_admission(count: usize, admission: bool) -> Self {
+        Self::with_approval(count, admission, false)
+    }
+    pub(super) fn with_approval(count: usize, admission: bool, approval: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = storage::StorageConfig {
             db_path: dir.path().join("runs.db"),
@@ -177,6 +180,16 @@ impl Fixture {
         let (completed_tx, completed) = mpsc::unbounded_channel();
         let release: Vec<_> = (0..count).map(|_| Arc::new(Semaphore::new(0))).collect();
         let mut executor = ToolExecutor::new(bus.clone());
+        if approval {
+            executor.set_policy(
+                sandbox::ApprovalPolicy::standard(sandbox::ApprovalMode::OnRequest)
+                    .with_override("read", sandbox::PolicyDecision::Ask),
+            );
+            executor.set_approval_gate(sandbox::ApprovalGate::new(
+                bus.clone(),
+                std::time::Duration::from_secs(300),
+            ));
+        }
         executor
             .register(Arc::new(GateRead {
                 entered: entered_tx,

@@ -594,7 +594,9 @@ impl AgentRuntime {
                         }
                         ResumePolicy::Unsupported => return Err(RecoveryReason::UnknownOwnership),
                     }
-                    if r.recipe.settings_reference.trim().is_empty() {
+                    if r.recipe.settings_reference
+                        != crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE
+                    {
                         return Err(RecoveryReason::CurrentSettingsRequired);
                     }
                     if r.recipe.team.is_some() {

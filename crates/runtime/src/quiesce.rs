@@ -24,6 +24,8 @@ pub(crate) mod dispatch;
 pub use dispatch::DispatchDrainFence;
 mod recovery;
 pub use recovery::*;
+mod continuity;
+pub use continuity::*;
 
 pub(crate) struct Coordinator {
     inner: Mutex<Inner>,

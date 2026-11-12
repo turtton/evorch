@@ -173,7 +173,7 @@ async fn explicit_current_config_and_core_policy_capture_a_candidate_but_never_a
     let recipes = BTreeMap::from([(
         run,
         RecoveryRecipe {
-            settings_reference: "current-test-config".into(),
+            settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
             policy: ResumePolicy::CoreOwned,
             goal_id: None,
             team: None,

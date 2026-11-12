@@ -12,7 +12,7 @@ async fn saved(f: &Fixture) -> RunId {
     let fence = f.runtime.fence_dispatch_restart().await.unwrap();
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
     let recipe = RecoveryRecipe {
-        settings_reference: "current-profile".into(),
+        settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
         policy: ResumePolicy::CoreOwned,
         goal_id: None,
         team: None,
@@ -121,7 +121,7 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
         .unwrap();
     let other = f.start();
     let recipe = RecoveryRecipe {
-        settings_reference: "current-profile".into(),
+        settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
         policy: ResumePolicy::CoreOwned,
         goal_id: None,
         team: None,
@@ -578,7 +578,7 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
         .capture_recovery_records(&BTreeMap::from([(
             root,
             RecoveryRecipe {
-                settings_reference: "current".into(),
+                settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
                 policy: ResumePolicy::CoreOwned,
                 goal_id: None,
                 team: None,
@@ -864,7 +864,7 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
         .capture_recovery_records(&BTreeMap::from([(
             run,
             RecoveryRecipe {
-                settings_reference: "current".into(),
+                settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
                 policy: ResumePolicy::CoreOwned,
                 goal_id: None,
                 team: None,
