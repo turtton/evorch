@@ -84,6 +84,22 @@ fn items(
     result.sort_by(|a, b| b.since_at_ns.cmp(&a.since_at_ns).then(a.id.cmp(&b.id)));
     Ok(result)
 }
+/// The pending questions routed to a lane for its current management.
+const PENDING_QUESTIONS: &str = "FROM lane_question_routes r JOIN user_questions q ON q.id=r.question_id WHERE r.lane_id=?1 AND r.management_revision=?2 AND q.answered=0 AND r.requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)";
+
+/// How many pending questions [`lane_items`] would list for the lane, counted without
+/// reading any of them.
+pub(crate) fn pending_question_count(
+    conn: &Connection,
+    lane_id: &str,
+    management_revision: u64,
+) -> Result<u64, StorageError> {
+    Ok(conn.query_row(
+        &format!("SELECT COUNT(*) {PENDING_QUESTIONS}"),
+        params![lane_id, management_revision],
+        |r| r.get(0),
+    )?)
+}
 /// The attention items of one lane, unsorted. `question_limit` bounds how many pending
 /// questions are read (`i64::MAX` for all), so a caller that shows a few reads few.
 pub(crate) fn lane_items(
@@ -94,7 +110,9 @@ pub(crate) fn lane_items(
 ) -> Result<(), StorageError> {
     {
         let l = lane(conn, lane_id)?;
-        let mut s=conn.prepare("SELECT r.payload,q.payload FROM lane_question_routes r JOIN user_questions q ON q.id=r.question_id WHERE r.lane_id=?1 AND r.management_revision=?2 AND q.answered=0 AND r.requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) ORDER BY r.question_id LIMIT ?3")?;
+        let mut s = conn.prepare(&format!(
+            "SELECT r.payload,q.payload {PENDING_QUESTIONS} ORDER BY r.question_id LIMIT ?3"
+        ))?;
         for row in s.query_map(
             params![lane_id, l.management_revision, question_limit],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),

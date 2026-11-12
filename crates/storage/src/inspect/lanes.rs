@@ -10,6 +10,7 @@
 use std::collections::BTreeSet;
 
 use event_bus::LaneStatus;
+use event_bus::lane::LaneAttentionKind;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -221,7 +222,9 @@ fn has_live_lead(conn: &Connection, lane: &LaneRecord) -> Result<bool, StorageEr
 /// attention list, read for this one lane and cut at [`LANE_DIAGNOSTICS_LIST_MAX`].
 fn attention_json(conn: &Connection, lane: &LaneRecord) -> Result<Value, StorageError> {
     if !has_live_lead(conn, lane)? {
-        return Ok(json!({"eligible": false, "shown": 0, "truncated": false, "items": []}));
+        return Ok(
+            json!({"eligible": false, "total": 0, "shown": 0, "truncated": false, "items": []}),
+        );
     }
     let mut items = Vec::new();
     crate::repo::lane_control::lane_items(
@@ -235,7 +238,17 @@ fn attention_json(conn: &Connection, lane: &LaneRecord) -> Result<Value, Storage
             .cmp(&a.since_at_ns)
             .then_with(|| a.id.cmp(&b.id))
     });
-    let truncated = items.len() > LANE_DIAGNOSTICS_LIST_MAX;
+    let questions_read = items
+        .iter()
+        .filter(|item| matches!(item.kind, LaneAttentionKind::QuestionPending { .. }))
+        .count();
+    let questions_total = crate::repo::lane_control::pending_question_count(
+        conn,
+        &lane.lane_id,
+        lane.management_revision,
+    )?;
+    let others = u64::try_from(items.len() - questions_read).unwrap_or(u64::MAX);
+    let total = others.saturating_add(questions_total);
     items.truncate(LANE_DIAGNOSTICS_LIST_MAX);
     let shown = items
         .iter()
@@ -252,8 +265,9 @@ fn attention_json(conn: &Connection, lane: &LaneRecord) -> Result<Value, Storage
         .collect::<Result<Vec<_>, StorageError>>()?;
     Ok(json!({
         "eligible": true,
+        "total": total,
         "shown": shown.len(),
-        "truncated": truncated,
+        "truncated": total > u64::try_from(shown.len()).unwrap_or(u64::MAX),
         "items": shown,
     }))
 }

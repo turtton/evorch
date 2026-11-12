@@ -378,26 +378,34 @@ fn everything_read_in_one_snapshot_comes_from_one_commit() {
 }
 
 #[test]
-fn attention_is_cut_at_the_list_limit_and_says_so() {
+fn attention_is_cut_at_the_list_limit_and_counts_every_kind_in_its_total() {
     let f = Fixture::new();
     started(&f);
     lead_run(&f);
     for question in 0..25 {
         f.create(1, question, LaneDeliveryBinding::Bound);
     }
+    f.h()
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
+        .unwrap();
 
     let section = section(&f, "lead-root");
 
-    let attention = &first_lane(&section)["attention"];
+    let lane = first_lane(&section);
+    let attention = &lane["attention"];
     assert_eq!(attention["eligible"], true);
+    assert_eq!(
+        attention["total"], 26,
+        "25 questions and the unclosed Ready"
+    );
     assert_eq!(
         attention["shown"],
         storage::inspect::LANE_DIAGNOSTICS_LIST_MAX
     );
     assert_eq!(attention["truncated"], true);
-    assert_eq!(
-        attention["items"].as_array().unwrap().len(),
-        storage::inspect::LANE_DIAGNOSTICS_LIST_MAX
+    assert!(
+        kinds(lane).contains(&"ready_unclosed".to_owned()),
+        "the newest item is among those shown"
     );
 }
 
