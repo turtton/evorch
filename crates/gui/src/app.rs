@@ -34,6 +34,7 @@ mod input;
 pub mod lane_attention;
 #[cfg(test)]
 mod lane_attention_tests;
+pub mod lane_close;
 pub mod lane_management;
 pub mod lanes;
 #[cfg(test)]

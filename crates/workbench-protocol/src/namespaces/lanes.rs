@@ -3,12 +3,14 @@
 use crate::{
     handshake::{Capability, WireLimits},
     lane_attention::LaneId,
-    lane_management::{LaneManagementResult, LaneManagementState, ManageLane},
+    lane_management::{
+        CloseLane, LaneCloseResult, LaneManagementResult, LaneManagementState, ManageLane,
+    },
     validation::ValidationError,
 };
 use serde::{Deserialize, Serialize};
 
-pub const COMMAND_OPERATIONS: &[&str] = &["manage_lane"];
+pub const COMMAND_OPERATIONS: &[&str] = &["manage_lane", "close_lane"];
 /// `manage_lane`'s `request.action.type` values: the wire names of
 /// [`LaneManagementAction`](crate::lane_management::LaneManagementAction)'s
 /// variants (a test keeps the two in step).
@@ -31,6 +33,7 @@ pub const EVENT_TYPES: &[&str] = &[];
 )]
 pub enum LanesCommand {
     ManageLane(ManageLane),
+    CloseLane(CloseLane),
 }
 
 impl LanesCommand {
@@ -41,6 +44,7 @@ impl LanesCommand {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::ManageLane(_) => Ok(()),
+            Self::CloseLane(close) => close.validate(),
         }
     }
 }
@@ -54,6 +58,7 @@ impl LanesCommand {
 )]
 pub enum LanesResult {
     Managed(LaneManagementResult),
+    Closed(LaneCloseResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

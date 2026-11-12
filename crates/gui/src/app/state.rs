@@ -175,6 +175,7 @@ pub struct WorkbenchState<S> {
     pub(super) thread_mirror: Option<super::thread_mirror::ThreadMirrorLink>,
     pub(super) lanes: super::lanes::LaneState,
     pub(super) attention: super::lane_attention::AttentionState,
+    pub(super) lane_close: super::lane_close::LaneCloseState,
     pub(super) pull_requests: super::pull_requests::PullRequestState,
     /// Threads a confirmed deletion removed; the sidebar never holds them again.
     pub(super) tombstones: storage::thread_retention::TombstoneSet,
@@ -317,6 +318,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             thread_mirror: None,
             lanes: Default::default(),
             attention: Default::default(),
+            lane_close: Default::default(),
             pull_requests: Default::default(),
             tombstones: Default::default(),
             retention: Default::default(),

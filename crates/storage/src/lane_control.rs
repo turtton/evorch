@@ -67,6 +67,21 @@ pub struct LaneCloseContext {
     /// The brief revision that Ready was reported for.
     pub ready_brief_revision: Option<u64>,
 }
+/// What a person reads before ending a lane: the brief, the Ready the close would be about,
+/// reference facts (never conditions) and the revisions the close compares. All of it comes
+/// from one snapshot of the ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneClosePreview {
+    pub lane: crate::lanes::LaneRecord,
+    pub context: LaneCloseContext,
+    /// The latest report, when it is a Ready for the current management.
+    pub ready: Option<LaneReport>,
+    /// Review state of that Ready; `None` when there is no Ready.
+    pub readiness: Option<LaneReadyState>,
+    pub pr_context: LaneClosePrContext,
+    /// The close that stands now, if any.
+    pub current_close: Option<LaneCloseResult>,
+}
 /// Longest note a close accepts, in bytes.
 pub const LANE_CLOSE_NOTE_MAX_BYTES: usize = 2048;
 /// Most review caveats a verification or close snapshot keeps, each at most 256 bytes.
@@ -96,5 +111,30 @@ impl crate::Database {
         limit: usize,
     ) -> Result<LaneAttentionPage, crate::StorageError> {
         crate::repo::lane_control::attention(&self.conn, filter, cursor, limit)
+    }
+
+    /// What a person reads before ending a lane, with the revisions the close compares,
+    /// from one snapshot. Read only; nothing here is a condition of the close.
+    ///
+    /// # Errors
+    /// `NotAttached` for a detached lane, `LaneNotFound`, and SQLite or decoding failures.
+    pub fn lane_close_preview(
+        &self,
+        lane_id: &str,
+    ) -> Result<LaneClosePreview, crate::StorageError> {
+        let tx = self.conn.unchecked_transaction()?;
+        crate::repo::lane_control::close_preview(&tx, lane_id)
+    }
+
+    /// The close that stands for a managed lane now; `None` when there is none or the lane
+    /// is detached. Read only.
+    ///
+    /// # Errors
+    /// SQLite or decoding failures.
+    pub fn current_lane_close(
+        &self,
+        lane_id: &str,
+    ) -> Result<Option<LaneCloseResult>, crate::StorageError> {
+        crate::repo::lane_control::current_close(&self.conn, lane_id)
     }
 }

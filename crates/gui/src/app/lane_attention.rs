@@ -177,7 +177,7 @@ impl Default for AttentionState {
 }
 
 impl AttentionState {
-    fn request(&mut self, lead: &str) {
+    pub(super) fn request(&mut self, lead: &str) {
         if self.in_flight.contains(lead) {
             self.dirty.insert(lead.to_owned());
         } else {
@@ -331,6 +331,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             AttentionOp::OpenLane(thread) => {
                 self.open_thread_from_attention(ctx, thread.clone());
             }
+            AttentionOp::BeginClose(choice) => {
+                let choice = *choice;
+                self.begin_lane_close(&action, choice);
+            }
             AttentionOp::ContinueThread(_)
             | AttentionOp::ResumeThread(_)
             | AttentionOp::ResumeDelivery => {
@@ -425,7 +429,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 AttentionOp::ResumeDelivery => {
                     self.apply_lane_action(LaneAction::ResumeDelivery { lead: action.lead });
                 }
-                AttentionOp::OpenLane(_) | AttentionOp::Refresh => {}
+                AttentionOp::OpenLane(_) | AttentionOp::Refresh | AttentionOp::BeginClose(_) => {}
             }
             self.attention.request(lead);
         }

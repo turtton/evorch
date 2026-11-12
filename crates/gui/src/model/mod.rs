@@ -17,6 +17,7 @@ pub mod fuzzy;
 pub mod harness_card;
 pub mod html_snapshots;
 pub mod lane_attention;
+pub mod lane_close;
 pub mod lanes;
 pub mod latest_job;
 pub mod ledger;

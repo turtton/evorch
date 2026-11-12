@@ -1374,6 +1374,15 @@ fn build_workbench(
         .with_lane_ledger(Arc::new(gui::app::lanes::StorageLaneReader::new(
             storage_config.db_path.clone(),
         )))
+        .with_lane_close(
+            Arc::new(gui::app::lane_close::StorageLaneClosePreviewReader::new(
+                storage_config.db_path.clone(),
+            )),
+            Arc::new(
+                gui::runtime_sink::GuiLaneCloseHost::new(runtime.clone())
+                    .with_ownership(ownership.clone()),
+            ),
+        )
         .with_lane_attention(Arc::new(
             gui::app::lane_attention::StorageLaneAttentionReader::new(
                 storage_config.db_path.clone(),

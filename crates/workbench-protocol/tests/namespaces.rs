@@ -145,6 +145,7 @@ fn each_operation_asks_for_the_capability_it_always_asked_for() {
         ("questions/answer_user_question", Questions),
         ("approvals/decide_tool_approval", Approvals),
         ("lanes/manage_lane", Commands),
+        ("lanes/close_lane", Commands),
     ];
     let queries_expected = [
         ("conversation/get_input_receipts", InputReceipts),

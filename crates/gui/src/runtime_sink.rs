@@ -20,9 +20,11 @@ use workbench_protocol::envelope::Provenance;
 use crate::model::commands::{CommandSink, GoalSubmission, LoopEvent, WorkbenchCommand};
 
 mod host_adapter;
+mod lane_close;
 mod lane_host;
 mod lane_management;
 mod pull_requests;
+pub use lane_close::GuiLaneCloseHost;
 pub use lane_host::GuiLaneDeliveryHost;
 pub use lane_management::GuiLaneManagementHost;
 

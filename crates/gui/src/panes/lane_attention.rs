@@ -5,8 +5,10 @@
 //! The pane decides nothing. It draws the rows it is given and returns the operation the user
 //! chose; the operations are the ones that already exist (open the lane, continue the lead,
 //! resume held notices, answer a question the ledger leaves to the user). A question the lead
-//! owns gets no answer control, only [`LEAD_HANDLING_LABEL`]. Stall nudges, forwarding,
-//! verification and close are shown, never offered, until their operations are merged.
+//! owns gets no answer control, only [`LEAD_HANDLING_LABEL`]. Stall nudges, forwarding and
+//! verification are shown, never offered, until their operations are merged. Closing and
+//! discarding by hand are offered only where the window can record them (`can_close`), and
+//! only open a confirmation: nothing is recorded from the row itself.
 
 use std::collections::BTreeMap;
 
@@ -18,6 +20,7 @@ use workbench_protocol::lane_attention::{
 use crate::model::lane_attention::{
     AttentionAction, AttentionBoard, AttentionOp, AttentionRow, Destination, LEAD_HANDLING_LABEL,
 };
+use crate::model::lane_close::{CloseChoice, MEANING};
 use crate::panes::requests::{ConversationRequests, RequestAction};
 use crate::theme::text::muted;
 use crate::theme::tokens::{R_SM, STATUS_STROKE, attention_color, palette};
@@ -109,6 +112,7 @@ pub fn lane_attention_section(
     board: &AttentionBoard,
     rows: &[AttentionRow<'_>],
     drafts: &mut BTreeMap<String, String>,
+    can_close: bool,
 ) -> AttentionPaneOutput {
     let mut output = AttentionPaneOutput::default();
     if !board.has_reads() {
@@ -147,7 +151,7 @@ pub fn lane_attention_section(
                 .max_height(320.0)
                 .show(ui, |ui| {
                     for row in rows {
-                        ui.push_id(row.item.id.as_str(), |ui| row_card(ui, row, drafts, &mut output));
+                        ui.push_id(row.item.id.as_str(), |ui| row_card(ui, row, drafts, can_close, &mut output));
                     }
                 });
         });
@@ -159,6 +163,7 @@ fn row_card(
     ui: &mut Ui,
     row: &AttentionRow<'_>,
     drafts: &mut BTreeMap<String, String>,
+    can_close: bool,
     output: &mut AttentionPaneOutput,
 ) {
     let item = row.item;
@@ -289,6 +294,33 @@ fn row_card(
                 {
                     op = Some(offered);
                 }
+                if can_close {
+                    let ready = matches!(&item.kind, LaneAttentionKind::ReadyUnclosed { .. });
+                    if ready
+                        && allows(LaneAttentionAction::Close)
+                        && ui
+                            .small_button(CloseChoice::Complete.button())
+                            .on_hover_text(MEANING)
+                            .clicked()
+                    {
+                        op = Some(AttentionOp::BeginClose(CloseChoice::Complete));
+                    }
+                    let endable = ready
+                        || matches!(
+                            &item.kind,
+                            LaneAttentionKind::Blocked { .. }
+                                | LaneAttentionKind::Failed { .. }
+                                | LaneAttentionKind::Stall { .. }
+                        );
+                    if endable
+                        && ui
+                            .small_button(CloseChoice::Discard.button())
+                            .on_hover_text(MEANING)
+                            .clicked()
+                    {
+                        op = Some(AttentionOp::BeginClose(CloseChoice::Discard));
+                    }
+                }
             });
             if let Some(op) = op {
                 output.action = Some(chosen(op));
@@ -367,6 +399,14 @@ mod tests {
         items: Vec<LaneAttentionItem>,
         question: Option<event_bus::UserQuestion>,
     ) -> (Harness<'static>, Captured) {
+        draw_with(items, question, false)
+    }
+
+    fn draw_with(
+        items: Vec<LaneAttentionItem>,
+        question: Option<event_bus::UserQuestion>,
+        can_close: bool,
+    ) -> (Harness<'static>, Captured) {
         let captured: Captured = Rc::default();
         let sink = captured.clone();
         let mut board = AttentionBoard::default();
@@ -399,7 +439,7 @@ mod tests {
             .build_ui(move |ui| {
                 crate::theme::install(ui.ctx());
                 let rows = crate::model::lane_attention::rows(&board, &threads);
-                let output = lane_attention_section(ui, &board, &rows, &mut drafts);
+                let output = lane_attention_section(ui, &board, &rows, &mut drafts, can_close);
                 if output.action.is_some() || output.request.is_some() {
                     *sink.borrow_mut() = output;
                 }
@@ -534,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn verification_and_close_are_shown_but_not_offered_until_they_have_an_operation() {
+    fn verification_is_shown_but_not_offered_and_close_needs_a_window_that_can_record_it() {
         let (mut harness, captured) = draw(
             vec![item(
                 "r",
@@ -554,10 +594,69 @@ mod tests {
 
         assert!(harness.query_by_label("Ready (awaiting close)").is_some());
         assert!(harness.query_by_label("Open lane").is_some());
-        for label in ["Verify", "Close", "Close lane", "Verify lane"] {
+        for label in ["Verify", "Verify lane", "Close…", "Discard…"] {
             assert!(harness.query_by_label(label).is_none(), "{label}");
         }
         assert_eq!(*captured.borrow(), AttentionPaneOutput::default());
+    }
+
+    #[test]
+    fn a_ready_lane_offers_close_and_discard_that_only_open_the_confirmation() {
+        let ready = || {
+            item(
+                "r",
+                LaneAttentionKind::ReadyUnclosed {
+                    ready_seq: Sequence(4),
+                    readiness: LaneReadyState::Unreviewed,
+                },
+                &[LaneAttentionAction::Close, LaneAttentionAction::Inspect],
+            )
+        };
+        let (mut harness, captured) = draw_with(vec![ready()], None, true);
+        harness.run_steps(2);
+        harness.get_by_label("Close…").click();
+        harness.run_steps(2);
+        let action = captured.borrow_mut().action.take().unwrap();
+        assert_eq!(action.item, Some(("r".into(), 7)));
+        assert_eq!(action.op, AttentionOp::BeginClose(CloseChoice::Complete));
+
+        harness.get_by_label("Discard…").click();
+        harness.run_steps(2);
+        assert_eq!(
+            captured.borrow().action.as_ref().unwrap().op,
+            AttentionOp::BeginClose(CloseChoice::Discard)
+        );
+    }
+
+    #[test]
+    fn a_blocked_lane_can_be_discarded_but_not_closed_as_done() {
+        let blocked = item(
+            "b",
+            LaneAttentionKind::Blocked {
+                report_seq: Sequence(2),
+            },
+            &[LaneAttentionAction::Inspect, LaneAttentionAction::Continue],
+        );
+        let (mut harness, _captured) = draw_with(vec![blocked], None, true);
+        harness.run_steps(2);
+        assert!(harness.query_by_label("Close…").is_none());
+        assert!(harness.query_by_label("Discard…").is_some());
+    }
+
+    #[test]
+    fn a_question_row_has_no_way_to_end_the_lane() {
+        let (mut harness, _captured) = draw_with(
+            vec![item(
+                "q",
+                question_kind(LaneQuestionResponder::User),
+                &[LaneAttentionAction::Inspect],
+            )],
+            Some(user_question(event_bus::lane::QuestionResponder::User)),
+            true,
+        );
+        harness.run_steps(2);
+        assert!(harness.query_by_label("Close…").is_none());
+        assert!(harness.query_by_label("Discard…").is_none());
     }
 
     #[test]
@@ -632,7 +731,7 @@ mod tests {
         let board = AttentionBoard::default();
         let mut drafts = BTreeMap::new();
         let mut harness = Harness::builder().build_ui(move |ui| {
-            let output = lane_attention_section(ui, &board, &[], &mut drafts);
+            let output = lane_attention_section(ui, &board, &[], &mut drafts, true);
             *captured.borrow_mut() = output;
         });
         harness.run_steps(2);

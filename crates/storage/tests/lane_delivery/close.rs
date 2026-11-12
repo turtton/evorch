@@ -661,3 +661,78 @@ fn a_close_records_a_reviewer_that_already_ended_as_it_ended_not_as_running() {
         LaneVerificationState::Pending
     );
 }
+
+#[test]
+fn the_preview_gives_a_person_what_to_read_and_the_revisions_a_close_compares() {
+    let f = Fixture::new();
+    started(&f);
+    let before = f.db().lane_close_preview("lane-1").unwrap();
+    assert_eq!(before.ready, None);
+    assert_eq!(before.readiness, None);
+    assert_eq!(before.current_close, None);
+    assert_eq!(before.pr_context.status, LanePrContextStatus::NotLinked);
+
+    f.h()
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
+        .unwrap();
+    let preview = f.db().lane_close_preview("lane-1").unwrap();
+    // The same revisions the writer path compares, so a screen built on this read is
+    // exactly as current as the ledger was when it was read.
+    assert_eq!(
+        preview.context,
+        f.h().lane_close_context("lane-1".into()).unwrap()
+    );
+    assert_eq!(preview.context.latest_ready_seq, Some(1));
+    assert_eq!(preview.ready.as_ref().unwrap().summary, "result");
+    assert_eq!(preview.readiness, Some(LaneReadyState::Unreviewed));
+    assert_eq!(
+        preview.lane.brief,
+        f.db().lane("lane-1").unwrap().unwrap().brief
+    );
+
+    let closed = f
+        .h()
+        .close_lane(human_close(&f, LaneCloseKind::HumanClosed))
+        .unwrap();
+    let after = f.db().lane_close_preview("lane-1").unwrap();
+    assert_eq!(
+        after.current_close.as_ref().unwrap().close_id,
+        closed.close_id
+    );
+    assert_eq!(
+        f.db().current_lane_close("lane-1").unwrap().unwrap().kind,
+        LaneCloseKind::HumanClosed
+    );
+
+    // New work clears the close and moves the revision a stale screen would still hold.
+    f.h()
+        .append_lane_report("lane-1", 1, second_ready(), 5)
+        .unwrap();
+    let moved = f.db().lane_close_preview("lane-1").unwrap();
+    assert_eq!(moved.current_close, None);
+    assert!(moved.context.request_revision > preview.context.request_revision);
+    assert_eq!(f.db().current_lane_close("lane-1").unwrap(), None);
+}
+
+#[test]
+fn a_blocked_lane_a_person_discarded_no_longer_asks_for_attention() {
+    let f = Fixture::new();
+    started(&f);
+    f.h()
+        .append_lane_report("lane-1", 1, report(LaneStatus::Blocked), 3)
+        .unwrap();
+    let listed = || {
+        f.h()
+            .lane_attention(filter(), None, 20)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|i| matches!(i.kind, LaneAttentionKind::Blocked { .. }))
+            .count()
+    };
+    assert_eq!(listed(), 1);
+    f.h()
+        .close_lane(human_close(&f, LaneCloseKind::Discarded))
+        .unwrap();
+    assert_eq!(listed(), 0);
+}

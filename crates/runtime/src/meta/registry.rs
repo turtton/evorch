@@ -208,4 +208,41 @@ mod tests {
             assert!(names.insert(*name), "duplicate meta operation: {name}");
         }
     }
+
+    /// A person's close or discard is reachable only from the trusted host path. The agent
+    /// catalog has one close-shaped tool, the lead's `lane_close`, and neither it nor any
+    /// other tool takes an argument that could name who decided or choose a human kind.
+    #[test]
+    fn no_agent_tool_can_end_a_lane_as_a_person() {
+        const HUMAN_ONLY: [&str; 6] = [
+            "discard",
+            "surface",
+            "client_id",
+            "closed_by",
+            "actor",
+            "provenance",
+        ];
+        for name in META_OPS {
+            assert!(
+                !name.contains("human") && !name.contains("discard"),
+                "{name} reads like a person's lane operation"
+            );
+            let spec = MetaOp::from_name(name).unwrap().spec();
+            let properties = spec.input_schema["properties"].as_object();
+            let lane_tool = name.starts_with("lane_");
+            for field in HUMAN_ONLY.into_iter().chain(lane_tool.then_some("kind")) {
+                assert!(
+                    !properties.is_some_and(|properties| properties.contains_key(field)),
+                    "{name} accepts `{field}`"
+                );
+            }
+        }
+        let close = MetaOp::from_name("lane_close").unwrap().spec();
+        assert_eq!(close.input_schema["additionalProperties"], false);
+        let lane_tools: Vec<_> = META_OPS
+            .iter()
+            .filter(|name| name.starts_with("lane_") && name.contains("close"))
+            .collect();
+        assert_eq!(lane_tools, [&"lane_close"]);
+    }
 }

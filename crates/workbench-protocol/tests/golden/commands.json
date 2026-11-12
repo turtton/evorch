@@ -248,6 +248,20 @@
     },
     "type": "execution"
   },
+  "lanes/close_lane": {
+    "payload": {
+      "payload": {
+        "expected_management_revision": "1",
+        "expected_request_revision": "2",
+        "kind": "discard",
+        "lane_id": "lane-1",
+        "note": "superseded by another lane",
+        "ready_seq": "3"
+      },
+      "type": "close_lane"
+    },
+    "type": "lanes"
+  },
   "lanes/manage_lane": {
     "payload": {
       "payload": {

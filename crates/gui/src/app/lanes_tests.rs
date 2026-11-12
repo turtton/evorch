@@ -119,6 +119,7 @@ fn snapshot(record: LaneRecord, latest_report: Option<LaneReport>) -> LaneSnapsh
             record,
             latest_report,
             delivery: Default::default(),
+            close: None,
         },
     }
 }

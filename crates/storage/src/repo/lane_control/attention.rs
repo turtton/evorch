@@ -36,6 +36,37 @@ fn item(
         available_actions: actions,
     })
 }
+/// What the ledger knows of the review of a Ready report. Informative only: no state here
+/// stops the lead (or a person) from closing. Derives only; reading changes nothing.
+pub(crate) fn ready_readiness(
+    conn: &Connection,
+    lane_id: &str,
+    report: &LaneReport,
+) -> Result<LaneReadyState, StorageError> {
+    let state:Option<String>=conn.query_row("SELECT payload FROM lane_verifications WHERE lane_id=?1 AND reviewer_run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY rowid DESC LIMIT 1",[lane_id],|r|r.get(0)).optional()?;
+    let verification = state
+        .as_deref()
+        .map(parse::<LaneVerification>)
+        .transpose()?;
+    let current = verification.filter(|v| target(conn, lane_id).is_ok_and(|t| v.target == t));
+    Ok(match current {
+        Some(v) => match (derived_state(conn, &v)?, v.submission.as_ref()) {
+            (LaneVerificationState::Pending | LaneVerificationState::Submitted, _) => {
+                LaneReadyState::ReviewInProgress
+            }
+            (LaneVerificationState::Incomplete, _) => LaneReadyState::ReviewIncomplete,
+            (LaneVerificationState::Completed, Some(s))
+                if s.verdict == LaneVerificationVerdict::Approved
+                    && s.checks.iter().all(|c| c.passed) =>
+            {
+                LaneReadyState::AwaitingClose
+            }
+            _ => LaneReadyState::ReviewRejected,
+        },
+        None if report.artifact_revision.is_none() => LaneReadyState::NoEvidence,
+        None => LaneReadyState::Unreviewed,
+    })
+}
 fn items(
     conn: &Connection,
     f: &LaneAttentionFilter,
@@ -89,7 +120,14 @@ fn items(
                 })
         {
             let mut readiness = None;
+            // A lane a person or its lead has closed needs nothing more from anyone.
+            let closed: bool = conn.query_row(
+                "SELECT current_close_id IS NOT NULL FROM lanes WHERE lane_id=?1",
+                [&lane_id],
+                |r| r.get(0),
+            )?;
             let kind = match report.status {
+                _ if closed => None,
                 LaneStatus::Blocked => Some(LaneAttentionKind::Blocked {
                     report_seq: report.report_seq,
                 }),
@@ -98,51 +136,12 @@ fn items(
                     episode_id: report.failure_episode.clone(),
                 }),
                 LaneStatus::Ready => {
-                    let closed: bool = conn.query_row(
-                        "SELECT current_close_id IS NOT NULL FROM lanes WHERE lane_id=?1",
-                        [&lane_id],
-                        |r| r.get(0),
-                    )?;
-                    if closed {
-                        None
-                    } else {
-                        let state:Option<String>=conn.query_row("SELECT payload FROM lane_verifications WHERE lane_id=?1 AND reviewer_run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY rowid DESC LIMIT 1",[&lane_id],|r|r.get(0)).optional()?;
-                        let verification = state
-                            .as_deref()
-                            .map(parse::<LaneVerification>)
-                            .transpose()?;
-                        let current = verification
-                            .filter(|v| target(conn, &lane_id).is_ok_and(|t| v.target == t));
-                        // Informative only; no state here stops the lead from closing.
-                        let state = match current {
-                            Some(v) => match (derived_state(conn, &v)?, v.submission.as_ref()) {
-                                (
-                                    LaneVerificationState::Pending
-                                    | LaneVerificationState::Submitted,
-                                    _,
-                                ) => LaneReadyState::ReviewInProgress,
-                                (LaneVerificationState::Incomplete, _) => {
-                                    LaneReadyState::ReviewIncomplete
-                                }
-                                (LaneVerificationState::Completed, Some(s))
-                                    if s.verdict == LaneVerificationVerdict::Approved
-                                        && s.checks.iter().all(|c| c.passed) =>
-                                {
-                                    LaneReadyState::AwaitingClose
-                                }
-                                _ => LaneReadyState::ReviewRejected,
-                            },
-                            None if report.artifact_revision.is_none() => {
-                                LaneReadyState::NoEvidence
-                            }
-                            None => LaneReadyState::Unreviewed,
-                        };
-                        readiness = Some(state);
-                        Some(LaneAttentionKind::ReadyUnclosed {
-                            ready_seq: report.report_seq,
-                            readiness: state,
-                        })
-                    }
+                    let state = ready_readiness(conn, &lane_id, &report)?;
+                    readiness = Some(state);
+                    Some(LaneAttentionKind::ReadyUnclosed {
+                        ready_seq: report.report_seq,
+                        readiness: state,
+                    })
                 }
                 _ => None,
             };

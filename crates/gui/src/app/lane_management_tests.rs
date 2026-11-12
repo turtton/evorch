@@ -1,4 +1,6 @@
 //! Actual SQLite + locked sidebar host. Boundary ordering is explicit and synchronous.
+#[path = "lane_management_tests/close.rs"]
+mod close;
 #[path = "lane_management_tests/runtime.rs"]
 mod runtime;
 

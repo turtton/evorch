@@ -17,7 +17,7 @@ use workspace_ui::{ProjectId, ThreadChatRole, ThreadId, lane_management::LaneDro
 
 type Window = HeadlessWorkbench<DemoSource>;
 
-struct NoExecution;
+pub(super) struct NoExecution;
 #[async_trait]
 impl AgentModel for NoExecution {
     async fn complete(

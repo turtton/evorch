@@ -231,6 +231,14 @@ pub fn commands() -> Vec<Command> {
             attachment_id: AttachmentId::new("att-1").unwrap(),
         }),
         Command::Lanes(LanesCommand::ManageLane(workbench_protocol::lane_management::ManageLane { request: serde_json::from_value(serde_json::json!({"operation_id":"manage-1","lane_id":"lane-1","expected_management_revision":"1","action":{"type":"set_policy","payload":{"policy":"summary"}}})).unwrap(), expected_family_revision: None })),
+        Command::Lanes(LanesCommand::CloseLane(workbench_protocol::lane_management::CloseLane {
+            lane_id: workbench_protocol::lane_attention::LaneId::new("lane-1").unwrap(),
+            kind: workbench_protocol::lane_management::HumanLaneCloseKind::Discard,
+            ready_seq: Some(workbench_protocol::wire::Sequence(3)),
+            expected_management_revision: Revision(1),
+            expected_request_revision: Revision(2),
+            note: "superseded by another lane".into(),
+        })),
     ]
 }
 

@@ -7,8 +7,20 @@
 use event_bus::lane::{LaneBrief, LaneStatus};
 
 use super::{AgentPaneAction, LaneAction, LaneContext, LeadContext};
+use crate::model::lane_close::{close_detail, close_label};
 use crate::model::lanes::{LaneDeliveryView, routing_notice, status_label};
 use crate::theme::{text::muted, tokens::*, widgets::badge};
+
+/// Badge colors of a close. A person's completion stays a warning color: nothing verified it.
+fn close_colors(kind: event_bus::lane::LaneCloseKind) -> (egui::Color32, egui::Color32) {
+    use event_bus::lane::LaneCloseKind;
+    let p = palette();
+    match kind {
+        LaneCloseKind::LeadClosed => (p.TEXT_MUTED, p.SURFACE_RAISED),
+        LaneCloseKind::HumanClosed => (p.WARNING_FG, p.WARNING_SURFACE),
+        LaneCloseKind::Discarded => (p.TEXT_MUTED, p.SURFACE_RAISED),
+    }
+}
 
 /// Badge colors of a Report status; `ready` stays a warning color until verified.
 fn status_colors(status: LaneStatus) -> (egui::Color32, egui::Color32) {
@@ -38,8 +50,12 @@ pub(super) fn lane_card(
         policy.on_hover_text(
             "A lane is an independent Orchestrator thread. Its policy decides who manages it.",
         );
-        match detail.status() {
-            Some(status) => {
+        match (&detail.close, detail.status()) {
+            (Some(close), _) => {
+                let (fg, bg) = close_colors(close.kind);
+                badge(ui, close_label(close), fg, bg).on_hover_text(close_detail(close));
+            }
+            (None, Some(status)) => {
                 let (fg, bg) = status_colors(status);
                 let response = badge(ui, status_label(status), fg, bg);
                 if status == LaneStatus::Ready {
@@ -48,7 +64,7 @@ pub(super) fn lane_card(
                     );
                 }
             }
-            None => {
+            (None, None) => {
                 ui.label(muted("no report yet"));
             }
         }
@@ -64,6 +80,9 @@ pub(super) fn lane_card(
         }
     });
     ui.label(muted(routing_notice(record.policy, lane.delivery_bound)));
+    if let Some(close) = &detail.close {
+        ui.add(egui::Label::new(muted(close_detail(close))).wrap());
+    }
     delivery_lines(
         ui,
         &detail.delivery,

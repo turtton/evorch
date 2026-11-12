@@ -567,3 +567,28 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
     tx.commit()?;
     Ok(result)
 }
+/// Everything a person reads before ending a lane, from one snapshot of the ledger, with the
+/// revisions a close then compares. Read only: it observes no artifact, Git or GitHub state.
+pub(crate) fn close_preview(
+    conn: &Connection,
+    lane_id: &str,
+) -> Result<LaneClosePreview, StorageError> {
+    let context = close_context(conn, lane_id)?;
+    let lane = lane(conn, lane_id)?;
+    let ready = match context.latest_ready_seq {
+        Some(_) => latest_report(conn, &lane)?,
+        None => None,
+    };
+    let readiness = ready
+        .as_ref()
+        .map(|report| ready_readiness(conn, lane_id, report))
+        .transpose()?;
+    Ok(LaneClosePreview {
+        context,
+        pr_context: pr_context(conn, &lane.thread_id)?,
+        current_close: current_close(conn, lane_id)?,
+        lane,
+        ready,
+        readiness,
+    })
+}

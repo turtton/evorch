@@ -52,6 +52,7 @@ const COMMAND_NAMESPACE = {
   answer_user_question: "questions",
   decide_tool_approval: "approvals",
   manage_lane: "lanes",
+  close_lane: "lanes",
 };
 
 /** The namespace of every query operation. */

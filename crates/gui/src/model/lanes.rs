@@ -76,6 +76,8 @@ pub struct LaneDetail {
     pub record: LaneRecord,
     pub latest_report: Option<LaneReport>,
     pub delivery: LaneDeliveryView,
+    /// The close that stands for the lane, when its lead or a person ended it.
+    pub close: Option<event_bus::lane::LaneCloseResult>,
 }
 
 /// The status as the UI words it: `ready` is only a claim.

@@ -1000,6 +1000,7 @@ async fn attention_query_and_display_leave_a_static_provider_input_and_saved_pre
                     board,
                     &rows,
                     &mut drafts,
+                    false,
                 );
                 assert!(output.action.is_none() && output.request.is_none());
             });

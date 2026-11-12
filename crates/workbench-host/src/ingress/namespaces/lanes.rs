@@ -15,6 +15,7 @@ impl CommandHost {
     ) -> Result<CommandReply, WorkbenchError> {
         match command {
             LanesCommand::ManageLane(manage) => self.manage_lane_command(manage, provenance),
+            LanesCommand::CloseLane(close) => self.close_lane_command(close, provenance),
         }
     }
 
