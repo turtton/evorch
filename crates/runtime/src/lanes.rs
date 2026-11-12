@@ -626,6 +626,9 @@ impl AgentRuntime {
     ) -> Result<(RunId, bool), LaneError> {
         let seed: StartSeed = serde_json::from_str(&lane.start_seed)
             .map_err(|e| LaneError::new("restore_failed", e))?;
+        // Idempotent open_lane retries return the existing ledger row too. Fence
+        // that path before ownership, registration or any admission is attempted.
+        self.check_lane_recovery(lane, &seed)?;
         if let Some(reason) = &lane.start_blocked_reason {
             return Err(LaneError::new("lane_creation_denied", reason));
         }
