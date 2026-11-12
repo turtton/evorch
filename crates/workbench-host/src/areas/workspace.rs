@@ -361,7 +361,7 @@ impl Service {
                 let root = path
                     .canonicalize()
                     .map_err(|_| WorkspaceRejection::InvalidPath {
-                        reason: ProjectError::NotDirectory.to_string(),
+                        reason: ProjectError::NotADirectory.to_string(),
                     })?;
                 let id = workspace_state::ProjectId::new(format!(
                     "project-{:016x}",
