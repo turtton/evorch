@@ -236,3 +236,87 @@ operator Stopped の例外だけでは、Done/Error の親の手動継続や、�
 検証: `crates/runtime/src/runtime/chat_restore/renewal.rs` のphase別競合テスト、
 `crates/runtime/tests/held_reports.rs` のDone/Error再開・子の結果回収・保留分の一度だけの配送。
 関連feature: [durable execution states](../features/orchestration/durable-execution-states.md)。
+
+## Addendum（2026-11-11、ADR 0045 / PR #568（06a、merge SHA: `2e3fc8e37dbd9dbaacfa824a5cbe5f828ac041a5`）、core graph recovery の準備契約）
+
+単一コアの予定再起動に向け、run 単体の履歴復元とは別に、実行関係を保存する
+core graph recovery 入口を定義する。06a は永続 graph・revision CAS・dispatch tail
+の drain と診断までを実装する段階であり、自動 activation はまだ有効にしない。
+**06a は、wait を含む稼働中の graph を自動で quiesce・復旧できるとは主張しない。**
+未完了の DurableWait を含む component は専用の構造化理由で保留する。
+wait の park・continuation の再接続は06b、現在 authority の取得と lane 起動への
+統合は06cで行う。exec、CLI の再接続、crash 予算、再起動 UI は本追補の対象外。
+
+### 新入口の authority 条件
+
+公開 adapter は host の bootstrap::recovery 配下に置く。復旧対象は、snapshot と
+intent の対応を検証して commit 済みの manifest の component に限る。manifest に
+属さない active intent、Preparing のみの manifest、未解決 claim は自動実行しない。
+
+- 保存情報は recipe・識別・観測位置であって、実行権限ではない。現在の core host が
+  project/thread の ownership と設定、network/filesystem の許可を取り直す。
+  古い RunEntry、permit、writer、lease、semaphore、process/shell handle は復活させない。
+- resume policy は root から子へ継承する。明示された core 所有だけを自動復旧候補とし、
+  CLI invocation 所有は有効な現在 lease または planned handoff の照合が必要。
+  ownership の記録がないものを core 所有と推定しない。未知・非対応の権限源は保留する。
+- claim は run ID + expected incarnation + expected intent revision の CAS で行う。
+  同じ incarnation への Stop/Cancel 更新も revision を進める。claim の Prepared 状態と
+  新 incarnation は実行前に永続化し、claim 自体は旧 intent の incarnation/payload を
+  書き換えず snapshot を消費しない。消費は06bの登録時の SnapshotReservation が行う。
+- activation 前には DB の revision と、Stop、Cancel、tombstone、消費済み・置換済み
+  snapshot を再照合する。active=false / Terminal の Done root は配送宛先として
+  保持できるが、resume の対象にはしない。停止された実行を自動で再実行しない。
+- Prepared claim 後の crash は実行済みと推定せず PendingClaim として保留する。
+  06b/c が現在 authority と登録・activation の durable ack または未実行の証拠を
+  検証して claim を解決する。Checkpointed 後 commit 前の Stop 競合で capture が
+  拒否された場合の再試行・restart transaction 方針は PR 07 に委ねる。
+
+### team / non-root 設定のフィールド分類
+
+以下は新しい core graph recovery 入口にだけ適用する分類方針である。既存の
+continue_goal / delegate_chat / restore_and_deliver の hard blocker を緩めない。
+
+| class | フィールド・条件 | core graph recovery の契約 |
+|---|---|---|
+| historical identity | run/parent/root/thread/project、goal/team/coordinator/lane の識別、旧 incarnation、モデル/設定の参照 | 関係と現在設定の照合に用いる。保存値から権限を生成しない。 |
+| renewable | ownership、network/filesystem 許可、memory、finding_store（root 限定）、team_store、DynamicTeam topology、delegation_value（team root 限定）、worker limit | 現在 host から同一 project/team の authority と設定を供給する。child の保存済み設定だけで store を開かない。 |
+| execution-bound / blocking | team_task の claim/generation、non-root の team 実行関係、child の memory/finding、未完了 wait/continuation、learning_internal | graph の関係と現在 board/revision/claim の照合ができる段階までは component ごと保留する。期限切れ claim を安全と推定しない。06a では実行を許可しない。child の memory/finding は06cでrootの現在設定から供給するまで保留。 |
+| security/privacy | skip_secret_redaction 等、秘密・権限を広げる設定、未知の設定フィールド | 現在の明示許可なしに緩和しない。recipe に秘密値や権限実体を保存しない。 |
+| durable observation | mailbox/held、消費 receipt、completion/question/answer 世代、入力位置、自動 wake 回数・利用者入力による reset | 再配送・二重消費防止に使う。利用者入力の reset を auto wake 消費に数えない。実行権限として扱わない。 |
+
+provider input・replay・compaction 境界・route pin・affinity は既存05の intent を正本とし、
+manifest member は run/incarnation/revision で参照する。送信済みの provider prefix を
+復旧処理の都合で書き換えない。
+
+### 終了境界・診断
+
+runtime.wait の終端公開は dispatch tail の完了ではない。tail を spawn 前または
+同期 terminal publication 前に登録し、既存 tail から生じる tail も追跡する。
+run task の lifetime は tail に数えない（安全点で park しても drain 可能にする）。
+producer 停止の receipt を根拠とする fence token を渡して close/drain し、追跡数が0で
+必要な永続化も完了してから owner の解放、bridge flush、restart manifest 確定へ進む。
+operator shutdown では request_quiesce を呼ばず、live run と tail がともに無くなるまで
+再列挙・停止・待機してから原子的に close する。close 後の通常の producer は仕事を始める
+前に通常の拒否エラーを返す。開始済みの未登録 tail、panic、必須保存の失敗は sticky
+failure とし、drain 成功にしない。terminal guard は publish_terminal の戻り値として
+run task に返し、entry の有無に依存せず learning/panic 後処理まで保持する。系譜の
+ない learning は診断して skip し、新しい producer にしない。同一 runtime/世代の
+fence token による二回目の close/drain は同じ結果を返す（不正 token は通常の Err）。
+
+破損や復旧不可は component 単位で構造化理由を報告し、正常な別 component は診断・
+計画生成を続ける。識別列が読めず component を特定できない場合は manifest 全体を保留する。
+report は秘密値、message 本文、raw provider request を含めない。未確認の tool/job を
+再実行せず、外部副作用の exactly-once を保証したとは主張しない。
+
+検証: `crates/runtime/src/quiesce/dispatch_06a_tests.rs`、
+`crates/runtime/src/quiesce/recovery_06a_tests.rs`、`crates/storage/tests/recovery_06a.rs`、
+`crates/storage/tests/recovery_06a_io.rs`、
+`crates/workbench-host/src/bootstrap/recovery_06a_tests.rs` に契約テストを追加。
+既存 S2 18関数は共通 helper で admission disabled/enabled の両方を実行する。
+fresh/v60 upgrade/undo/inventory、部分 manifest、revision 競合、claim の再open、
+行破損のcomponent隔離、停止/消費snapshot、200member/4000delivery erasure進行を含む。
+cache の入力由来mockと独立wire-prefix assertionは維持する。
+
+05のquiesce_for_restartは安全点準備のみ維持し、成功後の明示shutdownも可能とする。
+PR07はquiesce_for_restartの後にCheckpointed fenceを取得し、bootstrap::recovery::captureへ渡す。
+captureはNone/別runtime/非restart fenceをErrとし、close/drain→graph commitする。
