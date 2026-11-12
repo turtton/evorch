@@ -5,6 +5,8 @@ use storage::{
     resume_intent::ResumeIntentRecord,
 };
 
+#[path = "recovery_06b/prepared.rs"]
+mod prepared;
 #[path = "recovery_06b/retention.rs"]
 mod retention;
 
