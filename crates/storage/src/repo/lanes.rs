@@ -219,20 +219,39 @@ pub(crate) fn managed_lanes(
         .map_err(Into::into)
 }
 
-/// Lanes of `lead` whose ledger entry currently stands closed (`lead_closed`,
-/// `human_closed` or `discarded`). A later input, report or brief/management change
-/// clears the close, so a reopened lane drops out of this set again.
-pub(crate) fn closed_lane_ids(
+/// Membership, current close and latest report of every lane `lead` manages. The caller
+/// runs this as one writer job, so the three facts describe the same ledger state. A
+/// close (`lead_closed`, `human_closed`, `discarded`) stands until a later input, report
+/// or brief/management change clears it.
+pub(crate) fn collection_view(
     conn: &Connection,
     lead: &str,
-) -> Result<std::collections::BTreeSet<String>, StorageError> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT lane_id FROM lanes WHERE lead_thread_id = ?1 AND current_close_id IS NOT NULL AND {LIVE}"
-    ))?;
-    statement
-        .query_map([lead], |row| row.get(0))?
-        .collect::<Result<_, _>>()
-        .map_err(Into::into)
+) -> Result<Vec<crate::lanes::LaneCollectionEntry>, StorageError> {
+    managed_lanes(conn, lead)?
+        .into_iter()
+        .map(|lane| {
+            let closed: bool = conn.query_row(
+                "SELECT current_close_id IS NOT NULL FROM lanes WHERE lane_id = ?1",
+                [&lane.lane_id],
+                |row| row.get(0),
+            )?;
+            let latest_report = reports(
+                conn,
+                &lane.lane_id,
+                lane.latest_report_seq.saturating_sub(1),
+                1,
+            )?
+            .into_iter()
+            .next();
+            Ok(crate::lanes::LaneCollectionEntry {
+                lane_id: lane.lane_id,
+                management_revision: lane.management_revision,
+                brief_revision: lane.brief_revision,
+                closed,
+                latest_report,
+            })
+        })
+        .collect()
 }
 
 /// Identity lookup deliberately ignores current lead/policy: detached intents

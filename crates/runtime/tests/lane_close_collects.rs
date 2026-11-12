@@ -153,6 +153,7 @@ struct Fixture {
     runtime: AgentRuntime,
     events: event_bus::EventReceiver,
     diagnostics: event_bus::EventReceiver,
+    collector_feed: event_bus::EventReceiver,
 }
 
 fn stored_runtime(config: &storage::StorageConfig, limit: Option<u32>) -> Fixture {
@@ -160,6 +161,7 @@ fn stored_runtime(config: &storage::StorageConfig, limit: Option<u32>) -> Fixtur
     let bus = Arc::new(EventBus::new(4096));
     let events = bus.subscribe();
     let diagnostics = bus.subscribe();
+    let collector_feed = bus.subscribe();
     let model = Arc::new(Model::default());
     let mut runtime = AgentRuntime::new(
         bus.clone(),
@@ -176,6 +178,7 @@ fn stored_runtime(config: &storage::StorageConfig, limit: Option<u32>) -> Fixtur
         runtime,
         events,
         diagnostics,
+        collector_feed,
     }
 }
 
@@ -407,4 +410,79 @@ async fn a_human_close_leaves_the_cohort_across_a_restore() {
 #[tokio::test]
 async fn a_discard_leaves_the_cohort_across_a_restore() {
     human_end_survives_a_restore(true).await;
+}
+
+/// The same lane closes, leaves the cohort and reports anew: the cohort that forms again
+/// is a new episode, so the self-improvement collector counts its suppression as another
+/// occurrence instead of dropping it as the one it already observed.
+#[tokio::test]
+async fn a_lane_that_reports_again_after_its_close_forms_a_new_observed_episode() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("episode.db"),
+        ..Default::default()
+    };
+    let mut f = stored_runtime(&config, Some(2));
+    let lead = f
+        .runtime
+        .delegate_chat(
+            "progress-lead",
+            Role::Orchestrator,
+            "coordinate".into(),
+            lead_config(None),
+        )
+        .unwrap();
+    waiting(&mut f.events, lead).await;
+    seed_ready(&f.store, lead, "returning");
+    let mut roots = Vec::new();
+    let mut episodes = Vec::new();
+    for round in 0..2 {
+        for n in 0..2 {
+            roots.push(open_created(&mut f, lead, &format!("r{round}-{n}")).await);
+        }
+        let blocked = command(&mut f, lead, &format!("open:blocked-{round}")).await;
+        assert_eq!(blocked["code"], "lane_creation_suppressed", "{blocked}");
+        episodes.extend(suppression_diagnostics(&mut f));
+        if round == 0 {
+            lead_closes(&mut f, lead, "returning").await;
+            roots.push(open_created(&mut f, lead, "after-close").await);
+            f.store
+                .handle()
+                .append_lane_report("returning", 1, report(), 3)
+                .unwrap();
+        }
+    }
+    assert_eq!(episodes.len(), 2, "{episodes:?}");
+    assert!(
+        episodes
+            .iter()
+            .all(|d| d.detail.contains("lane_ids=returning\n"))
+    );
+    let feed = f.collector_feed;
+    let runtime = f.runtime;
+    for run in roots.iter().copied().chain([lead]) {
+        runtime.cancel(run).unwrap();
+    }
+    for run in roots.into_iter().chain([lead]) {
+        runtime.wait(run).await.unwrap();
+    }
+
+    let collector = runtime::self_improvement::ImprovementCollector::new(
+        runtime::self_improvement::ImprovementSettings {
+            writer: f.store.handle(),
+            project: "episode".into(),
+            policy: runtime::self_improvement::ImprovementPolicy {
+                draft_dir: Some(dir.path().join("drafts")),
+                ..Default::default()
+            },
+        },
+    );
+    collector.run_until(feed, async {}, |_| true).await.unwrap();
+    let candidates = storage::Database::open(&config)
+        .unwrap()
+        .improvement_candidates("episode", None, 100)
+        .unwrap();
+    let suppressed: Vec<_> = candidates.iter().filter(|c| c.code == CODE).collect();
+    assert_eq!(suppressed.len(), 1, "{candidates:?}");
+    assert_eq!(suppressed[0].occurrences, 2, "{:?}", suppressed[0]);
 }

@@ -993,6 +993,39 @@ fn uncollected_suppression_is_reported_once_per_cohort_and_once_more_from_an_old
 }
 
 #[test]
+fn a_cohort_that_forms_again_from_the_same_lanes_is_a_new_episode() {
+    let lane = BTreeSet::from(["A".to_string()]);
+    let none = BTreeSet::new();
+    let mut credits = SpawnCredits::default();
+    assert!(!credits.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    credits.record_lane_open("n1");
+    credits.record_lane_open("n2");
+    assert!(credits.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    let first = credits.take_uncollected_suppression(2).unwrap();
+
+    // The lane ends (a close) and the cohort resolves; nothing is left to report.
+    assert!(!credits.reconcile_uncollected_lanes_at(&none, &none, 2));
+    assert!(credits.take_uncollected_suppression(2).is_none());
+
+    // The same lane reports anew: a new cohort of the same IDs, reported afresh. A restored
+    // run of that episode keeps its identity.
+    assert!(!credits.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    credits.record_lane_open("n3");
+    credits.record_lane_open("n4");
+    let snapshot = serde_json::to_value(&credits).unwrap();
+    assert!(credits.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    let second = credits.take_uncollected_suppression(2).unwrap();
+    assert_eq!(second.lane_ids, first.lane_ids);
+    assert_ne!(second.cohort_id, first.cohort_id);
+    let mut restored: SpawnCredits = serde_json::from_value(snapshot).unwrap();
+    assert!(restored.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    assert_eq!(
+        restored.take_uncollected_suppression(2).unwrap().cohort_id,
+        second.cohort_id
+    );
+}
+
+#[test]
 fn uncollected_suppression_detail_names_the_cohort_without_report_text() {
     let suppression = UncollectedSuppression {
         cohort_id: "abc".into(),
