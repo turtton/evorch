@@ -26,6 +26,7 @@ impl AgentRuntime {
         models: &RecoveryModels,
     ) -> Result<PausedRecoveryComponent, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
+        let startup = Arc::new(startup);
         if !self
             .shared
             .recovery_message_ids_safe
@@ -182,6 +183,9 @@ impl AgentRuntime {
             index.paused_recovery = Some(PausedRecoveryIndex {
                 claim_id: current.claim().claim_id.clone(),
                 old_incarnation: source.intent.incarnation.clone(),
+                stop_config: authority.members.get(&source.record.run_id).cloned(),
+                startup: Arc::clone(&startup),
+                ownership_root: ownership_root.to_path_buf(),
             });
         }
         Ok(PausedRecoveryComponent {
@@ -226,7 +230,7 @@ impl AgentRuntime {
                 || intent.parent_run_id != record.parent
                 || intent.role != record.role
                 || record.next_message_id > store.next_recovery_message_id
-                || !intent.tool_intent.is_empty()
+                || (member.resume && !intent.tool_intent.is_empty())
             {
                 return Err(error("invalid prepared domain record"));
             }
@@ -264,15 +268,19 @@ impl AgentRuntime {
                 {
                     return Err(error("prepared snapshot changed"));
                 }
-                crate::restore::validate_recovery_waits(&bundle.record, &record.waits)?;
+                if member.resume {
+                    crate::restore::validate_recovery_waits(&bundle.record, &record.waits)?;
+                }
             } else if intent.initial_input.is_none() || !record.waits.is_empty() {
                 return Err(error("missing prepared continuation"));
             }
-            if intent
-                .checkpoint
-                .as_ref()
-                .is_some_and(|c| c.boundary == crate::checkpoint::CheckpointBoundary::ToolsWaiting)
-                != !record.waits.is_empty()
+            if !member.resume && !record.waits.is_empty() {
+                return Err(error("terminal endpoint cannot resume a wait"));
+            }
+            if member.resume
+                && (intent.checkpoint.as_ref().is_some_and(|c| {
+                    c.boundary == crate::checkpoint::CheckpointBoundary::ToolsWaiting
+                }) != !record.waits.is_empty())
             {
                 return Err(error("prepared continuation boundary mismatch"));
             }

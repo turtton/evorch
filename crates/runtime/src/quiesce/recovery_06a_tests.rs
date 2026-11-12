@@ -729,6 +729,58 @@ async fn stopped_child_with_interrupted_tool_does_not_block_its_report_recipient
             .iter()
             .any(|s| s.runs == [child] && s.reason == RecoveryReason::OperatorStopped)
     );
+    // A separate runtime prepares; a second reopen must still adopt the parent
+    // while preserving the stopped endpoint and its interrupted-tool evidence.
+    let first = super::recovery_06b_tests::new_process(&f);
+    let paused = super::recovery_06b_tests::prepare(&f, &first);
+    let claim = paused.claim().clone();
+    drop(paused);
+    drop(first);
+    let restored = super::recovery_06b_tests::new_process(&f);
+    let root = f._dir.path().join("ownership");
+    let leases =
+        storage::shared_with_wait(&f.config.db_path, &root, std::time::Duration::ZERO).unwrap();
+    let startup = leases
+        .recovery_startup_complete(&f.config.db_path, &root)
+        .unwrap();
+    let proof = f
+        ._storage
+        .handle()
+        .validate_prepared_claim(claim.claim_id.clone(), &startup, &root)
+        .unwrap();
+    let owner = crate::ownership::OwnerHost::open(
+        &f._dir.path().join("terminal-owner"),
+        Default::default(),
+        std::sync::Arc::new(event_bus::EventBus::new(64)),
+    )
+    .unwrap();
+    let authority = crate::CurrentRecoveryAuthority {
+        members: BTreeMap::from([(
+            parent,
+            RunConfig {
+                ownership: Some(owner.start(&parent.to_string()).unwrap()),
+                keep_alive: true,
+                ..Default::default()
+            },
+        )]),
+    };
+    let db = storage::Database::open(&f.config).unwrap();
+    let before = db.recovery_claim_snapshot(&claim.claim_id).unwrap();
+    let calls = f.model.calls.load(Ordering::SeqCst);
+    let mut adopted = restored
+        .adopt_prepared_claim(proof, startup, &root, &authority)
+        .unwrap();
+    assert_eq!(adopted.claim(), &claim);
+    restored
+        .restore_relations_and_continuations(&mut adopted)
+        .unwrap();
+    assert_eq!(db.recovery_claim_snapshot(&claim.claim_id).unwrap(), before);
+    let terminal =
+        ResumeIntent::decode(db.resume_intent(&child.to_string()).unwrap().unwrap()).unwrap();
+    assert!(!terminal.tool_intent.is_empty());
+    assert_eq!(terminal.stop_reason, Some(StopReason::OperatorStopped));
+    assert!(restored.list_agents().is_empty());
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), calls);
     f.cleanup(parent).await;
 }
 

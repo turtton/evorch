@@ -1,10 +1,15 @@
 //! Prepared adoption exercises the production writer proof, not invented IDs.
 #[path = "recovery_model_tests.rs"]
 mod models;
+#[path = "recovery_owner_tests.rs"]
+mod prepared_owner;
 use super::*;
 use crate::CurrentRecoveryAuthority;
 
-fn authority(f: &Fixture, run: RunId) -> (crate::ownership::OwnerHost, CurrentRecoveryAuthority) {
+pub(super) fn authority(
+    f: &Fixture,
+    run: RunId,
+) -> (crate::ownership::OwnerHost, CurrentRecoveryAuthority) {
     let owner = crate::ownership::OwnerHost::open(
         &f._dir.path().join("adopt-owner"),
         Default::default(),
@@ -24,7 +29,7 @@ fn authority(f: &Fixture, run: RunId) -> (crate::ownership::OwnerHost, CurrentRe
     };
     (owner, authority)
 }
-fn evidence(
+pub(super) fn evidence(
     f: &Fixture,
     claim: &str,
 ) -> (
@@ -158,6 +163,10 @@ async fn adoption_rechecks_stale_evidence_and_current_authority_without_registra
     assert!(!runtime.has_paused_recovery());
     let (proof, startup, root) = evidence(&f, &id);
     let (_owner, authority) = authority(&f, run);
+    let (current_proof, current_startup, current_root) = evidence(&f, &id);
+    let _bound = first
+        .adopt_prepared_claim(current_proof, current_startup, &current_root, &authority)
+        .unwrap();
     first.stop(run, StopScope::SelfOnly).unwrap();
     let db = storage::Database::open(&f.config).unwrap();
     let stopped = db.resume_intent(&run.to_string()).unwrap();

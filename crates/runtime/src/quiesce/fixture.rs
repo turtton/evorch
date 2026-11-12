@@ -23,6 +23,29 @@ pub(super) struct GateModel {
 }
 #[async_trait::async_trait]
 impl AgentModel for GateModel {
+    fn validate_checkpoint_compatibility(
+        &self,
+        invocation: &AgentInvocationContext,
+        _: Role,
+        pins: &[crate::RoutePinRecord],
+        input: Option<&ProviderInput>,
+    ) -> Result<(), RuntimeError> {
+        // This fixture has one immutable route and no router pins.
+        if !pins.is_empty()
+            || input.is_some_and(|i| {
+                i.profile != "test"
+                    || i.request.model != "test"
+                    || i.protocol != model::ApiProtocol::OpenAiCompletions
+                    || i.affinity_key != invocation.run_id
+            })
+        {
+            return Err(RuntimeError::Model {
+                reason: "incompatible test route".into(),
+            });
+        }
+        Ok(())
+    }
+
     fn requires_admission(&self) -> bool {
         self.admission
     }

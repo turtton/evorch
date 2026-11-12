@@ -241,8 +241,23 @@ impl AgentRuntime {
     }
 }
 
-fn prepared_unexecuted(s: &RecoveryClaimSnapshot) -> bool {
+pub(super) fn prepared_stoppable(s: &RecoveryClaimSnapshot) -> bool {
     matches!(s.claim.state, RecoveryClaimState::Prepared) && coherent(s, false)
+}
+fn prepared_unexecuted(s: &RecoveryClaimSnapshot) -> bool {
+    prepared_stoppable(s)
+        && s.claim.members.iter().all(|m| {
+            s.intents
+                .iter()
+                .find(|o| o.run_id == m.run_id)
+                .is_some_and(|o| {
+                    o.revision == Some(m.reserved_revision)
+                        && o.intent
+                            .as_ref()
+                            .and_then(|r| ResumeIntent::decode(r.clone()).ok())
+                            .is_some_and(|i| i.active && i.stop_reason.is_none())
+                })
+        })
 }
 fn cleanup_state(s: &RecoveryClaimSnapshot) -> RecoveryCleanupState {
     match s.claim.state {
@@ -312,8 +327,10 @@ fn coherent(s: &RecoveryClaimSnapshot, activated: bool) -> bool {
             } else {
                 intent.incarnation == c.old_incarnation
                     && (o.revision == Some(c.reserved_revision)
-                        || (matches!(s.claim.state, RecoveryClaimState::Released { .. })
-                            && !intent.active
+                        || (matches!(
+                            s.claim.state,
+                            RecoveryClaimState::Prepared | RecoveryClaimState::Released { .. }
+                        ) && !intent.active
                             && matches!(
                                 intent.stop_reason,
                                 Some(

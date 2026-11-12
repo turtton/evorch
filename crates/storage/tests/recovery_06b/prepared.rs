@@ -5,9 +5,12 @@ fn inspect(f: &Fixture) -> Result<ValidatedPreparedClaim, storage::StorageError>
     let root = f._dir.path().join("ownership");
     let leases = storage::shared_with_wait(&f.config.db_path, &root, std::time::Duration::ZERO)?;
     let startup = leases.recovery_startup_complete(&f.config.db_path, &root)?;
+    let retained = startup.try_clone()?;
+    drop(startup);
+    drop(leases);
     f.storage
         .handle()
-        .validate_prepared_claim("claim".into(), &startup, &root)
+        .validate_prepared_claim("claim".into(), &retained, &root)
 }
 
 fn rewrite(f: &Fixture, id: &str, change: impl FnOnce(&mut Value)) {
@@ -55,10 +58,13 @@ fn prepared_evidence_requires_matching_startup_leases() {
     let startup = leases
         .recovery_startup_complete(&other.config.db_path, &root)
         .unwrap();
+    let retained = startup.try_clone().unwrap();
+    drop(startup);
+    drop(leases);
     assert!(
         f.storage
             .handle()
-            .validate_prepared_claim("claim".into(), &startup, &root)
+            .validate_prepared_claim("claim".into(), &retained, &root)
             .is_err()
     );
 }
