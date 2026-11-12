@@ -244,6 +244,138 @@ async fn a_stopped_lane_keeps_the_instruction_pending_until_an_explicit_resume()
     n.cancel().await;
 }
 
+/// Drives the lane's durable wake guard to `suppressed` with the same signal a woken
+/// no-progress batch sends, once per batch, until the storage limit trips.
+fn suppress_wake_guard(n: &NudgeFixture) {
+    let handle = n.f.store.handle();
+    for batch in 0..storage::lane_delivery::LANE_NO_PROGRESS_LIMIT {
+        let guard = handle
+            .lane_wake_guard(n.observation.lane_id.clone())
+            .unwrap();
+        handle
+            .update_lane_wake_guard(
+                n.observation.lane_id.clone(),
+                guard.revision,
+                storage::lane_delivery::LaneGuardSignal::WakeBatch {
+                    batch_id: format!("no-progress-{batch}"),
+                },
+            )
+            .unwrap();
+    }
+    assert!(
+        handle
+            .lane_wake_guard(n.observation.lane_id.clone())
+            .unwrap()
+            .suppressed
+    );
+}
+
+/// A lane whose wake guard is suppressed (no progress for the storage limit of woken
+/// batches) takes no new wake from the outbox, and an accepted instruction is an
+/// ordinary outbox entry: it stays queued, sends nothing and restores nothing. The
+/// existing explicit Resume is the only release, and the instruction then reaches the
+/// lane once, in the prefix-preserving place, for both a live and a finished lane.
+#[tokio::test]
+async fn an_instruction_held_by_a_suppressed_wake_guard_is_delivered_once_after_the_explicit_resume()
+ {
+    for done in [false, true] {
+        let mut n = NudgeFixture::new().await;
+        let lead = lead_run(&n);
+        let lane_id = n.observation.lane_id.clone();
+        if done {
+            n.f.finish().await;
+        }
+        // A message to the lead is a real user input and would reset the guard, so the
+        // guard trips only after the instruction is accepted; the automatic trigger is
+        // denied until then and the explicit driver is the barrier.
+        n.f.host.denied.store(true, Ordering::SeqCst);
+        lead_says(
+            &mut n,
+            lead,
+            vec![
+                send("held-send", &lane_id, 1, 1, "hold until the guard is reset"),
+                text_response("sent"),
+            ],
+        )
+        .await;
+        assert_eq!(result(&n.f.h, "held-send")["delivery"], "queued");
+        n.f.host.checked.notified().await;
+        n.f.host.denied.store(false, Ordering::SeqCst);
+        suppress_wake_guard(&n);
+        let sent = n.f.requests().len();
+        for _ in 0..3 {
+            assert_eq!(n.drive().await.unwrap(), LaneDeliveryOutcome::Empty);
+        }
+        assert_eq!(n.receipts(), 0);
+        assert_eq!(n.f.requests().len(), sent, "nothing reached the lane");
+        assert_eq!(n.f.host.restores.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            n.f.store
+                .handle()
+                .lane_instruction_delivery(&lane_id, 1)
+                .unwrap(),
+            Some(LaneInstructionDelivery::Queued)
+        );
+        assert_eq!(instruction_state(&n), "pending");
+        assert!(
+            n.f.store
+                .handle()
+                .lane_wake_guard(lane_id.clone())
+                .unwrap()
+                .suppressed
+        );
+
+        n.f.h.mock.enqueue(if done {
+            vec![call(
+                "released-finish",
+                "finish",
+                json!({"result":"handled the held instruction"}),
+            )]
+        } else {
+            vec![text_response("read the held instruction")]
+        });
+        n.f.h
+            .runtime
+            .resume_lane_deliveries(&n.f.host.thread, n.f.lead, None)
+            .unwrap();
+        if done {
+            n.f.events
+                .extend(through_phase(&mut n.f.h.receiver, n.f.lead, AgentRunPhase::Done).await);
+            n.f.h.runtime.wait(n.f.lead).await.unwrap();
+        } else {
+            n.f.delivered_request().await;
+        }
+        assert!(
+            !n.f.store
+                .handle()
+                .lane_wake_guard(lane_id.clone())
+                .unwrap()
+                .suppressed
+        );
+        assert_eq!(n.receipts(), 1);
+        assert_eq!(
+            n.f.store
+                .handle()
+                .lane_instruction_delivery(&lane_id, 1)
+                .unwrap(),
+            Some(LaneInstructionDelivery::Delivered)
+        );
+        assert_eq!(n.drive().await.unwrap(), LaneDeliveryOutcome::Empty);
+        assert_eq!(n.receipts(), 1);
+        assert_eq!(n.f.host.restores.load(Ordering::SeqCst), usize::from(done));
+        if !done {
+            n.f.followup("ordinary turn after the released instruction")
+                .await;
+        }
+        let text = lane_text(n.f.requests().last().unwrap());
+        assert_eq!(text.matches("hold until the guard is reset").count(), 1);
+        n.f.verify(0);
+        if !done {
+            n.cancel().await;
+        }
+    }
+}
+
 struct ReleaseOnDrop(mock_openai::ResponseGate);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
