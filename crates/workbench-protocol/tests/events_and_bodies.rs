@@ -42,9 +42,15 @@ fn another_epoch_never_delivers_and_does_not_move_the_cursor() {
 #[test]
 fn only_resync_and_close_end_a_subscription() {
     let ending: Vec<bool> = ui_events().iter().map(UiEvent::ends_subscription).collect();
-    let expected: Vec<bool> = UiEvent::TYPES
+    let expected: Vec<bool> = ui_events()
         .iter()
-        .map(|t| matches!(*t, "resync_required" | "subscription_closed"))
+        .map(|event| {
+            let wire = serde_json::to_value(event).unwrap();
+            matches!(
+                wire["payload"]["type"].as_str(),
+                Some("resync_required" | "subscription_closed")
+            )
+        })
         .collect();
     assert_eq!(ending, expected);
 }

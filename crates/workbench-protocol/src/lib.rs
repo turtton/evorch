@@ -13,10 +13,10 @@
 //!   [`handshake::ServerHello`] says so.
 //!
 //! Frame layout is in [`framing`], the connection handshake in [`handshake`],
-//! request and reply envelopes in [`envelope`].
+//! request and reply envelopes in [`envelope`]. Every command, query, reply and
+//! event is routed by a typed namespace ([`namespaces`]); wire version 2.
 
 pub mod commands;
-pub mod conversation;
 pub mod envelope;
 pub mod errors;
 pub mod events;
@@ -26,6 +26,7 @@ pub mod ids;
 pub mod lane_attention;
 pub mod lane_management;
 pub mod limits;
+pub mod namespaces;
 pub mod queries;
 pub mod validation;
 pub mod views;
@@ -33,3 +34,4 @@ pub mod wire;
 
 pub use errors::{ErrorCode, RetryAdvice, WorkbenchError};
 pub use handshake::{Capability, ProtocolVersion};
+pub use namespaces::conversation;

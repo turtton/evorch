@@ -727,7 +727,7 @@ fn child_exit_two_reconnects_to_existing_owner_without_respawning() {
         let _: ClientHello = serde_json::from_slice(&bytes).unwrap();
         let hello = ServerHello {
             protocol_version: ProtocolVersion::CURRENT,
-            capabilities: Capability::ALL.to_vec(),
+            capabilities: Capability::IMPLEMENTED.to_vec(),
             server_build: BuildInfo {
                 name: "legacy-test-owner".into(),
                 version: "1".into(),

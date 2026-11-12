@@ -3,6 +3,9 @@ use workbench_client::{
     WorkbenchClient,
     fake::{FakeServer, FakeTransport},
 };
+use workbench_protocol::namespaces::{
+    ApprovalsEvent, ProjectionQuery, ProjectionReply, WorkspaceEvent,
+};
 use workbench_protocol::{
     envelope::*, events::*, handshake::*, ids::*, queries::*, views::*, wire::*,
 };
@@ -29,9 +32,9 @@ fn event(epoch: u64, sequence: u64, title: &str, revision: u64) -> EventEnvelope
         subscription_id: SubscriptionId::new("s").unwrap(),
         cursor: cursor(epoch, sequence),
         caused_by_request_id: None,
-        event: UiEvent::ThreadChanged {
+        event: UiEvent::Workspace(WorkspaceEvent::ThreadChanged {
             thread: thread(title, revision),
-        },
+        }),
     }
 }
 async fn connected() -> (WorkbenchClient, FakeServer) {
@@ -39,7 +42,7 @@ async fn connected() -> (WorkbenchClient, FakeServer) {
     let config = client_config();
     let hello = ServerHello {
         protocol_version: ProtocolVersion::CURRENT,
-        capabilities: Capability::ALL.to_vec(),
+        capabilities: Capability::IMPLEMENTED.to_vec(),
         server_build: config.client_build.clone(),
         core: CoreIdentity::new("core").unwrap(),
         instance_epoch: InstanceEpoch(7),
@@ -94,22 +97,24 @@ async fn paged_snapshot_keeps_its_cut_then_applies_later_events_not_revision_ord
         let page = server.recv_request().await.unwrap();
         assert!(matches!(
             page.body,
-            RequestBody::Query(Query::ReadSnapshot(_))
+            RequestBody::Query(Query::Projection(ProjectionQuery::ReadSnapshot(_)))
         ));
         server.event(event(7, 39, "before", 1000));
         server.event(event(7, 41, "new", 1));
         server.event(event(7, 41, "duplicate", 500));
         server.reply(
             &page.request_id,
-            ReplyResult::Success(ReplyPayload::Query(QueryReply::Snapshot(SnapshotPage {
-                snapshot_id: SnapshotId::new("cut").unwrap(),
-                high_water: expected,
-                page: Page {
-                    items: vec![SnapshotItem::Thread(thread("snapshot", 999))],
-                    next_cursor: None,
-                    snapshot_revision: Revision(40),
-                },
-            }))),
+            ReplyResult::Success(ReplyPayload::Query(QueryReply::Projection(
+                ProjectionReply::Snapshot(SnapshotPage {
+                    snapshot_id: SnapshotId::new("cut").unwrap(),
+                    high_water: expected,
+                    page: Page {
+                        items: vec![SnapshotItem::Thread(thread("snapshot", 999))],
+                        next_cursor: None,
+                        snapshot_revision: Revision(40),
+                    },
+                }),
+            ))),
         );
     };
     let (cache, _) = tokio::join!(reader, responder);
@@ -145,15 +150,17 @@ async fn overflow_or_epoch_change_requires_new_snapshot_instead_of_mixing_cuts()
             // A late reply for the abandoned page cannot revive the old cut.
             server.reply(
                 &old_page.request_id,
-                ReplyResult::Success(ReplyPayload::Query(QueryReply::Snapshot(SnapshotPage {
-                    snapshot_id: SnapshotId::new("cut").unwrap(),
-                    high_water: cursor(7, 40),
-                    page: Page {
-                        items: vec![],
-                        next_cursor: None,
-                        snapshot_revision: Revision(40),
-                    },
-                }))),
+                ReplyResult::Success(ReplyPayload::Query(QueryReply::Projection(
+                    ProjectionReply::Snapshot(SnapshotPage {
+                        snapshot_id: SnapshotId::new("cut").unwrap(),
+                        high_water: cursor(7, 40),
+                        page: Page {
+                            items: vec![],
+                            next_cursor: None,
+                            snapshot_revision: Revision(40),
+                        },
+                    }),
+                ))),
             );
             let request = client.subscribe(Subscribe {
                 scope: SubscriptionScope::All,
@@ -289,7 +296,7 @@ fn changed_approval_invalidates_the_input_previously_confirmed_by_the_human() {
         subscription_id: SubscriptionId::new("s").unwrap(),
         cursor: cursor(7, 41),
         caused_by_request_id: None,
-        event: UiEvent::ApprovalChanged { approval }
+        event: UiEvent::Approvals(ApprovalsEvent::ApprovalChanged { approval })
     }));
     assert!(!cache.approval_inputs.contains_key("a"));
     assert_eq!(cache.approvals["a"].revision, Revision(2));

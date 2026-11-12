@@ -8,11 +8,12 @@ use std::{
 };
 use storage::lanes::LaneRecord;
 use workbench_protocol::{
-    commands::{CommandDisposition, CommandReply},
+    commands::{CommandDisposition, CommandReply, CommandResult},
     envelope::{Actor, Provenance},
     errors::{ErrorCode, RetryAdvice, WorkbenchError},
     ids::ThreadId,
     lane_management as wire,
+    namespaces::LanesResult,
     wire::Revision,
 };
 
@@ -359,11 +360,7 @@ impl CommandHost {
             } else {
                 CommandDisposition::Accepted
             },
-            thread_revision: None,
-            conversation: None,
-            lane_management: Some(Box::new(result)),
-            submission_id: None,
-            run_id: None,
+            ..CommandReply::with_result(CommandResult::Lanes(LanesResult::Managed(result)))
         })
     }
     pub(crate) fn lane_management_state(

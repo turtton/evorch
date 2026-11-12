@@ -84,6 +84,18 @@ export function buildKey(hello) {
   return `${b.name ?? ""}/${b.version ?? ""}/${b.revision ?? ""}`;
 }
 
+/** The protocol version this page speaks (workbench-protocol's `ProtocolVersion::CURRENT`). */
+export const PROTOCOL_VERSION = 2;
+
+/**
+ * The banner text when the core speaks another protocol version than this
+ * page, or `null` when they match.
+ */
+export function protocolMismatch(hello) {
+  if (!hello || hello.protocol_version === PROTOCOL_VERSION) return null;
+  return `このページは protocol v${PROTOCOL_VERSION} 用です（コアは v${hello.protocol_version}）。再読み込みしてください。`;
+}
+
 /**
  * Whether the core behind the page is no longer the one the page was loaded
  * against: another build, another core identity or a new instance epoch.

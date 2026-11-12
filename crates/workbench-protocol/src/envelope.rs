@@ -1,14 +1,17 @@
 //! Request, reply and server-push frames.
 //!
 //! Wire shape of a request:
-//! `{"request_id":"..","session_id":"..","kind":"command","payload":{"type":"send_chat","payload":{..}}}`.
+//! `{"request_id":"..","session_id":"..","kind":"command","payload":{"type":"conversation","payload":{"type":"send_chat","payload":{..}}}}`.
+//! The payload is a namespace (`conversation`) wrapping one operation
+//! (`send_chat`); see [`crate::namespaces`].
 //! A reply is `{"request_id":"..","status":"success"|"error","payload":..}`.
 
 use crate::commands::{Command, CommandReply};
-use crate::errors::{ErrorCode, RetryAdvice, WorkbenchError};
+use crate::errors::WorkbenchError;
 use crate::events::{EventEnvelope, Subscribe, SubscriptionStarted};
 use crate::handshake::{Capability, WireLimits};
 use crate::ids::{ClientId, RequestId, RunId, SessionId, SubscriptionId};
+use crate::namespaces;
 use crate::queries::{Query, QueryReply};
 use crate::validation::ValidationError;
 use crate::wire::Nonce;
@@ -167,10 +170,11 @@ pub struct RequestRejection {
 
 /// Decode and validate one request frame.
 ///
-/// An unknown command, query or control type is reported as
-/// [`ErrorCode::UnsupportedCapability`] (a newer client talking to an older
-/// core); every other defect is [`ErrorCode::InvalidRequest`] or
-/// [`ErrorCode::LimitExceeded`]. Diagnostics must not quote input tokens: a
+/// An unknown namespace, an unknown operation inside a known namespace, or an
+/// unknown control type is reported as [`crate::ErrorCode::UnsupportedCapability`] (a
+/// newer client talking to an older core); every other defect, including a
+/// known operation with a missing, mistyped or unknown field, is [`crate::ErrorCode::InvalidRequest`] or
+/// [`crate::ErrorCode::LimitExceeded`]. Diagnostics must not quote input tokens: a
 /// transport can reject the frame before the backend output guard is reached.
 pub fn decode_request(
     bytes: &[u8],
@@ -217,23 +221,30 @@ pub fn decode_request(
     let envelope: RequestEnvelope = match serde_json::from_value(probe.clone()) {
         Ok(envelope) => envelope,
         Err(_) => {
-            let known: Option<&[&str]> = match probe.get("kind").and_then(|k| k.as_str()) {
-                Some("command") => Some(&Command::TYPES),
-                Some("query") => Some(&Query::TYPES),
-                Some("control") => Some(&Control::TYPES),
+            // Name the first level that is not known, down to the operation:
+            // a newer client talking to an older core is unsupported, not
+            // malformed. Only the names are read; no input is echoed.
+            let payload = probe.get("payload");
+            let classified = match (probe.get("kind").and_then(|k| k.as_str()), payload) {
+                (Some("command"), Some(payload)) => Some(namespaces::classify_command(payload)),
+                (Some("query"), Some(payload)) => {
+                    Some(namespaces::classify(payload, |n| n.queries))
+                }
+                (Some("control"), Some(payload)) => payload
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|ty| !Control::TYPES.contains(ty))
+                    .map(|_| namespaces::Classified::UnknownOperation),
                 _ => None,
             };
-            let ty = probe
-                .pointer("/payload/type")
-                .and_then(serde_json::Value::as_str);
-            if let (Some(known), Some(ty)) = (known, ty)
-                && !known.contains(&ty)
-            {
-                return Err(rejection(WorkbenchError::new(
-                    ErrorCode::UnsupportedCapability,
-                    "unknown request type",
-                    RetryAdvice::Never,
-                )));
+            if matches!(
+                classified,
+                Some(
+                    namespaces::Classified::UnknownNamespace
+                        | namespaces::Classified::UnknownOperation
+                )
+            ) {
+                return Err(rejection(namespaces::unsupported_operation()));
             }
             return Err(rejection(WorkbenchError::invalid_request(
                 "malformed request",

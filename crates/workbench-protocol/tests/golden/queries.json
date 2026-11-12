@@ -1,121 +1,163 @@
 {
-  "get_approval_input": {
+  "approvals/get_approval_input": {
     "payload": {
-      "approval_id": "ap-1",
-      "approval_revision": "2",
-      "core_epoch": "7",
-      "max_bytes": 65536,
-      "offset": "0"
+      "payload": {
+        "approval_id": "ap-1",
+        "approval_revision": "2",
+        "core_epoch": "7",
+        "max_bytes": 65536,
+        "offset": "0"
+      },
+      "type": "get_approval_input"
     },
-    "type": "get_approval_input"
+    "type": "approvals"
   },
-  "get_command_receipt": {
+  "approvals/list_approvals": {
     "payload": {
-      "request_id": "req-3"
+      "payload": {
+        "page": {
+          "cursor": "cur-1",
+          "limit": 25
+        },
+        "pending_only": true,
+        "thread": "thr-1"
+      },
+      "type": "list_approvals"
     },
-    "type": "get_command_receipt"
+    "type": "approvals"
   },
-  "get_core_status": {
-    "type": "get_core_status"
-  },
-  "get_input_receipts": {
+  "conversation/get_input_receipts": {
     "payload": {
-      "page": {
+      "payload": {
+        "page": {
+          "cursor": "cur-1",
+          "limit": 25
+        },
+        "thread": "thr-1"
+      },
+      "type": "get_input_receipts"
+    },
+    "type": "conversation"
+  },
+  "conversation/read_committed_history": {
+    "payload": {
+      "payload": {
+        "direction": "forward",
+        "page": {
+          "cursor": "cur-1",
+          "limit": 25
+        },
+        "run": "run-1",
+        "thread": "thr-1"
+      },
+      "type": "read_committed_history"
+    },
+    "type": "conversation"
+  },
+  "execution/list_runs": {
+    "payload": {
+      "payload": {
+        "page": {
+          "cursor": "cur-1",
+          "limit": 25
+        },
+        "thread": "thr-1"
+      },
+      "type": "list_runs"
+    },
+    "type": "execution"
+  },
+  "lanes/get_lane_management": {
+    "payload": {
+      "payload": {
+        "lane_id": "lane-1"
+      },
+      "type": "get_lane_management"
+    },
+    "type": "lanes"
+  },
+  "lifecycle/get_core_status": {
+    "payload": {
+      "type": "get_core_status"
+    },
+    "type": "lifecycle"
+  },
+  "projection/get_command_receipt": {
+    "payload": {
+      "payload": {
+        "request_id": "req-3"
+      },
+      "type": "get_command_receipt"
+    },
+    "type": "projection"
+  },
+  "projection/read_body": {
+    "payload": {
+      "payload": {
+        "body_id": "body-1",
+        "max_bytes": 65536,
+        "offset": "65536"
+      },
+      "type": "read_body"
+    },
+    "type": "projection"
+  },
+  "projection/read_snapshot": {
+    "payload": {
+      "payload": {
+        "page": {
+          "cursor": "cur-1",
+          "limit": 25
+        },
+        "snapshot_id": "snap-1"
+      },
+      "type": "read_snapshot"
+    },
+    "type": "projection"
+  },
+  "questions/list_questions": {
+    "payload": {
+      "payload": {
+        "page": {
+          "cursor": "cur-1",
+          "limit": 25
+        },
+        "pending_only": true,
+        "thread": "thr-1"
+      },
+      "type": "list_questions"
+    },
+    "type": "questions"
+  },
+  "workspace/get_thread": {
+    "payload": {
+      "payload": {
+        "thread": "thr-1"
+      },
+      "type": "get_thread"
+    },
+    "type": "workspace"
+  },
+  "workspace/list_projects": {
+    "payload": {
+      "payload": {
         "cursor": "cur-1",
         "limit": 25
       },
-      "thread": "thr-1"
+      "type": "list_projects"
     },
-    "type": "get_input_receipts"
+    "type": "workspace"
   },
-  "get_lane_management": {
+  "workspace/list_threads": {
     "payload": {
-      "lane_id": "lane-1"
-    },
-    "type": "get_lane_management"
-  },
-  "get_thread": {
-    "payload": {
-      "thread": "thr-1"
-    },
-    "type": "get_thread"
-  },
-  "list_approvals": {
-    "payload": {
-      "page": {
-        "cursor": "cur-1",
-        "limit": 25
+      "payload": {
+        "page": {
+          "limit": 50
+        },
+        "project": "proj-1"
       },
-      "pending_only": true,
-      "thread": "thr-1"
+      "type": "list_threads"
     },
-    "type": "list_approvals"
-  },
-  "list_projects": {
-    "payload": {
-      "cursor": "cur-1",
-      "limit": 25
-    },
-    "type": "list_projects"
-  },
-  "list_questions": {
-    "payload": {
-      "page": {
-        "cursor": "cur-1",
-        "limit": 25
-      },
-      "pending_only": true,
-      "thread": "thr-1"
-    },
-    "type": "list_questions"
-  },
-  "list_runs": {
-    "payload": {
-      "page": {
-        "cursor": "cur-1",
-        "limit": 25
-      },
-      "thread": "thr-1"
-    },
-    "type": "list_runs"
-  },
-  "list_threads": {
-    "payload": {
-      "page": {
-        "limit": 50
-      },
-      "project": "proj-1"
-    },
-    "type": "list_threads"
-  },
-  "read_body": {
-    "payload": {
-      "body_id": "body-1",
-      "max_bytes": 65536,
-      "offset": "65536"
-    },
-    "type": "read_body"
-  },
-  "read_committed_history": {
-    "payload": {
-      "direction": "forward",
-      "page": {
-        "cursor": "cur-1",
-        "limit": 25
-      },
-      "run": "run-1",
-      "thread": "thr-1"
-    },
-    "type": "read_committed_history"
-  },
-  "read_snapshot": {
-    "payload": {
-      "page": {
-        "cursor": "cur-1",
-        "limit": 25
-      },
-      "snapshot_id": "snap-1"
-    },
-    "type": "read_snapshot"
+    "type": "workspace"
   }
 }

@@ -11,9 +11,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 use workbench_client::ClientConfig;
+use workbench_protocol::namespaces::{
+    ApprovalsCommand, ConversationCommand, ExecutionCommand, QuestionsCommand,
+};
 use workbench_protocol::{
     commands::*,
-    conversation::ConversationCommand,
     handshake::{BuildInfo, Capability},
     ids::*,
     views::*,
@@ -290,10 +292,10 @@ impl eframe::App for CoreClientApp {
                     enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::PrepareExistingThread { project: project.clone(), thread: thread.clone() }), draft: None });
                 }
                 if ui.button("続行").clicked() {
-                    enqueue(&self.actions, &mut shared, Action::Command { command: Command::ContinueChat(ContinueChat { project: project.clone(), thread: thread.clone(), composer_role: self.composer_role, model_preference: None }), draft: None });
+                    enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::ContinueChat(ContinueChat { project: project.clone(), thread: thread.clone(), composer_role: self.composer_role, model_preference: None })), draft: None });
                 }
                 if ui.button("停止").clicked() {
-                    enqueue(&self.actions, &mut shared, Action::Command { command: Command::StopChat(ThreadTarget { thread: thread.clone() }), draft: None });
+                    enqueue(&self.actions, &mut shared, Action::Command { command: Command::Execution(ExecutionCommand::StopChat(ThreadTarget { thread: thread.clone() })), draft: None });
                 }
             });
             egui::ScrollArea::vertical().id_salt("committed-history").max_height(ui.available_height() * 0.45).show(ui, |ui| {
@@ -317,7 +319,7 @@ impl eframe::App for CoreClientApp {
                     ui.horizontal(|ui| {
                         ui.label(format!("{} {:?}", run.id, run.phase));
                         if ui.button("この run を停止").clicked() {
-                            enqueue(&self.actions, &mut shared, Action::Command { command: Command::StopRun(StopRun { thread: thread.clone(), run: run.id }), draft: None });
+                            enqueue(&self.actions, &mut shared, Action::Command { command: Command::Execution(ExecutionCommand::StopRun(StopRun { thread: thread.clone(), run: run.id })), draft: None });
                         }
                     });
                 }
@@ -329,7 +331,7 @@ impl eframe::App for CoreClientApp {
                 ui.text_edit_singleline(answer);
                 for option in &question.options { if ui.button(option).clicked() { *answer = option.clone(); } }
                 if ui.button("質問に回答").clicked() {
-                    enqueue(&self.actions, &mut shared, Action::Command { command: Command::AnswerUserQuestion(AnswerUserQuestion { thread: thread.clone(), question_id: question.id, answer: answer.clone(), question_revision: question.routing_revision }), draft: None });
+                    enqueue(&self.actions, &mut shared, Action::Command { command: Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion { thread: thread.clone(), question_id: question.id, answer: answer.clone(), question_revision: question.routing_revision })), draft: None });
                 }
             }
             let approvals: Vec<_> = shared.cache.approvals.values().filter(|a| a.thread == thread && a.state == ApprovalState::Pending).cloned().collect();
@@ -341,7 +343,7 @@ impl eframe::App for CoreClientApp {
                 ui.horizontal(|ui| {
                     for (label, decision) in [("承認", ApprovalDecision::Approve), ("拒否", ApprovalDecision::Deny)] {
                         if ui.add_enabled(decision == ApprovalDecision::Deny || shared.cache.approval_inputs.contains_key(approval.id.as_str()), egui::Button::new(label)).clicked() {
-                            enqueue(&self.actions, &mut shared, Action::Command { command: Command::DecideToolApproval(DecideToolApproval { approval_id: approval.id.clone(), core_epoch: approval.core_epoch, approval_revision: approval.revision, decision }), draft: None });
+                            enqueue(&self.actions, &mut shared, Action::Command { command: Command::Approvals(ApprovalsCommand::DecideToolApproval(DecideToolApproval { approval_id: approval.id.clone(), core_epoch: approval.core_epoch, approval_revision: approval.revision, decision })), draft: None });
                         }
                     }
                 });
@@ -352,12 +354,12 @@ impl eframe::App for CoreClientApp {
                     ui.label(format!("入力 {}: {:?}", receipt.submission_id, receipt.state));
                     if receipt.state == InputReceiptState::Accepted && let Some(run) = receipt.run
                         && ui.button("follow-up を取消").clicked() {
-                            enqueue(&self.actions, &mut shared, Action::Command { command: Command::WithdrawFollowUp(WithdrawFollowUp { thread: thread.clone(), run, submission_id: receipt.submission_id }), draft: None });
+                            enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::WithdrawFollowUp(WithdrawFollowUp { thread: thread.clone(), run, submission_id: receipt.submission_id })), draft: None });
                         }
                 });
             }
             if ui.button("follow-up を次の turn で配信").clicked() {
-                enqueue(&self.actions, &mut shared, Action::Command { command: Command::DeliverFollowUpsNextTurn(ThreadTarget { thread: thread.clone() }), draft: None });
+                enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::DeliverFollowUpsNextTurn(ThreadTarget { thread: thread.clone() })), draft: None });
             }
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.composer_role, ComposerRole::Worker, "Worker");
@@ -395,8 +397,8 @@ impl eframe::App for CoreClientApp {
                 if self.team && !chat.images.is_empty() { shared.status = "チーム objective への画像添付は Unsupported".into(); return; }
                 let command = if self.team {
                     let goal = SubmitGoal { project: chat.project.clone(), thread: thread.clone(), objective: chat.text.clone(), references: vec![], constraints: vec![], delegation: Some(Delegation::Team { value: chat.text }) };
-                    if shared.cache.threads.contains_key(thread.as_str()) { Command::SubmitGoal(goal) } else { Command::Conversation(ConversationCommand::CreateGoal(goal)) }
-                } else if shared.cache.threads.contains_key(thread.as_str()) { Command::SendChat(chat) } else { Command::Conversation(ConversationCommand::CreateExecution(chat)) };
+                    if shared.cache.threads.contains_key(thread.as_str()) { Command::Execution(ExecutionCommand::SubmitGoal(goal)) } else { Command::Conversation(ConversationCommand::CreateGoal(goal)) }
+                } else if shared.cache.threads.contains_key(thread.as_str()) { Command::Conversation(ConversationCommand::SendChat(chat)) } else { Command::Conversation(ConversationCommand::CreateExecution(chat)) };
                 enqueue(&self.actions, &mut shared, Action::Command { command, draft: Some((thread.to_string(), revision)) });
             }
         });
@@ -431,9 +433,9 @@ mod upload_regressions {
     }
     fn send() -> Action {
         Action::Command {
-            command: Command::StopChat(ThreadTarget {
+            command: Command::Execution(ExecutionCommand::StopChat(ThreadTarget {
                 thread: ThreadId::new("t").unwrap(),
-            }),
+            })),
             draft: Some(("t".into(), 0)),
         }
     }

@@ -5,6 +5,7 @@
 mod common;
 
 use std::sync::{Arc, Mutex};
+use workbench_protocol::namespaces::ConversationCommand;
 
 use async_trait::async_trait;
 use event_bus::EventBus;
@@ -54,7 +55,9 @@ fn first_request_for(provenance: workbench_protocol::envelope::Provenance) -> St
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone());
     let mut host = host_with_project(&rt, runtime, dir.path());
     host.handle_command(
-        Command::SendChat(send("thread-1", "sub-1", "hello")),
+        Command::Conversation(ConversationCommand::SendChat(send(
+            "thread-1", "sub-1", "hello",
+        ))),
         provenance,
     )
     .unwrap();

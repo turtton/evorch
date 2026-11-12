@@ -43,7 +43,7 @@ pub struct BackendSubscription {
     /// Events after `started.high_water`, in cursor order.
     ///
     /// The backend must never wait for this channel: when it is full the
-    /// backend sends [`UiEvent::ResyncRequired`](workbench_protocol::events::UiEvent)
+    /// backend sends [`UiEvent::Projection(ProjectionEvent::ResyncRequired)`](workbench_protocol::events::UiEvent)
     /// (reason `SlowSubscriber`) with `try_send` semantics and ends the stream.
     /// An event that ends the subscription ([`UiEvent::ends_subscription`])
     /// must be the last one sent.

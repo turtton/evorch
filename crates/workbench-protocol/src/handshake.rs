@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 pub struct ProtocolVersion(pub u32);
 
 impl ProtocolVersion {
-    /// The only version this crate speaks.
-    pub const CURRENT: Self = Self(1);
+    /// The only version this crate speaks. Version 2 routes every request, reply
+    /// and event through a typed namespace; version 1 is not spoken at all.
+    pub const CURRENT: Self = Self(2);
 }
 
 /// A feature a core may offer. Definitions only: the presence of a variant
@@ -58,6 +59,22 @@ impl Capability {
         Self::Questions,
         Self::CommittedBodies,
         Self::SafeRestart,
+        Self::Conversation,
+    ];
+
+    /// What a core serving this protocol version offers: the capabilities with an
+    /// implementation behind them, listed explicitly. A core must advertise this
+    /// and not [`Self::ALL`]: a name existing in the protocol says nothing about
+    /// an implementation. `SafeRestart` is absent until the restart transaction
+    /// is implemented.
+    pub const IMPLEMENTED: [Capability; 8] = [
+        Self::Commands,
+        Self::Queries,
+        Self::SnapshotEvents,
+        Self::InputReceipts,
+        Self::Approvals,
+        Self::Questions,
+        Self::CommittedBodies,
         Self::Conversation,
     ];
 

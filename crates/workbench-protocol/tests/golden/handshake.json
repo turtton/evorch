@@ -21,7 +21,7 @@
         "subscription_queue_bytes": 4194304,
         "subscription_queue_events": 1024
       },
-      "protocol_version": 1,
+      "protocol_version": 2,
       "server_build": {
         "name": "evorch",
         "revision": "abc1234",
@@ -53,7 +53,7 @@
       "reason": "missing_capabilities",
       "recommended_action": "upgrade_core",
       "supported_versions": [
-        1
+        2
       ]
     },
     "type": "rejected"

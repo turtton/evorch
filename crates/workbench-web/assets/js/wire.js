@@ -2,8 +2,12 @@
 //
 // Pure functions only: no DOM, no network. The shapes follow
 // crates/workbench-protocol (golden fixtures in its tests/golden):
-//   request  {request_id, session_id, kind: "command"|"query", payload: {type, payload?}}
+//   request  {request_id, session_id, kind: "command"|"query",
+//            payload: {type: <namespace>, payload: {type: <operation>, payload?}}}
 //   reply    {request_id?, status: "success"|"error", payload}
+//   event    {type: <namespace>, payload: {type: <event>, payload?}}
+// Callers name only the operation; the namespace each operation belongs to is
+// the table below (the protocol's `namespaces` module is the source).
 // Every u64 travels as a canonical decimal string; enums are {type, payload}.
 
 const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
@@ -26,13 +30,76 @@ export function randomUuid(cryptoImpl = globalThis.crypto) {
   return uuidFromBytes(cryptoImpl.getRandomValues(new Uint8Array(16)));
 }
 
-/** `{kind, payload: {type, payload}}` without the ids. */
+/** The namespace of every command operation. */
+const COMMAND_NAMESPACE = {
+  resolve_project: "conversation",
+  create_execution: "conversation",
+  create_goal: "conversation",
+  prepare_existing_thread: "conversation",
+  upload_image: "conversation",
+  discard_attachment: "conversation",
+  send_chat: "conversation",
+  continue_chat: "conversation",
+  compact_chat: "conversation",
+  deliver_follow_ups_next_turn: "conversation",
+  withdraw_follow_up: "conversation",
+  stop_chat: "execution",
+  stop_run: "execution",
+  submit_goal: "execution",
+  set_goal_review: "execution",
+  set_goal_checks_paused: "execution",
+  set_agent_web_tools_enabled: "execution",
+  answer_user_question: "questions",
+  decide_tool_approval: "approvals",
+  manage_lane: "lanes",
+};
+
+/** The namespace of every query operation. */
+const QUERY_NAMESPACE = {
+  get_input_receipts: "conversation",
+  read_committed_history: "conversation",
+  list_projects: "workspace",
+  list_threads: "workspace",
+  get_thread: "workspace",
+  list_runs: "execution",
+  list_questions: "questions",
+  list_approvals: "approvals",
+  get_approval_input: "approvals",
+  get_lane_management: "lanes",
+  get_core_status: "lifecycle",
+  get_command_receipt: "projection",
+  read_body: "projection",
+  read_snapshot: "projection",
+};
+
+function operation(kind, table, type, payload) {
+  const namespace = table[type];
+  if (!namespace) throw new Error(`unknown ${kind} operation: ${type}`);
+  const inner = payload === undefined ? { type } : { type, payload };
+  return { kind, payload: { type: namespace, payload: inner } };
+}
+
+/** `{kind, payload: {type: namespace, payload: {type, payload}}}` without the ids. */
 export function command(type, payload) {
-  return { kind: "command", payload: payload === undefined ? { type } : { type, payload } };
+  return operation("command", COMMAND_NAMESPACE, type, payload);
 }
 
 export function query(type, payload) {
-  return { kind: "query", payload: payload === undefined ? { type } : { type, payload } };
+  return operation("query", QUERY_NAMESPACE, type, payload);
+}
+
+/**
+ * A UiEvent as `{type, payload}` of the event itself: the namespace level the
+ * wire adds is dropped, because an event's name is unique across namespaces.
+ * An event that does not have the namespaced shape is returned as an event of
+ * unknown type, so the callers' "ignore unknown events" rule applies.
+ */
+export function flattenEvent(event) {
+  const inner = event && typeof event === "object" ? event.payload : null;
+  if (!inner || typeof inner !== "object" || typeof inner.type !== "string") {
+    return { type: "unknown_event", payload: {} };
+  }
+  return inner;
 }
 
 export function envelope(requestId, sessionId, body) {
@@ -75,13 +142,18 @@ function mismatch(message) {
   return { ok: false, error: { code: "internal", message, retry: "never" } };
 }
 
-/** The value inside a successful query reply of the expected `type`. */
+/**
+ * The value inside a successful query reply of the expected `type`. The reply
+ * is `{type: namespace, payload: {type, payload}}`; its inner level names the
+ * reply.
+ */
 export function expectQuery(result, type) {
   if (!result.ok) return result;
-  if (result.kind !== "query" || !result.value || result.value.type !== type) {
+  const reply = result.value?.payload;
+  if (result.kind !== "query" || !reply || reply.type !== type) {
     return mismatch(`expected a ${type} reply`);
   }
-  return { ok: true, value: result.value.payload };
+  return { ok: true, value: reply.payload };
 }
 
 /** The CommandReply inside a successful command reply. */

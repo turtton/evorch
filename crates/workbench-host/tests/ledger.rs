@@ -13,6 +13,7 @@ use workbench_protocol::commands::{Command, CommandDisposition};
 use workbench_protocol::envelope::Surface;
 use workbench_protocol::errors::ErrorCode;
 use workbench_protocol::ids::RunId;
+use workbench_protocol::namespaces::ConversationCommand;
 
 fn accepted_run(events: &[HostEvent]) -> String {
     events
@@ -30,13 +31,21 @@ fn any_difference_in_a_resent_message_is_a_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
     let mut host = host_with_two_projects(&rt, runtime(), dir.path(), elsewhere.path());
-    host.handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
-        .unwrap();
+    host.handle_command(
+        Command::Conversation(ConversationCommand::SendChat(send(
+            "thread-1", "sub-1", "hello",
+        ))),
+        web(),
+    )
+    .unwrap();
     let agents = host.service().runtime().list_agents().len();
 
     for (field, message) in differing_messages("thread-1", "sub-1", "hello") {
         let error = host
-            .handle_command(Command::SendChat(message), cli())
+            .handle_command(
+                Command::Conversation(ConversationCommand::SendChat(message)),
+                cli(),
+            )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Conflict, "{field}");
     }
@@ -44,7 +53,12 @@ fn any_difference_in_a_resent_message_is_a_conflict() {
     assert_eq!(host.service().runtime().list_agents().len(), agents);
     assert_eq!(host.submission_provenance("sub-1"), Some(web()));
     let same = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), cli())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            cli(),
+        )
         .unwrap();
     assert_eq!(same.disposition, CommandDisposition::AlreadyApplied);
 }
@@ -76,11 +90,26 @@ fn a_message_sent_through_either_door_is_recognised_by_the_other() {
         &desktop,
     );
     let from_protocol = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
-    let different = host.handle_command(Command::SendChat(send("thread-1", "sub-1", "bye")), web());
+    let different = host.handle_command(
+        Command::Conversation(ConversationCommand::SendChat(send(
+            "thread-1", "sub-1", "bye",
+        ))),
+        web(),
+    );
     let protocol_first = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-2", "more")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-2", "more",
+            ))),
+            web(),
+        )
         .unwrap();
     let from_local = host.submit_local(
         HostCommand::SendChat(local_chat(dir.path(), "sub-2", "more")),
@@ -126,13 +155,23 @@ fn a_caller_that_lost_the_thread_learns_nothing_from_the_ledger() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut host = host_with_project(&rt, runtime(), dir.path());
-    host.handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
-        .unwrap();
+    host.handle_command(
+        Command::Conversation(ConversationCommand::SendChat(send(
+            "thread-1", "sub-1", "hello",
+        ))),
+        web(),
+    )
+    .unwrap();
     let lost = lost_ownership("thread-1");
     host.service_mut().set_ownership(Some(lost.owner.clone()));
 
     let protocol = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap_err();
     let local = host.submit_local(
         HostCommand::SendChat(local_chat(dir.path(), "sub-1", "hello")),

@@ -3,6 +3,7 @@
 //! delivery destination; whatever binds it is the bootstrap. Only the model is scripted.
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use workbench_protocol::namespaces::{ConversationCommand, WorkspaceQuery, WorkspaceReply};
 
 use event_bus::lane::LaneDeliveryBinding;
 use event_bus::{AgentRunPhase, Event, EventKind, EventReceiver, LifecycleEvent, ToolEvent};
@@ -158,25 +159,31 @@ impl Core {
 
     /// Starts the lead conversation the way a client does, through the core backend.
     fn start_lead(&self) -> RunId {
-        let ReplyPayload::Query(QueryReply::Projects(projects)) = self.request(
-            "projects",
-            RequestBody::Query(Query::ListProjects(Default::default())),
-        ) else {
+        let ReplyPayload::Query(QueryReply::Workspace(WorkspaceReply::Projects(projects))) = self
+            .request(
+                "projects",
+                RequestBody::Query(Query::Workspace(WorkspaceQuery::ListProjects(
+                    Default::default(),
+                ))),
+            )
+        else {
             panic!("expected the project list");
         };
         let ReplyPayload::Command(reply) = self.request(
             "lead",
-            RequestBody::Command(Command::SendChat(SendChat {
-                project: projects.items[0].id.clone(),
-                thread: ThreadId::new(LEAD).unwrap(),
-                submission_id: SubmissionId::new("lead-1").unwrap(),
-                composer_role: ComposerRole::Orchestrator,
-                text: "coordinate".into(),
-                skills: Vec::new(),
-                images: Vec::new(),
-                model_preference: None,
-                fork_seed: None,
-            })),
+            RequestBody::Command(Command::Conversation(ConversationCommand::SendChat(
+                SendChat {
+                    project: projects.items[0].id.clone(),
+                    thread: ThreadId::new(LEAD).unwrap(),
+                    submission_id: SubmissionId::new("lead-1").unwrap(),
+                    composer_role: ComposerRole::Orchestrator,
+                    text: "coordinate".into(),
+                    skills: Vec::new(),
+                    images: Vec::new(),
+                    model_preference: None,
+                    fork_seed: None,
+                },
+            ))),
         ) else {
             panic!("expected a command reply");
         };

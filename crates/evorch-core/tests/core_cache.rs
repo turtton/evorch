@@ -2,6 +2,10 @@
 //! the fixture's input-derived cache, and wire prefix assertions are independent.
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+use workbench_protocol::namespaces::{
+    ApprovalsCommand, ApprovalsEvent, ConversationCommand, ConversationEvent, ConversationQuery,
+    QuestionsCommand, QuestionsQuery, QuestionsReply,
+};
 
 use event_bus::{EventBus, EventKind, ProviderEvent};
 use evorch_core::{backend::HostBackend, instance::Instance, unix};
@@ -14,7 +18,7 @@ use workbench_protocol::{commands::*, envelope::*, events::*, handshake::*, ids:
 use workbench_web::{WebServer, WebServerConfig};
 
 fn send(thread: &str, submission: &str, text: &str) -> Command {
-    Command::SendChat(SendChat {
+    Command::Conversation(ConversationCommand::SendChat(SendChat {
         project: ProjectId::new("project").unwrap(),
         thread: ThreadId::new(thread).unwrap(),
         submission_id: SubmissionId::new(submission).unwrap(),
@@ -24,7 +28,7 @@ fn send(thread: &str, submission: &str, text: &str) -> Command {
         images: vec![],
         model_preference: None,
         fork_seed: None,
-    })
+    }))
 }
 
 async fn turn(events: &mut event_bus::EventReceiver, run: runtime::RunId) {
@@ -203,19 +207,21 @@ context_window_tokens = 1000000
     let run: runtime::RunId = reply.run_id.unwrap().as_str().parse().unwrap();
     turn(&mut turns, run).await;
     bridge.flush().unwrap();
-    let query = Query::ReadCommittedHistory(ReadCommittedHistory {
-        direction: workbench_protocol::queries::HistoryDirection::Forward,
-        thread: ThreadId::new("thread").unwrap(),
-        run: None,
-        page: Default::default(),
-    });
+    let query = Query::Conversation(ConversationQuery::ReadCommittedHistory(
+        ReadCommittedHistory {
+            direction: workbench_protocol::queries::HistoryDirection::Forward,
+            thread: ThreadId::new("thread").unwrap(),
+            run: None,
+            page: Default::default(),
+        },
+    ));
     let history = client.query(query.clone()).await.unwrap();
     let serialized = serde_json::to_string(&history).unwrap();
     assert!(serialized.contains("hello"));
     assert!(!serialized.contains(&secret));
     loop {
         let event = subscription.next().await.unwrap();
-        if let UiEvent::MessageCommitted { message } = &event.event
+        if let UiEvent::Conversation(ConversationEvent::MessageCommitted { message }) = &event.event
             && serde_json::to_string(message).unwrap().contains("hello")
         {
             assert!(!serde_json::to_string(&event).unwrap().contains(&secret));
@@ -301,12 +307,14 @@ context_window_tokens = 1000000
         .await
         .unwrap();
     turn(&mut turns, run).await;
-    let QueryReply::Questions(questions) = client
-        .query(Query::ListQuestions(PendingQuery {
-            thread: Some(ThreadId::new("thread").unwrap()),
-            pending_only: true,
-            page: Default::default(),
-        }))
+    let QueryReply::Questions(QuestionsReply::Questions(questions)) = client
+        .query(Query::Questions(QuestionsQuery::ListQuestions(
+            PendingQuery {
+                thread: Some(ThreadId::new("thread").unwrap()),
+                pending_only: true,
+                page: Default::default(),
+            },
+        )))
         .await
         .unwrap()
     else {
@@ -319,12 +327,14 @@ context_window_tokens = 1000000
         .json(&RequestEnvelope {
             request_id: RequestId::new("web-answer").unwrap(),
             session_id: SessionId::new("web-test").unwrap(),
-            body: RequestBody::Command(Command::AnswerUserQuestion(AnswerUserQuestion {
-                thread: ThreadId::new("thread").unwrap(),
-                question_id: question.id.clone(),
-                question_revision: question.revision,
-                answer: "JSON".into(),
-            })),
+            body: RequestBody::Command(Command::Questions(QuestionsCommand::AnswerUserQuestion(
+                AnswerUserQuestion {
+                    thread: ThreadId::new("thread").unwrap(),
+                    question_id: question.id.clone(),
+                    question_revision: question.revision,
+                    answer: "JSON".into(),
+                },
+            ))),
         })
         .send()
         .await
@@ -366,7 +376,9 @@ context_window_tokens = 1000000
 
     // Secrets in diagnostics and approval summaries must never cross either
     // transport; model-output secrets are already refused by durable storage.
-    let Command::SendChat(mut unknown) = send("unknown", "unknown-sub", "do not run") else {
+    let Command::Conversation(ConversationCommand::SendChat(mut unknown)) =
+        send("unknown", "unknown-sub", "do not run")
+    else {
         unreachable!()
     };
     unknown.project = ProjectId::new(&secret).unwrap();
@@ -376,7 +388,9 @@ context_window_tokens = 1000000
         .json(&RequestEnvelope {
             request_id: RequestId::new("web-diagnostic").unwrap(),
             session_id: SessionId::new("web-test").unwrap(),
-            body: RequestBody::Command(Command::SendChat(unknown.clone())),
+            body: RequestBody::Command(Command::Conversation(ConversationCommand::SendChat(
+                unknown.clone(),
+            ))),
         })
         .send()
         .await
@@ -386,7 +400,9 @@ context_window_tokens = 1000000
         .unwrap();
     assert!(!response.contains(&secret));
     let diagnostic = client
-        .command(Command::SendChat(unknown))
+        .command(Command::Conversation(ConversationCommand::SendChat(
+            unknown,
+        )))
         .await
         .unwrap_err();
     assert!(!format!("{diagnostic:?}").contains(&secret));
@@ -410,15 +426,17 @@ context_window_tokens = 1000000
     );
     loop {
         let event = subscription.next().await.unwrap();
-        if let UiEvent::ApprovalChanged { approval } = &event.event {
+        if let UiEvent::Approvals(ApprovalsEvent::ApprovalChanged { approval }) = &event.event {
             assert!(!approval.summary.contains(&secret));
             client
-                .command(Command::DecideToolApproval(DecideToolApproval {
-                    approval_id: approval.id.clone(),
-                    core_epoch: approval.core_epoch,
-                    approval_revision: approval.revision,
-                    decision: ApprovalDecision::Deny,
-                }))
+                .command(Command::Approvals(ApprovalsCommand::DecideToolApproval(
+                    DecideToolApproval {
+                        approval_id: approval.id.clone(),
+                        core_epoch: approval.core_epoch,
+                        approval_revision: approval.revision,
+                        decision: ApprovalDecision::Deny,
+                    },
+                )))
                 .await
                 .unwrap();
             break;
@@ -429,7 +447,8 @@ context_window_tokens = 1000000
         sandbox::approval::ApprovalState::Denied
     );
     loop {
-        if let UiEvent::ApprovalChanged { approval } = sse_event(&mut sse, &mut buffer).await.event
+        if let UiEvent::Approvals(ApprovalsEvent::ApprovalChanged { approval }) =
+            sse_event(&mut sse, &mut buffer).await.event
         {
             assert!(!approval.summary.contains(&secret));
             break;
@@ -446,7 +465,8 @@ context_window_tokens = 1000000
         Duration::from_secs(3600),
     );
     let approval = loop {
-        if let UiEvent::ApprovalChanged { approval } = sse_event(&mut sse, &mut buffer).await.event
+        if let UiEvent::Approvals(ApprovalsEvent::ApprovalChanged { approval }) =
+            sse_event(&mut sse, &mut buffer).await.event
             && approval.id.as_str() == pending.id().value.as_str()
         {
             break approval;
@@ -458,12 +478,14 @@ context_window_tokens = 1000000
         .json(&RequestEnvelope {
             request_id: RequestId::new("web-approval").unwrap(),
             session_id: SessionId::new("web-test").unwrap(),
-            body: RequestBody::Command(Command::DecideToolApproval(DecideToolApproval {
-                approval_id: approval.id,
-                core_epoch: approval.core_epoch,
-                approval_revision: approval.revision,
-                decision: ApprovalDecision::Deny,
-            })),
+            body: RequestBody::Command(Command::Approvals(ApprovalsCommand::DecideToolApproval(
+                DecideToolApproval {
+                    approval_id: approval.id,
+                    core_epoch: approval.core_epoch,
+                    approval_revision: approval.revision,
+                    decision: ApprovalDecision::Deny,
+                },
+            ))),
         })
         .send()
         .await

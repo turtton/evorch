@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::Notify;
+use workbench_protocol::namespaces::ProjectionEvent;
 use workbench_protocol::{events::*, ids::SubscriptionId};
 
 #[derive(Debug, Clone, Copy)]
@@ -53,9 +54,9 @@ impl Queue {
         {
             p.events.clear();
             p.bytes = 0;
-            event.event = UiEvent::ResyncRequired {
+            event.event = UiEvent::Projection(ProjectionEvent::ResyncRequired {
                 reason: ResyncReason::SlowSubscriber,
-            };
+            });
         }
         if event.event.ends_subscription() {
             p.events.clear();

@@ -5,16 +5,21 @@
 //! boundary: events at or before it are already reflected in the snapshot.
 //! Delivery may repeat events (ADR 0045 allows SSE duplicates) but never skips
 //! silently: a subscriber that cannot be served receives
-//! [`UiEvent::ResyncRequired`] and must take a new snapshot. Token deltas are
+//! [`ProjectionEvent::ResyncRequired`] and must take a new snapshot. Token deltas are
 //! not events; only committed messages are.
 
 use crate::handshake::CoreStatus;
 use crate::ids::{ProjectId, RequestId, SnapshotId, SubscriptionId, ThreadId};
-use crate::validation::ValidationError;
-use crate::views::{
-    ApprovalView, CommittedMessage, InputReceipt, Page, ProjectSummary, QuestionView, RunSummary,
-    ThreadSummary,
+use crate::namespaces::{
+    approvals::ApprovalsEvent, artifacts::ArtifactsEvent, auth::AuthEvent, browser::BrowserEvent,
+    conversation::ConversationEvent, diagnostics::DiagnosticsEvent, evaluation::EvaluationEvent,
+    execution::ExecutionEvent, improvement::ImprovementEvent, lanes::LanesEvent,
+    lifecycle::LifecycleEvent, maintenance::MaintenanceEvent, mcp::McpEvent, memory::MemoryEvent,
+    projection::ProjectionEvent, pull_requests::PullRequestsEvent, questions::QuestionsEvent,
+    settings::SettingsEvent, teams::TeamsEvent, workspace::WorkspaceEvent,
 };
+use crate::validation::ValidationError;
+use crate::views::{ApprovalView, Page, ProjectSummary, QuestionView, RunSummary, ThreadSummary};
 use crate::wire::{InstanceEpoch, Sequence};
 use serde::{Deserialize, Serialize};
 
@@ -114,40 +119,66 @@ pub enum CloseReason {
     ScopeRemoved,
 }
 
+/// An event on a subscription: one namespace, then one of its events. Only the
+/// projection namespace's control notices end a subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum UiEvent {
-    CoreStatusChanged { status: CoreStatus },
-    ThreadChanged { thread: ThreadSummary },
-    RunChanged { run: RunSummary },
-    InputReceiptChanged { receipt: InputReceipt },
-    QuestionChanged { question: QuestionView },
-    ApprovalChanged { approval: ApprovalView },
-    MessageCommitted { message: CommittedMessage },
-    ResyncRequired { reason: ResyncReason },
-    SubscriptionClosed { reason: CloseReason },
+    Conversation(ConversationEvent),
+    Workspace(WorkspaceEvent),
+    Execution(ExecutionEvent),
+    Questions(QuestionsEvent),
+    Approvals(ApprovalsEvent),
+    Lanes(LanesEvent),
+    Lifecycle(LifecycleEvent),
+    Projection(ProjectionEvent),
+    Settings(SettingsEvent),
+    Auth(AuthEvent),
+    Mcp(McpEvent),
+    Teams(TeamsEvent),
+    Diagnostics(DiagnosticsEvent),
+    Memory(MemoryEvent),
+    Evaluation(EvaluationEvent),
+    Improvement(ImprovementEvent),
+    PullRequests(PullRequestsEvent),
+    Browser(BrowserEvent),
+    Artifacts(ArtifactsEvent),
+    Maintenance(MaintenanceEvent),
 }
 
 impl UiEvent {
-    /// Wire names of every variant.
-    pub const TYPES: [&'static str; 9] = [
-        "core_status_changed",
-        "thread_changed",
-        "run_changed",
-        "input_receipt_changed",
-        "question_changed",
-        "approval_changed",
-        "message_committed",
-        "resync_required",
-        "subscription_closed",
-    ];
+    /// Wire names of every namespace.
+    pub const TYPES: [&'static str; 20] = crate::namespaces::NAMESPACE_NAMES;
 
     /// Whether the subscription is over after this event.
     pub fn ends_subscription(&self) -> bool {
-        matches!(
-            self,
-            Self::ResyncRequired { .. } | Self::SubscriptionClosed { .. }
-        )
+        match self {
+            Self::Projection(e) => e.ends_subscription(),
+            Self::Conversation(_)
+            | Self::Workspace(_)
+            | Self::Execution(_)
+            | Self::Questions(_)
+            | Self::Approvals(_)
+            | Self::Lifecycle(_) => false,
+            Self::Lanes(e) => match *e {},
+            Self::Settings(e) => match *e {},
+            Self::Auth(e) => match *e {},
+            Self::Mcp(e) => match *e {},
+            Self::Teams(e) => match *e {},
+            Self::Diagnostics(e) => match *e {},
+            Self::Memory(e) => match *e {},
+            Self::Evaluation(e) => match *e {},
+            Self::Improvement(e) => match *e {},
+            Self::PullRequests(e) => match *e {},
+            Self::Browser(e) => match *e {},
+            Self::Artifacts(e) => match *e {},
+            Self::Maintenance(e) => match *e {},
+        }
     }
 }
 
@@ -231,15 +262,26 @@ impl UiEvent {
     /// Bound an event received from a peer.
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
-            Self::CoreStatusChanged { status } => status.validate(),
-            Self::ThreadChanged { thread } => thread.validate(),
-            Self::RunChanged { .. }
-            | Self::ResyncRequired { .. }
-            | Self::SubscriptionClosed { .. } => Ok(()),
-            Self::InputReceiptChanged { receipt } => receipt.validate(),
-            Self::QuestionChanged { question } => question.validate(),
-            Self::ApprovalChanged { approval } => approval.validate(),
-            Self::MessageCommitted { message } => message.validate(),
+            Self::Conversation(e) => e.validate(),
+            Self::Workspace(e) => e.validate(),
+            Self::Execution(e) => e.validate(),
+            Self::Questions(e) => e.validate(),
+            Self::Approvals(e) => e.validate(),
+            Self::Lanes(e) => e.validate(),
+            Self::Lifecycle(e) => e.validate(),
+            Self::Projection(e) => e.validate(),
+            Self::Settings(e) => e.validate(),
+            Self::Auth(e) => e.validate(),
+            Self::Mcp(e) => e.validate(),
+            Self::Teams(e) => e.validate(),
+            Self::Diagnostics(e) => e.validate(),
+            Self::Memory(e) => e.validate(),
+            Self::Evaluation(e) => e.validate(),
+            Self::Improvement(e) => e.validate(),
+            Self::PullRequests(e) => e.validate(),
+            Self::Browser(e) => e.validate(),
+            Self::Artifacts(e) => e.validate(),
+            Self::Maintenance(e) => e.validate(),
         }
     }
 }

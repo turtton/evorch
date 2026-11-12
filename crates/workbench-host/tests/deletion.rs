@@ -5,6 +5,9 @@
 mod common;
 
 use std::path::Path;
+use workbench_protocol::namespaces::{
+    ConversationCommand, ExecutionCommand, ProjectionQuery, ProjectionReply, QuestionsCommand,
+};
 
 use common::{host_with_project, runtime_on_store, runtime_with_store, send, web};
 use rusqlite::Connection;
@@ -63,7 +66,12 @@ fn a_deleted_conversations_message_is_not_answered_from_memory_or_storage() {
     let (runtime, storage) = runtime_with_store(dir.path());
     let mut host = host_with_project(&rt, runtime, dir.path());
     let accepted = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
     assert_eq!(host.submission_provenance("sub-1"), Some(web()));
 
@@ -71,7 +79,12 @@ fn a_deleted_conversations_message_is_not_answered_from_memory_or_storage() {
 
     assert_eq!(host.submission_provenance("sub-1"), None);
     let again = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap_err();
     let desktop = host.submit_local(
         HostCommand::SendChat(local_chat(dir.path(), "hello")),
@@ -89,7 +102,12 @@ fn a_deleted_conversations_message_is_not_answered_from_memory_or_storage() {
     let mut recreated = host_with_project(&rt, runtime_on_store(dir.path(), &storage), dir.path());
     assert_eq!(recreated.submission_provenance("sub-1"), None);
     let error = recreated
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Conflict);
 }
@@ -105,7 +123,12 @@ fn after_the_reclaim_nothing_is_kept_so_a_recreated_hosts_id_is_deliberately_new
     let (runtime, storage) = runtime_with_store(dir.path());
     let mut host = host_with_project(&rt, runtime, dir.path());
     let accepted = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap();
     let original = run_of(&accepted);
     tombstone(dir.path(), &original);
@@ -114,7 +137,12 @@ fn after_the_reclaim_nothing_is_kept_so_a_recreated_hosts_id_is_deliberately_new
     // The host that remembered the message still refuses to answer for it.
     assert_eq!(host.submission_provenance("sub-1"), None);
     let same_host = host
-        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
+            web(),
+        )
         .unwrap_err();
     assert_eq!(same_host.code, ErrorCode::Conflict);
 
@@ -122,7 +150,12 @@ fn after_the_reclaim_nothing_is_kept_so_a_recreated_hosts_id_is_deliberately_new
     // never answered with the deleted run.
     let mut recreated = host_with_project(&rt, runtime_on_store(dir.path(), &storage), dir.path());
     assert_eq!(recreated.submission_provenance("sub-1"), None);
-    match recreated.handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web()) {
+    match recreated.handle_command(
+        Command::Conversation(ConversationCommand::SendChat(send(
+            "thread-1", "sub-1", "hello",
+        ))),
+        web(),
+    ) {
         Ok(reply) => {
             assert_eq!(reply.disposition, CommandDisposition::Accepted);
             assert_ne!(run_of(&reply), original);
@@ -139,12 +172,12 @@ fn a_deleted_questions_answer_provenance_is_gone() {
     let question = common::offline_question(&rt, dir.path(), &storage);
     let mut host = host_with_project(&rt, runtime, dir.path());
     host.handle_command(
-        Command::AnswerUserQuestion(AnswerUserQuestion {
+        Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {
             thread: ThreadId::new("thread-1").unwrap(),
             question_id: QuestionId::new(question.id.clone()).unwrap(),
             answer: "JSON".into(),
             question_revision: Revision(0),
-        }),
+        })),
         web(),
     )
     .unwrap();
@@ -174,13 +207,13 @@ fn receipt_state(
     match host
         .handle_query(
             session,
-            &Query::GetCommandReceipt {
+            &Query::Projection(ProjectionQuery::GetCommandReceipt {
                 request_id: request.clone(),
-            },
+            }),
         )
         .unwrap()
     {
-        QueryReply::CommandReceipt(receipt) => receipt.state,
+        QueryReply::Projection(ProjectionReply::CommandReceipt(receipt)) => receipt.state,
         other => panic!("not a receipt: {other:?}"),
     }
 }
@@ -198,16 +231,18 @@ fn a_command_receipt_of_a_deleted_conversation_reads_as_unknown_before_and_after
         .handle_request(
             &session,
             &chat,
-            Command::SendChat(send("thread-1", "sub-1", "hello")),
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1", "sub-1", "hello",
+            ))),
             web(),
         )
         .unwrap();
     host.handle_request(
         &session,
         &stop,
-        Command::StopChat(ThreadTarget {
+        Command::Execution(ExecutionCommand::StopChat(ThreadTarget {
             thread: ThreadId::new("thread-1").unwrap(),
-        }),
+        })),
         web(),
     )
     .unwrap();
@@ -258,7 +293,9 @@ fn a_command_receipt_of_a_live_conversation_is_unaffected_by_another_ones_deleti
     host.handle_request(
         &session,
         &chat,
-        Command::SendChat(send("thread-1", "sub-1", "hello")),
+        Command::Conversation(ConversationCommand::SendChat(send(
+            "thread-1", "sub-1", "hello",
+        ))),
         web(),
     )
     .unwrap();

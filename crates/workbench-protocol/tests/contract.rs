@@ -12,6 +12,11 @@ use workbench_protocol::framing::encode_frame;
 use workbench_protocol::handshake::*;
 use workbench_protocol::ids::*;
 use workbench_protocol::limits::*;
+use workbench_protocol::namespaces::{
+    ConversationCommand, ConversationReply, ExecutionCommand, LifecycleReply, ProjectionQuery,
+    ProjectionReply, QuestionsCommand, QuestionsEvent, QuestionsReply, WorkspaceEvent,
+    WorkspaceQuery, WorkspaceReply,
+};
 use workbench_protocol::queries::*;
 use workbench_protocol::validation::ValidationError;
 use workbench_protocol::views::*;
@@ -69,7 +74,7 @@ fn version_mismatch_is_rejected_with_a_direction() {
     let hello = client_hello();
     let newer_core = negotiate(
         &hello,
-        &offer(&core, &[ProtocolVersion(2)], &Capability::ALL),
+        &offer(&core, &[ProtocolVersion(3)], &Capability::ALL),
     )
     .unwrap_err();
     assert_eq!(newer_core.reason, RejectReason::UnsupportedVersion);
@@ -77,13 +82,13 @@ fn version_mismatch_is_rejected_with_a_direction() {
         newer_core.recommended_action,
         RecommendedAction::UpgradeClient
     );
-    assert_eq!(newer_core.supported_versions, [ProtocolVersion(2)]);
+    assert_eq!(newer_core.supported_versions, [ProtocolVersion(3)]);
 
     let mut newer_client = client_hello();
     newer_client.supported_versions = vec![ProtocolVersion(5)];
     let rejected = negotiate(
         &newer_client,
-        &offer(&core, &[ProtocolVersion(1)], &Capability::ALL),
+        &offer(&core, &[ProtocolVersion::CURRENT], &Capability::ALL),
     )
     .unwrap_err();
     assert_eq!(rejected.recommended_action, RecommendedAction::UpgradeCore);
@@ -194,16 +199,22 @@ fn unknown_command_query_and_control_types_are_refused_as_unsupported() {
 #[test]
 fn malformed_requests_are_invalid_not_unsupported() {
     let cases = [
-        request_json("command", json!({"type": "stop_chat", "payload": {}})), // missing thread
+        // missing thread
         request_json(
             "command",
-            json!({"type": "stop_chat", "payload": {"thread": "t", "x": 1}}),
+            json!({"type": "execution", "payload": {"type": "stop_chat", "payload": {}}}),
+        ),
+        request_json(
+            "command",
+            json!({"type": "execution", "payload": {"type": "stop_chat", "payload": {"thread": "t", "x": 1}}}),
         ),
         request_json(
             "teleport",
-            json!({"type": "stop_chat", "payload": {"thread": "t"}}),
+            json!({"type": "execution", "payload": {"type": "stop_chat", "payload": {"thread": "t"}}}),
         ),
-        json!({"session_id": "s", "kind": "query", "payload": {"type": "get_core_status"}}),
+        // a known namespace without any operation
+        request_json("command", json!({"type": "execution"})),
+        json!({"session_id": "s", "kind": "query", "payload": {"type": "lifecycle", "payload": {"type": "get_core_status"}}}),
     ];
     for case in cases {
         let rejection = decode(case.clone()).unwrap_err();
@@ -216,15 +227,18 @@ fn malformed_requests_are_invalid_not_unsupported() {
 
 #[test]
 fn clients_cannot_supply_provenance_or_automatic_continuation() {
-    let mut send = serde_json::to_value(Command::SendChat(send_chat())).unwrap();
-    send["payload"]["provenance"] =
+    let mut send = serde_json::to_value(Command::Conversation(ConversationCommand::SendChat(
+        send_chat(),
+    )))
+    .unwrap();
+    send["payload"]["payload"]["payload"]["provenance"] =
         json!({"actor": "agent", "surface": "none", "agent_run_id": "run-1"});
     let rejection = decode(request_json("command", send)).unwrap_err();
     assert_eq!(rejection.error.code, ErrorCode::InvalidRequest);
 
     let rejection = decode(request_json(
         "command",
-        json!({"type": "continue_chat", "payload": {"project": "p", "thread": "t", "automatic": true}}),
+        json!({"type": "conversation", "payload": {"type": "continue_chat", "payload": {"project": "p", "thread": "t", "automatic": true}}}),
     ))
     .unwrap_err();
     assert_eq!(rejection.error.code, ErrorCode::InvalidRequest);
@@ -263,7 +277,7 @@ fn invalid_field_values_map_to_structured_errors() {
     chat.text = "x".repeat(MAX_TEXT_BYTES + 1);
     let rejection = decode(request_json(
         "command",
-        serde_json::to_value(Command::SendChat(chat)).unwrap(),
+        serde_json::to_value(Command::Conversation(ConversationCommand::SendChat(chat))).unwrap(),
     ))
     .unwrap_err();
     assert_eq!(rejection.error.code, ErrorCode::LimitExceeded);
@@ -277,7 +291,7 @@ fn invalid_field_values_map_to_structured_errors() {
     let mut chat = send_chat();
     chat.text = "bell\u{7}".into();
     assert_eq!(
-        Command::SendChat(chat).validate(),
+        Command::Conversation(ConversationCommand::SendChat(chat)).validate(),
         Err(ValidationError::InvalidChars { field: "text" })
     );
 }
@@ -349,12 +363,12 @@ fn command_collections_and_strings_are_bounded() {
         .validate()
         .unwrap();
 
-    let blank = Command::AnswerUserQuestion(AnswerUserQuestion {
+    let blank = Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {
         thread: thread(),
         question_id: QuestionId::new("q").unwrap(),
         answer: String::new(),
         question_revision: Revision(1),
-    });
+    }));
     assert!(blank.validate().is_err());
 }
 
@@ -402,15 +416,19 @@ fn the_largest_valid_command_fits_the_default_frame() {
         }),
     };
     goal.validate().unwrap();
-    let answer = Command::AnswerUserQuestion(AnswerUserQuestion {
+    let answer = Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {
         thread: thread(),
         question_id: QuestionId::new("q").unwrap(),
         answer: worst,
         question_revision: Revision(1),
-    });
+    }));
     answer.validate().unwrap();
 
-    for command in [Command::SendChat(chat), Command::SubmitGoal(goal), answer] {
+    for command in [
+        Command::Conversation(ConversationCommand::SendChat(chat)),
+        Command::Execution(ExecutionCommand::SubmitGoal(goal)),
+        answer,
+    ] {
         let frame = encode_frame(
             &envelope(1, RequestBody::Command(command)),
             DEFAULT_FRAME_BYTES,
@@ -426,10 +444,10 @@ fn the_largest_valid_command_fits_the_default_frame() {
 fn page_and_body_requests_are_bounded() {
     let limits = WireLimits::default();
     let page = |limit| {
-        Query::ListProjects(PageRequest {
+        Query::Workspace(WorkspaceQuery::ListProjects(PageRequest {
             cursor: None,
             limit,
-        })
+        }))
     };
     page(1).validate(&limits).unwrap();
     page(MAX_PAGE_SIZE).validate(&limits).unwrap();
@@ -437,11 +455,11 @@ fn page_and_body_requests_are_bounded() {
     assert!(page(MAX_PAGE_SIZE + 1).validate(&limits).is_err());
 
     let read = |max_bytes| {
-        Query::ReadBody(ReadBody {
+        Query::Projection(ProjectionQuery::ReadBody(ReadBody {
             body_id: BodyId::new("b").unwrap(),
             offset: ByteOffset(0),
             max_bytes,
-        })
+        }))
     };
     read(limits.max_body_chunk_bytes).validate(&limits).unwrap();
     read(MIN_BODY_CHUNK_BYTES).validate(&limits).unwrap();
@@ -462,9 +480,9 @@ fn page_and_body_requests_are_bounded() {
 #[test]
 fn page_request_defaults_apply_when_fields_are_omitted() {
     let query: Query =
-        serde_json::from_value(json!({"type": "list_threads", "payload": {"project": "p"}}))
+        serde_json::from_value(json!({"type": "workspace", "payload": {"type": "list_threads", "payload": {"project": "p"}}}))
             .unwrap();
-    let Query::ListThreads(list) = query else {
+    let Query::Workspace(WorkspaceQuery::ListThreads(list)) = query else {
         panic!()
     };
     assert_eq!(list.page.limit, DEFAULT_PAGE_SIZE);
@@ -547,11 +565,11 @@ fn every_sample_server_frame_passes_validation() {
 }
 
 fn messages(n: usize, text: String) -> QueryReply {
-    QueryReply::CommittedHistory(Page {
+    QueryReply::Conversation(ConversationReply::CommittedHistory(Page {
         items: vec![message(MessageContent::Inline { text }); n],
         next_cursor: None,
         snapshot_revision: Revision(1),
-    })
+    }))
 }
 
 #[test]
@@ -582,13 +600,13 @@ fn received_pages_chunks_and_text_over_their_bounds_fail_validation() {
     )));
     // Body chunk against the negotiated chunk size.
     let chunk = |len: usize| {
-        ReplyPayload::Query(QueryReply::Body(BodyChunk {
+        ReplyPayload::Query(QueryReply::Projection(ProjectionReply::Body(BodyChunk {
             body_id: BodyId::new("b").unwrap(),
             offset: ByteOffset(0),
             text: "x".repeat(len),
             total_bytes: ByteOffset(len as u64),
             next_offset: None,
-        }))
+        })))
     };
     valid(chunk(limits.max_body_chunk_bytes as usize));
     invalid(chunk(limits.max_body_chunk_bytes as usize + 1));
@@ -612,17 +630,19 @@ fn received_pages_chunks_and_text_over_their_bounds_fail_validation() {
     // Text fields of views and errors.
     let mut long_title = thread_summary();
     long_title.title = "t".repeat(MAX_TITLE_BYTES + 1);
-    invalid(ReplyPayload::Query(QueryReply::Thread(ThreadView {
-        summary: long_title.clone(),
-        root_run: None,
-        active_run: None,
-        pending_questions: 0,
-        pending_approvals: 0,
-        queued_follow_ups: 0,
-    })));
-    let event = ServerFrame::Event(Box::new(event_envelope(UiEvent::ThreadChanged {
-        thread: long_title,
-    })));
+    invalid(ReplyPayload::Query(QueryReply::Workspace(
+        WorkspaceReply::Thread(ThreadView {
+            summary: long_title.clone(),
+            root_run: None,
+            active_run: None,
+            pending_questions: 0,
+            pending_approvals: 0,
+            queued_follow_ups: 0,
+        }),
+    )));
+    let event = ServerFrame::Event(Box::new(event_envelope(UiEvent::Workspace(
+        WorkspaceEvent::ThreadChanged { thread: long_title },
+    ))));
     assert!(event.validate(&limits).is_err());
     let mut huge_error = error();
     huge_error.message = "e".repeat(9 * 1024);
@@ -636,18 +656,22 @@ fn received_pages_chunks_and_text_over_their_bounds_fail_validation() {
     );
     let mut busy = status();
     busy.retention_reasons = vec![RetentionReason::ActiveTurn; 17];
-    invalid(ReplyPayload::Query(QueryReply::CoreStatus(busy)));
+    invalid(ReplyPayload::Query(QueryReply::Lifecycle(
+        LifecycleReply::CoreStatus(busy),
+    )));
     // Incoherent provenance in a relayed view.
     let mut bad_receipt = receipt();
     bad_receipt.sent_by = Provenance {
         agent_run_id: None,
         ..agent()
     };
-    invalid(ReplyPayload::Query(QueryReply::InputReceipts(Page {
-        items: vec![bad_receipt],
-        next_cursor: None,
-        snapshot_revision: Revision(1),
-    })));
+    invalid(ReplyPayload::Query(QueryReply::Conversation(
+        ConversationReply::InputReceipts(Page {
+            items: vec![bad_receipt],
+            next_cursor: None,
+            snapshot_revision: Revision(1),
+        }),
+    )));
 }
 
 #[test]
@@ -665,7 +689,8 @@ fn unknown_fields_are_refused_at_every_level_of_a_request() {
     let cases = [
         // Envelope level: a client-supplied provenance must not be ignored.
         json!({"request_id": "req-9", "session_id": "s", "kind": "query",
-               "payload": {"type": "get_core_status"}, "provenance": {"actor": "agent"}}),
+               "payload": {"type": "lifecycle", "payload": {"type": "get_core_status"}},
+               "provenance": {"actor": "agent"}}),
         // Struct-like enum variants.
         request_json(
             "control",
@@ -677,13 +702,22 @@ fn unknown_fields_are_refused_at_every_level_of_a_request() {
         ),
         request_json(
             "query",
-            json!({"type": "get_command_receipt", "payload": {"request_id": "r", "extra": 1}}),
+            json!({"type": "projection", "payload": {"type": "get_command_receipt", "payload": {"request_id": "r", "extra": 1}}}),
         ),
         request_json(
             "command",
-            json!({"type": "submit_goal", "payload": {
+            json!({"type": "execution", "payload": {"type": "submit_goal", "payload": {
             "project": "p", "thread": "t", "objective": "o",
-            "delegation": {"type": "reference", "payload": {"value": "v", "extra": 1}}}}),
+            "delegation": {"type": "reference", "payload": {"value": "v", "extra": 1}}}}}),
+        ),
+        // The namespace and operation levels are closed shapes too.
+        request_json(
+            "query",
+            json!({"type": "lifecycle", "payload": {"type": "get_core_status"}, "extra": 1}),
+        ),
+        request_json(
+            "query",
+            json!({"type": "lifecycle", "payload": {"type": "get_core_status", "extra": 1}}),
         ),
     ];
     for case in cases {
@@ -708,18 +742,18 @@ fn a_question_answer_is_bounded_on_every_received_path() {
     let limits = WireLimits::default();
     let frames = |q: QuestionView| {
         vec![
-            reply_frame(ReplyPayload::Query(QueryReply::Questions(one_page(
-                q.clone(),
-            )))),
+            reply_frame(ReplyPayload::Query(QueryReply::Questions(
+                QuestionsReply::Questions(one_page(q.clone())),
+            ))),
             reply_frame(ReplyPayload::SubscriptionStarted(SubscriptionStarted {
                 subscription_id: sub(),
                 snapshot_id: None,
                 high_water: cursor(7, 1),
                 initial_page: Some(one_page(SnapshotItem::Question(q.clone()))),
             })),
-            ServerFrame::Event(Box::new(event_envelope(UiEvent::QuestionChanged {
-                question: q,
-            }))),
+            ServerFrame::Event(Box::new(event_envelope(UiEvent::Questions(
+                QuestionsEvent::QuestionChanged { question: q },
+            )))),
         ]
     };
     for frame in frames(answered("x".repeat(MAX_TEXT_BYTES))) {

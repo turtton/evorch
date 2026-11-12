@@ -741,7 +741,7 @@ mod tests {
         };
         let hello = ServerHello {
             protocol_version: ProtocolVersion::CURRENT,
-            capabilities: Capability::ALL.to_vec(),
+            capabilities: Capability::IMPLEMENTED.to_vec(),
             server_build: build,
             core: CoreIdentity::new("core").unwrap(),
             instance_epoch: InstanceEpoch(1),
