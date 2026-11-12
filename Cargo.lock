@@ -2474,6 +2474,7 @@ dependencies = [
  "reqwest 0.12.28",
  "routing",
  "runtime",
+ "rusqlite",
  "rustix 1.1.4",
  "sandbox",
  "secret-guard",

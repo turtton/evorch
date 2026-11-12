@@ -413,3 +413,209 @@ async fn wrong_startup_evidence_or_missing_high_watermarks_do_not_install_the_la
         Err(runtime::ownership::RegistryError::Absent)
     ));
 }
+
+#[tokio::test]
+async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let options = BootstrapOptions {
+        config_dir: root.clone(),
+        project_root: root.clone(),
+        ownership_root: root.join("owners"),
+    };
+    let config = storage::StorageConfig {
+        db_path: root.join("events.db"),
+        ..Default::default()
+    };
+    let leases = storage::shared_with_wait(
+        &config.db_path,
+        &options.ownership_root,
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    let storage =
+        storage::Storage::open_with_lease(config.clone(), leases.db_lease().unwrap()).unwrap();
+    let writer = storage.handle();
+    let model = Arc::new(ParkedModel::default());
+    let source = runtime(&config, &writer, model.clone());
+    let mut recipes = BTreeMap::new();
+    let mut runs = vec![];
+    for thread in ["bad", "good"] {
+        let run = source
+            .delegate_chat(
+                thread,
+                Role::Orchestrator,
+                "park".into(),
+                RunConfig {
+                    project_root: Some(root.clone()),
+                    interactive: true,
+                    keep_alive: true,
+                    conversation: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        model.entered.notified().await;
+        runs.push(run);
+        recipes.insert(
+            run,
+            RecoveryRecipe {
+                settings_reference: CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                policy: ResumePolicy::CoreOwned,
+                goal_id: None,
+                team: None,
+                lane: None,
+                descriptor: None,
+            },
+        );
+        writer
+            .upsert_thread_runtime(&storage::threads::ThreadUpsert {
+                thread_id: thread.into(),
+                project_root: Some(root.to_string_lossy().into_owned()),
+                root_run_id: Some(run.to_string()),
+                chat_role: Some(Role::Orchestrator.name().into()),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    source.request_quiesce();
+    model.release.add_permits(2);
+    source.wait_quiesced().await.unwrap();
+    let fence = source.fence_dispatch_restart().await.unwrap();
+    source.drain_dispatch_tails(&fence).await.unwrap();
+    let records = source.capture_recovery_records(&recipes).unwrap();
+    source
+        .save_recovery_graph("mixed-claims", &records)
+        .unwrap();
+    let manifests = storage::Database::open(&config)
+        .unwrap()
+        .recovery_manifests()
+        .unwrap();
+    let manifest = |run: RunId| {
+        manifests
+            .iter()
+            .find(|m| {
+                m.record
+                    .as_ref()
+                    .unwrap()
+                    .members
+                    .iter()
+                    .any(|member| member.run_id == run.to_string())
+            })
+            .unwrap()
+            .manifest_id
+            .clone()
+    };
+    let bad = manifest(runs[0]);
+    let good = manifest(runs[1]);
+    writer
+        .claim_recovery_manifest(storage::recovery::RecoveryClaimRequest {
+            claim_id: "bad-claim".into(),
+            manifest_id: bad.clone(),
+            incarnations: vec![(runs[0].to_string(), "bad-new-incarnation".into())],
+        })
+        .unwrap();
+    rusqlite::Connection::open(&config.db_path)
+        .unwrap()
+        .execute(
+            "UPDATE recovery_claim_members SET old_incarnation=x'ff' WHERE claim_id='bad-claim'",
+            [],
+        )
+        .unwrap();
+    let mut projects = StaticProjects::default();
+    projects.insert(
+        &workbench_protocol::ids::ProjectId::new("project").unwrap(),
+        root.clone(),
+    );
+    let first = runtime(&config, &writer, model.clone());
+    let owner = Arc::new(
+        OwnerHost::open(
+            &options.ownership_root,
+            Default::default(),
+            first.event_bus().clone(),
+        )
+        .unwrap(),
+    );
+    let coordinator = StartupCoordinator::new(
+        StartupInputs {
+            runtime: &first,
+            owner: &owner,
+            storage: &config,
+            writer: &writer,
+            options: &options,
+            projects: &projects,
+        },
+        leases
+            .recovery_startup_complete(&config.db_path, &options.ownership_root)
+            .unwrap(),
+        RecoveryCatalog::default(),
+    )
+    .unwrap();
+    let scan = coordinator.scan().unwrap();
+    assert!(scan.unreadable_claims);
+    assert_eq!(
+        scan.components
+            .iter()
+            .find(|c| c.manifest_id == bad)
+            .unwrap()
+            .disposition,
+        Disposition::NeedsAttention
+    );
+    assert_eq!(
+        coordinator.prepare(&bad).err(),
+        Some(StartupBlocked::NeedsAttention)
+    );
+    let prepared = coordinator.prepare(&good).unwrap();
+    let claim_id = prepared.claim_id().to_owned();
+    let claim = storage::Database::open(&config)
+        .unwrap()
+        .recovery_claim_loads()
+        .unwrap()
+        .into_iter()
+        .find(|(m, _)| m == &good)
+        .unwrap()
+        .1
+        .unwrap();
+    assert!(!owner.begin_quiesce().unwrap());
+    assert!(!owner.release_ready().unwrap());
+    let second = runtime(&config, &writer, model.clone());
+    let successor = Arc::new(
+        OwnerHost::open(
+            &options.ownership_root,
+            Default::default(),
+            second.event_bus().clone(),
+        )
+        .unwrap(),
+    );
+    let reopened = StartupCoordinator::new(
+        StartupInputs {
+            runtime: &second,
+            owner: &successor,
+            storage: &config,
+            writer: &writer,
+            options: &options,
+            projects: &projects,
+        },
+        leases
+            .recovery_startup_complete(&config.db_path, &options.ownership_root)
+            .unwrap(),
+        RecoveryCatalog::default(),
+    )
+    .unwrap();
+    let adopted = reopened.prepare(&good).unwrap();
+    assert_eq!(adopted.claim_id(), claim_id);
+    assert_eq!(
+        storage::Database::open(&config)
+            .unwrap()
+            .recovery_claim_loads()
+            .unwrap()
+            .into_iter()
+            .find(|(m, _)| m == &good)
+            .unwrap()
+            .1
+            .unwrap(),
+        claim
+    );
+    assert_eq!(model.admissions.load(Ordering::SeqCst), 2);
+    adopted.release(&second).unwrap();
+}

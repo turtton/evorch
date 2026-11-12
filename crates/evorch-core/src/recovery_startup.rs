@@ -132,13 +132,13 @@ impl<'a> StartupCoordinator<'a> {
             let disposition = match &load.record {
                 Ok(record) => match claims
                     .iter()
-                    .filter_map(|(_, claim)| claim.as_ref().ok())
-                    .find(|claim| claim.manifest_id == load.manifest_id)
-                    .map(|c| &c.state)
+                    .find(|(manifest, _)| manifest == &load.manifest_id)
+                    .map(|(_, claim)| claim.as_ref().map(|c| &c.state))
                 {
-                    Some(RecoveryClaimState::Prepared) => Disposition::Prepared,
-                    Some(RecoveryClaimState::Activated) => Disposition::AlreadyActivated,
-                    Some(RecoveryClaimState::Released { .. }) => Disposition::Released,
+                    Some(Ok(RecoveryClaimState::Prepared)) => Disposition::Prepared,
+                    Some(Ok(RecoveryClaimState::Activated)) => Disposition::AlreadyActivated,
+                    Some(Ok(RecoveryClaimState::Released { .. })) => Disposition::Released,
+                    Some(Err(_)) => Disposition::NeedsAttention,
                     None if record.superseded => Disposition::Superseded,
                     None if plan
                         .components
@@ -173,6 +173,24 @@ impl<'a> StartupCoordinator<'a> {
             unreadable_claims,
         })
     }
+    fn claim(&self, id: &str) -> Result<Option<storage::recovery::RecoveryClaim>, StartupBlocked> {
+        let claims = storage::Database::open(self.inputs.storage)
+            .map_err(|_| StartupBlocked::StorageUnavailable)?
+            .recovery_claim_loads()
+            .map_err(|_| StartupBlocked::StorageUnavailable)?;
+        // An unknown relational identity cannot safely be assigned to a peer.
+        // Known corrupt claims quarantine only their own component.
+        if claims.iter().any(|(manifest, claim)| {
+            (manifest == "unreadable" || manifest.is_empty()) && claim.is_err()
+        }) {
+            return Err(StartupBlocked::NeedsAttention);
+        }
+        claims
+            .into_iter()
+            .find(|(manifest, _)| manifest == id)
+            .map(|(_, claim)| claim.map_err(|_| StartupBlocked::NeedsAttention))
+            .transpose()
+    }
     fn manifest(&self, id: &str) -> Result<RecoveryManifestRecord, StartupBlocked> {
         storage::Database::open(self.inputs.storage)
             .map_err(|_| StartupBlocked::StorageUnavailable)?
@@ -189,9 +207,6 @@ impl<'a> StartupCoordinator<'a> {
     /// Prepared claims are adopted with their existing revision/incarnation pair.
     pub fn prepare(&self, id: &str) -> Result<PreparedStartupComponent, StartupBlocked> {
         let scan = self.scan()?;
-        if scan.unreadable_claims {
-            return Err(StartupBlocked::NeedsAttention);
-        }
         let status = scan
             .components
             .iter()
@@ -234,12 +249,7 @@ impl<'a> StartupCoordinator<'a> {
         }
         .resolve(&records, &resume)?;
         let models = self.catalog.pin(self.inputs.runtime, &authority);
-        let db = storage::Database::open(self.inputs.storage)
-            .map_err(|_| StartupBlocked::StorageUnavailable)?;
-        let claims = db
-            .recovery_claims()
-            .map_err(|_| StartupBlocked::NeedsAttention)?;
-        let existing = claims.into_iter().find(|claim| claim.manifest_id == id);
+        let existing = self.claim(id)?;
         let claim = if let Some(claim) = existing {
             match claim.state {
                 RecoveryClaimState::Prepared => claim,
