@@ -19,6 +19,14 @@ pub enum ResumeIntentWriteOutcome {
     Replaced { current: String },
 }
 
+/// A human recovery Continue replaces exactly the released/activated revision.
+#[derive(Debug, Clone)]
+pub struct RecoveryContinueFence {
+    pub record: ResumeIntentRecord,
+    pub expected_incarnation: String,
+    pub expected_revision: u64,
+}
+
 impl Database {
     pub fn resume_intent(&self, run_id: &str) -> Result<Option<ResumeIntentRecord>, StorageError> {
         Ok(self.conn.query_row("SELECT run_id, incarnation, payload FROM resume_intents WHERE run_id=?1 AND run_id NOT IN (SELECT run_id FROM run_tombstones)", [run_id], |row| Ok(ResumeIntentRecord { run_id: row.get(0)?, incarnation: row.get(1)?, payload: row.get(2)? })).optional()?)

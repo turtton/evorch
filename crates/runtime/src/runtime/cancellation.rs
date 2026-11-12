@@ -392,6 +392,10 @@ pub(crate) enum HookPoint {
     ContinuationSnapshotPrepared,
     QuestionMailboxClosing,
     QuestionChildPrepared,
+    RecoveryBeforeActivation,
+    RecoveryActivated,
+    RecoveryPublished,
+    RecoveryGateOpened,
 }
 #[cfg(test)]
 type ExecutionHook = (HookPoint, Weak<ExecutionControl>, Box<dyn FnOnce() + Send>);

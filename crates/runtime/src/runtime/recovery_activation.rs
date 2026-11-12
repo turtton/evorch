@@ -6,6 +6,17 @@ use crate::quiesce::{
 use std::collections::BTreeSet;
 use storage::recovery::RecoveryClaimRequest;
 
+mod activate;
+pub use activate::CurrentRecoveryAuthority;
+mod relations;
+
+struct RecoverySource {
+    record: RunRecoveryRecord,
+    intent: ResumeIntent,
+    bundle: Option<storage::thread_index::SnapshotBundle>,
+    snapshot: Option<storage::RunContextReceipt>,
+}
+
 pub(super) struct PausedRecoveryIndex {
     pub(super) claim_id: String,
     pub(super) old_incarnation: String,
@@ -18,7 +29,9 @@ pub struct PausedRecoveryComponent {
     runtime: Weak<Shared>,
     claim: RecoveryClaim,
     members: Vec<ResumeIntent>,
-    _controls: Vec<(RunId, Arc<ExecutionControl>)>,
+    controls: Vec<(RunId, Arc<ExecutionControl>)>,
+    sources: Vec<RecoverySource>,
+    relations: Option<relations::PreparedRelations>,
     _reservations: Vec<SnapshotReservation>,
     _startup: storage::RecoveryStartupComplete,
 }
@@ -139,7 +152,8 @@ impl AgentRuntime {
                         db.resume_intent(&member.run_id)?.ok_or_else(|| {
                             storage::StorageError::Io("missing recovery intent".into())
                         })?,
-                        db.run_context(&member.run_id)?,
+                        db.snapshot_bundle(&member.run_id)
+                            .map_err(crate::restore::provenance::storage_error)?,
                     ))
                 })
                 .map_err(error)?;
@@ -161,7 +175,7 @@ impl AgentRuntime {
                 reservations.push(SnapshotReservation::prepare_recovery(
                     store,
                     record.run_id,
-                    snapshot,
+                    &snapshot.record,
                     receipt,
                 )?);
             }
@@ -193,7 +207,14 @@ impl AgentRuntime {
             })
             .collect();
         self.shared.quiesce.adopt(members.clone(), true);
-        for (record, intent, _, _, execution) in sources {
+        let mut retained = Vec::new();
+        for (record, intent, bundle, snapshot, execution) in sources {
+            retained.push(RecoverySource {
+                record: record.clone(),
+                intent: intent.clone(),
+                bundle,
+                snapshot,
+            });
             let index = indexes.entry(record.run_id).or_default();
             index.parent = record.parent;
             index.execution = execution;
@@ -206,7 +227,9 @@ impl AgentRuntime {
             runtime: Arc::downgrade(&self.shared),
             claim,
             members,
-            _controls: controls,
+            controls,
+            sources: retained,
+            relations: None,
             _reservations: reservations,
             _startup: startup,
         })

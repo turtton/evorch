@@ -31,6 +31,16 @@ pub fn release(
     Ok(runtime.release_prepared_component(component, reason)?)
 }
 
+/// Current authority is supplied explicitly; startup planning never calls this.
+pub fn activate(
+    runtime: &AgentRuntime,
+    mut component: runtime::PausedRecoveryComponent,
+    authority: runtime::CurrentRecoveryAuthority,
+) -> Result<Vec<RunId>, BootstrapError> {
+    runtime.restore_relations_and_continuations(&mut component)?;
+    Ok(runtime.activate_component(component, authority)?)
+}
+
 /// `capture_id` is unique per attempt, including retries. Components commit
 /// independently; on error inspect durable manifests before a fresh-ID retry.
 /// After restart drain closes dispatch, the caller must exit, not fall back to

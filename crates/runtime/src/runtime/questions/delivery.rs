@@ -22,6 +22,26 @@ pub(crate) struct QuestionDelivery {
     pub(in crate::runtime) root_requests: HashSet<RunId>,
 }
 
+impl QuestionDelivery {
+    pub(in crate::runtime) fn recovery_receipt(
+        &self,
+        id: &str,
+    ) -> (Option<Arc<QuestionNotice>>, bool) {
+        (self.notices.get(id).cloned(), self.reported.contains(id))
+    }
+    pub(in crate::runtime) fn adopt_recovery(
+        &mut self,
+        notices: impl IntoIterator<Item = Arc<QuestionNotice>>,
+    ) {
+        for notice in notices {
+            if notice.observed() {
+                self.reported.insert(notice.id.clone());
+            }
+            self.notices.insert(notice.id.clone(), notice);
+        }
+    }
+}
+
 impl AgentRuntime {
     pub(crate) fn close_question_mailbox(&self, parent: RunId, mailbox: &crate::RunMailbox) {
         #[cfg(test)]

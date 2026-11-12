@@ -480,6 +480,75 @@ fn manual_continue_after_release_fences_revision_and_snapshot_in_one_transaction
     );
 }
 
+#[test]
+fn human_continue_evidence_bundle_rolls_back_when_the_release_revision_changed() {
+    use storage::thread_index::*;
+    let f = Fixture::new();
+    let request = f.seed(false);
+    f.claim(&request);
+    f.storage
+        .handle()
+        .release_recovery_claim("claim".into(), "human".into())
+        .unwrap();
+    let before = f.db().run_context("run-a").unwrap().unwrap();
+    let mut record = before.clone();
+    record.messages_json = "[]".into();
+    record.updated_at_ns += 1;
+    let write = SnapshotWrite {
+        record,
+        expected_snapshot_revision: None,
+        binding: None,
+        status: ProvenanceStatus::Verified {
+            evidence: ProvenanceEvidence::CompletePositionMap,
+        },
+        map: ProvenanceMap {
+            version: PROVENANCE_FORMAT_VERSION,
+            raw_message_count: 0,
+            checkpoint_count: 0,
+            messages: vec![],
+        },
+    };
+    let fence = storage::resume_intent::RecoveryContinueFence {
+        record: request.intents[0].clone(),
+        expected_incarnation: "old".into(),
+        expected_revision: 0,
+    };
+    let mut wrong_identity = fence.clone();
+    wrong_identity.record.run_id = "run-b".into();
+    assert!(
+        f.storage
+            .handle()
+            .save_recovery_continue(&write, &[], None, &Default::default(), wrong_identity,)
+            .is_err()
+    );
+    assert!(
+        f.storage
+            .handle()
+            .save_recovery_continue(&write, &[], None, &Default::default(), fence.clone(),)
+            .is_err()
+    );
+    assert_eq!(f.db().run_context("run-a").unwrap(), Some(before));
+    assert_eq!(f.db().resume_intent_revision("run-a").unwrap(), Some(1));
+    f.storage
+        .handle()
+        .save_recovery_continue(
+            &write,
+            &[],
+            None,
+            &Default::default(),
+            storage::resume_intent::RecoveryContinueFence {
+                expected_revision: 1,
+                ..fence
+            },
+        )
+        .unwrap();
+    assert_eq!(f.db().resume_intent_revision("run-a").unwrap(), Some(2));
+    assert_eq!(
+        f.db().run_context("run-a").unwrap().unwrap().messages_json,
+        "[]"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn startup_evidence_is_bound_to_both_leases_and_keeps_them_shared() {

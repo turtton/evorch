@@ -17,7 +17,7 @@ mod host_prompt;
 mod recovery_activation;
 mod recovery_graph;
 pub(crate) use host_prompt::HostPrompt;
-pub use recovery_activation::PausedRecoveryComponent;
+pub use recovery_activation::{CurrentRecoveryAuthority, PausedRecoveryComponent};
 mod nested_orchestrator;
 mod output;
 mod project;
@@ -1404,9 +1404,33 @@ impl AgentRuntime {
         parent: Option<RunId>,
         role: Role,
         prompt: String,
+        config: RunConfig,
+        continuation: RunContinuation,
+        review_seed: Option<ReviewSeed>,
+    ) -> Result<RunAdmission, RuntimeError> {
+        self.try_spawn_run_preadmitted(
+            run_id,
+            parent,
+            role,
+            prompt,
+            config,
+            continuation,
+            review_seed,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_spawn_run_preadmitted(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
         mut config: RunConfig,
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
+        preadmitted: Option<Arc<ExecutionControl>>,
     ) -> Result<RunAdmission, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard().inspect_err(|error| {
             self.fail_admission(run_id, parent, &config, error.clone());
@@ -1495,19 +1519,22 @@ impl AgentRuntime {
             .get(&run_id)
             .and_then(|intent| intent.parent)
             .or(parent);
-        if self.shared.quiesce.active(run_id) {
+        if preadmitted.is_none() && self.shared.quiesce.active(run_id) {
             return Err(RuntimeError::Model {
                 reason: "durable intent is still active".into(),
             });
         }
         // Pre-admission reservations and registration share a single execution.
         // An explicit resume or replacement of a registered run starts a new one.
-        let execution =
-            if !resets_cancellation && !lock_runs(&self.shared.runs).contains_key(&run_id) {
-                intents.get(&run_id).and_then(|i| i.execution.clone())
-            } else {
-                None
-            }
+        let execution = preadmitted
+            .clone()
+            .or_else(|| {
+                if !resets_cancellation && !lock_runs(&self.shared.runs).contains_key(&run_id) {
+                    intents.get(&run_id).and_then(|i| i.execution.clone())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| ExecutionControl::new(cancelled));
         let execution = if cancelled && !execution.cancelled() {
             ExecutionControl::new(true)
@@ -1528,16 +1555,20 @@ impl AgentRuntime {
                 paused_recovery: None,
             },
         );
-        match self.admit_intent(
-            run_id,
-            execution.publication().incarnation(),
-            parent,
-            role,
-            &prompt,
-            &config,
-            matches!(&continuation, RunContinuation::Resume { .. }),
-            true,
-        ) {
+        match if preadmitted.is_some() {
+            Ok(true)
+        } else {
+            self.admit_intent(
+                run_id,
+                execution.publication().incarnation(),
+                parent,
+                role,
+                &prompt,
+                &config,
+                matches!(&continuation, RunContinuation::Resume { .. }),
+                true,
+            )
+        } {
             Ok(true) => {}
             Ok(false) => {
                 self.reserve_admission_for(
@@ -2074,6 +2105,30 @@ impl AgentRuntime {
                     return;
                 };
                 let runtime = AgentRuntime { shared };
+                let model = runtime.shared.model_for(&task.config);
+                if model.requires_admission() {
+                    let invocation = crate::AgentInvocationContext {
+                        btw: None,
+                        attempts: None,
+                        turn: None,
+                        run_id: run_id.to_string(),
+                        model_preference: task.config.model_preference.clone(),
+                        category: task.config.category.clone(),
+                        purpose: event_bus::RequestPurpose::Agent,
+                    };
+                    let mut cancellation = channels.cancel_rx.clone();
+                    let admission = crate::panic_capture::catch_panic(async {
+                        tokio::select! {
+                            biased;
+                            _ = cancellation.wait_for(|signal| matches!(signal, RunInterrupt::Stop | RunInterrupt::Cancel)) =>
+                                Err(RuntimeError::RunTerminated { run_id: run_id.to_string() }),
+                            result = model.admit(&invocation, task.role) => result,
+                        }
+                    }).await.unwrap_or_else(|panic| Err(RuntimeError::Model { reason: format!("provider admission panicked: {}", panic.message) }));
+                    if let Err(error) = admission {
+                        task.startup_failure = Some(error.to_string());
+                    }
+                }
                 runtime.schedule_question_recovery(run_id);
                 runtime.prepare_learning(&task)
             } else {

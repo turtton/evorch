@@ -308,3 +308,295 @@ async fn planned_restart_does_not_release_or_publish_a_paused_component() {
     );
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn activation_commits_once_and_publishes_the_whole_family_before_starting() {
+    let f = Fixture::new(0);
+    let root = f.start();
+    let child = f
+        .runtime
+        .delegate_background_as_child(
+            root,
+            Role::Worker,
+            "child",
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    f.runtime.request_quiesce();
+    f.runtime.wait_quiesced().await.unwrap();
+    let fence = f.runtime.fence_dispatch_restart().await.unwrap();
+    f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+    let records = f
+        .runtime
+        .capture_recovery_records(&BTreeMap::from([(
+            root,
+            RecoveryRecipe {
+                settings_reference: "current".into(),
+                policy: ResumePolicy::CoreOwned,
+                goal_id: None,
+                team: None,
+                lane: None,
+                descriptor: None,
+            },
+        )]))
+        .unwrap();
+    f.runtime
+        .save_recovery_graph("activate-family", &records)
+        .unwrap();
+    let runtime = new_process(&f);
+    let mut paused = prepare(&f, &runtime);
+    let claim = paused.claim().clone();
+    runtime
+        .restore_relations_and_continuations(&mut paused)
+        .unwrap();
+    let owner = crate::ownership::OwnerHost::open(
+        &f._dir.path().join("current-owner"),
+        Default::default(),
+        Arc::new(EventBus::new(64)),
+    )
+    .unwrap();
+    let permit = owner.start("current").unwrap();
+    let authority = crate::CurrentRecoveryAuthority {
+        members: [root, child]
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    RunConfig {
+                        ownership: Some(permit.clone()),
+                        interactive: true,
+                        keep_alive: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect(),
+    };
+    let execution = runtime.execution_snapshot(root).unwrap();
+    let observed = runtime.clone();
+    let model = f.model.clone();
+    runtime.on_execution(
+        crate::runtime::HookPoint::RecoveryActivated,
+        &execution,
+        move || {
+            assert!(observed.list_agents().is_empty());
+            assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+        },
+    );
+    let observed = runtime.clone();
+    let model = f.model.clone();
+    runtime.on_execution(
+        crate::runtime::HookPoint::RecoveryPublished,
+        &execution,
+        move || {
+            assert_eq!(observed.list_agents().len(), 2);
+            assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+        },
+    );
+    assert_eq!(
+        runtime.activate_component(paused, authority).unwrap().len(),
+        2
+    );
+    assert!(!runtime.has_paused_recovery());
+    let db = storage::Database::open(&f.config).unwrap();
+    for member in &claim.members {
+        assert_eq!(
+            db.resume_intent(&member.run_id)
+                .unwrap()
+                .unwrap()
+                .incarnation,
+            member.new_incarnation
+        );
+        assert_eq!(
+            db.resume_intent_revision(&member.run_id).unwrap(),
+            Some(member.reserved_revision + 1)
+        );
+    }
+    assert_eq!(
+        db.recovery_claims().unwrap()[0].state,
+        RecoveryClaimState::Activated
+    );
+    while f.model.calls.load(Ordering::SeqCst) < 2 {
+        f.model.entered.notified().await;
+    }
+    runtime.cancel_subtree(root).unwrap();
+    runtime.wait(root).await.unwrap();
+    runtime.wait(child).await.unwrap();
+}
+
+#[tokio::test]
+async fn activation_failure_after_ack_never_releases_or_replays_the_component() {
+    let f = Fixture::new(0);
+    let run = saved(&f).await;
+    let runtime = new_process(&f);
+    let mut paused = prepare(&f, &runtime);
+    runtime
+        .restore_relations_and_continuations(&mut paused)
+        .unwrap();
+    let owner = crate::ownership::OwnerHost::open(
+        &f._dir.path().join("current-owner"),
+        Default::default(),
+        Arc::new(EventBus::new(64)),
+    )
+    .unwrap();
+    let authority = crate::CurrentRecoveryAuthority {
+        members: BTreeMap::from([(
+            run,
+            RunConfig {
+                ownership: Some(owner.start("current").unwrap()),
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )]),
+    };
+    let execution = runtime.execution_snapshot(run).unwrap();
+    runtime.on_execution(
+        crate::runtime::HookPoint::RecoveryActivated,
+        &execution,
+        || {
+            panic!("fault after FULL ACK, before publication");
+        },
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.activate_component(paused, authority)
+        }))
+        .is_err()
+    );
+    assert!(runtime.list_agents().is_empty());
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
+    let reopened = new_process(&f);
+    let plan = reopened.recovery_plan().unwrap();
+    assert!(plan.components.is_empty());
+    assert!(
+        plan.report
+            .skipped
+            .iter()
+            .any(|s| s.reason == RecoveryReason::SupersededManifest)
+    );
+    let db = storage::Database::open(&f.config).unwrap();
+    let claim = &db.recovery_claims().unwrap()[0];
+    assert_eq!(claim.state, RecoveryClaimState::Activated);
+    assert!(
+        f._storage
+            .handle()
+            .release_recovery_claim(claim.claim_id.clone(), "retry".into())
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn released_same_process_continue_commits_input_snapshot_and_new_intent_once() {
+    let f = Fixture::new(0);
+    let run = saved(&f).await;
+    let runtime = new_process(&f);
+    let paused = prepare(&f, &runtime);
+    let old = paused.claim().members[0].old_incarnation.clone();
+    let revision = paused.claim().members[0].reserved_revision;
+    runtime
+        .release_prepared_component(&paused, "manual Continue")
+        .unwrap();
+    let db = storage::Database::open(&f.config).unwrap();
+    assert_eq!(
+        db.resume_intent_revision(&run.to_string()).unwrap(),
+        Some(revision)
+    );
+    let result = runtime.continue_goal(
+        run,
+        "human input after release".into(),
+        RunConfig::default(),
+    );
+    assert_eq!(result.unwrap(), run);
+    let intent =
+        ResumeIntent::decode(db.resume_intent(&run.to_string()).unwrap().unwrap()).unwrap();
+    assert_ne!(intent.incarnation, old);
+    assert!(intent.active);
+    assert_eq!(
+        db.resume_intent_revision(&run.to_string()).unwrap(),
+        Some(revision + 1)
+    );
+    let record = db.run_context(&run.to_string()).unwrap().unwrap();
+    assert!(record.messages_json.contains("human input after release"));
+    assert!(!runtime.has_paused_recovery());
+    runtime.cancel(run).unwrap();
+    runtime.wait(run).await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_provider_admission_is_also_behind_the_component_gate() {
+    let f = Fixture::with_admission(0, true);
+    let run = f.start();
+    f.model.admission_entered.notified().await;
+    f.runtime.request_quiesce();
+    // Let the old admission acknowledge AdmissionQueued under quiesce.
+    f.model.admission_release.add_permits(1);
+    f.runtime.wait_quiesced().await.unwrap();
+    let fence = f.runtime.fence_dispatch_restart().await.unwrap();
+    f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+    let records = f
+        .runtime
+        .capture_recovery_records(&BTreeMap::from([(
+            run,
+            RecoveryRecipe {
+                settings_reference: "current".into(),
+                policy: ResumePolicy::CoreOwned,
+                goal_id: None,
+                team: None,
+                lane: None,
+                descriptor: None,
+            },
+        )]))
+        .unwrap();
+    f.runtime
+        .save_recovery_graph("admission-gate", &records)
+        .unwrap();
+    let calls_before = f.model.admission_calls.load(Ordering::SeqCst);
+    let runtime = new_process(&f);
+    let mut paused = prepare(&f, &runtime);
+    runtime
+        .restore_relations_and_continuations(&mut paused)
+        .unwrap();
+    let owner = crate::ownership::OwnerHost::open(
+        &f._dir.path().join("current-owner"),
+        Default::default(),
+        Arc::new(EventBus::new(64)),
+    )
+    .unwrap();
+    let execution = runtime.execution_snapshot(run).unwrap();
+    let model = f.model.clone();
+    runtime.on_execution(
+        crate::runtime::HookPoint::RecoveryPublished,
+        &execution,
+        move || {
+            assert_eq!(model.admission_calls.load(Ordering::SeqCst), calls_before);
+            assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+        },
+    );
+    runtime
+        .activate_component(
+            paused,
+            crate::CurrentRecoveryAuthority {
+                members: BTreeMap::from([(
+                    run,
+                    RunConfig {
+                        ownership: Some(owner.start("current").unwrap()),
+                        interactive: true,
+                        keep_alive: true,
+                        ..Default::default()
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+    while f.model.admission_calls.load(Ordering::SeqCst) == calls_before {
+        f.model.admission_entered.notified().await;
+    }
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
+    runtime.cancel(run).unwrap();
+    runtime.wait(run).await.unwrap();
+}

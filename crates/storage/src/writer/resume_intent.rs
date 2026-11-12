@@ -69,6 +69,43 @@ impl StorageHandle {
         })
     }
 
+    /// Human recovery Continue preserves the ordinary evidence/input transaction
+    /// while fencing the released revision and admitting its successor atomically.
+    pub fn save_recovery_continue(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+        rows: &[crate::ReviewEvidenceRow],
+        consumed_reference_id: Option<&str>,
+        host_inputs: &crate::HostInputWrite,
+        fence: crate::resume_intent::RecoveryContinueFence,
+    ) -> Result<
+        (
+            crate::thread_index::SnapshotReceipt,
+            Vec<crate::HostInputTransition>,
+        ),
+        crate::thread_index::SnapshotApiError,
+    > {
+        if fence.record.run_id != write.record.run_id
+            || fence.record.incarnation.is_empty()
+            || fence.record.incarnation == fence.expected_incarnation
+        {
+            return Err(
+                StorageError::Serialization("recovery Continue identity mismatch".into()).into(),
+            );
+        }
+        self.snapshot_request(|reply| {
+            Command::SaveSnapshotBundleWithEvidence(
+                Box::new(write.clone()),
+                rows.to_vec(),
+                Vec::new(),
+                consumed_reference_id.map(String::from),
+                host_inputs.clone(),
+                Some(fence),
+                reply,
+            )
+        })
+    }
+
     /// Flush buffered usage and sync the WAL into the database. A busy checkpoint
     /// is an error, not evidence that it is safe to exit.
     pub fn flush_resume_intents(&self) -> Result<(), StorageError> {

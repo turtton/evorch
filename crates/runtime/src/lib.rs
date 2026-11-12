@@ -120,10 +120,11 @@ pub use run::{
 };
 pub use run_store::RunStore;
 pub use runtime::{
-    AgentRuntime, AnswerOutcome, AnswerQuestionError, ChatResumeObservation, FollowUpStatus,
-    FollowUpWithdrawalError, PausedRecoveryComponent, ProjectModelResolver, ProjectSlugResolver,
-    RunWait, SandboxFactory, WeakAgentRuntime, WorkspaceMounts, production_executor,
-    production_executor_with_config, production_executor_with_host_tools,
+    AgentRuntime, AnswerOutcome, AnswerQuestionError, ChatResumeObservation,
+    CurrentRecoveryAuthority, FollowUpStatus, FollowUpWithdrawalError, PausedRecoveryComponent,
+    ProjectModelResolver, ProjectSlugResolver, RunWait, SandboxFactory, WeakAgentRuntime,
+    WorkspaceMounts, production_executor, production_executor_with_config,
+    production_executor_with_host_tools,
 };
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,
