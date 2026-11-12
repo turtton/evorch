@@ -352,7 +352,8 @@ impl Service {
         }
         if done.applied.changed
             && let WorkspaceCommand::SetFamilyArchived(SetFamilyArchived { thread, .. })
-            | WorkspaceCommand::SetFamilyPinned(SetFamilyPinned { thread, .. }) = command
+            | WorkspaceCommand::SetFamilyPinned(SetFamilyPinned { thread, .. })
+            | WorkspaceCommand::RenameThread(RenameThread { thread, .. }) = command
         {
             self.mirror_family(&document, thread);
         }

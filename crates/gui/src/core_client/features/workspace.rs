@@ -20,8 +20,9 @@ use workbench_protocol::{
     namespaces::{
         WorkspaceEvent, WorkspaceQuery, WorkspaceReply,
         workspace::{
-            FamilyView, RenameThread, SetFamilyArchived, SetFamilyPinned, ThreadDetail,
-            WorkspaceCommand, WorkspaceRejection, WorkspaceResult,
+            FamilyView, ProjectAccessView, RenameThread, SetFamilyArchived, SetFamilyPinned,
+            SetProjectTrust, ThreadDetail, TrustLevel, WorkspaceCommand, WorkspaceRejection,
+            WorkspaceResult,
         },
     },
     queries::{PageRequest, Query, QueryReply},
@@ -43,6 +44,8 @@ enum Inflight {
     Families,
     Detail(String),
     Command(String),
+    Access(String),
+    TrustCommand(String),
 }
 
 /// A request waiting to leave with the next frame.
@@ -57,6 +60,8 @@ pub enum Outgoing {
 pub struct SidebarModel {
     pub families: BTreeMap<String, FamilyView>,
     pub details: BTreeMap<String, ThreadDetail>,
+    /// Trust and allowed directories of the projects asked about.
+    pub access: BTreeMap<String, ProjectAccessView>,
 }
 
 impl SidebarModel {
@@ -83,6 +88,7 @@ pub struct WorkspaceFeature {
     /// request sent before it is still delivered.
     inflight: BTreeMap<u64, Inflight>,
     intents: BTreeMap<String, Intent>,
+    trust_intents: BTreeMap<String, TrustLevel>,
     outbox: Vec<Outgoing>,
     /// The core says something changed (or nothing was read yet).
     stale: bool,
@@ -123,7 +129,60 @@ impl WorkspaceFeature {
         }
     }
 
-    fn want_detail(&mut self, thread: &str) {
+    /// The user asked for `trust` on `project`; it is sent with the revision
+    /// the core reports for the project's access.
+    pub fn ask_trust(&mut self, project: &str, trust: TrustLevel) {
+        self.notice = None;
+        self.trust_intents.insert(project.to_owned(), trust);
+        if self.model.access.contains_key(project) {
+            self.send_trust(project);
+        } else {
+            self.want_access(project);
+        }
+    }
+
+    /// Asks the core for the access of `project` unless that is already on its way.
+    pub fn want_access(&mut self, project: &str) {
+        if self.model.access.contains_key(project)
+            || self
+                .inflight
+                .values()
+                .any(|f| matches!(f, Inflight::Access(p) if p == project))
+        {
+            return;
+        }
+        let Ok(id) = workbench_protocol::ids::ProjectId::new(project) else {
+            return;
+        };
+        let tag = self.tag(Inflight::Access(project.to_owned()));
+        self.outbox.push(Outgoing::Query(
+            tag,
+            Query::Workspace(WorkspaceQuery::GetProjectAccess(
+                workbench_protocol::namespaces::workspace::ProjectTarget { project: id },
+            )),
+        ));
+    }
+
+    fn send_trust(&mut self, project: &str) {
+        let (Some(trust), Some(access)) = (
+            self.trust_intents.remove(project),
+            self.model.access.get(project).cloned(),
+        ) else {
+            return;
+        };
+        let tag = self.tag(Inflight::TrustCommand(project.to_owned()));
+        self.outbox.push(Outgoing::Command(
+            tag,
+            Command::Workspace(WorkspaceCommand::SetProjectTrust(SetProjectTrust {
+                project: access.project,
+                trust,
+                expected_revision: access.revision,
+            })),
+        ));
+    }
+
+    /// Asks for the details of `thread` unless they are known or on their way.
+    pub fn want_detail(&mut self, thread: &str) {
         let waiting = self
             .inflight
             .values()
@@ -133,7 +192,7 @@ impl WorkspaceFeature {
             .inflight
             .values()
             .any(|f| matches!(f, Inflight::Detail(t) if t == thread));
-        if known || waiting >= DETAILS_IN_FLIGHT {
+        if known || waiting >= DETAILS_IN_FLIGHT || self.model.details.contains_key(thread) {
             return;
         }
         let Ok(id) = ThreadId::new(thread) else {
@@ -231,6 +290,38 @@ impl WorkspaceFeature {
                 self.model.details.clear();
                 for thread in known {
                     self.want_detail(&thread);
+                }
+                let known: Vec<String> = self.model.access.keys().cloned().collect();
+                self.model.access.clear();
+                for project in known {
+                    self.want_access(&project);
+                }
+            }
+            (
+                Inflight::Access(project),
+                FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::ProjectAccess(
+                    access,
+                )))),
+            ) => {
+                self.model.access.insert(project.clone(), *access);
+                if self.trust_intents.contains_key(&project) {
+                    self.send_trust(&project);
+                }
+            }
+            (Inflight::TrustCommand(project), FeatureReply::Command(Ok(reply))) => {
+                match reply.result.as_deref() {
+                    Some(CommandResult::Workspace(WorkspaceResult::Applied(_))) => {
+                        self.model.access.remove(&project);
+                        self.stale = true;
+                        self.want_access(&project);
+                    }
+                    Some(CommandResult::Workspace(WorkspaceResult::Rejected(rejection))) => {
+                        self.notice = Some(rejection_text(rejection));
+                        self.model.access.remove(&project);
+                        self.stale = true;
+                        self.want_access(&project);
+                    }
+                    _ => self.notice = Some("the core answered something unexpected".into()),
                 }
             }
             (
@@ -349,8 +440,12 @@ impl Feature for WorkspaceFeature {
         for thread in &threads {
             self.want_detail(thread.id.as_str());
         }
+        if let Some(project) = selection.project.as_ref() {
+            self.want_access(project.as_str());
+        }
         let mut navigations = Vec::new();
         let mut asks: Vec<(String, Intent)> = Vec::new();
+        let mut trust_asks: Vec<(String, TrustLevel)> = Vec::new();
         ui.horizontal_wrapped(|ui| {
             for project in &projects {
                 let selected = selection.project.as_ref() == Some(&project.id);
@@ -363,6 +458,24 @@ impl Feature for WorkspaceFeature {
             }
         });
         if let Some(project) = selection.project.as_ref() {
+            if let Some(access) = self.model.access.get(project.as_str()) {
+                let approved = access.trust == TrustLevel::Approved;
+                ui.horizontal(|ui| {
+                    ui.label(if approved {
+                        "Trust: Approved"
+                    } else {
+                        "Trust: Unapproved"
+                    });
+                    let (button, next) = if approved {
+                        ("Revoke trust", TrustLevel::Unapproved)
+                    } else {
+                        ("Approve project", TrustLevel::Approved)
+                    };
+                    if ui.small_button(button).clicked() {
+                        trust_asks.push((project.as_str().to_owned(), next));
+                    }
+                });
+            }
             if ui.small_button("New conversation").clicked() {
                 navigations.push(Navigation::NewConversation(project.clone()));
             }
@@ -379,6 +492,12 @@ impl Feature for WorkspaceFeature {
             for thread in visible {
                 let id = thread.id.as_str();
                 ui.horizontal(|ui| {
+                    let title = self
+                        .model
+                        .details
+                        .get(id)
+                        .map_or(thread.title.as_str(), |d| d.title.as_str())
+                        .to_owned();
                     if let Some((editing, text)) = self.renaming.as_mut()
                         && editing == id
                     {
@@ -392,7 +511,7 @@ impl Feature for WorkspaceFeature {
                     let pinned = if self.model.pinned(id) { "📌 " } else { "" };
                     let selected = selection.thread.as_ref() == Some(&thread.id);
                     if ui
-                        .selectable_label(selected, format!("{pinned}{}", thread.title))
+                        .selectable_label(selected, format!("{pinned}{title}"))
                         .clicked()
                     {
                         navigations.push(Navigation::SelectThread {
@@ -401,7 +520,7 @@ impl Feature for WorkspaceFeature {
                         });
                     }
                     if ui.small_button("Rename").clicked() {
-                        self.renaming = Some((id.to_owned(), thread.title.clone()));
+                        self.renaming = Some((id.to_owned(), title.clone()));
                     }
                     let pin = !self.model.pinned(id);
                     if ui.small_button(if pin { "Pin" } else { "Unpin" }).clicked() {
@@ -418,6 +537,9 @@ impl Feature for WorkspaceFeature {
         }
         for (thread, intent) in asks {
             self.ask(&thread, intent);
+        }
+        for (project, trust) in trust_asks {
+            self.ask_trust(&project, trust);
         }
         for navigation in navigations {
             ctx.navigate(navigation);
@@ -527,6 +649,53 @@ mod tests {
             (rename.title.as_str(), rename.expected_revision),
             ("new", Revision(42))
         );
+    }
+
+    #[test]
+    fn trust_is_sent_with_the_revision_of_the_access_the_core_reported() {
+        let mut feature = WorkspaceFeature::default();
+        feature.ask_trust("p", TrustLevel::Approved);
+        let outbox = feature.take_outbox();
+        let [Outgoing::Query(tag, Query::Workspace(WorkspaceQuery::GetProjectAccess(_)))] =
+            outbox.as_slice()
+        else {
+            panic!("{outbox:?}")
+        };
+        let access = ProjectAccessView {
+            project: workbench_protocol::ids::ProjectId::new("p").unwrap(),
+            name: "p".into(),
+            root: "/p".into(),
+            trust: TrustLevel::Unapproved,
+            allowed_directories: Vec::new(),
+            revision: Revision(9),
+        };
+        feature.on_reply(
+            *tag,
+            FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::ProjectAccess(
+                Box::new(access),
+            )))),
+        );
+        let outbox = feature.take_outbox();
+        let [Outgoing::Command(_, Command::Workspace(WorkspaceCommand::SetProjectTrust(c)))] =
+            outbox.as_slice()
+        else {
+            panic!("{outbox:?}")
+        };
+        assert_eq!(c.trust, TrustLevel::Approved);
+        assert_eq!(c.expected_revision, Revision(9));
+    }
+
+    #[test]
+    fn what_is_known_is_not_asked_again_while_the_sidebar_draws() {
+        let mut feature = WorkspaceFeature::default();
+        feature.want_detail("t1");
+        let tag = match feature.take_outbox().as_slice() {
+            [Outgoing::Query(tag, _)] => *tag,
+            other => panic!("{other:?}"),
+        };
+        feature.on_reply(tag, detail_reply(detail("t1", 1, "t1")));
+        feature.want_detail("t1");
+        assert!(feature.take_outbox().is_empty());
     }
 
     #[test]
