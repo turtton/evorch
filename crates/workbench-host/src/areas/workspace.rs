@@ -239,13 +239,13 @@ impl WorkspaceArea {
         match query {
             Q::GetProjectAccess(target) => service
                 .access_view(&document, &target.project)
-                .map(WorkspaceReply::ProjectAccess),
+                .map(|view| WorkspaceReply::ProjectAccess(Box::new(view))),
             Q::ListFamilies(page) => service
                 .families(&document, page)
                 .map(WorkspaceReply::Families),
             Q::GetThreadDetail(target) => service
                 .detail(&document, &target.thread)
-                .map(WorkspaceReply::ThreadDetail),
+                .map(|detail| WorkspaceReply::ThreadDetail(Box::new(detail))),
             Q::ListProjects(_) | Q::ListThreads(_) | Q::GetThread(_) => Err(WorkbenchError::new(
                 ErrorCode::InvalidRequest,
                 "answered by the projection",

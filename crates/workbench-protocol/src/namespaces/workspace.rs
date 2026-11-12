@@ -386,9 +386,9 @@ pub enum WorkspaceReply {
     Projects(Page<ProjectSummary>),
     Threads(Page<ThreadSummary>),
     Thread(ThreadView),
-    ProjectAccess(ProjectAccessView),
+    ProjectAccess(Box<ProjectAccessView>),
     Families(Page<FamilyView>),
-    ThreadDetail(ThreadDetail),
+    ThreadDetail(Box<ThreadDetail>),
 }
 
 impl WorkspaceReply {

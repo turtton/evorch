@@ -89,7 +89,7 @@ pub fn samples() -> AreaSamples {
             revision: Revision(11),
         })],
         query_replies: vec![
-            QueryReply::Workspace(WorkspaceReply::ProjectAccess(ProjectAccessView {
+            QueryReply::Workspace(WorkspaceReply::ProjectAccess(Box::new(ProjectAccessView {
                 project: project(),
                 name: "evorch".into(),
                 root: "/work/evorch".into(),
@@ -100,7 +100,7 @@ pub fn samples() -> AreaSamples {
                     live: false,
                 }],
                 revision: Revision(7),
-            })),
+            }))),
             QueryReply::Workspace(WorkspaceReply::Families(Page {
                 items: vec![FamilyView {
                     key: thread(),
@@ -114,7 +114,7 @@ pub fn samples() -> AreaSamples {
                 next_cursor: None,
                 snapshot_revision: Revision(5),
             })),
-            QueryReply::Workspace(WorkspaceReply::ThreadDetail(ThreadDetail {
+            QueryReply::Workspace(WorkspaceReply::ThreadDetail(Box::new(ThreadDetail {
                 thread: thread(),
                 project: project(),
                 title: "Plan".into(),
@@ -129,7 +129,7 @@ pub fn samples() -> AreaSamples {
                 archived: false,
                 pinned: true,
                 revision: Revision(3),
-            })),
+            }))),
         ],
     }
 }
