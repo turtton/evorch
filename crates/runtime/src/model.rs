@@ -65,6 +65,10 @@ pub struct AgentInvocationContext {
 #[async_trait]
 pub trait AgentModel: Send + Sync {
     /// Pure, fail-closed recovery check. No provider/tool calls or shared route mutation.
+    ///
+    /// Callers must load and publish any output-limit catalog needed to prove
+    /// the effective settings before validation/activation. This method never
+    /// loads missing catalog data as a side effect.
     fn validate_checkpoint_compatibility(
         &self,
         _invocation: &AgentInvocationContext,

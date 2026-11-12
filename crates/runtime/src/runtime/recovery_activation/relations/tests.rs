@@ -28,6 +28,7 @@ async fn message_ids_advance_across_components_and_exhaust_without_wrapping() {
     for (component, number) in [(1, 40), (2, 7), (3, 90)] {
         let mut root = source(component, None);
         root.record.root = root.record.run_id;
+        root.record.next_message_id = number + 1;
         let mut d = delivery(&format!("msg-{number}"));
         d.recipient = root.record.run_id;
         d.state = DurableDeliveryState::Consumed;
@@ -64,6 +65,22 @@ async fn message_ids_advance_across_components_and_exhaust_without_wrapping() {
 }
 
 #[test]
+fn absent_or_understated_message_id_evidence_is_not_recoverable() {
+    let mut root = source(1, None);
+    let mut value = serde_json::to_value(&root.record).unwrap();
+    value.as_object_mut().unwrap().remove("next_message_id");
+    assert!(serde_json::from_value::<RunRecoveryRecord>(value).is_err());
+    root.record.next_message_id = 0;
+    assert!(PreparedRelations::prepare(std::slice::from_ref(&root)).is_err());
+    root.record.next_message_id = 1;
+    root.record.deliveries.push(delivery("msg-1"));
+    let mut sources = [root, source(2, Some(1))];
+    assert!(PreparedRelations::prepare(&sources).is_err());
+    sources[0].record.next_message_id = 2;
+    assert!(PreparedRelations::prepare(&sources).is_ok());
+}
+
+#[test]
 fn component_ancestry_preserves_grandchild_metadata_before_publication() {
     let graph =
         PreparedRelations::prepare(&[source(1, None), source(2, Some(1)), source(3, Some(2))])
@@ -96,7 +113,7 @@ fn source(id: u64, parent: Option<u64>) -> RecoverySource {
             "recipe":{"settings_reference":"current","policy":{"owner":"core_owned"},
                 "goal_id":null,"team":null,"lane":null,"descriptor":null},
             "waits":[],"deliveries":[],"completion":null,"auto_wakes":20,
-            "user_reset_generation":9,"input_ids":[]
+            "user_reset_generation":9,"input_ids":[],"next_message_id":100
         }))
         .unwrap(),
         intent,

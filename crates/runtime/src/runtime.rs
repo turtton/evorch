@@ -197,6 +197,7 @@ pub(crate) struct Shared {
     /// Read-only directories per thread id (ADR 0037), read when a run builds its sandbox.
     pub(crate) thread_read_dirs: Mutex<HashMap<String, Vec<PathBuf>>>,
     next_message_id: AtomicU64,
+    recovery_message_ids_safe: AtomicBool,
     next_reference_token: AtomicU64,
     pub(crate) runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
@@ -844,6 +845,7 @@ impl AgentRuntime {
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
+                recovery_message_ids_safe: AtomicBool::new(true),
                 next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -873,6 +875,27 @@ impl AgentRuntime {
 
     /// 終端保存先を接続する。設定済みの場合は先勝ちで変更しない。
     pub fn with_run_store(self, store: crate::RunStore) -> Self {
+        if self.shared.run_store.get().is_some() {
+            return self;
+        }
+        // Reserve all committed components before the first new send. A late
+        // store attachment cannot prove earlier IDs were disjoint: keep normal
+        // operation available, but refuse recovery rather than miscorrelating.
+        if self
+            .shared
+            .next_message_id
+            .compare_exchange(
+                1,
+                store.next_recovery_message_id,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            self.shared
+                .recovery_message_ids_safe
+                .store(false, Ordering::Release);
+        }
         if let Some(latest) = store.latest_run_id {
             self.shared.run_ids.observe(latest);
         }
@@ -1189,6 +1212,7 @@ impl AgentRuntime {
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
+                recovery_message_ids_safe: AtomicBool::new(true),
                 next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),

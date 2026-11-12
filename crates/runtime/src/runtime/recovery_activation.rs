@@ -83,6 +83,15 @@ impl AgentRuntime {
         ownership_root: &std::path::Path,
     ) -> Result<PausedRecoveryComponent, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
+        if !self
+            .shared
+            .recovery_message_ids_safe
+            .load(Ordering::Acquire)
+        {
+            return Err(error(
+                "run store must be attached before issuing message IDs for recovery",
+            ));
+        }
         if !self.recovery_plan()?.components.contains(component) {
             return Err(error("component is no longer a recovery candidate"));
         }
@@ -146,6 +155,11 @@ impl AgentRuntime {
         for member in &manifest.members {
             let record: RunRecoveryRecord =
                 serde_json::from_str(&member.record_json).map_err(error)?;
+            if record.next_message_id > store.next_recovery_message_id {
+                return Err(error(
+                    "component message IDs were not fenced at run store startup",
+                ));
+            }
             let (intent, snapshot) = store
                 .with_database(|db| {
                     Ok((

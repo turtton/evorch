@@ -49,6 +49,10 @@ impl PreparedRelations {
         let mut wakes = BTreeMap::new();
         for source in sources {
             let r = &source.record;
+            if r.next_message_id == 0 {
+                return Err(error("invalid recovery message ID high-watermark"));
+            }
+            next_message_id = next_message_id.max(r.next_message_id);
             if r.parent.is_some_and(|parent| !ids.contains(&parent)) || !ids.contains(&r.root) {
                 return Err(error("missing recovery observation endpoint"));
             }
@@ -69,11 +73,13 @@ impl PreparedRelations {
             for delivery in &r.deliveries {
                 if let Some(number) = delivery.message_id.strip_prefix("msg-") {
                     let number: u64 = number.parse().map_err(error)?;
-                    next_message_id = next_message_id.max(
-                        number
-                            .checked_add(1)
-                            .ok_or_else(|| error("recovery message ID overflow"))?,
-                    );
+                    let after = number
+                        .checked_add(1)
+                        .ok_or_else(|| error("recovery message ID overflow"))?;
+                    if after > r.next_message_id {
+                        return Err(error("delivery exceeds captured message ID high-watermark"));
+                    }
+                    next_message_id = next_message_id.max(after);
                 }
                 if delivery.recipient != r.run_id || !ids.contains(&delivery.recipient) {
                     return Err(error("invalid delivery recipient"));

@@ -287,6 +287,7 @@ impl AgentRuntime {
                 recipe,
                 waits,
                 deliveries,
+                next_message_id: self.shared.next_message_id.load(Ordering::Acquire),
                 completion,
                 completion_generation: runs
                     .get(&intent.run_id)

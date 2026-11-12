@@ -142,6 +142,9 @@ pub struct RunRecoveryRecord {
     pub recipe: RecoveryRecipe,
     pub waits: Vec<DurableWait>,
     pub deliveries: Vec<DurableDelivery>,
+    /// Exclusive runtime-wide high-watermark, including completed/expired receipts.
+    /// Required: an older record without this evidence cannot be activated.
+    pub next_message_id: u64,
     pub completion: Option<ObservedGeneration>,
     #[serde(default)]
     pub completion_generation: Option<u64>,

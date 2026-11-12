@@ -25,6 +25,10 @@ impl AgentRuntime {
 
     /// No task, model admission, tool, or wake starts until ALL members have
     /// been prepared, the FULL writer ACK received, and ALL endpoints published.
+    ///
+    /// The caller must load/publish any catalog needed for model compatibility
+    /// before calling this API. Missing evidence blocks before ACK without
+    /// fetching metadata or modifying the model's pins.
     pub fn activate_component(
         &self,
         mut paused: PausedRecoveryComponent,

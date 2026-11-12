@@ -50,6 +50,201 @@ fn prepare(f: &Fixture, runtime: &AgentRuntime) -> crate::PausedRecoveryComponen
 }
 
 #[tokio::test]
+async fn recovery_rejects_store_attached_after_a_message_was_issued() {
+    let f = Fixture::new(0);
+    let run = saved(&f).await;
+    let bus = Arc::new(EventBus::new(64));
+    let late = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        f.model.clone(),
+    );
+    let root = late.delegate_background(Role::Worker, "fresh".into(), RunConfig::default());
+    let child = late
+        .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    late.send_agent_message(
+        root,
+        child,
+        event_bus::AgentMessageKind::Send,
+        "early",
+        None,
+    )
+    .unwrap();
+    let late = late.with_run_store(RunStore::open(&f.config, f._storage.handle()).unwrap());
+    let ownership = f._dir.path().join("ownership");
+    let leases =
+        storage::shared_with_wait(&f.config.db_path, &ownership, std::time::Duration::ZERO)
+            .unwrap();
+    let startup = leases
+        .recovery_startup_complete(&f.config.db_path, &ownership)
+        .unwrap();
+    let plan = late.recovery_plan().unwrap();
+    assert_eq!(plan.components[0].runs, [run]);
+    assert!(
+        late.prepare_component(&plan.components[0], startup, &ownership)
+            .is_err()
+    );
+    assert!(
+        storage::Database::open(&f.config)
+            .unwrap()
+            .recovery_claims()
+            .unwrap()
+            .is_empty()
+    );
+    late.cancel(root).unwrap();
+}
+
+#[tokio::test]
+async fn startup_fences_expired_message_ids_before_sends_and_delayed_components() {
+    let f = Fixture::new(0);
+    let root = f.start();
+    let child = f
+        .runtime
+        .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    let other = f.start();
+    let recipe = RecoveryRecipe {
+        settings_reference: "current-profile".into(),
+        policy: ResumePolicy::CoreOwned,
+        goal_id: None,
+        team: None,
+        lane: None,
+        descriptor: None,
+    };
+    let mut expired = Vec::new();
+    for _ in 0..2 {
+        let id = f
+            .runtime
+            .send_agent_message(
+                root,
+                child,
+                event_bus::AgentMessageKind::Send,
+                "expired request",
+                None,
+            )
+            .unwrap();
+        assert_eq!(f.runtime.take_inbox(child).unwrap().len(), 1);
+        // The production recovered-timeout branch removes the sent receipt.
+        assert!(matches!(
+            f.runtime.expire_recovery_reply_wait(&id),
+            crate::RuntimeError::ReplyTimeout { .. }
+        ));
+        expired.push(id);
+    }
+    f.runtime.request_quiesce();
+    f.runtime.wait_quiesced().await.unwrap();
+    let fence = f.runtime.fence_dispatch_restart().await.unwrap();
+    f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+    let records = f
+        .runtime
+        .capture_recovery_records(&BTreeMap::from([(root, recipe.clone()), (other, recipe)]))
+        .unwrap();
+    assert!(records.iter().all(|r| r.deliveries.is_empty()));
+    assert!(records.iter().all(|r| r.next_message_id > 2));
+    f.runtime
+        .save_recovery_graph("expired-ids", &records)
+        .unwrap();
+
+    let runtime = new_process(&f);
+    // A new run can send before *any* recovery component is prepared.
+    let fresh = runtime.delegate_background(Role::Worker, "fresh".into(), RunConfig::default());
+    let fresh_child = runtime
+        .delegate_background_as_child(fresh, Role::Worker, "fresh child", RunConfig::default())
+        .unwrap();
+    let first = runtime
+        .send_agent_message(
+            fresh,
+            fresh_child,
+            event_bus::AgentMessageKind::Send,
+            "before activation",
+            None,
+        )
+        .unwrap();
+    assert!(!expired.contains(&first));
+    let plan = runtime.recovery_plan().unwrap();
+    assert_eq!(plan.components.len(), 2);
+    let ownership = f._dir.path().join("ownership");
+    let leases =
+        storage::shared_with_wait(&f.config.db_path, &ownership, std::time::Duration::ZERO)
+            .unwrap();
+    let owner = crate::ownership::OwnerHost::open(
+        &f._dir.path().join("current-owner"),
+        Default::default(),
+        Arc::new(EventBus::new(64)),
+    )
+    .unwrap();
+    for component in &plan.components {
+        let startup = leases
+            .recovery_startup_complete(&f.config.db_path, &ownership)
+            .unwrap();
+        let mut paused = runtime
+            .prepare_component(component, startup, &ownership)
+            .unwrap();
+        runtime
+            .restore_relations_and_continuations(&mut paused)
+            .unwrap();
+        runtime
+            .activate_component(
+                paused,
+                crate::CurrentRecoveryAuthority {
+                    members: component
+                        .runs
+                        .iter()
+                        .map(|id| {
+                            (
+                                *id,
+                                RunConfig {
+                                    ownership: Some(owner.start(&id.to_string()).unwrap()),
+                                    interactive: *id != child,
+                                    keep_alive: *id != child,
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+        let between = runtime
+            .send_agent_message(
+                fresh,
+                fresh_child,
+                event_bus::AgentMessageKind::Send,
+                "between component activations",
+                None,
+            )
+            .unwrap();
+        assert!(!expired.contains(&between));
+    }
+    let current = runtime
+        .send_agent_message(
+            root,
+            child,
+            event_bus::AgentMessageKind::Send,
+            "new request",
+            None,
+        )
+        .unwrap();
+    assert!(!expired.contains(&current));
+    assert!(
+        runtime
+            .send_agent_message(
+                child,
+                root,
+                event_bus::AgentMessageKind::Reply,
+                "late old reply",
+                Some(expired[1].clone()),
+            )
+            .is_err()
+    );
+    runtime.check_reply_wait(root, &current).unwrap();
+    for run in [root, other, fresh] {
+        runtime.cancel(run).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn prepare_and_drop_leave_exact_snapshot_and_pending_claim_without_execution() {
     let f = Fixture::new(0);
     let run = saved(&f).await;
