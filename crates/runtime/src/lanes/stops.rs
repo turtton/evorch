@@ -150,6 +150,8 @@ impl AgentRuntime {
                     } else {
                         None
                     };
+                    #[cfg(test)]
+                    self.lane_stop_write_hook(run, crate::runtime::HookPoint::LaneStopWriteStarted);
                     self.write_lane_stop(&request)?;
                     let mut pending = writes.pending.lock().unwrap();
                     if pending
@@ -160,7 +162,7 @@ impl AgentRuntime {
                     }
                     drop(pending);
                     #[cfg(test)]
-                    self.lane_stop_write_hook(run, true);
+                    self.lane_stop_write_hook(run, crate::runtime::HookPoint::LaneStopPersisted);
                     tracing::info!(%run, lane = %request.lane, "lane cancellation is durable");
                     Ok::<_, LaneError>(())
                 }
@@ -168,7 +170,7 @@ impl AgentRuntime {
                 if let Err(error) = result {
                     retry_storage |= error.code == "storage_unavailable";
                     #[cfg(test)]
-                    self.lane_stop_write_hook(run, false);
+                    self.lane_stop_write_hook(run, crate::runtime::HookPoint::LaneStopWriteFailed);
                     let error = crate::RuntimeError::LaneCancellation {
                         run_id: run.to_string(),
                         reason: format!(
