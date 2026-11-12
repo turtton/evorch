@@ -11,6 +11,8 @@ mod fixture;
 mod recovery_06a_tests;
 #[cfg(test)]
 mod recovery_06b_tests;
+#[cfg(test)]
+mod recovery_cache_tests;
 pub(crate) mod runtime;
 mod safe_point;
 #[cfg(test)]

@@ -212,6 +212,19 @@ impl AgentRuntime {
                 recipe.descriptor = Some(descriptor);
             }
             let descriptor = recipe.descriptor.as_ref();
+            let waits = descriptor
+                .map(|d| d.recovery_waits.clone())
+                .unwrap_or_default();
+            if intent
+                .checkpoint
+                .as_ref()
+                .is_some_and(|c| c.boundary == crate::checkpoint::CheckpointBoundary::ToolsWaiting)
+                != !waits.is_empty()
+            {
+                return Err(graph_error(
+                    "intent/descriptor ToolsWaiting boundary mismatch",
+                ));
+            }
             let mut deliveries = Vec::new();
             if let Some(entry) = runs.get(&intent.run_id) {
                 for (index, q) in entry.mailbox.recovery_messages().iter().enumerate() {
@@ -264,10 +277,12 @@ impl AgentRuntime {
                 project: descriptor.and_then(|d| d.project_root.clone()),
                 role: intent.role.clone(),
                 recipe,
-                waits: Vec::new(),
+                waits,
                 deliveries,
                 completion,
-                completion_generation: None,
+                completion_generation: runs
+                    .get(&intent.run_id)
+                    .map(|entry| entry.completion_notice.generation),
                 auto_wakes: wakes.get(&root).copied().unwrap_or_default(),
                 user_reset_generation: resets.get(&root).copied().unwrap_or_default(),
                 input_ids: intent
@@ -529,11 +544,20 @@ impl AgentRuntime {
                     if !intent.tool_intent.is_empty() {
                         return Err(RecoveryReason::UnconfirmedEffects);
                     }
-                    if !r.waits.is_empty() {
+                    if intent.checkpoint.as_ref().is_some_and(|c| {
+                        c.boundary == crate::checkpoint::CheckpointBoundary::ToolsWaiting
+                    }) != !r.waits.is_empty()
+                    {
+                        return Err(RecoveryReason::UnfinishedWaitUnsupportedIn06a);
+                    }
+                    if !r.waits.is_empty() && snapshot.is_none() {
                         return Err(RecoveryReason::UnfinishedWaitUnsupportedIn06a);
                     }
                     if let Some(receipt) = &member.snapshot {
                         let snapshot = snapshot.ok_or(RecoveryReason::MissingSnapshot)?;
+                        if crate::restore::validate_recovery_waits(&snapshot, &r.waits).is_err() {
+                            return Err(RecoveryReason::UnfinishedWaitUnsupportedIn06a);
+                        }
                         if !receipt.matches(&snapshot) {
                             return Err(RecoveryReason::MissingSnapshot);
                         }

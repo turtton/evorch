@@ -11,136 +11,6 @@ fn call(id: &str, name: &str, input: serde_json::Value) -> ContentBlock {
     }
 }
 
-async fn assert_wire_cache_after_wait(before: &[Message], after: &[Message]) {
-    use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
-    use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
-    use providers::wire::responses::{ResponsesDialect, ResponsesRequestOptions};
-    let request = |messages: &[Message]| providers::ChatRequest {
-        model: "mock-model".into(),
-        messages: messages.to_vec(),
-        tools: vec![
-            providers::ToolSpec {
-                name: "wait".into(),
-                description: "observe existing runs".into(),
-                input_schema: json!({"type":"object"}),
-            },
-            providers::ToolSpec {
-                name: "read".into(),
-                description: "read only".into(),
-                input_schema: json!({"type":"object"}),
-            },
-        ],
-        temperature: Some(0.2),
-        max_tokens: Some(300),
-        reasoning_effort: None,
-        service_tier: None,
-        output_schema: None,
-        tool_choice: None,
-        observation: None,
-        responses_replay: None,
-    };
-    let options = |dialect| ResponsesRequestOptions {
-        dialect,
-        prompt_cache_key: Some("stable-affinity".into()),
-        codex_model: None,
-    };
-    for dialect in [
-        None,
-        Some(ResponsesDialect::OpenAi),
-        Some(ResponsesDialect::Codex),
-    ] {
-        let mock = StreamingMockOpenAi::spawn_with_prompt_cache(
-            (0..2)
-                .map(|_| ScriptedResponse::text_stream("response", "mock-model", ["ok"]))
-                .collect(),
-        );
-        let encode = |messages: &[Message]| match dialect {
-            None => serde_json::to_value(providers::wire::openai::to_wire_request(
-                &request(messages),
-                false,
-            ))
-            .unwrap(),
-            Some(dialect) => {
-                let mut value = serde_json::to_value(providers::wire::responses::to_wire_request(
-                    &request(messages),
-                    &options(dialect),
-                ))
-                .unwrap();
-                value["stream"] = json!(false);
-                value
-            }
-        };
-        let client = reqwest::Client::new();
-        let path = if dialect.is_none() {
-            "chat/completions"
-        } else {
-            "responses"
-        };
-        let mut usage = Vec::new();
-        for messages in [before, after] {
-            let body = client
-                .post(format!("{}/{path}", mock.base_url()))
-                .json(&encode(messages))
-                .send()
-                .await
-                .unwrap()
-                .error_for_status()
-                .unwrap()
-                .text()
-                .await
-                .unwrap();
-            let observed = if dialect.is_none() {
-                serde_json::from_str::<serde_json::Value>(&body).unwrap()["usage"].clone()
-            } else {
-                body.lines()
-                    .filter_map(|line| line.strip_prefix("data: "))
-                    .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
-                    .find(|event| event["type"] == "response.completed")
-                    .expect("mock emits a terminal response")["response"]["usage"]
-                    .clone()
-            };
-            usage.push(observed);
-        }
-        let captured = mock.recorded_requests();
-        assert_eq!(captured.len(), 2);
-        assert_append_only(
-            if dialect.is_none() {
-                CacheProtocol::OpenAi
-            } else {
-                CacheProtocol::Codex
-            },
-            &captured[0].body,
-            &captured[1].body,
-        )
-        .unwrap();
-        let (input_key, detail_key) = if dialect.is_none() {
-            ("prompt_tokens", "prompt_tokens_details")
-        } else {
-            ("input_tokens", "input_tokens_details")
-        };
-        assert!(usage[0][input_key].as_u64().unwrap() > 0);
-        assert_eq!(usage[1][detail_key]["cached_tokens"], usage[0][input_key]);
-        let body = &captured[1].body;
-        let outputs: Vec<_> = if dialect.is_none() {
-            body["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|item| item["tool_call_id"].as_str())
-                .collect()
-        } else {
-            body["input"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|item| item["type"] == "function_call_output")
-                .filter_map(|item| item["call_id"].as_str())
-                .collect()
-        };
-        assert_eq!(outputs, ["read", "wait-all", "wait-legacy"]);
-    }
-}
-
 #[tokio::test]
 async fn target_completion_while_parked_does_not_observe_or_rewind_its_generation() {
     let (_dir, _storage, runtime, mut state) =
@@ -363,7 +233,36 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
     );
     assert!(state.resume_recovery_waits().await);
     assert_eq!(state.context.messages.len(), prefix.len() + 2);
-    assert_wire_cache_after_wait(&provider_prefix, &state.context.messages).await;
+    let request = |messages: &[Message]| providers::ChatRequest {
+        model: "mock-model".into(),
+        messages: messages.to_vec(),
+        tools: vec![
+            providers::ToolSpec {
+                name: "wait".into(),
+                description: "observe existing runs".into(),
+                input_schema: json!({"type":"object"}),
+            },
+            providers::ToolSpec {
+                name: "read".into(),
+                description: "read only".into(),
+                input_schema: json!({"type":"object"}),
+            },
+        ],
+        temperature: Some(0.2),
+        max_tokens: Some(300),
+        reasoning_effort: None,
+        service_tier: None,
+        output_schema: None,
+        tool_choice: None,
+        observation: None,
+        responses_replay: None,
+    };
+    crate::recovery_cache_test_support::assert_wait_cache(
+        &request(&provider_prefix),
+        &request(&state.context.messages),
+        &["read", "wait-all", "wait-legacy"],
+    )
+    .await;
     drop(storage);
 }
 
@@ -436,6 +335,20 @@ async fn delegate_projection_uses_original_call_order_and_existing_child_ids() {
     state.delegate_wait_calls = children.clone();
     state.recovery_waits = state.pending_waits(None).unwrap();
     assert_eq!(state.recovery_waits.len(), 2);
+    let mut mismatched = state.recovery_waits.clone();
+    if let WaitKind::Delegates { calls } =
+        &mut mismatched[0].continuation.payload.as_mut().unwrap().kind
+    {
+        calls.swap(0, 1);
+    }
+    assert!(
+        crate::restore::waiting::validate_wait_messages(
+            parent,
+            &state.context.messages,
+            &mismatched,
+        )
+        .is_err()
+    );
     let count = runtime.list_agents().len();
     for child in &children {
         runtime.cancel(child.child).unwrap();
@@ -457,4 +370,112 @@ async fn delegate_projection_uses_original_call_order_and_existing_child_ids() {
         .collect();
     assert_eq!(ids, ["call-a", "call-b"]);
     assert_eq!(runtime.list_agents().len(), count);
+}
+
+#[tokio::test]
+async fn reply_continuation_consumes_only_the_correlated_reply_once() {
+    use event_bus::AgentMessageKind;
+    let (_dir, _storage, runtime, mut state) =
+        crate::agent_loop::continuity_tests::stored_fixture_in("reply-continuation.db", false)
+            .await;
+    let (_cancel, cancel_rx) = tokio::sync::watch::channel(crate::RunInterrupt::None);
+    state.channels.cancel_rx = cancel_rx;
+    state
+        .transition(event_bus::AgentRunPhase::Running, None)
+        .unwrap();
+    let parent = state.task.run_id;
+    state.task.publication = runtime.execution_snapshot(parent).unwrap().publication();
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    let message = runtime
+        .send_agent_message(parent, child, AgentMessageKind::Send, "request", None)
+        .unwrap();
+    state.context.push_assistant(Message {
+        role: MessageRole::Assistant,
+        content: vec![call(
+            "reply",
+            "wait_reply",
+            json!({"message_id":message,"timeout_ms":1000}),
+        )],
+    });
+    // Epoch deadline is already elapsed. A queued correlated reply must still
+    // win over the deadline, just as a live wait_reply(timeout_ms=0) does.
+    state.recovery_waits = state.pending_waits(Some(("reply", 1))).unwrap();
+    let saved_waits = state.recovery_waits.clone();
+    crate::restore::persist_tools_waiting(&state).unwrap();
+    let bundle = runtime
+        .shared
+        .run_store
+        .get()
+        .unwrap()
+        .restore_bundle(parent)
+        .unwrap()
+        .unwrap();
+    let restored =
+        crate::restore::RestoredState::from_recovery_bundle(&bundle, &saved_waits).unwrap();
+    assert_eq!(restored.recovery_waits, saved_waits);
+    state.recovery_waits = restored.recovery_waits;
+    let unrelated = runtime
+        .send_agent_message(child, parent, AgentMessageKind::Send, "keep queued", None)
+        .unwrap();
+    let reply = runtime
+        .send_agent_message(
+            child,
+            parent,
+            AgentMessageKind::Reply,
+            "reply body",
+            Some(message.clone()),
+        )
+        .unwrap();
+    let prefix = state.context.messages.clone();
+    assert!(state.resume_recovery_waits().await);
+    assert_eq!(&state.context.messages[..prefix.len()], prefix);
+    let ContentBlock::ToolResult {
+        tool_call_id,
+        content,
+        is_error,
+    } = &state.context.messages.last().unwrap().content[0]
+    else {
+        panic!("reply result")
+    };
+    assert_eq!(tool_call_id, "reply");
+    assert!(!is_error);
+    let providers::ToolResultContent::Text { text } = &content[0] else {
+        panic!("reply text")
+    };
+    let value: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(value["message_id"], reply);
+    assert_eq!(value["content"], "reply body");
+    assert!(runtime.check_reply_wait(parent, &message).is_err());
+    assert_eq!(
+        runtime
+            .take_inbox(parent)
+            .unwrap()
+            .iter()
+            .map(|m| &m.message_id)
+            .collect::<Vec<_>>(),
+        [&unrelated]
+    );
+    assert!(state.resume_recovery_waits().await);
+    assert_eq!(state.context.messages.len(), prefix.len() + 1);
+
+    let expired = runtime
+        .send_agent_message(parent, child, AgentMessageKind::Send, "new request", None)
+        .unwrap();
+    state.context.push_assistant(Message {
+        role: MessageRole::Assistant,
+        content: vec![call(
+            "expired",
+            "wait_reply",
+            json!({"message_id":expired,"timeout_ms":1000}),
+        )],
+    });
+    state.recovery_waits = state.pending_waits(Some(("expired", 1))).unwrap();
+    let before_timeout = state.context.messages.len();
+    assert!(state.resume_recovery_waits().await);
+    assert!(matches!(&state.context.messages.last().unwrap().content[0],
+        ContentBlock::ToolResult {tool_call_id,is_error:true,..} if tool_call_id=="expired"));
+    assert!(state.resume_recovery_waits().await);
+    assert_eq!(state.context.messages.len(), before_timeout + 1);
 }

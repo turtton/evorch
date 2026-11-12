@@ -388,7 +388,18 @@ impl AgentRuntime {
                 trusted_user: true,
             }),
         )?;
-        let mut restored = RestoredState::for_conversation_bundle(&bundle)?;
+        let abort_waits = operator_resume && !descriptor.recovery_waits.is_empty();
+        let mut restored = if abort_waits {
+            RestoredState::for_human_recovery_bundle(&bundle)?
+        } else {
+            RestoredState::for_conversation_bundle(&bundle)?
+        };
+        if abort_waits {
+            descriptor.recovery_waits.clear();
+            descriptor.recovery_boundary = None;
+            record.messages_json =
+                serde_json::to_string(&restored.messages).expect("validated history serializes");
+        }
         let mut host_input = storage::HostInputWrite {
             reconcile_reason: Some("restored".into()),
             ..Default::default()

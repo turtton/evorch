@@ -108,6 +108,41 @@ fn fixture() -> (storage::RunContextRecord, Vec<DurableWait>, Vec<Message>) {
 }
 
 #[test]
+fn explicit_human_continue_appends_abort_results_without_rewriting_or_observing_waits() {
+    let (record, waits, messages) = fixture();
+    let bundle = storage::thread_index::SnapshotBundle {
+        record,
+        snapshot_revision: 17,
+        source_revision: 19,
+        provenance: None,
+        latest_note: None,
+    };
+    let before = bundle.record.clone();
+    assert!(RestoredState::for_conversation_bundle(&bundle).is_err());
+    let restored = RestoredState::for_human_recovery_bundle(&bundle).unwrap();
+    assert_eq!(&restored.messages[..messages.len()], messages);
+    let outputs: Vec<_> = restored.messages[messages.len()..]
+        .iter()
+        .flat_map(|m| &m.content)
+        .map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_call_id,
+                is_error,
+                ..
+            } => (tool_call_id.as_str(), *is_error),
+            _ => panic!("only abort tool results may be appended"),
+        })
+        .collect();
+    assert_eq!(outputs, [("wait-1", true), ("wait-2", true)]);
+    assert!(restored.recovery_waits.is_empty());
+    assert_eq!(restored.snapshot_revision.get(), Some(17));
+    assert_eq!(bundle.record.messages_json, before.messages_json);
+    let descriptor: RunRestoreDescriptor =
+        serde_json::from_str(&bundle.record.config_json).unwrap();
+    assert_eq!(descriptor.recovery_waits, waits);
+}
+
+#[test]
 fn tools_waiting_loader_retains_exact_batch_and_completed_results() {
     let (record, waits, messages) = fixture();
     let before = record.clone();

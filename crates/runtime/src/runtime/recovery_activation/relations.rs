@@ -17,6 +17,23 @@ pub(super) struct PreparedRelations {
     question_states: BTreeMap<String, (bool, bool, bool)>,
 }
 
+fn merge_generation(
+    generations: &mut BTreeMap<RunId, (u64, bool)>,
+    child: RunId,
+    generation: u64,
+    observed: bool,
+) -> Result<(), RuntimeError> {
+    if generation == u64::MAX {
+        return Err(error("completion generation overflow"));
+    }
+    let previous = generations.entry(child).or_insert((generation, false));
+    if previous.0 != generation {
+        return Err(error("completion generation conflict"));
+    }
+    previous.1 |= observed;
+    Ok(())
+}
+
 impl PreparedRelations {
     pub(super) fn prepare(sources: &[RecoverySource]) -> Result<Self, RuntimeError> {
         let ids = sources
@@ -37,16 +54,14 @@ impl PreparedRelations {
             {
                 return Err(error("conflicting recovery wake/reset counters"));
             }
+            if let Some(generation) = r.completion_generation {
+                merge_generation(&mut generations, r.run_id, generation, false)?;
+            }
             if let Some(observed) = &r.completion {
-                if observed.id != r.run_id.to_string() || observed.generation == u64::MAX {
-                    return Err(error("invalid completion generation"));
+                if observed.id != r.run_id.to_string() {
+                    return Err(error("invalid completion observation identity"));
                 }
-                if generations
-                    .insert(r.run_id, (observed.generation, true))
-                    .is_some_and(|(generation, _)| generation != observed.generation)
-                {
-                    return Err(error("completion generation conflict"));
-                }
+                merge_generation(&mut generations, r.run_id, observed.generation, true)?;
             }
             for delivery in &r.deliveries {
                 if delivery.recipient != r.run_id || !ids.contains(&delivery.recipient) {

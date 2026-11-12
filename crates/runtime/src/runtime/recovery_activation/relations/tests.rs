@@ -71,6 +71,15 @@ fn completion_queue_and_output_share_the_saved_generation_and_observation() {
     notice.observe();
     assert!(queued.observed());
     assert_eq!(relations.wakes[&RunId::new(1)], (20, 9));
+
+    let root = source(1, None);
+    let mut unread = source(2, Some(1));
+    unread.record.completion_generation = Some(37);
+    let restored = PreparedRelations::prepare(&[root, unread]).unwrap();
+    let notice = &restored.completions[&RunId::new(2)];
+    assert_eq!(notice.generation, 37);
+    assert!(!notice.observed());
+    assert!(restored.queues.is_empty());
 }
 
 #[test]

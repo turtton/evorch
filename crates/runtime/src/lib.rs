@@ -57,6 +57,9 @@ pub mod policy;
 pub mod prompt;
 pub mod pull_requests;
 pub mod quiesce;
+#[cfg(test)]
+#[path = "../shared-test-support/recovery_cache.rs"]
+mod recovery_cache_test_support;
 pub mod repository;
 mod request_turn;
 pub mod restore;

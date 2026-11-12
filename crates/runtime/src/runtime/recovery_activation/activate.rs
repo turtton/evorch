@@ -141,9 +141,13 @@ impl AgentRuntime {
                 self.resolve_pending_reference(d.pending_reference_id.as_deref())?;
             }
             let continuation = if let Some(bundle) = &source.bundle {
-                // ToolsWaiting uses its dedicated loader when that boundary is
-                // integrated; ordinary incomplete batches remain rejected here.
-                let restored = RestoredState::from_bundle(bundle)?;
+                if source.intent.checkpoint.as_ref().is_some_and(|c| {
+                    c.boundary == crate::checkpoint::CheckpointBoundary::ToolsWaiting
+                }) != !source.record.waits.is_empty()
+                {
+                    return Err(error("intent/continuation ToolsWaiting boundary mismatch"));
+                }
+                let restored = RestoredState::from_recovery_bundle(bundle, &source.record.waits)?;
                 RunContinuation::Resume {
                     restored: Box::new(restored),
                     handoff: None,

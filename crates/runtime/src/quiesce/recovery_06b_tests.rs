@@ -430,6 +430,20 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
 
 #[tokio::test]
 async fn activation_failure_after_ack_never_releases_or_replays_the_component() {
+    post_activation_fault(crate::runtime::HookPoint::RecoveryActivated, false).await;
+}
+
+#[tokio::test]
+async fn activation_crash_after_publication_keeps_gate_closed_and_forbids_reactivation() {
+    post_activation_fault(crate::runtime::HookPoint::RecoveryPublished, true).await;
+}
+
+#[tokio::test]
+async fn activation_crash_after_gate_open_never_turns_into_a_prepared_retry() {
+    post_activation_fault(crate::runtime::HookPoint::RecoveryGateOpened, true).await;
+}
+
+async fn post_activation_fault(point: crate::runtime::HookPoint, published: bool) {
     let f = Fixture::new(0);
     let run = saved(&f).await;
     let runtime = new_process(&f);
@@ -455,20 +469,16 @@ async fn activation_failure_after_ack_never_releases_or_replays_the_component() 
         )]),
     };
     let execution = runtime.execution_snapshot(run).unwrap();
-    runtime.on_execution(
-        crate::runtime::HookPoint::RecoveryActivated,
-        &execution,
-        || {
-            panic!("fault after FULL ACK, before publication");
-        },
-    );
+    runtime.on_execution(point, &execution, || {
+        panic!("fault at the selected post-ACK checkpoint");
+    });
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             runtime.activate_component(paused, authority)
         }))
         .is_err()
     );
-    assert!(runtime.list_agents().is_empty());
+    assert_eq!(runtime.list_agents().len(), usize::from(published));
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
     let reopened = new_process(&f);
     let plan = reopened.recovery_plan().unwrap();
