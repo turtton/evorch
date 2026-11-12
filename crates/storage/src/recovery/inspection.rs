@@ -30,6 +30,45 @@ impl std::fmt::Debug for RecoveryClaimSnapshot {
 }
 
 impl Database {
+    /// Raw relational identities owned by graph recovery, independent of payload
+    /// decoding. Orphan intents without a manifest are deliberately NOT included.
+    /// An unreadable identity fails closed instead of silently dropping a member.
+    pub fn recovery_owned_run_ids(
+        &self,
+        quarantined_manifests: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, StorageError> {
+        let quarantined = serde_json::to_string(quarantined_manifests)
+            .map_err(|error| StorageError::Serialization(error.to_string()))?;
+        let tx = self.conn.unchecked_transaction()?;
+        let incomplete: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recovery_manifests g \
+             WHERE ((g.committed=1 AND g.superseded=0) OR g.manifest_id IN (SELECT value FROM json_each(?1))) \
+             AND (g.member_count<1 OR g.member_count!=(SELECT count(*) FROM recovery_members m WHERE m.manifest_id=g.manifest_id))) \
+             OR EXISTS(SELECT 1 FROM recovery_claims c WHERE c.state!='released' AND \
+             (NOT EXISTS(SELECT 1 FROM recovery_manifests g WHERE g.manifest_id=c.manifest_id) \
+             OR (SELECT count(*) FROM recovery_claim_members m WHERE m.claim_id=c.claim_id)=0 \
+             OR (SELECT count(*) FROM recovery_claim_members m WHERE m.claim_id=c.claim_id) \
+                 !=(SELECT count(*) FROM recovery_members m WHERE m.manifest_id=c.manifest_id AND m.resume=1)))",
+            [&quarantined], |row| row.get(0),
+        )?;
+        if incomplete {
+            return Err(invalid("graph ownership identities unavailable"));
+        }
+        let mut q = tx.prepare(
+            "SELECT m.run_id FROM recovery_members m JOIN recovery_manifests g USING(manifest_id) \
+             WHERE (g.committed=1 AND g.superseded=0) \
+                OR g.manifest_id IN (SELECT value FROM json_each(?1)) \
+             UNION SELECT m.run_id FROM recovery_claim_members m JOIN recovery_claims c USING(claim_id) \
+             WHERE c.state!='released' ORDER BY 1",
+        )?;
+        let ids = q
+            .query_map([quarantined], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        drop(q);
+        tx.commit()?;
+        Ok(ids)
+    }
+
     /// ACK-loss resolution must not combine a pre-commit claim with post-commit
     /// intents. A read error is indeterminate, never an authorization to release.
     pub fn recovery_claim_snapshot(&self, id: &str) -> Result<RecoveryClaimSnapshot, StorageError> {
