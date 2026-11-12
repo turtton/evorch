@@ -3,6 +3,8 @@
 //! authorities and register the entire graph before activating any component.
 #[path = "recovery_authority.rs"]
 pub mod authority;
+#[path = "recovery_catalog.rs"]
+pub mod catalog;
 #[path = "recovery_current.rs"]
 pub mod current;
 use super::BootstrapError;
