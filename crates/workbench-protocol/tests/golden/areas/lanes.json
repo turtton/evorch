@@ -1,1 +1,137 @@
-{}
+{
+  "command/lanes/resume_lane_deliveries": {
+    "payload": {
+      "payload": {
+        "expected_lead_root_run_id": "run-1",
+        "expected_management_revision": "3",
+        "lane_id": "lane-1",
+        "lead_thread_id": "thread-1"
+      },
+      "type": "resume_lane_deliveries"
+    },
+    "type": "lanes"
+  },
+  "query/lanes/get_lane": {
+    "payload": {
+      "payload": {
+        "lane_id": "lane-1"
+      },
+      "type": "get_lane"
+    },
+    "type": "lanes"
+  },
+  "query/lanes/list_lanes": {
+    "payload": {
+      "payload": {
+        "lead_thread": "thread-1",
+        "page": {
+          "limit": 50
+        }
+      },
+      "type": "list_lanes"
+    },
+    "type": "lanes"
+  },
+  "query_reply/lanes/lane": {
+    "payload": {
+      "payload": {
+        "attention": [
+          {
+            "available_actions": [
+              "resume"
+            ],
+            "revision": "1",
+            "since": "1700000000002",
+            "summary": "held",
+            "tag": "stop_pending"
+          }
+        ],
+        "delivery": {
+          "held": true,
+          "pending_count": 2
+        },
+        "latest_report": {
+          "brief_revision": "1",
+          "created_at": "1700000000001",
+          "management_revision": "3",
+          "needs_human": false,
+          "seq": "4",
+          "status": "ready",
+          "summary": "done"
+        },
+        "ready": {
+          "brief_changed_since": true,
+          "brief_revision": "1",
+          "readiness": "unreviewed",
+          "report_seq": "4"
+        },
+        "summary": {
+          "brief_revision": "2",
+          "generation": "1",
+          "lane_id": "lane-1",
+          "last_activity_at": "1700000000000",
+          "latest_report_status": "ready",
+          "lead_thread_id": "thread-1",
+          "management_revision": "3",
+          "objective_preview": "build the thing",
+          "policy": "attached",
+          "revision": "11",
+          "root_run": "run-9",
+          "start": "started",
+          "thread_id": "thread-2"
+        }
+      },
+      "type": "lane"
+    },
+    "type": "lanes"
+  },
+  "query_reply/lanes/lanes": {
+    "payload": {
+      "payload": {
+        "items": [
+          {
+            "brief_revision": "2",
+            "generation": "1",
+            "lane_id": "lane-1",
+            "last_activity_at": "1700000000000",
+            "latest_report_status": "ready",
+            "lead_thread_id": "thread-1",
+            "management_revision": "3",
+            "objective_preview": "build the thing",
+            "policy": "attached",
+            "revision": "11",
+            "root_run": "run-9",
+            "start": "started",
+            "thread_id": "thread-2"
+          }
+        ],
+        "snapshot_revision": "9"
+      },
+      "type": "lanes"
+    },
+    "type": "lanes"
+  },
+  "ui_event/lanes/lane_changed": {
+    "payload": {
+      "payload": {
+        "lane": {
+          "brief_revision": "2",
+          "generation": "1",
+          "lane_id": "lane-1",
+          "last_activity_at": "1700000000000",
+          "latest_report_status": "ready",
+          "lead_thread_id": "thread-1",
+          "management_revision": "3",
+          "objective_preview": "build the thing",
+          "policy": "attached",
+          "revision": "11",
+          "root_run": "run-9",
+          "start": "started",
+          "thread_id": "thread-2"
+        }
+      },
+      "type": "lane_changed"
+    },
+    "type": "lanes"
+  }
+}

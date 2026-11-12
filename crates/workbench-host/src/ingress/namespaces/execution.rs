@@ -41,9 +41,9 @@ impl CommandHost {
 }
 
 impl CommandHost {
-    /// Run listings are read from the projection. An operation the execution
-    /// area adds later gets its own arm, answered by `self.areas.execution`;
-    /// the compiler asks for it.
+    /// The plain run listing is read from the projection; the detail queries
+    /// (roots and children, one run, goal, todo and ledger) are answered by the
+    /// execution area, which composes live and persisted runs.
     pub(in crate::ingress) fn execution_query(
         &self,
         query: &workbench_protocol::queries::Query,
@@ -53,6 +53,7 @@ impl CommandHost {
             workbench_protocol::namespaces::ExecutionQuery::ListRuns(_) => {
                 self.projection.query(query)
             }
+            _ => self.areas.execution.query(query, namespace_query),
         }
     }
 }
