@@ -348,8 +348,12 @@ impl SpawnCredits {
         let derived = self.uncollected_cohort_id.is_none() && !self.uncollected_lane_ids.is_empty();
         StoredUncollectedLanes {
             cohort_id: self.uncollected_cohort_id.clone().or_else(|| {
-                (!self.uncollected_lane_ids.is_empty())
-                    .then(|| cohort_identity(&self.uncollected_lane_ids))
+                (!self.uncollected_lane_ids.is_empty()).then(|| {
+                    cohort_identity(
+                        &self.uncollected_lane_ids,
+                        self.uncollected_cohort_generation,
+                    )
+                })
             }),
             cohort_id_derived: derived,
             uncollected_lane_open_count: self.uncollected_lane_open_count,
