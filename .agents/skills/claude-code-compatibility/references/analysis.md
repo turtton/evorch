@@ -8,8 +8,11 @@
 調査メモに次を記録する。secret や account ID は含めない。
 
 - 実行 wrapper と native binary の実体パス、binary SHA-256、隔離環境で確認した CLI version/build、OS/arch。
+  registry の tarball integrity と展開した native binary の SHA-256 は別の digest なので、混同せず、再計算した方を pin にする。
 - SDK/runtime の値と、その出所が静的解析か通信実測か。
-- OMP repository URL と full commit、evorch の HEAD。
+- OMP repository URL と full commit、evorch の HEAD。**HEAD は解析の開始時と終了時の両方**を記録する。
+  並行 merge で差分が既に対応済みになることがある（2.1.322 の調査中に新 model 対応が入った）。
+  比較には終了時（または profile を実際に更新する直前）の HEAD を使い、対応済みの項目を二重修正しない。
 - 採取 mode、model/settings、起こした操作、比較対象となる request 種別。
 
 既存 fixture の provenance に binary hash/arch 等がなければ「未記録」とする。
@@ -35,7 +38,13 @@ rg --text --only-matching --byte-offset \
   "$analysis_native_binary"
 ```
 
+binary 内の位置は **byte offset** で記録する。JS 文字列の index（UTF-16）や、UTF-8 に
+変換した文字列の位置を byte offset と混ぜない。minified の symbol は、同名が別 chunk にあり得るので
+所属 chunk の範囲も合わせて特定する。
+
 検索語は手掛かりであり、新 version で見つからない場合は構造から探す。
+特定の beta literal が 0 件でも、動的に組み立てた名前の不存在までは言えない。実際に送られた beta 名と、
+その送信条件（flag・環境・provider・latch）を、実測と静的解析で分けて記録する。
 旧 offset・minified symbol・以前の CLI flag の効果をそのまま当てはめない。
 単一関数だけで判断せず、値の生成元、caller、mode 分岐、最終 request への挿入箇所を追う。
 
@@ -64,6 +73,10 @@ UI の main、print/SDK、auxiliary、child、compaction の分岐を区別す�
 
 1. 対象 version の suffix sample、文字コード、salt/hash/seed、切り出し、除外処理、placeholder の挿入順を静的解析する。値を旧 skill から転記しない。
 2. 既知の synthetic user text を使った native request を隔離 mock で受け、**最終 serialized bytes** のまま検算する。解析用 JSON の parse/re-serialize を oracle にしない。
+   suffix の入力は **論理的な user text block** であり、wire 上の最初の text block とは限らない。native は
+   前置きの meta wrapper/reminder を user content の先頭に置くことがある（2.1.322）。どの block が
+   suffix に対応するかを、既知の text を含む block と観測した suffix の一致で確かめる。
+   これは suffix の oracle であり、最終 bytes の checksum 検算とは別に扱う。
 3. adapter が生成した対象 billing block の checksum placeholder だけを復元する。user text、schema、引数、過去 tool result の同じ文字列を置換しない。
 4. native の式から別実装で synthetic vector を作り、Rust の production 関数を期待値生成に使わない。独立 runtime、例えば確認した Bun の hash API、を使った場合は version と方法を記録する。
 5. ASCII、短い/空の入力、非 BMP 文字と片側 surrogate、空白・escaping、入れ子の routing literal、sentinel の重複を必要な差分に応じて検証する。除外した値が wire 自体から消えていないことも見る。

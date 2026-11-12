@@ -15,7 +15,7 @@ offline 調査だけの依頼や対象 binary が未入手の場合は、既存�
 
 ## 進め方
 
-1. [解析と検証](references/analysis.md) を読み、対象 native binary の実体・hash・version、OMP の full commit、evorch HEAD を記録する。wrapper と実体、調査対象と手元の一時 clone を区別する。
+1. [解析と検証](references/analysis.md) を読み、対象 native binary の実体・hash・version、OMP の full commit、evorch HEAD（解析の開始時と終了時）を記録する。tarball の integrity と展開した native の SHA-256 を区別する。wrapper と実体、調査対象と手元の一時 clone を区別する。
 2. 意味のある文字列と呼出経路から静的解析し、各差分を「native 実測」「静的解析」「OMP からの推定」「未確認」に分ける。旧 byte offset や minified symbol を流用しない。
 3. 通信の実測が必要なら [隔離採取](references/capture.md) を読む。dummy 認証・隔離設定・外向き通信遮断を用意してから、必要な request 種別だけを採取する。
 4. native の証拠と evorch の契約を比較し、採用する差分と意図して残す差分を決める。CLI/SDK/runtime、headers、billing、TLS を整合した profile として更新し、会話の途中で profile を変更しない。

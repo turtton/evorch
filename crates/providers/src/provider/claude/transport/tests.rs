@@ -26,7 +26,7 @@ fn post(transport: &ClaudeTransport, url: &str) -> wreq::RequestBuilder {
 
 fn assert_native_request_shape(hello: Vec<u8>, requests: &[Vec<u8>]) {
     let expected =
-        include_bytes!("../../../../fixtures/claude-transport/native-2.1.295-client-hello.bin");
+        include_bytes!("../../../../fixtures/claude-transport/native-2.1.322-client-hello.bin");
     assert_eq!(normalize_hello(hello), expected);
     let expected_headers: Vec<String> = serde_json::from_str(include_str!(
         "../../../../fixtures/claude-transport/native-2.1.295-shared-headers.json"

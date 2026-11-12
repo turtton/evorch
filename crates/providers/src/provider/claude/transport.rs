@@ -1,4 +1,4 @@
-//! Claude Code 2.1.295's captured TLS and HTTP/1 transport profile.
+//! Claude Code 2.1.322's captured TLS and HTTP/1 transport profile.
 
 use std::time::Duration;
 
@@ -98,7 +98,8 @@ fn tls_options() -> TlsOptions {
         .sigalgs_list(concat!(
             "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:",
             "ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:",
-            "rsa_pss_rsae_sha512:rsa_pkcs1_sha512:rsa_pkcs1_sha1"
+            "rsa_pss_rsae_sha512:rsa_pkcs1_sha512:ed25519:ecdsa_secp521r1_sha512:",
+            "rsa_pkcs1_sha1"
         ))
         .extension_permutation(
             [0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43]

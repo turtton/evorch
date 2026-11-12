@@ -325,7 +325,7 @@ async fn claude_cache_normal_turns_keep_identity_tools_and_sent_prefix_after_rot
             ("x-stainless-package-version", "0.128.0"),
             ("x-stainless-retry-count", "0"),
             ("x-stainless-runtime", "node"),
-            ("x-stainless-runtime-version", "v26.3.0"),
+            ("x-stainless-runtime-version", "v26.12.1"),
             ("x-stainless-timeout", "600"),
             ("x-app", "cli"),
             ("anthropic-dangerous-direct-browser-access", "true"),

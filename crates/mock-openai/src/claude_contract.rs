@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh64::xxh64;
 
-const BILLING_START: &str = "x-anthropic-billing-header: cc_version=2.1.295.";
+const BILLING_START: &str = "x-anthropic-billing-header: cc_version=2.1.322.";
 const BILLING_MIDDLE: &str = "; cc_entrypoint=cli; cch=";
 
 /// Validate subscription billing bytes and return the remaining model input.
@@ -197,7 +197,7 @@ fn version_suffix(text: &str) -> String {
         .map(|index| units.get(index).copied().unwrap_or(u16::from(b'0')))
         .collect();
     let sample = String::from_utf16_lossy(&selected);
-    let digest = Sha256::digest(format!("59cf53e54c78{sample}2.1.295"));
+    let digest = Sha256::digest(format!("59cf53e54c78{sample}2.1.322"));
     format!("{digest:x}")[..3].to_owned()
 }
 

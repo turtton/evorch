@@ -6,9 +6,40 @@ permissions, schemas, arguments, and stored tool names remain evorch's contracts
 
 The reference is OMP commit
 [`470b7ef`](https://github.com/can1357/oh-my-pi/tree/470b7efb67673960d37e3e64584669e6e9caad1c)
-and locally inspected Claude Code **2.1.295**, built on 2026-10-08. The current
-profile uses its SDK **0.128.0** and runtime **v26.3.0**. OMP at the reference
-commit pins CLI 2.1.280 and SDK 0.112.1; these older constants were not copied.
+and an isolated capture of Claude Code **2.1.322**
+(`@anthropic-ai/claude-code-linux-x64`, native binary SHA-256
+`bfb3703ad5380242328459bc62ada4bde8ae7ba57c6e1eeadb9c00e08874c478`, static build
+time 2026-11-10T00:15:08Z). The current profile uses CLI **2.1.322**, SDK **0.128.0**
+(unchanged since 2.1.295) and runtime **v26.12.1**. The OMP commit was not
+re-analyzed for 2.1.322; OMP at the reference commit pins CLI 2.1.280 and
+SDK 0.112.1, and these older constants were not copied. The package registry's
+tarball integrity value and the extracted native binary's SHA-256 are different
+digests; only the latter identifies the inspected executable.
+
+### 2.1.322 capture conditions and evidence
+
+Linux x86_64 only, with a dummy OAuth token and no real endpoint, account or
+normal Claude configuration. The native binary ran in unprivileged user, network,
+PID, IPC and UTS namespaces with a read-only Nix store, a synthetic home and
+workspace, and a cleared environment. Before every launch a positive control
+required that only `lo` existed with no routes, a loopback TCP connect succeeded, and
+direct IPv4/IPv6 connections failed with `ENETUNREACH`; any failure stopped the run.
+A CONNECT proxy accepted only `api.anthropic.com:443` and forwarded it, without DNS,
+to a fixed loopback TLS listener whose dedicated CA was trusted through
+`NODE_EXTRA_CA_CERTS` with certificate and hostname verification enabled.
+Nine Messages requests were observed: an interactive main call (default model and
+`claude-fable-5-2` with `xhigh`), print/SDK calls, a Read tool continuation
+and a WebSearch main/auxiliary/main sequence. The settings/policy endpoints returned
+synthetic `{}`, so remote feature flags, plan state and managed policy were not
+reproduced: the absence of a beta in these requests does not show that a real
+account never sends it. The raw requests, prompts, tool definitions and credentials
+are not stored in the repository.
+
+| Evidence | Findings |
+| --- | --- |
+| Native measurement | CLI/runtime/User-Agent, ClientHello, header casing/order, beta list, body field order, billing checksum and suffix, metadata and session header equality |
+| Static analysis | Conditions of cache keepalive, thinking resumption and cache eviction betas; effort/display mapping |
+| Not measured | Real endpoint acceptance, subscription eligibility, billing or usage-credit routing, actual cache hits, forced `tool_choice`, child/compaction requests, features that need real flags, other OS/architectures, TLS session resumption on a new connection |
 
 ## Compatibility boundary
 
@@ -82,7 +113,17 @@ verified native agent catalogue mapping.
 ## TLS and HTTP reference
 
 The subscription client uses pinned `wreq` 0.16.1 with a dedicated BoringSSL
-profile. The reference Linux ClientHello is 1,504 bytes. Local comparison
+profile. The reference Linux ClientHello (2.1.322) is 1,508 bytes. Its
+`signature_algorithms` list is, in order: ECDSA P-256/SHA-256, RSA-PSS-RSAE
+SHA-256, RSA PKCS#1 SHA-256, ECDSA P-384/SHA-384, RSA-PSS-RSAE SHA-384, RSA PKCS#1
+SHA-384, RSA-PSS-RSAE SHA-512, RSA PKCS#1 SHA-512, Ed25519 (`0x0807`), ECDSA
+P-521/SHA-512 (`0x0603`), RSA PKCS#1 SHA-1. The last two before SHA-1 are the only
+difference from the 2.1.295 reference (1,504 bytes): with those two removed the
+normalized handshake and the TLS record boundaries were identical. The fixture
+was derived from the native capture, not from Rust output. The pinned BoringSSL
+build accepts the names `ed25519` and `ecdsa_secp521r1_sha512` in its signature
+algorithm list and emits them in that order. The advertised list only offers
+algorithms; certificate and hostname verification are unchanged. Local comparison
 excludes only the random value, session ID, and key-share public keys, then
 compares every remaining byte. Header casing and order also follow the captured
 CLI request. The generic API client continues to use its existing reqwest path.
@@ -105,9 +146,12 @@ every platform, TLS resumption behavior, or future service-side classification.
 Version suffixes select UTF-16 code units 4, 7, and 20 from the first wire user
 message's first text block, substituting `0` when absent. SHA-256 of salt
 `59cf53e54c78`, that sample, and the CLI version supplies the first three hex
-digits. `Reply LOCAL_CAPTURE_OK.` with version 2.1.295 produces `bef`.
+digits. `Reply LOCAL_CAPTURE_OK.` produces `951` with version 2.1.322 (and `bef`
+with 2.1.295), so a version update always changes the suffix. In a native request
+the first wire user block can be a meta wrapper or reminder; the suffix sample is
+the logical user text block, not necessarily the first block.
 
-The native 2.1.295 checksum differs from OMP's older whole-body algorithm.
+The native checksum (unchanged from 2.1.295 to 2.1.322) differs from OMP's older whole-body algorithm.
 It uses XXHash64 seed `0x4d659218e32a3268` and the low twenty bits, excluding
 literal model values and routing fields (`max_tokens`, `fallbacks`, and
 `fallback_credit_token`) **from hashing only**. The transmitted fields are kept.
@@ -117,8 +161,11 @@ strings in user text, tool schemas, arguments, and historical results stay intac
 A local HTTPS capture of the installed native CLI produced a 63,019-byte
 request with checksum `bf7d5`. Restoring its billing placeholder and applying
 the native exclusions reproduced `bf7d5` with both Bun and Rust; OMP's older
-whole-body calculation produced `728b0`. Fixed independent synthetic vectors
-are checked into the fingerprint tests. The captured CLI prompt and bundled
+whole-body calculation produced `728b0`. In the 2.1.322 capture all nine Messages requests reproduced
+their checksum and suffix with a standalone BigInt XXH64 and a C XXH64 library
+(xxHash 0.8.3 through Python ctypes); none used a parse/re-serialize oracle. Fixed independent synthetic vectors
+for 2.1.295 and 2.1.322 are checked into the fingerprint tests. Fallback fields and
+exotic inputs (lone surrogates, extreme values) were not exercised against 2.1.322. The captured CLI prompt and bundled
 tool definitions are not copied into the repository.
 
 ## Cache and signed replay
@@ -179,6 +226,31 @@ describes paid overflow after included limits are reached and usage credits are
 enabled. This compatibility adapter does not guarantee billing eligibility or
 change the account's usage-credit settings.
 
+## Intentional differences from native 2.1.322
+
+The profile aligns the CLI/SDK/runtime identity and the TLS handshake; it does not
+claim every native behavior. These differences were measured against 2.1.322 and
+are deliberately kept, because each needs a stateful feature or a provenance
+evorch does not have, and adding only the header or beta would risk rejection or
+rewriting an already-sent prefix:
+
+| Native 2.1.322 | evorch |
+| --- | --- |
+| Per-message `output_config.effort` in a `role: system` message (`per-turn-control`, `mid-conversation-*`, `tool-provenance`, `thinking-binding-controls` betas) | Top-level effort only; those betas are not sent |
+| `cache-keepalive`, `thinking-resumption`, `prompt-caching-evict` betas (not sent in the nine observed requests; conditions are gated by flags/state) | Not implemented, not advertised |
+| `x-claude-code-sandy-plover` (empty list, then the names of used tools) | Not sent; the header would need evorch's real wire tool names and scope |
+| `thinking.display` `updates` (interactive) or omitted (print) with its beta | Adaptive thinking requests `summarized`; the beta is not sent |
+| Default effort `medium` always explicit | No effort is sent unless a model/user setting asks for it |
+| `metadata.user_id` JSON key order `device_id`, `account_uuid`, `session_id` | `device_id`, `session_id`, `account_uuid`; IDs and the session mapping are kept, never rotated for ordering |
+| `max_tokens` 128000 on every model | Model catalog and user settings decide the limit |
+| `cc_entrypoint`/turn origin/prompt index from the real UI | Provenance only when known; never relabeled as human input |
+| WebSearch auxiliary request with automatic tool choice | Same; forced tool choice for other models was not measured |
+
+The WebSearch auxiliary request in the 2.1.322 capture used
+`web_search_20250305`, at most eight uses, automatic tool choice, no cache markers
+and no thinking. The earlier note about a forced choice comes from static analysis
+of 2.1.295 and was not re-measured here.
+
 ## Updating the profile
 
 Use the repository's [Claude Code compatibility skill](../.agents/skills/claude-code-compatibility/SKILL.md)
@@ -186,7 +258,9 @@ for repeatable analysis and isolated captures. Review and improve the skill's
 procedures and offline helper during each follow-up; keep current profile values
 in this document and the implementation.
 
-1. Pin the new CLI version and OMP commit. Inspect an isolated installation;
+1. Pin the new CLI version, the extracted native binary's SHA-256, and the OMP
+   commit; also record the evorch HEAD at the start and the end of the analysis, because
+   concurrent merges can already cover a difference. Inspect an isolated installation;
    never use a real credential or the user's normal Claude configuration for
    captures. Direct a dummy token to a loopback mock. For the official-host
    branch, use a locally trusted TLS mock and a CONNECT proxy that rejects every

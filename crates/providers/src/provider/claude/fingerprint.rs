@@ -45,7 +45,7 @@ pub(crate) fn finalize_billing_checksum(body: &mut [u8]) -> Result<(), ProviderE
     Ok(())
 }
 
-// Claude Code 2.1.295 hashes raw bytes while omitting routing fields. These literal
+// Claude Code 2.1.295 and 2.1.322 hash raw bytes while omitting routing fields. These literal
 // matches intentionally apply inside schemas too; parsing and reserializing changes cch.
 fn native_checksum(body: &[u8]) -> u64 {
     let mut hash = Xxh64::new(CHECKSUM_SEED);
