@@ -68,3 +68,11 @@ Role を personality ではなく capability boundary とする。
 - 評価用ツールはユーザー DB と `<user config dir>/eval/` を読む host tool で、GUI プロセスが executor に登録し、run ごとの executor へ引き継ぐ。capability で Evaluator 以外には公開しない。サンプルの保存・解除は DB への書き込みとして `fs_write` を宣言し、副作用のあるツールとして並行実行しない。
 - `eval_start` は `evorch eval run` の起動として `process_spawn` を、`eval_apply_config` はユーザー設定の書き込みとして `fs_write` を宣言する。どちらも実行前に tool 自身が承認ゲートでユーザーの承認を待ち、model はそれを省略できない。書き込めるのは設定保存処理が扱う `agents` / `routing` / 既存の `role_profiles.<name>` の同じ節に限る。
 - Orchestrator は Evaluator へ委譲できる。headless 実行はユーザー DB を持たないため評価用ツールを登録しない。
+
+## 2026-11-12 確定: Reviewer に shell を追加し、read-only 運用は指示で行う（PR #567）
+
+- `Role::Reviewer` の許可ツールに `shell` を追加し、`read` / `grep` / `shell` / `git_diff` / `run_js` とする（全ロール共通の ledger / user question 操作は引き続き利用できる）。`write` / `edit` / `apply_patch` / `delegate` / `skill_load`・AgentRun 間メッセージ操作・Web ツールは持たせない。
+- サンドボックスは変更せず、ワークスペースと許可ディレクトリ（allowed directories）を変更しない read-only 運用は技術的強制ではなく Reviewer の指示（`role-reviewer`）で求める。`shell` は差分・ログの確認と対象を絞ったテスト実行に限り、ファイルの編集、commit / checkout など Git 状態を変える操作、worktree の新規作成は行わず、生成物やログは `$TMPDIR` に置く。
+- `shell` を持つため、既存の `ExecutionPolicy::allowed_access` の導出（[ADR 0032](0032-project-allowed-directories.md)）により通常の Reviewer の allowed directories は `ReadWrite` になる。
+- 内部用途の Reviewer（`RunPurpose::ThreadGoalReview` / `LaneVerification` / `LessonReview`）は目的別のツール集合で上書きされ、`shell` は付かない。
+- あわせて Reviewer の `plan-review` カテゴリを実装前の設計・計画レビュー（design and plan review）に拡張し、承認時は合意済み設計制約の一覧を返す。
