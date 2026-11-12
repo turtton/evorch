@@ -22,11 +22,14 @@ storage = { path = "../storage" }
 secret-guard = { path = "../secret-guard" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time"] }
 uuid = { workspace = true }
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+model = { path = "../model" }
+runtime = { path = "../runtime", features = ["recovery-test-support"] }
 rusqlite = { workspace = true }
 tracing-subscriber = { workspace = true }
 wiremock = { workspace = true }

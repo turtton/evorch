@@ -141,3 +141,6 @@ pub use skill_source::{SkillCatalogSource, SourceSnapshot};
 pub use state::{InterruptKind, RunInterrupt, RunState, StopScope, is_valid_transition};
 
 mod continuity;
+
+#[cfg(feature = "recovery-test-support")]
+pub use runtime::RecoveryActivationBoundary;

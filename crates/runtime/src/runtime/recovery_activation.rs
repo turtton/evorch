@@ -15,6 +15,34 @@ mod models;
 mod relations;
 pub use models::RecoveryModels;
 
+#[cfg(feature = "recovery-test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryActivationBoundary {
+    Prepared,
+    BeforeFullAck,
+    AfterFullAck,
+}
+#[cfg(feature = "recovery-test-support")]
+pub(crate) type RecoveryActivationProbe = Arc<dyn Fn(RecoveryActivationBoundary) + Send + Sync>;
+#[cfg(feature = "recovery-test-support")]
+impl AgentRuntime {
+    /// Local explicit test seam, never installed from environment or persistence.
+    pub fn set_recovery_activation_probe(
+        &self,
+        probe: impl Fn(RecoveryActivationBoundary) + Send + Sync + 'static,
+    ) -> Result<(), RuntimeError> {
+        self.shared
+            .recovery_probe
+            .set(Arc::new(probe))
+            .map_err(|_| error("recovery probe already set"))
+    }
+    fn recovery_activation_probe(&self, boundary: RecoveryActivationBoundary) {
+        if let Some(probe) = self.shared.recovery_probe.get() {
+            probe(boundary);
+        }
+    }
+}
+
 struct RecoverySource {
     record: RunRecoveryRecord,
     intent: ResumeIntent,
@@ -319,6 +347,8 @@ impl AgentRuntime {
                 ownership_root: ownership_root.to_path_buf(),
             });
         }
+        #[cfg(feature = "recovery-test-support")]
+        self.recovery_activation_probe(RecoveryActivationBoundary::Prepared);
         Ok(PausedRecoveryComponent {
             runtime: Arc::downgrade(&self.shared),
             claim,

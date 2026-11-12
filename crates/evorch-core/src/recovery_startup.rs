@@ -1,5 +1,5 @@
-//! Core-only staged coordinator. NOT connected to production main: automatic
-//! activation remains disabled until cross-process crash/cache e2e coverage lands.
+//! Core-only startup coordinator, installed by the production core bootstrap.
+//! Legacy embedded hosts do not run graph recovery.
 //! The caller must complete maintenance, downgrade/reopen under shared leases,
 //! issue startup evidence, attach RunStore (high watermarks), then preload catalog.
 use runtime::{
@@ -43,7 +43,8 @@ pub struct StartupScan {
     pub components: Vec<ComponentStatus>,
     pub unreadable_claims: bool,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StartupBlocked {
     OwnerBlocked,
     CurrentBindingRequired,
@@ -73,10 +74,10 @@ pub struct StartupInputs<'a> {
     pub storage: &'a storage::StorageConfig,
     pub writer: &'a storage::StorageHandle,
     pub options: &'a BootstrapOptions,
-    pub projects: &'a dyn ProjectDirectory,
+    pub projects: &'a (dyn ProjectDirectory + Sync),
 }
 /// Owns the process-local lease proof and frozen lane exclusions. No polling task
-/// is detached; owner-blocked retry/lifecycle wiring is deliberately a later stage.
+/// is detached; the core's managed service owns owner-blocked retries.
 pub struct StartupCoordinator<'a> {
     inputs: StartupInputs<'a>,
     startup: storage::RecoveryStartupComplete,
@@ -173,6 +174,101 @@ impl<'a> StartupCoordinator<'a> {
             unreadable_claims,
         })
     }
+    /// Conditional durable release even when adoption/descriptor validation failed.
+    /// Only current binding/owner grants mutation authority; the writer atomically
+    /// proves every member unexecuted. Activated/mixed/corrupt claims stay quarantined.
+    pub fn decline(&self, id: &str) -> Result<(), StartupBlocked> {
+        let scan = self.scan()?;
+        if !scan
+            .components
+            .iter()
+            .any(|c| c.manifest_id == id && c.disposition == Disposition::Prepared)
+        {
+            return Err(StartupBlocked::NeedsAttention);
+        }
+        let manifest = self.manifest(id)?;
+        let records = manifest
+            .members
+            .iter()
+            .map(|m| {
+                serde_json::from_str::<RunRecoveryRecord>(&m.record_json)
+                    .map_err(|_| StartupBlocked::NeedsAttention)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let resume = manifest
+            .members
+            .iter()
+            .filter(|m| m.resume)
+            .map(|m| {
+                m.run_id
+                    .parse::<RunId>()
+                    .map_err(|_| StartupBlocked::NeedsAttention)
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let bindings = bindings::load(self.inputs.storage, self.inputs.projects)
+            .map_err(|_| StartupBlocked::StorageUnavailable)?;
+        let authority = CurrentAuthorityProvider {
+            runtime: self.inputs.runtime,
+            owner: self.inputs.owner,
+            bindings: &bindings,
+            storage: self.inputs.storage,
+            writer: self.inputs.writer,
+            config_dir: &self.inputs.options.config_dir,
+        }
+        .resolve_for_release(&records, &resume)?;
+        let claim = self.claim(id)?.ok_or(StartupBlocked::NeedsAttention)?;
+        // One registry transaction per path; repeated child permits on the same
+        // registry must not deadlock by reacquiring its mutation lock.
+        let permits = authority
+            .members
+            .values()
+            .map(|c| c.ownership.as_ref().ok_or(StartupBlocked::OwnerBlocked))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut paths = std::collections::BTreeMap::new();
+        for permit in &permits {
+            paths.entry(permit.registry_path.clone()).or_insert(*permit);
+        }
+        {
+            let mut guards = paths
+                .values()
+                .map(|p| p.mutation_guard().map_err(|_| StartupBlocked::OwnerBlocked))
+                .collect::<Result<Vec<_>, _>>()?;
+            // All distinct generations, not just the first thread, are checked
+            // under the same registry guard before crossing the writer boundary.
+            for permit in &permits {
+                let position = paths
+                    .keys()
+                    .position(|path| path == &permit.registry_path)
+                    .ok_or(StartupBlocked::OwnerBlocked)?;
+                guards[position]
+                    .guard_generation(permit)
+                    .map_err(|_| StartupBlocked::OwnerBlocked)?;
+            }
+            self.inputs
+                .writer
+                .release_prepared_claim_if_unexecuted(
+                    claim.claim_id.clone(),
+                    "core_startup_declined".into(),
+                )
+                .map_err(|_| StartupBlocked::NeedsAttention)?;
+        }
+        if let Ok(runtime::RecoveryClaimHandle::Quarantined(handle)) =
+            self.inputs.runtime.recover_recovery_claim(
+                &claim.claim_id,
+                self.startup
+                    .try_clone()
+                    .map_err(|_| StartupBlocked::StorageUnavailable)?,
+                &self.inputs.options.ownership_root,
+                &authority,
+            )
+        {
+            self.inputs
+                .runtime
+                .cleanup_recovery_claim(&handle)
+                .map_err(|_| StartupBlocked::NeedsAttention)?;
+        }
+        Ok(())
+    }
     fn claim(&self, id: &str) -> Result<Option<storage::recovery::RecoveryClaim>, StartupBlocked> {
         let claims = storage::Database::open(self.inputs.storage)
             .map_err(|_| StartupBlocked::StorageUnavailable)?
@@ -248,6 +344,24 @@ impl<'a> StartupCoordinator<'a> {
             config_dir: &self.inputs.options.config_dir,
         }
         .resolve(&records, &resume)?;
+        // This trusted binding comes from the current host directory/permit,
+        // never from a saved recipe. Install it before the run loop freezes its
+        // tools, or a restored conversation silently loses todo_write.
+        for record in records.iter().filter(|record| record.parent.is_none()) {
+            if let Some(config) = authority.members.get(&record.run_id) {
+                let permit = config
+                    .ownership
+                    .as_ref()
+                    .ok_or(StartupBlocked::OwnerBlocked)?;
+                let _generation = permit
+                    .mutation_guard()
+                    .map_err(|_| StartupBlocked::OwnerBlocked)?;
+                self.inputs
+                    .runtime
+                    .bind_thread_root(&permit.thread_id, record.run_id)
+                    .map_err(|_| StartupBlocked::NeedsAttention)?;
+            }
+        }
         let models = self.catalog.pin(self.inputs.runtime, &authority);
         let existing = self.claim(id)?;
         let claim = if let Some(claim) = existing {
@@ -332,7 +446,7 @@ impl PreparedStartupComponent {
             )
             .map_err(|_| StartupBlocked::NeedsAttention)
     }
-    /// Explicit only. Production main does NOT invoke this during startup.
+    /// Activate only after current authority and full-component preparation.
     pub fn activate(self, runtime: &AgentRuntime) -> Result<Vec<RunId>, StartupBlocked> {
         runtime
             .activate_component_with_models(self.paused, self.authority, self.models)

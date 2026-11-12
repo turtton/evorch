@@ -42,6 +42,31 @@ impl RecoveryCatalog {
         }
         Ok(current)
     }
+    /// Publish on current registered projects BEFORE graph scan. No saved recipe
+    /// or ownership claim is needed to load a model's public catalog.
+    pub fn publish_projects(
+        &self,
+        runtime: &AgentRuntime,
+        projects: &dyn crate::projects::ProjectDirectory,
+    ) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, root) in projects.entries() {
+            let model = runtime.recovery_model_for_catalog(&runtime::RunConfig {
+                project_root: Some(root),
+                ..Default::default()
+            });
+            if state.models.iter().any(|known| Arc::ptr_eq(known, &model)) {
+                continue;
+            }
+            if let Some(catalog) = &state.catalog {
+                model.publish_model_catalog(catalog.clone());
+            }
+            state.models.push(model);
+        }
+    }
     pub fn is_available(&self) -> bool {
         self.0
             .lock()

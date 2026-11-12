@@ -2,6 +2,7 @@ use evorch_core::{
     backend::HostBackend,
     instance::{ConfigIdentity, Instance, InstanceError, LaunchGuard},
     lifecycle::IdleGrace,
+    recovery_service::CoreGraphRecovery,
     unix,
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -72,11 +73,14 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
         .ok_or("cannot resolve ownership state directory")?
         .join("evorch");
     // Same owner registry as the unchanged GUI (ADR 0024).
-    let mut host = BootstrappedHost::open(BootstrapOptions {
-        config_dir,
-        ownership_root: state_dir.join("threads"),
-        project_root: std::env::current_dir()?,
-    })
+    let mut host = BootstrappedHost::open_for_core(
+        BootstrapOptions {
+            config_dir,
+            ownership_root: state_dir.join("threads"),
+            project_root: std::env::current_dir()?,
+        },
+        &CoreGraphRecovery,
+    )
     .await?;
     let backend = Arc::new(HostBackend::new(
         host.host.clone(),

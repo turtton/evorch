@@ -57,6 +57,15 @@ impl RecoveryModels {
     }
 }
 impl AgentRuntime {
+    /// Catalog publication is not execution authority. Use the same canonical
+    /// project context and concrete generation that recovery will later pin.
+    pub fn recovery_model_for_catalog(&self, config: &RunConfig) -> Arc<dyn AgentModel> {
+        let model = self.shared.model_for(config);
+        model
+            .recovery_snapshot()
+            .map_or(model, |snapshot| snapshot.model)
+    }
+
     /// Resolve exactly the canonical project context used by execution. A
     /// SwitchableModel's wrapper identity alone is not a configuration fence.
     pub fn pin_recovery_models(&self, authority: &CurrentRecoveryAuthority) -> RecoveryModels {

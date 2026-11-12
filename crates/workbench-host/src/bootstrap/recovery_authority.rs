@@ -39,15 +39,34 @@ impl CurrentAuthorityProvider<'_> {
         records: &[RunRecoveryRecord],
         resume: &BTreeSet<RunId>,
     ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
+        self.resolve_current(records, resume, true)
+    }
+
+    /// Release grants no execution capability. Current binding/team/owner checks
+    /// still apply, but a rejected continuation selector is itself a release reason.
+    pub fn resolve_for_release(
+        &self,
+        records: &[RunRecoveryRecord],
+        resume: &BTreeSet<RunId>,
+    ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
+        self.resolve_current(records, resume, false)
+    }
+
+    fn resolve_current(
+        &self,
+        records: &[RunRecoveryRecord],
+        resume: &BTreeSet<RunId>,
+        execution: bool,
+    ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
         let mut roots = BTreeMap::new();
         for record in records
             .iter()
             .filter(|record| resume.contains(&record.run_id))
         {
-            if record.recipe.settings_reference != CORE_RECOVERY_SETTINGS_REFERENCE {
+            if execution && record.recipe.settings_reference != CORE_RECOVERY_SETTINGS_REFERENCE {
                 return Err(CurrentAuthorityProblem::CurrentSettingsRequired);
             }
-            if !matches!(record.recipe.policy, ResumePolicy::CoreOwned) {
+            if execution && !matches!(record.recipe.policy, ResumePolicy::CoreOwned) {
                 return Err(CurrentAuthorityProblem::CliContinuityRequired);
             }
             let thread = record

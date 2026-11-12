@@ -604,13 +604,22 @@ async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool, manual_r
     assert_eq!(lane.generation, 1);
     assert!(f.handle().unstarted_lanes(10).unwrap().is_empty());
     let restarted_model = Arc::new(Model::default());
-    let mut restarted = f
-        .core(
-            restarted_model.clone(),
-            Arc::new(FakePullRequestSource::new()),
-            Arc::new(Logs::default()),
-        )
-        .await;
+    // A new core uses the graph-aware bootstrap; already-started legacy seeds
+    // are still NoCommittedManifest and must never acquire a second admission.
+    let mut restarted = BootstrappedHost::open_for_core_with_test_seams(
+        BootstrapOptions {
+            config_dir: f.root.clone(),
+            ownership_root: f.root.join("owners"),
+            project_root: f.dir.path().canonicalize().unwrap(),
+        },
+        TestSeams {
+            model: restarted_model.clone(),
+            sandbox: Arc::new(Direct),
+        },
+        &evorch_core::recovery_service::CoreGraphRecovery,
+    )
+    .await
+    .unwrap();
     restarted.shutdown().await.unwrap();
     assert_eq!(restarted_model.calls.load(Ordering::SeqCst), 0);
     assert_eq!(
