@@ -22,6 +22,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let result = match method {
             "server/discover" => {
+                // With `HANG` set the server tells the test that the handshake
+                // reached it and then never answers, so a test can cancel
+                // exactly while the handshake is open.
+                if std::env::var_os("HANG").is_some() {
+                    writeln!(control, "{}", json!({"event":"discover"}))?;
+                    continue;
+                }
                 json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"})
             }
             "tools/list" => {

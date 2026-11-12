@@ -1484,6 +1484,7 @@ dependencies = [
  "core-instance",
  "core-launcher",
  "egui",
+ "egui_kittest",
  "event-bus",
  "evorch-core",
  "gui",

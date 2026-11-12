@@ -1,12 +1,13 @@
-//! Mcp namespace adapter (reserved). The namespace has no operations yet,
-//! so its command and query types are empty and these bodies are unreachable;
-//! the PR that implements it replaces them, without editing the shared router.
-use workbench_protocol::commands::CommandReply;
+//! Mcp namespace adapter: translates the protocol's operations into the `mcp`
+//! area service (`self.areas.mcp`). A command only names its project; the
+//! directory is resolved here, from the project directory the core owns.
+use workbench_protocol::commands::{CommandDisposition, CommandReply, CommandResult};
 use workbench_protocol::envelope::Provenance;
 use workbench_protocol::errors::WorkbenchError;
-use workbench_protocol::namespaces::mcp::{McpCommand, McpQuery};
+use workbench_protocol::namespaces::mcp::{McpCommand, McpQuery, McpReply, McpResult};
 use workbench_protocol::queries::{Query, QueryReply};
 
+use crate::areas::mcp::project_of;
 use crate::ingress::CommandHost;
 
 impl CommandHost {
@@ -15,7 +16,16 @@ impl CommandHost {
         command: McpCommand,
         _provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
-        match command {}
+        let root = project_of(&command)
+            .map(|project| self.project_root(project))
+            .transpose()?;
+        let submitted = self.areas.mcp.submit(command, root)?;
+        let mut reply =
+            CommandReply::with_result(CommandResult::Mcp(McpResult::Operation(submitted.view)));
+        if submitted.already_applied {
+            reply.disposition = CommandDisposition::AlreadyApplied;
+        }
+        Ok(reply)
     }
 
     pub(in crate::ingress) fn mcp_query(
@@ -23,6 +33,18 @@ impl CommandHost {
         _query: &Query,
         query: &McpQuery,
     ) -> Result<QueryReply, WorkbenchError> {
-        match *query {}
+        let mcp = &self.areas.mcp;
+        Ok(QueryReply::Mcp(match query {
+            McpQuery::GetSettings { project } => {
+                self.project_root(project)?;
+                McpReply::Settings(Box::new(mcp.settings(project)?))
+            }
+            McpQuery::GetOperation { operation_id } => {
+                McpReply::Operation(mcp.operation(operation_id)?)
+            }
+            McpQuery::ListOperations { project } => McpReply::Operations {
+                operations: mcp.operations(project.as_ref())?,
+            },
+        }))
     }
 }

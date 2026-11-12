@@ -71,12 +71,16 @@ enum Pending {
 
 impl Pending {
     fn rejected(&self, state: &mut Shared, error: &str) {
+        self.rejected_with(state, FeatureError::new(error));
+    }
+
+    fn rejected_with(&self, state: &mut Shared, error: FeatureError) {
         match self {
-            Self::Feature { feature, tag } => state.features.reply(
-                *feature,
-                *tag,
-                FeatureReply::Command(Err(FeatureError::new(error))),
-            ),
+            Self::Feature { feature, tag } => {
+                state
+                    .features
+                    .reply(*feature, *tag, FeatureReply::Command(Err(error)));
+            }
             Self::Command(Some((thread, _))) => {
                 state.sending.remove(thread);
             }
@@ -261,7 +265,7 @@ pub async fn serve(
                                     send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Feature { feature, tag }).await;
                                 }
                                 FeatureRequest::Query(query) => {
-                                    let result = client.query(query).await.map_err(|e| FeatureError::new(e.to_string()));
+                                    let result = client.query(query).await.map_err(|e| feature_error(&e));
                                     update(&shared, &ctx, |s| s.features.reply(feature, tag, FeatureReply::Query(result)));
                                 }
                             },
@@ -411,6 +415,14 @@ async fn reconcile_uncertain(
 
 /// Send one command. A lost reply is reconciled after the next connect through
 /// its receipt, never replayed.
+fn feature_error(error: &ClientError) -> FeatureError {
+    let refused = FeatureError::new(error.to_string());
+    match error {
+        ClientError::Server(server) => refused.with_code(server.code),
+        _ => refused,
+    }
+}
+
 async fn send_command(
     client: &WorkbenchClient,
     shared: &Arc<Mutex<Shared>>,
@@ -438,7 +450,7 @@ async fn send_command(
             });
         }
         Err(e) => update(shared, ctx, |s| {
-            pending.rejected(s, &e.to_string());
+            pending.rejected_with(s, feature_error(&e));
             s.status = e.to_string();
         }),
     }
