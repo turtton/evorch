@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use tempfile::TempDir;
-use workspace_ui::{ProjectId, SidebarState, ThreadId};
+use workspace_state::{ProjectId, SidebarState, ThreadId};
 
 fn base_state(dir: &TempDir) -> (SidebarState, ProjectId) {
     let project = ProjectId::new("project");
@@ -21,7 +21,7 @@ fn base_state(dir: &TempDir) -> (SidebarState, ProjectId) {
     (sidebar, project)
 }
 
-fn thread<'a>(sidebar: &'a SidebarState, id: &str) -> &'a workspace_ui::ThreadRecord {
+fn thread<'a>(sidebar: &'a SidebarState, id: &str) -> &'a workspace_state::ThreadRecord {
     sidebar
         .threads
         .iter()

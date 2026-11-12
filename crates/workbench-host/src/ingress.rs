@@ -75,15 +75,26 @@ impl CommandHost {
     /// Reserve an absent thread for a new chat, after resolving its project.
     /// This never claims or hands off an existing owner row, even a released one.
     pub fn reserve_new_chat_thread(&self, send: &SendChat) -> Result<(), WorkbenchError> {
-        self.reserve_new_thread(&send.project, &send.thread)
+        self.reserve_new_thread(
+            &send.project,
+            &send.thread,
+            &send.text,
+            send.composer_role == workbench_protocol::commands::ComposerRole::Orchestrator,
+            send.fork_seed
+                .as_ref()
+                .map(|seed| (seed.source_run_id.to_string(), seed.context_len.get())),
+        )
     }
 
     fn reserve_new_thread(
         &self,
         project: &ProjectId,
         thread: &workbench_protocol::ids::ThreadId,
+        title_hint: &str,
+        orchestrator: bool,
+        fork: Option<(String, u64)>,
     ) -> Result<(), WorkbenchError> {
-        self.project_root(project)?;
+        let root = self.project_root(project)?;
         if let Some(owner) = self.service.ownership() {
             match owner.attach(thread.as_str()) {
                 Ok(_) => (),
@@ -100,7 +111,20 @@ impl CommandHost {
                 }
             }
         }
-        Ok(())
+        // The conversation is the core's own now: list it in the sidebar, under
+        // the same lock and file as every other sidebar write. Idempotent, and
+        // nothing when the workspace service is not wired (a desktop that lists
+        // its own threads).
+        self.areas
+            .workspace
+            .register_thread(&crate::areas::workspace::NewThread {
+                project,
+                thread,
+                title_hint,
+                project_root: Some(root),
+                orchestrator,
+                fork,
+            })
     }
 
     pub fn new(service: CommandService) -> Self {
@@ -126,10 +150,30 @@ impl CommandHost {
         self
     }
 
+    /// Makes the project directory and the projection follow the projects the
+    /// workspace service holds: the roots runs work in, and the saved names.
+    ///
+    /// # Errors
+    /// The sidebar could not be read, or the projection could not be read again.
+    pub(crate) fn sync_projects(&mut self) -> Result<(), WorkbenchError> {
+        let entries = self.areas.workspace.project_entries()?;
+        let mut names = std::collections::BTreeMap::new();
+        for (id, root, name) in entries {
+            self.projects.upsert(&id, root);
+            names.insert(id.as_str().to_owned(), name);
+        }
+        self.projection
+            .configure_projects(self.projects.entries(), names)
+    }
+
     /// Install the area services, constructed from the bootstrap's handles
-    /// (the projection they publish through is [`Self::projection`]).
+    /// (the projection they publish through is [`Self::projection`]). The
+    /// projects the saved sidebar holds join the project directory.
     pub fn with_areas(mut self, areas: crate::areas::Areas) -> Self {
         self.areas = areas;
+        if let Err(error) = self.sync_projects() {
+            tracing::warn!(?error.code, "the saved projects were not read into the project directory");
+        }
         self
     }
 

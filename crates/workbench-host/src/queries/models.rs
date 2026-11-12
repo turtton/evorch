@@ -59,6 +59,7 @@ fn saved_phase(value: &str) -> RunPhase {
 pub(crate) fn collect(
     runtime: &AgentRuntime,
     projects: &[(ProjectId, PathBuf)],
+    names: &BTreeMap<String, String>,
 ) -> Result<Models, storage::StorageError> {
     let mut m = Models::default();
     let live = runtime.list_agents();
@@ -216,7 +217,10 @@ pub(crate) fn collect(
     for (id, _) in projects {
         let mut project = ProjectSummary {
             id: id.clone(),
-            display_name: text(id.as_str(), 256),
+            display_name: text(
+                names.get(id.as_str()).map_or(id.as_str(), String::as_str),
+                256,
+            ),
             thread_count: m
                 .threads
                 .values()

@@ -141,23 +141,34 @@ fn view<'a>(
 }
 
 #[test]
-fn the_shipped_placeholders_are_never_offered_rendered_or_replacing_the_selector() {
+fn only_the_implemented_workspace_is_offered_and_the_other_placeholders_stay_silent() {
     let mut features = Features::default();
     let (cache, selection) = (Cache::default(), Selection::default());
-    // Only implemented areas are offered; MCP is the one shipped so far, and
-    // without a selected project it asks for nothing.
+    // Only implemented areas are offered: the workspace and MCP (in slot
+    // order). Without a selected project MCP asks for nothing.
     assert_eq!(
         features.available(true, &Capability::IMPLEMENTED),
-        [FeatureId::Mcp]
+        [FeatureId::Workspace, FeatureId::Mcp]
+    );
+    assert!(
+        features
+            .available(false, &Capability::IMPLEMENTED)
+            .is_empty()
     );
     run_ui(|ui| {
         let v = view(true, &Capability::IMPLEMENTED, &cache, &selection);
         let frame = features.render(ui, v);
-        assert!(frame.actions.is_empty() && frame.navigation.is_empty());
-        // The built-in selector stays: nothing replaced it and nothing was drawn.
+        assert!(
+            frame
+                .actions
+                .iter()
+                .all(|a| a.feature == FeatureId::Workspace),
+            "a placeholder never sends anything"
+        );
+        assert!(frame.navigation.is_empty());
         let outcome = features.render_selector(ui, v);
-        assert!(!outcome.replaced);
-        assert!(outcome.frame.actions.is_empty() && outcome.frame.navigation.is_empty());
+        assert!(outcome.replaced, "the workspace feature draws the selector");
+        assert!(outcome.frame.navigation.is_empty());
     });
 }
 

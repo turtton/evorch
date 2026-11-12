@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use tempfile::tempdir;
-use workspace_ui::{Membership, ProjectError, ProjectId, SidebarState, TrustState};
+use workspace_state::{Membership, ProjectError, ProjectId, SidebarState, TrustState};
 
 #[test]
 fn add_project_canonicalizes_and_rejects_duplicate_root() {

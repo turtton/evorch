@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use tempfile::{TempDir, tempdir};
-use workspace_ui::{
+use workspace_state::{
     ProjectId, SidebarError, SidebarState, ThreadError, ThreadId, ThreadRecord, sidebar_from_json,
     sidebar_to_json,
 };

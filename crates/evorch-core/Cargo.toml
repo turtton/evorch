@@ -38,6 +38,7 @@ tools = { path = "../tools" }
 routing = { path = "../routing" }
 recorder = { path = "../recorder" }
 storage = { path = "../storage" }
+workspace-state = { path = "../workspace-state" }
 reqwest = { workspace = true }
 workbench-client = { path = "../workbench-client" }
 tempfile = { workspace = true }

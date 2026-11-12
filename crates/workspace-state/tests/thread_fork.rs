@@ -1,5 +1,5 @@
 use serde_json::json;
-use workspace_ui::{
+use workspace_state::{
     ForkPoint, LineageKind, ProjectId, ThreadId, ThreadLineage, ThreadRecord, display_parent,
     normalize_versions, point_versions, show_version, visible_version,
 };

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use workspace_ui::{ProjectId, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase};
+use workspace_state::{ProjectId, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase};
 
 #[test]
 fn legacy_v1_defaults_when_archive_fields_are_absent() {
@@ -246,7 +246,7 @@ fn root_titles(
     ThreadRecord::partition_for_project(threads, project, phases)
         .0
         .iter()
-        .filter(|thread| workspace_ui::display_parent(threads, &thread.id).is_none())
+        .filter(|thread| workspace_state::display_parent(threads, &thread.id).is_none())
         .map(|thread| thread.title.clone())
         .collect()
 }
@@ -305,8 +305,8 @@ fn main_list_lifts_family_for_a_run_in_a_hidden_rewind_version_and_restores_on_f
     threads[1].escalation_source_run_id = Some("run-worker".into());
     // A rewind replaces its source in place: the source is hidden, the rewind shows.
     threads[2].parent_thread_id = Some(ThreadId::new("child"));
-    threads[2].lineage = Some(workspace_ui::ThreadLineage {
-        kind: workspace_ui::LineageKind::Rewind,
+    threads[2].lineage = Some(workspace_state::ThreadLineage {
+        kind: workspace_state::LineageKind::Rewind,
         point: None,
     });
     threads[1].superseded = true;

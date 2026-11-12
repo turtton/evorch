@@ -1503,6 +1503,7 @@ dependencies = [
  "workbench-host",
  "workbench-protocol",
  "workbench-web",
+ "workspace-state",
 ]
 
 [[package]]
@@ -2490,6 +2491,7 @@ dependencies = [
  "workbench-host",
  "workbench-protocol",
  "workbench-web",
+ "workspace-state",
 ]
 
 [[package]]
@@ -8448,6 +8450,7 @@ dependencies = [
  "tracing",
  "uuid",
  "workbench-protocol",
+ "workspace-state",
 ]
 
 [[package]]
@@ -8481,7 +8484,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "workspace-ui"
+name = "workspace-state"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
@@ -8489,7 +8492,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "workspace-ui"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
  "toml",
+ "workspace-state",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@
 //! older per-thread form.
 
 use tempfile::TempDir;
-use workspace_ui::{
+use workspace_state::{
     FamilyUnresolved, LineageKind, ProjectId, SidebarState, ThreadId, ThreadLineage, ThreadRecord,
     sidebar_from_json_report,
 };
@@ -36,15 +36,15 @@ fn family(dir: &TempDir) -> SidebarState {
         thread.parent_thread_id = Some(id(parent));
         thread.lineage = kind.map(|kind| ThreadLineage { kind, point: None });
     }
-    workspace_ui::show_version(&mut sidebar.threads, &id("v2"));
+    workspace_state::show_version(&mut sidebar.threads, &id("v2"));
     sidebar.refresh_derived();
     sidebar
 }
 
 fn state<'a>(
-    states: &'a std::collections::BTreeMap<ThreadId, workspace_ui::ResolvedState>,
+    states: &'a std::collections::BTreeMap<ThreadId, workspace_state::ResolvedState>,
     name: &str,
-) -> &'a workspace_ui::ResolvedState {
+) -> &'a workspace_state::ResolvedState {
     &states[&id(name)]
 }
 
@@ -57,7 +57,7 @@ fn every_descendant_resolves_to_the_same_stable_family_key() {
         .map(|name| sidebar.family_key(&id(name)).unwrap())
         .to_vec();
     // The key is the top ancestor, whichever version is shown.
-    workspace_ui::show_version(&mut sidebar.threads, &id("v2"));
+    workspace_state::show_version(&mut sidebar.threads, &id("v2"));
     let shown: Vec<_> = ["root", "fork", "v2", "esc"]
         .map(|name| sidebar.family_key(&id(name)).unwrap())
         .to_vec();
@@ -137,7 +137,7 @@ fn adding_a_member_or_showing_a_version_changes_no_state() {
         .unwrap();
     sidebar.threads.last_mut().unwrap().parent_thread_id = Some(id("v2"));
     sidebar.refresh_derived();
-    workspace_ui::show_version(&mut sidebar.threads, &id("v2"));
+    workspace_state::show_version(&mut sidebar.threads, &id("v2"));
     sidebar.refresh_derived();
 
     // The state is the same one, and the new member reads it.
@@ -275,7 +275,7 @@ fn equal_revisions_with_different_content_keep_the_protective_side() {
     let dir = TempDir::new().unwrap();
     let base = family(&dir);
     let mut a = base.clone();
-    a.families.push(workspace_ui::FamilyState {
+    a.families.push(workspace_state::FamilyState {
         membership_epoch: 0,
         key: id("root"),
         archived: true,
@@ -285,7 +285,7 @@ fn equal_revisions_with_different_content_keep_the_protective_side() {
         pin_revision: 3,
     });
     let mut b = base.clone();
-    b.families.push(workspace_ui::FamilyState {
+    b.families.push(workspace_state::FamilyState {
         membership_epoch: 0,
         key: id("root"),
         archived: false,
@@ -467,7 +467,7 @@ fn equal_revisions_with_two_archive_times_keep_the_later_one_on_either_side() {
     let base = family(&dir);
     let side = |at: i64| {
         let mut sidebar = base.clone();
-        sidebar.families.push(workspace_ui::FamilyState {
+        sidebar.families.push(workspace_state::FamilyState {
             membership_epoch: 0,
             key: id("root"),
             archived: true,
@@ -559,7 +559,7 @@ fn merging_family_states_is_commutative_idempotent_and_never_lowers_a_revision()
         .collect();
     let with = |revision: u64, archived: bool, at: Option<i64>, pinned: bool| {
         let mut sidebar = base.clone();
-        sidebar.families.push(workspace_ui::FamilyState {
+        sidebar.families.push(workspace_state::FamilyState {
             membership_epoch: 0,
             key: id("root"),
             archived,

@@ -134,7 +134,7 @@ async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the
     std::fs::create_dir(root.join(".evorch")).unwrap();
     std::fs::write(
         root.join("sidebar.json"),
-        serde_json::json!({"projects":[{"id":"p","repo_root":root}]}).to_string(),
+        serde_json::json!({"version":workspace_state::SIDEBAR_SCHEMA_VERSION,"projects":[{"id":"p","name":"p","repo_root":root,"allowed_directories":[]}],"threads":[]}).to_string(),
     )
     .unwrap();
     // The mock MCP server connects here when it starts.

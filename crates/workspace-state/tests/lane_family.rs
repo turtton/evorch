@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use tempfile::TempDir;
-use workspace_ui::{
+use workspace_state::{
     LaneLink, LanePolicy, ProjectId, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase,
 };
 
@@ -97,7 +97,7 @@ fn summary_lanes_nest_like_attached_ones() {
         .apply_lane_link(&id("lane"), link(Some("lead"), LanePolicy::Summary, 1))
         .unwrap();
 
-    let index = workspace_ui::LineageIndex::new(&sidebar.threads);
+    let index = workspace_state::LineageIndex::new(&sidebar.threads);
     assert_eq!(index.display_parent(&id("lane")), Some(&id("lead")));
     assert_eq!(
         index
@@ -251,8 +251,8 @@ fn the_lane_projection_survives_saving_and_loading_the_sidebar() {
         .apply_lane_link(&id("lane"), link(Some("lead"), LanePolicy::Summary, 3))
         .unwrap();
 
-    let json = workspace_ui::sidebar_to_json(&sidebar).unwrap();
-    let loaded = workspace_ui::sidebar_from_json(&json).unwrap();
+    let json = workspace_state::sidebar_to_json(&sidebar).unwrap();
+    let loaded = workspace_state::sidebar_from_json(&json).unwrap();
 
     let lane = lane_of(&loaded, "lane").lane.clone().unwrap();
     assert_eq!(lane, link(Some("lead"), LanePolicy::Summary, 3));
@@ -315,7 +315,7 @@ fn each_detach_resets_state_but_repair_and_merge_keep_edits_in_the_same_epoch() 
 
 #[test]
 fn drops_are_typed_and_rejected_for_each_invalid_destination_and_family_state() {
-    use workspace_ui::{
+    use workspace_state::{
         ThreadChatRole,
         lane_management::{LaneDropError, LaneDropIntent},
     };
