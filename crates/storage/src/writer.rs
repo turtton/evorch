@@ -121,6 +121,7 @@ enum Command {
         Box<crate::thread_index::SnapshotWrite>,
         crate::resume_intent::ResumeIntentRecord,
         Option<String>,
+        Option<u64>,
         SnapshotReplyTx,
     ),
     SaveSnapshotBundleWithEvidence(

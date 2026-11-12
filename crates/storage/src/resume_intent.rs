@@ -42,8 +42,27 @@ pub(crate) fn save(
     record: &ResumeIntentRecord,
     expected: Option<&str>,
 ) -> Result<(), StorageError> {
+    save_with_revision(conn, record, expected, None)
+}
+
+pub(crate) fn save_with_revision(
+    conn: &rusqlite::Connection,
+    record: &ResumeIntentRecord,
+    expected: Option<&str>,
+    revision: Option<u64>,
+) -> Result<(), StorageError> {
     validate_payload(record)?;
-    if write(conn, record, expected)? != 1 {
+    // Only the recovery release -> manual admission path adds a revision fence.
+    // Ordinary saves, retirement, and unregistered stops retain their own CAS.
+    let changed = if let (Some(expected), Some(revision)) = (expected, revision) {
+        conn.execute(
+            "UPDATE resume_intents SET incarnation=?2, payload=?3 WHERE run_id=?1 AND incarnation=?4 AND revision=?5",
+            params![record.run_id, record.incarnation, record.payload, expected, revision],
+        )?
+    } else {
+        write(conn, record, expected)?
+    };
+    if changed != 1 {
         return Err(StorageError::Io("stale resume intent incarnation".into()));
     }
     Ok(())

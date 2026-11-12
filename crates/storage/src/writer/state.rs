@@ -360,7 +360,13 @@ pub(super) fn run_writer_with_index(
                 });
                 let _ = reply.send(result);
             }
-            Ok(Command::SaveSnapshotBundleWithResumeIntent(write, intent, expected, reply)) => {
+            Ok(Command::SaveSnapshotBundleWithResumeIntent(
+                write,
+                intent,
+                expected,
+                revision,
+                reply,
+            )) => {
                 let result = (|| {
                     let previous: i64 =
                         state
@@ -369,7 +375,12 @@ pub(super) fn run_writer_with_index(
                     state.conn.pragma_update(None, "synchronous", "FULL")?;
                     let result = snapshot_transaction(&state, "restore admission", |conn| {
                         let receipt = crate::repo::thread_index::stage_snapshot(conn, &write)?;
-                        crate::resume_intent::save(conn, &intent, expected.as_deref())?;
+                        crate::resume_intent::save_with_revision(
+                            conn,
+                            &intent,
+                            expected.as_deref(),
+                            revision,
+                        )?;
                         Ok(receipt)
                     });
                     // Remaining at FULL is safe if restoring the performance

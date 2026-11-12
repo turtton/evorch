@@ -23,6 +23,38 @@ impl StorageHandle {
     pub fn validate_recovery_claim(&self, id: String) -> Result<(), StorageError> {
         self.recovery_write(Write::Validate(id)).map(|_| ())
     }
+    /// The runtime's prepare entry point must hold shared startup evidence for
+    /// this writer's DB and its current ownership root.
+    pub fn claim_recovery_component(
+        &self,
+        request: RecoveryClaimRequest,
+        startup: &crate::RecoveryStartupComplete,
+        ownership_root: &std::path::Path,
+    ) -> Result<RecoveryClaim, StorageError> {
+        startup.validate(&self.2.db_path, ownership_root)?;
+        self.claim_recovery_manifest(request)
+    }
+    /// FULL-durable all-member activation. No snapshot consumption marker is written.
+    pub fn activate_recovery_claim(
+        &self,
+        request: RecoveryActivationRequest,
+    ) -> Result<RecoveryClaim, StorageError> {
+        match self.recovery_write(Write::Activate(request))? {
+            Written::Claimed(claim) => Ok(claim),
+            Written::Saved => unreachable!("activation command reply"),
+        }
+    }
+    /// Release only an unactivated claim, without rolling back intent revisions.
+    pub fn release_recovery_claim(
+        &self,
+        claim_id: String,
+        reason: String,
+    ) -> Result<RecoveryClaim, StorageError> {
+        match self.recovery_write(Write::Release { claim_id, reason })? {
+            Written::Claimed(claim) => Ok(claim),
+            Written::Saved => unreachable!("release command reply"),
+        }
+    }
     fn recovery_write(&self, write: Write) -> Result<Written, StorageError> {
         self.request(|reply| Command::Recovery(write, reply))
     }
