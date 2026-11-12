@@ -406,6 +406,107 @@ fn snapshot_receipt_is_preserved_by_claim_and_late_missing_consumed_or_replaced_
 }
 
 #[test]
+fn non_resume_members_allow_interrupted_tools_and_consumed_snapshot_but_keep_receipt_fencing() {
+    for resume in [false, true] {
+        for evidence in ["tool", "consumed", "replaced"] {
+            let f = Fixture::new();
+            let snapshot = storage::RunContextRecord {
+                run_id: "run-1".into(),
+                role: "Worker".into(),
+                name: "snapshot".into(),
+                parent_run_id: None,
+                config_json: if evidence == "consumed" {
+                    "{\"non_restorable_reason\":\"snapshot_consumed\"}"
+                } else {
+                    "{}"
+                }
+                .into(),
+                messages_json: "[]".into(),
+                checkpoints_json: "[]".into(),
+                terminal_phase: "stopped".into(),
+                restorable: false,
+                updated_at_ns: 1,
+                host_inputs_json: "[]".into(),
+            };
+            let receipt = f
+                .storage
+                .handle()
+                .upsert_run_context_receipt(&snapshot)
+                .unwrap();
+            let mut intent = f.intent("run-1");
+            let mut value: serde_json::Value = serde_json::from_str(&intent.payload).unwrap();
+            value["active"] = json!(resume);
+            value["stop_reason"] = if resume {
+                json!(null)
+            } else {
+                json!("operator_stopped")
+            };
+            if evidence == "tool" {
+                value["tool_intent"] = json!([{"id":"interrupted"}]);
+            }
+            let mut reference = serde_json::to_value(&receipt).unwrap();
+            reference["kind"] = json!("run_context");
+            value["checkpoint"] = json!({"snapshot":reference});
+            intent.payload = value.to_string();
+            f.storage.handle().save_resume_intent(intent, None).unwrap();
+            let mut manifest = f.manifest("terminal-evidence", &["run-1"]);
+            manifest.members[0].resume = resume;
+            manifest.members[0].snapshot = Some(receipt);
+            f.storage
+                .handle()
+                .prepare_recovery_manifest(manifest)
+                .unwrap();
+            if evidence == "replaced" {
+                let mut replacement = snapshot.clone();
+                replacement.messages_json = "[{\"different\":true}]".into();
+                f.storage
+                    .handle()
+                    .upsert_run_context_receipt(&replacement)
+                    .unwrap();
+            }
+            let result = f
+                .storage
+                .handle()
+                .commit_recovery_manifest("terminal-evidence".into());
+            assert_eq!(
+                result.is_ok(),
+                !resume && evidence != "replaced",
+                "{resume}/{evidence}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn superseding_a_committed_component_does_not_reapply_its_old_tombstone_commit_fence() {
+    let f = Fixture::new();
+    f.commit("old", &["run-1", "run-2"]);
+    f.sql().execute("INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES('run-2','thread','family')", []).unwrap();
+    f.storage
+        .handle()
+        .prepare_recovery_manifest(f.manifest("new", &["run-1"]))
+        .unwrap();
+    f.storage
+        .handle()
+        .commit_recovery_manifest("new".into())
+        .unwrap();
+    let manifests = Database::open(&f.config)
+        .unwrap()
+        .recovery_manifests()
+        .unwrap();
+    assert!(
+        manifests
+            .iter()
+            .any(|m| m.manifest_id == "old" && m.record.as_ref().unwrap().superseded)
+    );
+    assert!(
+        manifests
+            .iter()
+            .any(|m| m.manifest_id == "new" && m.record.as_ref().unwrap().committed)
+    );
+}
+
+#[test]
 fn retention_of_one_member_erases_component_claim_and_cross_member_delivery_copies() {
     for count in [2, 200] {
         let f = Fixture::new();

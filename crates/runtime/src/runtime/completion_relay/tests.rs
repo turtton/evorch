@@ -271,17 +271,19 @@ async fn stop_cancels_pending_admission_for_self_and_subtree_with_admission(admi
         let execution = runtime.execution_snapshot(pending).unwrap();
         {
             let _intents = runtime.shared.spawn_intents.lock().unwrap();
-            runtime.admit_run(
-                pending,
-                Some(root),
-                Role::Worker,
-                "pending".into(),
-                RunConfig::default(),
-                RunContinuation::Fresh,
-                None,
-                execution,
-                &_intents,
-            );
+            runtime
+                .admit_run(
+                    pending,
+                    Some(root),
+                    Role::Worker,
+                    "pending".into(),
+                    RunConfig::default(),
+                    RunContinuation::Fresh,
+                    None,
+                    execution,
+                    &_intents,
+                )
+                .unwrap();
         }
         assert_eq!(runtime.live_descendants(root), vec![pending]);
         let target = if scope == StopScope::SelfOnly {

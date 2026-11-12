@@ -106,6 +106,16 @@ impl Database {
     pub fn recovery_manifests(&self) -> Result<Vec<RecoveryLoad>, StorageError> {
         load_all(&self.conn)
     }
+    /// Relational identities remain available even if a member payload cannot decode.
+    pub fn recovery_manifest_run_ids(&self, manifest: &str) -> Result<Vec<String>, StorageError> {
+        let mut q = self
+            .conn
+            .prepare("SELECT run_id FROM recovery_members WHERE manifest_id=?1 ORDER BY run_id")?;
+        // A malformed identity is diagnosed by recovery_manifests; keep its readable peers.
+        Ok(q.query_map([manifest], |row| row.get::<_, String>(0))?
+            .filter_map(Result::ok)
+            .collect())
+    }
     /// Decode each claim independently so one damaged component cannot hide its peers.
     pub fn recovery_claim_loads(&self) -> Result<Vec<RecoveryClaimLoad>, StorageError> {
         let mut q = self
@@ -326,10 +336,11 @@ fn evidence(
     {
         return Err(invalid("recovery member stopped or terminal"));
     }
-    if value
-        .get("tool_intent")
-        .and_then(|v| v.as_array())
-        .is_none_or(|calls| !calls.is_empty())
+    if m.resume
+        && value
+            .get("tool_intent")
+            .and_then(|v| v.as_array())
+            .is_none_or(|calls| !calls.is_empty())
     {
         return Err(invalid("unconfirmed recovery effects"));
     }
@@ -348,14 +359,16 @@ fn evidence(
             if !receipt.matches(&snapshot) {
                 return Err(invalid("recovery snapshot changed"));
             }
-            let descriptor: serde_json::Value = serde_json::from_str(&snapshot.config_json)
-                .map_err(|_| invalid("corrupt recovery descriptor"))?;
-            if descriptor
-                .get("non_restorable_reason")
-                .and_then(|v| v.as_str())
-                == Some("snapshot_consumed")
-            {
-                return Err(invalid("recovery snapshot consumed"));
+            if m.resume {
+                let descriptor: serde_json::Value = serde_json::from_str(&snapshot.config_json)
+                    .map_err(|_| invalid("corrupt recovery descriptor"))?;
+                if descriptor
+                    .get("non_restorable_reason")
+                    .and_then(|v| v.as_str())
+                    == Some("snapshot_consumed")
+                {
+                    return Err(invalid("recovery snapshot consumed"));
+                }
             }
         }
         None => {

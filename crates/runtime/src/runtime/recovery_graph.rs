@@ -20,6 +20,7 @@ fn snapshot_receipt(intent: &ResumeIntent) -> Option<storage::RunContextReceipt>
 }
 fn edges(records: &[RunRecoveryRecord]) -> Vec<RecoveryEdge> {
     let mut edges = BTreeSet::new();
+    let captured: BTreeSet<_> = records.iter().map(|record| record.run_id).collect();
     for r in records {
         if let Some(parent) = r.parent {
             edges.insert((
@@ -38,6 +39,18 @@ fn edges(records: &[RunRecoveryRecord]) -> Vec<RecoveryEdge> {
             }
         }
         for d in &r.deliveries {
+            // Consumed receipts are historical evidence, not a live dependency.
+            if d.state == DurableDeliveryState::Consumed {
+                continue;
+            }
+            if !captured.contains(&d.sender) || !captured.contains(&d.recipient) {
+                tracing::warn!(
+                    run_id=%r.run_id, sender=%d.sender, recipient=%d.recipient,
+                    state=?d.state, code="RecoveryDeliveryEndpointMissing",
+                    "delivery retained without a graph edge: endpoint was not captured"
+                );
+                continue;
+            }
             edges.insert((
                 d.sender.to_string(),
                 d.recipient.to_string(),
@@ -268,6 +281,12 @@ impl AgentRuntime {
     }
     /// Persist weakly connected components. A component's partial capture never
     /// becomes executable; a failed commit leaves explicit Preparing evidence.
+    ///
+    /// `capture_id` MUST be unique for every attempt, including retries (PR 07).
+    /// Components commit independently: Err does not roll back earlier successes,
+    /// and later healthy components are still attempted. On Err, inspect durable
+    /// manifests / recovery_plan to discover committed IDs before retrying with a
+    /// new capture_id; the error itself does not return those IDs.
     pub fn save_recovery_graph(
         &self,
         capture_id: &str,
@@ -393,6 +412,13 @@ impl AgentRuntime {
             .map_err(graph_error)?;
         for load in loads {
             let id = load.manifest_id;
+            let component_runs: Vec<_> = store
+                .with_database(|db| db.recovery_manifest_run_ids(&id))
+                .map_err(graph_error)?
+                .into_iter()
+                .filter_map(|id| id.parse::<RunId>().ok())
+                .collect();
+            covered.extend(component_runs.iter().copied());
             let mut candidates = Vec::new();
             let mut required = vec![
                 RequiredRecoveryAuthority::CurrentOwnership,
@@ -429,7 +455,6 @@ impl AgentRuntime {
                     }
                 }
                 for (member, r) in manifest.members.iter().zip(&records) {
-                    covered.insert(r.run_id);
                     if r.version != 1
                         || member.run_id != r.run_id.to_string()
                         || member.incarnation != r.old_incarnation
@@ -530,7 +555,7 @@ impl AgentRuntime {
                 }
                 Err(reason) => plan.report.blocked.push(RecoveryOutcome {
                     manifest_id: Some(id),
-                    runs: candidates,
+                    runs: component_runs,
                     reason,
                 }),
             }

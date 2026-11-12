@@ -110,8 +110,14 @@ impl DispatchTails {
     ) -> Result<DispatchGuard, RuntimeError> {
         let parent = SYNC_PARENT
             .with(|p| p.borrow().last().cloned())
-            .or_else(|| ASYNC_PARENT.try_with(Clone::clone).ok());
-        if let Some(parent) = parent.filter(|g| Arc::ptr_eq(&g.0.tails, self)) {
+            .filter(|g| Arc::ptr_eq(&g.0.tails, self))
+            .or_else(|| {
+                ASYNC_PARENT
+                    .try_with(Clone::clone)
+                    .ok()
+                    .filter(|g| Arc::ptr_eq(&g.0.tails, self))
+            });
+        if let Some(parent) = parent {
             return Ok(parent.fork());
         }
         let mut state = self
@@ -240,6 +246,10 @@ impl AgentRuntime {
         }
         Ok(())
     }
+    /// Obtain restart evidence after checkpointing. Once restart drain closes the
+    /// registry, only process exit is supported, not operator shutdown fallback.
+    /// PR 07 must add a generation-fenced reopen or an explicit close handoff
+    /// before it can support such a fallback.
     pub async fn fence_dispatch_restart(&self) -> Result<DispatchDrainFence, RuntimeError> {
         self.quiesce().await?;
         Ok(DispatchDrainFence {
@@ -277,13 +287,17 @@ impl AgentRuntime {
                 live.sort();
                 live.dedup();
                 for run in &live {
-                    self.stop(*run, crate::StopScope::Subtree)?;
+                    if let Err(error) = self.stop(*run, crate::StopScope::Subtree)
+                        && !self.dispatch_run_settled(*run, &error)
+                    {
+                        return Err(error);
+                    }
                 }
                 self.join_dispatch_admissions().await?;
                 for run in live {
                     match self.wait(run).await {
                         Ok(_) => {}
-                        Err(crate::RuntimeError::RunTerminated { .. }) => {}
+                        Err(error) if self.dispatch_run_settled(run, &error) => {}
                         Err(e) => return Err(e),
                     }
                 }

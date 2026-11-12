@@ -479,3 +479,283 @@ async fn a_corrupt_snapshot_descriptor_does_not_abort_other_components_capture()
     f.cleanup(bad).await;
     f.cleanup(healthy).await;
 }
+
+#[tokio::test]
+async fn stopped_child_with_interrupted_tool_does_not_block_its_report_recipient() {
+    let mut f = Fixture::new(1);
+    let parent = f.runtime.delegate_background(
+        Role::Orchestrator,
+        "parent".into(),
+        RunConfig {
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    let child = f
+        .runtime
+        .delegate_background_as_child(
+            parent,
+            Role::Worker,
+            "child",
+            RunConfig {
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // Both loops are inside a tool; stopping the child must leave evidence of
+    // its interrupted call, while the parent's call completes before capture.
+    f.model.release.add_permits(2);
+    f.entered.recv().await.unwrap();
+    f.entered.recv().await.unwrap();
+    f.runtime.stop(child, crate::StopScope::SelfOnly).unwrap();
+    assert_eq!(
+        f.runtime.wait(child).await.unwrap(),
+        event_bus::AgentRunPhase::Stopped
+    );
+    assert!(!f.intent(child).tool_intent.is_empty());
+    f.runtime.request_quiesce();
+    f.release[0].add_permits(1);
+    f.completed.recv().await.unwrap();
+    f.runtime.wait_quiesced().await.unwrap();
+    let records = capture(
+        &f,
+        &BTreeMap::from([(parent, recipe(ResumePolicy::CoreOwned))]),
+    )
+    .await;
+    let recipient = records.iter().find(|r| r.run_id == parent).unwrap();
+    assert!(recipient.deliveries.iter().any(
+        |d| matches!(d.notice, DurableNotice::Completion { child: sender, .. } if sender == child)
+    ));
+    assert_eq!(
+        f.runtime
+            .save_recovery_graph("stopped-report", &records)
+            .unwrap()
+            .len(),
+        1
+    );
+    let plan = f.runtime.recovery_plan().unwrap();
+    assert_eq!(plan.components.len(), 1, "{plan:?}");
+    assert_eq!(plan.components[0].runs, vec![parent]);
+    assert!(
+        plan.report
+            .skipped
+            .iter()
+            .any(|s| s.runs == [child] && s.reason == RecoveryReason::OperatorStopped)
+    );
+    f.cleanup(parent).await;
+}
+
+#[tokio::test]
+async fn historical_deliveries_keep_receipts_without_requiring_missing_or_tombstoned_senders() {
+    for damage in ["missing", "tombstoned"] {
+        let f = Fixture::new(0);
+        let recipient = f.start();
+        let sender = f
+            .runtime
+            .delegate_background_as_child(
+                recipient,
+                Role::Worker,
+                "historical sender",
+                RunConfig {
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let consumed = f
+            .runtime
+            .send_agent_message(
+                sender,
+                recipient,
+                event_bus::AgentMessageKind::Send,
+                "consumed",
+                None,
+            )
+            .unwrap();
+        f.runtime.take_inbox(recipient).unwrap();
+        let held_id = f
+            .runtime
+            .send_agent_message(
+                sender,
+                recipient,
+                event_bus::AgentMessageKind::Send,
+                "held",
+                None,
+            )
+            .unwrap();
+        let held = f.runtime.take_inbox(recipient).unwrap().pop().unwrap();
+        let mailbox = f
+            .runtime
+            .send_agent_message(
+                sender,
+                recipient,
+                event_bus::AgentMessageKind::Send,
+                "queued",
+                None,
+            )
+            .unwrap();
+        let fence = f.runtime.fence_dispatch_restart().await.unwrap();
+        f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+        f.runtime.shared.held_messages.lock().unwrap().insert(
+            recipient,
+            vec![crate::mailbox::QueuedMessage::explicit(held)],
+        );
+        let sql = rusqlite::Connection::open(&f.config.db_path).unwrap();
+        if damage == "missing" {
+            sql.execute(
+                "DELETE FROM resume_intents WHERE run_id=?1",
+                [sender.to_string()],
+            )
+            .unwrap();
+        } else {
+            sql.execute("INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES(?1,'thread','family')", [sender.to_string()]).unwrap();
+        }
+        drop(sql);
+        let records = f
+            .runtime
+            .capture_recovery_records(&BTreeMap::from([(
+                recipient,
+                recipe(ResumePolicy::CoreOwned),
+            )]))
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        let deliveries = &records[0].deliveries;
+        assert!(deliveries.iter().any(|d| d.message_id == consumed
+            && d.state == DurableDeliveryState::Consumed
+            && d.consumed_receipt.is_some()));
+        assert!(
+            deliveries
+                .iter()
+                .any(|d| d.message_id == held_id && d.state == DurableDeliveryState::Held)
+        );
+        assert!(
+            deliveries
+                .iter()
+                .any(|d| d.message_id == mailbox && d.state == DurableDeliveryState::Mailbox)
+        );
+        let ids = f
+            .runtime
+            .save_recovery_graph("historical", &records)
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        let db = storage::Database::open(&f.config).unwrap();
+        assert!(
+            db.recovery_manifests().unwrap()[0]
+                .record
+                .as_ref()
+                .unwrap()
+                .edges
+                .is_empty()
+        );
+        let plan = f.runtime.recovery_plan().unwrap();
+        assert_eq!(plan.components.len(), 1, "{damage}: {plan:?}");
+        assert_eq!(plan.components[0].runs, vec![recipient]);
+        f.cleanup(recipient).await;
+        // Sender evidence was deliberately removed; do not expect a durable
+        // stopped intent for it, but still join its in-memory loop.
+        let _ = f.runtime.cancel(sender);
+        let _ = f.runtime.wait(sender).await;
+    }
+}
+
+#[tokio::test]
+async fn a_consumed_receipt_does_not_merge_independent_live_components() {
+    let f = Fixture::new(0);
+    let sender = f.start();
+    let recipient = f.start();
+    let mut records = capture(
+        &f,
+        &BTreeMap::from([
+            (sender, recipe(ResumePolicy::CoreOwned)),
+            (recipient, recipe(ResumePolicy::CoreOwned)),
+        ]),
+    )
+    .await;
+    // Historical sent receipts can outlive the relationship that originally
+    // authorized the delivery; they are evidence, not a resumption dependency.
+    records
+        .iter_mut()
+        .find(|r| r.run_id == recipient)
+        .unwrap()
+        .deliveries
+        .push(DurableDelivery {
+            message_id: "historical-receipt".into(),
+            sender,
+            recipient,
+            sequence: 0,
+            state: DurableDeliveryState::Consumed,
+            consumed_receipt: Some("historical-receipt".into()),
+            notice: DurableNotice::Explicit,
+            message: None,
+        });
+    assert_eq!(
+        f.runtime
+            .save_recovery_graph("independent-receipt", &records)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(f.runtime.recovery_plan().unwrap().components.len(), 2);
+    f.cleanup(sender).await;
+    f.cleanup(recipient).await;
+}
+
+#[tokio::test]
+async fn blocked_component_reports_all_members_without_orphan_double_accounting() {
+    for corrupt_payload in [false, true] {
+        let f = Fixture::new(0);
+        let root = f.runtime.delegate_background(
+            Role::Orchestrator,
+            "parent".into(),
+            RunConfig {
+                keep_alive: true,
+                ..Default::default()
+            },
+        );
+        let child = f
+            .runtime
+            .delegate_background_as_child(
+                root,
+                Role::Worker,
+                "child",
+                RunConfig {
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let records = capture(
+            &f,
+            &BTreeMap::from([(root, recipe(ResumePolicy::Unsupported))]),
+        )
+        .await;
+        f.runtime
+            .save_recovery_graph("blocked-members", &records)
+            .unwrap();
+        if corrupt_payload {
+            let sql = rusqlite::Connection::open(&f.config.db_path).unwrap();
+            sql.execute(
+                "UPDATE recovery_members SET record_json='broken' WHERE run_id=?1",
+                [child.to_string()],
+            )
+            .unwrap();
+        }
+        let plan = f.runtime.recovery_plan().unwrap();
+        assert!(plan.components.is_empty());
+        let mut expected = vec![root, child];
+        expected.sort();
+        assert_eq!(plan.report.blocked.len(), 1, "{plan:?}");
+        assert_eq!(plan.report.blocked[0].runs, expected);
+        assert!(
+            !plan
+                .report
+                .skipped
+                .iter()
+                .any(|s| s.reason == RecoveryReason::NoCommittedManifest),
+            "{plan:?}"
+        );
+        f.cleanup(root).await;
+        f.cleanup(child).await;
+    }
+}

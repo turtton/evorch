@@ -538,26 +538,24 @@ impl BootstrappedHost {
         for task in tasks {
             lane_pr::remember(&mut failure, task.await.map(|_| ()));
         }
-        // A failed dispatch/persistence drain is not permission to flush or
-        // release ownership; keep those resources for explicit recovery.
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        let mut failure = None;
+        let drained = failure.is_none();
         if let Some(reclaim) = self.reclaim.take() {
             reclaim.shutdown();
         }
+        // Events published before a drain failure still need their bridge ack.
         if let Some(bridge) = &mut self.bridge {
             lane_pr::remember(&mut failure, bridge.flush());
         }
-        match self.owner.release_ready() {
-            Ok(true) => {
-                failure.get_or_insert_with(|| {
-                    "owner still has active turns after runtime drain".into()
-                });
+        if drained {
+            match self.owner.release_ready() {
+                Ok(true) => {
+                    failure.get_or_insert_with(|| {
+                        "owner still has active turns after runtime drain".into()
+                    });
+                }
+                Ok(false) => {}
+                Err(error) => lane_pr::remember(&mut failure, Err::<(), _>(error)),
             }
-            Ok(false) => {}
-            Err(error) => lane_pr::remember(&mut failure, Err::<(), _>(error)),
         }
         if let Some(mut bridge) = self.bridge.take() {
             bridge.shutdown();

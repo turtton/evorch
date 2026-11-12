@@ -63,6 +63,49 @@ fn start(boot: &BootstrappedHost) -> runtime::RunId {
         },
     )
 }
+
+#[tokio::test]
+async fn failed_drain_still_flushes_bridge_without_releasing_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_owners, mut boot) = open(dir.path()).await;
+    let _permit = boot.owner.start("owned").unwrap();
+    let bus = boot.runtime.event_bus().clone();
+    boot.services.start("failing-drain", |stop| async move {
+        let _ = stop.await;
+        // Publish at the failed producer's terminal boundary, not before the
+        // drain begins: this event still requires the bridge's durable ack.
+        bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+            source: "06a-test".into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
+            code: "06a.failed-drain".into(),
+            detail: "producer stopped with an error".into(),
+            run_id: None,
+            thread_id: None,
+            call_id: None,
+        }));
+        Err("injected producer drain failure".into())
+    });
+    assert!(
+        boot.shutdown()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("injected producer drain failure")
+    );
+    assert!(
+        boot.bridge.is_none(),
+        "failed drain must not skip bridge acknowledgement and shutdown"
+    );
+    assert_ne!(
+        boot.owner.attach("owned").unwrap().state,
+        runtime::ownership::OwnerState::Released
+    );
+    let db = storage::Database::open(&boot.composition.storage).unwrap();
+    assert_eq!(db.events_all_ordered().unwrap().iter().filter(|event|
+        matches!(&event.event.kind, event_bus::EventKind::Diagnostic(d) if d.code == "06a.failed-drain")
+    ).count(), 1);
+}
+
 #[tokio::test]
 async fn original_restart_safe_point_still_allows_explicit_operator_shutdown() {
     let dir = tempfile::tempdir().unwrap();

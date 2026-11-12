@@ -12,6 +12,10 @@ pub fn plan(runtime: &AgentRuntime) -> Result<RecoveryPlan, BootstrapError> {
     Ok(runtime.recovery_plan()?)
 }
 
+/// `capture_id` is unique per attempt, including retries. Components commit
+/// independently; on error inspect durable manifests before a fresh-ID retry.
+/// After restart drain closes dispatch, the caller must exit, not fall back to
+/// operator shutdown (generation-fenced reopen / close handoff belongs to PR 07).
 pub async fn capture(
     runtime: &AgentRuntime,
     fence: Option<&runtime::quiesce::DispatchDrainFence>,

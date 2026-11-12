@@ -1333,7 +1333,7 @@ impl AgentRuntime {
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
     ) -> RunId {
-        self.try_spawn_run_with_handoff(
+        match self.try_spawn_run_with_handoff(
             run_id,
             parent,
             role,
@@ -1341,9 +1341,15 @@ impl AgentRuntime {
             config,
             continuation,
             review_seed,
-        )
-        .map(|admission| admission.run)
-        .unwrap_or(run_id)
+        ) {
+            Ok(admission) => admission.run,
+            Err(_) => {
+                // The fallible boundary records rejected registrations, including
+                // closed dispatch, so wait observes a settled admission, not a hang.
+                tracing::debug!(%run_id, "background registration rejected");
+                run_id
+            }
+        }
     }
 
     // Keep host provenance explicit at this installation boundary.
@@ -1358,7 +1364,9 @@ impl AgentRuntime {
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
     ) -> Result<RunAdmission, RuntimeError> {
-        let _dispatch = self.dispatch_registration_guard()?;
+        let _dispatch = self.dispatch_registration_guard().inspect_err(|error| {
+            self.fail_admission(run_id, parent, &config, error.clone());
+        })?;
         // Every spawn path ends here: an infallible entry point (`spawn_reserved`)
         // still cannot start a child Orchestrator. Its admission fails instead.
         if let Err(error) = crate::policy::authorize_child_role(parent, role) {
@@ -1514,7 +1522,8 @@ impl AgentRuntime {
             }
         }
         let run = if self.shared.model_for(&config).requires_admission() {
-            self.admit_run(
+            let failure_config = config.clone();
+            let admitted = self.admit_run(
                 run_id,
                 parent,
                 role,
@@ -1524,7 +1533,15 @@ impl AgentRuntime {
                 review_seed,
                 Arc::clone(&execution),
                 &intents,
-            )
+            );
+            match admitted {
+                Ok(run) => run,
+                Err(error) => {
+                    drop(intents);
+                    self.fail_admission(run_id, parent, &failure_config, error.clone());
+                    return Err(error);
+                }
+            }
         } else {
             self.register_without_admission(
                 run_id,

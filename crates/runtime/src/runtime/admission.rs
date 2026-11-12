@@ -442,7 +442,8 @@ impl AgentRuntime {
         review_seed: Option<ReviewSeed>,
         execution: Arc<ExecutionControl>,
         intents: &HashMap<RunId, cancellation::SpawnIntent>,
-    ) -> RunId {
+    ) -> Result<RunId, RuntimeError> {
+        let dispatch = self.dispatch_registration_guard()?;
         assert!(
             intents
                 .get(&run_id)
@@ -467,9 +468,6 @@ impl AgentRuntime {
             .expect("reserved admission has one completion sender");
         let goal_stamp = self.goal_input_stamp(run_id);
         let lane_execution = Arc::clone(&execution);
-        let dispatch = self
-            .dispatch_registration_guard()
-            .expect("admission caller holds a registration guard until handoff");
         let runtime = self.clone();
         let task = dispatch.scope(async move {
             let handoff = matches!(
@@ -676,7 +674,7 @@ impl AgentRuntime {
         } else {
             tokio::spawn(task);
         }
-        run_id
+        Ok(run_id)
     }
 
     /// No loop will append this input. A restored prompt was already delivered
@@ -728,6 +726,26 @@ impl AgentRuntime {
 }
 
 impl AgentRuntime {
+    pub(crate) fn dispatch_run_settled(&self, run: RunId, error: &RuntimeError) -> bool {
+        if matches!(
+            error,
+            RuntimeError::UnknownRun { .. } | RuntimeError::RunTerminated { .. }
+        ) {
+            return true;
+        }
+        self.shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run)
+            .is_some_and(|admission| {
+                admission
+                    .result
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|result| result.as_ref().is_err_and(|settled| settled == error))
+            })
+    }
     pub(crate) fn dispatch_pending_admissions(&self) -> Vec<RunId> {
         self.shared
             .admissions
@@ -795,6 +813,47 @@ mod tests {
         fn selected_model(&self, _: Role, _: Option<&str>) -> String {
             "test".into()
         }
+    }
+
+    #[tokio::test]
+    async fn closed_background_registration_settles_admission_and_shutdown_only_ignores_settled_errors()
+     {
+        let bus = Arc::new(EventBus::new(32));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            Arc::new(Model),
+        );
+        assert!(runtime.shared.dispatch_tails.try_close());
+        let run =
+            runtime.delegate_background(Role::Worker, "rejected".into(), RunConfig::default());
+        let error = runtime.wait(run).await.unwrap_err();
+        assert!(matches!(error, RuntimeError::Model { .. }), "{error:?}");
+        assert!(runtime.dispatch_run_settled(run, &error));
+        assert!(!runtime.dispatch_run_settled(
+            run,
+            &RuntimeError::Model {
+                reason: "unrelated storage failure".into()
+            }
+        ));
+        assert!(runtime.dispatch_run_settled(
+            run,
+            &RuntimeError::UnknownRun {
+                run_id: run.to_string()
+            }
+        ));
+        assert!(runtime.dispatch_run_settled(
+            run,
+            &RuntimeError::RunTerminated {
+                run_id: run.to_string()
+            }
+        ));
+        assert!(runtime.list_agents().is_empty());
+        let fence = runtime
+            .fence_dispatch_shutdown(|| async { Ok::<_, RuntimeError>(()) })
+            .await
+            .unwrap();
+        runtime.drain_dispatch_tails(&fence).await.unwrap();
     }
 
     #[tokio::test]

@@ -52,7 +52,8 @@ CREATE TRIGGER fence_recovery_claim_member_update BEFORE UPDATE ON recovery_clai
 WHEN EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=NEW.run_id)
 BEGIN SELECT RAISE(ABORT,'run is tombstoned'); END;
 CREATE TRIGGER fence_recovery_manifest_commit BEFORE UPDATE ON recovery_manifests
-WHEN EXISTS(SELECT 1 FROM recovery_members m JOIN run_tombstones t USING(run_id) WHERE m.manifest_id=NEW.manifest_id)
+WHEN NEW.committed=1 AND OLD.committed=0
+AND EXISTS(SELECT 1 FROM recovery_members m JOIN run_tombstones t USING(run_id) WHERE m.manifest_id=NEW.manifest_id)
 BEGIN SELECT RAISE(ABORT,'manifest member is tombstoned'); END;
 CREATE TRIGGER fence_recovery_claim_update BEFORE UPDATE ON recovery_claims
 WHEN EXISTS(SELECT 1 FROM recovery_claim_members m JOIN run_tombstones t USING(run_id) WHERE m.claim_id=NEW.claim_id)

@@ -3,6 +3,24 @@ use crate::quiesce::fixture::Fixture;
 use std::sync::{Barrier, mpsc};
 
 #[tokio::test]
+async fn foreign_sync_parent_does_not_hide_same_runtime_async_lineage() {
+    let own = Arc::new(DispatchTails::default());
+    let foreign = Arc::new(DispatchTails::default());
+    let parent = own.register(false).unwrap();
+    let other = foreign.register(false).unwrap();
+    own.state.lock().unwrap().closed = true;
+    parent
+        .scope(async {
+            let child = other.enter(|| own.register(false)).unwrap();
+            assert_eq!(own.state.lock().unwrap().count, 2);
+            drop(child);
+        })
+        .await;
+    own.idle().await;
+    assert!(own.result().is_ok());
+}
+
+#[tokio::test]
 async fn pre_spawn_guard_and_descendant_keep_tail_drain_pending_until_both_complete() {
     let tails = Arc::new(DispatchTails::default());
     let parent = tails.register(false).unwrap();
