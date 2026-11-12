@@ -506,7 +506,22 @@ impl AgentRuntime {
                         self.release_indexed_recovery(&claim, "shutdown", None, true)
                     }
                     RecoveryClaimHandle::Quarantined(handle) => {
-                        self.cleanup_recovery_claim(&handle)
+                        let snapshot = self
+                            .shared
+                            .run_store
+                            .get()
+                            .ok_or_else(|| error("no run store"))?
+                            .with_database(|db| db.recovery_claim_snapshot(&claim))
+                            .map_err(error)?;
+                        if cleanup::prepared_explicitly_stopped(&snapshot) {
+                            // Diagnostic selection is not authority. This path
+                            // rechecks every current owner and the writer proves
+                            // all members unexecuted (including explicit Stop)
+                            // in its FULL transaction. Never make this Retryable.
+                            self.release_indexed_recovery(&claim, "shutdown after Stop", None, true)
+                        } else {
+                            self.cleanup_recovery_claim(&handle)
+                        }
                     }
                 });
             if let Err(err) = result {

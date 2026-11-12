@@ -244,6 +244,17 @@ impl AgentRuntime {
 pub(super) fn prepared_stoppable(s: &RecoveryClaimSnapshot) -> bool {
     matches!(s.claim.state, RecoveryClaimState::Prepared) && coherent(s, false)
 }
+// A stopped old incarnation is never executable again. This predicate only
+// selects the owner-guarded FULL conditional-release path, not Retryable.
+pub(super) fn prepared_explicitly_stopped(s: &RecoveryClaimSnapshot) -> bool {
+    prepared_stoppable(s)
+        && s.claim.members.iter().any(|m| {
+            s.intents
+                .iter()
+                .find(|o| o.run_id == m.run_id)
+                .is_some_and(|o| o.revision.is_some_and(|r| r > m.reserved_revision))
+        })
+}
 fn prepared_unexecuted(s: &RecoveryClaimSnapshot) -> bool {
     prepared_stoppable(s)
         && s.claim.members.iter().all(|m| {

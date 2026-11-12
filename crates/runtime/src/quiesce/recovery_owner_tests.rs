@@ -93,8 +93,56 @@ async fn an_explicit_prepared_stop_cannot_be_reclassified_as_retryable() {
             .unwrap(),
         crate::RecoveryClaimHandle::Quarantined(_)
     ));
-    runtime
-        .release_prepared_component(&paused, "operator stop")
+    let db = storage::Database::open(&f.config).unwrap();
+    let before = db
+        .recovery_claim_snapshot(&paused.claim().claim_id)
         .unwrap();
+    runtime.release_shutdown_recovery().unwrap();
+    let after = db
+        .recovery_claim_snapshot(&paused.claim().claim_id)
+        .unwrap();
+    assert!(matches!(
+        after.claim.state,
+        storage::recovery::RecoveryClaimState::Released { .. }
+    ));
+    assert_eq!(after.intents, before.intents);
+    assert_eq!(after.manifest, before.manifest);
+    assert!(!runtime.has_paused_recovery());
+    assert!(runtime.list_agents().is_empty());
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
     drop(owner);
+}
+
+#[tokio::test]
+async fn stopped_prepared_shutdown_cannot_release_after_owner_handoff() {
+    let f = Fixture::new(0);
+    let run = saved(&f).await;
+    let runtime = new_process(&f);
+    let paused = prepare(&f, &runtime);
+    let (old, authority) = authority(&f, run);
+    let (proof, startup, root) = evidence(&f, &paused.claim().claim_id);
+    let _adopted = runtime
+        .adopt_prepared_claim(proof, startup, &root, &authority)
+        .unwrap();
+    runtime.stop(run, StopScope::SelfOnly).unwrap();
+    let next = crate::ownership::OwnerHost::open(
+        &f._dir.path().join("adopt-owner"),
+        Default::default(),
+        Arc::new(EventBus::new(64)),
+    )
+    .unwrap();
+    old.handoff(authority.members[&run].ownership.as_ref().unwrap(), &next)
+        .unwrap();
+    let db = storage::Database::open(&f.config).unwrap();
+    let before = db
+        .recovery_claim_snapshot(&paused.claim().claim_id)
+        .unwrap();
+    assert!(runtime.release_shutdown_recovery().is_err());
+    assert_eq!(
+        db.recovery_claim_snapshot(&paused.claim().claim_id)
+            .unwrap(),
+        before
+    );
+    assert!(runtime.has_paused_recovery());
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
 }
