@@ -3,7 +3,9 @@
 # through dpkg, otherwise apt-get, and which .debs may be saved afterwards.
 # Environment: APT_PACKAGES, APT_TIMEOUT, APT_PRIMARY_TIMEOUT, CACHE_HIT,
 # GITHUB_OUTPUT (ImageVersion is the runner's).
-set -u
+# Actions runs a `shell: bash` step with -e and pipefail; keep that now that the steps
+# live in a script. Commands that may fail without failing the install say so.
+set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The defaults are the runner's; scripts/tests/test_apt_install.sh overrides them.
 archives="${APT_CACHE_DIR:-$HOME/apt-archives}"
@@ -50,7 +52,7 @@ fi
 
 # Only verified .debs seed apt's download cache.
 if [ "$verified" = true ]; then
-  sudo cp "$archives"/*.deb "$apt_archives"/
+  sudo cp "$archives"/*.deb "$apt_archives"/ || echo "::warning::could not seed apt's download cache from the verified .debs"
 fi
 apt_install() {
   local limit=$1 status=0
@@ -71,15 +73,15 @@ if [ "$status" -ne 0 ]; then
   # /var/cache/apt/archives and are not downloaded again.
   echo "::warning::apt-get on the default mirror failed or timed out (status $status); retrying on archive.ubuntu.com"
   if [ -f "$apt_etc/apt-mirrors.txt" ]; then
-    cat "$apt_etc/apt-mirrors.txt"
-    sudo sed -i '/azure\.archive\.ubuntu\.com/d' "$apt_etc/apt-mirrors.txt"
+    cat "$apt_etc/apt-mirrors.txt" || true
+    sudo sed -i '/azure\.archive\.ubuntu\.com/d' "$apt_etc/apt-mirrors.txt" || true
     if ! grep -q . "$apt_etc/apt-mirrors.txt"; then
-      echo 'https://archive.ubuntu.com/ubuntu/' | sudo tee "$apt_etc/apt-mirrors.txt" > /dev/null
+      echo 'https://archive.ubuntu.com/ubuntu/' | sudo tee "$apt_etc/apt-mirrors.txt" > /dev/null || true
     fi
   fi
   for sources in "$apt_etc/sources.list" "$apt_etc"/sources.list.d/*.list "$apt_etc"/sources.list.d/*.sources; do
     [ -f "$sources" ] || continue
-    sudo sed -i 's#http://azure\.archive\.ubuntu\.com#https://archive.ubuntu.com#g' "$sources"
+    sudo sed -i 's#http://azure\.archive\.ubuntu\.com#https://archive.ubuntu.com#g' "$sources" || true
   done
   # A timeout during unpacking leaves dpkg half-configured.
   sudo dpkg --configure -a || true
@@ -93,25 +95,30 @@ fi
 # Keep the .debs of the versions that are installed now (status exactly
 # "install ok installed", not a removed package with config files left) and
 # nothing else: an older leftover version of a package would make the dpkg
-# install of the whole set above fail.
-rm -rf "$archives"
-mkdir -p "$archives"
-for deb in "$apt_archives"/*.deb; do
-  [ -f "$deb" ] || continue
-  pkg=$(dpkg-deb -f "$deb" Package)
-  ver=$(dpkg-deb -f "$deb" Version)
-  if dpkg-query -W -f='${Status} ${Version}\n' "$pkg" 2> /dev/null | grep -qxF "install ok installed $ver"; then
-    cp "$deb" "$archives/"
-  fi
-done
-du -sh "$archives"
+# install of the whole set above fail. Every step has to succeed, or nothing is
+# saved: a function run as a condition ignores -e, so each command checks itself.
+prepare_cache() {
+  local deb pkg ver
+  rm -rf "$archives" || return 1
+  mkdir -p "$archives" || return 1
+  for deb in "$apt_archives"/*.deb; do
+    [ -f "$deb" ] || continue
+    pkg=$(dpkg-deb -f "$deb" Package) || return 1
+    ver=$(dpkg-deb -f "$deb" Version) || return 1
+    if dpkg-query -W -f='${Status} ${Version}\n' "$pkg" 2> /dev/null | grep -qxF "install ok installed $ver"; then
+      cp "$deb" "$archives/" || return 1
+    fi
+  done
+}
 # Only a complete install whose cache passes the same check a later run
 # makes is saved: a cache key cannot be rewritten, so an entry that could
 # not be used would make every later run fall back to the network.
-if compgen -G "$archives/*.deb" > /dev/null \
+if prepare_cache \
+  && compgen -G "$archives/*.deb" > /dev/null \
   && "$verify" collect "$archives" \
   && "$verify" verify "$archives"; then
+  du -sh "$archives" || true
   echo "collected=true" >> "$GITHUB_OUTPUT"
 else
-  echo "::warning::the installed .debs could not be matched to the signed archive indexes; not caching them"
+  echo "::warning::the installed .debs could not be prepared and matched to the signed archive indexes; not caching them"
 fi

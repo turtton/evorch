@@ -14,12 +14,31 @@ bin="$work/bin"
 mkdir "$bin"
 
 # sudo runs only what the scenarios fake or copy; it never edits the host's apt
-# configuration (sed -i and tee are logged and skipped).
+# configuration (sed -i and tee are logged and skipped, or fail on request).
 cat > "$bin/sudo" <<'EOF'
 #!/usr/bin/env bash
 echo "sudo $*" >> "$FAKE_LOG"
-case "$1" in sed | tee) exit 0 ;; esac
+case "$1" in sed | tee) [[ -z "${FAKE_SED_FAIL:-}" ]]; exit ;; esac
 exec "$@"
+EOF
+# rm, mkdir and cp touch the download cache only when asked to fail there.
+export REAL_RM="$(command -v rm)" REAL_MKDIR="$(command -v mkdir)" REAL_CP="$(command -v cp)"
+cat > "$bin/rm" <<'EOF'
+#!/usr/bin/env bash
+[[ -n "${FAKE_RM_FAIL:-}" && "$*" == *"$APT_CACHE_DIR"* ]] && exit 1
+exec "$REAL_RM" "$@"
+EOF
+cat > "$bin/mkdir" <<'EOF'
+#!/usr/bin/env bash
+[[ -n "${FAKE_MKDIR_FAIL:-}" && "$*" == *"$APT_CACHE_DIR"* ]] && exit 1
+exec "$REAL_MKDIR" "$@"
+EOF
+cat > "$bin/cp" <<'EOF'
+#!/usr/bin/env bash
+last="${@: -1}"
+[[ -n "${FAKE_CP_FAIL:-}" && "$last" == "$APT_CACHE_DIR/" && "$*" == *"$FAKE_CP_FAIL"* ]] && exit 1
+[[ -n "${FAKE_SEED_CP_FAIL:-}" && "$last" == "$APT_ARCHIVES_DIR/" ]] && exit 1
+exec "$REAL_CP" "$@"
 EOF
 cat > "$bin/dpkg" <<'EOF'
 #!/usr/bin/env bash
@@ -89,7 +108,8 @@ new_case() {
   export APT_VERIFY_SCRIPT="$work/verify-stub" APT_PACKAGES="a" APT_TIMEOUT=60 APT_PRIMARY_TIMEOUT=60
   export ImageVersion=1 CACHE_HIT=false PATH="$bin:$PATH"
   unset FAKE_DRYRUN_FAIL FAKE_DPKG_FAIL FAKE_APT_UPDATE_FAIL_ONCE FAKE_APT_INSTALL_FAIL \
-    FAKE_DOWNLOADS FAKE_VERIFY_FAIL FAKE_COLLECT_FAIL
+    FAKE_DOWNLOADS FAKE_VERIFY_FAIL FAKE_COLLECT_FAIL FAKE_SED_FAIL FAKE_RM_FAIL FAKE_MKDIR_FAIL \
+    FAKE_CP_FAIL FAKE_SEED_CP_FAIL
   : > "$FAKE_LOG"
   : > "$GITHUB_OUTPUT"
   printf 'a install,ok,installed 1\n' > "$FAKE_STATE/status"
@@ -191,5 +211,42 @@ new_case nothing-installed
 printf 'a deinstall,ok,config-files 1\n' > "$FAKE_STATE/status"
 FAKE_DOWNLOADS="a_1_amd64.deb" run_install
 expect_no_collected nothing-installed
+
+# 9. Preparing the download cache fails after a good install: the install still
+# succeeds, but nothing is marked for saving, so a stale .deb that survives a
+# failed clean-up (it would pass the signature check) can never be saved.
+new_case rm-fails
+printf 'deb' > "$case_dir/cache/old_1_amd64.deb"
+FAKE_RM_FAIL=1 FAKE_DOWNLOADS="a_1_amd64.deb" run_install
+expect_status 0 rm-fails
+expect_no_collected rm-fails
+[[ -e "$case_dir/cache/old_1_amd64.deb" ]] || fail "rm-fails: the failed clean-up unexpectedly removed the stale .deb"
+grep -q 'not caching them' "$case_dir/stdout" || fail "rm-fails: no warning that nothing is cached"
+new_case mkdir-fails
+FAKE_MKDIR_FAIL=1 FAKE_DOWNLOADS="a_1_amd64.deb" run_install
+expect_status 0 mkdir-fails
+expect_no_collected mkdir-fails
+new_case cp-fails
+printf 'a install,ok,installed 1\nc install,ok,installed 3\n' > "$FAKE_STATE/status"
+FAKE_CP_FAIL=c_3 FAKE_DOWNLOADS="a_1_amd64.deb c_3_amd64.deb" run_install
+expect_status 0 cp-fails
+expect_no_collected cp-fails
+
+# 10. Best-effort steps do not fail the install: seeding apt's download cache, and
+# editing the mirror list before the retry.
+new_case seed-fails
+printf 'deb' > "$case_dir/cache/a_1_amd64.deb"
+FAKE_SEED_CP_FAIL=1 FAKE_DOWNLOADS="a_1_amd64.deb" run_install
+expect_status 0 seed-fails
+expect_logged 'apt-get install' seed-fails
+new_case sed-fails
+printf 'http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n' > "$case_dir/etc/apt-mirrors.txt"
+FAKE_SED_FAIL=1 FAKE_APT_UPDATE_FAIL_ONCE=1 FAKE_DOWNLOADS="a_1_amd64.deb" run_install
+expect_status 0 sed-fails
+expect_output 'collected=true' sed-fails
+
+# 11. The script keeps what an Actions bash step provides: -e and pipefail.
+head -n 1 "$install_sh" | grep -q bash || fail "install.sh has no bash shebang"
+grep -q '^set -euo pipefail$' "$install_sh" || fail "install.sh must run with set -euo pipefail"
 
 echo "apt-install tests passed"
