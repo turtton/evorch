@@ -80,12 +80,9 @@ impl CommandHost {
             &send.thread,
             &send.text,
             send.composer_role == workbench_protocol::commands::ComposerRole::Orchestrator,
-            send.fork_seed.as_ref().map(|seed| {
-                (
-                    seed.source_run_id.to_string(),
-                    u64::from(seed.context_len.get()),
-                )
-            }),
+            send.fork_seed
+                .as_ref()
+                .map(|seed| (seed.source_run_id.to_string(), seed.context_len.get())),
         )
     }
 
