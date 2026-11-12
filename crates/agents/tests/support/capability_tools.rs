@@ -69,6 +69,7 @@ pub const WORKER_TOOLS: &[&str] = &[
 pub const REVIEWER_TOOLS: &[&str] = &[
     "read",
     "grep",
+    "shell",
     "git_diff",
     "run_js",
     "working_note_write",

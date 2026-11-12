@@ -254,8 +254,9 @@ mod tests {
     }
 
     #[test]
-    fn only_roles_that_change_files_write_allowed_directories() {
-        // Given / When / Then: Worker alone holds write, edit or shell.
+    fn only_roles_with_file_tools_or_shell_write_allowed_directories() {
+        // Given / When / Then: Worker (write, edit, shell) and Reviewer (shell, no direct
+        // edit tools) get read-write access; shell can change files.
         for role in [
             Role::Orchestrator,
             Role::Explorer,
@@ -269,7 +270,7 @@ mod tests {
         ] {
             assert_eq!(
                 ExecutionPolicy::for_role(role).allowed_access(),
-                if role == Role::Worker {
+                if matches!(role, Role::Worker | Role::Reviewer) {
                     sandbox::PathAccess::ReadWrite
                 } else {
                     sandbox::PathAccess::ReadOnly

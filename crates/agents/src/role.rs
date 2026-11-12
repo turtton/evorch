@@ -48,7 +48,7 @@ pub const EVALUATOR_TOOLS: [&str; 7] = [
 /// | Orchestrator | 委譲・調査・skill_load・AgentRun 間メッセージ系 + web_fetch (mutation tool なし) | 可 |
 /// | Explorer | read / grep / run_js | 不可 |
 /// | Worker | read / write / edit / apply_patch / grep / shell / git_diff / skill_load / run_js + AgentRun 間メッセージ系 | 不可 |
-/// | Reviewer | read / grep / git_diff / run_js | 不可 |
+/// | Reviewer | read / grep / shell / git_diff / run_js | 不可 |
 /// | Advisor | read / grep / git_diff / run_js | 不可 |
 /// | WebResearcher | read / grep / web_search / web_fetch / browser_* / run_js | 不可 |
 /// | Evaluator | read / grep / eval_* | 不可 |
@@ -56,6 +56,9 @@ pub const EVALUATOR_TOOLS: [&str; 7] = [
 /// # 設計上の決定
 ///
 /// - Reviewer のツールセットはワークスペースの決定であり、intents では未定義。
+///   shell は差分・ログの確認と対象を絞ったテスト実行のためで、write / edit /
+///   apply_patch は持たない。shell を持つため allowed directories は読み書きになる。
+///   ファイルを変更しない運用は Reviewer の指示で求める。
 /// - Orchestrator は root 専用で、delegate の対象にならない (ADR 0044 §2)。
 /// - web_search は WebResearcher 専用であり、Orchestrator は web_fetch のみを持つ。
 /// - apply_patch はファイルを書き換えるため、edit / write と同じく Worker だけが持つ。
@@ -201,7 +204,9 @@ impl Role {
                 ],
                 false,
             ),
-            Role::Reviewer => RoleCapabilities::new(["read", "grep", "git_diff", "run_js"], false),
+            Role::Reviewer => {
+                RoleCapabilities::new(["read", "grep", "shell", "git_diff", "run_js"], false)
+            }
             Role::WebResearcher => RoleCapabilities::new(
                 ["read", "grep", "web_search", "web_fetch", "run_js"]
                     .into_iter()
