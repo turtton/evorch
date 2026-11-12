@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use workbench_protocol::namespaces::{
     ApprovalsCommand, ApprovalsEvent, ConversationCommand, ConversationEvent, ConversationQuery,
-    ExecutionQuery, ExecutionReply, LanesQuery, QuestionsCommand, QuestionsQuery, QuestionsReply,
+    ExecutionQuery, ExecutionReply, LanesQuery, LanesReply, QuestionsCommand, QuestionsQuery,
+    QuestionsReply,
     execution::{RunDetailsQuery, RunScope},
     lanes::ListLanes,
     teams::TeamsQuery,
@@ -58,6 +59,7 @@ fn display_queries() -> Vec<Query> {
         Query::Lanes(LanesQuery::ListLanes(ListLanes {
             lead_thread: thread,
             policy: None,
+            detached: false,
             page: Default::default(),
         })),
     ]
@@ -255,6 +257,27 @@ context_window_tokens = 1000000
             page: Default::default(),
         },
     ));
+    // The thread's team board as a coordinator saved it (a claim included), so the team reads
+    // below return real tasks. Only a store write: no provider request is made.
+    bridge
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "thread".into(),
+            project_id: Some("project".into()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        }])
+        .unwrap();
+    let board = runtime::team::TeamBoard::durable(bridge.handle(), "project:thread".into());
+    for id in ["task-ready", "task-claimed"] {
+        board
+            .enqueue(runtime::team::TaskSpec {
+                id: id.into(),
+                paths: vec![format!("src/{id}.rs").into()],
+            })
+            .unwrap();
+    }
+    board.claim("task-claimed", "worker-1", 1).unwrap();
     let display = display_queries();
     let QueryReply::Execution(ExecutionReply::RunDetails(runs)) =
         client.query(display[0].clone()).await.unwrap()
@@ -262,10 +285,55 @@ context_window_tokens = 1000000
         panic!("run details reply")
     };
     assert_eq!(runs.items.len(), 1, "the thread's one root run is listed");
-    for query in &display[1..] {
-        // A thread without a team or lanes answers an error; reading is all that matters.
-        let _ = client.query(query.clone()).await;
-    }
+    // The thread has one root run and a saved team board but no lane (a lane would add provider
+    // requests of its own): every read must succeed with what exists, or the prefix check below
+    // would only prove that failing queries leave it alone.
+    let QueryReply::Execution(ExecutionReply::ThreadExecution(execution)) =
+        client.query(display[1].clone()).await.unwrap()
+    else {
+        panic!("thread execution reply")
+    };
+    assert_eq!(execution.root_run, Some(runs.items[0].summary.id.clone()));
+    let QueryReply::Teams(workbench_protocol::namespaces::teams::TeamsReply::Team(team)) =
+        client.query(display[2].clone()).await.unwrap()
+    else {
+        panic!("team reply")
+    };
+    assert_eq!((team.ready, team.claimed, team.complete), (1, 1, 0));
+    let QueryReply::Teams(workbench_protocol::namespaces::teams::TeamsReply::Tasks(tasks)) =
+        client.query(display[3].clone()).await.unwrap()
+    else {
+        panic!("team tasks reply")
+    };
+    assert_eq!(
+        tasks
+            .items
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect::<Vec<_>>(),
+        ["task-claimed", "task-ready"],
+        "the saved board's tasks are listed"
+    );
+    assert_eq!(tasks.items[0].owner.as_deref(), Some("worker-1"));
+    let QueryReply::Lanes(LanesReply::Lanes(lanes)) =
+        client.query(display[4].clone()).await.unwrap()
+    else {
+        panic!("lanes reply")
+    };
+    assert!(lanes.items.is_empty());
+    let QueryReply::Execution(ExecutionReply::Run(run_detail)) = client
+        .query(Query::Execution(ExecutionQuery::GetRun(
+            workbench_protocol::namespaces::execution::RunRef {
+                thread: ThreadId::new("thread").unwrap(),
+                run: runs.items[0].summary.id.clone(),
+            },
+        )))
+        .await
+        .unwrap()
+    else {
+        panic!("run reply")
+    };
+    assert_eq!(*run_detail, runs.items[0]);
     let history = client.query(query.clone()).await.unwrap();
     let serialized = serde_json::to_string(&history).unwrap();
     assert!(serialized.contains("hello"));

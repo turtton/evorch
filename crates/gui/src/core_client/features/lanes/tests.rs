@@ -23,6 +23,14 @@ fn lanes(items: Vec<Value>) -> FeatureReply {
     )
 }
 
+/// A page of lanes with a following page behind `cursor`.
+fn lanes_then(items: Vec<Value>, cursor: &str) -> FeatureReply {
+    query_reply(
+        json!({"type": "lanes", "payload": {"type": "lanes", "payload": {
+        "items": items, "next_cursor": cursor, "snapshot_revision": "1"}}}),
+    )
+}
+
 fn detail(id: &str, held: bool, revision: u64) -> FeatureReply {
     query_reply(
         json!({"type": "lanes", "payload": {"type": "lane", "payload": {
@@ -61,7 +69,11 @@ fn tag_of(actions: &[FeatureAction], wanted: impl Fn(&Query) -> bool) -> u64 {
 }
 
 fn is_list(query: &Query) -> bool {
-    matches!(query, Query::Lanes(LanesQuery::ListLanes(_)))
+    matches!(query, Query::Lanes(LanesQuery::ListLanes(list)) if !list.detached)
+}
+
+fn is_detached_list(query: &Query) -> bool {
+    matches!(query, Query::Lanes(LanesQuery::ListLanes(list)) if list.detached)
 }
 
 fn is_roots(query: &Query) -> bool {
@@ -130,6 +142,7 @@ fn a_detach_then_a_reattach_waits_for_the_family_and_the_lead_root_run() {
         tag_of(&first, is_list),
         lanes(vec![summary("l1", "attached", 3)]),
     );
+    answer(&mut screen, tag_of(&first, is_detached_list), lanes(vec![]));
     screen.get_by_label("切り離す").click();
     let detach = asked(&mut screen);
     let manage = manage_of(&detach[0]);
@@ -146,6 +159,13 @@ fn a_detach_then_a_reattach_waits_for_the_family_and_the_lead_root_run() {
         &mut screen,
         tag_of(&refreshed, is_roots),
         roots(vec!["run-old", "run-lead"]),
+    );
+    // The detached lane is offered because the core lists it, not because this window
+    // remembers detaching it.
+    answer(
+        &mut screen,
+        tag_of(&refreshed, is_detached_list),
+        lanes(vec![summary("l1", "detached", 4)]),
     );
 
     screen.get_by_label("再接続").click();
@@ -187,6 +207,125 @@ fn a_detach_then_a_reattach_waits_for_the_family_and_the_lead_root_run() {
     };
     assert_eq!(lead_thread_id.as_str(), "lead");
     assert_eq!(expected_lead_root_run_id.as_str(), "run-lead");
+}
+
+#[test]
+fn a_detached_lane_is_found_again_after_switching_threads_and_after_a_reconnect() {
+    let mut screen = screen(Box::<LanesFeature>::default(), Some("lead"));
+    let first = asked(&mut screen);
+    answer(&mut screen, tag_of(&first, is_list), lanes(vec![]));
+    answer(
+        &mut screen,
+        tag_of(&first, is_detached_list),
+        lanes(vec![summary("l1", "detached", 4)]),
+    );
+    screen.get_by_label("切り離し済み: objective l1");
+
+    // Another thread shows none of it, and the lead shows it again once it is selected.
+    screen.state_mut().selection.thread = Some(ThreadId::new("other").unwrap());
+    let other = asked(&mut screen);
+    assert!(
+        other
+            .iter()
+            .any(|a| matches!(&a.request, FeatureRequest::Query(q) if is_detached_list(q)))
+    );
+    assert!(
+        screen
+            .query_by_label("切り離し済み: objective l1")
+            .is_none()
+    );
+    screen.state_mut().selection.thread = Some(ThreadId::new("lead").unwrap());
+    let back = asked(&mut screen);
+    answer(&mut screen, tag_of(&back, is_list), lanes(vec![]));
+    answer(
+        &mut screen,
+        tag_of(&back, is_detached_list),
+        lanes(vec![summary("l1", "detached", 4)]),
+    );
+    screen.get_by_label("切り離し済み: objective l1");
+
+    // A new connection starts from nothing and asks the core again.
+    screen.state_mut().feature.reset();
+    let reconnected = asked(&mut screen);
+    assert!(
+        screen
+            .query_by_label("切り離し済み: objective l1")
+            .is_none()
+    );
+    answer(&mut screen, tag_of(&reconnected, is_list), lanes(vec![]));
+    answer(
+        &mut screen,
+        tag_of(&reconnected, is_detached_list),
+        lanes(vec![summary("l1", "detached", 4)]),
+    );
+    screen.get_by_label("切り離し済み: objective l1");
+}
+
+#[test]
+fn detached_lanes_past_the_first_page_are_loaded_with_the_cursor_and_can_be_reattached() {
+    let mut screen = screen(Box::<LanesFeature>::default(), Some("lead"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        tag_of(&first, is_roots),
+        roots(vec!["run-lead"]),
+    );
+    answer(&mut screen, tag_of(&first, is_list), lanes(vec![]));
+    answer(
+        &mut screen,
+        tag_of(&first, is_detached_list),
+        lanes_then(vec![summary("l1", "detached", 4)], "page-2"),
+    );
+    screen.get_by_label("切り離し済み: objective l1");
+    assert!(
+        screen
+            .query_by_label("切り離し済み: objective l51")
+            .is_none()
+    );
+
+    // The next page is asked for with the cursor the core returned.
+    screen.get_by_label("切り離し済みをさらに読み込む").click();
+    let more = asked(&mut screen);
+    let tag = tag_of(&more, is_detached_list);
+    let cursor = more
+        .iter()
+        .find_map(|a| match &a.request {
+            FeatureRequest::Query(Query::Lanes(LanesQuery::ListLanes(list))) if list.detached => {
+                Some(list.page.cursor.clone())
+            }
+            _ => None,
+        })
+        .expect("a detached list was asked for");
+    assert_eq!(
+        cursor.map(|c| c.as_str().to_owned()).as_deref(),
+        Some("page-2")
+    );
+    answer(&mut screen, tag, lanes(vec![summary("l51", "detached", 9)]));
+    // The first page stays and the lane behind the page boundary is shown and reattachable.
+    screen.get_by_label("切り離し済み: objective l1");
+    screen.get_by_label("切り離し済み: objective l51");
+    assert!(
+        screen
+            .query_by_label("切り離し済みをさらに読み込む")
+            .is_none()
+    );
+    screen.get_by_label_contains("objective l51");
+    let reattach_l51 = screen
+        .get_all_by_label("再接続")
+        .nth(1)
+        .expect("a reattach button for the second lane");
+    reattach_l51.click();
+    let asked_for = asked(&mut screen);
+    let manage_lane = asked_for
+        .iter()
+        .find_map(|a| match &a.request {
+            FeatureRequest::Query(Query::Lanes(LanesQuery::GetLaneManagement { lane_id })) => {
+                Some(lane_id.as_str().to_owned())
+            }
+            _ => None,
+        })
+        .expect("the management state of the chosen lane is asked for");
+    assert_eq!(manage_lane, "l51");
 }
 
 #[test]
@@ -248,6 +387,7 @@ fn an_answer_for_another_lead_or_lane_is_dropped_and_events_of_other_leads_are_i
                     "last_activity_at": "1", "revision": "1"}),
             )
             .unwrap(),
+            also_for: vec![],
         })
     };
     screen.state_mut().feature.event(&event("lead", "l9"));

@@ -489,6 +489,52 @@ fn membership_epoch_topology_projection_are_independent_of_reports_and_policy() 
     assert_eq!(pending_projections(f.c(), 20).unwrap(), vec![d.lane]);
 }
 #[test]
+fn a_lane_moved_to_another_lead_and_detached_there_is_found_again_from_that_lead() {
+    let f = Fixture::new(LanePolicy::Attached);
+    let found = |lead: &str| -> Vec<String> {
+        crate::repo::lanes::detached_lanes_for(f.c(), lead)
+            .unwrap()
+            .into_iter()
+            .map(|lane| lane.lane_id)
+            .collect()
+    };
+    assert!(found("lead").is_empty(), "a managed lane is not detached");
+
+    // Created by "lead", detached, handed to "target", then detached there.
+    f.apply("detach-1", 1, LaneManagementAction::Detach);
+    assert_eq!(found("lead"), ["lane"]);
+    assert!(found("target").is_empty(), "target never managed it");
+    f.apply(
+        "reattach",
+        2,
+        LaneManagementAction::Reattach {
+            lead_thread_id: "target".into(),
+            expected_lead_root_run_id: "target-root".into(),
+        },
+    );
+    assert!(found("lead").is_empty() && found("target").is_empty());
+    f.apply("detach-2", 3, LaneManagementAction::Detach);
+    assert_eq!(found("target"), ["lane"], "the last lead finds it again");
+    assert_eq!(
+        found("lead"),
+        ["lane"],
+        "and so does the thread it came from"
+    );
+    assert!(found("stranger").is_empty());
+
+    // It can be attached to the last lead again.
+    let back = f.apply(
+        "reattach-2",
+        4,
+        LaneManagementAction::Reattach {
+            lead_thread_id: "target".into(),
+            expected_lead_root_run_id: "target-root".into(),
+        },
+    );
+    assert_eq!(back.lane.lead_thread_id.as_deref(), Some("target"));
+    assert!(found("target").is_empty());
+}
+#[test]
 fn policy_routing_preserves_requester_and_does_not_steal_user_questions() {
     let f = Fixture::new(LanePolicy::Attached);
     let before = f.question();

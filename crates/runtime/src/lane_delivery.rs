@@ -1299,7 +1299,7 @@ impl AgentRuntime {
         ownership: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<(), crate::RuntimeError> {
         match self.saved_root_thread(run) {
-            Some(thread) => self.resume_thread_lane_delivery(&thread, run, ownership),
+            Some(thread) => self.resume_thread_lane_delivery(&thread, run, ownership, false),
             None => Ok(()),
         }
     }
@@ -1345,13 +1345,46 @@ impl AgentRuntime {
                 ),
             ));
         }
-        self.resume_thread_lane_delivery(thread, run, ownership)
+        self.resume_thread_lane_delivery(thread, run, ownership, true)
+    }
+    /// The thread's current conversation root: the live binding when the thread has one, else
+    /// the root recorded for the thread, else the newest root among its saved runs. A root
+    /// that merely belongs to the thread (an older one) is not current.
+    pub(crate) fn current_thread_root(&self, thread: &str) -> Option<RunId> {
+        if let Some(live) = self
+            .goal_lock()
+            .roots
+            .iter()
+            .find_map(|(root, bound)| (bound == thread).then_some(*root))
+        {
+            return Some(live);
+        }
+        let store = self.shared.run_store.get()?;
+        store
+            .with_database(|db| {
+                if let Some(root) = db
+                    .thread(thread)?
+                    .and_then(|row| row.root_run_id)
+                    .and_then(|root| root.parse::<RunId>().ok())
+                {
+                    return Ok(Some(root));
+                }
+                Ok(db
+                    .runs_of_thread(thread)?
+                    .into_iter()
+                    .filter(|row| row.depth == 0)
+                    .filter_map(|row| row.run_id.parse::<RunId>().ok())
+                    .max())
+            })
+            .ok()
+            .flatten()
     }
     fn resume_thread_lane_delivery(
         &self,
         thread: &str,
         run: RunId,
         ownership: Option<&crate::ownership::OwnerPermit>,
+        require_current_root: bool,
     ) -> Result<(), crate::RuntimeError> {
         let Some(store) = self.shared.run_store.get() else {
             return Ok(());
@@ -1361,6 +1394,17 @@ impl AgentRuntime {
             .map(|p| p.mutation_guard())
             .transpose()
             .map_err(|e| Self::review_error(run, e))?;
+        // Inside the ownership fence, against the canonical current root: a root that is only
+        // saved under this thread (a superseded one) must not rebind the destination.
+        if require_current_root && self.current_thread_root(&thread) != Some(run) {
+            return Err(Self::review_error(
+                run,
+                LaneError::new(
+                    "not_the_threads_root",
+                    format!("{run} is not the current root of thread {thread}"),
+                ),
+            ));
+        }
         if let Some(destination) = store
             .handle
             .lane_delivery_destination(thread.clone())

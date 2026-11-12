@@ -32,6 +32,8 @@ pub const EVENT_TYPES: &[&str] = &["lane_changed"];
 
 /// Most attention entries one [`LaneDetail`] shows.
 pub const MAX_LANE_DETAIL_ATTENTION: usize = 16;
+/// The most threads a lane change names besides its lane thread and current lead.
+pub const MAX_LANE_EVENT_THREADS: usize = 4;
 
 /// Whether a lane's root run was ever started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -199,6 +201,13 @@ pub struct ListLanes {
     /// Only lanes under this policy; absent for every managed lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<ManagedLanePolicy>,
+    /// List the detached lanes (no lead manages them) that `lead_thread` can find again,
+    /// instead of the lanes it manages: those opened from it and those it managed last
+    /// (the lead of the lane's latest reattach). `policy` does not apply: every one of them
+    /// is detached. A detached lane is in no lead's managed list, so this is how a client
+    /// finds it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     #[serde(default)]
     pub page: PageRequest,
 }
@@ -319,14 +328,24 @@ impl LanesReply {
     deny_unknown_fields
 )]
 pub enum LanesEvent {
-    /// A lane changed (its management, brief, root run or reports).
-    LaneChanged { lane: LaneSummary },
+    /// A lane changed (its management, brief, root run or reports). `also_for` names the
+    /// threads that show the lane without being its lane thread or current lead (the leads
+    /// that find it again once detached, including the lead that just detached it), so a
+    /// scoped subscription to any of them receives the change.
+    LaneChanged {
+        lane: LaneSummary,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        also_for: Vec<ThreadId>,
+    },
 }
 
 impl LanesEvent {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
-            Self::LaneChanged { lane } => lane.validate(),
+            Self::LaneChanged { lane, also_for } => {
+                check_count("also_for", also_for.len(), MAX_LANE_EVENT_THREADS)?;
+                lane.validate()
+            }
         }
     }
 }

@@ -136,13 +136,41 @@ impl ExecutionArea {
     }
 }
 
+/// The thread a run belongs to: the saved binding (or its ancestor's), else the thread named
+/// by a live conversation root.
+fn thread_of_run(runtime: &AgentRuntime, run_id: &str) -> Option<String> {
+    let saved = runtime
+        .with_storage_reader(|db| db.thread_of_run(run_id))
+        .ok()
+        .flatten()
+        .flatten()
+        .map(|row| row.thread_id);
+    saved.or_else(|| {
+        runtime
+            .list_agents()
+            .iter()
+            .find(|agent| agent.run_id.to_string() == run_id)
+            .and_then(|agent| storage::threads::parse_chat_run_name(&agent.name))
+            .map(|(_, thread)| thread.to_owned())
+    })
+}
+
 fn publish_change(runtime: &AgentRuntime, source: &ProjectionSource, kind: &EventKind) {
-    let EventKind::Orchestrator(event) = kind else {
-        return;
-    };
-    let thread = match event {
-        OrchestratorEvent::ThreadGoalUpdated { snapshot } => snapshot.thread_id.clone(),
-        OrchestratorEvent::ThreadTodoUpdated { snapshot } => snapshot.thread_id.clone(),
+    let thread = match kind {
+        EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) => {
+            snapshot.thread_id.clone()
+        }
+        EventKind::Orchestrator(OrchestratorEvent::ThreadTodoUpdated { snapshot }) => {
+            snapshot.thread_id.clone()
+        }
+        // A working note changes neither goal nor todo; the thread that owns the run is
+        // told that its execution view (which carries the latest note) changed.
+        EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
+            let Some(thread) = thread_of_run(runtime, run_id) else {
+                return;
+            };
+            thread
+        }
         _ => return,
     };
     let Ok(thread_id) = ThreadId::new(&thread) else {

@@ -41,6 +41,7 @@ enum Pending {
     List { thread: ThreadId, append: bool },
     Detail { lane: LaneId },
     LeadRoot { thread: ThreadId },
+    Detached { thread: ThreadId, append: bool },
     Management { lane: LaneId },
     Command(&'static str),
 }
@@ -64,15 +65,22 @@ pub struct LanesFeature {
     /// The lead's latest root run, as the core last listed it.
     lead_root: Option<RunId>,
     lead_root_next: Option<PageCursor>,
-    /// Lanes this window detached: a detached lane no longer shows in the
-    /// lead's list, and is offered here for reattaching.
-    detached: Vec<(LaneId, String)>,
+    /// Lanes opened from this thread that no lead manages now, as the core lists them. A
+    /// detached lane is not in the lead's list, and is offered here for reattaching.
+    detached: Vec<LaneSummary>,
+    detached_next: Option<PageCursor>,
+    /// Pages of detached lanes loaded now, and how many the screen shows or has asked for: a
+    /// refresh re-reads the pages the user had loaded, instead of dropping all but the first.
+    detached_pages: usize,
+    detached_target_pages: usize,
     reattach: Option<Reattach>,
     status: String,
     list_stale: bool,
+    detached_stale: bool,
     detail_stale: bool,
     root_stale: bool,
     more_requested: bool,
+    detached_more_requested: bool,
 }
 
 impl LanesFeature {
@@ -91,10 +99,24 @@ impl LanesFeature {
         self.lead_root = None;
         self.lead_root_next = None;
         self.detached.clear();
+        self.detached_next = None;
+        self.detached_pages = 0;
+        self.detached_target_pages = 0;
         self.reattach = None;
         self.status.clear();
         self.list_stale = self.thread.is_some();
+        self.detached_stale = self.thread.is_some();
         self.root_stale = self.thread.is_some();
+    }
+
+    /// The lead's current root has been read: no root query is in flight or due.
+    fn root_settled(&self) -> bool {
+        !self.root_stale
+            && self.lead_root_next.is_none()
+            && !self
+                .pending
+                .values()
+                .any(|pending| matches!(pending, Pending::LeadRoot { .. }))
     }
 
     fn command(&mut self, ctx: &mut FeatureContext<'_>, label: &'static str, command: Command) {
@@ -131,6 +153,9 @@ impl LanesFeature {
     }
 
     fn drive_reattach(&mut self, ctx: &mut FeatureContext<'_>) {
+        if !self.root_settled() {
+            return;
+        }
         let (Some(flow), Some(lead), Some(root)) =
             (&self.reattach, self.thread.clone(), self.lead_root.clone())
         else {
@@ -190,8 +215,6 @@ impl LanesFeature {
                 }
                 if lane.policy != LaneManagementPolicy::Detached && ui.button("切り離す").clicked()
                 {
-                    self.detached
-                        .push((lane.lane_id.clone(), lane.objective_preview.clone()));
                     self.manage(
                         ctx,
                         "lane の切り離し",
@@ -338,13 +361,18 @@ impl Feature for LanesFeature {
         self.detail = None;
         self.lead_root = None;
         self.lead_root_next = None;
+        self.detached.clear();
+        self.detached_next = None;
+        self.detached_pages = 0;
+        self.detached_target_pages = 0;
         self.list_stale = self.thread.is_some();
+        self.detached_stale = self.thread.is_some();
         self.root_stale = self.thread.is_some();
         self.detail_stale = self.opened.is_some();
     }
 
     fn event(&mut self, event: &UiEvent) {
-        let UiEvent::Lanes(LanesEvent::LaneChanged { lane }) = event else {
+        let UiEvent::Lanes(LanesEvent::LaneChanged { lane, .. }) = event else {
             return;
         };
         let ours = self.thread.is_some()
@@ -352,6 +380,10 @@ impl Feature for LanesFeature {
                 || self.lanes.iter().any(|l| l.lane_id == lane.lane_id));
         if ours {
             self.list_stale = true;
+        }
+        // A detached lane has no lead: it is told apart only by asking the core again.
+        if self.thread.is_some() && (ours || lane.lead_thread_id.is_none()) {
+            self.detached_stale = true;
         }
         if self.opened.as_ref() == Some(&lane.lane_id) {
             self.detail_stale = true;
@@ -366,6 +398,7 @@ impl Feature for LanesFeature {
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
                 self.status = format!("{label}: 受け付けました");
                 self.list_stale = true;
+                self.detached_stale = true;
                 self.detail_stale = self.opened.is_some();
                 self.root_stale = true;
             }
@@ -375,6 +408,7 @@ impl Feature for LanesFeature {
                     self.pending.insert(tag, Pending::Command(label));
                 }
                 self.list_stale = true;
+                self.detached_stale = true;
                 self.detail_stale = self.opened.is_some();
                 self.root_stale = true;
             }
@@ -396,6 +430,31 @@ impl Feature for LanesFeature {
                     self.lanes = page.items;
                 }
                 self.next_cursor = page.next_cursor;
+            }
+            (
+                Pending::Detached { thread, append },
+                FeatureReply::Query(Ok(QueryReply::Lanes(LanesReply::Lanes(page)))),
+            ) => {
+                if self.thread.as_ref() != Some(&thread) {
+                    return;
+                }
+                if append {
+                    for lane in page.items {
+                        if !self.detached.iter().any(|l| l.lane_id == lane.lane_id) {
+                            self.detached.push(lane);
+                        }
+                    }
+                    self.detached_pages += 1;
+                } else {
+                    self.detached = page.items;
+                    self.detached_pages = 1;
+                }
+                self.detached_next = page.next_cursor;
+                // Pages the user had loaded before a refresh are read again, one at a time.
+                if self.detached_pages < self.detached_target_pages && self.detached_next.is_some()
+                {
+                    self.detached_more_requested = true;
+                }
             }
             (
                 Pending::Detail { lane },
@@ -453,9 +512,42 @@ impl Feature for LanesFeature {
                 Query::Lanes(LanesQuery::ListLanes(ListLanes {
                     lead_thread: thread.clone(),
                     policy: None,
+                    detached: false,
                     page: PageRequest {
                         cursor: if append {
                             self.next_cursor.clone()
+                        } else {
+                            None
+                        },
+                        ..PageRequest::default()
+                    },
+                })),
+            );
+        }
+        if self.detached_stale || self.detached_more_requested {
+            let append = self.detached_more_requested && !self.detached_stale;
+            if !append {
+                // A refresh answers a request for more as well: it reads one page past the
+                // ones shown, and the next pages follow its reply.
+                self.detached_target_pages = self
+                    .detached_target_pages
+                    .max(self.detached_pages.max(1) + usize::from(self.detached_more_requested));
+            }
+            self.detached_stale = false;
+            self.detached_more_requested = false;
+            let tag = self.tag(Pending::Detached {
+                thread: thread.clone(),
+                append,
+            });
+            ctx.query(
+                tag,
+                Query::Lanes(LanesQuery::ListLanes(ListLanes {
+                    lead_thread: thread.clone(),
+                    policy: None,
+                    detached: true,
+                    page: PageRequest {
+                        cursor: if append {
+                            self.detached_next.clone()
                         } else {
                             None
                         },
@@ -506,10 +598,11 @@ impl Feature for LanesFeature {
         if self.next_cursor.is_some() && ui.button("さらに読み込む").clicked() {
             self.more_requested = true;
         }
-        for (lane, preview) in self.detached.clone() {
+        for detached in self.detached.clone() {
+            let lane = detached.lane_id;
             ui.push_id(("detached", lane.as_str()), |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(format!("切り離し済み: {preview}"));
+                    ui.label(format!("切り離し済み: {}", detached.objective_preview));
                     if self.reattach.is_none() && ui.button("再接続").clicked() {
                         self.reattach = Some(Reattach {
                             lane: lane.clone(),
@@ -522,10 +615,15 @@ impl Feature for LanesFeature {
                                 lane_id: lane.clone(),
                             }),
                         );
+                        self.lead_root = None;
                         self.root_stale = true;
                     }
                 });
             });
+        }
+        if self.detached_next.is_some() && ui.button("切り離し済みをさらに読み込む").clicked()
+        {
+            self.detached_more_requested = true;
         }
         self.draw_detail(ui, ctx);
     }

@@ -956,10 +956,28 @@ impl ProjectionSource {
     }
 }
 
+/// Every thread besides `thread_of` that shows the event's subject.
+fn also_for(event: &UiEvent) -> &[ThreadId] {
+    match event {
+        UiEvent::Lanes(workbench_protocol::namespaces::LanesEvent::LaneChanged {
+            also_for,
+            ..
+        }) => also_for,
+        _ => &[],
+    }
+}
+
 fn thread_of(event: &UiEvent) -> Option<&ThreadId> {
     match event {
         UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) => Some(&thread.id),
         UiEvent::Execution(ExecutionEvent::RunChanged { run }) => Some(&run.thread),
+        UiEvent::Execution(ExecutionEvent::ThreadExecutionChanged { thread, .. }) => Some(thread),
+        UiEvent::Teams(workbench_protocol::namespaces::teams::TeamsEvent::TeamChanged { team }) => {
+            Some(&team.thread)
+        }
+        UiEvent::Lanes(workbench_protocol::namespaces::LanesEvent::LaneChanged {
+            lane, ..
+        }) => Some(lane.lead_thread_id.as_ref().unwrap_or(&lane.thread_id)),
         UiEvent::Questions(QuestionsEvent::QuestionChanged { question }) => {
             Some(&question.requester.thread)
         }
@@ -991,11 +1009,22 @@ fn matches_scope(models: &Models, scope: &SubscriptionScope, event: &UiEvent) ->
         }
         _ => None,
     };
-    let threads = [thread_of(event), routed];
+    let threads: Vec<&ThreadId> = [thread_of(event), routed]
+        .into_iter()
+        .flatten()
+        .chain(also_for(event))
+        .chain(match event {
+            UiEvent::Lanes(workbench_protocol::namespaces::LanesEvent::LaneChanged {
+                lane,
+                ..
+            }) => Some(&lane.thread_id),
+            _ => None,
+        })
+        .collect();
     match scope {
         SubscriptionScope::All => true,
-        SubscriptionScope::Thread { thread } => threads.contains(&Some(thread)),
-        SubscriptionScope::Project { project } => threads.into_iter().flatten().any(|t| {
+        SubscriptionScope::Thread { thread } => threads.contains(&thread),
+        SubscriptionScope::Project { project } => threads.into_iter().any(|t| {
             models
                 .threads
                 .get(t.as_str())

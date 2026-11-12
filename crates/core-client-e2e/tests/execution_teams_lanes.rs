@@ -1,22 +1,31 @@
-//! A real desktop (shared connection and features, drawn into egui) and a
-//! Web client against one core with a live lead and a managed lane: both show
-//! the same runs and lanes, and a lane operation made from the screen reaches
-//! the ledger and is shown again.
+//! The desktop (the CEF GUI crate's shared connection and features, drawn and clicked with
+//! egui_kittest) and a Web client against the production core composition
+//! (`BootstrappedHost`, so the areas run their own event tasks): a click on the screen
+//! reaches the core, what the core did comes back to the screen, and the Web client agrees.
+//! Only the model and the per-run sandbox are replaced. The execution, teams and lanes
+//! screens never start a CEF browser, so none is started here.
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use gui::core_client::{
     Shared,
     connection::{Action, serve},
-    features::{FeatureView, Selection},
+    features::{FeatureAction, FeatureView, Selection},
 };
+use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
+use workbench_protocol::commands::{Command, ComposerRole, ContinueChat, SendChat, ThreadTarget};
 use workbench_protocol::namespaces::{
-    ExecutionQuery, ExecutionReply, LanesQuery, LanesReply,
+    ConversationCommand, ExecutionQuery, ExecutionReply, LanesQuery, LanesReply, WorkspaceQuery,
+    WorkspaceReply,
     execution::{RunDetailsQuery, RunScope},
     lanes::ListLanes,
+    teams::{TeamTaskRef, TeamsQuery, TeamsReply},
 };
 use workbench_protocol::{envelope::*, ids::*, queries::*};
 
+/// Every turn only says it is idle, so a conversation run saves its context and waits.
 struct HeldModel(tokio::sync::Notify);
 
 #[async_trait]
@@ -29,223 +38,191 @@ impl runtime::AgentModel for HeldModel {
         _: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
         self.0.notify_one();
-        std::future::pending().await
+        Ok(providers::ChatResponse {
+            usage_reported: true,
+            message: providers::Message {
+                role: providers::Role::Assistant,
+                content: vec![providers::ContentBlock::Text {
+                    text: "idle".into(),
+                }],
+            },
+            usage: Default::default(),
+            finish_reason: providers::FinishReason::Stop,
+        })
     }
     fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
-        "held-model".into()
+        "idle-model".into()
     }
 }
 
-fn texts(output: &egui::FullOutput) -> String {
-    fn walk(shape: &egui::Shape, out: &mut String) {
-        match shape {
-            egui::Shape::Text(text) => {
-                out.push_str(text.galley.text());
-                out.push('\n');
-            }
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
-            _ => {}
-        }
-    }
-    let mut out = String::new();
-    for clipped in &output.shapes {
-        walk(&clipped.shape, &mut out);
-    }
-    out
-}
+/// The runs' sandbox is not what is under test, and bwrap is not available everywhere.
+struct Unisolated;
 
-/// Draw the features once for `thread`, send what they asked for, return the text drawn.
-async fn frame(
-    shared: &Arc<Mutex<Shared>>,
-    actions: &tokio::sync::mpsc::Sender<Action>,
-    ctx: &egui::Context,
-    thread: &str,
-) -> String {
-    let (asked, text) = {
-        let mut state = shared.lock().unwrap();
-        let selection = Selection {
-            project: Some(ProjectId::new("project-1").unwrap()),
-            thread: Some(ThreadId::new(thread).unwrap()),
-        };
-        let mut asked = None;
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let state = &mut *state;
-            let view = FeatureView {
-                connected: state.connected,
-                capabilities: &state.capabilities,
-                cache: &state.cache,
-                selection: &selection,
-            };
-            asked = Some(state.features.render(ui, view));
-        });
-        output.textures_delta.clear();
-        (asked.unwrap(), texts(&output))
-    };
-    for action in asked.actions {
-        actions.send(Action::Feature(action)).await.unwrap();
-    }
-    text
-}
-
-/// Draw until the screen shows everything in `wanted`; every wait is on a
-/// change the connection reported.
-async fn screen_shows(
-    shared: &Arc<Mutex<Shared>>,
-    actions: &tokio::sync::mpsc::Sender<Action>,
-    ctx: &egui::Context,
-    thread: &str,
-    wanted: &[String],
-) -> String {
-    let changed = shared.lock().unwrap().changed.clone();
-    loop {
-        let notification = changed.notified();
-        tokio::pin!(notification);
-        notification.as_mut().enable();
-        let text = frame(shared, actions, ctx, thread).await;
-        if wanted.iter().all(|w| text.contains(w.as_str())) {
-            return text;
-        }
-        notification.await;
+impl runtime::SandboxFactory for Unisolated {
+    fn build(
+        &self,
+        _: &runtime::ExecutionPolicy,
+        _: &runtime::WorkspaceMounts,
+    ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError> {
+        Ok(Arc::new(sandbox::DirectSandbox::new_unchecked()))
     }
 }
 
-async fn web(http: &reqwest::Client, root: &str, id: &str, query: Query) -> QueryReply {
-    let reply: ReplyEnvelope = http
-        .post(format!("{root}/api/v1/request"))
-        .header("Origin", root)
-        .json(&RequestEnvelope {
-            request_id: RequestId::new(id).unwrap(),
-            session_id: SessionId::new("web").unwrap(),
-            body: RequestBody::Query(query),
-        })
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    match reply.result {
-        ReplyResult::Success(ReplyPayload::Query(reply)) => reply,
-        other => panic!("{other:?}"),
-    }
+const LEAD: &str = "lead";
+const OBJECTIVE: &str = "e2e objective";
+
+struct World {
+    boot: BootstrappedHost,
+    backend: Arc<evorch_core::backend::HostBackend>,
+    model: Arc<HeldModel>,
+    project: ProjectId,
+    lead: runtime::RunId,
+    shared: Arc<Mutex<Shared>>,
+    actions: tokio::sync::mpsc::Sender<Action>,
+    root: String,
+    socket: std::path::PathBuf,
+    http: reqwest::Client,
+    _instance: evorch_core::instance::Instance,
+    // Dropped last: the sockets and the database live below it.
+    _web: workbench_web::WebServer,
+    _dir: tempfile::TempDir,
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn the_desktop_and_the_web_client_show_the_same_runs_and_lanes() {
-    let dir = tempfile::Builder::new()
-        .prefix("p12-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let bus = Arc::new(event_bus::EventBus::new(1024));
-    let model = Arc::new(HeldModel(tokio::sync::Notify::new()));
-    let config = storage::StorageConfig {
-        db_path: dir.path().join("events.db"),
-        ..Default::default()
-    };
-    let store = storage::Storage::open(config.clone()).unwrap();
-    let runtime = runtime::AgentRuntime::new(
-        bus.clone(),
-        Arc::new(tools::ToolExecutor::new(bus.clone())),
-        model.clone(),
-    )
-    .with_run_store(runtime::RunStore::open(&config, store.handle()).unwrap());
-    let owner = Arc::new(
-        runtime::ownership::OwnerHost::open(
-            &dir.path().join("owners"),
-            Default::default(),
-            bus.clone(),
-        )
-        .unwrap(),
-    );
-    let lead = runtime
-        .delegate_chat(
-            "lead",
-            runtime::Role::Orchestrator,
-            "manage lanes".into(),
-            runtime::RunConfig {
-                conversation: true,
-                interactive: true,
-                keep_alive: true,
-                ownership: Some(owner.start("lead").unwrap()),
-                project_root: Some(dir.path().into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    model.0.notified().await;
-    let brief: event_bus::LaneBrief = serde_json::from_value(serde_json::json!({
-        "objective": "e2e objective", "inputs": [], "deliverables": ["patch"],
+fn brief() -> event_bus::LaneBrief {
+    brief_of(OBJECTIVE)
+}
+
+fn brief_of(objective: &str) -> event_bus::LaneBrief {
+    serde_json::from_value(serde_json::json!({
+        "objective": objective, "inputs": [], "deliverables": ["patch"],
         "acceptance_criteria": ["review"], "constraints": [], "workspace": {},
         "report_policy": "attached"
     }))
-    .unwrap();
-    let lane = runtime.open_lane(lead, "e2e-open", brief).unwrap();
-    model.0.notified().await;
-    store
-        .handle()
-        .upsert_threads_host(&["lead", lane.thread_id.as_str()].map(|id| {
-            storage::threads::ThreadUpsert {
-                thread_id: id.into(),
-                project_id: Some("project-1".into()),
-                project_root: Some(dir.path().to_string_lossy().into_owned()),
-                ..Default::default()
-            }
-        }))
-        .unwrap();
-    std::fs::write(
-        dir.path().join("sidebar.json"),
-        r#"{"version":2,"families":[]}"#,
-    )
-    .unwrap();
+    .unwrap()
+}
 
-    let service = workbench_host::commands::CommandService::new(
-        runtime.clone(),
-        tokio::runtime::Handle::current(),
-    )
-    .with_event_bus(bus.clone())
-    .with_ownership(owner.clone());
-    service.bind_lane_delivery();
-    let areas = workbench_host::areas::Areas {
-        execution: workbench_host::areas::execution::ExecutionArea::with_runtime(runtime.clone()),
-        teams: workbench_host::areas::teams::TeamsArea::with_runtime(runtime.clone()),
-        lanes: workbench_host::areas::lanes::LanesArea::with_runtime(runtime.clone()),
-        ..Default::default()
+fn request(
+    backend: &evorch_core::backend::HostBackend,
+    id: &str,
+    body: RequestBody,
+) -> ReplyPayload {
+    let reply = backend.request(
+        RequestEnvelope {
+            request_id: RequestId::new(id).unwrap(),
+            session_id: SessionId::new("session").unwrap(),
+            body,
+        },
+        Provenance::human(Surface::Cli, ClientId::new("client").unwrap()),
+    );
+    match reply.result {
+        ReplyResult::Success(payload) => payload,
+        ReplyResult::Error(error) => panic!("{id} failed: {error:?}"),
+    }
+}
+
+/// Start a chat of `thread` the way a client does.
+fn start_chat(
+    backend: &evorch_core::backend::HostBackend,
+    project: &ProjectId,
+    thread: &str,
+) -> runtime::RunId {
+    let ReplyPayload::Command(reply) = request(
+        backend,
+        &format!("start-{thread}"),
+        RequestBody::Command(Command::Conversation(ConversationCommand::SendChat(
+            SendChat {
+                project: project.clone(),
+                thread: ThreadId::new(thread).unwrap(),
+                submission_id: SubmissionId::new(format!("sub-{thread}")).unwrap(),
+                composer_role: ComposerRole::Orchestrator,
+                text: "coordinate".into(),
+                skills: Vec::new(),
+                images: Vec::new(),
+                model_preference: None,
+                fork_seed: None,
+            },
+        ))),
+    ) else {
+        panic!("expected a command reply");
     };
-    let host = Arc::new(Mutex::new(
-        workbench_host::CommandHost::new(service)
-            .with_lane_sidebar_path(dir.path().join("sidebar.json"))
-            .with_areas(areas),
-    ));
-    let identity = core_instance::ConfigIdentity::new(&dir.path().join("config")).unwrap();
-    let instance = evorch_core::instance::Instance::acquire(
-        &core_instance::LaunchGuard::acquire(&identity).unwrap(),
-        dir.path(),
-    )
-    .unwrap();
-    let listener = instance.bind().unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
-    let backend = Arc::new(evorch_core::backend::HostBackend::new(
-        host,
-        instance.identity.clone(),
-    ));
-    let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let socket_backend = backend.clone();
-    tokio::spawn(async move {
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let backend = socket_backend.clone();
-            let stopped = stopped.clone();
-            tokio::spawn(async move {
-                let _ = evorch_core::unix::connection(stream, backend, stopped).await;
-            });
+    reply.run_id.unwrap().as_str().parse().unwrap()
+}
+
+impl World {
+    async fn web(&self, id: &str, query: Query) -> QueryReply {
+        let reply: ReplyEnvelope = self
+            .http
+            .post(format!("{}/api/v1/request", self.root))
+            .header("Origin", &self.root)
+            .json(&RequestEnvelope {
+                request_id: RequestId::new(id).unwrap(),
+                session_id: SessionId::new("web").unwrap(),
+                body: RequestBody::Query(query),
+            })
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        match reply.result {
+            ReplyResult::Success(ReplyPayload::Query(reply)) => reply,
+            other => panic!("{other:?}"),
         }
-    });
+    }
+
+    async fn web_lanes(
+        &self,
+        id: &str,
+        detached: bool,
+    ) -> workbench_protocol::views::Page<workbench_protocol::namespaces::lanes::LaneSummary> {
+        let QueryReply::Lanes(LanesReply::Lanes(page)) = self
+            .web(
+                id,
+                Query::Lanes(LanesQuery::ListLanes(ListLanes {
+                    lead_thread: ThreadId::new(LEAD).unwrap(),
+                    policy: None,
+                    detached,
+                    page: Default::default(),
+                })),
+            )
+            .await
+        else {
+            panic!("lanes expected");
+        };
+        page
+    }
+
+    async fn web_execution(
+        &self,
+        id: &str,
+    ) -> workbench_protocol::namespaces::execution::ThreadExecution {
+        let QueryReply::Execution(ExecutionReply::ThreadExecution(execution)) = self
+            .web(
+                id,
+                Query::Execution(ExecutionQuery::GetThreadExecution(ThreadTarget {
+                    thread: ThreadId::new(LEAD).unwrap(),
+                })),
+            )
+            .await
+        else {
+            panic!("thread execution expected");
+        };
+        *execution
+    }
+}
+
+/// A new desktop connection to the core, the way a started (or restarted) GUI makes it.
+async fn connect_gui(
+    socket: std::path::PathBuf,
+    root_dir: &std::path::Path,
+) -> (Arc<Mutex<Shared>>, tokio::sync::mpsc::Sender<Action>) {
+    let identity = core_instance::ConfigIdentity::new(&root_dir.join("gui-identity")).unwrap();
     let launcher = core_launcher::Launcher::with_socket(
         identity,
         core_launcher::CoreBinary::explicit(&std::env::current_exe().unwrap()).unwrap(),
         gui::core_client::client_config(),
-        instance.socket.clone(),
+        socket,
     )
     .unwrap();
     let (actions, rx) = tokio::sync::mpsc::channel(64);
@@ -266,133 +243,667 @@ async fn the_desktop_and_the_web_client_show_the_same_runs_and_lanes() {
         }
         notification.await;
     }
+    (shared, actions)
+}
 
+/// Waits until `run` has finished its turn and waits for input, which is when its context is saved.
+async fn waiting(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
+    while runtime.inspect_agent(run).map(|agent| agent.phase).ok()
+        != Some(event_bus::AgentRunPhase::Waiting)
+    {
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn start() -> World {
+    // The sockets live below the directory, so the path stays short.
+    let dir = tempfile::Builder::new()
+        .prefix("p12-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let root_dir = dir.path().canonicalize().unwrap();
+    std::fs::write(
+        root_dir.join("sidebar.json"),
+        serde_json::json!({"version":workspace_state::SIDEBAR_SCHEMA_VERSION,"projects":[],"threads":[]}).to_string(),
+    )
+    .unwrap();
+    let model = Arc::new(HeldModel(tokio::sync::Notify::new()));
+    let boot = BootstrappedHost::open_with_test_seams(
+        BootstrapOptions {
+            config_dir: root_dir.clone(),
+            project_root: root_dir.clone(),
+            ownership_root: root_dir.join("owners"),
+        },
+        TestSeams {
+            model: model.clone(),
+            sandbox: Arc::new(Unisolated),
+        },
+    )
+    .await
+    .unwrap();
+
+    let identity = core_instance::ConfigIdentity::new(&root_dir.join("gui-identity")).unwrap();
+    std::fs::create_dir_all(root_dir.join("instance")).unwrap();
+    let instance = evorch_core::instance::Instance::acquire(
+        &core_instance::LaunchGuard::acquire(&identity).unwrap(),
+        &root_dir.join("instance"),
+    )
+    .unwrap();
+    let backend = Arc::new(evorch_core::backend::HostBackend::new(
+        boot.host.clone(),
+        instance.identity.clone(),
+    ));
+    let world_parts = (boot, backend, model);
+    let listener = instance.bind().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let socket_backend = world_parts.1.clone();
+    tokio::spawn(async move {
+        let _keep = _stop;
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let backend = socket_backend.clone();
+            let stopped = stopped.clone();
+            tokio::spawn(async move {
+                let _ = evorch_core::unix::connection(stream, backend, stopped).await;
+            });
+        }
+    });
+    let socket = instance.socket.clone();
+    let (shared, actions) = connect_gui(socket.clone(), &root_dir).await;
     let web_server = workbench_web::WebServer::start(
         workbench_web::WebServerConfig {
             enabled: true,
             bind: ([127, 0, 0, 1], 0).into(),
             ..Default::default()
         },
-        backend.clone(),
+        world_parts.1.clone(),
     )
     .await
     .unwrap()
     .unwrap();
     let root = format!("http://{}", web_server.local_addr());
-    let http = reqwest::Client::new();
 
-    // What the Web client reads for the lead's thread.
-    let QueryReply::Execution(ExecutionReply::RunDetails(web_runs)) = web(
-        &http,
-        &root,
-        "web-runs",
-        Query::Execution(ExecutionQuery::ListRunDetails(RunDetailsQuery {
-            thread: ThreadId::new("lead").unwrap(),
-            scope: RunScope::Roots,
-            page: Default::default(),
-        })),
-    )
-    .await
+    let (boot, backend, model) = world_parts;
+    let ReplyPayload::Query(QueryReply::Workspace(WorkspaceReply::Projects(projects))) = request(
+        &backend,
+        "projects",
+        RequestBody::Query(Query::Workspace(WorkspaceQuery::ListProjects(
+            Default::default(),
+        ))),
+    ) else {
+        panic!("expected the project list");
+    };
+    let project = projects.items[0].id.clone();
+    let lead = start_chat(&backend, &project, LEAD);
+    model.0.notified().await;
+    waiting(&boot.runtime, lead).await;
+    World {
+        boot,
+        backend,
+        model,
+        project,
+        lead,
+        shared,
+        actions,
+        root,
+        socket,
+        http: reqwest::Client::new(),
+        _instance: instance,
+        _web: web_server,
+        _dir: dir,
+    }
+}
+
+impl World {
+    /// A GUI that connects after the core already holds state: what a restarted window sees.
+    async fn restarted_desktop(&self) -> Desktop {
+        let (shared, actions) = connect_gui(self.socket.clone(), self._dir.path()).await;
+        Desktop::new(shared, actions, self.project.clone())
+    }
+
+    fn desktop(&self) -> Desktop {
+        Desktop::new(
+            self.shared.clone(),
+            self.actions.clone(),
+            self.project.clone(),
+        )
+    }
+}
+
+/// The desktop's feature screens, drawn and clicked with egui_kittest. Every wait is on a
+/// change the connection reported.
+struct Desktop {
+    harness: Harness<'static>,
+    shared: Arc<Mutex<Shared>>,
+    thread: Arc<Mutex<Option<String>>>,
+    asked: Arc<Mutex<Vec<FeatureAction>>>,
+    actions: tokio::sync::mpsc::Sender<Action>,
+}
+
+impl Desktop {
+    fn new(
+        shared: Arc<Mutex<Shared>>,
+        actions: tokio::sync::mpsc::Sender<Action>,
+        project: ProjectId,
+    ) -> Self {
+        let thread = Arc::new(Mutex::new(None::<String>));
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let harness = {
+            let (shared, thread, asked) = (shared.clone(), thread.clone(), asked.clone());
+            Harness::new_ui(move |ui| {
+                let selection = Selection {
+                    project: Some(project.clone()),
+                    thread: thread
+                        .lock()
+                        .unwrap()
+                        .as_deref()
+                        .map(|id| ThreadId::new(id).unwrap()),
+                };
+                let mut state = shared.lock().unwrap();
+                let state = &mut *state;
+                let view = FeatureView {
+                    connected: state.connected,
+                    capabilities: &state.capabilities,
+                    cache: &state.cache,
+                    selection: &selection,
+                };
+                let frame = state.features.render(ui, view);
+                asked.lock().unwrap().extend(frame.actions);
+            })
+        };
+        Self {
+            harness,
+            shared,
+            thread,
+            asked,
+            actions,
+        }
+    }
+
+    fn select(&self, thread: &str) {
+        *self.thread.lock().unwrap() = Some(thread.to_owned());
+    }
+
+    async fn flush(&mut self) {
+        self.harness.run_steps(2);
+        let asked = std::mem::take(&mut *self.asked.lock().unwrap());
+        for action in asked {
+            self.actions.send(Action::Feature(action)).await.unwrap();
+        }
+    }
+
+    fn shows(&self, label: &str) -> bool {
+        self.harness.query_all_by_label(label).next().is_some()
+    }
+
+    fn shows_part(&self, part: &str) -> bool {
+        self.harness
+            .query_all_by_label_contains(part)
+            .next()
+            .is_some()
+    }
+
+    async fn until(&mut self, done: impl Fn(&Desktop) -> bool) {
+        let changed = self.shared.lock().unwrap().changed.clone();
+        loop {
+            let notification = changed.notified();
+            tokio::pin!(notification);
+            notification.as_mut().enable();
+            self.flush().await;
+            if done(self) {
+                return;
+            }
+            notification.await;
+        }
+    }
+
+    async fn click(&mut self, label: &str) {
+        self.harness.get_by_label(label).click();
+        self.flush().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clicks_on_runs_and_goals_reach_the_core_and_its_answers_come_back() {
+    let world = start().await;
+    let child = world
+        .boot
+        .runtime
+        .delegate_background_as_child(
+            world.lead,
+            runtime::Role::Worker,
+            "child task",
+            runtime::RunConfig {
+                project_root: Some(world._dir.path().canonicalize().unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    world.model.0.notified().await;
+    world
+        .boot
+        .runtime
+        .create_thread_goal(
+            LEAD,
+            world.lead,
+            "ship it".into(),
+            vec!["tests pass".into()],
+        )
+        .unwrap();
+
+    // The lead's roots, then a drill-down into its child, both as the Web client lists them.
+    let mut desktop = world.desktop();
+    desktop.select(LEAD);
+    desktop.until(|d| d.shows_part("子 run (1)")).await;
+    desktop.click("子 run (1)").await;
+    let QueryReply::Execution(ExecutionReply::RunDetails(children)) = world
+        .web(
+            "web-children",
+            Query::Execution(ExecutionQuery::ListRunDetails(RunDetailsQuery {
+                thread: ThreadId::new(LEAD).unwrap(),
+                scope: RunScope::Children {
+                    parent: RunId::new(world.lead.to_string()).unwrap(),
+                },
+                page: Default::default(),
+            })),
+        )
+        .await
     else {
         panic!("run details expected");
     };
-    let QueryReply::Lanes(LanesReply::Lanes(web_lanes)) = web(
-        &http,
-        &root,
-        "web-lanes",
-        Query::Lanes(LanesQuery::ListLanes(ListLanes {
-            lead_thread: ThreadId::new("lead").unwrap(),
-            policy: None,
-            page: Default::default(),
-        })),
-    )
-    .await
-    else {
-        panic!("lanes expected");
-    };
-    assert_eq!(web_runs.items.len(), 1);
-    assert_eq!(web_lanes.items.len(), 1);
-    assert_eq!(web_lanes.items[0].lane_id.as_str(), lane.lane_id);
+    assert_eq!(children.items.len(), 1);
+    assert_eq!(children.items[0].summary.id.as_str(), child.to_string());
+    let child_name = children.items[0].name.clone();
+    desktop.until(|d| d.shows(&child_name)).await;
+    desktop.click("ルート").await;
+    desktop.until(|d| d.shows_part("子 run (1)")).await;
 
-    // The desktop shows exactly those runs and lanes.
-    let wanted: Vec<String> = web_runs
-        .items
-        .iter()
-        .map(|run| run.name.clone())
-        .chain(
-            web_lanes
-                .items
-                .iter()
-                .map(|lane| lane.objective_preview.clone()),
-        )
-        .collect();
-    let ctx = egui::Context::default();
-    let text = screen_shows(&shared, &actions, &ctx, "lead", &wanted).await;
-    assert!(text.contains("実行中"), "the lead's run is live and active");
-    assert!(text.contains("添付"), "the lane is attached");
+    // Goal review: the checkbox sends the command, the core flips the goal, the screen says so.
+    desktop.until(|d| d.shows_part("ゴール: ship it")).await;
+    let before = world.web_execution("goal-before").await.goal.unwrap();
+    desktop.click("ゴールレビュー").await;
+    desktop
+        .until(|d| d.shows("ゴールレビューの切替: 受け付けました"))
+        .await;
+    let after = world.web_execution("goal-after").await.goal.unwrap();
+    assert_ne!(after.review_enabled, before.review_enabled);
 
-    // A lane operation from the desktop reaches the ledger; both clients then
-    // agree that the lane left the lead's list.
-    let wanted_after = ["この会話が管理している lane はありません。".to_owned()];
-    let changed = shared.lock().unwrap().changed.clone();
-    let mut clicked = false;
-    loop {
-        let notification = changed.notified();
-        tokio::pin!(notification);
-        notification.as_mut().enable();
-        if !clicked {
-            // The same typed command the screen's "切り離す" button sends.
-            use workbench_protocol::lane_management::*;
-            let command = workbench_protocol::commands::Command::Lanes(
-                workbench_protocol::namespaces::LanesCommand::ManageLane(ManageLane {
-                    request: LaneManagementRequest {
-                        operation_id: LaneManagementOperationId::new("e2e-detach").unwrap(),
-                        lane_id: workbench_protocol::lane_attention::LaneId::new(&lane.lane_id)
-                            .unwrap(),
-                        expected_management_revision: web_lanes.items[0].management_revision,
-                        action: LaneManagementAction::Detach,
-                    },
-                    expected_family_revision: None,
-                }),
-            );
-            actions
-                .send(Action::Command {
-                    command,
-                    draft: None,
-                })
-                .await
-                .unwrap();
-            // The area here has no event task, so the screen is refreshed the way
-            // its "再接続 / 再同期" button does.
-            actions.send(Action::Reconnect).await.unwrap();
-            clicked = true;
-        }
-        let text = frame(&shared, &actions, &ctx, "lead").await;
-        if wanted_after.iter().all(|w| text.contains(w.as_str())) {
-            break;
-        }
-        notification.await;
+    for run in [child, world.lead] {
+        world.boot.runtime.cancel(run).unwrap();
+        let _ = world.boot.runtime.wait(run).await;
     }
-    let QueryReply::Lanes(LanesReply::Lanes(after)) = web(
-        &http,
-        &root,
-        "web-lanes-after",
-        Query::Lanes(LanesQuery::ListLanes(ListLanes {
-            lead_thread: ThreadId::new("lead").unwrap(),
-            policy: None,
-            page: Default::default(),
-        })),
-    )
-    .await
-    else {
-        panic!("lanes expected");
-    };
-    assert!(
-        after.items.is_empty(),
-        "the Web client sees the same ledger"
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lane_operations_on_the_screen_reach_the_ledger_and_survive_a_thread_switch_and_a_reconnect()
+ {
+    let world = start().await;
+    let lane = world
+        .boot
+        .runtime
+        .open_lane(world.lead, "e2e-open", brief())
+        .unwrap();
+    waiting(&world.boot.runtime, lane.root_run_id).await;
+    // The workspace puts both threads in the lead's project; the ledger requires that before a
+    // detached lane can be attached to its lead again.
+    let side = storage::Storage::open(storage::StorageConfig {
+        db_path: world
+            ._dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("evorch-events.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    let project_root = world._dir.path().canonicalize().unwrap();
+    side.handle()
+        .upsert_threads_host(&[LEAD, lane.thread_id.as_str()].map(|thread| {
+            storage::threads::ThreadUpsert {
+                thread_id: thread.to_owned(),
+                project_id: Some(world.project.as_str().to_owned()),
+                project_root: Some(project_root.to_string_lossy().into_owned()),
+                ..Default::default()
+            }
+        }))
+        .unwrap();
+    let mut desktop = world.desktop();
+    desktop.select(LEAD);
+
+    // The lane is shown as the Web client lists it.
+    let listed = world.web_lanes("web-lanes", false).await;
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].lane_id.as_str(), lane.lane_id);
+    desktop.until(|d| d.shows(OBJECTIVE)).await;
+
+    // Detach from the screen: the core's event, not a reload, brings the lane to the
+    // detached section and takes it out of the lead's list.
+    desktop.click("切り離す").await;
+    desktop
+        .until(|d| d.shows(&format!("切り離し済み: {OBJECTIVE}")))
+        .await;
+    assert!(world.web_lanes("web-managed", false).await.items.is_empty());
+    assert_eq!(world.web_lanes("web-detached", true).await.items.len(), 1);
+
+    // Another thread and back, then a new connection: the core still offers it.
+    desktop.select("some-other-thread");
+    desktop
+        .until(|d| !d.shows(&format!("切り離し済み: {OBJECTIVE}")))
+        .await;
+    desktop.select(LEAD);
+    desktop
+        .until(|d| d.shows(&format!("切り離し済み: {OBJECTIVE}")))
+        .await;
+    let mut restarted = world.restarted_desktop().await;
+    restarted.select(LEAD);
+    restarted
+        .until(|d| d.shows(&format!("切り離し済み: {OBJECTIVE}")))
+        .await;
+
+    // Reattach from the screen: the lead's current root run is read first, then sent.
+    desktop.click("再接続").await;
+    desktop
+        .until(|d| d.shows("切り離す") && !d.shows_part("切り離し済み"))
+        .await;
+    assert_eq!(
+        world.web_lanes("web-reattached", false).await.items.len(),
+        1
     );
-    for run in [lane.root_run_id, lead] {
-        runtime.cancel(run).unwrap();
-        runtime.wait(run).await.unwrap();
+    assert!(world.web_lanes("web-none", true).await.items.is_empty());
+
+    // The operator stops the lead: the open lane shows its notices held, and the refusal of a
+    // resume while the stop stands comes back to the screen. Continuing frees them.
+    desktop.click(OBJECTIVE).await;
+    desktop.until(|d| d.shows_part("管理 revision")).await;
+    world
+        .boot
+        .runtime
+        .stop(world.lead, runtime::StopScope::SelfOnly)
+        .unwrap();
+    desktop
+        .until(|d| d.shows_part("lead への通知が保留されています"))
+        .await;
+    desktop.click("保留中の通知を再配信").await;
+    desktop
+        .until(|d| d.shows_part("通知の再配信: ") && d.shows_part("lead_stopped"))
+        .await;
+    let ReplyPayload::Command(_) = request(
+        &world.backend,
+        "continue",
+        RequestBody::Command(Command::Conversation(ConversationCommand::ContinueChat(
+            ContinueChat {
+                project: world.project.clone(),
+                thread: ThreadId::new(LEAD).unwrap(),
+                composer_role: ComposerRole::Orchestrator,
+                model_preference: None,
+            },
+        ))),
+    ) else {
+        panic!("expected a command reply");
+    };
+    desktop
+        .until(|d| !d.shows_part("lead への通知が保留されています"))
+        .await;
+    for run in [lane.root_run_id, world.lead] {
+        let _ = world.boot.runtime.cancel(run);
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_click_on_a_team_task_opens_the_detail_the_core_and_the_web_client_report() {
+    let world = start().await;
+    // The team board is the lead thread's persisted one, written through the real board (a
+    // claim included) the way a coordinator saves it; the core reads it as a restarted one would.
+    let side = storage::Storage::open(storage::StorageConfig {
+        db_path: world
+            ._dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("evorch-events.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    side.handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: LEAD.to_owned(),
+            project_id: Some(world.project.as_str().to_owned()),
+            project_root: Some(
+                world
+                    ._dir
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..Default::default()
+        }])
+        .unwrap();
+    let board = runtime::team::TeamBoard::durable(
+        side.handle(),
+        format!("{}:{LEAD}", world.project.as_str()),
+    );
+    for (id, path) in [
+        ("task-ready", "src/ready.rs"),
+        ("task-claimed", "docs/claimed.md"),
+    ] {
+        board
+            .enqueue(runtime::team::TaskSpec {
+                id: id.to_owned(),
+                paths: vec![std::path::PathBuf::from(path)],
+            })
+            .unwrap();
+    }
+    board
+        .claim("task-claimed", &world.lead.to_string(), 1)
+        .unwrap();
+
+    // What the core and the Web client report for the claimed task.
+    let QueryReply::Teams(TeamsReply::Task(task)) = world
+        .web(
+            "web-task",
+            Query::Teams(TeamsQuery::GetTeamTask(TeamTaskRef {
+                thread: ThreadId::new(LEAD).unwrap(),
+                task_id: "task-claimed".to_owned(),
+            })),
+        )
+        .await
+    else {
+        panic!("a team task expected");
+    };
+    assert_eq!(task.paths, ["docs/claimed.md"]);
+    assert_eq!(task.owner.as_deref(), Some(world.lead.to_string().as_str()));
+    assert_eq!(
+        task.owner_run.as_ref().map(|run| run.as_str()),
+        Some(world.lead.to_string().as_str())
+    );
+    let QueryReply::Teams(TeamsReply::Team(team)) = world
+        .web(
+            "web-team",
+            Query::Teams(TeamsQuery::GetTeam(ThreadTarget {
+                thread: ThreadId::new(LEAD).unwrap(),
+            })),
+        )
+        .await
+    else {
+        panic!("a team overview expected");
+    };
+    assert_eq!((team.ready, team.claimed, team.complete), (1, 1, 0));
+
+    // The screen lists both tasks and the board's counts; a click on one opens its detail.
+    let mut desktop = world.desktop();
+    desktop.select(LEAD);
+    desktop.until(|d| d.shows("task-claimed")).await;
+    assert!(desktop.shows("task-ready"));
+    assert!(desktop.shows_part(&format!(
+        "待機 {} / 担当中 {} / 完了 {}",
+        team.ready, team.claimed, team.complete
+    )));
+    assert!(
+        !desktop.shows("タスク task-claimed"),
+        "no detail before the click"
+    );
+    desktop.click("task-claimed").await;
+    desktop.until(|d| d.shows("タスク task-claimed")).await;
+    assert!(desktop.shows_part(&format!("claim 世代 {}", task.claim_generation.0)));
+    assert!(desktop.shows(&format!("担当: {}", task.owner.as_deref().unwrap())));
+    assert!(desktop.shows(&format!(
+        "担当 run: {}",
+        task.owner_run.as_ref().unwrap().as_str()
+    )));
+    assert!(desktop.shows(&task.paths[0]));
+    assert!(
+        !desktop.shows("タスク task-ready"),
+        "only the clicked task is opened"
+    );
+
+    world.boot.runtime.cancel(world.lead).unwrap();
+    let _ = world.boot.runtime.wait(world.lead).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_screen() {
+    let world = start().await;
+    // One more than a default page of detached lanes: the last one is behind the cursor.
+    let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
+    let mut lanes = Vec::new();
+    for n in 0..count {
+        let lane = world
+            .boot
+            .runtime
+            .open_lane(
+                world.lead,
+                &format!("bulk-{n}"),
+                brief_of(&format!("bulk lane {n}")),
+            )
+            .unwrap();
+        waiting(&world.boot.runtime, lane.root_run_id).await;
+        lanes.push(lane);
+    }
+    let side = storage::Storage::open(storage::StorageConfig {
+        db_path: world
+            ._dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("evorch-events.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    let project_root = world._dir.path().canonicalize().unwrap();
+    side.handle()
+        .upsert_threads_host(
+            &std::iter::once(LEAD.to_owned())
+                .chain(lanes.iter().map(|lane| lane.thread_id.clone()))
+                .map(|thread| storage::threads::ThreadUpsert {
+                    thread_id: thread,
+                    project_id: Some(world.project.as_str().to_owned()),
+                    project_root: Some(project_root.to_string_lossy().into_owned()),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    for (n, lane) in lanes.iter().enumerate() {
+        let ReplyPayload::Command(_) = request(
+            &world.backend,
+            &format!("detach-{n}"),
+            RequestBody::Command(Command::Lanes(
+                workbench_protocol::namespaces::LanesCommand::ManageLane(
+                    workbench_protocol::lane_management::ManageLane {
+                        request: workbench_protocol::lane_management::LaneManagementRequest {
+                            operation_id:
+                                workbench_protocol::lane_management::LaneManagementOperationId::new(
+                                    format!("e2e-detach-{n}"),
+                                )
+                                .unwrap(),
+                            lane_id: workbench_protocol::lane_attention::LaneId::new(&lane.lane_id)
+                                .unwrap(),
+                            expected_management_revision: workbench_protocol::wire::Revision(1),
+                            action:
+                                workbench_protocol::lane_management::LaneManagementAction::Detach,
+                        },
+                        expected_family_revision: None,
+                    },
+                ),
+            )),
+        ) else {
+            panic!("expected a command reply");
+        };
+    }
+    // The Web client's second page names the lane behind the cursor.
+    let first = world.web_lanes("web-page-1", true).await;
+    assert_eq!(first.items.len(), count - 1);
+    let QueryReply::Lanes(LanesReply::Lanes(second)) = world
+        .web(
+            "web-page-2",
+            Query::Lanes(LanesQuery::ListLanes(ListLanes {
+                lead_thread: ThreadId::new(LEAD).unwrap(),
+                policy: None,
+                detached: true,
+                page: PageRequest {
+                    cursor: first.next_cursor.clone(),
+                    ..Default::default()
+                },
+            })),
+        )
+        .await
+    else {
+        panic!("lanes expected");
+    };
+    assert_eq!(second.items.len(), 1);
+    let far = second.items[0].clone();
+
+    // The screen shows the first page only; the load button brings the far lane, and its own
+    // reconnect button attaches exactly that lane to the lead again.
+    let mut desktop = world.desktop();
+    desktop.select(LEAD);
+    let far_label = format!("切り離し済み: {}", far.objective_preview);
+    desktop
+        .until(|d| d.shows_part("切り離し済みをさらに読み込む"))
+        .await;
+    assert!(
+        !desktop.shows(&far_label),
+        "the far lane is behind the cursor"
+    );
+    // Both buttons are far below the visible rows, so they are activated through the
+    // accessibility tree, as a screen reader would (a pointer click would land off screen).
+    desktop
+        .harness
+        .get_by_label("切り離し済みをさらに読み込む")
+        .click_accesskit();
+    desktop.flush().await;
+    desktop.until(|d| d.shows(&far_label)).await;
+    assert_eq!(
+        desktop
+            .harness
+            .query_all_by_label_contains("切り離し済み: ")
+            .count(),
+        count
+    );
+    // The far lane is drawn last, so its reconnect button is the last one.
+    desktop
+        .harness
+        .get_all_by_label("再接続")
+        .last()
+        .expect("a reconnect button")
+        .click_accesskit();
+    desktop.flush().await;
+    desktop.until(|d| !d.shows(&far_label)).await;
+    let attached = world.web_lanes("web-attached", false).await;
+    assert_eq!(
+        attached
+            .items
+            .iter()
+            .map(|lane| lane.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        [far.lane_id.as_str()]
+    );
+    for lane in &lanes {
+        let _ = world.boot.runtime.cancel(lane.root_run_id);
+    }
+    let _ = world.boot.runtime.cancel(world.lead);
 }

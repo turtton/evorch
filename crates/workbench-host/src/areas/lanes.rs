@@ -116,8 +116,14 @@ impl LanesArea {
         let lead = list.lead_thread.as_str().to_owned();
         let items = runtime
             .with_storage_reader(|db| {
-                let mut records = db.managed_lanes(&lead)?;
-                records.retain(|record| policy.is_none_or(|policy| record.policy == policy));
+                let mut records = if list.detached {
+                    // The `policy` filter does not apply: every detached lane is Detached.
+                    db.detached_lanes_for(&lead)?
+                } else {
+                    let mut managed = db.managed_lanes(&lead)?;
+                    managed.retain(|record| policy.is_none_or(|policy| record.policy == policy));
+                    managed
+                };
                 // Newest activity first, ties by lane id: a stable order for paging.
                 records.sort_by(|left, right| {
                     right
@@ -149,33 +155,68 @@ impl LanesArea {
     }
 }
 
+/// The runtime's source name for a delivery-visible state change (Stop, held notices, resume).
+const DELIVERY_SOURCE: &str = "lane_delivery";
+
 fn publish_change(runtime: &AgentRuntime, source: &ProjectionSource, kind: &EventKind) {
-    let EventKind::Ledger(event) = kind else {
-        return;
-    };
-    let lane_id = match event {
-        LedgerEvent::LaneCreated { lane_id, .. }
-        | LedgerEvent::LaneReportAppended { lane_id, .. }
-        | LedgerEvent::LaneManagementChanged { lane_id, .. }
-        | LedgerEvent::LaneBriefRevised { lane_id, .. } => lane_id,
+    let summaries = match kind {
+        EventKind::Ledger(event) => {
+            let lane_id = match event {
+                LedgerEvent::LaneCreated { lane_id, .. }
+                | LedgerEvent::LaneReportAppended { lane_id, .. }
+                | LedgerEvent::LaneManagementChanged { lane_id, .. }
+                | LedgerEvent::LaneBriefRevised { lane_id, .. } => lane_id,
+                _ => return,
+            };
+            read_summaries(runtime, |db| Ok(db.lane(lane_id)?.into_iter().collect()))
+        }
+        // The delivery state of a lead (and of a lane's own thread) changed. The event carries
+        // no state: every lane on either side is read again from the ledger.
+        EventKind::Diagnostic(event) if event.source == DELIVERY_SOURCE => {
+            let Some(thread) = event.thread_id.as_deref() else {
+                return;
+            };
+            read_summaries(runtime, |db| {
+                let mut lanes = db.managed_lanes(thread)?;
+                lanes.extend(db.lane_by_thread(thread)?);
+                Ok(lanes)
+            })
+        }
         _ => return,
     };
-    let summary = runtime
-        .with_storage_reader(|db| match db.lane(lane_id)? {
-            Some(record) => {
+    for (lane, also_for) in summaries {
+        if let Err(error) =
+            source.publish(UiEvent::Lanes(LanesEvent::LaneChanged { lane, also_for }))
+        {
+            tracing::warn!(?error.code, "lanes event was not published");
+        }
+    }
+}
+
+/// The summaries of the lanes `lanes` reads, each with the threads that show it besides its
+/// own thread and current lead: the leads that find it again once detached (its origin and
+/// its last lead, so the lead that just detached it hears of the detach).
+fn read_summaries(
+    runtime: &AgentRuntime,
+    lanes: impl FnOnce(&storage::Database) -> Result<Vec<LaneRecord>, storage::StorageError>,
+) -> Vec<(LaneSummary, Vec<ThreadId>)> {
+    runtime
+        .with_storage_reader(|db| {
+            let mut out = Vec::new();
+            for record in lanes(db)? {
                 let report = latest_report(db, &record)?;
-                Ok(summary_of(&record, report.as_ref()))
+                let also_for = db
+                    .lane_finders(&record.lane_id)?
+                    .iter()
+                    .filter_map(|thread| ThreadId::new(thread).ok())
+                    .collect();
+                out.extend(summary_of(&record, report.as_ref()).map(|summary| (summary, also_for)));
             }
-            None => Ok(None),
+            Ok(out)
         })
         .ok()
         .flatten()
-        .flatten();
-    if let Some(lane) = summary
-        && let Err(error) = source.publish(UiEvent::Lanes(LanesEvent::LaneChanged { lane }))
-    {
-        tracing::warn!(?error.code, "lanes event was not published");
-    }
+        .unwrap_or_default()
 }
 
 fn latest_report(

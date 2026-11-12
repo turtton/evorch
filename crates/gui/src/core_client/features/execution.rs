@@ -373,7 +373,14 @@ impl Feature for ExecutionFeature {
         if changed == self.thread.as_ref() {
             // Ask again instead of patching: the core's answer is current.
             match event {
-                ExecutionEvent::RunChanged { .. } => self.runs_stale = true,
+                ExecutionEvent::RunChanged { run } => {
+                    self.runs_stale = true;
+                    // The ledger, goal and todo shown belong to the thread's current root:
+                    // a root that appears or ends may have changed which one that is.
+                    if run.parent_run.is_none() {
+                        self.execution_stale = true;
+                    }
+                }
                 ExecutionEvent::ThreadExecutionChanged { .. } => self.execution_stale = true,
             }
         }

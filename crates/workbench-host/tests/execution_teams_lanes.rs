@@ -181,6 +181,7 @@ impl Fixture {
             .query(Query::Lanes(LanesQuery::ListLanes(ListLanes {
                 lead_thread: ThreadId::new("lead").unwrap(),
                 policy,
+                detached: false,
                 page,
             })))
             .unwrap()
@@ -441,6 +442,7 @@ async fn the_lane_listing_pages_without_repeats_and_follows_the_ledger() {
         .query(Query::Lanes(LanesQuery::ListLanes(ListLanes {
             lead_thread: ThreadId::new("lead").unwrap(),
             policy: Some(ManagedLanePolicy::Summary),
+            detached: false,
             page: page_request(2, first.next_cursor.clone()),
         })))
         .unwrap_err();
@@ -499,6 +501,26 @@ async fn the_lane_listing_pages_without_repeats_and_follows_the_ledger() {
             .all(|lane| lane.lane_id.as_str() != target)
     );
     let detail = f.lane_detail(&target);
+    let QueryReply::Lanes(LanesReply::Lanes(detached)) = f
+        .query(Query::Lanes(LanesQuery::ListLanes(ListLanes {
+            lead_thread: ThreadId::new("lead").unwrap(),
+            policy: None,
+            detached: true,
+            page: PageRequest::default(),
+        })))
+        .unwrap()
+    else {
+        panic!("lanes expected");
+    };
+    assert_eq!(
+        detached
+            .items
+            .iter()
+            .map(|lane| lane.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        [target.as_str()],
+        "the detached lane is found again from the thread it was opened from"
+    );
     assert_eq!(detail.summary.policy, LaneManagementPolicy::Detached);
     assert_eq!(detail.summary.start, LaneStartState::Started);
     assert!(detail.detached_since_management_revision.is_some());
@@ -614,4 +636,279 @@ async fn a_stopped_lead_keeps_its_lanes_and_a_resume_does_not_restart_it() {
     assert_eq!(f.lane_page(None, PageRequest::default()).items, page.items);
     f.runtime.cancel(f.lanes[0].root_run_id).unwrap();
     let _ = f.runtime.wait(f.lanes[0].root_run_id).await;
+}
+
+fn run_ref(id: &RunId) -> workbench_protocol::ids::RunId {
+    workbench_protocol::ids::RunId::new(id.to_string()).unwrap()
+}
+
+#[tokio::test]
+async fn a_run_that_only_belongs_to_the_thread_cannot_resume_deliveries_of_its_successor() {
+    let mut f = Fixture::new(1).await;
+    let old_root = f.lead;
+    let revision = f
+        .lane_detail(&f.lanes[0].lane_id)
+        .summary
+        .management_revision
+        .0;
+    let destination = || {
+        f.runtime
+            .with_storage_reader(|db| db.lane_delivery_destination("lead"))
+            .unwrap()
+            .unwrap()
+    };
+
+    // The lead's conversation moves on to a new root in the same thread; the old root is
+    // still a saved run of it.
+    f.runtime.cancel(old_root).unwrap();
+    let _ = f.runtime.wait(old_root).await;
+    let new_root = f
+        .runtime
+        .delegate_chat(
+            "lead",
+            Role::Orchestrator,
+            "carry on".into(),
+            RunConfig {
+                conversation: true,
+                interactive: true,
+                keep_alive: true,
+                ownership: Some(f.owner.owned_permit("lead").unwrap()),
+                project_root: Some(f.dir.path().into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    f.model.reached.notified().await;
+    assert_ne!(new_root, old_root);
+
+    let before = destination();
+    let refused = f
+        .host
+        .handle_command(
+            f.resume(0, revision, "lead", &old_root.to_string()),
+            common::web(),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::StaleRevision);
+    assert_eq!(destination(), before, "nothing was rebound");
+
+    let accepted = f
+        .host
+        .handle_command(
+            f.resume(0, revision, "lead", &new_root.to_string()),
+            common::web(),
+        )
+        .unwrap();
+    assert_eq!(accepted.disposition, CommandDisposition::Accepted);
+    for run in [f.lanes[0].root_run_id, new_root] {
+        f.runtime.cancel(run).unwrap();
+        let _ = f.runtime.wait(run).await;
+    }
+}
+
+#[tokio::test]
+async fn children_of_a_lead_page_across_the_boundary_and_a_stopped_child_stays_as_history() {
+    let f = Fixture::new(0).await;
+    let mut children = Vec::new();
+    for n in 0..3 {
+        children.push(
+            f.runtime
+                .delegate_background_as_child(
+                    f.lead,
+                    Role::Worker,
+                    format!("child task {n}"),
+                    RunConfig {
+                        project_root: Some(f.dir.path().into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        );
+        f.model.reached.notified().await;
+    }
+    let scope = RunScope::Children {
+        parent: run_ref(&f.lead),
+    };
+    let first = f
+        .runs("lead", scope.clone(), page_request(2, None))
+        .unwrap();
+    assert_eq!(first.items.len(), 2);
+    let cursor = first.next_cursor.clone().expect("a second page follows");
+    let second = f
+        .runs("lead", scope.clone(), page_request(2, Some(cursor)))
+        .unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert!(second.next_cursor.is_none());
+    let seen: BTreeSet<_> = first
+        .items
+        .iter()
+        .chain(&second.items)
+        .map(|run| run.summary.id.as_str().to_owned())
+        .collect();
+    let expected: BTreeSet<_> = children.iter().map(ToString::to_string).collect();
+    assert_eq!(seen, expected, "every child exactly once");
+    assert!(
+        first
+            .items
+            .iter()
+            .chain(&second.items)
+            .all(
+                |run| run.summary.parent_run.as_ref() == Some(&run_ref(&f.lead))
+                    && run.lifecycle == RunLifecycle::Active
+            )
+    );
+
+    // One child ends: it is still listed once, now as a run that is no longer active, and
+    // the others are untouched.
+    f.runtime.cancel(children[0]).unwrap();
+    let _ = f.runtime.wait(children[0]).await;
+    let after = f.runs("lead", scope, PageRequest::default()).unwrap().items;
+    assert_eq!(after.len(), 3);
+    for run in &after {
+        let ended = run.summary.id.as_str() == children[0].to_string();
+        assert_eq!(run.lifecycle != RunLifecycle::Active, ended, "{run:?}");
+    }
+    let history = after
+        .iter()
+        .find(|run| run.summary.id.as_str() == children[0].to_string())
+        .unwrap();
+    assert!(history.terminal_reason.is_some());
+    let QueryReply::Execution(ExecutionReply::Run(one)) = f
+        .query(Query::Execution(ExecutionQuery::GetRun(RunRef {
+            thread: ThreadId::new("lead").unwrap(),
+            run: history.summary.id.clone(),
+        })))
+        .unwrap()
+    else {
+        panic!("run expected");
+    };
+    assert_eq!(&*one, history);
+    for run in &children[1..] {
+        f.runtime.cancel(*run).unwrap();
+        let _ = f.runtime.wait(*run).await;
+    }
+    f.runtime.cancel(f.lead).unwrap();
+    let _ = f.runtime.wait(f.lead).await;
+}
+
+#[tokio::test]
+async fn a_stopped_lead_holds_its_notices_and_is_resumed_only_after_it_was_continued() {
+    let mut f = Fixture::new(1).await;
+    let lead_root = f.lead.to_string();
+    let revision = f
+        .lane_detail(&f.lanes[0].lane_id)
+        .summary
+        .management_revision
+        .0;
+    assert!(!f.lane_detail(&f.lanes[0].lane_id).delivery.held);
+
+    f.runtime
+        .stop(f.lead, runtime::StopScope::SelfOnly)
+        .unwrap();
+    let _ = f.runtime.wait(f.lead).await;
+    assert!(f.lane_detail(&f.lanes[0].lane_id).delivery.held);
+    // The button is refused while the stop stands, and the notices stay held.
+    let refused = f
+        .host
+        .handle_command(f.resume(0, revision, "lead", &lead_root), common::web())
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert!(f.lane_detail(&f.lanes[0].lane_id).delivery.held);
+
+    // The operator continues the lead: its conversation gets a new root, and that clears the
+    // stop, so the held notices are free. The stopped root stays refused.
+    let permit = f.owner.owned_permit("lead").unwrap();
+    let continued = f
+        .runtime
+        .delegate_chat(
+            "lead",
+            Role::Orchestrator,
+            "continue".into(),
+            RunConfig {
+                conversation: true,
+                interactive: true,
+                keep_alive: true,
+                ownership: Some(permit.clone()),
+                project_root: Some(f.dir.path().into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    f.model.reached.notified().await;
+    f.runtime
+        .explicitly_resume_lane_delivery(continued, Some(&permit))
+        .unwrap();
+    assert!(!f.lane_detail(&f.lanes[0].lane_id).delivery.held);
+    let old_root = f
+        .host
+        .handle_command(f.resume(0, revision, "lead", &lead_root), common::web())
+        .unwrap_err();
+    assert_eq!(old_root.code, ErrorCode::Conflict);
+    let resumed = f
+        .host
+        .handle_command(
+            f.resume(0, revision, "lead", &continued.to_string()),
+            common::web(),
+        )
+        .unwrap();
+    assert_eq!(resumed.disposition, CommandDisposition::Accepted);
+    for run in [f.lanes[0].root_run_id, continued] {
+        f.runtime.cancel(run).unwrap();
+        let _ = f.runtime.wait(run).await;
+    }
+}
+
+#[tokio::test]
+async fn detached_lanes_page_past_the_first_page_and_ignore_the_policy_filter() {
+    // One more than a default page: the last lane is only reachable with the cursor.
+    let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
+    let mut f = Fixture::new(count).await;
+    for lane in 0..count {
+        f.host
+            .handle_command(
+                f.manage(
+                    lane,
+                    &format!("detach-{lane}"),
+                    1,
+                    LaneManagementAction::Detach,
+                ),
+                common::web(),
+            )
+            .unwrap();
+    }
+    assert!(f.lane_page(None, PageRequest::default()).items.is_empty());
+    let detached = |policy, page| match f
+        .query(Query::Lanes(LanesQuery::ListLanes(ListLanes {
+            lead_thread: ThreadId::new("lead").unwrap(),
+            policy,
+            detached: true,
+            page,
+        })))
+        .unwrap()
+    {
+        QueryReply::Lanes(LanesReply::Lanes(page)) => page,
+        other => panic!("{other:?}"),
+    };
+    // The policy filter of a managed list does not apply to detached lanes.
+    let first = detached(Some(ManagedLanePolicy::Summary), PageRequest::default());
+    assert_eq!(first.items.len(), count - 1);
+    let cursor = first.next_cursor.clone().expect("a second page follows");
+    let second = detached(
+        Some(ManagedLanePolicy::Summary),
+        page_request(workbench_protocol::limits::DEFAULT_PAGE_SIZE, Some(cursor)),
+    );
+    assert_eq!(second.items.len(), 1);
+    assert!(second.next_cursor.is_none());
+    let seen: BTreeSet<_> = first
+        .items
+        .iter()
+        .chain(&second.items)
+        .map(|lane| lane.lane_id.as_str().to_owned())
+        .collect();
+    let expected: BTreeSet<_> = f.lanes.iter().map(|lane| lane.lane_id.clone()).collect();
+    assert_eq!(
+        seen, expected,
+        "every detached lane exactly once across the pages"
+    );
+    f.stop().await;
 }
