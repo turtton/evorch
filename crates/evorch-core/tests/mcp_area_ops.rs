@@ -132,7 +132,7 @@ impl Area {
         std::fs::create_dir(root.join(".evorch")).unwrap();
         std::fs::write(
             root.join("sidebar.json"),
-            serde_json::json!({"projects":[{"id":"p","repo_root":root}]}).to_string(),
+            serde_json::json!({"version":workspace_state::SIDEBAR_SCHEMA_VERSION,"projects":[{"id":"p","name":"p","repo_root":root,"allowed_directories":[]}],"threads":[]}).to_string(),
         )
         .unwrap();
         // The peer connects here when it starts; the count says whether a

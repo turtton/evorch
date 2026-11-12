@@ -45,7 +45,9 @@ async fn compose(subscription: bool) -> Composed {
         std::fs::write(
             directory.join("sidebar.json"),
             json!({
-                "projects":[{"id":"p","repo_root":project.root()}]
+                "version":workspace_state::SIDEBAR_SCHEMA_VERSION,
+                "projects":[{"id":"p","name":"p","repo_root":project.root(),"allowed_directories":[]}],
+                "threads":[]
             })
             .to_string(),
         )

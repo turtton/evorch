@@ -123,7 +123,9 @@ impl Core {
         std::fs::write(
             root.join("sidebar.json"),
             json!({
-                "projects":[{"id":"p","repo_root":root}]
+                "version":workspace_state::SIDEBAR_SCHEMA_VERSION,
+                "projects":[{"id":"p","name":"p","repo_root":root,"allowed_directories":[]}],
+                "threads":[]
             })
             .to_string(),
         )
