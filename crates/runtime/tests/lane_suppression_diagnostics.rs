@@ -374,15 +374,28 @@ async fn the_persisted_snapshot_carries_the_cohort_the_diagnostic_named() {
 
     let database = storage::Database::open_read_only(&config.db_path).unwrap();
     let inspected = database.inspect_run(&lead.to_string(), false).unwrap();
-    let stored =
-        runtime::budget_tracker::stored_uncollected_lanes(&inspected["context"]["config_json"])
-            .unwrap();
+    let stored_config = &inspected["context"]["config_json"];
+    assert!(
+        stored_config["spawn_credits"]["uncollected_cohort_generation"]
+            .as_u64()
+            .is_some_and(|generation| generation >= 1),
+        "runtime snapshot must persist a seeded cohort generation: {stored_config}"
+    );
+    let stored = runtime::budget_tracker::stored_uncollected_lanes(stored_config).unwrap();
 
     assert_eq!(stored.cohort_id.as_deref(), Some(identity.as_str()));
     assert!(!stored.cohort_id_derived);
     assert!(stored.suppression_reported);
     assert_eq!(stored.uncollected_lane_open_count, 2);
     assert_eq!(stored.lane_ids, ["uncollected"]);
+    let mut identityless_config = stored_config.clone();
+    identityless_config["spawn_credits"]
+        .as_object_mut()
+        .unwrap()
+        .remove("uncollected_cohort_id");
+    let derived = runtime::budget_tracker::stored_uncollected_lanes(&identityless_config).unwrap();
+    assert!(derived.cohort_id_derived);
+    assert_eq!(derived.cohort_id.as_deref(), Some(identity.as_str()));
     for run in roots.iter().copied().chain([lead]) {
         runtime.cancel(run).unwrap();
     }
