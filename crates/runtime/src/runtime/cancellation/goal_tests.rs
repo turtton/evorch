@@ -181,23 +181,25 @@ async fn ac15_old_admission_failure_preserves_new_goal_before_and_after_executio
             model.reject.store(true, Ordering::SeqCst);
             {
                 let intents = runtime.shared.spawn_intents.lock().unwrap();
-                runtime.admit_run(
-                    root,
-                    None,
-                    Role::Worker,
-                    "handoff".into(),
-                    RunConfig::default(),
-                    RunContinuation::Handoff(RunHandoff {
-                        continuity: Default::default(),
-                        pending_reference_id: None,
-                        source_run_id: root,
-                        restored: None,
-                        seed_revision: 0,
-                    }),
-                    None,
-                    Arc::clone(&a),
-                    &intents,
-                );
+                runtime
+                    .admit_run(
+                        root,
+                        None,
+                        Role::Worker,
+                        "handoff".into(),
+                        RunConfig::default(),
+                        RunContinuation::Handoff(RunHandoff {
+                            continuity: Default::default(),
+                            pending_reference_id: None,
+                            source_run_id: root,
+                            restored: None,
+                            seed_revision: 0,
+                        }),
+                        None,
+                        Arc::clone(&a),
+                        &intents,
+                    )
+                    .unwrap();
             }
             failed.recv().unwrap();
             model.reject.store(false, Ordering::SeqCst);
@@ -253,23 +255,25 @@ async fn ac15_handoff_reserves_before_goal_lock_while_old_failure_finishes() {
     model.reject.store(true, Ordering::SeqCst);
     {
         let intents = runtime.shared.spawn_intents.lock().unwrap();
-        runtime.admit_run(
-            root,
-            None,
-            Role::Worker,
-            "old".into(),
-            RunConfig::default(),
-            RunContinuation::Handoff(RunHandoff {
-                continuity: Default::default(),
-                pending_reference_id: None,
-                source_run_id: root,
-                restored: None,
-                seed_revision: 0,
-            }),
-            None,
-            Arc::clone(&a),
-            &intents,
-        );
+        runtime
+            .admit_run(
+                root,
+                None,
+                Role::Worker,
+                "old".into(),
+                RunConfig::default(),
+                RunContinuation::Handoff(RunHandoff {
+                    continuity: Default::default(),
+                    pending_reference_id: None,
+                    source_run_id: root,
+                    restored: None,
+                    seed_revision: 0,
+                }),
+                None,
+                Arc::clone(&a),
+                &intents,
+            )
+            .unwrap();
     }
     checkpoint.recv().unwrap();
     model.reject.store(false, Ordering::SeqCst);

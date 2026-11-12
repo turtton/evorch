@@ -221,6 +221,7 @@ pub(crate) struct LoopState {
     retracted_delegates: retracted_delegates::RetractedDelegates,
     durable_task: Option<storage::entity::TaskContinuation>,
     pending_terminal: Option<(RunState, LifecycleEvent)>,
+    terminal_dispatch: Option<crate::quiesce::dispatch::DispatchGuard>,
     pub(crate) scratch: Option<crate::scratch::RunScratch>,
     /// The run project's live allowed directories with this run's access, read again
     /// by every command and file tool call. Benchmark runs have none.
@@ -306,6 +307,7 @@ impl LoopState {
             retracted_delegates: retracted_delegates::RetractedDelegates::default(),
             durable_task: None,
             pending_terminal: None,
+            terminal_dispatch: None,
             scratch: None,
             allowed_directories: None,
             thread_read_dirs: Vec::new(),
@@ -320,21 +322,21 @@ impl LoopState {
 
 mod saved_compaction;
 
-pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
+pub(crate) async fn run_agent(
+    shared: Weak<Shared>,
+    mut task: RunTask,
+    channels: LoopChannels,
+) -> Option<crate::quiesce::dispatch::DispatchGuard> {
     let project = shared
         .upgrade()
         .and_then(|runtime| runtime.run_project(&task.config));
-    let Some(mut loop_shared) = loop_shared(&shared, project.as_deref()) else {
-        return;
-    };
+    let mut loop_shared = loop_shared(&shared, project.as_deref())?;
     if let Some(runtime) = shared.upgrade()
         && let Some(resolution) = runtime.model_resolution.get()
     {
         resolution.apply(&mut loop_shared.compaction).await;
     }
-    let Some(runtime) = crate::AgentRuntime::from_weak(&shared) else {
-        return;
-    };
+    let runtime = crate::AgentRuntime::from_weak(&shared)?;
     let image_model = loop_shared
         .model
         .invocation_snapshot()
@@ -870,6 +872,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     }
     .await;
     state.finalize().await;
+    state.terminal_dispatch.take()
 }
 
 /// workspace 情報は既存 System 内で更新し、System がなければ履歴末尾へ追加する。

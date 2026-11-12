@@ -31,6 +31,7 @@ impl AgentRuntime {
         recipient: RunId,
         mut queued: crate::mailbox::QueuedMessage,
     ) -> Result<Option<MessageDelivery>, RuntimeError> {
+        let _dispatch = self.dispatch_registration_guard()?;
         let fail = |reason| RuntimeError::RunRestoreFailed {
             run_id: recipient.to_string(),
             reason,

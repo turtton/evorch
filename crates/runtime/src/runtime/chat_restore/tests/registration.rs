@@ -1,13 +1,14 @@
 use super::*;
 
 pub(super) struct AdmissionModel {
+    pub(super) admission: bool,
     pub(super) reject: AtomicBool,
 }
 
 #[async_trait::async_trait]
 impl AgentModel for AdmissionModel {
     fn requires_admission(&self) -> bool {
-        true
+        self.admission
     }
 
     async fn admit(&self, _: &crate::AgentInvocationContext, _: Role) -> Result<(), RuntimeError> {
@@ -63,6 +64,7 @@ async fn restored_event_observes_registered_entry_before_execution() {
 async fn restored_event_is_absent_when_admission_fails() {
     // Given: a terminal goal and a provider that rejects its next admission.
     let model = Arc::new(AdmissionModel {
+        admission: true,
         reject: AtomicBool::new(false),
     });
     let fixture = Fixture::with_model(model.clone());
@@ -112,6 +114,7 @@ async fn restored_event_is_absent_when_admission_fails() {
 #[tokio::test]
 async fn resume_snapshot_is_retryable_after_admission_failure() {
     let model = Arc::new(AdmissionModel {
+        admission: true,
         reject: AtomicBool::new(false),
     });
     let fixture = Fixture::with_model(model.clone());

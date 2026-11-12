@@ -1,0 +1,13 @@
+DROP TRIGGER erase_recovery_component;
+DROP TRIGGER fence_recovery_claim_update;
+DROP TRIGGER fence_recovery_manifest_commit;
+DROP TRIGGER fence_recovery_claim_member_update;
+DROP TRIGGER fence_recovery_claim_member_insert;
+DROP TRIGGER fence_recovery_member_update;
+DROP TRIGGER fence_recovery_member_insert;
+DROP TABLE recovery_claim_members;
+DROP TABLE recovery_claims;
+DROP TABLE recovery_members;
+DROP TABLE recovery_manifests;
+DROP TRIGGER advance_resume_intent_revision;
+ALTER TABLE resume_intents DROP COLUMN revision;

@@ -123,6 +123,11 @@ pub(super) struct Fixture {
     pub(super) release: Vec<Arc<Semaphore>>,
 }
 impl Fixture {
+    pub(super) fn for_s2(count: usize, admission: bool) -> Self {
+        let fixture = Self::with_admission(count, admission);
+        fixture.model.admission_release.add_permits(128);
+        fixture
+    }
     pub(super) fn new(count: usize) -> Self {
         Self::with_admission(count, false)
     }
@@ -182,7 +187,10 @@ impl Fixture {
     }
     pub(super) async fn cleanup(&self, run: RunId) {
         self.runtime.cancel(run).unwrap();
-        self.runtime.wait(run).await.unwrap();
+        if let Err(error) = self.runtime.wait(run).await {
+            assert!(matches!(error, RuntimeError::RunTerminated { .. }));
+            assert!(!self.intent(run).active);
+        }
     }
     pub(super) fn intent(&self, run: RunId) -> ResumeIntent {
         self.runtime

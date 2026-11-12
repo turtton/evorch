@@ -22,6 +22,7 @@ mod lane_management;
 mod lanes;
 mod pull_request_auto_fix;
 mod pull_requests;
+mod recovery;
 mod resume_intent;
 use crate::thread_index::{
     IndexCapacityStatus, IndexLease, IndexOwner, IndexSettingsReceipt, IndexStepResult,
@@ -104,7 +105,16 @@ enum Command {
         Option<String>,
         ReplyTx,
     ),
+    RetireResumeIntent(
+        crate::resume_intent::ResumeIntentRecord,
+        ReplyTx<crate::resume_intent::ResumeIntentWriteOutcome>,
+    ),
+    StopUnregisteredResumeIntent(
+        crate::resume_intent::ResumeIntentRecord,
+        ReplyTx<crate::resume_intent::ResumeIntentWriteOutcome>,
+    ),
     FlushResumeIntents(ReplyTx),
+    Recovery(crate::recovery::Write, ReplyTx<crate::recovery::Written>),
     AppendIndexedNote(String, String, ReplyTx<crate::thread_index::NoteReceipt>),
     SaveSnapshotBundle(Box<crate::thread_index::SnapshotWrite>, SnapshotReplyTx),
     SaveSnapshotBundleWithResumeIntent(

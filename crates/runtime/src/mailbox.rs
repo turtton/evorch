@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
 
-mod completion;
+pub(crate) mod completion;
 mod question;
 pub(crate) use completion::{CompletionNotice, QueuedMessage};
 pub(crate) use question::QuestionNotice;
@@ -93,6 +93,11 @@ impl RunMailbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         queue.retain(|message| !message.observed());
         queue
+    }
+
+    /// Non-destructive restart evidence; never observe a message as a side effect.
+    pub(crate) fn recovery_messages(&self) -> Vec<QueuedMessage> {
+        self.pending().iter().cloned().collect()
     }
 
     pub(crate) fn discard_observed_completions(&self) {

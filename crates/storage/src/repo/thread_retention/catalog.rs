@@ -66,6 +66,26 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "one provenance entry per row; reclaimed before the sidecar header it points at",
     ),
     ("run_ledger", ReclaimRun, "run notes, deleted with a grant"),
+    (
+        "recovery_members",
+        ReclaimRun,
+        "runtime recovery recipes, reclaimed by run",
+    ),
+    (
+        "recovery_claim_members",
+        ReclaimRun,
+        "claim incarnation receipts, reclaimed by run",
+    ),
+    (
+        "recovery_manifests",
+        Keep,
+        "component metadata; member erasure trigger removes the whole component",
+    ),
+    (
+        "recovery_claims",
+        Keep,
+        "claim metadata; cascades with its erased recovery component",
+    ),
     ("host_input_receipts", ReclaimRun, "delivery receipts"),
     (
         "resume_intents",

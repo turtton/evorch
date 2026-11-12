@@ -57,11 +57,24 @@ impl AgentRuntime {
         ))
     }
 
-    pub(crate) fn publish_terminal(&self, run_id: RunId, event: LifecycleEvent) {
-        self.publish_terminal_relay(run_id, event);
-        // Relay drops the runs lock on every return path. A queued Continue may
-        // now use the committed terminal snapshot without an untracked waiter.
-        self.resume_deferred_chat(run_id);
+    pub(crate) fn publish_terminal(
+        &self,
+        run_id: RunId,
+        event: LifecycleEvent,
+    ) -> Option<crate::quiesce::dispatch::DispatchGuard> {
+        // Registered BEFORE phase publication: runtime.wait may return inside relay.
+        let dispatch = self.shared.dispatch_tails.register(true).ok();
+        let publish = || {
+            self.publish_terminal_relay(run_id, event);
+            self.resume_deferred_chat(run_id);
+        };
+        if let Some(guard) = &dispatch {
+            guard.enter(publish);
+        } else {
+            publish();
+        }
+        // The run task retains this through postterminal learning/panic teardown.
+        dispatch
     }
 
     fn publish_terminal_relay(&self, run_id: RunId, event: LifecycleEvent) {

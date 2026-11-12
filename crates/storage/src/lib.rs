@@ -83,6 +83,7 @@ mod projection;
 pub mod pull_request_auto_fix;
 pub mod pull_requests;
 mod read;
+pub mod recovery;
 mod repo;
 pub mod resume_intent;
 mod review;

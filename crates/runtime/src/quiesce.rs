@@ -7,6 +7,8 @@ use tokio::sync::watch;
 
 #[cfg(test)]
 mod fixture;
+#[cfg(test)]
+mod recovery_06a_tests;
 pub(crate) mod runtime;
 mod safe_point;
 #[cfg(test)]
@@ -14,6 +16,10 @@ mod tests;
 
 mod schema;
 pub use schema::*;
+pub(crate) mod dispatch;
+pub use dispatch::DispatchDrainFence;
+mod recovery;
+pub use recovery::*;
 
 pub(crate) struct Coordinator {
     inner: Mutex<Inner>,
@@ -304,6 +310,120 @@ impl Coordinator {
         self.changed();
         Ok(())
     }
+    pub(crate) fn retire(
+        &self,
+        run: RunId,
+        incarnation: &str,
+        store: Option<&RunStore>,
+        reason: StopReason,
+    ) -> Result<(), String> {
+        self.finish_intent_update(run, incarnation, store, reason, true)
+    }
+    pub(crate) fn stop_unregistered(
+        &self,
+        run: RunId,
+        incarnation: &str,
+        store: Option<&RunStore>,
+        reason: StopReason,
+    ) -> Result<(), String> {
+        self.finish_intent_update(run, incarnation, store, reason, false)
+    }
+    fn finish_intent_update(
+        &self,
+        run: RunId,
+        incarnation: &str,
+        store: Option<&RunStore>,
+        reason: StopReason,
+        completed: bool,
+    ) -> Result<(), String> {
+        use storage::resume_intent::ResumeIntentWriteOutcome;
+        let mut inner = self.lock();
+        let Some(old) = inner
+            .intents
+            .get(&run)
+            .filter(|old| old.incarnation == incarnation)
+        else {
+            return Ok(());
+        };
+        let mut intent = old.clone();
+        if completed {
+            intent.active = false;
+            if reason == StopReason::Cancelled {
+                intent.resume_requested = false;
+            }
+            if intent.stop_reason.is_none() || reason == StopReason::Cancelled {
+                intent.stop_reason = Some(reason);
+            }
+        } else {
+            if intent.stop_reason != Some(StopReason::CliDisconnected)
+                || reason == StopReason::Cancelled
+            {
+                intent.stop_reason = Some(reason);
+            }
+            intent.resume_requested = false;
+            if intent.wait == ResumeWait::AdmissionQueued {
+                intent.active = false;
+            }
+        }
+        if *old == intent {
+            return Ok(());
+        }
+        let saved = (|| {
+            if let Some(store) = store
+                && inner.persisted.contains(&run)
+            {
+                self.storage_step(StorageStep::Save)?;
+                let record = storage::resume_intent::ResumeIntentRecord {
+                    run_id: run.to_string(),
+                    incarnation: incarnation.into(),
+                    payload: serde_json::to_string(&intent).map_err(|error| error.to_string())?,
+                };
+                let outcome = if completed {
+                    store.handle.retire_resume_intent(record)
+                } else {
+                    store.handle.stop_unregistered_resume_intent(record)
+                }
+                .map_err(|error| error.to_string())?;
+                self.storage_step(StorageStep::Flush)?;
+                store
+                    .handle
+                    .flush_resume_intents()
+                    .map_err(|error| error.to_string())?;
+                Ok(outcome)
+            } else {
+                // With no run store this is local-only. A newly attached store
+                // still uses the strict initial-insert CAS until first persisted.
+                self.save(store, &intent, None, None)
+                    .map(|_| ResumeIntentWriteOutcome::Saved)
+                    .map_err(|error| error.to_string())
+            }
+        })();
+        match saved {
+            Ok(ResumeIntentWriteOutcome::Replaced { current }) => {
+                tracing::debug!(run = %run, old = incarnation, current = %current, "resume intent superseded by another owner");
+                // A successor already owns the durable row. Remove only this
+                // obsolete local copy so later cleanup cannot update it again.
+                inner.intents.remove(&run);
+                inner.persisted.remove(&run);
+            }
+            Ok(ResumeIntentWriteOutcome::Saved) => {
+                if store.is_some() {
+                    inner.persisted.insert(run);
+                }
+                inner.intents.insert(run, intent);
+            }
+            Err(error) => {
+                inner.phase = QuiesceState::Failed {
+                    reason: error.clone(),
+                };
+                self.changed();
+                return Err(error);
+            }
+        }
+        self.changed();
+        Ok(())
+    }
+
     pub(crate) fn begin(&self) {
         let mut inner = self.lock();
         inner.requested = true;

@@ -10,6 +10,25 @@ impl StorageHandle {
         self.request(|reply| Command::SaveResumeIntent(record, expected_incarnation, reply))
     }
 
+    /// Retire only this completed incarnation. An already-replaced incarnation
+    /// is a typed no-op, never permission to modify its successor's replay state.
+    pub fn retire_resume_intent(
+        &self,
+        record: crate::resume_intent::ResumeIntentRecord,
+    ) -> Result<crate::resume_intent::ResumeIntentWriteOutcome, StorageError> {
+        self.request(|reply| Command::RetireResumeIntent(record, reply))
+    }
+
+    /// Call only while the runtime's A/R fence proves this execution is not
+    /// registered and prevents registration. A replaced row is left unchanged;
+    /// missing/tombstoned rows and persistence failures are not successful stops.
+    pub fn stop_unregistered_resume_intent(
+        &self,
+        record: crate::resume_intent::ResumeIntentRecord,
+    ) -> Result<crate::resume_intent::ResumeIntentWriteOutcome, StorageError> {
+        self.request(|reply| Command::StopUnregisteredResumeIntent(record, reply))
+    }
+
     /// Consume a checkpoint and admit its new incarnation atomically. The writer
     /// commits with FULL synchronous durability; no fallible post-commit flush
     /// can turn a committed consumption into an apparently retryable error.

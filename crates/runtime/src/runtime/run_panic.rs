@@ -7,7 +7,11 @@ use event_bus::{DiagnosticEvent, DiagnosticSeverity};
 impl AgentRuntime {
     /// The loop unwound without `finalize`: stop the run's shell processes, keep its
     /// workspace (as a failed finalization does), report the panic, then publish Error.
-    pub(super) async fn run_panicked(&self, run_id: RunId, panic: CaughtPanic) {
+    pub(super) async fn run_panicked(
+        &self,
+        run_id: RunId,
+        panic: CaughtPanic,
+    ) -> Option<crate::quiesce::dispatch::DispatchGuard> {
         let id = run_id.to_string();
         // Panic is never a safe-point checkpoint, even after successful cleanup.
         if !self.shared.quiesce.running() {
@@ -100,7 +104,7 @@ impl AgentRuntime {
             if let Ok(mailbox) = self.run_mailbox(run_id) {
                 self.close_question_mailbox(run_id, &mailbox);
             }
-            self.publish_terminal(
+            return self.publish_terminal(
                 run_id,
                 LifecycleEvent::AgentRunStateChanged {
                     run_id: id,
@@ -110,5 +114,6 @@ impl AgentRuntime {
                 },
             );
         }
+        None
     }
 }

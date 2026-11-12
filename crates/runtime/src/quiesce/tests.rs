@@ -7,13 +7,45 @@ use std::sync::atomic::Ordering;
 
 #[tokio::test]
 async fn before_model_request_parks_without_consuming_durable_queue() {
-    let fixture = Fixture::new(1);
+    for admission in [false, true] {
+        before_model_request_parks_without_consuming_durable_queue_with_admission(admission).await;
+    }
+}
+
+async fn before_model_request_parks_without_consuming_durable_queue_with_admission(
+    admission: bool,
+) {
+    let fixture = Fixture::for_s2(1, admission);
+    if admission {
+        let weak = fixture.runtime.downgrade();
+        *fixture
+            .runtime
+            .shared
+            .admission_registration_hook
+            .lock()
+            .unwrap() = Some(std::sync::Arc::new(move |run| {
+            let runtime = weak.upgrade().unwrap();
+            runtime.request_quiesce();
+            runtime
+                .send_message_with_images(
+                    run,
+                    "queued".into(),
+                    Vec::new(),
+                    Some("queued-id".into()),
+                )
+                .unwrap();
+        }));
+    }
     let run = fixture.start();
-    fixture.runtime.request_quiesce();
-    fixture
-        .runtime
-        .send_message_with_images(run, "queued".into(), Vec::new(), Some("queued-id".into()))
-        .unwrap();
+    if admission {
+        fixture.runtime.wait_admission(run).await.unwrap();
+    } else {
+        fixture.runtime.request_quiesce();
+        fixture
+            .runtime
+            .send_message_with_images(run, "queued".into(), Vec::new(), Some("queued-id".into()))
+            .unwrap();
+    }
     fixture.runtime.wait_quiesced().await.unwrap();
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 0);
     let intent = fixture.intent(run);
@@ -83,11 +115,34 @@ async fn provider_wait_and_parallel_partial_results_never_allow_exit() {
 
 #[tokio::test]
 async fn snapshot_intent_and_flush_failures_never_publish_checkpointed() {
+    for admission in [false, true] {
+        snapshot_intent_and_flush_failures_never_publish_checkpointed_with_admission(admission)
+            .await;
+    }
+}
+
+async fn snapshot_intent_and_flush_failures_never_publish_checkpointed_with_admission(
+    admission: bool,
+) {
     for step in [StorageStep::Snapshot, StorageStep::Save, StorageStep::Flush] {
-        let fixture = Fixture::new(1);
+        let fixture = Fixture::for_s2(1, admission);
         let run = fixture.start();
-        *fixture.runtime.shared.quiesce.fault.lock().unwrap() = Some(step);
-        fixture.runtime.request_quiesce();
+        if admission {
+            let weak = fixture.runtime.downgrade();
+            *fixture
+                .runtime
+                .shared
+                .admission_registration_hook
+                .lock()
+                .unwrap() = Some(std::sync::Arc::new(move |_| {
+                let runtime = weak.upgrade().unwrap();
+                *runtime.shared.quiesce.fault.lock().unwrap() = Some(step);
+                runtime.request_quiesce();
+            }));
+        } else {
+            *fixture.runtime.shared.quiesce.fault.lock().unwrap() = Some(step);
+            fixture.runtime.request_quiesce();
+        }
         assert!(fixture.runtime.wait_quiesced().await.is_err());
         assert!(matches!(
             fixture.runtime.quiesce_state(),
@@ -101,7 +156,13 @@ async fn snapshot_intent_and_flush_failures_never_publish_checkpointed() {
 
 #[tokio::test]
 async fn duplicate_admission_cannot_replace_the_active_incarnation() {
-    let fixture = Fixture::new(1);
+    for admission in [false, true] {
+        duplicate_admission_cannot_replace_the_active_incarnation_with_admission(admission).await;
+    }
+}
+
+async fn duplicate_admission_cannot_replace_the_active_incarnation_with_admission(admission: bool) {
+    let fixture = Fixture::for_s2(1, admission);
     let run = fixture.start();
     let old = fixture.intent(run);
     assert!(
@@ -128,12 +189,18 @@ async fn duplicate_admission_cannot_replace_the_active_incarnation() {
 
 #[tokio::test]
 async fn stop_reasons_are_independent_of_safe_point_quiesce() {
+    for admission in [false, true] {
+        stop_reasons_are_independent_of_safe_point_quiesce_with_admission(admission).await;
+    }
+}
+
+async fn stop_reasons_are_independent_of_safe_point_quiesce_with_admission(admission: bool) {
     for reason in [
         StopReason::OperatorStopped,
         StopReason::CliDisconnected,
         StopReason::Cancelled,
     ] {
-        let fixture = Fixture::new(1);
+        let fixture = Fixture::for_s2(1, admission);
         let run = fixture.start();
         if reason == StopReason::CliDisconnected {
             fixture.runtime.record_cli_disconnected(run).unwrap();
@@ -146,11 +213,11 @@ async fn stop_reasons_are_independent_of_safe_point_quiesce() {
                 .stop(run, crate::StopScope::SelfOnly)
                 .unwrap();
         }
-        let phase = fixture.runtime.wait(run).await.unwrap();
-        assert!(matches!(
-            phase,
-            AgentRunPhase::Stopped | AgentRunPhase::Error
-        ));
+        let phase = fixture.runtime.wait(run).await;
+        assert!(
+            matches!(phase, Ok(AgentRunPhase::Stopped | AgentRunPhase::Error))
+                || (admission && matches!(phase, Err(crate::RuntimeError::RunTerminated { .. })))
+        );
         let intent = fixture.intent(run);
         assert_eq!(intent.stop_reason, Some(reason));
         assert!(!intent.active);
@@ -160,9 +227,22 @@ async fn stop_reasons_are_independent_of_safe_point_quiesce() {
 
 #[tokio::test]
 async fn provider_admission_is_durable_once_and_quiesce_waits_for_its_actual_result() {
-    let fixture = Fixture::with_admission(1, true);
+    for admission in [false, true] {
+        provider_admission_is_durable_once_and_quiesce_waits_for_its_actual_result_with_admission(
+            admission,
+        )
+        .await;
+    }
+}
+
+async fn provider_admission_is_durable_once_and_quiesce_waits_for_its_actual_result_with_admission(
+    admission: bool,
+) {
+    let fixture = Fixture::with_admission(1, admission);
     let run = fixture.start();
-    fixture.model.admission_entered.notified().await;
+    if admission {
+        fixture.model.admission_entered.notified().await;
+    }
     assert!(fixture.intent(run).active);
     assert_eq!(fixture.intent(run).wait, ResumeWait::Admission);
     // An actual duplicate entry, not merely the schema helper, must not invoke
@@ -179,15 +259,27 @@ async fn provider_admission_is_durable_once_and_quiesce_waits_for_its_actual_res
     assert!(futures_util::poll!(&mut wait).is_pending());
     fixture.model.admission_release.add_permits(1);
     wait.await.unwrap();
-    assert_eq!(fixture.model.admission_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.model.admission_calls.load(Ordering::SeqCst),
+        usize::from(admission)
+    );
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 0);
     fixture.cleanup(run).await;
 }
 
 #[tokio::test]
 async fn queued_admission_stop_is_durable_without_a_provider_or_a_loop() {
+    for admission in [false, true] {
+        queued_admission_stop_is_durable_without_a_provider_or_a_loop_with_admission(admission)
+            .await;
+    }
+}
+
+async fn queued_admission_stop_is_durable_without_a_provider_or_a_loop_with_admission(
+    admission: bool,
+) {
     for reason in [StopReason::OperatorStopped, StopReason::Cancelled] {
-        let fixture = Fixture::new(1);
+        let fixture = Fixture::for_s2(1, admission);
         fixture.runtime.quiesce().await.unwrap();
         let run = fixture.start();
         if reason == StopReason::Cancelled {
@@ -209,7 +301,18 @@ async fn queued_admission_stop_is_durable_without_a_provider_or_a_loop() {
 
 #[tokio::test]
 async fn history_only_readmission_keeps_an_initial_input_it_did_not_consume() {
-    let fixture = Fixture::new(1);
+    for admission in [false, true] {
+        history_only_readmission_keeps_an_initial_input_it_did_not_consume_with_admission(
+            admission,
+        )
+        .await;
+    }
+}
+
+async fn history_only_readmission_keeps_an_initial_input_it_did_not_consume_with_admission(
+    admission: bool,
+) {
+    let fixture = Fixture::for_s2(1, admission);
     fixture.runtime.quiesce().await.unwrap();
     let run = fixture.start();
     fixture
@@ -238,7 +341,13 @@ async fn history_only_readmission_keeps_an_initial_input_it_did_not_consume() {
 
 #[tokio::test]
 async fn setup_failure_retires_intent_before_terminal_publication() {
-    let fixture = Fixture::new(1);
+    for admission in [false, true] {
+        setup_failure_retires_intent_before_terminal_publication_with_admission(admission).await;
+    }
+}
+
+async fn setup_failure_retires_intent_before_terminal_publication_with_admission(admission: bool) {
+    let fixture = Fixture::for_s2(1, admission);
     // Invalid team setup fails before LoopState/finalization exists.
     let run = fixture.runtime.delegate_background(
         Role::Worker,
@@ -261,7 +370,15 @@ async fn setup_failure_retires_intent_before_terminal_publication() {
 
 #[tokio::test]
 async fn terminal_snapshot_failure_during_quiesce_never_allows_exit() {
-    let fixture = Fixture::new(1);
+    for admission in [false, true] {
+        terminal_snapshot_failure_during_quiesce_never_allows_exit_with_admission(admission).await;
+    }
+}
+
+async fn terminal_snapshot_failure_during_quiesce_never_allows_exit_with_admission(
+    admission: bool,
+) {
+    let fixture = Fixture::for_s2(1, admission);
     let run = fixture.start();
     fixture.model.entered.notified().await;
     let conn = rusqlite::Connection::open(&fixture.config.db_path).unwrap();
@@ -286,7 +403,13 @@ async fn terminal_snapshot_failure_during_quiesce_never_allows_exit() {
 
 #[tokio::test]
 async fn normal_persistence_failure_does_not_quiesce_other_runs() {
-    let mut fixture = Fixture::new(1);
+    for admission in [false, true] {
+        normal_persistence_failure_does_not_quiesce_other_runs_with_admission(admission).await;
+    }
+}
+
+async fn normal_persistence_failure_does_not_quiesce_other_runs_with_admission(admission: bool) {
+    let mut fixture = Fixture::for_s2(1, admission);
     let first = fixture.start();
     fixture.model.entered.notified().await;
     *fixture.runtime.shared.quiesce.fault.lock().unwrap() = Some(StorageStep::Save);
@@ -329,13 +452,20 @@ async fn normal_persistence_failure_does_not_quiesce_other_runs() {
 
 #[tokio::test]
 async fn cancel_before_registration_is_durably_cancelled() {
-    let fixture = Fixture::new(1);
+    for admission in [false, true] {
+        cancel_before_registration_is_durably_cancelled_with_admission(admission).await;
+    }
+}
+
+async fn cancel_before_registration_is_durably_cancelled_with_admission(admission: bool) {
+    let fixture = Fixture::for_s2(1, admission);
     let run = fixture.runtime.reserve_run_id();
     fixture.runtime.reserve_admission(run, None, None);
     fixture.runtime.cancel(run).unwrap();
     fixture
         .runtime
         .spawn_reserved(run, None, Role::Worker, "never start", RunConfig::default());
+    assert!(fixture.runtime.wait(run).await.is_err());
     assert_eq!(fixture.intent(run).stop_reason, Some(StopReason::Cancelled));
     assert!(!fixture.intent(run).active);
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 0);
@@ -344,7 +474,15 @@ async fn cancel_before_registration_is_durably_cancelled() {
 
 #[tokio::test]
 async fn queued_lane_admissions_are_busy_but_not_drained_by_restart() {
-    let fixture = Fixture::new(1);
+    for admission in [false, true] {
+        queued_lane_admissions_are_busy_but_not_drained_by_restart_with_admission(admission).await;
+    }
+}
+
+async fn queued_lane_admissions_are_busy_but_not_drained_by_restart_with_admission(
+    admission: bool,
+) {
+    let fixture = Fixture::for_s2(1, admission);
     fixture.runtime.quiesce().await.unwrap();
     let lane = fixture.runtime.delegate_background(
         Role::Worker,
@@ -368,7 +506,18 @@ async fn queued_lane_admissions_are_busy_but_not_drained_by_restart() {
 
 #[tokio::test]
 async fn queued_lane_admissions_are_operator_drained_without_provider_tasks() {
-    let fixture = Fixture::new(1);
+    for admission in [false, true] {
+        queued_lane_admissions_are_operator_drained_without_provider_tasks_with_admission(
+            admission,
+        )
+        .await;
+    }
+}
+
+async fn queued_lane_admissions_are_operator_drained_without_provider_tasks_with_admission(
+    admission: bool,
+) {
+    let fixture = Fixture::for_s2(1, admission);
     fixture.runtime.quiesce().await.unwrap();
     let lane = fixture.runtime.delegate_background(
         Role::Worker,

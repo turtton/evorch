@@ -246,7 +246,7 @@ impl LoopState {
         let phase = *to;
         self.publish_durable_task(phase, reason.clone());
         if let Some(runtime) = self.runtime() {
-            runtime.publish_terminal(self.task.run_id, event);
+            self.terminal_dispatch = runtime.publish_terminal(self.task.run_id, event);
         }
     }
 }

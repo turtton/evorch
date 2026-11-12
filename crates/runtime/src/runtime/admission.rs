@@ -188,10 +188,12 @@ impl AgentRuntime {
                         && Arc::ptr_eq(&admission.execution, &execution)
                     {
                         admission.cancelled = true;
-                        let queued = self.note_intent_stop(
+                        let queued = self.note_fenced_intent_stop(
                             run,
                             &execution.publication().incarnation(),
                             crate::quiesce::StopReason::Cancelled,
+                            runs.get(&run)
+                                .is_some_and(|entry| Arc::ptr_eq(&entry.execution, &execution)),
                         );
                         // Registration is fenced by A/R: set the signal before a
                         // completing provider can choose its durable stop reason.
@@ -442,7 +444,8 @@ impl AgentRuntime {
         review_seed: Option<ReviewSeed>,
         execution: Arc<ExecutionControl>,
         intents: &HashMap<RunId, cancellation::SpawnIntent>,
-    ) -> RunId {
+    ) -> Result<RunId, RuntimeError> {
+        let dispatch = self.dispatch_registration_guard()?;
         assert!(
             intents
                 .get(&run_id)
@@ -468,7 +471,7 @@ impl AgentRuntime {
         let goal_stamp = self.goal_input_stamp(run_id);
         let lane_execution = Arc::clone(&execution);
         let runtime = self.clone();
-        let task = async move {
+        let task = dispatch.scope(async move {
             let handoff = matches!(
                 &continuation,
                 RunContinuation::Handoff(_)
@@ -489,16 +492,12 @@ impl AgentRuntime {
             let model = runtime.shared.model_for(&config);
             let mut cancellation = execution.cancel_tx.subscribe();
             let admission = crate::panic_capture::catch_panic(async {
-            if lane_root {
                 tokio::select! {
                     biased;
                     _ = cancellation.wait_for(|signal| matches!(signal, RunInterrupt::Stop | RunInterrupt::Cancel)) =>
                         Err(RuntimeError::RunTerminated { run_id: run_id.to_string() }),
                     result = model.admit(&invocation, role) => result,
                 }
-            } else {
-                model.admit(&invocation, role).await
-            }
             }).await;
             let admission_panicked = admission.is_err();
             let mut admitted = admission.unwrap_or_else(|panic| {
@@ -669,7 +668,7 @@ impl AgentRuntime {
             if admitted.is_err() {
                 result.send_replace(Some(admitted));
             }
-        };
+        });
         if lane_root {
             self.shared
                 .lane_admissions
@@ -677,7 +676,7 @@ impl AgentRuntime {
         } else {
             tokio::spawn(task);
         }
-        run_id
+        Ok(run_id)
     }
 
     /// No loop will append this input. A restored prompt was already delivered
@@ -728,6 +727,75 @@ impl AgentRuntime {
     }
 }
 
+impl AgentRuntime {
+    pub(crate) fn dispatch_run_settled(&self, run: RunId, error: &RuntimeError) -> bool {
+        if matches!(
+            error,
+            RuntimeError::UnknownRun { .. } | RuntimeError::RunTerminated { .. }
+        ) {
+            return true;
+        }
+        self.shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run)
+            .is_some_and(|admission| {
+                admission
+                    .result
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|result| result.as_ref().is_err_and(|settled| settled == error))
+            })
+    }
+    pub(crate) fn dispatch_pending_admissions(&self) -> Vec<RunId> {
+        self.shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, a)| a.result.borrow().is_none())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+    pub(crate) async fn join_dispatch_admissions(&self) -> Result<(), RuntimeError> {
+        let pending: Vec<_> = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|a| a.result.borrow().is_none())
+            .map(|a| a.result.clone())
+            .collect();
+        for mut result in pending {
+            result
+                .wait_for(Option::is_some)
+                .await
+                .map_err(|_| RuntimeError::Model {
+                    reason: "dispatch admission ended without receipt".into(),
+                })?;
+        }
+        Ok(())
+    }
+    pub(crate) fn try_seal_dispatch(&self, restart: bool) -> bool {
+        // Same registration order. tails is innermost and never held over A/R acquisition.
+        let admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runs = lock_runs(&self.shared.runs);
+        if !restart
+            && (admissions.values().any(|a| a.result.borrow().is_none())
+                || runs.values().any(is_live))
+        {
+            return false;
+        }
+        self.shared.dispatch_tails.try_close()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,6 +815,47 @@ mod tests {
         fn selected_model(&self, _: Role, _: Option<&str>) -> String {
             "test".into()
         }
+    }
+
+    #[tokio::test]
+    async fn closed_background_registration_settles_admission_and_shutdown_only_ignores_settled_errors()
+     {
+        let bus = Arc::new(EventBus::new(32));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            Arc::new(Model),
+        );
+        assert!(runtime.shared.dispatch_tails.try_close());
+        let run =
+            runtime.delegate_background(Role::Worker, "rejected".into(), RunConfig::default());
+        let error = runtime.wait(run).await.unwrap_err();
+        assert!(matches!(error, RuntimeError::Model { .. }), "{error:?}");
+        assert!(runtime.dispatch_run_settled(run, &error));
+        assert!(!runtime.dispatch_run_settled(
+            run,
+            &RuntimeError::Model {
+                reason: "unrelated storage failure".into()
+            }
+        ));
+        assert!(runtime.dispatch_run_settled(
+            run,
+            &RuntimeError::UnknownRun {
+                run_id: run.to_string()
+            }
+        ));
+        assert!(runtime.dispatch_run_settled(
+            run,
+            &RuntimeError::RunTerminated {
+                run_id: run.to_string()
+            }
+        ));
+        assert!(runtime.list_agents().is_empty());
+        let fence = runtime
+            .fence_dispatch_shutdown(|| async { Ok::<_, RuntimeError>(()) })
+            .await
+            .unwrap();
+        runtime.drain_dispatch_tails(&fence).await.unwrap();
     }
 
     #[tokio::test]

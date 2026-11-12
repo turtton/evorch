@@ -17,6 +17,9 @@ pub mod learning;
 mod learning_tests;
 pub mod models;
 mod project_models;
+pub mod recovery;
+#[cfg(test)]
+mod recovery_06a_tests;
 pub mod services;
 #[cfg(test)]
 mod tests;
@@ -535,20 +538,24 @@ impl BootstrappedHost {
         for task in tasks {
             lane_pr::remember(&mut failure, task.await.map(|_| ()));
         }
+        let drained = failure.is_none();
         if let Some(reclaim) = self.reclaim.take() {
             reclaim.shutdown();
         }
+        // Events published before a drain failure still need their bridge ack.
         if let Some(bridge) = &mut self.bridge {
             lane_pr::remember(&mut failure, bridge.flush());
         }
-        match self.owner.release_ready() {
-            Ok(true) => {
-                failure.get_or_insert_with(|| {
-                    "owner still has active turns after runtime drain".into()
-                });
+        if drained {
+            match self.owner.release_ready() {
+                Ok(true) => {
+                    failure.get_or_insert_with(|| {
+                        "owner still has active turns after runtime drain".into()
+                    });
+                }
+                Ok(false) => {}
+                Err(error) => lane_pr::remember(&mut failure, Err::<(), _>(error)),
             }
-            Ok(false) => {}
-            Err(error) => lane_pr::remember(&mut failure, Err::<(), _>(error)),
         }
         if let Some(mut bridge) = self.bridge.take() {
             bridge.shutdown();

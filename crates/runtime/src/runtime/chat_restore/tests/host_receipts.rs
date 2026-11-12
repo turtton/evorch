@@ -183,6 +183,7 @@ async fn same_run_restore_reconciles_old_receipts_before_inserting_the_new_input
 #[tokio::test]
 async fn rejected_provider_admission_drops_a_fresh_input_but_keeps_a_restored_delivery() {
     let model = Arc::new(super::registration::AdmissionModel {
+        admission: true,
         reject: AtomicBool::new(true),
     });
     let fixture = Fixture::with_model(model.clone());
