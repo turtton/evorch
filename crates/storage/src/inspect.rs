@@ -19,12 +19,14 @@ use crate::repo::event::select::{
 use crate::{Database, StorageError};
 
 mod bodies;
+mod lanes;
 mod open;
 mod storage_summary;
 pub use bodies::{
     BLOB_PREVIEW_BYTES, BlobOptions, BodyCheckScope, DEFAULT_REFERENCES_LISTED,
     MAX_REFERENCES_LISTED, MIN_BLOB_PREFIX_DIGITS,
 };
+pub use lanes::{LANE_DIAGNOSTICS_LIST_MAX, LANE_DIAGNOSTICS_UNCOLLECTED_EVALUATED_MAX};
 pub use open::InspectedDatabase;
 pub use storage_summary::{DEFAULT_TOP_THREADS, StorageSummaryOptions};
 

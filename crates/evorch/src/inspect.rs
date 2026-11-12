@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use storage::Database;
 use storage::improvement::{ImprovementCandidate, ImprovementStatus};
+
+mod lanes;
 use storage::inspect::{
     BlobOptions, BodyCheckScope, DEFAULT_TOP_THREADS, EventScope, InspectBodies,
     InspectEventsOptions, StorageSummaryOptions, event_json,
@@ -16,7 +18,7 @@ use storage::inspect::{
 pub const USAGE: &str = "usage: evorch inspect [--db <path>] <command>
   candidates [--project <slug>] [--status new|reviewed|dismissed] [--limit <n>]
   candidate <candidate-id>
-  run <run-id> [--full | --messages <from>..<to>]   (ordinals count System messages)
+  run <run-id> [--full | --messages <from>..<to>]   (ordinals count System messages; adds lane_diagnostics)
   events (--run <run-id> | --around <unix-ns> [--window-ms <ms>]) [--limit <n>]
          [--bodies resolved|refs] [--contains <text>]   (refs shows token hash/length, reads no blob)
   storage [--physical] [--top <n>]
@@ -279,8 +281,11 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
                 None if full => storage::inspect::RunDetail::Full,
                 None => storage::inspect::RunDetail::Summary,
             };
-            db.inspect_run_detail(&run_id, detail)
-                .map_err(|error| error.to_string())?
+            let mut document = db
+                .inspect_run_detail(&run_id, detail)
+                .map_err(|error| error.to_string())?;
+            lanes::attach(&db, &run_id, &mut document)?;
+            document
         }
         InspectCommand::Events {
             scope,

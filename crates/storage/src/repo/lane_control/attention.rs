@@ -67,7 +67,7 @@ pub(crate) fn ready_readiness(
         None => LaneReadyState::Unreviewed,
     })
 }
-fn items(
+pub(crate) fn items(
     conn: &Connection,
     f: &LaneAttentionFilter,
 ) -> Result<Vec<LaneAttentionItem>, StorageError> {
