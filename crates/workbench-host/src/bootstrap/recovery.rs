@@ -1,6 +1,10 @@
 //! Read-only planning and explicit safe-point capture. No activation loop.
 //! The caller stops ingress/producers before capture. 06b/c will acquire current
 //! authorities and register the entire graph before activating any component.
+#[path = "recovery_authority.rs"]
+pub mod authority;
+#[path = "recovery_current.rs"]
+pub mod current;
 use super::BootstrapError;
 use runtime::{
     AgentRuntime, RunId,
