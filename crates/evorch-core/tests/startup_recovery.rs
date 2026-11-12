@@ -271,7 +271,21 @@ impl workbench_host::bootstrap::core_startup::CoreStartupHook for ProbeHook {
                     // checkpoint. No time-based completion or global fault env.
                     loop { std::thread::park(); }
                 }
+                Ok(())
             }).unwrap();
+        }
+        if self.0 == "lost_ack" {
+            inputs
+                .runtime
+                .set_recovery_activation_probe(|boundary| {
+                    if boundary == Boundary::AfterFullAck {
+                        return Err(runtime::RuntimeError::Model {
+                            reason: "test: committed activation ACK lost".into(),
+                        });
+                    }
+                    Ok(())
+                })
+                .unwrap();
         }
         workbench_host::bootstrap::core_startup::CoreStartupHook::start(
             &CoreGraphRecovery,
@@ -451,7 +465,7 @@ async fn startup_subprocess_worker() {
         // An unfinished wait may still own an active turn. A real crash leaves
         // that lease intact; process B must use managed expiry retry, never steal it.
         host.owner.release_ready().unwrap();
-        let lane_owner = if mode == "capture_lane" {
+        let lane_owner = if mode == "capture_lane" || mode == "capture_catalog_lane" {
             let orphan = host.runtime.reserve_run_id();
             store.create_lane(storage::lanes::NewLane {
                 lane_id:"orphan".into(), thread_id:"orphan-thread".into(), origin_thread_id:"thread".into(), origin_run_id:run.to_string(), creation_key:"before-crash".into(),
@@ -466,8 +480,12 @@ async fn startup_subprocess_worker() {
                 Arc::new(event_bus::EventBus::new(64)),
             )
             .unwrap();
-            owner.start("orphan-thread").unwrap();
-            Some(owner)
+            if mode == "capture_lane" {
+                owner.start("orphan-thread").unwrap();
+                Some(owner)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -485,6 +503,13 @@ async fn startup_subprocess_worker() {
         }
         std::future::pending::<()>().await;
     } else {
+        if mode == "empty" {
+            let report = host.recovery_diagnostics.as_ref().unwrap().snapshot();
+            assert_eq!(report["components"], json!([]));
+            emit(json!({"phase":"empty_bootstrapped", "pid":std::process::id(), "report":report}));
+            host.shutdown().await.unwrap();
+            return;
+        }
         let run: RunId = std::fs::read_to_string(root.join("captured-run"))
             .unwrap()
             .parse()
@@ -502,6 +527,62 @@ async fn startup_subprocess_worker() {
             );
         }
         emit(json!({"phase":"bootstrapped", "pid":std::process::id(), "report":report}));
+        if mode == "catalog_failure" {
+            assert_eq!(report["components"][0]["state"], "quarantined");
+            assert_eq!(report["components"][0]["reason"], "needs_attention");
+            assert_eq!(report["components"][0]["manual_continue"], false);
+            assert!(host.runtime.inspect_agent(run).is_err());
+            assert!(!host.runtime.has_paused_recovery());
+            let orphan: RunId = std::fs::read_to_string(root.join("orphan-run"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            waiting(&host.runtime, orphan).await;
+            emit(
+                json!({"phase":"unrelated_lane_restored", "pid":std::process::id(), "run":orphan}),
+            );
+            host.shutdown().await.unwrap();
+            return;
+        }
+        if mode == "lost_ack" {
+            assert_eq!(report["components"][0]["reason"], "already_activated");
+            assert_eq!(report["components"][0]["manual_continue"], true);
+            assert!(!host.runtime.has_paused_recovery());
+            assert!(host.runtime.inspect_agent(run).is_err());
+            let db = storage::Database::open(&host.composition.storage).unwrap();
+            let claim = db.recovery_claims().unwrap().remove(0);
+            assert_eq!(
+                claim.state,
+                storage::recovery::RecoveryClaimState::Activated
+            );
+            let before = db.recovery_claim_snapshot(&claim.claim_id).unwrap();
+            // Wait for the parent to assert zero automatic provider requests.
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "continue");
+            assert_eq!(db.recovery_claim_snapshot(&claim.claim_id).unwrap(), before);
+            let permit = host.owner.owned_permit("thread").unwrap();
+            host.runtime
+                .continue_goal(
+                    run,
+                    "Explicit human Continue after ACK loss".into(),
+                    RunConfig {
+                        ownership: Some(permit),
+                        project_root: Some(root.clone()),
+                        interactive: true,
+                        conversation: true,
+                        keep_alive: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            waiting(&host.runtime, run).await;
+            assert_eq!(db.recovery_claims().unwrap()[0], claim);
+            emit(json!({"phase":"manual_continued", "pid":std::process::id()}));
+            host.shutdown().await.unwrap();
+            assert_eq!(db.recovery_claims().unwrap()[0], claim);
+            return;
+        }
         if mode == "observe" {
             host.shutdown().await.unwrap();
             return;
@@ -587,7 +668,20 @@ struct Process {
 }
 impl Process {
     fn spawn(root: &Path, mode: &str) -> Self {
-        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        Self::spawn_with_proxy(root, mode, None)
+    }
+    fn spawn_with_proxy(root: &Path, mode: &str, proxy: Option<&str>) -> Self {
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        if let Some(proxy) = proxy {
+            // Child-local proxy rejects models.dev CONNECT, never contacting the
+            // external service. Provider requests stay on our loopback mock.
+            command
+                .env("HTTPS_PROXY", proxy)
+                .env("https_proxy", proxy)
+                .env("NO_PROXY", "127.0.0.1,localhost")
+                .env("no_proxy", "127.0.0.1,localhost");
+        }
+        let mut child = command
             .args([
                 "--ignored",
                 "--exact",
@@ -971,6 +1065,137 @@ async fn startup_orphan_unowned_seed_waits_for_external_owner_then_starts_once()
     let mut observer = Process::spawn(dir.path(), "observe");
     observer.checkpoint("bootstrapped").await;
     assert!(observer.child.wait().await.unwrap().success());
+    assert_eq!(
+        mock.recorded_requests()
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .count(),
+        2
+    );
+}
+
+// Exercise the production error path, not a successful empty-catalog substitute.
+async fn catalog_outage(fetch_fails: bool) {
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
+        ScriptedResponse::text_stream("before", "mock-model", ["Waiting"]),
+        ScriptedResponse::text_stream("lane", "mock-model", ["Unrelated lane recovered"]),
+    ]);
+    let dir = fixture(&mock);
+    let mut source = Process::spawn(dir.path(), "capture_catalog_lane");
+    source.checkpoint("captured").await;
+    source.kill().await;
+    if !fetch_fails {
+        let mut prepared = Process::spawn(dir.path(), "prepared");
+        prepared.checkpoint("crash_boundary").await;
+        prepared.kill().await;
+    }
+    let storage = storage::StorageConfig {
+        db_path: dir.path().join("evorch-events.db"),
+        ..Default::default()
+    };
+    let db = storage::Database::open(&storage).unwrap();
+    let claims = db.recovery_claims().unwrap();
+    std::fs::remove_file(dir.path().join("catalog/models-dev.json")).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.path().join("catalog/models-dev.lock"))
+        .unwrap();
+    if !fetch_fails {
+        lock.lock().unwrap();
+    }
+    let proxy = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(503))
+        .mount(&proxy)
+        .await;
+    let mut recovered =
+        Process::spawn_with_proxy(dir.path(), "catalog_failure", Some(&proxy.uri()));
+    recovered.checkpoint("bootstrapped").await;
+    recovered.checkpoint("unrelated_lane_restored").await;
+    assert!(recovered.child.wait().await.unwrap().success());
+    assert_eq!(
+        db.recovery_claims().unwrap(),
+        claims,
+        "outage must not release Prepared"
+    );
+    assert_eq!(
+        db.lane_by_thread("orphan-thread")
+            .unwrap()
+            .unwrap()
+            .generation,
+        1
+    );
+    // Exactly the source capture and unrelated lane: the graph made zero new requests.
+    let requests = mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !String::from_utf8(serde_json::to_vec(&requests[1].body).unwrap())
+            .unwrap()
+            .contains("Preserve the already-sent provider prefix")
+    );
+    if fetch_fails {
+        assert!(!proxy.received_requests().await.unwrap().is_empty());
+    }
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_missing_catalog_cache_holds_prepared_and_recovers_unrelated_lane() {
+    catalog_outage(false).await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_catalog_fetch_failure_holds_graph_and_recovers_unrelated_lane() {
+    catalog_outage(true).await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_catalog_outage_without_graphs_does_not_prevent_core_boot() {
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![]);
+    let dir = fixture(&mock);
+    std::fs::remove_file(dir.path().join("catalog/models-dev.json")).unwrap();
+    let proxy = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(503))
+        .mount(&proxy)
+        .await;
+    let mut empty = Process::spawn_with_proxy(dir.path(), "empty", Some(&proxy.uri()));
+    empty.checkpoint("empty_bootstrapped").await;
+    assert!(empty.child.wait().await.unwrap().success());
+    assert!(mock.recorded_requests().is_empty());
+    assert!(!proxy.received_requests().await.unwrap().is_empty());
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_same_process_ack_loss_cleans_only_for_explicit_manual_continue() {
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
+        ScriptedResponse::text_stream("before", "mock-model", ["Waiting"]),
+        ScriptedResponse::text_stream("manual", "mock-model", ["Human Continue"]),
+    ]);
+    let dir = fixture(&mock);
+    let mut source = Process::spawn(dir.path(), "capture");
+    source.checkpoint("captured").await;
+    source.kill().await;
+    let mut recovered = Process::spawn(dir.path(), "lost_ack");
+    recovered.checkpoint("bootstrapped").await;
+    assert_eq!(
+        mock.recorded_requests()
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .count(),
+        1
+    );
+    recovered
+        .child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"continue\n")
+        .await
+        .unwrap();
+    recovered.checkpoint("manual_continued").await;
+    assert!(recovered.child.wait().await.unwrap().success());
     assert_eq!(
         mock.recorded_requests()
             .iter()

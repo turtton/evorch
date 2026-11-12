@@ -52,6 +52,7 @@ pub enum StartupBlocked {
     CliContinuityRequired,
     TeamReconciliationRequired,
     StorageUnavailable,
+    CatalogUnavailable,
     AlreadyActivated,
     Released,
     NeedsAttention,
@@ -173,6 +174,41 @@ impl<'a> StartupCoordinator<'a> {
             components,
             unreadable_claims,
         })
+    }
+    /// Read back a consumed activation handle and clean only coherent, local,
+    /// unpublished Activated state. This never grants authority to retry/release.
+    pub fn cleanup_activated(&self, id: &str) -> Result<(), StartupBlocked> {
+        let claim = self.claim(id)?.ok_or(StartupBlocked::NeedsAttention)?;
+        if claim.state != RecoveryClaimState::Activated {
+            return Err(StartupBlocked::NeedsAttention);
+        }
+        let observed = self
+            .inputs
+            .runtime
+            .recover_recovery_claim(
+                &claim.claim_id,
+                self.startup
+                    .try_clone()
+                    .map_err(|_| StartupBlocked::StorageUnavailable)?,
+                &self.inputs.options.ownership_root,
+                // Observation/cleanup changes no durable state. No saved or current
+                // capability is needed or inferred; a race to Prepared cannot adopt.
+                &CurrentRecoveryAuthority {
+                    members: Default::default(),
+                },
+            )
+            .map_err(|_| StartupBlocked::NeedsAttention)?;
+        match observed {
+            runtime::RecoveryClaimHandle::Quarantined(handle)
+                if handle.state() == runtime::RecoveryCleanupState::ActivatedUnpublished =>
+            {
+                self.inputs
+                    .runtime
+                    .cleanup_recovery_claim(&handle)
+                    .map_err(|_| StartupBlocked::NeedsAttention)
+            }
+            _ => Err(StartupBlocked::NeedsAttention),
+        }
     }
     /// Conditional durable release even when adoption/descriptor validation failed.
     /// Only current binding/owner grants mutation authority; the writer atomically
@@ -313,6 +349,9 @@ impl<'a> StartupCoordinator<'a> {
             Disposition::Released => return Err(StartupBlocked::Released),
             Disposition::Prepared | Disposition::AwaitingAuthority => {}
             _ => return Err(StartupBlocked::NeedsAttention),
+        }
+        if !self.catalog.is_available() {
+            return Err(StartupBlocked::CatalogUnavailable);
         }
         let manifest = self.manifest(id)?;
         let records = manifest

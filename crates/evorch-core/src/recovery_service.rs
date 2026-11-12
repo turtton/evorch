@@ -182,12 +182,28 @@ fn attempt(
                 Err(StartupBlocked::OwnerBlocked) => {
                     (RecoveryState::Blocked, Some(StartupBlocked::OwnerBlocked))
                 }
+                // Missing metadata must hold even Prepared claims: no adoption,
+                // activation, provider admission, or conditional release.
+                Err(StartupBlocked::CatalogUnavailable) => (
+                    RecoveryState::Quarantined,
+                    Some(StartupBlocked::NeedsAttention),
+                ),
                 Err(reason) => match coordinator.decline(&component.manifest_id) {
                     Ok(()) => (RecoveryState::Released, Some(reason)),
                     Err(StartupBlocked::OwnerBlocked) => {
                         (RecoveryState::Blocked, Some(StartupBlocked::OwnerBlocked))
                     }
-                    Err(_) => (RecoveryState::Quarantined, Some(reason)),
+                    Err(_) => {
+                        let reason = if coordinator
+                            .cleanup_activated(&component.manifest_id)
+                            .is_ok()
+                        {
+                            StartupBlocked::AlreadyActivated
+                        } else {
+                            reason
+                        };
+                        (RecoveryState::Quarantined, Some(reason))
+                    }
                 },
             }
         }

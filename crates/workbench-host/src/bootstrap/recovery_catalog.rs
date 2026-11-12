@@ -24,9 +24,17 @@ impl RecoveryCatalog {
         if config.providers.is_empty() && !directory.join("models-dev.json").exists() {
             return Ok(Self::default()); // Explicit unconfigured health mode.
         }
-        let mut catalog = catalog::ModelCatalog::load_or_refresh(&directory).await?;
-        let refresh = catalog.take_refresh();
         let current = Self::default();
+        let mut catalog = match catalog::ModelCatalog::load_or_refresh(&directory).await {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                // A public catalog outage blocks recovery, not the core or
+                // independent lane producers. Do not substitute saved metadata.
+                tracing::warn!(%error, "recovery catalog unavailable; graph components held");
+                return Ok(current);
+            }
+        };
+        let refresh = catalog.take_refresh();
         current.publish(catalog);
         if let Some(refresh) = refresh {
             let target = current.clone();

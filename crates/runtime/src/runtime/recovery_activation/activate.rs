@@ -261,7 +261,7 @@ impl AgentRuntime {
         // On an uncertain ACK, retain the durable claim and the closed gate.
         // Observation is diagnostic only: it never permits release or replay.
         #[cfg(feature = "recovery-test-support")]
-        self.recovery_activation_probe(RecoveryActivationBoundary::BeforeFullAck);
+        self.recovery_activation_probe(RecoveryActivationBoundary::BeforeFullAck)?;
         if let Err(write_error) = store.handle.activate_recovery_claim(request) {
             let observation =
                 store.with_database(|db| db.observe_recovery_activation(&paused.claim));
@@ -270,7 +270,7 @@ impl AgentRuntime {
             )));
         }
         #[cfg(feature = "recovery-test-support")]
-        self.recovery_activation_probe(RecoveryActivationBoundary::AfterFullAck);
+        self.recovery_activation_probe(RecoveryActivationBoundary::AfterFullAck)?;
         #[cfg(test)]
         if paused.lose_activation_ack {
             return Err(error(

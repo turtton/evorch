@@ -55,6 +55,21 @@ fn runtime(
     AgentRuntime::new(bus.clone(), Arc::new(tools::ToolExecutor::new(bus)), model)
         .with_run_store(RunStore::open(config, writer.clone()).unwrap())
 }
+async fn available_catalog(options: &BootstrapOptions) -> RecoveryCatalog {
+    let directory = options.config_dir.join("catalog");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::copy(
+        test_support::model_catalog_dir().join("models-dev.json"),
+        directory.join("models-dev.json"),
+    )
+    .unwrap();
+    let mut services = BackgroundServices::default();
+    let catalog = RecoveryCatalog::preload(options, &Default::default(), &mut services)
+        .await
+        .unwrap();
+    services.shutdown().await.unwrap();
+    catalog
+}
 #[tokio::test]
 async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay() {
     for activate in [false, true] {
@@ -135,10 +150,7 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
             &workbench_protocol::ids::ProjectId::new("project").unwrap(),
             root.clone(),
         );
-        let mut services = BackgroundServices::default();
-        let catalog = RecoveryCatalog::preload(&options, &Default::default(), &mut services)
-            .await
-            .unwrap();
+        let catalog = available_catalog(&options).await;
         let first = runtime(&config, &writer, model.clone());
         let owner = Arc::new(
             OwnerHost::open(
@@ -280,7 +292,6 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
             );
             assert_eq!(model.admissions.load(Ordering::SeqCst), before);
         }
-        services.shutdown().await.unwrap();
     }
 }
 
@@ -548,7 +559,7 @@ async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
         leases
             .recovery_startup_complete(&config.db_path, &options.ownership_root)
             .unwrap(),
-        RecoveryCatalog::default(),
+        available_catalog(&options).await,
     )
     .unwrap();
     let scan = coordinator.scan().unwrap();
@@ -599,7 +610,7 @@ async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
         leases
             .recovery_startup_complete(&config.db_path, &options.ownership_root)
             .unwrap(),
-        RecoveryCatalog::default(),
+        available_catalog(&options).await,
     )
     .unwrap();
     let adopted = reopened.prepare(&good).unwrap();

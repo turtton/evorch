@@ -23,23 +23,28 @@ pub enum RecoveryActivationBoundary {
     AfterFullAck,
 }
 #[cfg(feature = "recovery-test-support")]
-pub(crate) type RecoveryActivationProbe = Arc<dyn Fn(RecoveryActivationBoundary) + Send + Sync>;
+pub(crate) type RecoveryActivationProbe =
+    Arc<dyn Fn(RecoveryActivationBoundary) -> Result<(), RuntimeError> + Send + Sync>;
 #[cfg(feature = "recovery-test-support")]
 impl AgentRuntime {
     /// Local explicit test seam, never installed from environment or persistence.
     pub fn set_recovery_activation_probe(
         &self,
-        probe: impl Fn(RecoveryActivationBoundary) + Send + Sync + 'static,
+        probe: impl Fn(RecoveryActivationBoundary) -> Result<(), RuntimeError> + Send + Sync + 'static,
     ) -> Result<(), RuntimeError> {
         self.shared
             .recovery_probe
             .set(Arc::new(probe))
             .map_err(|_| error("recovery probe already set"))
     }
-    fn recovery_activation_probe(&self, boundary: RecoveryActivationBoundary) {
-        if let Some(probe) = self.shared.recovery_probe.get() {
-            probe(boundary);
-        }
+    fn recovery_activation_probe(
+        &self,
+        boundary: RecoveryActivationBoundary,
+    ) -> Result<(), RuntimeError> {
+        self.shared
+            .recovery_probe
+            .get()
+            .map_or(Ok(()), |probe| probe(boundary))
     }
 }
 
@@ -348,7 +353,7 @@ impl AgentRuntime {
             });
         }
         #[cfg(feature = "recovery-test-support")]
-        self.recovery_activation_probe(RecoveryActivationBoundary::Prepared);
+        self.recovery_activation_probe(RecoveryActivationBoundary::Prepared)?;
         Ok(PausedRecoveryComponent {
             runtime: Arc::downgrade(&self.shared),
             claim,
