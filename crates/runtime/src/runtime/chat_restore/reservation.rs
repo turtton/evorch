@@ -12,6 +12,7 @@ pub(crate) struct SnapshotReservation {
     expected_config: String,
     retry_config: String,
     armed: bool,
+    _recovery_expectation: Option<storage::recovery::RecoverySnapshotExpectation>,
 }
 
 impl SnapshotReservation {
@@ -35,7 +36,38 @@ impl SnapshotReservation {
             expected_config: String::new(),
             retry_config: String::new(),
             armed: false,
+            _recovery_expectation: None,
         })
+    }
+
+    /// Unlike ordinary chat admission, recovery prepare changes no durable row.
+    /// Consequently dropping this token must not run the normal rollback CAS.
+    pub(crate) fn prepare_recovery(
+        store: &crate::RunStore,
+        run_id: RunId,
+        record: &storage::RunContextRecord,
+        receipt: &storage::RunContextReceipt,
+    ) -> Result<Self, RuntimeError> {
+        let fail = |reason: &str| RuntimeError::Model {
+            reason: reason.into(),
+        };
+        if record.run_id != run_id.to_string() || !receipt.matches(record) {
+            return Err(fail("recovery snapshot receipt mismatch"));
+        }
+        let descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
+            .map_err(|_| fail("invalid recovery snapshot descriptor"))?;
+        if descriptor.admission_reservation_id.is_some()
+            || descriptor.non_restorable_reason.as_deref() == Some("snapshot_consumed")
+        {
+            return Err(fail("recovery snapshot already reserved"));
+        }
+        let mut token = Self::new(store, run_id, record, &descriptor)?;
+        token._recovery_expectation = Some(storage::recovery::RecoverySnapshotExpectation {
+            run_id: run_id.to_string(),
+            receipt: receipt.clone(),
+            config_json: record.config_json.clone(),
+        });
+        Ok(token)
     }
 
     pub(super) fn id(&self) -> &str {

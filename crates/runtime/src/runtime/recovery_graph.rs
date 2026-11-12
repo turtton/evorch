@@ -418,7 +418,9 @@ impl AgentRuntime {
                 .into_iter()
                 .filter_map(|id| id.parse::<RunId>().ok())
                 .collect();
-            covered.extend(component_runs.iter().copied());
+            if !load.record.as_ref().is_ok_and(|m| m.superseded) {
+                covered.extend(component_runs.iter().copied());
+            }
             let mut candidates = Vec::new();
             let mut required = vec![
                 RequiredRecoveryAuthority::CurrentOwnership,
@@ -445,6 +447,31 @@ impl AgentRuntime {
                     .collect::<Result<Vec<_>, _>>()?;
                 if edges(&records) != manifest.edges {
                     return Err(RecoveryReason::MissingEdge);
+                }
+                // A durable paused Stop increments the old revision. Identity and
+                // explicit Stop win over that expected conflict or PendingClaim.
+                for member in manifest.members.iter().filter(|m| m.resume) {
+                    let intent = store
+                        .with_database(|db| db.resume_intent(&member.run_id))
+                        .map_err(|_| RecoveryReason::CorruptComponent)?
+                        .ok_or(RecoveryReason::CorruptComponent)?;
+                    let intent = ResumeIntent::decode(intent)
+                        .map_err(|_| RecoveryReason::CorruptComponent)?;
+                    if intent.incarnation == member.incarnation {
+                        match intent.stop_reason {
+                            Some(StopReason::OperatorStopped) => {
+                                return Err(RecoveryReason::OperatorStopped);
+                            }
+                            Some(StopReason::Cancelled) => return Err(RecoveryReason::Cancelled),
+                            Some(StopReason::CliDisconnected) => {
+                                return Err(RecoveryReason::CliDisconnected);
+                            }
+                            _ => {}
+                        }
+                        if !intent.active {
+                            return Err(RecoveryReason::Terminal);
+                        }
+                    }
                 }
                 for (_, claim) in claims.iter().filter(|(manifest, _)| manifest == &id) {
                     let claim = claim
@@ -552,6 +579,23 @@ impl AgentRuntime {
                             required_authority: required,
                         });
                     }
+                }
+                Err(reason)
+                    if matches!(
+                        reason,
+                        RecoveryReason::SupersededManifest
+                            | RecoveryReason::IntentRevisionConflict
+                            | RecoveryReason::OperatorStopped
+                            | RecoveryReason::Cancelled
+                            | RecoveryReason::CliDisconnected
+                            | RecoveryReason::Terminal
+                    ) =>
+                {
+                    plan.report.skipped.push(RecoveryOutcome {
+                        manifest_id: Some(id),
+                        runs: component_runs,
+                        reason,
+                    });
                 }
                 Err(reason) => plan.report.blocked.push(RecoveryOutcome {
                     manifest_id: Some(id),
