@@ -19,7 +19,9 @@ pub(crate) async fn resume_wait(
     };
     match &payload.kind {
         WaitKind::Runs => {
-            let result = super::runs::waiting::wait(state, runtime, payload.input.clone()).await;
+            let mut input = payload.input.clone();
+            super::drop_ignored_arguments("wait", &mut input);
+            let result = super::runs::waiting::wait(state, runtime, input).await;
             vec![(wait.tool_call_id.clone(), result.result)]
         }
         WaitKind::Reply { .. } => {

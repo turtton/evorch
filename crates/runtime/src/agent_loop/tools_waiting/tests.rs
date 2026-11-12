@@ -161,7 +161,7 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
             call(
                 "wait-all",
                 "wait",
-                json!({"run_ids":[child.to_string()],"mode":"all"}),
+                json!({"run_ids":[child.to_string()],"mode":"all","timeout_ms":1234}),
             ),
             call("wait-legacy", "wait", json!({"run_id":child.to_string()})),
         ],
@@ -374,6 +374,15 @@ async fn delegate_projection_uses_original_call_order_and_existing_child_ids() {
 
 #[tokio::test]
 async fn reply_continuation_consumes_only_the_correlated_reply_once() {
+    reply_continuation(false).await;
+}
+
+#[tokio::test]
+async fn expired_recovery_reply_times_out_once_without_consuming_queued_reply() {
+    reply_continuation(true).await;
+}
+
+async fn reply_continuation(expired: bool) {
     use event_bus::AgentMessageKind;
     let (_dir, _storage, runtime, mut state) =
         crate::agent_loop::continuity_tests::stored_fixture_in("reply-continuation.db", false)
@@ -399,9 +408,10 @@ async fn reply_continuation_consumes_only_the_correlated_reply_once() {
             json!({"message_id":message,"timeout_ms":1000}),
         )],
     });
-    // Epoch deadline is already elapsed. A queued correlated reply must still
-    // win over the deadline, just as a live wait_reply(timeout_ms=0) does.
-    state.recovery_waits = state.pending_waits(Some(("reply", 1))).unwrap();
+    // An elapsed recovery deadline wins; live waits retain their ordinary priority.
+    state.recovery_waits = state
+        .pending_waits(Some(("reply", if expired { 1 } else { u64::MAX })))
+        .unwrap();
     let saved_waits = state.recovery_waits.clone();
     crate::restore::persist_tools_waiting(&state).unwrap();
     let bundle = runtime
@@ -440,13 +450,15 @@ async fn reply_continuation_consumes_only_the_correlated_reply_once() {
         panic!("reply result")
     };
     assert_eq!(tool_call_id, "reply");
-    assert!(!is_error);
+    assert_eq!(*is_error, expired);
     let providers::ToolResultContent::Text { text } = &content[0] else {
         panic!("reply text")
     };
-    let value: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(value["message_id"], reply);
-    assert_eq!(value["content"], "reply body");
+    if !expired {
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(value["message_id"], reply);
+        assert_eq!(value["content"], "reply body");
+    }
     assert!(runtime.check_reply_wait(parent, &message).is_err());
     assert_eq!(
         runtime
@@ -455,7 +467,11 @@ async fn reply_continuation_consumes_only_the_correlated_reply_once() {
             .iter()
             .map(|m| &m.message_id)
             .collect::<Vec<_>>(),
-        [&unrelated]
+        if expired {
+            vec![&unrelated, &reply]
+        } else {
+            vec![&unrelated]
+        }
     );
     assert!(state.resume_recovery_waits().await);
     assert_eq!(state.context.messages.len(), prefix.len() + 1);

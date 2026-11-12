@@ -1,6 +1,83 @@
 use super::*;
 use serde_json::json;
 
+#[tokio::test]
+async fn message_ids_advance_across_components_and_exhaust_without_wrapping() {
+    struct Model;
+    #[async_trait::async_trait]
+    impl crate::AgentModel for Model {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "fixed".into()
+        }
+        async fn complete(
+            &self,
+            _: &crate::AgentInvocationContext,
+            _: Role,
+            _: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, RuntimeError> {
+            std::future::pending().await
+        }
+    }
+    let bus = Arc::new(event_bus::EventBus::new(64));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        Arc::new(Model),
+    );
+    for (component, number) in [(1, 40), (2, 7), (3, 90)] {
+        let mut root = source(component, None);
+        root.record.root = root.record.run_id;
+        let mut d = delivery(&format!("msg-{number}"));
+        d.recipient = root.record.run_id;
+        d.state = DurableDeliveryState::Consumed;
+        d.consumed_receipt = Some(d.message_id.clone());
+        d.notice = DurableNotice::Explicit;
+        d.message = None;
+        root.record.deliveries.push(d);
+        let mut relations = PreparedRelations::prepare(&[root]).unwrap();
+        relations.publish(&runtime, &mut vec![]);
+        let next = runtime.allocate_message_id().unwrap();
+        assert_eq!(
+            next,
+            format!("msg-{}", if number == 7 { 42 } else { number + 1 })
+        );
+    }
+    let mut root = source(1, None);
+    let mut d = delivery(&format!("msg-{}", u64::MAX));
+    d.state = DurableDeliveryState::Consumed;
+    d.consumed_receipt = Some(d.message_id.clone());
+    d.notice = DurableNotice::Explicit;
+    d.message = None;
+    root.record.deliveries.push(d);
+    assert!(PreparedRelations::prepare(&[root]).is_err());
+    runtime
+        .shared
+        .next_message_id
+        .store(u64::MAX, Ordering::Release);
+    assert!(runtime.allocate_message_id().is_err());
+    assert!(runtime.allocate_message_id().is_err());
+    assert_eq!(
+        runtime.shared.next_message_id.load(Ordering::Acquire),
+        u64::MAX
+    );
+}
+
+#[test]
+fn component_ancestry_preserves_grandchild_metadata_before_publication() {
+    let graph =
+        PreparedRelations::prepare(&[source(1, None), source(2, Some(1)), source(3, Some(2))])
+            .unwrap();
+    assert!(!graph.ancestries[&RunId::new(1)].is_subagent);
+    assert!(graph.ancestries[&RunId::new(2)].is_subagent);
+    assert_eq!(graph.ancestries[&RunId::new(2)].parent_subagent_id, None);
+    assert!(graph.ancestries[&RunId::new(3)].is_subagent);
+    assert_eq!(
+        graph.ancestries[&RunId::new(3)].parent_subagent_id,
+        Some(RunId::new(2))
+    );
+}
+
 fn source(id: u64, parent: Option<u64>) -> RecoverySource {
     let run = RunId::new(id);
     let parent = parent.map(RunId::new);
@@ -122,6 +199,7 @@ fn question_messages_share_one_receipt_and_generation_conflicts_fail_closed() {
         admitted: true,
         paused: true,
     };
+    first.message.as_mut().unwrap().sender_run_id = "runtime".into();
     let mut second = first.clone();
     second.message_id = "msg-6".into();
     second.message.as_mut().unwrap().message_id = second.message_id.clone();

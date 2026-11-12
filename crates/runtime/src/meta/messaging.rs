@@ -166,11 +166,19 @@ pub(super) async fn wait_reply(
             Err(message) => return error(message),
         },
     };
+    let recovering = saved.is_some();
+    let expired = recovering
+        && match crate::agent_loop::tools_waiting::unix_ms() {
+            Ok(now) => deadline_unix_ms <= now,
+            Err(message) => return error(message),
+        };
     let caller = state.caller_run_id();
     let mut cancel = state.channels.cancel_rx.clone();
     let outcome = if let Err(runtime_error) = runtime.check_reply_wait(caller, &args.message_id) {
         // An unknown or foreign message_id fails whatever input is pending.
         WaitOutcome::Finished(Err(runtime_error))
+    } else if expired {
+        WaitOutcome::Finished(Err(runtime.expire_recovery_reply_wait(&args.message_id)))
     } else if state.has_pending_user_messages() {
         // Another wait in this same tool batch may already have received input.
         WaitOutcome::UserInput
@@ -183,12 +191,20 @@ pub(super) async fn wait_reply(
             Ok(now) => deadline_unix_ms.saturating_sub(now),
             Err(message) => return error(message),
         };
-        let wait = runtime.wait_reply_or_answers(
-            caller,
-            &args.message_id,
-            Duration::from_millis(remaining_ms),
-            Some(&delivered),
-        );
+        let wait = async {
+            if recovering && remaining_ms == 0 {
+                Err(runtime.expire_recovery_reply_wait(&args.message_id))
+            } else {
+                runtime
+                    .wait_reply_or_answers(
+                        caller,
+                        &args.message_id,
+                        Duration::from_millis(remaining_ms),
+                        Some(&delivered),
+                    )
+                    .await
+            }
+        };
         tokio::pin!(wait);
         loop {
             tokio::select! {

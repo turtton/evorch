@@ -2038,6 +2038,11 @@ impl AgentRuntime {
             reservation.commit();
         }
         if task.restored.is_some() {
+            // Lifecycle notices must still be emitted when numeric delivery IDs
+            // are exhausted; this separate namespace cannot grant reply authority.
+            let message_id = self.allocate_message_id().unwrap_or_else(|_| {
+                format!("restored-{}-{}", run_id, task.publication.incarnation())
+            });
             self.shared
                 .bus
                 .emit(Event::new(LifecycleEvent::AgentRunRestored {
@@ -2046,10 +2051,7 @@ impl AgentRuntime {
                         .ownership
                         .as_ref()
                         .map_or_else(|| "user".into(), |permit| permit.lease.owner_id.clone()),
-                    message_id: format!(
-                        "msg-{}",
-                        self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
-                    ),
+                    message_id,
                 }));
         }
         self.shared
@@ -3712,10 +3714,7 @@ impl AgentRuntime {
             None
         };
 
-        let message_id = format!(
-            "msg-{}",
-            self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
-        );
+        let message_id = self.allocate_message_id()?;
 
         queued.message.message_id.clone_from(&message_id);
         let message = queued.message.clone();
@@ -3984,6 +3983,24 @@ impl AgentRuntime {
                 reason: None,
             }));
         Ok(())
+    }
+
+    fn allocate_message_id(&self) -> Result<String, RuntimeError> {
+        self.shared
+            .next_message_id
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+            .map(|id| format!("msg-{id}"))
+            .map_err(|_| RuntimeError::Model {
+                reason: "message ID allocator exhausted".into(),
+            })
+    }
+
+    /// Recovery alone commits an elapsed deadline before looking at queued input.
+    pub(crate) fn expire_recovery_reply_wait(&self, message_id: &str) -> RuntimeError {
+        self.remove_sent_record(message_id);
+        RuntimeError::ReplyTimeout {
+            message_id: message_id.to_owned(),
+        }
     }
 
     fn remove_sent_record(&self, message_id: &str) {

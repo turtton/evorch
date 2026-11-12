@@ -15,6 +15,8 @@ pub(super) struct PreparedRelations {
     queues: BTreeMap<RunId, Vec<(DurableDeliveryState, QueuedMessage)>>,
     wakes: BTreeMap<RunId, (u32, u64)>,
     question_states: BTreeMap<String, (bool, bool, bool)>,
+    next_message_id: u64,
+    ancestries: BTreeMap<RunId, crate::request_turn::RequestAncestry>,
 }
 
 fn merge_generation(
@@ -41,6 +43,7 @@ impl PreparedRelations {
             .map(|s| s.record.run_id)
             .collect::<BTreeSet<_>>();
         let mut deliveries = BTreeMap::<String, DurableDelivery>::new();
+        let mut next_message_id = 1;
         let mut generations = BTreeMap::new();
         let mut questions = BTreeMap::<String, Arc<QuestionNotice>>::new();
         let mut wakes = BTreeMap::new();
@@ -64,6 +67,14 @@ impl PreparedRelations {
                 merge_generation(&mut generations, r.run_id, observed.generation, true)?;
             }
             for delivery in &r.deliveries {
+                if let Some(number) = delivery.message_id.strip_prefix("msg-") {
+                    let number: u64 = number.parse().map_err(error)?;
+                    next_message_id = next_message_id.max(
+                        number
+                            .checked_add(1)
+                            .ok_or_else(|| error("recovery message ID overflow"))?,
+                    );
+                }
                 if delivery.recipient != r.run_id || !ids.contains(&delivery.recipient) {
                     return Err(error("invalid delivery recipient"));
                 }
@@ -84,7 +95,11 @@ impl PreparedRelations {
                             .as_ref()
                             .ok_or_else(|| error("missing delivery body"))?;
                         if message.message_id != delivery.message_id
-                            || message.sender_run_id != delivery.sender.to_string()
+                            || message.sender_run_id
+                                != match &delivery.notice {
+                                    DurableNotice::Question { .. } => "runtime".to_string(),
+                                    _ => delivery.sender.to_string(),
+                                }
                             || message.recipient_run_id != delivery.recipient.to_string()
                         {
                             return Err(error("delivery body identity mismatch"));
@@ -136,7 +151,12 @@ impl PreparedRelations {
                         admitted,
                         paused,
                     } => {
-                        if *parent != delivery.recipient || *child != delivery.sender {
+                        if *parent != delivery.recipient
+                            || *child != delivery.sender
+                            || !sources.iter().any(|s| {
+                                s.record.run_id == *child && s.record.parent == Some(*parent)
+                            })
+                        {
                             return Err(error("question notice endpoint mismatch"));
                         }
                         let notice = questions.entry(id.clone()).or_insert_with(|| {
@@ -219,10 +239,33 @@ impl PreparedRelations {
             queues,
             wakes,
             question_states,
+            next_message_id,
+            ancestries: sources
+                .iter()
+                .map(|source| {
+                    (
+                        source.record.run_id,
+                        crate::request_turn::RequestAncestry::new(
+                            source.record.parent,
+                            source.record.parent.is_some_and(|parent| {
+                                sources
+                                    .iter()
+                                    .any(|s| s.record.run_id == parent && s.record.parent.is_some())
+                            }),
+                        ),
+                    )
+                })
+                .collect(),
         })
     }
 
     pub(super) fn reconcile_current(&mut self, runtime: &AgentRuntime) -> Result<(), RuntimeError> {
+        // Reserve the ID range before checking live sent records. In-flight sends
+        // hold the sent lock, so that check also sees allocations preceding this fence.
+        runtime
+            .shared
+            .next_message_id
+            .fetch_max(self.next_message_id, Ordering::AcqRel);
         for (id, notice) in &mut self.questions {
             let question = runtime
                 .user_question(id)
@@ -301,6 +344,12 @@ impl PreparedRelations {
         &self,
         candidate: &mut PreparedRunCandidate,
     ) -> Result<(), RuntimeError> {
+        // Use the validated component, not the not-yet-published runs registry.
+        let ancestry = self.ancestries[&candidate.task.run_id];
+        candidate.task.ancestry = ancestry;
+        candidate.task.turn.is_subagent = ancestry.is_subagent;
+        candidate.task.turn.parent_subagent_id =
+            ancestry.parent_subagent_id.map(|id| id.to_string());
         self.connect(candidate.task.run_id, &mut candidate.entry)
     }
 
@@ -387,6 +436,10 @@ impl PreparedRelations {
     ) {
         // Publication is infallible: queues/capacity/identities were checked
         // before ACK. No recovery_* writer is involved in later consumption.
+        runtime
+            .shared
+            .next_message_id
+            .fetch_max(self.next_message_id, Ordering::AcqRel);
         let mut runs = lock_runs(&runtime.shared.runs);
         for (id, entry) in endpoints.drain(..) {
             runs.insert(id, entry);
@@ -409,7 +462,13 @@ impl PreparedRelations {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for delivery in &self.deliveries {
-            if delivery.state != DurableDeliveryState::Held {
+            if delivery.state != DurableDeliveryState::Held
+                && !matches!(delivery.notice, DurableNotice::Question { .. })
+                && delivery
+                    .message
+                    .as_ref()
+                    .is_none_or(|m| m.kind != AgentMessageKind::Reply)
+            {
                 sent.insert(
                     delivery.message_id.clone(),
                     SentRecord {

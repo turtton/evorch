@@ -22,6 +22,19 @@ struct WaitModel {
 }
 #[async_trait::async_trait]
 impl AgentModel for WaitModel {
+    fn validate_checkpoint_compatibility(
+        &self,
+        invocation: &AgentInvocationContext,
+        _: Role,
+        pins: &[crate::RoutePinRecord],
+        input: Option<&ProviderInput>,
+    ) -> Result<(), RuntimeError> {
+        assert!(pins.is_empty());
+        assert!(
+            input.is_none_or(|i| i.request.model == "test" && i.affinity_key == invocation.run_id)
+        );
+        Ok(())
+    }
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "test".into()
     }

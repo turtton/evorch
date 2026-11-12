@@ -139,6 +139,7 @@ impl AgentRuntime {
                 let d: RunRestoreDescriptor =
                     serde_json::from_str(&bundle.record.config_json).map_err(error)?;
                 self.resolve_pending_reference(d.pending_reference_id.as_deref())?;
+                config.spawn_credits = d.spawn_credits.clone();
             }
             let continuation = if let Some(bundle) = &source.bundle {
                 if source.intent.checkpoint.as_ref().is_some_and(|c| {
@@ -194,11 +195,17 @@ impl AgentRuntime {
                     "recovery candidate failed startup or worker admission",
                 ));
             }
-            if let Some(input) = &source.intent.provider_input
-                && candidate.entry.model != input.request.model
-            {
-                return Err(error("current model differs from the saved provider input"));
-            }
+            self.shared.model.validate_checkpoint_compatibility(
+                &crate::AgentInvocationContext {
+                    run_id: id.to_string(),
+                    category: candidate.entry.config.category.clone(),
+                    model_preference: candidate.entry.config.model_preference.clone(),
+                    ..Default::default()
+                },
+                candidate.task.role,
+                &source.intent.route_pins,
+                source.intent.provider_input.as_ref(),
+            )?;
             relations.connect_candidate(&mut candidate)?;
             let mut intent = source.intent.clone();
             intent.incarnation = execution.publication().incarnation();
@@ -241,6 +248,21 @@ impl AgentRuntime {
             cancellation::HookPoint::RecoveryActivated,
             &paused.controls[0].1,
         );
+        // Pure checks above succeeded for every member. Adopt only after FULL ACK,
+        // before any task can reach provider admission through the common gate.
+        for source in &paused.sources {
+            if paused
+                .controls
+                .iter()
+                .any(|(id, _)| *id == source.record.run_id)
+            {
+                self.shared.model.adopt_recovery_checkpoint(
+                    &source.record.run_id.to_string(),
+                    &source.intent.route_pins,
+                    source.intent.provider_input.as_ref(),
+                );
+            }
+        }
         self.shared.quiesce.adopt(intents, true);
         let (gate, closed) = watch::channel(false);
         relations.publish(self, &mut endpoints);

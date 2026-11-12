@@ -312,7 +312,19 @@ async fn planned_restart_does_not_release_or_publish_a_paused_component() {
 #[tokio::test]
 async fn activation_commits_once_and_publishes_the_whole_family_before_starting() {
     let f = Fixture::new(0);
-    let root = f.start();
+    let root = f.runtime.delegate_background(
+        Role::Orchestrator,
+        "work".into(),
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            spawn_credits: serde_json::from_value(serde_json::json!({
+                "spawned":["old-child"],"observed":[],"unobserved":3
+            }))
+            .unwrap(),
+            ..Default::default()
+        },
+    );
     let child = f
         .runtime
         .delegate_background_as_child(
@@ -325,6 +337,24 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
                 ..Default::default()
             },
         )
+        .unwrap();
+    let old_messages: Vec<_> = (0..8)
+        .map(|_| {
+            f.runtime
+                .send_agent_message(
+                    root,
+                    child,
+                    event_bus::AgentMessageKind::Send,
+                    "request",
+                    None,
+                )
+                .unwrap()
+        })
+        .collect();
+    let original_message = old_messages.last().unwrap().clone();
+    let question = f
+        .runtime
+        .request_user_question(child, "blocking recovery question".into(), vec![], true)
         .unwrap();
     f.runtime.request_quiesce();
     f.runtime.wait_quiesced().await.unwrap();
@@ -344,6 +374,29 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
             },
         )]))
         .unwrap();
+    let question_delivery = records
+        .iter()
+        .find(|r| r.run_id == root)
+        .unwrap()
+        .deliveries
+        .iter()
+        .find(|d| matches!(d.notice, DurableNotice::Question { .. }))
+        .unwrap();
+    assert_eq!(question_delivery.sender, child);
+    assert_eq!(
+        question_delivery.message.as_ref().unwrap().sender_run_id,
+        "runtime"
+    );
+    let saved_credits = records
+        .iter()
+        .find(|r| r.run_id == root)
+        .unwrap()
+        .recipe
+        .descriptor
+        .as_ref()
+        .unwrap()
+        .spawn_credits
+        .clone();
     f.runtime
         .save_recovery_graph("activate-family", &records)
         .unwrap();
@@ -402,6 +455,51 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
         2
     );
     assert!(!runtime.has_paused_recovery());
+    assert_eq!(
+        serde_json::to_value(
+            runtime
+                .shared
+                .runs
+                .lock()
+                .unwrap()
+                .get(&root)
+                .unwrap()
+                .config
+                .spawn_credits
+                .clone()
+        )
+        .unwrap(),
+        serde_json::to_value(saved_credits).unwrap()
+    );
+    let new_message = runtime
+        .send_agent_message(
+            root,
+            child,
+            event_bus::AgentMessageKind::Send,
+            "after recovery",
+            None,
+        )
+        .unwrap();
+    assert!(
+        !old_messages.contains(&new_message),
+        "recovery must reserve all delivery IDs"
+    );
+    assert_eq!(
+        runtime.reply_wait_target(root, &original_message).unwrap(),
+        child
+    );
+    assert_eq!(
+        runtime.reply_wait_target(root, &new_message).unwrap(),
+        child
+    );
+    assert!(
+        runtime
+            .check_reply_wait(child, &question_delivery.message_id)
+            .is_err()
+    );
+    runtime
+        .answer_user_question(&question.id, "continue")
+        .unwrap();
     let db = storage::Database::open(&f.config).unwrap();
     for member in &claim.members {
         assert_eq!(

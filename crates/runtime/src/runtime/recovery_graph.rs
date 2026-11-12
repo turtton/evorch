@@ -106,7 +106,15 @@ fn delivery(
     };
     Ok(DurableDelivery {
         message_id: q.message.message_id.clone(),
-        sender: q.message.sender_run_id.parse().map_err(graph_error)?,
+        sender: match &q.origin {
+            MessageOrigin::QuestionNotice(n) => {
+                if q.message.sender_run_id != "runtime" {
+                    return Err(graph_error("question notice body sender mismatch"));
+                }
+                n.child
+            }
+            _ => q.message.sender_run_id.parse().map_err(graph_error)?,
+        },
         recipient: q.message.recipient_run_id.parse().map_err(graph_error)?,
         sequence,
         state,
