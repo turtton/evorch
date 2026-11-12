@@ -55,6 +55,11 @@ fn acceptance_criteria(code: &str) -> &'static [&'static str] {
             "Reproduce identical tool calls with the recorded tool and input; verify they stop at the configured threshold.",
             "Add a regression test proving distinct tool inputs and successful progress are not incorrectly stopped.",
         ],
+        "LaneUncollectedCreationSuppressed" => &[
+            "Reproduce the suppression using evidence.fields cohort, uncollected_lane_open_count, threshold and lane_ids; only lane_open is refused, no run is stopped.",
+            "Verify that collecting the listed lanes' terminal reports (lane_list or notification delivery) lifts the suppression, and that the same cohort is reported once.",
+            "Decide from the recorded lane objectives whether lead guidance or the threshold, not the lanes, caused the uncollected backlog.",
+        ],
         "BudgetExhausted" => &[
             "Reproduce budget exhaustion with the recorded limit and usage; distinguish configured limits from harness defects.",
             "Add boundary tests proving the budget is enforced and the terminal reason and checkpoint are preserved.",

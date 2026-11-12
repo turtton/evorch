@@ -190,6 +190,14 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         EVALUATION_FINISHED => Ignored,
         // Lane ledger re-query hints are routine state notifications, not faults.
         LANE_STALL_CHANGED | LANE_NUDGE_ACCEPTED => Ignored,
+        // budget_tracker: the lead kept opening lanes without collecting terminal
+        // reports and the harness refused further creation; the guidance or
+        // threshold may be at fault, so it is a harness improvement candidate.
+        LANE_UNCOLLECTED_CREATION_SUPPRESSED => HarnessImprovement,
+        // lane_delivery: three failures to restore one stored target. Three failures
+        // alone do not show a harness defect (snapshot, disk and provider causes
+        // look the same), so it is evidence, not a candidate.
+        LANE_RESTORE_RETRY_SUPPRESSED => TransientOrExternal,
         // Includes tool-result codes (unknown_run/run_output_denied), not bus diagnostics.
         _ => return None,
     })
@@ -436,16 +444,21 @@ impl ImprovementCollector {
         use sha2::Digest;
         // Fingerprint the ORIGINAL immutable event, including provenance/timestamps,
         // not the normalized candidate key: independent occurrences still count.
-        let bytes = match serde_json::to_vec(&event) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::warn!(%error, "cannot identify improvement observation");
-                return;
-            }
+        // A lane suppression names its own episode, which a re-emission after a
+        // restore repeats with a new timestamp: that is one occurrence.
+        let key = match stable_diagnostic_observation_key(&event) {
+            Some(key) => key,
+            None => match serde_json::to_vec(&event) {
+                Ok(bytes) => format!("{:x}", sha2::Sha256::digest(bytes)),
+                Err(error) => {
+                    tracing::warn!(%error, "cannot identify improvement observation");
+                    return;
+                }
+            },
         };
         let collector = Self {
             settings: self.settings.clone(),
-            observation_key: Some(format!("{:x}", sha2::Sha256::digest(bytes))),
+            observation_key: Some(key),
         };
         collector.observe_once(event);
     }
@@ -666,6 +679,32 @@ fn diagnostic_fields(detail: &str) -> serde_json::Map<String, Value> {
             Some((key.to_owned(), Value::String(value.to_owned())))
         })
         .collect()
+}
+
+/// Observation identity of a lane suppression diagnostic: its code, the thread it
+/// names (the lead's, for an uncollected cohort) and the `identity` detail line
+/// (cohort or recovery episode). Independent of timestamps and wording.
+fn stable_diagnostic_observation_key(event: &event_bus::Event) -> Option<String> {
+    use diagnostic_codes::{LANE_RESTORE_RETRY_SUPPRESSED, LANE_UNCOLLECTED_CREATION_SUPPRESSED};
+    use sha2::Digest;
+    let EventKind::Diagnostic(diagnostic) = &event.kind else {
+        return None;
+    };
+    if !matches!(
+        diagnostic.code.as_str(),
+        LANE_UNCOLLECTED_CREATION_SUPPRESSED | LANE_RESTORE_RETRY_SUPPRESSED
+    ) {
+        return None;
+    }
+    let fields = diagnostic_fields(&diagnostic.detail);
+    let identity = fields.get("identity")?.as_str()?;
+    let mut hash = sha2::Sha256::new();
+    hash.update(format!(
+        "lane-suppression\0{}\0{}\0{identity}",
+        diagnostic.code,
+        diagnostic.thread_id.as_deref().unwrap_or_default()
+    ));
+    Some(format!("{:x}", hash.finalize()))
 }
 
 fn diagnostic_site(detail: &str) -> Option<&str> {

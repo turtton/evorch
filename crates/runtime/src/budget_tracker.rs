@@ -148,6 +148,14 @@ pub struct SpawnCredits {
     uncollected_lane_open_count: u32,
     #[serde(default)]
     uncollected_lane_ids: BTreeSet<String>,
+    /// Identity of the current uncollected cohort: a digest of the lane IDs it was
+    /// seeded with, so a restored run names the same cohort. Absent in a snapshot
+    /// that predates it; derived from the remaining IDs when first needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uncollected_cohort_id: Option<String>,
+    /// The suppression of `uncollected_cohort_id` was already reported as a diagnostic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    uncollected_suppression_reported: bool,
     /// Receipt acceptance is not model observation. Retained until a successful
     /// provider request, including across a crash/restore before presentation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -157,13 +165,62 @@ pub struct SpawnCredits {
 /// Not a lane-count limit; only further model-authored creation is suppressed.
 pub(crate) const UNCOLLECTED_LANE_OPEN_LIMIT: u32 = 100;
 
+fn cohort_identity(ids: &BTreeSet<String>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for id in ids {
+        hash.update(id.as_bytes());
+        hash.update([0]);
+    }
+    format!("{:x}", hash.finalize())[..16].to_owned()
+}
+
+/// What one uncollected cohort's first refusal tells a diagnostic consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UncollectedSuppression {
+    pub(crate) cohort_id: String,
+    pub(crate) uncollected_lane_open_count: u32,
+    pub(crate) threshold: u32,
+    pub(crate) lane_ids: Vec<String>,
+    pub(crate) remaining_lane_ids: usize,
+}
+
+impl UncollectedSuppression {
+    /// `key=value` lines for the diagnostic. `identity` is what a consumer
+    /// deduplicates on together with the lead thread. Lane IDs are bounded at
+    /// eight; no brief, report or tool input text is included.
+    pub(crate) fn detail(&self, lead_thread_id: &str) -> String {
+        format!(
+            "action=suppress_lane_open\nidentity={cohort}\ncohort={cohort}\nlead_thread_id={lead_thread_id}\nuncollected_lane_open_count={count}\nthreshold={threshold}\nlane_ids={ids}\nremaining_lane_ids={remaining}",
+            cohort = self.cohort_id,
+            count = self.uncollected_lane_open_count,
+            threshold = self.threshold,
+            ids = self.lane_ids.join(","),
+            remaining = self.remaining_lane_ids,
+        )
+    }
+}
+
 impl SpawnCredits {
     /// Ledger state is authoritative. Working is not collection: keep a cohort
     /// through temporary nonterminal reports, but never suppress on running alone.
+    #[cfg(test)]
     pub(crate) fn reconcile_uncollected_lanes(
         &mut self,
         managed: &BTreeSet<String>,
         terminal: &BTreeSet<String>,
+    ) -> bool {
+        self.reconcile_uncollected_lanes_at(managed, terminal, UNCOLLECTED_LANE_OPEN_LIMIT)
+    }
+
+    /// Ledger state is authoritative. Working is not collection: keep a cohort
+    /// through temporary nonterminal reports, but never suppress on running alone.
+    /// `limit` is the creation threshold: the default except where a test injects one.
+    pub(crate) fn reconcile_uncollected_lanes_at(
+        &mut self,
+        managed: &BTreeSet<String>,
+        terminal: &BTreeSet<String>,
+        limit: u32,
     ) -> bool {
         self.uncollected_lane_ids
             .retain(|id| managed.contains(id) && !self.observed.contains(&format!("lane:{id}")));
@@ -174,8 +231,11 @@ impl SpawnCredits {
                 .filter(|id| !self.observed.contains(&format!("lane:{id}")))
                 .cloned()
                 .collect();
+            self.uncollected_cohort_id = (!self.uncollected_lane_ids.is_empty())
+                .then(|| cohort_identity(&self.uncollected_lane_ids));
+            self.uncollected_suppression_reported = false;
         }
-        self.uncollected_lane_open_count >= UNCOLLECTED_LANE_OPEN_LIMIT
+        self.uncollected_lane_open_count >= limit
             && self
                 .uncollected_lane_ids
                 .iter()
@@ -192,12 +252,37 @@ impl SpawnCredits {
         }
     }
 
-    pub(crate) fn uncollected_lane_rejection(&self) -> String {
+    /// The diagnostic for a refusal being returned (call only then), once per
+    /// cohort. Reporting is recorded in the snapshot, so a restored run does not
+    /// repeat it; a snapshot saved before the report can repeat it at most once.
+    pub(crate) fn take_uncollected_suppression(
+        &mut self,
+        limit: u32,
+    ) -> Option<UncollectedSuppression> {
+        if self.uncollected_suppression_reported || self.uncollected_lane_ids.is_empty() {
+            return None;
+        }
+        let ids = &self.uncollected_lane_ids;
+        let cohort_id = self
+            .uncollected_cohort_id
+            .get_or_insert_with(|| cohort_identity(ids))
+            .clone();
+        self.uncollected_suppression_reported = true;
+        Some(UncollectedSuppression {
+            cohort_id,
+            uncollected_lane_open_count: self.uncollected_lane_open_count,
+            threshold: limit,
+            lane_ids: self.uncollected_lane_ids.iter().take(8).cloned().collect(),
+            remaining_lane_ids: self.uncollected_lane_ids.len().saturating_sub(8),
+        })
+    }
+
+    pub(crate) fn uncollected_lane_rejection(&self, limit: u32) -> String {
         // IDs are bounded at ingestion; at most eight are returned to the provider.
         serde_json::json!({
             "code": "lane_creation_suppressed",
             "uncollected_lane_open_count": self.uncollected_lane_open_count,
-            "threshold": UNCOLLECTED_LANE_OPEN_LIMIT,
+            "threshold": limit,
             "lane_ids": self.uncollected_lane_ids.iter().take(8).collect::<Vec<_>>(),
             "remaining_lane_ids": self.uncollected_lane_ids.len().saturating_sub(8),
             "message": "New lane_open temporarily suppressed. Collect the listed lanes' current ready/failed reports with lane_list or notification delivery. Existing lanes, collection and answers remain available; this is not a lane-count limit."

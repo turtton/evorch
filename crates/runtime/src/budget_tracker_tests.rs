@@ -922,3 +922,87 @@ fn uncollected_reattach_requires_new_current_terminal_report_without_reviving_ol
     assert_eq!(credits.uncollected_lane_ids, ids);
     assert_eq!(credits.uncollected_lane_open_count, 0);
 }
+
+#[test]
+fn uncollected_suppression_is_reported_once_per_cohort_and_once_more_from_an_old_snapshot() {
+    let mut credits = SpawnCredits::default();
+    let managed = BTreeSet::from(["A".into(), "B".into(), "C".into()]);
+    let cohort = BTreeSet::from(["A".into(), "B".into()]);
+    // The injected threshold is what the report and the refusal name.
+    assert!(!credits.reconcile_uncollected_lanes_at(&managed, &cohort, 2));
+    credits.record_lane_open("new-1");
+    credits.record_lane_open("new-2");
+    assert!(credits.reconcile_uncollected_lanes_at(&managed, &cohort, 2));
+    let first = credits.take_uncollected_suppression(2).unwrap();
+    assert_eq!(first.threshold, 2);
+    assert_eq!(first.uncollected_lane_open_count, 2);
+    assert_eq!(first.lane_ids, ["A", "B"]);
+    assert_eq!(first.remaining_lane_ids, 0);
+    let rejection: serde_json::Value =
+        serde_json::from_str(&credits.uncollected_lane_rejection(2)).unwrap();
+    assert_eq!(rejection["threshold"], 2);
+
+    // A refusal of the same cohort again is not a new report.
+    for _ in 0..3 {
+        assert!(credits.reconcile_uncollected_lanes_at(&managed, &cohort, 2));
+        assert!(credits.take_uncollected_suppression(2).is_none());
+    }
+
+    // The marker lives in the snapshot, so a restored run does not repeat it.
+    let snapshot = serde_json::to_value(&credits).unwrap();
+    let mut restored: SpawnCredits = serde_json::from_value(snapshot.clone()).unwrap();
+    assert!(restored.reconcile_uncollected_lanes_at(&managed, &cohort, 2));
+    assert!(restored.take_uncollected_suppression(2).is_none());
+
+    // A snapshot saved before the report repeats it once, under the same cohort.
+    let mut old = snapshot;
+    old.as_object_mut()
+        .unwrap()
+        .remove("uncollected_suppression_reported");
+    let mut restored: SpawnCredits = serde_json::from_value(old).unwrap();
+    assert!(restored.reconcile_uncollected_lanes_at(&managed, &cohort, 2));
+    let again = restored.take_uncollected_suppression(2).unwrap();
+    assert_eq!(again.cohort_id, first.cohort_id);
+    assert!(restored.take_uncollected_suppression(2).is_none());
+
+    // A snapshot that predates the cohort identity derives it from the current IDs.
+    let mut legacy = serde_json::to_value(&credits).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("uncollected_cohort_id");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("uncollected_suppression_reported");
+    let mut restored: SpawnCredits = serde_json::from_value(legacy).unwrap();
+    let derived = restored.take_uncollected_suppression(2).unwrap();
+    assert_eq!(derived.cohort_id, first.cohort_id);
+
+    // Collecting the whole cohort ends it; a later cohort is reported afresh.
+    credits.observed.insert("lane:A".into());
+    credits.observed.insert("lane:B".into());
+    let next = BTreeSet::from(["C".into()]);
+    assert!(!credits.reconcile_uncollected_lanes_at(&managed, &next, 2));
+    credits.record_lane_open("new-3");
+    credits.record_lane_open("new-4");
+    assert!(credits.reconcile_uncollected_lanes_at(&managed, &next, 2));
+    let second = credits.take_uncollected_suppression(2).unwrap();
+    assert_ne!(second.cohort_id, first.cohort_id);
+    assert_eq!(second.lane_ids, ["C"]);
+}
+
+#[test]
+fn uncollected_suppression_detail_names_the_cohort_without_report_text() {
+    let suppression = UncollectedSuppression {
+        cohort_id: "abc".into(),
+        uncollected_lane_open_count: 100,
+        threshold: 100,
+        lane_ids: vec!["A".into(), "B".into()],
+        remaining_lane_ids: 5,
+    };
+    assert_eq!(
+        suppression.detail("lead-thread"),
+        "action=suppress_lane_open\nidentity=abc\ncohort=abc\nlead_thread_id=lead-thread\nuncollected_lane_open_count=100\nthreshold=100\nlane_ids=A,B\nremaining_lane_ids=5"
+    );
+}
