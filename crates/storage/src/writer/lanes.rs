@@ -258,6 +258,19 @@ impl StorageHandle {
         self.lane_read(move |conn| crate::repo::lanes::managed_lanes(conn, &lead))
     }
 
+    /// What the uncollected-lane accounting needs of each lane `lead_thread_id` manages,
+    /// read in one writer job so membership, close and latest report agree. Read only.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn lane_collection_view(
+        &self,
+        lead_thread_id: &str,
+    ) -> Result<Vec<crate::lanes::LaneCollectionEntry>, StorageError> {
+        let lead = lead_thread_id.to_owned();
+        self.lane_read(move |conn| crate::repo::lanes::collection_view(conn, &lead))
+    }
+
     /// Read an existing creation intent, including after detach or before start.
     /// This does not create, start, update or acknowledge anything.
     ///

@@ -219,12 +219,49 @@ async fn accept_peer(
     (peer, event["pid"].as_u64().unwrap())
 }
 async fn await_call(peer: &mut BufReader<UnixStream>, events: &mut EventReceiver, run: RunId) {
+    // read_line is not cancellation-safe: retain its partial JSON across
+    // runtime events instead of dropping and recreating the control future.
+    let event = control(peer);
+    tokio::pin!(event);
     loop {
         tokio::select! {
-            event = control(peer) => { assert_eq!(event["event"], "call"); return; },
+            event = &mut event => { assert_eq!(event["event"], "call"); return; },
             event = events.recv() => check_progress(event.unwrap(), run),
         }
     }
+}
+
+#[tokio::test]
+async fn a_partial_control_event_survives_interleaved_runtime_events() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let (stream, mut writer) = UnixStream::pair().unwrap();
+    let mut peer = BufReader::new(stream);
+    let bus = event_bus::EventBus::new(16);
+    let mut events = bus.subscribe();
+    // Preload a prefix so the first poll consumes it and waits for the suffix,
+    // independently of socket readiness scheduling.
+    writer.write_all(b"{\"event\":").await.unwrap();
+    assert_eq!(peer.fill_buf().await.unwrap(), b"{\"event\":");
+    let mut call = std::pin::pin!(await_call(&mut peer, &mut events, RunId::new(1)));
+    poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+
+    bus.emit(Event::new(LifecycleEvent::Started {
+        session_id: "unrelated".into(),
+    }));
+    // Consume the runtime event while the control line is still incomplete.
+    poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    writer.write_all(b"\"call\"}\n").await.unwrap();
+    call.await;
 }
 
 fn check_progress(event: Event, run: RunId) {

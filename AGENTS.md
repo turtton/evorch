@@ -73,7 +73,7 @@ mismatch. Revisit this policy before cutting a v1 release.
   `PATH`; entering a dev shell in another terminal does not select the fork
   for an already-running evorch. To share the fork's build pool across thread
   scratches, explicitly allow the existing host `~/.cargo/targets`
-  (read-write for Worker, read-only for other roles).
+  (read-write for Worker and Reviewer, read-only for other roles).
 - Allowed canonical strict descendants of the process HOME are also bound at
   the same relative paths below `/tmp/home`, with the same access as their
   original absolute binds. HOME is canonicalized at boundary construction;

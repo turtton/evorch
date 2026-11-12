@@ -993,6 +993,39 @@ fn uncollected_suppression_is_reported_once_per_cohort_and_once_more_from_an_old
 }
 
 #[test]
+fn a_cohort_that_forms_again_from_the_same_lanes_is_a_new_episode() {
+    let lane = BTreeSet::from(["A".to_string()]);
+    let none = BTreeSet::new();
+    let mut credits = SpawnCredits::default();
+    assert!(!credits.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    credits.record_lane_open("n1");
+    credits.record_lane_open("n2");
+    assert!(credits.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    let first = credits.take_uncollected_suppression(2).unwrap();
+
+    // The lane ends (a close) and the cohort resolves; nothing is left to report.
+    assert!(!credits.reconcile_uncollected_lanes_at(&none, &none, 2));
+    assert!(credits.take_uncollected_suppression(2).is_none());
+
+    // The same lane reports anew: a new cohort of the same IDs, reported afresh. A restored
+    // run of that episode keeps its identity.
+    assert!(!credits.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    credits.record_lane_open("n3");
+    credits.record_lane_open("n4");
+    let snapshot = serde_json::to_value(&credits).unwrap();
+    assert!(credits.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    let second = credits.take_uncollected_suppression(2).unwrap();
+    assert_eq!(second.lane_ids, first.lane_ids);
+    assert_ne!(second.cohort_id, first.cohort_id);
+    let mut restored: SpawnCredits = serde_json::from_value(snapshot).unwrap();
+    assert!(restored.reconcile_uncollected_lanes_at(&lane, &lane, 2));
+    assert_eq!(
+        restored.take_uncollected_suppression(2).unwrap().cohort_id,
+        second.cohort_id
+    );
+}
+
+#[test]
 fn uncollected_suppression_detail_names_the_cohort_without_report_text() {
     let suppression = UncollectedSuppression {
         cohort_id: "abc".into(),
@@ -1004,5 +1037,93 @@ fn uncollected_suppression_detail_names_the_cohort_without_report_text() {
     assert_eq!(
         suppression.detail("lead-thread"),
         "action=suppress_lane_open\nidentity=abc\ncohort=abc\nlead_thread_id=lead-thread\nuncollected_lane_open_count=100\nthreshold=100\nlane_ids=A,B\nremaining_lane_ids=5"
+    );
+}
+
+fn stored_config(credits: &SpawnCredits) -> serde_json::Value {
+    serde_json::json!({"spawn_credits": serde_json::to_value(credits).unwrap()})
+}
+
+#[test]
+fn the_stored_uncollected_marker_reads_back_what_the_runtime_serialized() {
+    let mut credits = SpawnCredits::default();
+    let managed = BTreeSet::from(["A".into(), "B".into()]);
+    let cohort = BTreeSet::from(["A".into(), "B".into()]);
+    assert!(!credits.reconcile_uncollected_lanes_at(&managed, &cohort, 1));
+    credits.record_lane_open("new-1");
+    assert!(credits.reconcile_uncollected_lanes_at(&managed, &cohort, 1));
+    let reported = credits.take_uncollected_suppression(1).unwrap();
+
+    let stored = stored_uncollected_lanes(&stored_config(&credits)).unwrap();
+
+    assert_eq!(
+        stored.cohort_id.as_deref(),
+        Some(reported.cohort_id.as_str())
+    );
+    assert!(!stored.cohort_id_derived);
+    assert_eq!(stored.uncollected_lane_open_count, 1);
+    assert_eq!(stored.lane_ids, ["A", "B"]);
+    assert!(stored.suppression_reported);
+    assert_eq!(stored.default_threshold, UNCOLLECTED_LANE_OPEN_LIMIT);
+
+    let empty = stored_uncollected_lanes(&stored_config(&SpawnCredits::default())).unwrap();
+    assert_eq!(empty.uncollected_lane_open_count, 0);
+    assert!(empty.lane_ids.is_empty());
+    assert_eq!(empty.cohort_id, None);
+}
+
+#[test]
+fn a_stored_snapshot_without_the_uncollected_fields_is_not_read_as_empty() {
+    let missing = serde_json::json!({});
+    assert_eq!(
+        stored_uncollected_lanes(&missing),
+        Err(StoredSpawnCreditsError::Missing)
+    );
+
+    // Only the credit identity sets: the marker's own fields were never stored.
+    let partial =
+        serde_json::json!({"spawn_credits": {"spawned": [], "observed": [], "unobserved": 0}});
+    let Err(StoredSpawnCreditsError::Malformed(reason)) = stored_uncollected_lanes(&partial) else {
+        panic!("a partial spawn_credits must not read as an empty marker");
+    };
+    assert!(reason.contains("uncollected_lane_open_count"), "{reason}");
+
+    let mut without_ids = stored_config(&SpawnCredits::default());
+    without_ids["spawn_credits"]
+        .as_object_mut()
+        .unwrap()
+        .remove("uncollected_lane_ids");
+    assert!(matches!(
+        stored_uncollected_lanes(&without_ids),
+        Err(StoredSpawnCreditsError::Malformed(reason)) if reason.contains("uncollected_lane_ids")
+    ));
+
+    let wrong_type = serde_json::json!({"spawn_credits": "none"});
+    assert!(matches!(
+        stored_uncollected_lanes(&wrong_type),
+        Err(StoredSpawnCreditsError::Malformed(_))
+    ));
+}
+
+#[test]
+fn a_stored_snapshot_without_the_cohort_identity_derives_it_and_says_so() {
+    let mut credits = SpawnCredits::default();
+    let managed = BTreeSet::from(["A".into()]);
+    let cohort = BTreeSet::from(["A".into()]);
+    credits.reconcile_uncollected_lanes_at(&managed, &cohort, 100);
+    let mut config = stored_config(&credits);
+    config["spawn_credits"]
+        .as_object_mut()
+        .unwrap()
+        .remove("uncollected_cohort_id");
+
+    let stored = stored_uncollected_lanes(&config).unwrap();
+
+    assert!(stored.cohort_id_derived);
+    assert_eq!(
+        stored.cohort_id,
+        stored_uncollected_lanes(&stored_config(&credits))
+            .unwrap()
+            .cohort_id
     );
 }

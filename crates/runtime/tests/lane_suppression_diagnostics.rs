@@ -317,3 +317,76 @@ async fn a_cohort_is_reported_once_however_often_creation_is_refused() {
         runtime.wait(run).await.unwrap();
     }
 }
+
+/// The marker a suppression leaves in the persisted run snapshot is what the reader of
+/// `evorch inspect run` decodes, and it names the cohort the diagnostic reported.
+#[tokio::test]
+async fn the_persisted_snapshot_carries_the_cohort_the_diagnostic_named() {
+    const CODE: &str = event_bus::event::diagnostic_codes::LANE_UNCOLLECTED_CREATION_SUPPRESSED;
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("diagnostics.db"),
+        ..Default::default()
+    };
+    let (store, model, runtime, mut events, mut diagnostics) = stored_runtime(&config);
+    let lead = runtime
+        .delegate_chat(
+            "progress-lead",
+            Role::Orchestrator,
+            "coordinate".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    waiting(&mut events, lead).await;
+    seed_uncollected(&store, lead, true);
+    let mut roots = Vec::new();
+    for n in 0..2 {
+        let created = command(&runtime, &model, &mut events, lead, &format!("open:{n}")).await;
+        roots.push(
+            created["root_run_id"]
+                .as_str()
+                .unwrap()
+                .parse::<RunId>()
+                .unwrap(),
+        );
+    }
+    let rejected = command(&runtime, &model, &mut events, lead, "open:blocked").await;
+    assert_eq!(rejected["code"], "lane_creation_suppressed", "{rejected}");
+    let reported = diagnostics
+        .drain_pending_snapshot()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::Diagnostic(d) if d.code == CODE => Some(d),
+            _ => None,
+        })
+        .expect("the suppression is reported");
+    let identity = reported
+        .detail
+        .lines()
+        .find_map(|line| line.strip_prefix("identity="))
+        .unwrap()
+        .to_owned();
+
+    let database = storage::Database::open_read_only(&config.db_path).unwrap();
+    let inspected = database.inspect_run(&lead.to_string(), false).unwrap();
+    let stored =
+        runtime::budget_tracker::stored_uncollected_lanes(&inspected["context"]["config_json"])
+            .unwrap();
+
+    assert_eq!(stored.cohort_id.as_deref(), Some(identity.as_str()));
+    assert!(!stored.cohort_id_derived);
+    assert!(stored.suppression_reported);
+    assert_eq!(stored.uncollected_lane_open_count, 2);
+    assert_eq!(stored.lane_ids, ["uncollected"]);
+    for run in roots.iter().copied().chain([lead]) {
+        runtime.cancel(run).unwrap();
+    }
+    for run in roots.into_iter().chain([lead]) {
+        runtime.wait(run).await.unwrap();
+    }
+}

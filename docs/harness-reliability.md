@@ -211,10 +211,13 @@ list by the canonical project root, canonicalizes each directory, and skips
 (with a warning) any that is missing or not a directory, so a run never fails to
 start because of one. A run uses only the list of its own project.
 
-Access follows the run's role: a role whose tools include `write`, `edit` or
-`shell` (today only Worker) gets them read-write; every other role read-only,
-both in its shell and in its file tools. The project root stays read-write for
-every role.
+Access follows the run's role: a role whose allowed tools include `write`,
+`edit`, `apply_patch` or `shell` (Worker and general Reviewer; internal Reviewer
+purposes `ThreadGoalReview`, `LaneVerification` and `LessonReview` override the
+tool set without `shell`) gets them read-write; every other role gets them
+read-only, both in its shell and in its file tools. Reviewer has no direct file
+edit tools, and its read-only operation is by instruction rather than technical
+enforcement. The project root stays read-write for every role.
 
 Runs hold the project's live list rather than a copy. bwrap builds its argv for
 each command from the list at that moment (`--bind-try` / `--ro-bind-try`, so a
@@ -441,7 +444,7 @@ read-only and excludes host Cargo credentials/config; explicit allowed
 HOME-directory mirrors are an exception. Allowing all of `~/.cargo` exposes
 config/credentials too, so allow only the existing `~/.cargo/targets` when the
 goal is sharing the huacnlee/cargo fork's build pool across thread scratches
-(Worker read-write, other roles read-only).
+(Worker and Reviewer read-write, other roles read-only).
 
 Which Cargo runs depends on the evorch process's `PATH`, not a dev shell opened
 elsewhere. The sandbox does not inherit `RUSTC_WRAPPER`,

@@ -246,6 +246,17 @@ pub struct LaneListItem {
     pub latest_report: Option<LaneReport>,
 }
 
+/// One managed lane as the uncollected-lane accounting reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneCollectionEntry {
+    pub lane_id: String,
+    pub management_revision: u64,
+    pub brief_revision: u64,
+    /// A close (by the lead, a human or a discard) currently stands.
+    pub closed: bool,
+    pub latest_report: Option<LaneReport>,
+}
+
 /// One page of `lane_list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LaneListPage {
