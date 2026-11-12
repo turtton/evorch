@@ -9,6 +9,8 @@ use storage::{RunContextRecord, StorageError};
 use crate::agent_loop::LoopState;
 use crate::{CoordinationTopology, ModelPreference, RunId};
 
+pub(crate) mod waiting;
+pub(crate) use waiting::validate_recovery_waits;
 mod diagnostics;
 mod escalation;
 mod fork_seed;
@@ -21,6 +23,7 @@ pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
+    pub(crate) recovery_waits: Vec<crate::quiesce::DurableWait>,
     pub(crate) mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     pub(crate) harness_notice_pending: bool,
     pub(crate) provenance: provenance::ConversationProvenance,
@@ -58,6 +61,13 @@ impl RestoredState {
     }
 
     pub(crate) fn from_record(record: &RunContextRecord) -> Result<Self, crate::RuntimeError> {
+        Self::from_record_inner(record, false)
+    }
+
+    fn from_record_inner(
+        record: &RunContextRecord,
+        tools_waiting: bool,
+    ) -> Result<Self, crate::RuntimeError> {
         let fail = |reason| crate::RuntimeError::RunRestoreFailed {
             run_id: record.run_id.clone(),
             reason: crate::RunRestoreFailure::CorruptContext(reason),
@@ -68,7 +78,7 @@ impl RestoredState {
             serde_json::from_str(&record.checkpoints_json)
                 .map_err(|error| fail(error.to_string()))?;
         if messages.is_empty()
-            || safe_context_end(&messages) != messages.len()
+            || (!tools_waiting && safe_context_end(&messages) != messages.len())
             || checkpoints.iter().any(|checkpoint| {
                 checkpoint.range.0 >= checkpoint.range.1 || checkpoint.range.1 > messages.len()
             })
@@ -77,6 +87,11 @@ impl RestoredState {
         }
         let descriptor: RunRestoreDescriptor =
             serde_json::from_str(&record.config_json).map_err(|error| fail(error.to_string()))?;
+        if !tools_waiting && !descriptor.recovery_waits.is_empty() {
+            return Err(fail(
+                "ToolsWaiting requires the dedicated recovery loader".into(),
+            ));
+        }
         let responses_replay = descriptor.responses_replay.clone().unwrap_or_default();
         responses_replay
             .validate(&messages, &checkpoints)
@@ -99,6 +114,7 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            recovery_waits: descriptor.recovery_waits,
             mcp_snapshot: descriptor.mcp_snapshot,
             harness_notice_pending: descriptor.harness_notice_pending,
             provenance: provenance::ConversationProvenance::unknown(),
@@ -157,6 +173,10 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_waits: Vec<crate::quiesce::DurableWait>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_boundary: Option<crate::checkpoint::CheckpointBoundary>,
     /// Frozen definitions/order/bindings/permission class, never live sessions or secrets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
@@ -307,6 +327,35 @@ pub(crate) fn persist_checkpoint(
         ));
     }
     write_snapshot(state, "Checkpoint", end)
+}
+
+/// The only persistence entrance allowed to retain an unfinished tool batch.
+pub(crate) fn persist_tools_waiting(
+    state: &LoopState,
+) -> Result<crate::checkpoint::SnapshotReference, SnapshotError> {
+    if state
+        .shared
+        .executor
+        .has_unobserved_shell_jobs(&state.task.run_id.to_string())
+        || state.run_js_unconfirmed_detail().is_some()
+    {
+        return Err(SnapshotError::UnrecordedShellEffects);
+    }
+    if !cancelled_tool_calls(&state.context.messages).is_empty() {
+        return Err(SnapshotError::ResumeIntent(
+            "unconfirmed completed tool result".into(),
+        ));
+    }
+    waiting::validate_wait_messages(
+        state.task.run_id,
+        &state.context.messages,
+        &state.recovery_waits,
+    )
+    .map_err(SnapshotError::ResumeIntent)?;
+    if state.recovery_waits.is_empty() {
+        return Err(SnapshotError::ResumeIntent("empty ToolsWaiting".into()));
+    }
+    write_snapshot(state, "Checkpoint", state.context.messages.len())
 }
 
 pub(crate) fn persist_prepared_context(
@@ -574,6 +623,15 @@ fn write_snapshot_with_context(
         }
     };
     let descriptor = RunRestoreDescriptor {
+        recovery_waits: if terminal_phase == "Checkpoint" && end == context.messages.len() {
+            state.recovery_waits.clone()
+        } else {
+            Vec::new()
+        },
+        recovery_boundary: (terminal_phase == "Checkpoint"
+            && end == context.messages.len()
+            && !state.recovery_waits.is_empty())
+        .then_some(crate::checkpoint::CheckpointBoundary::ToolsWaiting),
         mcp_snapshot: state.frozen_mcp_snapshot().cloned(),
         responses_replay: Some(context.responses_replay.for_saved_end(end)),
         admission_reservation_id: None,

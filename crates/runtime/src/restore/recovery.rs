@@ -17,9 +17,7 @@ impl RestoredState {
     /// The bundle's body, provenance and revision all come from one read, so a
     /// later save is conditioned on exactly the snapshot this state was built from.
     pub(crate) fn from_bundle(bundle: &SnapshotBundle) -> Result<Self, crate::RuntimeError> {
-        let mut restored = Self::from_record(&bundle.record)?;
-        restored.attach_bundle(bundle);
-        Ok(restored)
+        Self::from_recovery_bundle(bundle, &[])
     }
 
     /// [`Self::for_conversation`] over one bundle read; see [`Self::from_bundle`].

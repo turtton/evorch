@@ -267,6 +267,7 @@ impl AgentRuntime {
                 waits: Vec::new(),
                 deliveries,
                 completion,
+                completion_generation: None,
                 auto_wakes: wakes.get(&root).copied().unwrap_or_default(),
                 user_reset_generation: resets.get(&root).copied().unwrap_or_default(),
                 input_ids: intent
