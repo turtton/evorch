@@ -2853,10 +2853,12 @@ impl AgentRuntime {
                 admission.cancelled = true;
                 admission.execution.stop_admission();
                 let incarnation = admission.execution.publication().incarnation();
-                let queued = self.note_intent_stop(
+                let queued = self.note_fenced_intent_stop(
                     target,
                     &incarnation,
                     crate::quiesce::StopReason::OperatorStopped,
+                    runs.get(&target)
+                        .is_some_and(|entry| Arc::ptr_eq(&entry.execution, &admission.execution)),
                 );
                 if queued {
                     admission.finish_queued(target);
@@ -2981,10 +2983,12 @@ impl AgentRuntime {
                     && Arc::ptr_eq(&admission.execution, &execution)
                 {
                     admission.cancelled = true;
-                    let queued = self.note_intent_stop(
+                    let queued = self.note_fenced_intent_stop(
                         target,
                         &execution.publication().incarnation(),
                         crate::quiesce::StopReason::Cancelled,
+                        runs.get(&target)
+                            .is_some_and(|entry| Arc::ptr_eq(&entry.execution, &execution)),
                     );
                     if queued {
                         admission.finish_queued(target);

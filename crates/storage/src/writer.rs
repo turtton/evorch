@@ -105,6 +105,14 @@ enum Command {
         Option<String>,
         ReplyTx,
     ),
+    RetireResumeIntent(
+        crate::resume_intent::ResumeIntentRecord,
+        ReplyTx<crate::resume_intent::ResumeIntentWriteOutcome>,
+    ),
+    StopUnregisteredResumeIntent(
+        crate::resume_intent::ResumeIntentRecord,
+        ReplyTx<crate::resume_intent::ResumeIntentWriteOutcome>,
+    ),
     FlushResumeIntents(ReplyTx),
     Recovery(crate::recovery::Write, ReplyTx<crate::recovery::Written>),
     AppendIndexedNote(String, String, ReplyTx<crate::thread_index::NoteReceipt>),

@@ -679,6 +679,26 @@ pub(super) fn run_writer_with_index(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::RetireResumeIntent(record, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "resume intent writes suspended".into(),
+                    ))
+                } else {
+                    crate::resume_intent::retire(&state.conn, &record)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::StopUnregisteredResumeIntent(record, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "resume intent writes suspended".into(),
+                    ))
+                } else {
+                    crate::resume_intent::stop_unregistered(&state.conn, &record)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::Recovery(command, reply)) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(

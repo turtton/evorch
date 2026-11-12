@@ -492,6 +492,12 @@ async fn concurrent_startup_does_not_steal_a_live_pending_lane_and_stops_retryin
 
 #[tokio::test]
 async fn an_unowned_seed_keeps_the_handoff_fence_while_admission_is_pending() {
+    for (finish_admission, stop_first) in [(true, false), (false, false), (false, true)] {
+        unowned_seed_handoff(finish_admission, stop_first).await;
+    }
+}
+
+async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool) {
     let f = Fixture::new();
     f.seed_with_ownership(false);
     let old_model = Arc::new(Model::default());
@@ -515,13 +521,14 @@ async fn an_unowned_seed_keeps_the_handoff_fence_while_admission_is_pending() {
     let mut next_events = next.runtime.event_bus().subscribe();
     let permit = old.owner.owned_permit("lane-thread").unwrap();
     old.owner.handoff(&permit, &next.owner).unwrap();
-    old_model.release_admission.notify_one();
-    // A provider completing admission is not authority to register a root after
-    // handoff. Even its initial context would race the successor's snapshot.
-    assert!(matches!(
-        old.runtime.wait(RunId::new(42)).await,
-        Err(RuntimeError::StaleOwnership { .. })
-    ));
+    if finish_admission {
+        old_model.release_admission.notify_one();
+        // Provider completion is not authority to register after handoff.
+        assert!(matches!(
+            old.runtime.wait(RunId::new(42)).await,
+            Err(RuntimeError::StaleOwnership { .. })
+        ));
+    }
     assert!(old.runtime.list_agents().is_empty());
     assert_eq!(old_model.calls.load(Ordering::SeqCst), 0);
     next.runtime
@@ -532,7 +539,35 @@ async fn an_unowned_seed_keeps_the_handoff_fence_while_admission_is_pending() {
         result = next.runtime.wait(RunId::new(42)) => panic!("next lane root ended before model entry: {result:?}, events={:?}", next_events.drain_pending_snapshot()),
     }
     assert_eq!(next_model.calls.load(Ordering::SeqCst), 1);
-    old.shutdown().await.unwrap();
+    if stop_first {
+        // The old owner can stop its local admission, not the successor's lane.
+        assert!(matches!(
+            old.runtime
+                .stop(RunId::new(42), runtime::StopScope::SelfOnly),
+            Err(RuntimeError::LaneCancellation { .. })
+        ));
+    }
+    let shutdown = old.shutdown().await;
+    if stop_first {
+        assert!(matches!(
+            shutdown.unwrap_err().downcast_ref::<RuntimeError>(),
+            Some(RuntimeError::LaneCancellation { .. })
+        ));
+        old.runtime.drain_lane_admissions().await.unwrap();
+        assert_eq!(
+            old.runtime.quiesce_state(),
+            runtime::quiesce::QuiesceState::Running
+        );
+    } else {
+        shutdown.unwrap();
+    }
+    assert!(!old_model.admitting.load(Ordering::SeqCst));
+    assert!(old.runtime.pending_lane_admissions().is_empty());
+    assert!(old.runtime.list_agents().is_empty());
+    assert_eq!(old_model.calls.load(Ordering::SeqCst), 0);
+    if !finish_admission {
+        assert!(old.runtime.wait(RunId::new(42)).await.is_err());
+    }
     next.shutdown().await.unwrap();
 }
 

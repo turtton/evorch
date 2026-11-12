@@ -307,11 +307,10 @@ impl AgentRuntime {
                 break;
             }
         }
-        if matches!(
-            self.quiesce_state(),
-            crate::quiesce::QuiesceState::Failed { .. }
-        ) {
-            tails.fail("required durable intent persistence failed");
+        if let crate::quiesce::QuiesceState::Failed { reason } = self.quiesce_state() {
+            tails.fail(&format!(
+                "required durable intent persistence failed: {reason}"
+            ));
         }
         tails.result()?;
         let drained = tails

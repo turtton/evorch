@@ -169,19 +169,34 @@ impl AgentRuntime {
         }
         queued
     }
+    /// The caller holds A/R and has fenced any unregistered execution out of
+    /// registration. A registered execution must keep the strict update CAS.
+    pub(crate) fn note_fenced_intent_stop(
+        &self,
+        run: RunId,
+        incarnation: &str,
+        reason: StopReason,
+        registered: bool,
+    ) -> bool {
+        if registered {
+            return self.note_intent_stop(run, incarnation, reason);
+        }
+        let queued = self.shared.quiesce.queued(run, incarnation);
+        if let Err(error) = self.shared.quiesce.stop_unregistered(
+            run,
+            incarnation,
+            self.shared.run_store.get(),
+            reason,
+        ) {
+            self.shared.quiesce.fail(error);
+        }
+        queued
+    }
     pub(crate) fn end_intent(&self, run: RunId, incarnation: &str, reason: StopReason) {
         if let Err(error) =
             self.shared
                 .quiesce
-                .update(run, incarnation, self.shared.run_store.get(), |intent| {
-                    intent.active = false;
-                    if reason == StopReason::Cancelled {
-                        intent.resume_requested = false;
-                    }
-                    if intent.stop_reason.is_none() || reason == StopReason::Cancelled {
-                        intent.stop_reason = Some(reason);
-                    }
-                })
+                .retire(run, incarnation, self.shared.run_store.get(), reason)
         {
             self.shared.quiesce.fail(error);
         }

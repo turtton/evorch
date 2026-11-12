@@ -3,6 +3,173 @@ use super::*;
 use crate::{Role, RunConfig};
 use std::{collections::BTreeMap, sync::atomic::Ordering};
 
+fn intent_for_retirement(f: &Fixture) -> (RunId, String) {
+    let run = f.runtime.reserve_run_id();
+    let incarnation = f.runtime.reserve_run_id().to_string();
+    f.runtime
+        .admit_intent(
+            run,
+            incarnation.clone(),
+            None,
+            Role::Worker,
+            "retire",
+            &RunConfig::default(),
+            false,
+            false,
+        )
+        .unwrap();
+    (run, incarnation)
+}
+
+fn replace_intent(f: &Fixture, run: RunId, incarnation: &str) -> ResumeIntent {
+    let mut successor = f.intent(run);
+    successor.incarnation = f.runtime.reserve_run_id().to_string();
+    f._storage
+        .handle()
+        .save_resume_intent(
+            storage::resume_intent::ResumeIntentRecord {
+                run_id: run.to_string(),
+                incarnation: successor.incarnation.clone(),
+                payload: serde_json::to_string(&successor).unwrap(),
+            },
+            Some(incarnation.into()),
+        )
+        .unwrap();
+    successor
+}
+
+#[tokio::test]
+async fn superseded_retirement_is_local_but_generic_cas_failure_still_blocks_shutdown() {
+    for retirement in [false, true] {
+        let f = Fixture::new(0);
+        let (run, incarnation) = intent_for_retirement(&f);
+        let successor = replace_intent(&f, run, &incarnation);
+        if retirement {
+            f.runtime
+                .end_intent(run, &incarnation, StopReason::Terminal);
+            assert_eq!(f.runtime.quiesce_state(), QuiesceState::Running);
+        } else {
+            assert!(
+                f.runtime
+                    .shared
+                    .quiesce
+                    .update(
+                        run,
+                        &incarnation,
+                        f.runtime.shared.run_store.get(),
+                        |intent| intent.active = false
+                    )
+                    .is_err()
+            );
+            assert!(matches!(
+                f.runtime.quiesce_state(),
+                QuiesceState::Failed { .. }
+            ));
+        }
+        assert_eq!(f.intent(run), successor);
+        let fence = f
+            .runtime
+            .fence_dispatch_shutdown(|| async { Ok::<_, crate::RuntimeError>(()) })
+            .await
+            .unwrap();
+        assert_eq!(
+            f.runtime.drain_dispatch_tails(&fence).await.is_ok(),
+            retirement
+        );
+        assert_eq!(f.intent(run), successor);
+    }
+}
+
+#[tokio::test]
+async fn only_unregistered_stops_discard_replaced_local_intents() {
+    for reason in [StopReason::Cancelled, StopReason::OperatorStopped] {
+        for registered in [false, true] {
+            let f = Fixture::new(0);
+            let (run, incarnation) = intent_for_retirement(&f);
+            let successor = replace_intent(&f, run, &incarnation);
+            f.runtime
+                .note_fenced_intent_stop(run, &incarnation, reason, registered);
+            assert_eq!(
+                matches!(f.runtime.quiesce_state(), QuiesceState::Failed { .. }),
+                registered
+            );
+            assert_eq!(
+                f.runtime.shared.quiesce.lock().intents.contains_key(&run),
+                registered
+            );
+            assert_eq!(f.intent(run), successor);
+            let fence = f
+                .runtime
+                .fence_dispatch_shutdown(|| async { Ok::<_, crate::RuntimeError>(()) })
+                .await
+                .unwrap();
+            assert_eq!(
+                f.runtime.drain_dispatch_tails(&fence).await.is_ok(),
+                !registered
+            );
+            assert_eq!(f.intent(run), successor);
+        }
+        let f = Fixture::new(0);
+        let (run, incarnation) = intent_for_retirement(&f);
+        let mut expected = f.intent(run);
+        expected.stop_reason = Some(reason);
+        expected.resume_requested = false;
+        f.runtime
+            .note_fenced_intent_stop(run, &incarnation, reason, false);
+        assert_eq!(
+            f.intent(run),
+            expected,
+            "a current pending admission stays active until joined"
+        );
+        assert!(expected.active);
+        let revision = || {
+            f.runtime
+                .shared
+                .run_store
+                .get()
+                .unwrap()
+                .with_database(|db| db.resume_intent_revision(&run.to_string()))
+                .unwrap()
+        };
+        let saved_revision = revision();
+        f.runtime
+            .note_fenced_intent_stop(run, &incarnation, reason, false);
+        assert_eq!(
+            revision(),
+            saved_revision,
+            "a repeated Stop must not advance revision"
+        );
+    }
+}
+
+#[tokio::test]
+async fn obsolete_intent_writes_still_fail_shutdown_on_save_or_flush_error() {
+    for completed in [false, true] {
+        for step in [StorageStep::Save, StorageStep::Flush] {
+            let f = Fixture::new(0);
+            let (run, incarnation) = intent_for_retirement(&f);
+            *f.runtime.shared.quiesce.fault.lock().unwrap() = Some(step);
+            if completed {
+                f.runtime
+                    .end_intent(run, &incarnation, StopReason::Terminal);
+            } else {
+                f.runtime
+                    .note_fenced_intent_stop(run, &incarnation, StopReason::Cancelled, false);
+            }
+            assert!(matches!(
+                f.runtime.quiesce_state(),
+                QuiesceState::Failed { .. }
+            ));
+            let fence = f
+                .runtime
+                .fence_dispatch_shutdown(|| async { Ok::<_, crate::RuntimeError>(()) })
+                .await
+                .unwrap();
+            assert!(f.runtime.drain_dispatch_tails(&fence).await.is_err());
+        }
+    }
+}
+
 fn recipe(policy: ResumePolicy) -> RecoveryRecipe {
     RecoveryRecipe {
         settings_reference: "current-host-profile".into(),
