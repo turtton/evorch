@@ -328,9 +328,9 @@ artifact revision の有無・一致、clean な checkout、PR facts（[ADR 0043
 
 #### 人間による close と破棄
 
-- 人間による close（`human_closed`）と破棄（`discarded`）は、**台帳上の終結だけ**を行う（run の停止、thread／worktree の削除、detach は別の操作）。
+- 人間による close（`human_closed`）と破棄（`discarded`）は、**台帳上の終結だけ**を行う（run の停止、thread／worktree の削除、detach は別の操作。PR #566）。
 - verified close（設けない）や `lead_closed` とは区別して記録する（人間は Ready がない状態でも終結できる）。
-- agent の tool・MCP・dispatch や wire の `Command` からは到達できない、信頼された host 経路（`AgentRuntime::close_lane_from_host` / `CommandHost::close_lane_human` / `HumanLaneManagement::close_lane`、`Actor::Human` のみ許可）に限る。GUI の操作画面（および wire の `Command` 接続）は後続 PR で対応する。
+- 実行経路は、認証済みの人間が使う wire 経路（`Command::CloseLane`、namespace `lanes/close_lane`、host が provenance を付与）と、GUI の Close…／Discard… の確認画面（理由 `note` の入力が必須、成果物の参照等を参考情報として表示）から実行できる。agent の tool、MCP、dispatch からは到達できない（信頼された host 経路 `HumanLaneManagement::close_lane_as`、`Actor::Human` のみ許可。PR #566）。
 
 detached はこの管理から外れる。既存 goal checks や通常のレビュー運用は使えるが、元 lead による lane close を要求しない。detach は close ではなく、管理関係の終了である。
 
@@ -431,6 +431,10 @@ Phase 1b で、既存の「未回収の起動に対する進捗 credit」を chi
 成果が provider に提示された場合は当該 lane のみを基準集合から除き、集合が解消されたら連続作成区間を終了する。管理終了した lane も対象から除くが、detach 自体は completion 観測や共通 credit 回復ではない。別 lane の completion、Report 採番・heartbeat・通常 tool は古い集合と回数をリセットしない。running の数や経過時間だけでは抑止しない。
 
 これは lane 総数・同時数の上限ではなく、共通 credit 20 とその全回復の仕様は維持する。初期値100と20の比較は4Eで評価し、既定値を20へ変更するにはユーザーの追加確認を要する。
+
+既知の制約として、intent を永続化してから計数を保存するまでの間に crash すると、その未保存分の計数は補修されず、抑止が遅れる（テストシナリオでは1件。PR #564）。
+
+また、未回収作成の抑止や復帰停止は診断コードとして追跡・通知する（Phase 4D D1、PR #571）。未回収作成抑止時は `LaneUncollectedCreationSuppressed`（HarnessImprovement）を、自動復帰が3回失敗して停止したときは `LaneRestoreRetrySuppressed`（TransientOrExternal）を発行する。いずれも再試行や復元で重複発行せず、cohort（または recovery episode）ごとに1回だけ発行する。
 
 ### 14. workspace
 
