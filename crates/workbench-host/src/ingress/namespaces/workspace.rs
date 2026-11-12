@@ -29,7 +29,8 @@ impl CommandHost {
             | WorkspaceQuery::GetThread(_) => self.projection.query(query),
             WorkspaceQuery::GetProjectAccess(_)
             | WorkspaceQuery::ListFamilies(_)
-            | WorkspaceQuery::GetThreadDetail(_) => self
+            | WorkspaceQuery::GetThreadDetail(_)
+            | WorkspaceQuery::GetRetention(_) => self
                 .areas
                 .workspace
                 .query(namespace_query)

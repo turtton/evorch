@@ -84,6 +84,7 @@ pub fn samples() -> AreaSamples {
             Query::Workspace(WorkspaceQuery::GetThreadDetail(ThreadTarget {
                 thread: thread(),
             })),
+            Query::Workspace(WorkspaceQuery::GetRetention(page_request())),
         ],
         ui_events: vec![UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged {
             revision: Revision(11),
@@ -130,6 +131,24 @@ pub fn samples() -> AreaSamples {
                 pinned: true,
                 revision: Revision(3),
             }))),
+            QueryReply::Workspace(WorkspaceReply::Retention(Page {
+                items: vec![
+                    RetentionEntry {
+                        thread: thread(),
+                        state: RetentionState::DueIn { days: 3 },
+                    },
+                    RetentionEntry {
+                        thread: thread(),
+                        state: RetentionState::Blocked {
+                            block: RetentionBlock::Recovery {
+                                reason: "member of a committed recovery manifest".into(),
+                            },
+                        },
+                    },
+                ],
+                next_cursor: None,
+                snapshot_revision: Revision(5),
+            })),
         ],
     }
 }

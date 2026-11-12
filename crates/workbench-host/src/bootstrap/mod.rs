@@ -425,6 +425,7 @@ impl BootstrappedHost {
             config: Arc::new(config.clone()),
             config_dir: options.config_dir.clone(),
             project_root: options.project_root.clone(),
+            ownership_root: options.ownership_root.clone(),
             bus: bus.clone(),
             storage: handle.clone(),
             mcp: mcp.clone(),

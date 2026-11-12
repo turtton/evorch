@@ -22,10 +22,15 @@ use crate::areas::ProjectionSource;
 use crate::bootstrap::BootstrapError;
 use crate::queries::{Pager, revision};
 use runtime::AgentRuntime;
+use runtime::ownership::Registry;
+use runtime::thread_retention::{
+    BindingPaths, StartupPaths, ThreadRetention, check_binding, startup_input,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use storage::thread_retention::{BlockReason, RetentionStatus, SidebarThread};
 use workbench_protocol::commands::{CommandReply, CommandResult};
 use workbench_protocol::envelope::Provenance;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
@@ -47,6 +52,7 @@ type Tombstones = dyn Fn() -> Result<Deleted, String> + Send + Sync;
 struct Service {
     store: SidebarStore,
     runtime: Option<AgentRuntime>,
+    retention: Option<RetentionSource>,
     /// Directories that hold the core's own configuration and databases.
     protected: Vec<PathBuf>,
     source: Option<ProjectionSource>,
@@ -163,6 +169,11 @@ impl WorkspaceArea {
             inner: Some(Service {
                 store: SidebarStore::new(handles.config_dir.join("sidebar.json")),
                 runtime: Some(runtime),
+                retention: Some(RetentionSource {
+                    ownership_root: handles.ownership_root.clone(),
+                    sidebar_path: handles.config_dir.join("sidebar.json"),
+                    policy: runtime::thread_retention::policy_from_config(&handles.config.storage),
+                }),
                 protected: vec![canonical(&handles.config_dir)],
                 source,
                 tombstones: Box::new(move || {
@@ -191,6 +202,7 @@ impl WorkspaceArea {
             inner: Some(Service {
                 store,
                 runtime,
+                retention: None,
                 protected: protected.iter().map(|p| canonical(p)).collect(),
                 source,
                 tombstones: Box::new(move || Ok(Arc::new(deleted.clone()))),
@@ -244,6 +256,9 @@ impl WorkspaceArea {
             Q::ListFamilies(page) => service
                 .families(&document, page)
                 .map(WorkspaceReply::Families),
+            Q::GetRetention(page) => service
+                .retention(&document, page)
+                .map(WorkspaceReply::Retention),
             Q::GetThreadDetail(target) => service
                 .detail(&document, &target.thread)
                 .map(|detail| WorkspaceReply::ThreadDetail(Box::new(detail))),
@@ -730,4 +745,165 @@ fn now_seconds() -> i64 {
         .ok()
         .and_then(|d| i64::try_from(d.as_secs()).ok())
         .unwrap_or(0)
+}
+
+/// What the retention view reads besides the sidebar: where the database and
+/// the sidebar are paired, and how long an archived thread is kept.
+#[derive(Debug, Clone)]
+pub struct RetentionSource {
+    pub ownership_root: PathBuf,
+    pub sidebar_path: PathBuf,
+    pub policy: storage::thread_retention::ThreadRetentionPolicy,
+}
+
+/// The sidebar's threads as the retention phase reads them, with the archive
+/// and pin state their family resolves to. A thread whose family cannot be
+/// found is told as not archived: nothing is guessed about it.
+pub fn sidebar_threads(sidebar: &workspace_state::SidebarState) -> Vec<SidebarThread> {
+    let states = sidebar.resolve_states();
+    sidebar
+        .threads
+        .iter()
+        .map(|thread| {
+            let state = states.get(&thread.id).filter(|state| state.is_resolved());
+            SidebarThread {
+                thread_id: thread.id.to_string(),
+                archived: state.is_some_and(|state| state.archived),
+                archived_at_s: state.and_then(|state| state.archived_at),
+                pinned: state.is_some_and(|state| state.pinned),
+                updated_at_s: thread.last_activity(),
+                created_at_s: thread.created_at,
+                archive_revision: state.map(|state| state.archive_revision),
+                pin_revision: state.map(|state| state.pin_revision),
+            }
+        })
+        .collect()
+}
+
+const RECOVERY_CLAIM_PENDING: &str = "recovery claim pending";
+
+fn retention_block(block: BlockReason) -> RetentionBlock {
+    match block {
+        BlockReason::Pinned => RetentionBlock::Pinned,
+        BlockReason::EvalSample => RetentionBlock::EvalSample,
+        BlockReason::FamilyMemberNotDue(thread) => RetentionBlock::FamilyMemberNotDue { thread },
+        BlockReason::FamilyMemberBlocked(thread) => RetentionBlock::FamilyMemberBlocked { thread },
+        BlockReason::FamilyUnresolved(thread) => RetentionBlock::FamilyUnresolved { thread },
+        BlockReason::Owner(reason)
+            if reason == runtime::thread_retention::BINDING_MISMATCH_BLOCK =>
+        {
+            RetentionBlock::BindingMismatch
+        }
+        BlockReason::Owner(reason) if reason == RECOVERY_CLAIM_PENDING => {
+            RetentionBlock::Recovery { reason }
+        }
+        BlockReason::Owner(reason) => RetentionBlock::Owner { reason },
+        BlockReason::Exploring => RetentionBlock::Exploring,
+        BlockReason::OverBudget => RetentionBlock::OverBudget,
+    }
+}
+
+fn retention_state(status: RetentionStatus) -> RetentionState {
+    match status {
+        RetentionStatus::NotArchived => RetentionState::NotArchived,
+        RetentionStatus::Disabled => RetentionState::Disabled,
+        RetentionStatus::DueIn { days } => RetentionState::DueIn { days },
+        RetentionStatus::DueNextStartup => RetentionState::DueNextStartup,
+        RetentionStatus::Blocked(block) => RetentionState::Blocked {
+            block: retention_block(block),
+        },
+    }
+}
+
+/// The retention status of every thread of `document`, computed the way the
+/// start-up phase will decide (a read only computation: nothing is confirmed
+/// or deleted here). The deciding is not tied to any client: a client that is
+/// closed, or none at all, changes nothing about it.
+///
+/// Recovery is taken into account by the storage side: a family whose run is a
+/// member of a committed, not superseded recovery manifest is not confirmed,
+/// and one with a prepared recovery claim reads as blocked.
+///
+/// # Errors
+/// A message when the database, the ownership registry or the binding cannot
+/// be read.
+pub fn retention_entries(
+    database: &storage::Database,
+    document: &SidebarDocument,
+    source: &RetentionSource,
+    now_ns: i64,
+) -> Result<Vec<RetentionEntry>, String> {
+    let error = |error: &dyn std::fmt::Display| error.to_string();
+    let paths = StartupPaths {
+        // The input is built from the sidebar and ownership paths only; the
+        // database is the handle already open.
+        db_path: PathBuf::new(),
+        ownership_root: source.ownership_root.clone(),
+        sidebar_path: source.sidebar_path.clone(),
+        artifacts_dir: None,
+    };
+    let input =
+        startup_input(&paths, sidebar_threads(&document.sidebar), now_ns).map_err(|e| error(&e))?;
+    let binding = check_binding(
+        database,
+        BindingPaths {
+            ownership_root: &source.ownership_root,
+            sidebar_path: &source.sidebar_path,
+        },
+    )
+    .map_err(|e| error(&e))?;
+    // No registry yet means no owner holds anything.
+    let registry = Registry::open_readonly(&source.ownership_root.join("owners.db")).ok();
+    let statuses = ThreadRetention::schedule(
+        database,
+        &input,
+        &source.policy,
+        &binding,
+        registry.as_ref(),
+    )
+    .map_err(|e| error(&e))?;
+    let mut entries = Vec::new();
+    for (thread, status) in statuses {
+        if let Ok(thread) = WireThread::new(thread) {
+            entries.push(RetentionEntry {
+                thread,
+                state: retention_state(status),
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.thread.as_str().cmp(b.thread.as_str()));
+    Ok(entries)
+}
+
+fn now_nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+impl Service {
+    fn retention(
+        &self,
+        document: &SidebarDocument,
+        page: &PageRequest,
+    ) -> Result<Page<RetentionEntry>, WorkbenchError> {
+        let (Some(source), Some(runtime)) = (&self.retention, &self.runtime) else {
+            return Err(unwired());
+        };
+        let entries = runtime
+            .with_storage_reader(|database| {
+                Ok(retention_entries(database, document, source, now_nanos()))
+            })
+            .map_err(|e| internal(&e.to_string()))?
+            .ok_or_else(|| internal("the database is not open"))?
+            .map_err(|e| internal(&e))?;
+        self.pager.page(
+            "workspace/get_retention",
+            &entries,
+            page,
+            revision(&entries),
+        )
+    }
 }

@@ -42,6 +42,8 @@ pub struct AreaHandles {
     pub config: Arc<config::Config>,
     pub config_dir: PathBuf,
     pub project_root: PathBuf,
+    /// The ownership root that pairs the database with the sidebar (retention).
+    pub ownership_root: PathBuf,
     pub bus: Arc<EventBus>,
     pub storage: storage::StorageHandle,
     pub mcp: McpHostServices,

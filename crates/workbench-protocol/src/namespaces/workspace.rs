@@ -45,6 +45,7 @@ pub const QUERY_OPERATIONS: &[&str] = &[
     "get_project_access",
     "list_families",
     "get_thread_detail",
+    "get_retention",
 ];
 pub const EVENT_TYPES: &[&str] = &["thread_changed", "workspace_changed"];
 /// Tagged choices inside a command's payload that classification names.
@@ -287,6 +288,7 @@ pub enum WorkspaceQuery {
     GetProjectAccess(ProjectTarget),
     ListFamilies(PageRequest),
     GetThreadDetail(ThreadTarget),
+    GetRetention(PageRequest),
 }
 
 impl WorkspaceQuery {
@@ -296,7 +298,9 @@ impl WorkspaceQuery {
 
     pub fn validate(&self, _limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
-            Self::ListProjects(page) | Self::ListFamilies(page) => page.validate(),
+            Self::ListProjects(page) | Self::ListFamilies(page) | Self::GetRetention(page) => {
+                page.validate()
+            }
             Self::ListThreads(q) => q.page.validate(),
             Self::GetThread(_) | Self::GetProjectAccess(_) | Self::GetThreadDetail(_) => Ok(()),
         }
@@ -323,6 +327,73 @@ pub struct ProjectAccessView {
     pub allowed_directories: Vec<AllowedDirectoryView>,
     /// What `rename_project`, `set_project_trust` and `update_allowed_directory` quote.
     pub revision: Revision,
+}
+
+/// Why a thread's deletion is held back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum RetentionBlock {
+    Pinned,
+    EvalSample,
+    /// Another thread of the family is not due yet.
+    FamilyMemberNotDue {
+        thread: String,
+    },
+    FamilyMemberBlocked {
+        thread: String,
+    },
+    FamilyUnresolved {
+        thread: String,
+    },
+    /// A running or recently running conversation holds the thread.
+    Owner {
+        reason: String,
+    },
+    /// The database and the sidebar are not the pair they were bound as, so
+    /// nothing is deleted.
+    BindingMismatch,
+    /// The search for what depends on the thread is not finished.
+    Exploring,
+    OverBudget,
+    /// A committed recovery manifest names the thread as a member, or a
+    /// prepared claim holds it; a family it belongs to is kept.
+    Recovery {
+        reason: String,
+    },
+}
+
+/// Where a thread stands in the retention of archived threads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum RetentionState {
+    NotArchived,
+    /// Deleting archived threads is switched off.
+    Disabled,
+    /// Whole days left, rounded up.
+    DueIn {
+        days: u32,
+    },
+    DueNextStartup,
+    Blocked {
+        block: RetentionBlock,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetentionEntry {
+    pub thread: ThreadId,
+    pub state: RetentionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,6 +459,7 @@ pub enum WorkspaceReply {
     Thread(ThreadView),
     ProjectAccess(Box<ProjectAccessView>),
     Families(Page<FamilyView>),
+    Retention(Page<RetentionEntry>),
     ThreadDetail(Box<ThreadDetail>),
 }
 
@@ -402,6 +474,7 @@ impl WorkspaceReply {
                 check_count("allowed_directories", view.allowed_directories.len(), 256)
             }
             Self::Families(page) => page.validate(),
+            Self::Retention(page) => page.validate(),
             Self::ThreadDetail(detail) => {
                 check_count(
                     "extra_read_dirs",
