@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum CheckpointBoundary {
     BeforeModelRequest,
     ToolsApplied,
+    ToolsWaiting,
     TurnEnd,
     Terminal,
     Idle,

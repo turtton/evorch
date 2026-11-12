@@ -954,6 +954,19 @@ impl LoopState {
                         ids.push(call.id);
                         children.push(child);
                     }
+                    self.delegate_wait_calls = ids
+                        .iter()
+                        .zip(&children)
+                        .filter_map(|(id, child)| {
+                            child
+                                .as_ref()
+                                .ok()
+                                .map(|child| crate::quiesce::DelegateWaitCall {
+                                    tool_call_id: id.clone(),
+                                    child: *child,
+                                })
+                        })
+                        .collect();
                     for (id, dispatch) in ids
                         .into_iter()
                         .zip(meta::wait_delegates(self, &runtime, children).await)
@@ -963,6 +976,7 @@ impl LoopState {
                         self.context.push_tool_result(id, dispatch.result);
                         self.publish_message_count();
                     }
+                    self.delegate_wait_calls.clear();
                     if let Some(kind) = self.interrupted() {
                         self.finish_interrupted(kind);
                         return false;

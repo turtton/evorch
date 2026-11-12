@@ -48,7 +48,12 @@ impl LoopState {
             return Err("model did not expose its exact provider input".into());
         }
         runtime.shared.quiesce.storage_step(StorageStep::Snapshot)?;
-        let snapshot = crate::restore::persist_checkpoint(self).map_err(|e| e.to_string())?;
+        let snapshot = if boundary == CheckpointBoundary::ToolsWaiting {
+            crate::restore::persist_tools_waiting(self)
+        } else {
+            crate::restore::persist_checkpoint(self)
+        }
+        .map_err(|e| e.to_string())?;
         if !matches!(snapshot, SnapshotReference::RunContext { .. }) {
             return Err("safe point did not commit a checkpoint".into());
         }

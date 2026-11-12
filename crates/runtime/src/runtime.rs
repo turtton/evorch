@@ -3804,6 +3804,24 @@ impl AgentRuntime {
     /// # Errors
     /// [`RuntimeError::UnknownMessage`] for an unknown or foreign message,
     /// [`RuntimeError::RunTerminated`] once the recipient is gone.
+    /// Validated identity for a durable reply continuation, without consuming it.
+    pub(crate) fn reply_wait_target(
+        &self,
+        requester: RunId,
+        message_id: &str,
+    ) -> Result<RunId, RuntimeError> {
+        self.shared
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(message_id)
+            .filter(|record| record.sender == requester)
+            .map(|record| record.recipient)
+            .ok_or_else(|| RuntimeError::UnknownMessage {
+                message_id: message_id.to_owned(),
+            })
+    }
+
     pub(crate) fn check_reply_wait(
         &self,
         run_id: RunId,

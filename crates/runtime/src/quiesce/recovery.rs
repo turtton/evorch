@@ -45,6 +45,35 @@ pub struct WaitContinuation {
     pub tool_name: String,
     pub legacy_result: bool,
     pub consume_mailbox: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<WaitPayload>,
+}
+/// Original batch identity; never an instruction to redispatch a tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitPayload {
+    pub position: usize,
+    pub input: serde_json::Value,
+    pub kind: WaitKind,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WaitKind {
+    Runs,
+    Delegates {
+        calls: Vec<DelegateWaitCall>,
+    },
+    Reply {
+        message_id: String,
+        deadline_unix_ms: u64,
+        delivered_answer_ids: Vec<String>,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegateWaitCall {
+    pub tool_call_id: String,
+    pub child: RunId,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +143,8 @@ pub struct RunRecoveryRecord {
     pub waits: Vec<DurableWait>,
     pub deliveries: Vec<DurableDelivery>,
     pub completion: Option<ObservedGeneration>,
+    #[serde(default)]
+    pub completion_generation: Option<u64>,
     pub auto_wakes: u32,
     pub user_reset_generation: u64,
     pub input_ids: Vec<String>,
