@@ -38,6 +38,8 @@ struct Keychain {
     inner: FileCredentialStore,
     fail_set: AtomicBool,
     fail_delete: AtomicBool,
+    /// Runs once right after a value was written (another writer's turn).
+    after_set: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 impl CredentialStore for Keychain {
     fn get(&self, key: &str) -> Result<Option<Secret>, CredentialError> {
@@ -47,7 +49,11 @@ impl CredentialStore for Keychain {
         if self.fail_set.load(Ordering::SeqCst) {
             return Err(CredentialError::KeychainLocked);
         }
-        self.inner.set(key, value)
+        self.inner.set(key, value)?;
+        if let Some(hook) = self.after_set.lock().unwrap().take() {
+            hook();
+        }
+        Ok(())
     }
     fn delete(&self, key: &str) -> Result<(), CredentialError> {
         if self.fail_delete.load(Ordering::SeqCst) {
@@ -165,6 +171,7 @@ impl Area {
             inner: FileCredentialStore::open(root.join("secrets")).unwrap(),
             fail_set: AtomicBool::new(false),
             fail_delete: AtomicBool::new(false),
+            after_set: std::sync::Mutex::default(),
         });
         keychain
             .inner
@@ -1022,4 +1029,82 @@ async fn two_writers_quoting_one_revision_cannot_both_succeed() {
         }
     }
     assert_eq!(succeeded, 1, "exactly one of two writers wins");
+}
+
+#[tokio::test]
+async fn a_secret_save_of_unknown_outcome_is_settled_by_reading_the_files_again() {
+    let mut area = Area::open().await;
+    let settings = area.settings().await;
+    let (_, definition) = area.definition("fixture").await;
+    // Another writer changes the files right after the keychain was written:
+    // the settings save conflicts, and the rotated value stays in the keychain.
+    let file = area.root.join(".evorch/mcp.toml");
+    area.keychain
+        .after_set
+        .lock()
+        .unwrap()
+        .replace(Box::new(move || {
+            let mut text = std::fs::read_to_string(&file).unwrap();
+            text.push_str(
+                "\n[servers.other]\ntype=\"stdio\"\ncommand=\"/bin/true\"\nroles=[\"worker\"]\n",
+            );
+            std::fs::write(&file, text).unwrap();
+        }));
+    let command = McpCommand::SaveSecret(Box::new(SaveSecret {
+        operation_id: area.id("secret"),
+        scope: scope("fixture"),
+        logical_name: "token".into(),
+        value: McpSecretValue::new("rotated-secret-value"),
+        expected_revision: settings.revision.clone(),
+        mutation: McpMutation::Upsert {
+            server_id: "fixture".into(),
+            definition,
+        },
+    }));
+    let done = area.run(command).await;
+    // The keychain changed and the settings did not: not "nothing was written".
+    assert_eq!(error(&done), McpErrorCode::OutcomeUnknown, "{done:?}");
+    // The core still holds what it read before the other writer's change.
+    let McpReply::Settings(stale) = area
+        .query(McpQuery::GetSettings { project: project() })
+        .unwrap()
+    else {
+        panic!("settings expected");
+    };
+    assert_eq!(stale.revision, settings.revision);
+    // Reading the files again (what the client asks for after an unknown
+    // outcome) shows the latest revision and that the entry holds a value.
+    let latest = area.settings().await;
+    assert_ne!(latest.revision, settings.revision);
+    assert!(latest.servers.iter().any(|s| s.server_id == "other"));
+    let fixture = latest
+        .servers
+        .iter()
+        .find(|s| s.server_id == "fixture")
+        .unwrap();
+    assert_eq!(
+        fixture.secret_states.get("token"),
+        Some(&McpSecretState::Present)
+    );
+    area.assert_secret_absent("rotated-secret-value");
+}
+
+#[tokio::test]
+async fn a_shutdown_after_the_handshake_reaps_the_child_and_drains_the_task() {
+    let mut area = Area::open().await;
+    let revision = area.add_hanging().await;
+    let test = area.test("hang", &revision);
+    area.submit(test).unwrap();
+    let pid = area.handshake_reached_a_peer().await;
+    assert!(area.boot.busy());
+    // The host stops while the handshake is open: its operation ends, the
+    // child is waited for and the task is joined before shutdown returns.
+    area.boot.shutdown().await.unwrap();
+    #[cfg(target_os = "linux")]
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "the child process was reaped"
+    );
+    let _ = pid;
+    assert!(!area.boot.busy(), "no operation is left running");
 }

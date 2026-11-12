@@ -16,7 +16,7 @@ use gui::core_client::{
     enqueue,
     features::{FeatureView, Selection},
 };
-use sandbox::{CredentialStore, FileCredentialStore};
+use sandbox::{CredentialStore, FileCredentialStore, Secret};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -282,8 +282,30 @@ async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the
         .expect("the secret was stored under its scoped name");
     assert_eq!(stored.expose(), SECRET);
     until(&mut window, "the keychain entry is shown as stored", |w| {
-        // Present entries are not listed; a missing one would be.
-        !shows(w, "no value is stored")
+        shows(w, "Keychain entry token: a value is stored")
+    })
+    .await;
+    // The entry changes behind the screen's back while the files stay as they
+    // are (the revision does not change): a reload shows the entry as it is.
+    let key = tools::mcp::secrets::credential_key(
+        &tools::mcp::types::ApprovalScope {
+            canonical_root: root.clone(),
+            server_id: "mock".into(),
+        },
+        "token",
+    );
+    keychain.delete(&key).unwrap();
+    click(&mut window, "Reload");
+    until(&mut window, "the missing entry is shown", |w| {
+        shows(w, "Keychain entry token: no value is stored yet")
+    })
+    .await;
+    keychain
+        .set(&key, &Secret::from(SECRET.to_owned()))
+        .unwrap();
+    click(&mut window, "Reload");
+    until(&mut window, "the stored entry is shown again", |w| {
+        shows(w, "Keychain entry token: a value is stored")
     })
     .await;
 

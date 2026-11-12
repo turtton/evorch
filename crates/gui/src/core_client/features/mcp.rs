@@ -261,7 +261,7 @@ pub fn error_text(code: McpErrorCode) -> String {
             "Access to the OS keychain was denied. The value may not have been stored.".into()
         }
         McpErrorCode::OutcomeUnknown => {
-            "The result is not known: the keychain entry may have been changed although the settings were not saved. The list is reloaded; check it before trying again.".into()
+            "The result is not known: the keychain entry or the settings may have been changed. The list is reloaded; check it before trying again.".into()
         }
         McpErrorCode::SecretMissing => "The keychain entry has no stored value yet.".into(),
         other => format!("Failed: {other:?}"),
@@ -397,7 +397,7 @@ impl McpFeature {
                     RowNote::Unknown,
                 );
             }
-            self.queue_settings(&target.project);
+            self.refresh(&target.project);
         }
         self.notice = Some(Notice::Expired);
     }
@@ -496,12 +496,14 @@ impl McpFeature {
             (McpOperationState::Succeeded { outcome }, kind) => match outcome {
                 McpOutcome::Settings { revision } => {
                     let known = self.settings_of(&project).map(|s| s.revision.clone());
-                    // A secret changes what the settings show (which entries hold
-                    // a value) without a new revision.
+                    // A reload and a secret change what the settings show (which
+                    // entries hold a value) without a new revision.
                     if known.as_ref() != Some(revision)
                         || matches!(
                             kind,
-                            McpOperationKind::SaveSecret | McpOperationKind::DeleteSecret
+                            McpOperationKind::Refresh
+                                | McpOperationKind::SaveSecret
+                                | McpOperationKind::DeleteSecret
                         )
                     {
                         self.queue_settings(&project);
@@ -579,12 +581,13 @@ impl McpFeature {
                         self.review = Some((server.clone(), Review::Failed(error)));
                     }
                     (McpErrorCode::OutcomeUnknown, kind) => {
-                        // The keychain may have changed while the settings did not
-                        // save: say so, and show what is stored now.
+                        // The keychain or the settings may have changed: say so, read
+                        // the files again (the core's copy may be older than them),
+                        // and show what is there when that read has ended.
                         let _ = kind;
                         self.notice =
                             Some(Notice::Failed(error_text(McpErrorCode::OutcomeUnknown)));
-                        self.queue_settings(&project);
+                        self.refresh(&project);
                     }
                     (McpErrorCode::ConfigConflict, _) => {
                         self.notice = Some(Notice::Conflict);
@@ -914,9 +917,10 @@ impl McpFeature {
                 ui.label(status_label(server));
             });
             for (name, state) in &server.secret_states {
-                if *state != McpSecretState::Present {
-                    ui.label(format!("Keychain entry {name}: {}", secret_state_label(*state)));
-                }
+                ui.label(format!(
+                    "Keychain entry {name}: {}",
+                    secret_state_label(*state)
+                ));
             }
             if let Some(note) = &note {
                 ui.label(match note {
@@ -1189,6 +1193,9 @@ impl McpFeature {
         let mut secret_request: Option<(SecretTarget, String, String)> = None;
         let mut delete_target: Option<SecretTarget> = None;
         let mut start_secret: Option<SecretTarget> = None;
+        // What was saved is what is closed at the end of the save: while it
+        // saves, the form takes no further input (nothing typed meanwhile is lost).
+        let editing_locked = editor.saving.is_some();
         ui.group(|ui| {
             let draft = &mut editor.draft;
             if stale {
@@ -1208,6 +1215,7 @@ impl McpFeature {
                 })
                 .strong(),
             );
+            ui.add_enabled_ui(!editing_locked, |ui| {
             ui.add_enabled_ui(draft.is_new(), |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Name");
@@ -1338,6 +1346,7 @@ impl McpFeature {
                 if ui.button("Cancel edit").clicked() {
                     cancel = true;
                 }
+            });
             });
         });
         if let Some(target) = start_secret {
@@ -1969,6 +1978,195 @@ mod tests {
         )));
         assert!(feature.editor.as_ref().unwrap().saving.is_none());
         assert!(matches!(feature.notice, Some(Notice::Failed(_))));
+    }
+
+    /// The feature drawn by egui, as the shared client draws it.
+    struct Window {
+        feature: McpFeature,
+        cache: crate::core_client::cache::Cache,
+        selection: crate::core_client::features::Selection,
+        frame: crate::core_client::features::FeatureFrame,
+    }
+
+    fn window(feature: McpFeature) -> egui_kittest::Harness<'static, Window> {
+        egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1000.0, 3000.0))
+            .build_ui_state(
+                |ui, window: &mut Window| {
+                    let Window {
+                        feature,
+                        cache,
+                        selection,
+                        frame,
+                    } = window;
+                    let mut context = FeatureContext {
+                        feature: FeatureId::Mcp,
+                        view: crate::core_client::features::FeatureView {
+                            connected: true,
+                            capabilities: &[],
+                            cache,
+                            selection,
+                        },
+                        frame,
+                    };
+                    feature.render(ui, &mut context);
+                },
+                Window {
+                    feature,
+                    cache: Default::default(),
+                    selection: crate::core_client::features::Selection {
+                        project: Some(project()),
+                        thread: None,
+                    },
+                    frame: Default::default(),
+                },
+            )
+    }
+
+    #[test]
+    fn a_form_that_is_saving_takes_no_input_and_what_was_typed_before_is_what_closes() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut feature = McpFeature::default();
+        feature.projects.entry("p".into()).or_default().settings =
+            Some(settings_of("p", revision('a')));
+        let mut draft = McpServerDraft::new_server();
+        draft.id = "x".into();
+        draft.command = "cmd".into();
+        feature.editor = Some(Editor::new(project(), revision('a'), draft));
+        let mut window = window(feature);
+        let name = |window: &egui_kittest::Harness<'static, Window>| {
+            window
+                .state()
+                .feature
+                .editor
+                .as_ref()
+                .unwrap()
+                .draft
+                .id
+                .clone()
+        };
+        let type_name = |window: &mut egui_kittest::Harness<'static, Window>, text: &str| {
+            window
+                .get_all_by_role(Role::TextInput)
+                .next()
+                .unwrap()
+                .click();
+            window.run_steps(4);
+            window
+                .get_all_by_role(Role::TextInput)
+                .next()
+                .unwrap()
+                .type_text(text);
+            window.run_steps(4);
+        };
+        window.run_steps(4);
+        type_name(&mut window, "y");
+        assert_eq!(name(&window), "xy", "an idle form takes input");
+        window.state_mut().feature.editor_save(disable());
+        window.run_steps(4);
+        type_name(&mut window, "z");
+        assert_eq!(name(&window), "xy", "a saving form takes none");
+        let saving = window
+            .state()
+            .feature
+            .editor
+            .as_ref()
+            .unwrap()
+            .saving
+            .clone()
+            .unwrap();
+        window.state_mut().feature.event(&completed(view(
+            &saving,
+            McpOperationKind::SaveOverride,
+            McpOperationState::Succeeded {
+                outcome: McpOutcome::Settings {
+                    revision: revision('b'),
+                },
+            },
+        )));
+        assert!(window.state().feature.editor.is_none());
+    }
+
+    #[test]
+    fn after_an_unknown_outcome_the_files_are_read_again_before_the_settings_are_asked_for() {
+        let mut feature = McpFeature::default();
+        feature.projects.entry("p".into()).or_default().settings =
+            Some(settings_of("p", revision('a')));
+        open_editor(&mut feature, "p", revision('a'));
+        feature.editor_save(disable());
+        let own = feature.editor.as_ref().unwrap().saving.clone().unwrap();
+        feature.outbox.clear();
+        feature.event(&completed(view(
+            &own,
+            McpOperationKind::SaveOverride,
+            McpOperationState::Failed {
+                error: McpErrorCode::OutcomeUnknown,
+            },
+        )));
+        assert!(
+            queued_commands(&feature)
+                .iter()
+                .any(|command| matches!(command, McpCommand::Refresh(_))),
+            "the core reads the files again"
+        );
+        assert!(
+            !feature.outbox.iter().any(|out| matches!(
+                out,
+                Outgoing::Query(Query::Mcp(McpQuery::GetSettings { .. }), _)
+            )),
+            "its older copy is not what is asked for"
+        );
+        assert!(
+            !queued_commands(&feature)
+                .iter()
+                .any(|command| matches!(command, McpCommand::SaveOverride(_))),
+            "the save is never sent again"
+        );
+        // The read has ended (at the revision the screen already knows): only
+        // now are the settings asked for.
+        let refresh = feature
+            .targets
+            .iter()
+            .find(|(_, target)| target.kind == McpOperationKind::Refresh)
+            .map(|(id, _)| id.clone())
+            .unwrap();
+        feature.mine.insert(refresh.clone());
+        feature.outbox.clear();
+        feature.event(&completed(view(
+            &refresh,
+            McpOperationKind::Refresh,
+            McpOperationState::Succeeded {
+                outcome: McpOutcome::Settings {
+                    revision: revision('a'),
+                },
+            },
+        )));
+        assert!(feature.outbox.iter().any(|out| matches!(
+            out,
+            Outgoing::Query(Query::Mcp(McpQuery::GetSettings { .. }), _)
+        )));
+    }
+
+    #[test]
+    fn a_finished_reload_always_asks_for_the_settings_even_at_the_same_revision() {
+        let mut feature = McpFeature::default();
+        feature.projects.entry("p".into()).or_default().settings =
+            Some(settings_of("p", revision('a')));
+        let reload = started(&mut feature, McpOperationKind::Refresh);
+        feature.event(&completed(view(
+            &reload,
+            McpOperationKind::Refresh,
+            McpOperationState::Succeeded {
+                outcome: McpOutcome::Settings {
+                    revision: revision('a'),
+                },
+            },
+        )));
+        assert!(feature.outbox.iter().any(|out| matches!(
+            out,
+            Outgoing::Query(Query::Mcp(McpQuery::GetSettings { .. }), _)
+        )));
     }
 
     #[test]
