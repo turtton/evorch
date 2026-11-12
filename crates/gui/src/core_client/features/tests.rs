@@ -17,6 +17,8 @@ pub(crate) struct Recorder {
     id: FeatureId,
     availability: Availability,
     selector: bool,
+    selector_query: bool,
+    note: Option<&'static str>,
     log: Log,
 }
 
@@ -26,12 +28,25 @@ impl Recorder {
             id,
             availability,
             selector: false,
+            selector_query: false,
+            note: None,
             log: log.clone(),
         })
     }
 
     fn with_selector(mut self: Box<Self>) -> Box<Self> {
         self.selector = true;
+        self
+    }
+
+    /// Asks for a query while being asked for the selector.
+    fn with_selector_query(mut self: Box<Self>) -> Box<Self> {
+        self.selector_query = true;
+        self
+    }
+
+    fn with_note(mut self: Box<Self>, note: &'static str) -> Box<Self> {
+        self.note = Some(note);
         self
     }
 
@@ -66,7 +81,13 @@ impl Feature for Recorder {
     fn render(&mut self, _ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
         ctx.query(7, Query::Lifecycle(LifecycleQuery::GetCoreStatus));
     }
+    fn unsupported(&self) -> Option<&'static str> {
+        self.note
+    }
     fn render_selector(&mut self, _ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) -> bool {
+        if self.selector_query {
+            ctx.query(11, Query::Lifecycle(LifecycleQuery::GetCoreStatus));
+        }
         if self.selector {
             let project = ctx.selection().project.clone().unwrap();
             ctx.navigate(Navigation::NewConversation(project));
@@ -133,7 +154,9 @@ fn the_shipped_placeholders_are_never_offered_rendered_or_replacing_the_selector
         let frame = features.render(ui, v);
         assert!(frame.actions.is_empty() && frame.navigation.is_empty());
         // The built-in selector stays: nothing replaced it and nothing was drawn.
-        assert!(features.render_selector(ui, v).is_none());
+        let outcome = features.render_selector(ui, v);
+        assert!(!outcome.replaced);
+        assert!(outcome.frame.actions.is_empty() && outcome.frame.navigation.is_empty());
     });
 }
 
@@ -177,15 +200,16 @@ fn only_an_available_feature_may_replace_the_selector_and_its_navigation_is_type
     features.install(Recorder::new(FeatureId::Workspace, NEEDS_QUERIES, &log).with_selector());
     run_ui(|ui| {
         // Not connected: the feature is not available, the built-in selector stays.
-        assert!(
-            features
-                .render_selector(ui, view(false, &[Capability::Queries], &cache, &selection))
-                .is_none()
+        let unavailable =
+            features.render_selector(ui, view(false, &[Capability::Queries], &cache, &selection));
+        assert!(!unavailable.replaced);
+        let outcome =
+            features.render_selector(ui, view(true, &[Capability::Queries], &cache, &selection));
+        assert!(outcome.replaced);
+        assert_eq!(
+            outcome.frame.navigation,
+            [Navigation::NewConversation(project)]
         );
-        let frame = features
-            .render_selector(ui, view(true, &[Capability::Queries], &cache, &selection))
-            .expect("the feature replaced the selector");
-        assert_eq!(frame.navigation, [Navigation::NewConversation(project)]);
     });
 }
 
@@ -261,4 +285,43 @@ fn a_session_resets_first_then_delivers_events_and_the_held_replies() {
     features.begin_session(&[], held);
     // A reset never discards a held reply: it comes after it.
     assert_eq!(lines(&log), ["reset", "reply 3 err"]);
+}
+
+#[test]
+fn what_a_feature_asks_for_while_declining_the_selector_is_not_lost() {
+    let log = log();
+    let mut features = Features::default();
+    // Available, declines to draw the selector, but asked for a query.
+    features
+        .install(Recorder::new(FeatureId::Workspace, NEEDS_QUERIES, &log).with_selector_query());
+    let (cache, selection) = (Cache::default(), Selection::default());
+    run_ui(|ui| {
+        let outcome =
+            features.render_selector(ui, view(true, &[Capability::Queries], &cache, &selection));
+        // The built-in selector stays, and the request is still delivered.
+        assert!(!outcome.replaced);
+        assert_eq!(outcome.frame.actions.len(), 1);
+        assert_eq!(
+            (
+                outcome.frame.actions[0].feature,
+                outcome.frame.actions[0].tag
+            ),
+            (FeatureId::Workspace, 11)
+        );
+    });
+}
+
+#[test]
+fn only_placeholders_that_say_so_are_listed_as_unsupported() {
+    let log = log();
+    let mut features = Features::default();
+    // The shipped placeholders say nothing: the view names no feature itself.
+    assert!(features.unsupported_notes().is_empty());
+    features.install(
+        Recorder::new(FeatureId::Mcp, Availability::Placeholder, &log).with_note("not yet"),
+    );
+    features.install(
+        Recorder::new(FeatureId::Teams, NEEDS_QUERIES, &log).with_note("implemented: not listed"),
+    );
+    assert_eq!(features.unsupported_notes(), [("recorder", "not yet")]);
 }

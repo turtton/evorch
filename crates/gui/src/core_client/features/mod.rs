@@ -22,7 +22,8 @@
 //! | [`Feature::event`] | for each delivered event of the namespace the feature owns, in order, exactly once per snapshot |
 //! | [`Feature::reply`] | the answer to a request the feature sent, matched by the tag it chose |
 //! | [`Feature::render`] | each frame while the feature is available; requests and navigation go out through the [`FeatureContext`] |
-//! | [`Feature::render_selector`] | the project/thread selector at the top of the conversation view; return `true` to replace the built-in one |
+//! | [`Feature::render_selector`] | the project/thread selector at the top of the conversation view; return `true` to replace the built-in one (what was queued is applied either way) |
+//! | [`Feature::unsupported`] | a note for the list of unsupported operations while the feature is a placeholder |
 //!
 //! ## Availability
 //!
@@ -207,6 +208,16 @@ pub struct FeatureFrame {
     pub navigation: Vec<Navigation>,
 }
 
+/// What asking the features for the selector came to.
+#[derive(Debug, Default)]
+pub struct SelectorOutcome {
+    /// A feature drew the selector: the built-in one is to be skipped.
+    pub replaced: bool,
+    /// What the features asked for while being asked, whether or not one of
+    /// them replaced the selector.
+    pub frame: FeatureFrame,
+}
+
 /// What a feature may do while rendering: read the client's view of the core
 /// and queue requests and navigation. They leave after the frame.
 pub struct FeatureContext<'a> {
@@ -281,10 +292,18 @@ pub trait Feature: Send {
     /// Draw the feature. Called only while it is available.
     fn render(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {}
 
+    /// What this area cannot do in this mode, shown in the list of unsupported
+    /// operations while the feature is a [`Availability::Placeholder`]. `None`
+    /// (the default) says nothing: the view never names features itself.
+    fn unsupported(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Draw the project/thread selector instead of the built-in one. Return
     /// `true` if it was drawn: the built-in selector is then skipped. The
-    /// default draws nothing and keeps the built-in selector. Called only while
-    /// the feature is available.
+    /// default draws nothing and keeps the built-in selector. Either way the
+    /// requests and navigation queued through `ctx` are kept and applied. Called
+    /// only while the feature is available.
     fn render_selector(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) -> bool {
         false
     }
@@ -355,14 +374,19 @@ impl Features {
         render_all(&mut self.features, ui, view)
     }
 
-    /// Let an available feature draw the selector. `None`: none did, the
-    /// built-in selector is to be drawn, and nothing was drawn here.
-    pub fn render_selector(
-        &mut self,
-        ui: &mut egui::Ui,
-        view: FeatureView<'_>,
-    ) -> Option<FeatureFrame> {
+    /// Let the available features draw the selector, in order, until one does.
+    pub fn render_selector(&mut self, ui: &mut egui::Ui, view: FeatureView<'_>) -> SelectorOutcome {
         render_selector(&mut self.features, ui, view)
+    }
+
+    /// What the placeholder features say they cannot do (title and note), for
+    /// the list of unsupported operations.
+    pub fn unsupported_notes(&self) -> Vec<(&'static str, &'static str)> {
+        self.features
+            .iter()
+            .filter(|f| f.availability() == Availability::Placeholder)
+            .filter_map(|f| f.unsupported().map(|note| (f.title(), note)))
+            .collect()
     }
 }
 
@@ -445,7 +469,7 @@ fn render_selector(
     features: &mut [Box<dyn Feature>],
     ui: &mut egui::Ui,
     view: FeatureView<'_>,
-) -> Option<FeatureFrame> {
+) -> SelectorOutcome {
     let mut frame = FeatureFrame::default();
     for feature in features
         .iter_mut()
@@ -457,10 +481,16 @@ fn render_selector(
             frame: &mut frame,
         };
         if feature.render_selector(ui, &mut ctx) {
-            return Some(frame);
+            return SelectorOutcome {
+                replaced: true,
+                frame,
+            };
         }
     }
-    None
+    SelectorOutcome {
+        replaced: false,
+        frame,
+    }
 }
 
 #[cfg(test)]

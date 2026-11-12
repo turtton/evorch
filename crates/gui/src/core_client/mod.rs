@@ -344,8 +344,14 @@ impl eframe::App for CoreClientApp {
             &mut self.selected,
             frame,
         );
-        ui.collapsing("未移行の機能 — Unsupported", |ui| {
-            ui.label("設定変更・モデル設定・project 追加・lane 管理・PR 管理・ファイル/terminal/browser・fork/rewind・削除/アーカイブ等はこのモードでは使用できません。直接 DB を開いて補完しません。");
+        // The view names no unsupported feature itself: each area says what it
+        // cannot do (`Feature::unsupported`).
+        let notes = shared.features.unsupported_notes();
+        ui.collapsing("未対応の操作 — Unsupported", |ui| {
+            ui.label("このモードでは、画面に表示されている操作だけが使用できます。それ以外は使用できません。直接 DB を開いて補完しません。");
+            for (title, note) in notes {
+                ui.label(format!("{title}: {note}"));
+            }
         });
         if !shared.connected {
             ui.label("コアへの接続が必要です。embedded runtime へは fallback しません。");
@@ -367,10 +373,10 @@ impl eframe::App for CoreClientApp {
                 };
                 s.features.render_selector(ui, view)
             };
-            let builtin_selector = replaced.is_none();
-            if let Some(frame) = replaced {
-                apply_frame(&self.actions, &mut shared, &mut self.project, &mut self.selected, frame);
-            }
+            // What the features asked for is applied whether or not one of them drew
+            // the selector.
+            let builtin_selector = !replaced.replaced;
+            apply_frame(&self.actions, &mut shared, &mut self.project, &mut self.selected, replaced.frame);
             if builtin_selector {
             ui.horizontal(|ui| {
                 let projects: Vec<_> = shared.cache.projects.values().cloned().collect();
