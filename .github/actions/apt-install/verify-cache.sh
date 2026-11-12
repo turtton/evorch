@@ -13,9 +13,10 @@
 #
 # verify checks, in this order:
 #   1. each lists/*InRelease verifies against the Ubuntu archive keyring and is not
-#      older than the same InRelease in the runner image's own lists, when the image
-#      has one (a signed snapshot older than the image cannot be replayed; the
-#      release pocket's InRelease is never refreshed, so there is no absolute age);
+#      older than the runner image's own InRelease of the same signed Origin and
+#      Suite (the image's must verify too; the file names are not signed and are
+#      never used). A release with no such counterpart is not trusted. There is no
+#      absolute age limit: the release pocket's InRelease is never refreshed;
 #   2. each Packages index (decompressed) has the sha256 that a verified InRelease
 #      lists for a Packages file; any other index is ignored;
 #   3. the sha256 of every *.deb is among the SHA256 fields of those indexes.
@@ -24,7 +25,7 @@
 #
 # Environment (all optional; the defaults are the runner's):
 #   APT_LISTS_DIR              /var/lib/apt/lists (collect: the source of the indexes;
-#                              verify: the image's InRelease files for the age check)
+#                              verify: the image's InRelease files, the baseline)
 #   APT_VERIFY_KEYRINGS        space-separated keyrings, default the Ubuntu archive ones
 #   APT_HELPER                 /usr/lib/apt/apt-helper (reads compressed indexes)
 set -euo pipefail
@@ -86,6 +87,27 @@ case "$mode" in
 
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
+    # What a verified InRelease says about itself: "Origin|Suite|Date as epoch".
+    # The file name is not signed, so it is never used to pair releases.
+    release_identity() { # release_identity <file>; the file must have been verified
+      local origin suite released
+      origin="$(sed -n 's/^Origin: //p' "$1" | head -n 1)"
+      suite="$(sed -n 's/^Suite: //p' "$1" | head -n 1)"
+      released="$(date -d "$(sed -n 's/^Date: //p' "$1" | head -n 1)" +%s 2> /dev/null)" || return 1
+      [[ -n "$origin" && -n "$suite" ]] || return 1
+      printf '%s|%s|%s\n' "$origin" "$suite" "$released"
+    }
+
+    # The image's own InRelease files are the baseline for what is current: they
+    # count only when they verify against the same keyring, and they are paired
+    # with a cached one by the signed Origin and Suite.
+    : > "$tmp/baseline"
+    for release in "$lists_dir"/*InRelease; do
+      [[ -f "$release" ]] || continue
+      gpgv "${keyring_args[@]}" --output "$tmp/image-release" "$release" 2> /dev/null || continue
+      release_identity "$tmp/image-release" >> "$tmp/baseline" || continue
+    done
+
     : > "$tmp/trusted-index-hashes"
     releases_total=0
     releases_ok=0
@@ -93,12 +115,12 @@ case "$mode" in
       [[ -f "$release" ]] || continue
       releases_total=$((releases_total + 1))
       gpgv "${keyring_args[@]}" --output "$tmp/release" "$release" 2> /dev/null || continue
-      released_at="$(date -d "$(sed -n 's/^Date: //p' "$tmp/release" | head -n 1)" +%s 2> /dev/null)" || continue
-      image_release="$lists_dir/${release##*/}"
-      if [[ -f "$image_release" ]]; then
-        image_at="$(date -d "$(sed -n 's/^Date: //p' "$image_release" | head -n 1)" +%s 2> /dev/null)" || image_at=0
-        (( released_at >= image_at )) || continue
-      fi
+      identity="$(release_identity "$tmp/release")" || continue
+      # Without an image release of the same Origin and Suite there is nothing to
+      # tell a current snapshot from a replayed old one, so it is not trusted.
+      newest="$(awk -F'|' -v key="${identity%|*}" '$1 "|" $2 == key && $3 > best { best = $3 } END { if (best != "") print best }' "$tmp/baseline")"
+      [[ -n "$newest" ]] || continue
+      (( ${identity##*|} >= newest )) || continue
       releases_ok=$((releases_ok + 1))
       awk '/^SHA256:/ { in_hashes = 1; next } /^[^ ]/ { in_hashes = 0 } in_hashes && $3 ~ /(^|\/)Packages$/ { print $1 }' \
         "$tmp/release" >> "$tmp/trusted-index-hashes"
