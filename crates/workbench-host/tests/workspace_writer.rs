@@ -699,6 +699,80 @@ fn archive_and_pin_of_a_family_are_projected_into_the_threads_table() {
     );
 }
 
+#[test]
+fn a_failed_database_projection_keeps_the_sidebar_and_converges_on_the_next_read() {
+    let mut f = fixture(vec![thread("root"), fork_of("fork", "root")]);
+    let db_path = f.config.join("host.db");
+    let storage = storage::Storage::open(storage::StorageConfig {
+        db_path: db_path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    f.area = WorkspaceArea::with_store(
+        SidebarStore::new(f.config.join("sidebar.json")),
+        None,
+        vec![f.config.clone()],
+        None,
+        |_| false,
+    )
+    .with_mirror(storage.handle());
+    let family = f.families().remove(0);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    // Fail the actual writer transaction, not a stub of the workspace service.
+    conn.execute_batch(
+        "CREATE TRIGGER fail_workspace_projection BEFORE INSERT ON threads
+        BEGIN SELECT RAISE(FAIL, 'injected workspace projection failure'); END;",
+    )
+    .unwrap();
+    applied(
+        f.send(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
+            thread: wire_thread("root"),
+            archived: true,
+            expected_family: identity_of(&family),
+            expected_revision: family.archive_revision,
+        })),
+    );
+    applied(f.send(WorkspaceCommand::SetFamilyPinned(SetFamilyPinned {
+        thread: wire_thread("root"),
+        pinned: true,
+        expected_family: identity_of(&family),
+        expected_revision: family.pin_revision,
+    })));
+    let saved = f.store.read_unlocked().unwrap();
+    for id in ["root", "fork"] {
+        let state = saved.sidebar.resolve_states()[&ThreadId::new(id)].clone();
+        assert!(
+            state.archived && state.pinned,
+            "sidebar remains authoritative for {id}"
+        );
+    }
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM threads", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "the failure really prevented database projection");
+    let bytes = std::fs::read(f.store.path()).unwrap();
+    conn.execute_batch("DROP TRIGGER fail_workspace_projection;")
+        .unwrap();
+    // A read repairs the projection from the latest saved state; no edit retry.
+    let _ = f.detail("root");
+    for id in ["root", "fork"] {
+        let state: (bool, bool) = conn
+            .query_row(
+                "SELECT archived, pinned FROM threads WHERE thread_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (true, true));
+    }
+    assert_eq!(
+        std::fs::read(f.store.path()).unwrap(),
+        bytes,
+        "repair is not a sidebar mutation"
+    );
+    storage.close();
+}
+
 /// The ledger says a lane is detached while the saved sidebar still holds it
 /// under its lead: a pin must be applied to the repaired family, and a pin
 /// decided for the old family must be refused.
