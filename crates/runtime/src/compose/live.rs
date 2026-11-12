@@ -49,6 +49,25 @@ impl SwitchableModel {
 
 #[async_trait]
 impl AgentModel for SwitchableModel {
+    fn validate_checkpoint_compatibility(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        pins: &[crate::RoutePinRecord],
+        input: Option<&crate::quiesce::ProviderInput>,
+    ) -> Result<(), RuntimeError> {
+        self.current()
+            .validate_checkpoint_compatibility(invocation, role, pins, input)
+    }
+    fn adopt_recovery_checkpoint(
+        &self,
+        run_id: &str,
+        pins: &[crate::RoutePinRecord],
+        input: Option<&crate::quiesce::ProviderInput>,
+    ) {
+        self.current()
+            .adopt_recovery_checkpoint(run_id, pins, input);
+    }
     fn restore_checkpoint_provider_state(
         &self,
         run_id: &str,

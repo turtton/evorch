@@ -14,8 +14,10 @@ mod child_renewal;
 mod completion_relay;
 mod held_messages;
 mod host_prompt;
+mod recovery_activation;
 mod recovery_graph;
 pub(crate) use host_prompt::HostPrompt;
+pub use recovery_activation::{CurrentRecoveryAuthority, PausedRecoveryComponent};
 mod nested_orchestrator;
 mod output;
 mod project;
@@ -197,6 +199,7 @@ pub(crate) struct Shared {
     /// Read-only directories per thread id (ADR 0037), read when a run builds its sandbox.
     pub(crate) thread_read_dirs: Mutex<HashMap<String, Vec<PathBuf>>>,
     next_message_id: AtomicU64,
+    recovery_message_ids_safe: AtomicBool,
     next_reference_token: AtomicU64,
     pub(crate) runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
@@ -314,6 +317,18 @@ impl PendingReference {
         row.id = format!("{:x}", Sha256::digest(format!("{}|{reference}", row.id)));
         row.reference_context = Some(reference);
     }
+}
+
+// Candidates own execution channels without being visible in runs/admissions.
+// A recovery activation builds every member before publishing any of them.
+struct PreparedRunCandidate {
+    task: RunTask,
+    channels: LoopChannels,
+    entry: RunEntry,
+    start_capture: Option<(String, std::path::PathBuf)>,
+    worker_slot: Option<Result<tokio::sync::OwnedSemaphorePermit, String>>,
+    prompt_origin: Option<crate::PromptOrigin>,
+    review_run: crate::escalation_review::ReviewRunContext,
 }
 
 pub(crate) struct RunEntry {
@@ -833,6 +848,7 @@ impl AgentRuntime {
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
+                recovery_message_ids_safe: AtomicBool::new(true),
                 next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -862,6 +878,27 @@ impl AgentRuntime {
 
     /// 終端保存先を接続する。設定済みの場合は先勝ちで変更しない。
     pub fn with_run_store(self, store: crate::RunStore) -> Self {
+        if self.shared.run_store.get().is_some() {
+            return self;
+        }
+        // Reserve all committed components before the first new send. A late
+        // store attachment cannot prove earlier IDs were disjoint: keep normal
+        // operation available, but refuse recovery rather than miscorrelating.
+        if self
+            .shared
+            .next_message_id
+            .compare_exchange(
+                1,
+                store.next_recovery_message_id,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            self.shared
+                .recovery_message_ids_safe
+                .store(false, Ordering::Release);
+        }
         if let Some(latest) = store.latest_run_id {
             self.shared.run_ids.observe(latest);
         }
@@ -1189,6 +1226,7 @@ impl AgentRuntime {
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
+                recovery_message_ids_safe: AtomicBool::new(true),
                 next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -1335,6 +1373,36 @@ impl AgentRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn register_run(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
+        config: RunConfig,
+        continuation: RunContinuation,
+        review_seed: Option<ReviewSeed>,
+        execution: Arc<ExecutionControl>,
+        intents: &HashMap<RunId, cancellation::SpawnIntent>,
+    ) -> RunId {
+        let Some(candidate) = self.build_run_candidate(
+            run_id,
+            parent,
+            role,
+            prompt,
+            config,
+            continuation,
+            review_seed,
+            execution,
+            intents,
+            true,
+        ) else {
+            return run_id;
+        };
+        self.publish_run_candidate(candidate, None)
+    }
+
     // Keep host provenance explicit at this installation boundary.
     #[allow(clippy::too_many_arguments)]
     fn spawn_run_with_handoff(
@@ -1374,9 +1442,33 @@ impl AgentRuntime {
         parent: Option<RunId>,
         role: Role,
         prompt: String,
+        config: RunConfig,
+        continuation: RunContinuation,
+        review_seed: Option<ReviewSeed>,
+    ) -> Result<RunAdmission, RuntimeError> {
+        self.try_spawn_run_preadmitted(
+            run_id,
+            parent,
+            role,
+            prompt,
+            config,
+            continuation,
+            review_seed,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_spawn_run_preadmitted(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
         mut config: RunConfig,
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
+        preadmitted: Option<Arc<ExecutionControl>>,
     ) -> Result<RunAdmission, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard().inspect_err(|error| {
             self.fail_admission(run_id, parent, &config, error.clone());
@@ -1438,6 +1530,14 @@ impl AgentRuntime {
                 });
             }
         }
+        if intents
+            .get(&run_id)
+            .is_some_and(|intent| intent.paused_recovery.is_some())
+        {
+            return Err(RuntimeError::Model {
+                reason: "run belongs to a paused recovery component".into(),
+            });
+        }
         // An explicitly validated conversation restore starts a new generation of
         // this root. Keep old descendants fenced, but preserve discard-then-resume
         // in place; fresh/in-flight spawns must still inherit cancellation.
@@ -1457,19 +1557,22 @@ impl AgentRuntime {
             .get(&run_id)
             .and_then(|intent| intent.parent)
             .or(parent);
-        if self.shared.quiesce.active(run_id) {
+        if preadmitted.is_none() && self.shared.quiesce.active(run_id) {
             return Err(RuntimeError::Model {
                 reason: "durable intent is still active".into(),
             });
         }
         // Pre-admission reservations and registration share a single execution.
         // An explicit resume or replacement of a registered run starts a new one.
-        let execution =
-            if !resets_cancellation && !lock_runs(&self.shared.runs).contains_key(&run_id) {
-                intents.get(&run_id).and_then(|i| i.execution.clone())
-            } else {
-                None
-            }
+        let execution = preadmitted
+            .clone()
+            .or_else(|| {
+                if !resets_cancellation && !lock_runs(&self.shared.runs).contains_key(&run_id) {
+                    intents.get(&run_id).and_then(|i| i.execution.clone())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| ExecutionControl::new(cancelled));
         let execution = if cancelled && !execution.cancelled() {
             ExecutionControl::new(true)
@@ -1487,18 +1590,23 @@ impl AgentRuntime {
                 cancelled,
                 cancellation_generation,
                 execution: Some(Arc::clone(&execution)),
+                paused_recovery: None,
             },
         );
-        match self.admit_intent(
-            run_id,
-            execution.publication().incarnation(),
-            parent,
-            role,
-            &prompt,
-            &config,
-            matches!(&continuation, RunContinuation::Resume { .. }),
-            true,
-        ) {
+        match if preadmitted.is_some() {
+            Ok(true)
+        } else {
+            self.admit_intent(
+                run_id,
+                execution.publication().incarnation(),
+                parent,
+                role,
+                &prompt,
+                &config,
+                matches!(&continuation, RunContinuation::Resume { .. }),
+                true,
+            )
+        } {
             Ok(true) => {}
             Ok(false) => {
                 self.reserve_admission_for(
@@ -1576,7 +1684,7 @@ impl AgentRuntime {
 
     // Keep host provenance explicit at this installation boundary.
     #[allow(clippy::too_many_arguments)]
-    fn register_run(
+    fn build_run_candidate(
         &self,
         run_id: RunId,
         parent: Option<RunId>,
@@ -1587,7 +1695,8 @@ impl AgentRuntime {
         review_seed: Option<ReviewSeed>,
         execution: Arc<ExecutionControl>,
         intents: &HashMap<RunId, cancellation::SpawnIntent>,
-    ) -> RunId {
+        inherit_parent: bool,
+    ) -> Option<PreparedRunCandidate> {
         // I and A are held by the registration caller. Observing cancellation
         // is nonblocking: only G may change this flag, monotonically.
         if intents.get(&run_id).is_none_or(|intent| {
@@ -1596,7 +1705,7 @@ impl AgentRuntime {
                 .as_ref()
                 .is_none_or(|current| !Arc::ptr_eq(current, &execution))
         }) {
-            return run_id;
+            return None;
         }
         debug_assert!(!intents.get(&run_id).is_some_and(|i| i.cancelled) || execution.cancelled());
         let completion_relayed = matches!(continuation, RunContinuation::Awaited);
@@ -1662,7 +1771,7 @@ impl AgentRuntime {
             config.budget = config.budget.clone().with_unlimited_resources();
         }
         self.shared.bind_project(parent, &mut config);
-        if let Some(parent) = parent {
+        if inherit_parent && let Some(parent) = parent {
             if let Some(entry) = lock_runs(&self.shared.runs).get(&parent) {
                 config.topology = entry.config.topology;
                 config.team = entry.config.team.clone();
@@ -1673,7 +1782,7 @@ impl AgentRuntime {
                 .and_then(|entry| entry.config.ownership.clone())
                 .or(config.ownership);
         }
-        if parent.is_none() {
+        if inherit_parent && parent.is_none() {
             config.team = None;
         }
         let team_setup = if (config.topology.worker_limit().is_some() || config.team.is_some())
@@ -1708,7 +1817,9 @@ impl AgentRuntime {
             })),
             _ => None,
         };
-        self.install_run_ownership_guard(run_id, &mut config);
+        if let Some(permit) = &mut config.ownership {
+            permit.run_id = Some(run_id.to_string());
+        }
         let start_capture = start_thread.zip(
             self.shared
                 .run_project(&config)
@@ -1750,11 +1861,6 @@ impl AgentRuntime {
         } else {
             crate::escalation_review::ReviewRunContext::empty(&run_id.to_string())
         };
-        self.shared
-            .review_runs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(run_id, review_run);
         let prompt = match &config.memory {
             Some(memory) if handoff.is_none() && !history_only => memory.augment(prompt),
             Some(_) | None => prompt,
@@ -1803,7 +1909,6 @@ impl AgentRuntime {
                 None
             }
         };
-        self.bind_approval_owner(run_id, &config, &execution);
         let task = RunTask {
             startup_failure: execution
                 .startup_failure
@@ -1828,7 +1933,7 @@ impl AgentRuntime {
             restored: None,
             initial_prompt_id,
         };
-        let mut task = match restored {
+        let task = match restored {
             Some(restored) => restored.attach_to(task),
             None => task,
         };
@@ -1844,42 +1949,79 @@ impl AgentRuntime {
             compaction_busy: compaction_busy.clone(),
             result_tx,
         };
+        let entry = RunEntry {
+            terminal_reason: None,
+            idle_turn: None,
+            role,
+            name: name.clone(),
+            model,
+            config: config.clone(),
+            parent,
+            escalated_from,
+            completion_relayed,
+            completion_notice: crate::mailbox::CompletionNotice::new(
+                parent,
+                run_id,
+                self.shared
+                    .next_completion_generation
+                    .fetch_add(1, Ordering::Relaxed),
+            ),
+            phase_tx: phase_tx_entry,
+            phase_rx,
+            message_count_rx,
+            inbox_tx,
+            user_inbox,
+            pending_reference: Arc::new(Mutex::new(pending_reference)),
+            execution,
+            compact_tx,
+            model_preference_tx,
+            result_rx,
+            compaction_busy: Arc::clone(&compaction_busy),
+            mailbox: Arc::clone(&mailbox),
+            _join: None,
+        };
+        Some(PreparedRunCandidate {
+            task,
+            channels,
+            entry,
+            start_capture,
+            worker_slot,
+            prompt_origin,
+            review_run,
+        })
+    }
+
+    fn publish_run_candidate(
+        &self,
+        candidate: PreparedRunCandidate,
+        start_gate: Option<watch::Receiver<bool>>,
+    ) -> RunId {
+        let PreparedRunCandidate {
+            mut task,
+            channels,
+            mut entry,
+            start_capture,
+            worker_slot,
+            prompt_origin,
+            review_run,
+        } = candidate;
+        let run_id = task.run_id;
+        let parent = entry.parent;
+        let role = entry.role;
+        let name = entry.name.clone();
+        self.install_run_ownership_guard(run_id, &mut task.config);
+        entry.config = task.config.clone();
+        let config = entry.config.clone();
+        let mailbox = Arc::clone(&entry.mailbox);
+        self.bind_approval_owner(run_id, &config, &entry.execution);
+        self.shared
+            .review_runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(run_id, review_run);
         {
             let mut runs = lock_runs(&self.shared.runs);
-            runs.insert(
-                run_id,
-                RunEntry {
-                    terminal_reason: None,
-                    idle_turn: None,
-                    role,
-                    name: name.clone(),
-                    model,
-                    config: config.clone(),
-                    parent,
-                    escalated_from,
-                    completion_relayed,
-                    completion_notice: crate::mailbox::CompletionNotice::new(
-                        parent,
-                        run_id,
-                        self.shared
-                            .next_completion_generation
-                            .fetch_add(1, Ordering::Relaxed),
-                    ),
-                    phase_tx: phase_tx_entry,
-                    phase_rx,
-                    message_count_rx,
-                    inbox_tx,
-                    user_inbox,
-                    pending_reference: Arc::new(Mutex::new(pending_reference)),
-                    execution,
-                    compact_tx,
-                    model_preference_tx,
-                    result_rx,
-                    compaction_busy: Arc::clone(&compaction_busy),
-                    mailbox: Arc::clone(&mailbox),
-                    _join: None,
-                },
-            );
+            runs.insert(run_id, entry);
             // The host wake may have been delayed while the question was answered.
             // Recheck receipts at registration, without any storage read or prefix edit.
             let automatic = self
@@ -1909,7 +2051,9 @@ impl AgentRuntime {
             }
             self.release_held_messages(run_id, &mailbox);
             drop(runs);
-            self.schedule_question_recovery(run_id);
+            if start_gate.is_none() {
+                self.schedule_question_recovery(run_id);
+            }
         }
         if let Some(parent) = parent {
             // Admission and registration succeeded. Failed/pending admissions
@@ -1932,6 +2076,11 @@ impl AgentRuntime {
             reservation.commit();
         }
         if task.restored.is_some() {
+            // Lifecycle notices must still be emitted when numeric delivery IDs
+            // are exhausted; this separate namespace cannot grant reply authority.
+            let message_id = self.allocate_message_id().unwrap_or_else(|_| {
+                format!("restored-{}-{}", run_id, task.publication.incarnation())
+            });
             self.shared
                 .bus
                 .emit(Event::new(LifecycleEvent::AgentRunRestored {
@@ -1940,10 +2089,7 @@ impl AgentRuntime {
                         .ownership
                         .as_ref()
                         .map_or_else(|| "user".into(), |permit| permit.lease.owner_id.clone()),
-                    message_id: format!(
-                        "msg-{}",
-                        self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
-                    ),
+                    message_id,
                 }));
         }
         self.shared
@@ -1984,8 +2130,50 @@ impl AgentRuntime {
                 task_id: run_id.to_string(),
             }));
         let weak = Arc::downgrade(&self.shared);
-        let learning = self.prepare_learning(&task);
+        let learning = start_gate
+            .is_none()
+            .then(|| self.prepare_learning(&task))
+            .flatten();
         let join = tokio::spawn(async move {
+            let learning = if let Some(mut gate) = start_gate {
+                while !*gate.borrow_and_update() {
+                    if gate.changed().await.is_err() {
+                        return;
+                    }
+                }
+                let Some(shared) = weak.upgrade() else {
+                    return;
+                };
+                let runtime = AgentRuntime { shared };
+                let model = runtime.shared.model_for(&task.config);
+                if model.requires_admission() {
+                    let invocation = crate::AgentInvocationContext {
+                        btw: None,
+                        attempts: None,
+                        turn: None,
+                        run_id: run_id.to_string(),
+                        model_preference: task.config.model_preference.clone(),
+                        category: task.config.category.clone(),
+                        purpose: event_bus::RequestPurpose::Agent,
+                    };
+                    let mut cancellation = channels.cancel_rx.clone();
+                    let admission = crate::panic_capture::catch_panic(async {
+                        tokio::select! {
+                            biased;
+                            _ = cancellation.wait_for(|signal| matches!(signal, RunInterrupt::Stop | RunInterrupt::Cancel)) =>
+                                Err(RuntimeError::RunTerminated { run_id: run_id.to_string() }),
+                            result = model.admit(&invocation, task.role) => result,
+                        }
+                    }).await.unwrap_or_else(|panic| Err(RuntimeError::Model { reason: format!("provider admission panicked: {}", panic.message) }));
+                    if let Err(error) = admission {
+                        task.startup_failure = Some(error.to_string());
+                    }
+                }
+                runtime.schedule_question_recovery(run_id);
+                runtime.prepare_learning(&task)
+            } else {
+                learning
+            };
             let _slot = match worker_slot {
                 Some(Ok(slot)) => Some(slot),
                 Some(Err(reason)) => {
@@ -2832,6 +3020,33 @@ impl AgentRuntime {
         for target in &targets {
             self.ensure_no_saved_compaction(*target)?;
         }
+        let paused = {
+            let indexes = self
+                .shared
+                .spawn_intents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            targets
+                .iter()
+                .filter_map(|id| {
+                    indexes.get(id).and_then(|index| {
+                        index.paused_recovery.as_ref().map(|paused| {
+                            (
+                                *id,
+                                (paused.old_incarnation.clone(), index.execution.clone()),
+                            )
+                        })
+                    })
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        // Stop gates pin these identities, without a database wait under runs.
+        for (id, (old, execution)) in &paused {
+            if let Some(execution) = execution {
+                execution.stop_admission();
+            }
+            self.fence_paused_stop(*id, old, crate::quiesce::StopReason::OperatorStopped)?;
+        }
         self.goal_work_stopped(run_id);
         let mut admissions = self
             .shared
@@ -2841,6 +3056,7 @@ impl AgentRuntime {
         // Keep the same admissions -> runs fence as cancel and registration.
         let runs = lock_runs(&self.shared.runs);
         if !runs.contains_key(&run_id)
+            && !paused.contains_key(&run_id)
             && !admissions
                 .get(&run_id)
                 .is_some_and(|admission| admission.result.borrow().is_none())
@@ -2861,6 +3077,10 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for target in targets {
+            if paused.contains_key(&target) {
+                operator_stops.insert(target);
+                continue;
+            }
             if let Some(admission) = admissions.get_mut(&target)
                 && admission.result.borrow().is_none()
             {
@@ -2968,6 +3188,31 @@ impl AgentRuntime {
     /// or [`RuntimeError::LaneCancellation`] if a pending lane cannot be durably
     /// cancelled. No success is acknowledged before its intent is blocked.
     pub fn cancel_subtree(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        let mut targets = self.run_subtree_ids(run_id).into_iter().collect::<Vec<_>>();
+        targets.sort_unstable();
+        // Ordinary cancellation must still interrupt a Continue which holds its
+        // Stop gate. Only paused identities need this additional release fence.
+        let paused_targets = {
+            let indexes = self
+                .shared
+                .spawn_intents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            targets
+                .into_iter()
+                .filter(|id| indexes.get(id).is_some_and(|i| i.paused_recovery.is_some()))
+                .collect::<HashSet<_>>()
+        };
+        let mut paused_ids = paused_targets.iter().copied().collect::<Vec<_>>();
+        paused_ids.sort_unstable();
+        let gates = paused_ids
+            .iter()
+            .map(|run| self.stop_restore_gate(*run))
+            .collect::<Vec<_>>();
+        let _stop = gates
+            .iter()
+            .map(|g| g.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+            .collect::<Vec<_>>();
         // Collection and the inherited fence use I -> A -> R. Cancellation of
         // the collected executions happens only after releasing these locks.
         let mut intents = self
@@ -2989,11 +3234,27 @@ impl AgentRuntime {
         }
         let ownership = Self::pending_lane_cancellation_ownership(run_id, &runs, &admissions);
         let mut cancellations = Vec::new();
-        for target in Self::collect_subtree_ids(run_id, &intents, &runs) {
+        let mut paused_stops = Vec::new();
+        let subtree = Self::collect_subtree_ids(run_id, &intents, &runs);
+        if subtree.iter().any(|id| {
+            intents.get(id).is_some_and(|i| i.paused_recovery.is_some())
+                && !paused_targets.contains(id)
+        }) {
+            return Err(RuntimeError::Model {
+                reason: "recovery registration raced subtree cancellation; retry cancellation"
+                    .into(),
+            });
+        }
+        for target in subtree {
             if let Some(execution) =
                 cancellation::current_execution(target, &intents, &admissions, &runs)
             {
-                if let Some(admission) = admissions.get_mut(&target)
+                if let Some(paused) = intents
+                    .get(&target)
+                    .and_then(|i| i.paused_recovery.as_ref())
+                {
+                    paused_stops.push((target, paused.old_incarnation.clone()));
+                } else if let Some(admission) = admissions.get_mut(&target)
                     && Arc::ptr_eq(&admission.execution, &execution)
                 {
                     admission.cancelled = true;
@@ -3023,10 +3284,21 @@ impl AgentRuntime {
         drop(runs);
         drop(admissions);
         drop(intents);
+        let mut paused_error = None;
+        for (target, old) in paused_stops {
+            if let Err(error) =
+                self.fence_paused_stop(target, &old, crate::quiesce::StopReason::Cancelled)
+            {
+                paused_error = Some(error);
+            }
+        }
         for execution in cancellations {
             #[cfg(test)]
             self.execution_hook(cancellation::HookPoint::SubtreeCollected, &execution);
             self.cancel_execution(&execution);
+        }
+        if let Some(error) = paused_error {
+            return Err(error);
         }
         self.persist_lane_start_cancellation(
             run_id,
@@ -3480,10 +3752,7 @@ impl AgentRuntime {
             None
         };
 
-        let message_id = format!(
-            "msg-{}",
-            self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
-        );
+        let message_id = self.allocate_message_id()?;
 
         queued.message.message_id.clone_from(&message_id);
         let message = queued.message.clone();
@@ -3572,6 +3841,24 @@ impl AgentRuntime {
     /// # Errors
     /// [`RuntimeError::UnknownMessage`] for an unknown or foreign message,
     /// [`RuntimeError::RunTerminated`] once the recipient is gone.
+    /// Validated identity for a durable reply continuation, without consuming it.
+    pub(crate) fn reply_wait_target(
+        &self,
+        requester: RunId,
+        message_id: &str,
+    ) -> Result<RunId, RuntimeError> {
+        self.shared
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(message_id)
+            .filter(|record| record.sender == requester)
+            .map(|record| record.recipient)
+            .ok_or_else(|| RuntimeError::UnknownMessage {
+                message_id: message_id.to_owned(),
+            })
+    }
+
     pub(crate) fn check_reply_wait(
         &self,
         run_id: RunId,
@@ -3734,6 +4021,24 @@ impl AgentRuntime {
                 reason: None,
             }));
         Ok(())
+    }
+
+    fn allocate_message_id(&self) -> Result<String, RuntimeError> {
+        self.shared
+            .next_message_id
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+            .map(|id| format!("msg-{id}"))
+            .map_err(|_| RuntimeError::Model {
+                reason: "message ID allocator exhausted".into(),
+            })
+    }
+
+    /// Recovery alone commits an elapsed deadline before looking at queued input.
+    pub(crate) fn expire_recovery_reply_wait(&self, message_id: &str) -> RuntimeError {
+        self.remove_sent_record(message_id);
+        RuntimeError::ReplyTimeout {
+            message_id: message_id.to_owned(),
+        }
     }
 
     fn remove_sent_record(&self, message_id: &str) {
@@ -4671,6 +4976,10 @@ mod comment_checker_tests;
 #[cfg(test)]
 #[path = "runtime/project_switch_tests.rs"]
 mod project_switch_tests;
+
+#[cfg(test)]
+#[path = "runtime/recovery_registration_tests.rs"]
+mod recovery_registration_tests;
 
 #[cfg(test)]
 use crate::escalation_review::support as comment_checker_support;

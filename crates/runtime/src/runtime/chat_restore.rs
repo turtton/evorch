@@ -6,6 +6,7 @@ pub(crate) use reservation::SnapshotReservation;
 mod deferred_resume;
 pub use deferred_resume::ChatResumeObservation;
 pub(super) use deferred_resume::ResumeFence;
+mod recovery;
 mod renewal;
 mod reservation;
 #[cfg(test)]
@@ -376,7 +377,29 @@ impl AgentRuntime {
             self.validate_new_thread_goal(thread, objective, criteria)
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         }
-        let mut restored = RestoredState::for_conversation_bundle(&bundle)?;
+        let recovery_continue = self.prepare_recovery_continue(
+            store,
+            run_id,
+            operator_resume,
+            prompt.map(|_| crate::quiesce::DurableInput {
+                id: prompt_id.clone().unwrap_or_else(|| "initial".into()),
+                text: sent.unwrap_or_default().into(),
+                images: authority.images.clone(),
+                trusted_user: true,
+            }),
+        )?;
+        let abort_waits = operator_resume && !descriptor.recovery_waits.is_empty();
+        let mut restored = if abort_waits {
+            RestoredState::for_human_recovery_bundle(&bundle)?
+        } else {
+            RestoredState::for_conversation_bundle(&bundle)?
+        };
+        if abort_waits {
+            descriptor.recovery_waits.clear();
+            descriptor.recovery_boundary = None;
+            record.messages_json =
+                serde_json::to_string(&restored.messages).expect("validated history serializes");
+        }
         let mut host_input = storage::HostInputWrite {
             reconcile_reason: Some("restored".into()),
             ..Default::default()
@@ -525,25 +548,44 @@ impl AgentRuntime {
                     "snapshot revision is unknown".into(),
                 ))
             })?;
-            let (saved, reconciled) = store
-                .handle
-                .save_snapshot_bundle_with_evidence_and_host_inputs(
-                    &restored
-                        .provenance
-                        .write(record.clone(), expected)
-                        .map_err(|error| {
-                            fail(RunRestoreFailure::CorruptContext(error.to_string()))
-                        })?,
+            let write = restored
+                .provenance
+                .write(record.clone(), expected)
+                .map_err(|e| fail(RunRestoreFailure::CorruptContext(e.to_string())))?;
+            let reference = prompt
+                .and(pending_reference.as_ref())
+                .map(|p| p.reference_id.as_str());
+            let _recovery_authority = recovery_continue
+                .as_ref()
+                .and(authority.ownership.as_ref())
+                .map(|permit| permit.mutation_guard())
+                .transpose()
+                .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
+            let (saved, reconciled) = if let Some(recovery) = &recovery_continue {
+                store.handle.save_recovery_continue(
+                    &write,
                     &evidence,
-                    &[],
-                    prompt
-                        .and(pending_reference.as_ref())
-                        .map(|pending| pending.reference_id.as_str()),
+                    reference,
                     &host_input,
+                    recovery.fence.clone(),
                 )
-                .map_err(|error| {
-                    Self::review_error(run_id, crate::restore::provenance::storage_error(error))
-                })?;
+            } else {
+                store
+                    .handle
+                    .save_snapshot_bundle_with_evidence_and_host_inputs(
+                        &write,
+                        &evidence,
+                        &[],
+                        reference,
+                        &host_input,
+                    )
+            }
+            .map_err(|error| {
+                Self::review_error(run_id, crate::restore::provenance::storage_error(error))
+            })?;
+            if let Some(recovery) = &recovery_continue {
+                self.shared.quiesce.adopt([recovery.intent.clone()], true);
+            }
             restored.snapshot_revision.commit(saved.snapshot_revision);
             for row in evidence {
                 shared.add_request(crate::run_store::request_from_evidence(row));
@@ -677,7 +719,7 @@ impl AgentRuntime {
                     .map_err(|e| fail(RunRestoreFailure::CorruptContext(e.to_string())))?;
             }
         }
-        let admission = self.try_spawn_run_with_handoff(
+        let admission = self.try_spawn_run_preadmitted(
             run_id,
             None,
             role,
@@ -685,6 +727,7 @@ impl AgentRuntime {
             config,
             continuation,
             review_seed,
+            recovery_continue.map(|recovery| recovery.execution),
         )?;
         #[cfg(test)]
         if let Some(execution) = source_execution {

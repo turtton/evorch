@@ -121,6 +121,7 @@ enum Command {
         Box<crate::thread_index::SnapshotWrite>,
         crate::resume_intent::ResumeIntentRecord,
         Option<String>,
+        Option<u64>,
         SnapshotReplyTx,
     ),
     SaveSnapshotBundleWithEvidence(
@@ -129,6 +130,7 @@ enum Command {
         Vec<crate::LineageEdge>,
         Option<String>,
         crate::HostInputWrite,
+        Option<crate::resume_intent::RecoveryContinueFence>,
         SnapshotReplyTx<(
             crate::thread_index::SnapshotReceipt,
             Vec<crate::HostInputTransition>,
@@ -648,6 +650,7 @@ impl StorageHandle {
                 edges.to_vec(),
                 consumed_reference_id.map(String::from),
                 host_inputs.clone(),
+                None,
                 reply,
             )
         })

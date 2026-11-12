@@ -64,6 +64,37 @@ pub struct AgentInvocationContext {
 /// (routing profiles) がモデル解決に使う引数である。
 #[async_trait]
 pub trait AgentModel: Send + Sync {
+    /// Pure, fail-closed recovery check. No provider/tool calls or shared route mutation.
+    ///
+    /// Callers must load and publish any output-limit catalog needed to prove
+    /// the effective settings before validation/activation. This method never
+    /// loads missing catalog data as a side effect.
+    fn validate_checkpoint_compatibility(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        pins: &[RoutePinRecord],
+        input: Option<&crate::quiesce::ProviderInput>,
+    ) -> Result<(), RuntimeError> {
+        if input.is_none() && pins.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeError::Model {
+                reason: "model cannot validate recovery checkpoint".into(),
+            })
+        }
+    }
+
+    /// Infallible adoption of a previously validated checkpoint, after durable ACK.
+    fn adopt_recovery_checkpoint(
+        &self,
+        run_id: &str,
+        pins: &[RoutePinRecord],
+        _input: Option<&crate::quiesce::ProviderInput>,
+    ) {
+        self.restore_route_pins(run_id, pins);
+    }
+
     /// Exact last provider input, not a reconstruction from current settings.
     /// Models that cannot expose it cannot produce restart-safe checkpoints.
     fn checkpoint_provider_input(&self, _run_id: &str) -> Option<crate::quiesce::ProviderInput> {

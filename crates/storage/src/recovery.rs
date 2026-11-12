@@ -1,5 +1,8 @@
 //! Component-scoped graph receipts and durable, revision-fenced claims (PR 06a).
 //! Payloads are runtime-owned. No method here starts work or grants authority.
+mod activation;
+pub use activation::*;
+
 use crate::{Database, RunContextReceipt, StorageError};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -78,6 +81,8 @@ pub(crate) enum Write {
     Commit(String),
     Claim(RecoveryClaimRequest),
     Validate(String),
+    Activate(RecoveryActivationRequest),
+    Release { claim_id: String, reason: String },
 }
 #[derive(Debug)]
 pub(crate) enum Written {
@@ -266,6 +271,10 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
                 Written::Saved
             }
             Write::Claim(request) => Written::Claimed(prepare_claim(&tx, &request)?),
+            Write::Activate(request) => Written::Claimed(activation::activate(&tx, &request)?),
+            Write::Release { claim_id, reason } => {
+                Written::Claimed(activation::release(&tx, &claim_id, &reason)?)
+            }
             Write::Validate(id) => {
                 validate_claim(&tx, &id)?;
                 Written::Saved

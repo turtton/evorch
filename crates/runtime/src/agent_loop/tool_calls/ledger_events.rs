@@ -30,7 +30,12 @@ impl LoopState {
         }
     }
 
-    pub(super) fn ledger_tool_completed(&self, name: &str, id: &str, result: &ToolResult) {
+    pub(in crate::agent_loop) fn ledger_tool_completed(
+        &self,
+        name: &str,
+        id: &str,
+        result: &ToolResult,
+    ) {
         if is_visible_op(name) {
             self.shared.bus.emit(Event::new(ToolEvent::ToolCompleted {
                 tool_name: name.into(),

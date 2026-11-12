@@ -513,6 +513,7 @@ impl BootstrappedHost {
         // chat's Waiting state, count that idle conversation as no work. Until
         // then retain all Waiting runs conservatively to avoid losing them.
         self.evaluations.is_busy()
+            || self.runtime.has_paused_recovery()
             || self.runtime.pending_lane_stop_writes() != 0
             || !self.runtime.pending_lane_admissions().is_empty()
             || self.host.lock().unwrap().service().has_background_work()

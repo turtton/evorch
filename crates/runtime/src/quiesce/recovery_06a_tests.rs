@@ -283,8 +283,27 @@ async fn root_policy_is_inherited_and_unfinished_wait_is_blocked_in_06a() {
                 tool_name: "wait".into(),
                 legacy_result: false,
                 consume_mailbox: true,
+                payload: None,
             },
         });
+    // The 06a reason now means an invalid ToolsWaiting proof, not a blanket
+    // rejection of waits: this forged ID has no unfinished tool-use or boundary.
+    let snapshot = f
+        .runtime
+        .shared
+        .run_store
+        .get()
+        .unwrap()
+        .restore_record(root)
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::restore::validate_recovery_waits(
+            &snapshot,
+            &records.iter().find(|r| r.run_id == root).unwrap().waits,
+        )
+        .is_err()
+    );
     assert_eq!(
         f.runtime
             .save_recovery_graph("wait", &records)

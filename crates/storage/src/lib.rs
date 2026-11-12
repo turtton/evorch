@@ -109,8 +109,8 @@ pub use host_input::{
     HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
 };
 pub use maintenance::offline::{
-    ExclusiveLeases, SharedLeases, improvement_lease, reclaim_lease, shared_with_wait,
-    try_exclusive,
+    ExclusiveLeases, RecoveryStartupComplete, SharedLeases, improvement_lease, reclaim_lease,
+    shared_with_wait, try_exclusive,
 };
 pub use migrations::backfill::{
     BackfillProgress, DEFAULT_BACKFILL_BATCH_ROWS, EventBackfillOptions, EventBackfillSummary,

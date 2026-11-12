@@ -14,6 +14,8 @@ pub struct RunStore {
     database: Mutex<Database>,
     /// Largest run ID already reserved in storage, so new IDs never reuse it.
     pub(crate) latest_run_id: Option<RunId>,
+    /// Reserved before any send, even if a component is activated much later.
+    pub(crate) next_recovery_message_id: u64,
     pub(crate) restore_gate: Mutex<()>,
 }
 
@@ -264,11 +266,28 @@ impl RunStore {
                 .map_err(|error| StorageError::Serialization(error.to_string()))?;
             latest_run_id = latest_run_id.max(Some(id));
         }
+        // Invalid/old members are not executable; do not let one corrupt
+        // component prevent unrelated components from loading. Include retired
+        // manifests as well: completed reply receipts no longer exist in sent.
+        let next_recovery_message_id = database
+            .recovery_manifests()?
+            .into_iter()
+            .filter_map(|load| load.record.ok())
+            .filter(|manifest| manifest.committed)
+            .flat_map(|manifest| manifest.members)
+            .filter_map(|member| {
+                serde_json::from_str::<crate::quiesce::RunRecoveryRecord>(&member.record_json).ok()
+            })
+            .map(|record| record.next_message_id)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         Ok(Self {
             db_path: config.db_path.clone(),
             handle,
             database: Mutex::new(database),
             latest_run_id,
+            next_recovery_message_id,
             restore_gate: Mutex::new(()),
         })
     }

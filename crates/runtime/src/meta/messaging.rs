@@ -137,30 +137,83 @@ pub(super) async fn wait_reply(
     }
     // Answers already in the history do not end the wait; a new one does, and
     // flush_user_answers injects its text after this tool result.
-    let delivered = state.delivered_answer_ids();
+    let mut delivered = state.delivered_answer_ids();
+    let call_id = state.meta_call_id.clone().unwrap_or_default();
+    let saved = state
+        .recovery_waits
+        .iter()
+        .find(|w| w.tool_call_id == call_id);
+    if let Some(saved) = saved {
+        delivered.extend(saved.answers.iter().map(|g| g.id.clone()));
+    }
+    let deadline_unix_ms = match saved
+        .and_then(|w| w.continuation.payload.as_ref())
+        .map(|p| &p.kind)
+    {
+        Some(crate::quiesce::WaitKind::Reply {
+            deadline_unix_ms,
+            delivered_answer_ids,
+            ..
+        }) => {
+            delivered.extend(delivered_answer_ids.iter().cloned());
+            *deadline_unix_ms
+        }
+        _ => match crate::agent_loop::tools_waiting::unix_ms().and_then(|now| {
+            now.checked_add(args.timeout_ms)
+                .ok_or("reply deadline overflow".into())
+        }) {
+            Ok(deadline) => deadline,
+            Err(message) => return error(message),
+        },
+    };
+    let recovering = saved.is_some();
+    let expired = recovering
+        && match crate::agent_loop::tools_waiting::unix_ms() {
+            Ok(now) => deadline_unix_ms <= now,
+            Err(message) => return error(message),
+        };
     let caller = state.caller_run_id();
     let mut cancel = state.channels.cancel_rx.clone();
     let outcome = if let Err(runtime_error) = runtime.check_reply_wait(caller, &args.message_id) {
         // An unknown or foreign message_id fails whatever input is pending.
         WaitOutcome::Finished(Err(runtime_error))
+    } else if expired {
+        WaitOutcome::Finished(Err(runtime.expire_recovery_reply_wait(&args.message_id)))
     } else if state.has_pending_user_messages() {
         // Another wait in this same tool batch may already have received input.
         WaitOutcome::UserInput
     } else {
-        let wait = runtime.wait_reply_or_answers(
-            caller,
-            &args.message_id,
-            Duration::from_millis(args.timeout_ms),
-            Some(&delivered),
-        );
+        let mut quiesce = runtime.shared.quiesce.subscribe();
+        state
+            .quiesce_tools_waiting(Some((&call_id, deadline_unix_ms)))
+            .await;
+        let remaining_ms = match crate::agent_loop::tools_waiting::unix_ms() {
+            Ok(now) => deadline_unix_ms.saturating_sub(now),
+            Err(message) => return error(message),
+        };
+        let wait = async {
+            if recovering && remaining_ms == 0 {
+                Err(runtime.expire_recovery_reply_wait(&args.message_id))
+            } else {
+                runtime
+                    .wait_reply_or_answers(
+                        caller,
+                        &args.message_id,
+                        Duration::from_millis(remaining_ms),
+                        Some(&delivered),
+                    )
+                    .await
+            }
+        };
         tokio::pin!(wait);
         loop {
             tokio::select! {
                 biased;
-                _ = cancel.wait_for(|interrupt| interrupt.is_interrupted()) => {
+                _ = async { let _ = cancel.wait_for(|interrupt| interrupt.is_interrupted()).await; } => {
                     break WaitOutcome::Cancelled;
                 }
                 result = &mut wait => break WaitOutcome::Finished(result),
+                _ = quiesce.changed() => state.quiesce_tools_waiting(Some((&call_id, deadline_unix_ms))).await,
                 // Inject after ToolResults, never between ToolUse and ToolResult.
                 Some(message) = state.channels.inbox_rx.recv() => {
                     state.queue_user_message(message);
