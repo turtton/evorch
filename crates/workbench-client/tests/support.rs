@@ -11,6 +11,9 @@ use workbench_protocol::envelope::*;
 use workbench_protocol::events::*;
 use workbench_protocol::handshake::*;
 use workbench_protocol::ids::*;
+use workbench_protocol::namespaces::{
+    ConversationEvent, ExecutionCommand, LifecycleEvent, LifecycleQuery, WorkspaceEvent,
+};
 use workbench_protocol::queries::*;
 use workbench_protocol::views::*;
 use workbench_protocol::wire::*;
@@ -38,7 +41,7 @@ pub fn status() -> CoreStatus {
 pub fn server_hello(limits: WireLimits) -> ServerHello {
     ServerHello {
         protocol_version: ProtocolVersion::CURRENT,
-        capabilities: Capability::ALL.to_vec(),
+        capabilities: Capability::IMPLEMENTED.to_vec(),
         server_build: build(),
         core: CoreIdentity::new("core-abc").unwrap(),
         instance_epoch: InstanceEpoch(7),
@@ -84,20 +87,18 @@ pub fn thread() -> ThreadId {
 }
 
 pub fn stop_chat(thread: &str) -> Command {
-    Command::StopChat(ThreadTarget {
+    Command::Execution(ExecutionCommand::StopChat(ThreadTarget {
         thread: ThreadId::new(thread).unwrap(),
-    })
+    }))
 }
 
 pub fn command_reply() -> CommandReply {
     CommandReply {
-        conversation: None,
-        lane_management: None,
-        lane_close: None,
         disposition: CommandDisposition::Accepted,
         submission_id: None,
         run_id: None,
         thread_revision: None,
+        result: None,
     }
 }
 
@@ -106,7 +107,7 @@ pub fn ok(payload: ReplyPayload) -> ReplyResult {
 }
 
 pub fn status_query() -> Query {
-    Query::GetCoreStatus
+    Query::Lifecycle(LifecycleQuery::GetCoreStatus)
 }
 
 /// Poll a future once and keep it. A client request is queued by its first
@@ -175,14 +176,18 @@ pub fn event(id: &str, cursor: EventCursor, event: UiEvent) -> EventEnvelope {
 }
 
 pub fn status_event(id: &str, cursor: EventCursor) -> EventEnvelope {
-    event(id, cursor, UiEvent::CoreStatusChanged { status: status() })
+    event(
+        id,
+        cursor,
+        UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged { status: status() }),
+    )
 }
 
 pub fn thread_changed(id: &str, cursor: EventCursor, title: &str) -> EventEnvelope {
     event(
         id,
         cursor,
-        UiEvent::ThreadChanged {
+        UiEvent::Workspace(WorkspaceEvent::ThreadChanged {
             thread: ThreadSummary {
                 id: thread(),
                 project: ProjectId::new("proj-1").unwrap(),
@@ -192,7 +197,7 @@ pub fn thread_changed(id: &str, cursor: EventCursor, title: &str) -> EventEnvelo
                 revision: Revision(1),
                 updated_at: UnixMillis(0),
             },
-        },
+        }),
     )
 }
 
@@ -249,7 +254,7 @@ pub fn big_event(id: &str, cursor: EventCursor, bytes: usize) -> EventEnvelope {
     event(
         id,
         cursor,
-        UiEvent::MessageCommitted {
+        UiEvent::Conversation(ConversationEvent::MessageCommitted {
             message: CommittedMessage {
                 thread: thread(),
                 run: RunId::new("run-1").unwrap(),
@@ -259,7 +264,7 @@ pub fn big_event(id: &str, cursor: EventCursor, bytes: usize) -> EventEnvelope {
                     text: "x".repeat(bytes),
                 },
             },
-        },
+        }),
     )
 }
 

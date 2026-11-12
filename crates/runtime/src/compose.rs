@@ -230,6 +230,7 @@ pub struct RoutedModel {
     tool_router: routing::Router,
     providers: BTreeMap<String, routing::ComposedProvider>,
     affinity: Mutex<SessionAffinity>,
+    checkpoint_inputs: Mutex<BTreeMap<String, crate::quiesce::ProviderInput>>,
     /// 失敗したプロファイル・モデルのクールダウン。両 Router と共有する。
     health: Arc<routing::ProviderHealth>,
     image_health: Arc<routing::ProviderHealth>,
@@ -248,7 +249,10 @@ pub struct RoutedModel {
     event_bus: Option<Arc<EventBus>>,
     provider_configs: BTreeMap<String, config::ProviderProfileConfig>,
     image_input: tokio::sync::OnceCell<BTreeMap<String, bool>>,
-    metadata_catalog: tokio::sync::OnceCell<Option<catalog::ModelCatalog>>,
+    /// Disk-backed models.dev data read once; context-window and image-input lookups use it.
+    metadata_catalog: tokio::sync::OnceCell<Option<Arc<catalog::ModelCatalog>>>,
+    /// Catalog generations for output limits, pinned per run and shared across reconfiguration.
+    output_limits: std::sync::RwLock<OutputLimitCatalogs>,
     /// models.dev cache directory; `None` uses [`catalog::default_cache_dir`].
     metadata_catalog_dir: Option<PathBuf>,
     model_presets: BTreeMap<String, config::ModelPresetConfig>,
@@ -294,6 +298,7 @@ impl RoutedModel {
             image_health: Arc::new(routing::ProviderHealth::default()),
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
+            checkpoint_inputs: Mutex::default(),
             agents,
             admission_routes: Vec::new(),
             max_retry_after_wait: std::time::Duration::from_secs(
@@ -307,6 +312,7 @@ impl RoutedModel {
             provider_configs: BTreeMap::new(),
             image_input: tokio::sync::OnceCell::new(),
             metadata_catalog: tokio::sync::OnceCell::new(),
+            output_limits: std::sync::RwLock::new(OutputLimitCatalogs::new()),
             metadata_catalog_dir: None,
             model_presets: BTreeMap::new(),
             edit_tools_by_run: Mutex::new(BTreeMap::new()),
@@ -867,7 +873,8 @@ impl RoutedModel {
                 max_tokens: if benchmark.is_some() {
                     generation.max_tokens.map(u64::from)
                 } else {
-                    self.output_limit(&route, generation.max_tokens).await
+                    self.output_limit(&invocation.run_id, &route, generation.max_tokens)
+                        .await
                 },
                 reasoning_effort: reasoning_effort.clone(),
                 service_tier: benchmark.map_or_else(
@@ -913,6 +920,28 @@ impl RoutedModel {
                 );
             }
             let result = structured::send(provider, &mut request, bus).await;
+            if invocation.purpose == event_bus::RequestPurpose::Agent {
+                let affinity_key =
+                    if provider.profile.api_protocol == model::ApiProtocol::OpenAiCodexResponses {
+                        providers::provider::codex::run_cache_affinity(&invocation.run_id)
+                    } else {
+                        invocation.run_id.clone()
+                    };
+                self.checkpoint_inputs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        invocation.run_id.clone(),
+                        crate::quiesce::ProviderInput {
+                            profile: route.profile.clone(),
+                            protocol: provider.profile.api_protocol,
+                            edit_tool: provider.profile.edit_tool_for(&route.model_id),
+                            affinity_key,
+                            replay: request.responses_replay.clone(),
+                            request: request.clone(),
+                        },
+                    );
+            }
             let error = match result {
                 Ok(response) => {
                     if let (true, Some(chain), Some(position)) =
@@ -1047,6 +1076,27 @@ struct FallbackAttempt<'a> {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn restore_checkpoint_provider_state(
+        &self,
+        run_id: &str,
+        role: Role,
+        category: Option<&str>,
+        input: &crate::quiesce::ProviderInput,
+    ) {
+        self.edit_tools_by_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                (run_id.to_owned(), chain_key(role, category)),
+                input.edit_tool,
+            );
+    }
+    fn checkpoint_provider_input(&self, run_id: &str) -> Option<crate::quiesce::ProviderInput> {
+        self.checkpoint_inputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(run_id)
+    }
     fn image_generation_enabled(&self) -> bool {
         !self.agents.image_generator_chain().is_empty()
     }
@@ -1136,7 +1186,7 @@ impl AgentModel for RoutedModel {
         let (_, speed) = config::types::provider::parse_model_speed(&route.model_id);
         let protocol = self.providers[&route.profile].profile.api_protocol;
         let max_tokens = self
-            .output_limit(&route, generation.max_tokens)
+            .output_limit(&invocation.run_id, &route, generation.max_tokens)
             .await
             .or_else(|| {
                 (protocol == model::ApiProtocol::AnthropicMessages)
@@ -1172,7 +1222,24 @@ impl AgentModel for RoutedModel {
         invocation: &AgentInvocationContext,
         role: Role,
     ) -> Result<(), RuntimeError> {
-        self.admit_candidates(invocation, role).await
+        self.pin_output_limits(&invocation.run_id);
+        self.admit_candidates(invocation, role).await?;
+        // Loads the pinned generation now, so a refresh landing after admission cannot
+        // change what this run's first request resolves.
+        self.pinned_catalog(&invocation.run_id).await;
+        Ok(())
+    }
+
+    fn publish_model_catalog(&self, catalog: Arc<catalog::ModelCatalog>) {
+        self.output_limit_state().publish(catalog);
+    }
+
+    fn output_limit_catalogs(&self) -> Option<OutputLimitCatalogs> {
+        Some(self.output_limit_state())
+    }
+
+    fn restore_output_limit_catalogs(&self, shared: &OutputLimitCatalogs) {
+        self.adopt_output_limit_state(shared);
     }
 
     async fn compact_context(
@@ -1221,7 +1288,9 @@ impl AgentModel for RoutedModel {
             messages: images::for_model(messages, &tools, accepts_images),
             tools,
             temperature: generation.temperature,
-            max_tokens: self.output_limit(&route, generation.max_tokens).await,
+            max_tokens: self
+                .output_limit(&invocation.run_id, &route, generation.max_tokens)
+                .await,
             reasoning_effort,
             service_tier: replay_service_tier(speed),
             output_schema: None,
@@ -1678,6 +1747,7 @@ mod live;
 mod structured;
 mod verification;
 pub use live::{SwitchableModel, UnconfiguredModel};
+pub use output_limits::OutputLimitCatalogs;
 
 /// Windows fixed by configuration: `[compaction.model_overrides]`, then each model's
 /// manual or preset window. The catalog and provider listings fill in the rest.

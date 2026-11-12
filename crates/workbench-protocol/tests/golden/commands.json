@@ -1,39 +1,115 @@
 {
-  "answer_user_question": {
+  "approvals/decide_tool_approval": {
     "payload": {
-      "answer": "yes",
-      "question_id": "q-1",
-      "question_revision": "4",
-      "thread": "thr-1"
+      "payload": {
+        "approval_id": "ap-1",
+        "approval_revision": "2",
+        "core_epoch": "7",
+        "decision": "deny"
+      },
+      "type": "decide_tool_approval"
     },
-    "type": "answer_user_question"
+    "type": "approvals"
   },
-  "close_lane": {
+  "conversation/compact_chat": {
     "payload": {
-      "expected_management_revision": "1",
-      "expected_request_revision": "2",
-      "kind": "discard",
-      "lane_id": "lane-1",
-      "note": "superseded by another lane",
-      "ready_seq": "3"
+      "payload": {
+        "thread": "thr-1"
+      },
+      "type": "compact_chat"
     },
-    "type": "close_lane"
+    "type": "conversation"
   },
-  "compact_chat": {
+  "conversation/continue_chat": {
     "payload": {
-      "thread": "thr-1"
+      "payload": {
+        "composer_role": "worker",
+        "project": "proj-1",
+        "thread": "thr-1"
+      },
+      "type": "continue_chat"
     },
-    "type": "compact_chat"
+    "type": "conversation"
   },
-  "continue_chat": {
+  "conversation/create_execution": {
     "payload": {
-      "composer_role": "worker",
-      "project": "proj-1",
-      "thread": "thr-1"
+      "payload": {
+        "composer_role": "orchestrator",
+        "fork_seed": {
+          "context_len": "9007199254740993",
+          "source_run_id": "run-0"
+        },
+        "images": [
+          {
+            "attachment_id": "att-1",
+            "mime_type": "image/png"
+          }
+        ],
+        "model_preference": {
+          "model": "gpt",
+          "profile": "default",
+          "reasoning_effort": "high"
+        },
+        "project": "proj-1",
+        "skills": [
+          "git"
+        ],
+        "submission_id": "sub-a",
+        "text": "hello\nworld",
+        "thread": "thr-1"
+      },
+      "type": "create_execution"
     },
-    "type": "continue_chat"
+    "type": "conversation"
   },
-  "conversation": {
+  "conversation/create_goal": {
+    "payload": {
+      "payload": {
+        "constraints": [],
+        "delegation": {
+          "payload": {
+            "value": "review"
+          },
+          "type": "team"
+        },
+        "objective": "ship it",
+        "project": "proj-1",
+        "references": [],
+        "thread": "thr-1"
+      },
+      "type": "create_goal"
+    },
+    "type": "conversation"
+  },
+  "conversation/deliver_follow_ups_next_turn": {
+    "payload": {
+      "payload": {
+        "thread": "thr-1"
+      },
+      "type": "deliver_follow_ups_next_turn"
+    },
+    "type": "conversation"
+  },
+  "conversation/discard_attachment": {
+    "payload": {
+      "payload": {
+        "attachment_id": "att-1"
+      },
+      "type": "discard_attachment"
+    },
+    "type": "conversation"
+  },
+  "conversation/prepare_existing_thread": {
+    "payload": {
+      "payload": {
+        "project": "proj-1",
+        "thread": "thr-1"
+      },
+      "type": "prepare_existing_thread"
+    },
+    "type": "conversation"
+  },
+  "conversation/resolve_project": {
     "payload": {
       "payload": {
         "root": "/work/project"
@@ -42,129 +118,179 @@
     },
     "type": "conversation"
   },
-  "decide_tool_approval": {
+  "conversation/send_chat": {
     "payload": {
-      "approval_id": "ap-1",
-      "approval_revision": "2",
-      "core_epoch": "7",
-      "decision": "deny"
+      "payload": {
+        "composer_role": "orchestrator",
+        "fork_seed": {
+          "context_len": "9007199254740993",
+          "source_run_id": "run-0"
+        },
+        "images": [
+          {
+            "attachment_id": "att-1",
+            "mime_type": "image/png"
+          }
+        ],
+        "model_preference": {
+          "model": "gpt",
+          "profile": "default",
+          "reasoning_effort": "high"
+        },
+        "project": "proj-1",
+        "skills": [
+          "git"
+        ],
+        "submission_id": "sub-a",
+        "text": "hello\nworld",
+        "thread": "thr-1"
+      },
+      "type": "send_chat"
     },
-    "type": "decide_tool_approval"
+    "type": "conversation"
   },
-  "deliver_follow_ups_next_turn": {
+  "conversation/upload_image": {
     "payload": {
-      "thread": "thr-1"
+      "payload": {
+        "data": "AA==",
+        "mime_type": "image/png",
+        "project": "proj-1",
+        "thread": "thr-1"
+      },
+      "type": "upload_image"
     },
-    "type": "deliver_follow_ups_next_turn"
+    "type": "conversation"
   },
-  "manage_lane": {
+  "conversation/withdraw_follow_up": {
     "payload": {
-      "request": {
-        "action": {
+      "payload": {
+        "run": "run-1",
+        "submission_id": "sub-a",
+        "thread": "thr-1"
+      },
+      "type": "withdraw_follow_up"
+    },
+    "type": "conversation"
+  },
+  "execution/set_agent_web_tools_enabled": {
+    "payload": {
+      "payload": {
+        "enabled": true
+      },
+      "type": "set_agent_web_tools_enabled"
+    },
+    "type": "execution"
+  },
+  "execution/set_goal_checks_paused": {
+    "payload": {
+      "payload": {
+        "goal": "goal-1",
+        "paused": false,
+        "thread": "thr-1"
+      },
+      "type": "set_goal_checks_paused"
+    },
+    "type": "execution"
+  },
+  "execution/set_goal_review": {
+    "payload": {
+      "payload": {
+        "enabled": true,
+        "goal": "goal-1",
+        "thread": "thr-1"
+      },
+      "type": "set_goal_review"
+    },
+    "type": "execution"
+  },
+  "execution/stop_chat": {
+    "payload": {
+      "payload": {
+        "thread": "thr-1"
+      },
+      "type": "stop_chat"
+    },
+    "type": "execution"
+  },
+  "execution/stop_run": {
+    "payload": {
+      "payload": {
+        "run": "run-1",
+        "thread": "thr-1"
+      },
+      "type": "stop_run"
+    },
+    "type": "execution"
+  },
+  "execution/submit_goal": {
+    "payload": {
+      "payload": {
+        "constraints": [
+          "no network"
+        ],
+        "delegation": {
           "payload": {
-            "policy": "summary"
+            "value": "packet-3"
           },
-          "type": "set_policy"
+          "type": "reference"
         },
+        "objective": "ship it",
+        "project": "proj-1",
+        "references": [
+          {
+            "kind": "issue",
+            "value": "#12"
+          }
+        ],
+        "thread": "thr-1"
+      },
+      "type": "submit_goal"
+    },
+    "type": "execution"
+  },
+  "lanes/close_lane": {
+    "payload": {
+      "payload": {
         "expected_management_revision": "1",
+        "expected_request_revision": "2",
+        "kind": "discard",
         "lane_id": "lane-1",
-        "operation_id": "manage-1"
-      }
-    },
-    "type": "manage_lane"
-  },
-  "send_chat": {
-    "payload": {
-      "composer_role": "orchestrator",
-      "fork_seed": {
-        "context_len": "9007199254740993",
-        "source_run_id": "run-0"
+        "note": "superseded by another lane",
+        "ready_seq": "3"
       },
-      "images": [
-        {
-          "attachment_id": "att-1",
-          "mime_type": "image/png"
+      "type": "close_lane"
+    },
+    "type": "lanes"
+  },
+  "lanes/manage_lane": {
+    "payload": {
+      "payload": {
+        "request": {
+          "action": {
+            "payload": {
+              "policy": "summary"
+            },
+            "type": "set_policy"
+          },
+          "expected_management_revision": "1",
+          "lane_id": "lane-1",
+          "operation_id": "manage-1"
         }
-      ],
-      "model_preference": {
-        "model": "gpt",
-        "profile": "default",
-        "reasoning_effort": "high"
       },
-      "project": "proj-1",
-      "skills": [
-        "git"
-      ],
-      "submission_id": "sub-a",
-      "text": "hello\nworld",
-      "thread": "thr-1"
+      "type": "manage_lane"
     },
-    "type": "send_chat"
+    "type": "lanes"
   },
-  "set_agent_web_tools_enabled": {
+  "questions/answer_user_question": {
     "payload": {
-      "enabled": true
-    },
-    "type": "set_agent_web_tools_enabled"
-  },
-  "set_goal_checks_paused": {
-    "payload": {
-      "goal": "goal-1",
-      "paused": false,
-      "thread": "thr-1"
-    },
-    "type": "set_goal_checks_paused"
-  },
-  "set_goal_review": {
-    "payload": {
-      "enabled": true,
-      "goal": "goal-1",
-      "thread": "thr-1"
-    },
-    "type": "set_goal_review"
-  },
-  "stop_chat": {
-    "payload": {
-      "thread": "thr-1"
-    },
-    "type": "stop_chat"
-  },
-  "stop_run": {
-    "payload": {
-      "run": "run-1",
-      "thread": "thr-1"
-    },
-    "type": "stop_run"
-  },
-  "submit_goal": {
-    "payload": {
-      "constraints": [
-        "no network"
-      ],
-      "delegation": {
-        "payload": {
-          "value": "packet-3"
-        },
-        "type": "reference"
+      "payload": {
+        "answer": "yes",
+        "question_id": "q-1",
+        "question_revision": "4",
+        "thread": "thr-1"
       },
-      "objective": "ship it",
-      "project": "proj-1",
-      "references": [
-        {
-          "kind": "issue",
-          "value": "#12"
-        }
-      ],
-      "thread": "thr-1"
+      "type": "answer_user_question"
     },
-    "type": "submit_goal"
-  },
-  "withdraw_follow_up": {
-    "payload": {
-      "run": "run-1",
-      "submission_id": "sub-a",
-      "thread": "thr-1"
-    },
-    "type": "withdraw_follow_up"
+    "type": "questions"
   }
 }

@@ -4,6 +4,7 @@ use runtime::{AgentRuntime, Role, RunConfig, RunId};
 use serde_json::json;
 use std::sync::Arc;
 use workbench_host::{CommandHost, commands::CommandService};
+use workbench_protocol::namespaces::{LanesCommand, LanesQuery, LanesReply};
 use workbench_protocol::{
     commands::{Command, CommandDisposition},
     envelope::Provenance,
@@ -100,7 +101,7 @@ impl Fixture {
         }
     }
     fn command(&self, id: &str, revision: u64, action: LaneManagementAction) -> Command {
-        Command::ManageLane(ManageLane {
+        Command::Lanes(LanesCommand::ManageLane(ManageLane {
             request: LaneManagementRequest {
                 operation_id: LaneManagementOperationId::new(id).unwrap(),
                 lane_id: workbench_protocol::lane_attention::LaneId::new(&self.lane.lane_id)
@@ -109,21 +110,21 @@ impl Fixture {
                 action,
             },
             expected_family_revision: None,
-        })
+        }))
     }
     fn state(&self) -> LaneManagementState {
         match self
             .host
             .handle_query(
                 &workbench_protocol::ids::SessionId::new("wire").unwrap(),
-                &Query::GetLaneManagement {
+                &Query::Lanes(LanesQuery::GetLaneManagement {
                     lane_id: workbench_protocol::lane_attention::LaneId::new(&self.lane.lane_id)
                         .unwrap(),
-                },
+                }),
             )
             .unwrap()
         {
-            QueryReply::LaneManagement(state) => state,
+            QueryReply::Lanes(LanesReply::LaneManagement(state)) => state,
             other => panic!("{other:?}"),
         }
     }
@@ -139,7 +140,7 @@ impl Fixture {
                 .unwrap(),
             },
         );
-        if let Command::ManageLane(input) = &mut command {
+        if let Command::Lanes(LanesCommand::ManageLane(input)) = &mut command {
             input.expected_family_revision = self.state().family_revision;
         }
         command
@@ -164,10 +165,7 @@ async fn wire_roundtrip_replay_stale_revision_and_restart_use_one_delivery_runti
             LaneManagementAction::SetPolicy { policy },
         );
         let reply = f.host.handle_command(cmd.clone(), common::web()).unwrap();
-        assert_eq!(
-            reply.lane_management.unwrap().management_revision,
-            Revision(rev + 1)
-        );
+        assert_eq!(lane_result(reply).management_revision, Revision(rev + 1));
         assert_eq!(
             f.host
                 .handle_command(cmd, common::web())
@@ -196,7 +194,7 @@ async fn wire_roundtrip_replay_stale_revision_and_restart_use_one_delivery_runti
         ErrorCode::PermissionDenied
     );
     let mut stale_family = attach.clone();
-    if let Command::ManageLane(i) = &mut stale_family {
+    if let Command::Lanes(LanesCommand::ManageLane(i)) = &mut stale_family {
         i.expected_family_revision.as_mut().unwrap().pin_revision.0 += 1;
     }
     assert_eq!(
@@ -209,9 +207,8 @@ async fn wire_roundtrip_replay_stale_revision_and_restart_use_one_delivery_runti
     let reply = f
         .host
         .handle_command(attach.clone(), common::web())
-        .unwrap()
-        .lane_management
         .unwrap();
+    let reply = lane_result(reply);
     assert_eq!(reply.policy, LaneManagementPolicy::Summary);
     assert!(
         reply.projection_pending,
@@ -388,6 +385,30 @@ async fn a_human_close_ends_only_the_ledger_entry_and_an_agent_cannot_reach_it()
     f.stop().await;
 }
 
+/// The lane management result a command answered with.
+fn lane_result(
+    reply: workbench_protocol::commands::CommandReply,
+) -> workbench_protocol::lane_management::LaneManagementResult {
+    match reply.result.map(|result| *result) {
+        Some(workbench_protocol::commands::CommandResult::Lanes(
+            workbench_protocol::namespaces::LanesResult::Managed(result),
+        )) => result,
+        other => panic!("expected a lane management result, got {other:?}"),
+    }
+}
+
+/// The lane close result a command answered with.
+fn close_result(
+    reply: workbench_protocol::commands::CommandReply,
+) -> workbench_protocol::lane_management::LaneCloseResult {
+    match reply.result.map(|result| *result) {
+        Some(workbench_protocol::commands::CommandResult::Lanes(
+            workbench_protocol::namespaces::LanesResult::Closed(result),
+        )) => result,
+        other => panic!("expected a lane close result, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn a_wire_close_is_recorded_under_the_authenticated_provenance_and_a_stale_screen_is_refused()
 {
@@ -401,14 +422,14 @@ async fn a_wire_close_is_recorded_under_the_authenticated_provenance_and_a_stale
         .lane_close_context(lane_id.clone())
         .unwrap();
     let close = |kind, note: &str, request_revision: u64| {
-        Command::CloseLane(CloseLane {
+        Command::Lanes(LanesCommand::CloseLane(CloseLane {
             lane_id: workbench_protocol::lane_attention::LaneId::new(&lane_id).unwrap(),
             kind,
             ready_seq: None,
             expected_management_revision: Revision(seen.management_revision),
             expected_request_revision: Revision(request_revision),
             note: note.into(),
-        })
+        }))
     };
     let standing = |f: &Fixture| {
         f.storage
@@ -470,7 +491,7 @@ async fn a_wire_close_is_recorded_under_the_authenticated_provenance_and_a_stale
         )
         .unwrap();
     assert_eq!(reply.disposition, CommandDisposition::Accepted);
-    let result = reply.lane_close.expect("a close result");
+    let result = close_result(reply);
     assert_eq!(result.kind, LaneCloseRecordKind::HumanClosed);
     assert!(!result.already_closed);
     let stored = standing(&f).unwrap();
@@ -496,7 +517,7 @@ async fn a_wire_close_is_recorded_under_the_authenticated_provenance_and_a_stale
         )
         .unwrap();
     assert_eq!(again.disposition, CommandDisposition::AlreadyApplied);
-    assert_eq!(again.lane_close.unwrap().close_id, result.close_id);
+    assert_eq!(close_result(again).close_id, result.close_id);
     assert_eq!(f.state().policy, LaneManagementPolicy::Attached);
     f.stop().await;
 }

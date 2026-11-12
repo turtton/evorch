@@ -21,6 +21,7 @@ use tools::mcp::{
     types::{ApprovalScope, ConfirmMcpApproval, McpApprovalStore},
 };
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
+use workbench_protocol::namespaces::ConversationCommand;
 use workbench_protocol::{
     commands::{Command, ComposerRole, SendChat},
     envelope::{Provenance, Surface},
@@ -282,7 +283,7 @@ fn send(
     let mut host = boot.host.lock().unwrap();
     host.reserve_new_chat_thread(&input)?;
     let reply = host.handle_command(
-        Command::SendChat(input),
+        Command::Conversation(ConversationCommand::SendChat(input)),
         Provenance::human(Surface::Cli, ClientId::new("03c").unwrap()),
     )?;
     Ok(reply.run_id.unwrap().as_str().parse().unwrap())

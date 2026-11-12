@@ -6,4 +6,4 @@ pub mod quota;
 pub mod session;
 pub mod tokens;
 
-pub use client::{CodexClient, CodexConfig};
+pub use client::{CodexClient, CodexConfig, run_derived_id as run_cache_affinity};

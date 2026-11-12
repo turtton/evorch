@@ -475,6 +475,60 @@ async fn subscription_adaptive_reasoning_is_model_validated_and_api_requests_sha
     );
 }
 
+// Given: Claude Fable 5.2, a thinking-required xhigh model, including a dated snapshot
+// When: xhigh is sent over the subscription and API-key transports
+// Then: both wires carry adaptive thinking and the effort; only subscription keeps
+// context_management and the Claude Code beta; an invalid snapshot sends no controls.
+#[tokio::test]
+async fn fable_5_2_xhigh_reaches_subscription_and_api_key_wires() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(send_response()))
+        .expect(5)
+        .mount(&server)
+        .await;
+    let auth = ProviderAuth::new("fixture-token");
+    let oauth = AnthropicClient::new(config(&server))
+        .unwrap()
+        .with_claude_oauth()
+        .unwrap();
+    let api = AnthropicClient::new(config(&server)).unwrap();
+    let mut input = request();
+    input.reasoning_effort = Some("xhigh".into());
+    for model in ["claude-fable-5-2", "claude-fable-5-2-20261017"] {
+        input.model = model.into();
+        oauth.send(&auth, &input).await.unwrap();
+        api.send(&auth, &input).await.unwrap();
+    }
+    // An unrecognised suffix is not a Fable 5.2 snapshot: the API-key wire stays silent.
+    input.model = "claude-fable-5-2-custom".into();
+    api.send(&auth, &input).await.unwrap();
+
+    let captured = server.received_requests().await.unwrap();
+    for pair in captured[..4].chunks(2) {
+        let subscription = claude_model_input(&pair[0].body).unwrap();
+        let api_body: Value = serde_json::from_slice(&pair[1].body).unwrap();
+        for body in [&subscription, &api_body] {
+            assert_eq!(
+                body["thinking"],
+                json!({"type":"adaptive","display":"summarized"})
+            );
+            assert_eq!(body["output_config"], json!({"effort":"xhigh"}));
+        }
+        assert_eq!(
+            subscription["context_management"],
+            json!({"edits":[{"type":"clear_thinking_20251015","keep":"all"}]})
+        );
+        assert!(api_body.get("context_management").is_none());
+        assert!(!pair[1].headers.contains_key("anthropic-beta"));
+    }
+    let unrecognised: Value = serde_json::from_slice(&captured[4].body).unwrap();
+    for field in ["thinking", "output_config", "context_management"] {
+        assert!(unrecognised.get(field).is_none(), "{field}");
+    }
+}
+
 #[tokio::test]
 async fn subscription_tool_surface_roundtrips_without_changing_api_key_requests() {
     let server = MockServer::start().await;

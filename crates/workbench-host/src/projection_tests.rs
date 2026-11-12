@@ -3,6 +3,7 @@ use event_bus::{Event, EventBus, LifecycleEvent};
 use providers::{ChatResponse, Message, ToolSpec};
 use runtime::{AgentInvocationContext, AgentModel, Role, RuntimeError};
 use std::sync::Barrier;
+use workbench_protocol::namespaces::{LifecycleEvent as WireLifecycleEvent, ProjectionEvent};
 
 struct NoModel;
 #[async_trait::async_trait]
@@ -40,7 +41,7 @@ fn all(after: Option<EventCursor>) -> Subscribe {
     }
 }
 fn event(n: u32) -> UiEvent {
-    UiEvent::CoreStatusChanged {
+    UiEvent::Lifecycle(WireLifecycleEvent::CoreStatusChanged {
         status: workbench_protocol::handshake::CoreStatus {
             state: workbench_protocol::handshake::CoreState::Ready,
             retention_reasons: vec![],
@@ -49,7 +50,7 @@ fn event(n: u32) -> UiEvent {
                 ..Default::default()
             },
         },
-    }
+    })
 }
 #[tokio::test]
 async fn replay_in_range_repeats_exactly_the_suffix_and_ids_never_recur() {
@@ -77,9 +78,9 @@ async fn replay_in_range_repeats_exactly_the_suffix_and_ids_never_recur() {
     p.unsubscribe(&resumed.started.subscription_id);
     assert!(matches!(
         resumed.recv().await.unwrap().event,
-        UiEvent::SubscriptionClosed {
+        UiEvent::Projection(ProjectionEvent::SubscriptionClosed {
             reason: CloseReason::Unsubscribed
-        }
+        })
     ));
     assert!(resumed.recv().await.is_none());
     let next = p.subscribe_with_snapshot(&all(None)).unwrap();
@@ -123,7 +124,10 @@ async fn replay_eviction_epoch_mismatch_and_future_cursor_require_resync() {
         assert!(sub.started.snapshot_id.is_some());
         let terminal = sub.recv().await.unwrap();
         assert!(terminal.cursor.sequence > sub.started.high_water.sequence);
-        assert_eq!(terminal.event, UiEvent::ResyncRequired { reason });
+        assert_eq!(
+            terminal.event,
+            UiEvent::Projection(ProjectionEvent::ResyncRequired { reason })
+        );
         assert!(sub.recv().await.is_none());
     }
 }
@@ -148,9 +152,9 @@ async fn slow_consumer_receives_terminal_resync_for_both_count_and_byte_budgets(
         }
         assert_eq!(
             sub.recv().await.unwrap().event,
-            UiEvent::ResyncRequired {
+            UiEvent::Projection(ProjectionEvent::ResyncRequired {
                 reason: ResyncReason::SlowSubscriber
-            }
+            })
         );
         assert!(sub.recv().await.is_none());
     }
@@ -169,9 +173,9 @@ async fn lag_on_the_host_bus_invalidates_the_epoch_instead_of_silently_continuin
     let terminal = sub.recv().await.unwrap();
     assert_eq!(
         terminal.event,
-        UiEvent::ResyncRequired {
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::EpochChanged
-        }
+        })
     );
     assert_ne!(
         terminal.cursor.core_epoch,
@@ -240,18 +244,18 @@ async fn replay_byte_eviction_and_shutdown_have_observable_terminal_events() {
     let mut stale = p.subscribe_with_snapshot(&all(Some(after))).unwrap();
     assert!(matches!(
         stale.recv().await.unwrap().event,
-        UiEvent::ResyncRequired {
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::CursorTooOld
-        }
+        })
     ));
     drop(p);
     let closed = active.recv().await.unwrap();
     assert!(closed.cursor.sequence > after.sequence);
     assert_eq!(
         closed.event,
-        UiEvent::SubscriptionClosed {
+        UiEvent::Projection(ProjectionEvent::SubscriptionClosed {
             reason: CloseReason::CoreShuttingDown
-        }
+        })
     );
     assert!(active.recv().await.is_none());
 }

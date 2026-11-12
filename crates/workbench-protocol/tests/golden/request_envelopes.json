@@ -3,31 +3,34 @@
     "kind": "command",
     "payload": {
       "payload": {
-        "composer_role": "orchestrator",
-        "fork_seed": {
-          "context_len": "9007199254740993",
-          "source_run_id": "run-0"
+        "payload": {
+          "composer_role": "orchestrator",
+          "fork_seed": {
+            "context_len": "9007199254740993",
+            "source_run_id": "run-0"
+          },
+          "images": [
+            {
+              "attachment_id": "att-1",
+              "mime_type": "image/png"
+            }
+          ],
+          "model_preference": {
+            "model": "gpt",
+            "profile": "default",
+            "reasoning_effort": "high"
+          },
+          "project": "proj-1",
+          "skills": [
+            "git"
+          ],
+          "submission_id": "sub-a",
+          "text": "hello\nworld",
+          "thread": "thr-1"
         },
-        "images": [
-          {
-            "attachment_id": "att-1",
-            "mime_type": "image/png"
-          }
-        ],
-        "model_preference": {
-          "model": "gpt",
-          "profile": "default",
-          "reasoning_effort": "high"
-        },
-        "project": "proj-1",
-        "skills": [
-          "git"
-        ],
-        "submission_id": "sub-a",
-        "text": "hello\nworld",
-        "thread": "thr-1"
+        "type": "send_chat"
       },
-      "type": "send_chat"
+      "type": "conversation"
     },
     "request_id": "req-1",
     "session_id": "sess-1"
@@ -56,11 +59,14 @@
     "kind": "query",
     "payload": {
       "payload": {
-        "body_id": "body-1",
-        "max_bytes": 65536,
-        "offset": "65536"
+        "payload": {
+          "body_id": "body-1",
+          "max_bytes": 65536,
+          "offset": "65536"
+        },
+        "type": "read_body"
       },
-      "type": "read_body"
+      "type": "projection"
     },
     "request_id": "req-2",
     "session_id": "sess-1"

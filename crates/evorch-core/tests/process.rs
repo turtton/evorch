@@ -5,6 +5,9 @@ use tokio::{
     net::UnixStream,
 };
 use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
+use workbench_protocol::namespaces::{
+    LifecycleQuery, LifecycleReply, WorkspaceQuery, WorkspaceReply,
+};
 use workbench_protocol::{envelope::*, errors::ErrorCode, handshake::*, ids::*, queries::*};
 
 async fn exchange(stream: &mut UnixStream, value: &impl serde::Serialize) -> serde_json::Value {
@@ -46,7 +49,7 @@ async fn rejects_input_reflection(
     let secret = format!("sk-proj-{}", "B".repeat(64));
     let base = serde_json::json!({
         "request_id":"bad-request", "session_id":"raw-session", "kind":"query",
-        "payload":{"type":"get_core_status"}
+        "payload":{"type":"lifecycle", "payload":{"type":"get_core_status"}}
     });
     let mut unknown_type = base.clone();
     unknown_type["payload"]["type"] = secret.clone().into();
@@ -54,9 +57,9 @@ async fn rejects_input_reflection(
     unknown_field[&secret] = true.into();
     let mut nested_field = serde_json::json!({
         "request_id":"bad-request", "session_id":"raw-session", "kind":"command",
-        "payload":{"type":"stop_chat", "payload":{"thread":"t"}}
+        "payload":{"type":"execution", "payload":{"type":"stop_chat", "payload":{"thread":"t"}}}
     });
-    nested_field["payload"]["payload"][&secret] = true.into();
+    nested_field["payload"]["payload"]["payload"][&secret] = true.into();
     let mut reflected_id = base.clone();
     reflected_id["request_id"] = secret.clone().into();
     reflected_id["payload"]["type"] = "unknown_query".into();
@@ -103,7 +106,10 @@ async fn rejects_input_reflection(
             "control",
             serde_json::json!({"type":"pong", "payload":{"nonce":"7"}}),
         ),
-        ("query", serde_json::json!({"type":"get_core_status"})),
+        (
+            "query",
+            serde_json::json!({"type":"lifecycle", "payload":{"type":"get_core_status"}}),
+        ),
     ] {
         let value = serde_json::json!({"request_id":secret, "session_id":"raw-session", "kind":kind, "payload":payload});
         let response = http
@@ -219,12 +225,18 @@ async fn foreground_web_health_handshake_rejection_and_sigterm_release_the_lock(
     .unwrap();
     assert!(matches!(
         client
-            .query(Query::ListProjects(Default::default()))
+            .query(Query::Workspace(WorkspaceQuery::ListProjects(
+                Default::default()
+            )))
             .await
             .unwrap(),
-        QueryReply::Projects(_)
+        QueryReply::Workspace(WorkspaceReply::Projects(_))
     ));
-    let QueryReply::CoreStatus(status) = client.query(Query::GetCoreStatus).await.unwrap() else {
+    let QueryReply::Lifecycle(LifecycleReply::CoreStatus(status)) = client
+        .query(Query::Lifecycle(LifecycleQuery::GetCoreStatus))
+        .await
+        .unwrap()
+    else {
         panic!("expected core status");
     };
     assert!(status.running.clients >= 1);

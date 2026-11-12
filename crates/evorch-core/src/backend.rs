@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use workbench_host::{CommandHost, projection::Projection};
+use workbench_protocol::namespaces::{ConversationCommand, LifecycleQuery, LifecycleReply};
 use workbench_protocol::{
     envelope::*, errors::*, events::*, handshake::*, ids::*, wire::InstanceEpoch,
 };
@@ -73,10 +74,7 @@ impl HostBackend {
             web_enabled: AtomicBool::new(false),
             hello: ServerHello {
                 protocol_version: ProtocolVersion::CURRENT,
-                capabilities: Capability::ALL
-                    .into_iter()
-                    .filter(|c| *c != Capability::SafeRestart)
-                    .collect(),
+                capabilities: Capability::IMPLEMENTED.to_vec(),
                 server_build: BuildInfo {
                     name: "evorch-core".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
@@ -128,12 +126,12 @@ impl HostBackend {
     pub fn hello(&self) -> ServerHello {
         let mut hello = self.hello.clone();
         hello.instance_epoch = self.projection.instance_epoch();
-        if let Ok(workbench_protocol::queries::QueryReply::CoreStatus(status)) =
-            self.host.lock().unwrap().handle_query(
-                &SessionId::new("core-health").unwrap(),
-                &workbench_protocol::queries::Query::GetCoreStatus,
-            )
-        {
+        if let Ok(workbench_protocol::queries::QueryReply::Lifecycle(LifecycleReply::CoreStatus(
+            status,
+        ))) = self.host.lock().unwrap().handle_query(
+            &SessionId::new("core-health").unwrap(),
+            &workbench_protocol::queries::Query::Lifecycle(LifecycleQuery::GetCoreStatus),
+        ) {
             hello.status = status;
         }
         hello.status = self.transport_status(hello.status);
@@ -162,7 +160,10 @@ impl HostBackend {
                 RequestBody::Command(command) => {
                     // Reserving a NEW thread is not a claim. Existing owner rows,
                     // including released rows, remain fenced; no automatic takeover.
-                    if let workbench_protocol::commands::Command::SendChat(send) = &command {
+                    if let workbench_protocol::commands::Command::Conversation(
+                        ConversationCommand::SendChat(send),
+                    ) = &command
+                    {
                         host.reserve_new_chat_thread(send)?;
                     }
                     host.handle_request(&request.session_id, &id, command, provenance)
@@ -171,11 +172,11 @@ impl HostBackend {
                 RequestBody::Query(query) => {
                     host.handle_query(&request.session_id, &query).map(|reply| {
                         ReplyPayload::Query(match reply {
-                            workbench_protocol::queries::QueryReply::CoreStatus(status) => {
-                                workbench_protocol::queries::QueryReply::CoreStatus(
-                                    self.transport_status(status),
-                                )
-                            }
+                            workbench_protocol::queries::QueryReply::Lifecycle(
+                                LifecycleReply::CoreStatus(status),
+                            ) => workbench_protocol::queries::QueryReply::Lifecycle(
+                                LifecycleReply::CoreStatus(self.transport_status(status)),
+                            ),
                             reply => reply,
                         })
                     })
@@ -297,12 +298,14 @@ mod tests {
             RequestEnvelope {
                 request_id: RequestId::new("status").unwrap(),
                 session_id: SessionId::new("session").unwrap(),
-                body: RequestBody::Query(workbench_protocol::queries::Query::GetCoreStatus),
+                body: RequestBody::Query(workbench_protocol::queries::Query::Lifecycle(
+                    LifecycleQuery::GetCoreStatus,
+                )),
             },
             Provenance::human(Surface::Cli, ClientId::new("client").unwrap()),
         );
         let ReplyResult::Success(ReplyPayload::Query(
-            workbench_protocol::queries::QueryReply::CoreStatus(queried),
+            workbench_protocol::queries::QueryReply::Lifecycle(LifecycleReply::CoreStatus(queried)),
         )) = response.result
         else {
             panic!("expected status reply")

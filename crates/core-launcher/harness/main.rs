@@ -139,7 +139,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let epoch = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
         let mut hello = ServerHello {
             protocol_version: ProtocolVersion::CURRENT,
-            capabilities: Capability::ALL.to_vec(),
+            capabilities: Capability::IMPLEMENTED.to_vec(),
             server_build: BuildInfo {
                 name: "harness".into(),
                 version: "1".into(),

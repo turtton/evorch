@@ -50,7 +50,7 @@ fn run_id_of(observation: Option<&crate::message::ObservationContext>) -> Option
 /// The identifier Codex calls the session/thread ID, derived from the run. Run IDs are
 /// ULIDs, not UUIDs, so the UUID is a v5 over the run ID text: the same run always gets
 /// the same value, in every request, resend and compaction, with no stored state.
-fn run_derived_id(run_id: &str) -> String {
+pub fn run_derived_id(run_id: &str) -> String {
     Uuid::new_v5(&Uuid::NAMESPACE_OID, run_id.as_bytes()).to_string()
 }
 

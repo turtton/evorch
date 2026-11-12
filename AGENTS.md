@@ -88,7 +88,8 @@ mismatch. Revisit this policy before cutting a v1 release.
 - `gui` enables CEF by default, so cargo builds of it need the CEF distribution.
   The default Nix dev shell sets `CEF_PATH` and `LD_LIBRARY_PATH` for it, but a
   sandbox does not inherit them: pass both explicitly (docs/browser.md,
-  `scripts/setup-cef.sh`).
+  `scripts/setup-cef.sh`). The `sandbox-build` skill gives a wrapper that
+  loads the whole dev shell environment (also `LIBCLANG_PATH`) in a sandbox.
 - The fork ignores `CARGO_TARGET_DIR`, `build.target-dir` and
   `build.build-dir` (with a warning), so do not set them. Intermediate
   artifacts go to `${CARGO_HOME:-~/.cargo}/targets/<workspace>-<hash>/`, with

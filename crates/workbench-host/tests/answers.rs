@@ -5,6 +5,7 @@
 mod common;
 
 use std::sync::{Arc, Mutex};
+use workbench_protocol::namespaces::QuestionsCommand;
 
 use async_trait::async_trait;
 use common::{cli, host_with_project, offline_question, runtime_with_store, web};
@@ -22,12 +23,12 @@ use workbench_protocol::ids::{QuestionId, ThreadId};
 use workbench_protocol::wire::Revision;
 
 fn answer(question: &event_bus::UserQuestion, text: &str) -> Command {
-    Command::AnswerUserQuestion(AnswerUserQuestion {
+    Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {
         thread: ThreadId::new("thread-1").unwrap(),
         question_id: QuestionId::new(question.id.clone()).unwrap(),
         answer: text.into(),
         question_revision: Revision(0),
-    })
+    }))
 }
 
 fn cancel(host: &workbench_host::CommandHost, rt: &tokio::runtime::Runtime) {

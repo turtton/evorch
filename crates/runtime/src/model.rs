@@ -64,6 +64,24 @@ pub struct AgentInvocationContext {
 /// (routing profiles) がモデル解決に使う引数である。
 #[async_trait]
 pub trait AgentModel: Send + Sync {
+    /// Exact last provider input, not a reconstruction from current settings.
+    /// Models that cannot expose it cannot produce restart-safe checkpoints.
+    fn checkpoint_provider_input(&self, _run_id: &str) -> Option<crate::quiesce::ProviderInput> {
+        None
+    }
+
+    /// Rehydrate only observational provider state; this grants no run/tool authority.
+    /// Preserve the old editing interface to distinguish a real settings switch
+    /// from a reconnect carrying an opaque provider compaction item.
+    fn restore_checkpoint_provider_state(
+        &self,
+        _run_id: &str,
+        _role: Role,
+        _category: Option<&str>,
+        _input: &crate::quiesce::ProviderInput,
+    ) {
+    }
+
     /// Whether request assembly selects editing tools separately for each candidate.
     /// Legacy/fixed implementations keep edit/write via the runtime call boundary.
     fn narrows_edit_tools(&self) -> bool {
@@ -355,6 +373,18 @@ pub trait AgentModel: Send + Sync {
 
     /// Seeds a restored run's chain pins; the next resolution checks them as usual.
     fn restore_route_pins(&self, _run_id: &str, _pins: &[RoutePinRecord]) {}
+
+    /// Publishes refreshed models.dev data. Only runs admitted afterwards resolve output
+    /// limits from it; admitted runs keep the data they started with.
+    fn publish_model_catalog(&self, _catalog: std::sync::Arc<catalog::ModelCatalog>) {}
+
+    /// The shared output-limit catalog state, handed to a replacement model.
+    fn output_limit_catalogs(&self) -> Option<crate::compose::OutputLimitCatalogs> {
+        None
+    }
+
+    /// Adopts the state of the model this one replaces; unsupported models ignore it.
+    fn restore_output_limit_catalogs(&self, _shared: &crate::compose::OutputLimitCatalogs) {}
 
     /// Every run's chain pins, carried over when a reconfigured model replaces this one.
     fn route_pins_by_run(&self) -> std::collections::BTreeMap<String, Vec<RoutePinRecord>> {

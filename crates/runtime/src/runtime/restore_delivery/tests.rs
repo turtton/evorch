@@ -232,3 +232,66 @@ async fn restored_registration_has_a_fresh_completion_receipt() {
     runtime.observe_completion(&new);
     assert!(runtime.shared.held_messages.lock().unwrap()[&parent].is_empty());
 }
+
+#[tokio::test]
+async fn restore_intent_failure_does_not_consume_checkpoint_or_admit_twice() {
+    test_support::isolated_state_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("intent-failure.sqlite3"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(128));
+    let model = Arc::new(CompletingModel::default());
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    runtime.wait(parent).await.unwrap();
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    runtime.wait(child).await.unwrap();
+    let store = runtime.shared.run_store.get().unwrap();
+    let before = store.restore_bundle(child).unwrap().unwrap();
+    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    conn.execute_batch(&format!("CREATE TRIGGER reject_restore_intent BEFORE UPDATE ON resume_intents WHEN NEW.run_id = '{child}' BEGIN SELECT RAISE(ABORT, 'injected intent-only failure'); END;")).unwrap();
+    assert!(
+        runtime
+            .send_agent_message(parent, child, AgentMessageKind::Send, "retry me", None)
+            .is_err()
+    );
+    assert_eq!(store.restore_bundle(child).unwrap().unwrap(), before);
+    assert_eq!(model.0.lock().unwrap().len(), 2);
+    conn.execute_batch("DROP TRIGGER reject_restore_intent;")
+        .unwrap();
+    runtime
+        .send_agent_message(parent, child, AgentMessageKind::Send, "retry me", None)
+        .unwrap();
+    // The successful retry is already admitted even before its task is polled.
+    assert!(
+        runtime
+            .admit_intent(
+                child,
+                "duplicate".into(),
+                Some(parent),
+                Role::Worker,
+                "duplicate",
+                &RunConfig::default(),
+                false,
+                true
+            )
+            .is_err()
+    );
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(model.0.lock().unwrap().len(), 3);
+    assert!(
+        store
+            .restore_bundle(child)
+            .unwrap()
+            .unwrap()
+            .snapshot_revision
+            > before.snapshot_revision
+    );
+}

@@ -29,6 +29,9 @@ impl SwitchableModel {
                 model.restore_route_pins(&run_id, &pins);
             }
             model.restore_edit_tools(&target.edit_tools_by_run());
+            if let Some(shared) = target.output_limit_catalogs() {
+                model.restore_output_limit_catalogs(&shared);
+            }
             std::mem::replace(&mut *target, model)
         };
         drop(previous);
@@ -46,6 +49,19 @@ impl SwitchableModel {
 
 #[async_trait]
 impl AgentModel for SwitchableModel {
+    fn restore_checkpoint_provider_state(
+        &self,
+        run_id: &str,
+        role: Role,
+        category: Option<&str>,
+        input: &crate::quiesce::ProviderInput,
+    ) {
+        self.current()
+            .restore_checkpoint_provider_state(run_id, role, category, input);
+    }
+    fn checkpoint_provider_input(&self, run_id: &str) -> Option<crate::quiesce::ProviderInput> {
+        self.current().checkpoint_provider_input(run_id)
+    }
     fn narrows_edit_tools(&self) -> bool {
         true
     }
@@ -289,6 +305,18 @@ impl AgentModel for SwitchableModel {
 
     fn route_pins_by_run(&self) -> std::collections::BTreeMap<String, Vec<crate::RoutePinRecord>> {
         self.current().route_pins_by_run()
+    }
+
+    fn publish_model_catalog(&self, catalog: Arc<catalog::ModelCatalog>) {
+        self.current().publish_model_catalog(catalog);
+    }
+
+    fn output_limit_catalogs(&self) -> Option<super::OutputLimitCatalogs> {
+        self.current().output_limit_catalogs()
+    }
+
+    fn restore_output_limit_catalogs(&self, shared: &super::OutputLimitCatalogs) {
+        self.current().restore_output_limit_catalogs(shared);
     }
 }
 

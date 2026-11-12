@@ -11,7 +11,7 @@
 // applied (the same cursor EventSource would send as Last-Event-ID). When
 // the core cannot replay from it, it answers with a fresh snapshot.
 
-import { classifyCursor, formatCursor } from "./wire.js";
+import { classifyCursor, flattenEvent, formatCursor } from "./wire.js";
 
 export const MAX_BACKOFF_MS = 30_000;
 const BASE_BACKOFF_MS = 1_000;
@@ -153,7 +153,7 @@ export class EventStream {
   }
 
   handle(envelope) {
-    const event = envelope.event ?? {};
+    const event = flattenEvent(envelope.event);
     if (event.type === "resync_required") {
       // Events were dropped (slow subscriber): try to replay from the last
       // applied cursor. An old cursor or a new epoch needs a snapshot.
@@ -177,7 +177,7 @@ export class EventStream {
         return;
       default:
         this.last = envelope.cursor;
-        this.onEvent(envelope);
+        this.onEvent({ ...envelope, event });
     }
   }
 

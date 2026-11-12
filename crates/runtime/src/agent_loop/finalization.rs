@@ -190,7 +190,21 @@ impl LoopState {
                 self.finalization_error(format!("benchmark completion recording failed: {error}"));
             }
         }
+        if let Some(runtime) = self.runtime()
+            && !runtime.shared.quiesce.running()
+            && (!drained || !authority || !saved || !released)
+        {
+            // Ordinary completion keeps ADR 0027's non-fatal snapshot policy,
+            // but a restart may not turn failed teardown/persistence into success.
+            runtime
+                .shared
+                .quiesce
+                .fail("terminal finalization did not commit a safe checkpoint");
+        }
         if released && let Some(memo) = self.take_pending_escalation() {
+            // Handoff publishes its own terminal event and returns early. Retire
+            // this incarnation before that publication, just like ordinary exit.
+            self.record_intent_terminal();
             let shared = self.shared.runtime.clone();
             crate::escalation::handoff::complete(&shared, self, memo).await;
             return;
@@ -199,6 +213,7 @@ impl LoopState {
         // escalation the source root no longer owns a list, so this is a no-op.
         // It must precede the terminal event and never changes how the run ended.
         self.reconcile_root_todo();
+        self.record_intent_terminal();
         self.publish_terminal();
     }
 

@@ -360,6 +360,27 @@ pub(super) fn run_writer_with_index(
                 });
                 let _ = reply.send(result);
             }
+            Ok(Command::SaveSnapshotBundleWithResumeIntent(write, intent, expected, reply)) => {
+                let result = (|| {
+                    let previous: i64 =
+                        state
+                            .conn
+                            .pragma_query_value(None, "synchronous", |row| row.get(0))?;
+                    state.conn.pragma_update(None, "synchronous", "FULL")?;
+                    let result = snapshot_transaction(&state, "restore admission", |conn| {
+                        let receipt = crate::repo::thread_index::stage_snapshot(conn, &write)?;
+                        crate::resume_intent::save(conn, &intent, expected.as_deref())?;
+                        Ok(receipt)
+                    });
+                    // Remaining at FULL is safe if restoring the performance
+                    // setting fails. Never report a committed admission as failed.
+                    if let Err(error) = state.conn.pragma_update(None, "synchronous", previous) {
+                        tracing::warn!(%error, "restore admission retained FULL synchronous mode");
+                    }
+                    result
+                })();
+                let _ = reply.send(result);
+            }
             Ok(Command::SaveSnapshotBundleWithEvidence(
                 write,
                 rows,
@@ -647,6 +668,33 @@ pub(super) fn run_writer_with_index(
             }
             Ok(Command::Reconcile(reply)) => {
                 let _ = reply.send(projection::reconcile(&state.conn));
+            }
+            Ok(Command::SaveResumeIntent(record, expected, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "resume intent writes suspended".into(),
+                    ))
+                } else {
+                    crate::resume_intent::save(&state.conn, &record, expected.as_deref())
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::FlushResumeIntents(reply)) => {
+                let result = flush_usage(&mut state).and_then(|()| {
+                    let (busy, frames, synced): (i64, i64, i64) =
+                        state
+                            .conn
+                            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                            })?;
+                    if busy != 0 || frames != synced {
+                        return Err(StorageError::Io(
+                            "resume intent WAL flush incomplete".into(),
+                        ));
+                    }
+                    Ok(())
+                });
+                let _ = reply.send(result);
             }
             Ok(Command::FlushUsage(reply)) => {
                 let result = flush_usage(&mut state);

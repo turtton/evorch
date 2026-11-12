@@ -23,6 +23,7 @@ use workbench_protocol::handshake::{
 use workbench_protocol::ids::{
     ClientId, CoreIdentity, RequestId, SessionId, SubscriptionId, ThreadId,
 };
+use workbench_protocol::namespaces::{LifecycleEvent, LifecycleQuery, LifecycleReply};
 use workbench_protocol::queries::{Query, QueryReply};
 use workbench_protocol::wire::{InstanceEpoch, Sequence};
 use workbench_web::{BackendSubscription, WebSession, WorkbenchBackend};
@@ -134,7 +135,7 @@ pub fn core_status() -> CoreStatus {
 pub fn server_hello() -> ServerHello {
     ServerHello {
         protocol_version: ProtocolVersion::CURRENT,
-        capabilities: Capability::ALL.to_vec(),
+        capabilities: Capability::IMPLEMENTED.to_vec(),
         server_build: BuildInfo {
             name: "evorch-core".to_owned(),
             version: "9.9.9".to_owned(),
@@ -188,16 +189,16 @@ impl WorkbenchBackend for FakeBackend {
             Some(error) => ReplyResult::Error(error),
             None => ReplyResult::Success(match body {
                 RequestBody::Command(_) => ReplyPayload::Command(CommandReply {
-                    conversation: None,
-                    lane_management: None,
-                    lane_close: None,
                     disposition: CommandDisposition::Accepted,
                     submission_id: None,
                     run_id: None,
                     thread_revision: None,
+                    result: None,
                 }),
-                RequestBody::Query(Query::GetCoreStatus) => {
-                    ReplyPayload::Query(QueryReply::CoreStatus(core_status()))
+                RequestBody::Query(Query::Lifecycle(LifecycleQuery::GetCoreStatus)) => {
+                    ReplyPayload::Query(QueryReply::Lifecycle(LifecycleReply::CoreStatus(
+                        core_status(),
+                    )))
                 }
                 _ => ReplyPayload::Ack,
             }),
@@ -258,9 +259,9 @@ pub fn event(cursor: EventCursor, event: UiEvent) -> EventEnvelope {
 pub fn status_event(cursor: EventCursor) -> EventEnvelope {
     event(
         cursor,
-        UiEvent::CoreStatusChanged {
+        UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged {
             status: core_status(),
-        },
+        }),
     )
 }
 
@@ -283,7 +284,7 @@ pub fn query_request(request_id: &str) -> serde_json::Value {
         "request_id": request_id,
         "session_id": "sess-1",
         "kind": "query",
-        "payload": {"type": "get_core_status"}
+        "payload": {"type": "lifecycle", "payload": {"type": "get_core_status"}}
     })
 }
 
@@ -292,7 +293,7 @@ pub fn command_request(request_id: &str) -> serde_json::Value {
         "request_id": request_id,
         "session_id": "sess-1",
         "kind": "command",
-        "payload": {"type": "stop_chat", "payload": {"thread": "thr-1"}}
+        "payload": {"type": "execution", "payload": {"type": "stop_chat", "payload": {"thread": "thr-1"}}}
     })
 }
 

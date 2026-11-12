@@ -1,6 +1,8 @@
 //! GUI-independent provider construction and live project model reloads.
 use std::sync::Arc;
 
+use runtime::AgentModel as _;
+
 use runtime::compose::{CompositionError, RoutedModel, compose_routed_model};
 
 #[derive(Clone)]
@@ -67,6 +69,9 @@ pub struct ProjectModels {
             std::collections::BTreeMap<std::path::PathBuf, Arc<runtime::compose::SwitchableModel>>,
         >,
     >,
+    /// The newest published catalog, so a model created later starts with it. Guarded by the
+    /// `models` lock: publishing and creating a model never interleave.
+    latest_catalog: Arc<std::sync::Mutex<Option<Arc<catalog::ModelCatalog>>>>,
 }
 
 impl ProjectModels {
@@ -75,6 +80,7 @@ impl ProjectModels {
         Self {
             base,
             models: Arc::default(),
+            latest_catalog: Arc::default(),
         }
     }
 
@@ -111,8 +117,36 @@ impl ProjectModels {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Some(Arc::clone(models.entry(root.to_path_buf()).or_insert_with(
-            || Arc::new(runtime::compose::SwitchableModel::new(self.compose(root))),
+            || {
+                let model = Arc::new(runtime::compose::SwitchableModel::new(self.compose(root)));
+                if let Some(catalog) = self
+                    .latest_catalog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                {
+                    model.publish_model_catalog(catalog);
+                }
+                model
+            },
         )))
+    }
+
+    /// Publishes refreshed models.dev data to every project model, existing or created later.
+    /// Runs admitted before this call keep their output limits; no provider client,
+    /// credential or cooldown is recomposed.
+    pub fn publish_model_catalog(&self, catalog: Arc<catalog::ModelCatalog>) {
+        let models = self
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *self
+            .latest_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&catalog));
+        for model in models.values() {
+            model.publish_model_catalog(Arc::clone(&catalog));
+        }
     }
 
     /// Recomposes one project's model after its configuration changed.
@@ -161,3 +195,21 @@ pub fn reload_models(
     }
     projects.map_or(Ok(()), ProjectModels::reload_all)
 }
+
+/// Publishes refreshed models.dev data to the startup model and every project model.
+pub fn publish_model_catalog(
+    main: Option<&(ProductionModel, Arc<runtime::compose::SwitchableModel>)>,
+    projects: Option<&ProjectModels>,
+    catalog: &Arc<catalog::ModelCatalog>,
+) {
+    if let Some((_, model)) = main {
+        model.publish_model_catalog(Arc::clone(catalog));
+    }
+    if let Some(projects) = projects {
+        projects.publish_model_catalog(Arc::clone(catalog));
+    }
+}
+
+#[cfg(test)]
+#[path = "models_tests.rs"]
+mod models_tests;

@@ -5,6 +5,12 @@ use runtime::AgentRuntime;
 use sandbox::approval::{ApprovalRegistry, ApprovalRequest, ApprovalState};
 use std::time::Duration;
 use workbench_host::CommandHost;
+use workbench_protocol::namespaces::{
+    ApprovalsCommand, ApprovalsEvent, ApprovalsQuery, ApprovalsReply, ConversationEvent,
+    ConversationQuery, ConversationReply, ExecutionQuery, ExecutionReply, LifecycleQuery,
+    LifecycleReply, ProjectionEvent, ProjectionQuery, ProjectionReply, QuestionsCommand,
+    QuestionsEvent, QuestionsQuery, QuestionsReply, WorkspaceQuery, WorkspaceReply,
+};
 use workbench_protocol::{
     commands::*, errors::ErrorCode, events::*, ids::*, queries::*, views::*, wire::*,
 };
@@ -91,12 +97,14 @@ fn pending() -> PendingQuery {
     }
 }
 fn history(page: PageRequest) -> Query {
-    Query::ReadCommittedHistory(ReadCommittedHistory {
-        direction: Default::default(),
-        thread: ThreadId::new("thread-1").unwrap(),
-        run: None,
-        page,
-    })
+    Query::Conversation(ConversationQuery::ReadCommittedHistory(
+        ReadCommittedHistory {
+            direction: Default::default(),
+            thread: ThreadId::new("thread-1").unwrap(),
+            run: None,
+            page,
+        },
+    ))
 }
 
 #[test]
@@ -112,13 +120,17 @@ fn queries_page_by_snapshot_and_refuse_reused_or_stale_cursors() {
             limit: 2,
         },
     };
-    let QueryReply::Threads(a) = f.query(Query::ListThreads(first.clone())) else {
+    let QueryReply::Workspace(WorkspaceReply::Threads(a)) =
+        f.query(Query::Workspace(WorkspaceQuery::ListThreads(first.clone())))
+    else {
         panic!()
     };
     assert_eq!(a.items.len(), 2);
     let mut next = first.clone();
     next.page.cursor = a.next_cursor.clone();
-    let QueryReply::Threads(b) = f.query(Query::ListThreads(next.clone())) else {
+    let QueryReply::Workspace(WorkspaceReply::Threads(b)) =
+        f.query(Query::Workspace(WorkspaceQuery::ListThreads(next.clone())))
+    else {
         panic!()
     };
     assert_eq!(b.snapshot_revision, a.snapshot_revision);
@@ -127,7 +139,7 @@ fn queries_page_by_snapshot_and_refuse_reused_or_stale_cursors() {
         .host
         .handle_query(
             &SessionId::new("session").unwrap(),
-            &Query::ListProjects(next.page.clone()),
+            &Query::Workspace(WorkspaceQuery::ListProjects(next.page.clone())),
         )
         .unwrap_err();
     assert_eq!(foreign.code, ErrorCode::Conflict);
@@ -136,7 +148,7 @@ fn queries_page_by_snapshot_and_refuse_reused_or_stale_cursors() {
         .host
         .handle_query(
             &SessionId::new("session").unwrap(),
-            &Query::ListThreads(next),
+            &Query::Workspace(WorkspaceQuery::ListThreads(next)),
         )
         .unwrap_err();
     assert_eq!(stale.code, ErrorCode::Conflict);
@@ -144,24 +156,28 @@ fn queries_page_by_snapshot_and_refuse_reused_or_stale_cursors() {
         assert!(
             f.host
                 .projection()
-                .query(&Query::ListProjects(PageRequest {
-                    cursor: None,
-                    limit
-                }))
+                .query(&Query::Workspace(WorkspaceQuery::ListProjects(
+                    PageRequest {
+                        cursor: None,
+                        limit
+                    }
+                )))
                 .is_err()
         );
     }
-    let QueryReply::Runs(runs) = f.query(Query::ListRuns(ThreadQuery {
-        thread: ThreadId::new("thread-1").unwrap(),
-        page: Default::default(),
-    })) else {
+    let QueryReply::Execution(ExecutionReply::Runs(runs)) =
+        f.query(Query::Execution(ExecutionQuery::ListRuns(ThreadQuery {
+            thread: ThreadId::new("thread-1").unwrap(),
+            page: Default::default(),
+        })))
+    else {
         panic!()
     };
     assert_eq!(runs.items.len(), 1);
     assert_eq!(runs.items[0].role, RunRole::Worker);
     assert!(matches!(
-        f.query(Query::GetCoreStatus),
-        QueryReply::CoreStatus(_)
+        f.query(Query::Lifecycle(LifecycleQuery::GetCoreStatus)),
+        QueryReply::Lifecycle(LifecycleReply::CoreStatus(_))
     ));
 }
 
@@ -174,7 +190,9 @@ fn committed_bodies_are_lazy_utf8_chunked_and_unavailable_after_deletion() {
         text: body.clone(),
     });
     f.store.handle().append_event(None, &event).unwrap();
-    let QueryReply::CommittedHistory(page) = f.query(history(Default::default())) else {
+    let QueryReply::Conversation(ConversationReply::CommittedHistory(page)) =
+        f.query(history(Default::default()))
+    else {
         panic!()
     };
     assert_eq!(page.items.len(), 1);
@@ -184,11 +202,13 @@ fn committed_bodies_are_lazy_utf8_chunked_and_unavailable_after_deletion() {
     let mut offset = ByteOffset(0);
     let mut joined = String::new();
     loop {
-        let QueryReply::Body(chunk) = f.query(Query::ReadBody(ReadBody {
-            body_id: reference.body_id.clone(),
-            offset,
-            max_bytes: 65536,
-        })) else {
+        let QueryReply::Projection(ProjectionReply::Body(chunk)) =
+            f.query(Query::Projection(ProjectionQuery::ReadBody(ReadBody {
+                body_id: reference.body_id.clone(),
+                offset,
+                max_bytes: 65536,
+            })))
+        else {
             panic!()
         };
         assert!(chunk.text.len() <= 65536);
@@ -202,30 +222,36 @@ fn committed_bodies_are_lazy_utf8_chunked_and_unavailable_after_deletion() {
         }
     }
     assert_eq!(joined, body);
-    let QueryReply::Body(one) = f.query(Query::ReadBody(ReadBody {
-        body_id: reference.body_id.clone(),
-        offset: ByteOffset(1),
-        max_bytes: 4,
-    })) else {
+    let QueryReply::Projection(ProjectionReply::Body(one)) =
+        f.query(Query::Projection(ProjectionQuery::ReadBody(ReadBody {
+            body_id: reference.body_id.clone(),
+            offset: ByteOffset(1),
+            max_bytes: 4,
+        })))
+    else {
         panic!()
     };
     assert_eq!(one.text, "😀");
     assert_eq!(one.next_offset, Some(ByteOffset(5)));
-    let QueryReply::Body(eof) = f.query(Query::ReadBody(ReadBody {
-        body_id: reference.body_id.clone(),
-        offset: ByteOffset(body.len() as u64),
-        max_bytes: 4,
-    })) else {
+    let QueryReply::Projection(ProjectionReply::Body(eof)) =
+        f.query(Query::Projection(ProjectionQuery::ReadBody(ReadBody {
+            body_id: reference.body_id.clone(),
+            offset: ByteOffset(body.len() as u64),
+            max_bytes: 4,
+        })))
+    else {
         panic!()
     };
     assert!(eof.text.is_empty());
     assert!(eof.next_offset.is_none());
     let invalid = |offset, bytes| {
-        f.host.projection().query(&Query::ReadBody(ReadBody {
-            body_id: reference.body_id.clone(),
-            offset: ByteOffset(offset),
-            max_bytes: bytes,
-        }))
+        f.host
+            .projection()
+            .query(&Query::Projection(ProjectionQuery::ReadBody(ReadBody {
+                body_id: reference.body_id.clone(),
+                offset: ByteOffset(offset),
+                max_bytes: bytes,
+            })))
     };
     assert!(invalid(2, 65536).is_err()); // inside the first emoji
     assert!(invalid(0, 65537).is_err());
@@ -238,10 +264,12 @@ fn committed_bodies_are_lazy_utf8_chunked_and_unavailable_after_deletion() {
             .query(&history(Default::default()))
             .is_err()
     );
-    let QueryReply::Threads(threads) = f.query(Query::ListThreads(ListThreads {
-        project: common::project(),
-        page: Default::default(),
-    })) else {
+    let QueryReply::Workspace(WorkspaceReply::Threads(threads)) =
+        f.query(Query::Workspace(WorkspaceQuery::ListThreads(ListThreads {
+            project: common::project(),
+            page: Default::default(),
+        })))
+    else {
         panic!()
     };
     assert!(threads.items.is_empty());
@@ -266,17 +294,23 @@ fn durable_commits_wake_subscribers_and_use_the_history_index_not_bus_deltas() {
     let envelope = f.rt.block_on(async {
         loop {
             let envelope = sub.recv().await.unwrap();
-            if matches!(envelope.event, UiEvent::MessageCommitted { .. }) {
+            if matches!(
+                envelope.event,
+                UiEvent::Conversation(ConversationEvent::MessageCommitted { .. })
+            ) {
                 break envelope;
             }
             assert!(!envelope.event.ends_subscription());
         }
     });
     assert!(envelope.cursor.sequence > sub.started.high_water.sequence);
-    let UiEvent::MessageCommitted { message } = envelope.event else {
+    let UiEvent::Conversation(ConversationEvent::MessageCommitted { message }) = envelope.event
+    else {
         panic!()
     };
-    let QueryReply::CommittedHistory(page) = f.query(history(Default::default())) else {
+    let QueryReply::Conversation(ConversationReply::CommittedHistory(page)) =
+        f.query(history(Default::default()))
+    else {
         panic!()
     };
     assert_eq!(page.items, vec![message]);
@@ -292,7 +326,10 @@ fn durable_commits_wake_subscribers_and_use_the_history_index_not_bus_deltas() {
     let replayed = f.rt.block_on(async {
         loop {
             let e = replay.recv().await.unwrap();
-            if matches!(e.event, UiEvent::MessageCommitted { .. }) {
+            if matches!(
+                e.event,
+                UiEvent::Conversation(ConversationEvent::MessageCommitted { .. })
+            ) {
                 break e;
             }
         }
@@ -315,7 +352,9 @@ fn approval_decision_uses_registry_cas_and_emits_changed_with_ingress_provenance
         },
         Duration::from_secs(3600),
     );
-    let QueryReply::Approvals(page) = f.query(Query::ListApprovals(pending())) else {
+    let QueryReply::Approvals(ApprovalsReply::Approvals(page)) =
+        f.query(Query::Approvals(ApprovalsQuery::ListApprovals(pending())))
+    else {
         panic!()
     };
     let view = &page.items[0];
@@ -326,18 +365,21 @@ fn approval_decision_uses_registry_cas_and_emits_changed_with_ingress_provenance
         .unwrap()
         .unwrap();
     assert_eq!(complete["command"], "echo hi");
-    let command = Command::DecideToolApproval(DecideToolApproval {
+    let command = Command::Approvals(ApprovalsCommand::DecideToolApproval(DecideToolApproval {
         approval_id: view.id.clone(),
         core_epoch: view.core_epoch,
         approval_revision: view.revision,
         decision: ApprovalDecision::Approve,
-    });
-    if let Command::DecideToolApproval(decide) = &command {
+    }));
+    if let Command::Approvals(ApprovalsCommand::DecideToolApproval(decide)) = &command {
         let mut wrong = decide.clone();
         wrong.core_epoch = InstanceEpoch(wrong.core_epoch.get() + 1);
         assert_eq!(
             f.host
-                .handle_command(Command::DecideToolApproval(wrong), common::web())
+                .handle_command(
+                    Command::Approvals(ApprovalsCommand::DecideToolApproval(wrong)),
+                    common::web()
+                )
                 .unwrap_err()
                 .code,
             ErrorCode::Conflict
@@ -346,7 +388,10 @@ fn approval_decision_uses_registry_cas_and_emits_changed_with_ingress_provenance
         stale.approval_revision = Revision(stale.approval_revision.get() + 1);
         assert_eq!(
             f.host
-                .handle_command(Command::DecideToolApproval(stale), common::web())
+                .handle_command(
+                    Command::Approvals(ApprovalsCommand::DecideToolApproval(stale)),
+                    common::web()
+                )
                 .unwrap_err()
                 .code,
             ErrorCode::Conflict
@@ -366,7 +411,7 @@ fn approval_decision_uses_registry_cas_and_emits_changed_with_ingress_provenance
     let changed = f.rt.block_on(async {
         loop {
             let e = sub.recv().await.unwrap();
-            if let UiEvent::ApprovalChanged { approval } = e.event
+            if let UiEvent::Approvals(ApprovalsEvent::ApprovalChanged { approval }) = e.event
                 && approval.state == workbench_protocol::views::ApprovalState::Approved
             {
                 break approval;
@@ -396,9 +441,9 @@ fn protocol_answer_emits_changed_and_its_receipt_is_hidden_after_requester_delet
         }])
         .unwrap();
     let mut host = common::host_with_project(&rt, runtime, dir.path());
-    let QueryReply::Questions(before) = host
+    let QueryReply::Questions(QuestionsReply::Questions(before)) = host
         .projection()
-        .query(&Query::ListQuestions(pending()))
+        .query(&Query::Questions(QuestionsQuery::ListQuestions(pending())))
         .unwrap()
     else {
         panic!()
@@ -416,19 +461,19 @@ fn protocol_answer_emits_changed_and_its_receipt_is_hidden_after_requester_delet
     host.handle_request(
         &session,
         &request,
-        Command::AnswerUserQuestion(AnswerUserQuestion {
+        Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {
             thread: ThreadId::new("thread-1").unwrap(),
             question_id: QuestionId::new(&question.id).unwrap(),
             answer: "JSON".into(),
             question_revision: Revision(0),
-        }),
+        })),
         common::web(),
     )
     .unwrap();
     let changed = rt.block_on(async {
         loop {
             let e = sub.recv().await.unwrap();
-            if let UiEvent::QuestionChanged { question } = e.event
+            if let UiEvent::Questions(QuestionsEvent::QuestionChanged { question }) = e.event
                 && question
                     .answer
                     .as_ref()
@@ -472,10 +517,12 @@ fn committed_history_pages_keep_their_high_water_while_new_messages_arrive() {
             )
             .unwrap();
     }
-    let QueryReply::CommittedHistory(first) = f.query(history(PageRequest {
-        cursor: None,
-        limit: 2,
-    })) else {
+    let QueryReply::Conversation(ConversationReply::CommittedHistory(first)) =
+        f.query(history(PageRequest {
+            cursor: None,
+            limit: 2,
+        }))
+    else {
         panic!()
     };
     f.store
@@ -488,10 +535,12 @@ fn committed_history_pages_keep_their_high_water_while_new_messages_arrive() {
             }),
         )
         .unwrap();
-    let QueryReply::CommittedHistory(next) = f.query(history(PageRequest {
-        cursor: first.next_cursor,
-        limit: 2,
-    })) else {
+    let QueryReply::Conversation(ConversationReply::CommittedHistory(next)) =
+        f.query(history(PageRequest {
+            cursor: first.next_cursor,
+            limit: 2,
+        }))
+    else {
         panic!()
     };
     assert_eq!(next.snapshot_revision, first.snapshot_revision);
@@ -530,7 +579,7 @@ fn legacy_questions_discard_stale_routing_payload_and_preserve_unknown_answer_or
     let answered = f.rt.block_on(async {
         loop {
             let e = sub.recv().await.unwrap();
-            if let UiEvent::QuestionChanged { question } = e.event
+            if let UiEvent::Questions(QuestionsEvent::QuestionChanged { question }) = e.event
                 && question.answer.is_some()
             {
                 break question;
@@ -541,7 +590,9 @@ fn legacy_questions_discard_stale_routing_payload_and_preserve_unknown_answer_or
     assert_eq!(answered.routing_revision, Revision(0));
     assert_eq!(answered.management_revision, Revision(0));
     assert_eq!(answered.answer.unwrap().answered_by, None);
-    let QueryReply::Questions(pending) = f.query(Query::ListQuestions(pending())) else {
+    let QueryReply::Questions(QuestionsReply::Questions(pending)) =
+        f.query(Query::Questions(QuestionsQuery::ListQuestions(pending())))
+    else {
         panic!()
     };
     assert!(pending.items.is_empty());
@@ -587,9 +638,9 @@ fn snapshot_pages_remain_frozen_and_tombstones_revoke_old_pages_and_replay() {
     let terminal = f.rt.block_on(sub.recv()).unwrap();
     assert!(matches!(
         terminal.event,
-        UiEvent::ResyncRequired {
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::EpochChanged
-        }
+        })
     ));
     assert!(f.rt.block_on(sub.recv()).is_none());
     let mut resumed = f
@@ -612,7 +663,7 @@ fn snapshot_pages_remain_frozen_and_tombstones_revoke_old_pages_and_replay() {
     );
     assert!(matches!(
         f.rt.block_on(resumed.recv()).unwrap().event,
-        UiEvent::ResyncRequired { .. }
+        UiEvent::Projection(ProjectionEvent::ResyncRequired { .. })
     ));
 }
 
@@ -680,7 +731,9 @@ fn lane_questions_use_durable_requester_and_user_or_lead_routing() {
             )
             .unwrap();
     }
-    let QueryReply::Questions(page) = f.query(Query::ListQuestions(pending())) else {
+    let QueryReply::Questions(QuestionsReply::Questions(page)) =
+        f.query(Query::Questions(QuestionsQuery::ListQuestions(pending())))
+    else {
         panic!()
     };
     assert_eq!(page.items.len(), 2);
@@ -752,18 +805,21 @@ fn input_receipt_query_and_changed_event_share_provenance_and_hide_tombstones() 
             accepted_at_ns: 1,
         })
         .unwrap();
-    let query = Query::GetInputReceipts(ThreadQuery {
+    let query = Query::Conversation(ConversationQuery::GetInputReceipts(ThreadQuery {
         thread: ThreadId::new("thread-1").unwrap(),
         page: Default::default(),
-    });
-    let QueryReply::InputReceipts(page) = f.query(query.clone()) else {
+    }));
+    let QueryReply::Conversation(ConversationReply::InputReceipts(page)) = f.query(query.clone())
+    else {
         panic!()
     };
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].sent_by, common::web());
     let changed = f.rt.block_on(async {
         loop {
-            if let UiEvent::InputReceiptChanged { receipt } = sub.recv().await.unwrap().event {
+            if let UiEvent::Conversation(ConversationEvent::InputReceiptChanged { receipt }) =
+                sub.recv().await.unwrap().event
+            {
                 break receipt;
             }
         }
@@ -773,19 +829,22 @@ fn input_receipt_query_and_changed_event_share_provenance_and_hide_tombstones() 
         .handle()
         .mark_host_inputs_unknown("run-1", "ended")
         .unwrap();
-    let QueryReply::InputReceipts(next) = f.query(query.clone()) else {
+    let QueryReply::Conversation(ConversationReply::InputReceipts(next)) = f.query(query.clone())
+    else {
         panic!()
     };
     assert_eq!(next.items[0].state, InputReceiptState::Unknown);
     assert_ne!(next.snapshot_revision, page.snapshot_revision);
-    let QueryReply::Thread(thread) = f.query(Query::GetThread(ThreadTarget {
-        thread: ThreadId::new("thread-1").unwrap(),
-    })) else {
+    let QueryReply::Workspace(WorkspaceReply::Thread(thread)) =
+        f.query(Query::Workspace(WorkspaceQuery::GetThread(ThreadTarget {
+            thread: ThreadId::new("thread-1").unwrap(),
+        })))
+    else {
         panic!()
     };
     assert_eq!(thread.root_run.unwrap().as_str(), "run-1");
     f.tombstone();
-    let QueryReply::InputReceipts(deleted) = f.query(query) else {
+    let QueryReply::Conversation(ConversationReply::InputReceipts(deleted)) = f.query(query) else {
         panic!()
     };
     assert!(deleted.items.is_empty());
@@ -834,10 +893,12 @@ fn input_for(
         .unwrap();
 }
 fn messages(f: &Fixture) -> Vec<CommittedMessage> {
-    let QueryReply::CommittedHistory(page) = f.query(history(PageRequest {
-        cursor: None,
-        limit: 200,
-    })) else {
+    let QueryReply::Conversation(ConversationReply::CommittedHistory(page)) =
+        f.query(history(PageRequest {
+            cursor: None,
+            limit: 200,
+        }))
+    else {
         panic!()
     };
     assert!(page.next_cursor.is_none());
@@ -850,8 +911,12 @@ fn next_message(
     f.rt.block_on(async {
         loop {
             match sub.recv().await.expect("open subscription").event {
-                UiEvent::MessageCommitted { message } => break message,
-                UiEvent::ResyncRequired { reason } => panic!("unexpected resync: {reason:?}"),
+                UiEvent::Conversation(ConversationEvent::MessageCommitted { message }) => {
+                    break message;
+                }
+                UiEvent::Projection(ProjectionEvent::ResyncRequired { reason }) => {
+                    panic!("unexpected resync: {reason:?}")
+                }
                 _ => {}
             }
         }
@@ -1032,7 +1097,10 @@ fn late_delivery_resynchronizes_instead_of_silently_reindexing_history() {
     let resync = f.rt.block_on(async {
         loop {
             let e = sub.recv().await.unwrap();
-            if matches!(e.event, UiEvent::ResyncRequired { .. }) {
+            if matches!(
+                e.event,
+                UiEvent::Projection(ProjectionEvent::ResyncRequired { .. })
+            ) {
                 break e;
             }
         }
@@ -1047,11 +1115,12 @@ fn late_delivery_resynchronizes_instead_of_silently_reindexing_history() {
 fn history_cursor_rejects_retained_row_removal_or_deleted_run() {
     for direction in [HistoryDirection::Forward, HistoryDirection::Backward] {
         let history = |page| {
-            let Query::ReadCommittedHistory(mut q) = history(page) else {
+            let Query::Conversation(ConversationQuery::ReadCommittedHistory(mut q)) = history(page)
+            else {
                 unreachable!()
             };
             q.direction = direction;
-            Query::ReadCommittedHistory(q)
+            Query::Conversation(ConversationQuery::ReadCommittedHistory(q))
         };
         for delete_run in [false, true] {
             let f = Fixture::new();
@@ -1082,10 +1151,12 @@ fn history_cursor_rejects_retained_row_removal_or_deleted_run() {
                     },
                 );
             }
-            let QueryReply::CommittedHistory(page) = f.query(history(PageRequest {
-                cursor: None,
-                limit: 1,
-            })) else {
+            let QueryReply::Conversation(ConversationReply::CommittedHistory(page)) =
+                f.query(history(PageRequest {
+                    cursor: None,
+                    limit: 1,
+                }))
+            else {
                 panic!()
             };
             let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
@@ -1166,11 +1237,13 @@ fn large_delivered_input_is_deferred_and_initial_prompt_still_deduplicates() {
     let MessageContent::Body(reference) = &items[0].content else {
         panic!("large receipt is deferred")
     };
-    let QueryReply::Body(chunk) = f.query(Query::ReadBody(ReadBody {
-        body_id: reference.body_id.clone(),
-        offset: ByteOffset(0),
-        max_bytes: 65536,
-    })) else {
+    let QueryReply::Projection(ProjectionReply::Body(chunk)) =
+        f.query(Query::Projection(ProjectionQuery::ReadBody(ReadBody {
+            body_id: reference.body_id.clone(),
+            offset: ByteOffset(0),
+            max_bytes: 65536,
+        })))
+    else {
         panic!()
     };
     assert_eq!(chunk.text, body[..65536]);
@@ -1179,11 +1252,11 @@ fn large_delivered_input_is_deferred_and_initial_prompt_still_deduplicates() {
     let err = f
         .host
         .projection()
-        .query(&Query::ReadBody(ReadBody {
+        .query(&Query::Projection(ProjectionQuery::ReadBody(ReadBody {
             body_id: reference.body_id.clone(),
             offset: ByteOffset(0),
             max_bytes: 65536,
-        }))
+        })))
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::NotFound);
 }
@@ -1216,12 +1289,12 @@ fn approval_registered_and_decided_between_refreshes_still_emits_changed() {
                 .handle_request(
                     &SessionId::new("immediate-session").unwrap(),
                     &RequestId::new("immediate-request").unwrap(),
-                    Command::DecideToolApproval(DecideToolApproval {
+                    Command::Approvals(ApprovalsCommand::DecideToolApproval(DecideToolApproval {
                         approval_id: ApprovalId::new(&pending.id.value).unwrap(),
                         core_epoch: InstanceEpoch(pending.id.core_epoch),
                         approval_revision: Revision(pending.revision),
                         decision: ApprovalDecision::Approve,
-                    }),
+                    })),
                     common::web(),
                 )
                 .unwrap();
@@ -1238,7 +1311,7 @@ fn approval_registered_and_decided_between_refreshes_still_emits_changed() {
         let changed = f.rt.block_on(async {
             loop {
                 let e = sub.recv().await.unwrap();
-                if let UiEvent::ApprovalChanged { approval } = e.event
+                if let UiEvent::Approvals(ApprovalsEvent::ApprovalChanged { approval }) = e.event
                     && approval.state == workbench_protocol::views::ApprovalState::Approved
                 {
                     break approval;
@@ -1311,11 +1384,13 @@ fn deferred_multipart_finish_retains_distinct_descriptor_shapes_without_prereadi
     let MessageContent::Body(reference) = committed.content else {
         panic!()
     };
-    let QueryReply::Body(chunk) = f.query(Query::ReadBody(ReadBody {
-        body_id: reference.body_id,
-        offset: ByteOffset(0),
-        max_bytes: 65536,
-    })) else {
+    let QueryReply::Projection(ProjectionReply::Body(chunk)) =
+        f.query(Query::Projection(ProjectionQuery::ReadBody(ReadBody {
+            body_id: reference.body_id,
+            offset: ByteOffset(0),
+            max_bytes: 65536,
+        })))
+    else {
         panic!()
     };
     assert_eq!(chunk.text, part.repeat(2));
@@ -1399,10 +1474,12 @@ fn history_and_subscription_do_not_resolve_missing_or_corrupt_page_external_bodi
             assert_eq!(damaged, 1);
             let meter = read_meter(&f);
             let mut sub = f.subscribe();
-            let QueryReply::CommittedHistory(page) = f.query(history(PageRequest {
-                cursor: None,
-                limit: 1,
-            })) else {
+            let QueryReply::Conversation(ConversationReply::CommittedHistory(page)) =
+                f.query(history(PageRequest {
+                    cursor: None,
+                    limit: 1,
+                }))
+            else {
                 panic!()
             };
             assert_eq!(page.items.len(), 1);
@@ -1483,7 +1560,8 @@ fn small_history_pages_and_subscription_updates_read_no_large_input_bodies() {
     let mut cursor = None;
     let mut items = vec![];
     for _ in 0..6 {
-        let QueryReply::CommittedHistory(page) = f.query(history(PageRequest { cursor, limit: 1 }))
+        let QueryReply::Conversation(ConversationReply::CommittedHistory(page)) =
+            f.query(history(PageRequest { cursor, limit: 1 }))
         else {
             panic!()
         };
@@ -1532,11 +1610,13 @@ fn small_history_pages_and_subscription_updates_read_no_large_input_bodies() {
     let MessageContent::Body(reference) = &items[0].content else {
         panic!()
     };
-    let QueryReply::Body(chunk) = f.query(Query::ReadBody(ReadBody {
-        body_id: reference.body_id.clone(),
-        offset: ByteOffset(0),
-        max_bytes: 65536,
-    })) else {
+    let QueryReply::Projection(ProjectionReply::Body(chunk)) =
+        f.query(Query::Projection(ProjectionQuery::ReadBody(ReadBody {
+            body_id: reference.body_id.clone(),
+            offset: ByteOffset(0),
+            max_bytes: 65536,
+        })))
+    else {
         panic!()
     };
     assert_eq!(chunk.text.len(), 65536);
@@ -1679,7 +1759,9 @@ fn complete_approval_input_chunks_bind_identity_and_recheck_resolution() {
         Duration::from_secs(3600),
     );
     let mut request = approval_input_request(&ticket);
-    let QueryReply::Approvals(list) = f.query(Query::ListApprovals(pending())) else {
+    let QueryReply::Approvals(ApprovalsReply::Approvals(list)) =
+        f.query(Query::Approvals(ApprovalsQuery::ListApprovals(pending())))
+    else {
         panic!()
     };
     let view = &list.items[0];
@@ -1688,11 +1770,12 @@ fn complete_approval_input_chunks_bind_identity_and_recheck_resolution() {
     let mut complete = String::new();
     let mut second = None;
     loop {
-        let QueryReply::ApprovalInput(chunk) = f.query(Query::GetApprovalInput(request.clone()))
-        else {
+        let QueryReply::Approvals(ApprovalsReply::ApprovalInput(chunk)) = f.query(
+            Query::Approvals(ApprovalsQuery::GetApprovalInput(request.clone())),
+        ) else {
             panic!()
         };
-        QueryReply::ApprovalInput(chunk.clone())
+        QueryReply::Approvals(ApprovalsReply::ApprovalInput(chunk.clone()))
             .validate(&Default::default())
             .unwrap();
         assert_eq!(chunk.approval_id, request.approval_id);
@@ -1707,7 +1790,9 @@ fn complete_approval_input_chunks_bind_identity_and_recheck_resolution() {
     }
     assert_eq!(complete, input.to_string());
     request.offset = ByteOffset(complete.len() as u64);
-    let QueryReply::ApprovalInput(eof) = f.query(Query::GetApprovalInput(request.clone())) else {
+    let QueryReply::Approvals(ApprovalsReply::ApprovalInput(eof)) = f.query(Query::Approvals(
+        ApprovalsQuery::GetApprovalInput(request.clone()),
+    )) else {
         panic!()
     };
     assert!(eof.text.is_empty());
@@ -1721,42 +1806,48 @@ fn complete_approval_input_chunks_bind_identity_and_recheck_resolution() {
         let mut bad = request.clone();
         bad.offset = offset;
         bad.max_bytes = max_bytes;
-        assert_eq!(query_error(&f, Query::GetApprovalInput(bad)), code);
+        assert_eq!(
+            query_error(&f, Query::Approvals(ApprovalsQuery::GetApprovalInput(bad))),
+            code
+        );
     }
     let mut bad = request.clone();
     bad.core_epoch = InstanceEpoch(request.core_epoch.get() + 1);
     assert_eq!(
-        query_error(&f, Query::GetApprovalInput(bad)),
+        query_error(&f, Query::Approvals(ApprovalsQuery::GetApprovalInput(bad))),
         ErrorCode::StaleEpoch
     );
     let mut bad = request.clone();
     bad.approval_revision = Revision(2);
     assert_eq!(
-        query_error(&f, Query::GetApprovalInput(bad)),
+        query_error(&f, Query::Approvals(ApprovalsQuery::GetApprovalInput(bad))),
         ErrorCode::StaleRevision
     );
     let mut bad = request.clone();
     bad.approval_id = ApprovalId::new("unknown").unwrap();
     assert_eq!(
-        query_error(&f, Query::GetApprovalInput(bad)),
+        query_error(&f, Query::Approvals(ApprovalsQuery::GetApprovalInput(bad))),
         ErrorCode::NotFound
     );
     f.host
         .handle_request(
             &SessionId::new("session").unwrap(),
             &RequestId::new("resolve-input").unwrap(),
-            Command::DecideToolApproval(DecideToolApproval {
+            Command::Approvals(ApprovalsCommand::DecideToolApproval(DecideToolApproval {
                 approval_id: request.approval_id.clone(),
                 core_epoch: request.core_epoch,
                 approval_revision: request.approval_revision,
                 decision: ApprovalDecision::Deny,
-            }),
+            })),
             common::web(),
         )
         .unwrap();
     request.offset = second.unwrap();
     assert_eq!(
-        query_error(&f, Query::GetApprovalInput(request)),
+        query_error(
+            &f,
+            Query::Approvals(ApprovalsQuery::GetApprovalInput(request))
+        ),
         ErrorCode::AlreadyResolved
     );
     assert_eq!(f.rt.block_on(ticket.wait()), ApprovalState::Denied);
@@ -1782,20 +1873,27 @@ fn approval_input_rejects_expired_cancelled_oversized_and_deleted_entries() {
     assert_eq!(
         query_error(
             &f,
-            Query::GetApprovalInput(approval_input_request(&expired))
+            Query::Approvals(ApprovalsQuery::GetApprovalInput(approval_input_request(
+                &expired
+            )))
         ),
         ErrorCode::AlreadyResolved
     );
     let cancelled = register(None, Duration::from_secs(3600));
     let request = approval_input_request(&cancelled);
-    let QueryReply::ApprovalInput(empty) = f.query(Query::GetApprovalInput(request.clone())) else {
+    let QueryReply::Approvals(ApprovalsReply::ApprovalInput(empty)) = f.query(Query::Approvals(
+        ApprovalsQuery::GetApprovalInput(request.clone()),
+    )) else {
         panic!()
     };
     assert_eq!(empty.total_bytes, ByteOffset(0));
     assert!(empty.text.is_empty());
     drop(cancelled);
     assert_eq!(
-        query_error(&f, Query::GetApprovalInput(request)),
+        query_error(
+            &f,
+            Query::Approvals(ApprovalsQuery::GetApprovalInput(request))
+        ),
         ErrorCode::AlreadyResolved
     );
     let oversized = register(
@@ -1805,19 +1903,26 @@ fn approval_input_rejects_expired_cancelled_oversized_and_deleted_entries() {
     assert_eq!(
         query_error(
             &f,
-            Query::GetApprovalInput(approval_input_request(&oversized))
+            Query::Approvals(ApprovalsQuery::GetApprovalInput(approval_input_request(
+                &oversized
+            )))
         ),
         ErrorCode::LimitExceeded
     );
     let deleted = register(Some(serde_json::json!({"x":1})), Duration::from_secs(3600));
     let request = approval_input_request(&deleted);
-    let QueryReply::Approvals(list) = f.query(Query::ListApprovals(pending())) else {
+    let QueryReply::Approvals(ApprovalsReply::Approvals(list)) =
+        f.query(Query::Approvals(ApprovalsQuery::ListApprovals(pending())))
+    else {
         panic!()
     };
     assert!(!list.items[0].summary_truncated);
     f.tombstone();
     assert_eq!(
-        query_error(&f, Query::GetApprovalInput(request)),
+        query_error(
+            &f,
+            Query::Approvals(ApprovalsQuery::GetApprovalInput(request))
+        ),
         ErrorCode::NotFound
     );
 }
@@ -1869,17 +1974,17 @@ fn snapshot_query_reads_every_frozen_item_after_connection_closure() {
     let mut cursor = initial.next_cursor;
     while let Some(next) = cursor {
         // A different HTTP session needs no live subscription identifier.
-        let QueryReply::Snapshot(reply) = f
+        let QueryReply::Projection(ProjectionReply::Snapshot(reply)) = f
             .host
             .handle_query(
                 &SessionId::new("another-connection").unwrap(),
-                &Query::ReadSnapshot(ReadSnapshot {
+                &Query::Projection(ProjectionQuery::ReadSnapshot(ReadSnapshot {
                     snapshot_id: id.clone(),
                     page: PageRequest {
                         cursor: Some(next),
                         limit: 17,
                     },
-                }),
+                })),
             )
             .unwrap()
         else {
@@ -1923,10 +2028,10 @@ fn snapshot_query_reads_every_frozen_item_after_connection_closure() {
     assert_eq!(
         query_error(
             &f,
-            Query::ReadSnapshot(ReadSnapshot {
+            Query::Projection(ProjectionQuery::ReadSnapshot(ReadSnapshot {
                 snapshot_id: id,
                 page: PageRequest::default()
-            })
+            }))
         ),
         ErrorCode::ResyncRequired
     );
@@ -1947,8 +2052,9 @@ fn backward_history_pages_from_tail_are_frozen_chronological_and_metadata_only()
         );
     }
     let read = |request: ReadCommittedHistory| {
-        let QueryReply::CommittedHistory(page) = f.query(Query::ReadCommittedHistory(request))
-        else {
+        let QueryReply::Conversation(ConversationReply::CommittedHistory(page)) = f.query(
+            Query::Conversation(ConversationQuery::ReadCommittedHistory(request)),
+        ) else {
             panic!()
         };
         page
@@ -1994,7 +2100,10 @@ fn backward_history_pages_from_tail_are_frozen_chronological_and_metadata_only()
     let mut wrong = request.clone();
     wrong.direction = HistoryDirection::Forward;
     assert_eq!(
-        query_error(&f, Query::ReadCommittedHistory(wrong)),
+        query_error(
+            &f,
+            Query::Conversation(ConversationQuery::ReadCommittedHistory(wrong))
+        ),
         ErrorCode::Conflict
     );
     request.page.cursor = middle.next_cursor;
@@ -2015,7 +2124,10 @@ fn backward_history_pages_from_tail_are_frozen_chronological_and_metadata_only()
     );
     f.tombstone();
     assert_eq!(
-        query_error(&f, Query::ReadCommittedHistory(request)),
+        query_error(
+            &f,
+            Query::Conversation(ConversationQuery::ReadCommittedHistory(request))
+        ),
         ErrorCode::NotFound
     );
 }
@@ -2039,8 +2151,9 @@ fn approval_input_masks_before_chunking_and_accepts_exactly_one_mib() {
     let mut request = approval_input_request(&ticket);
     let mut complete = String::new();
     loop {
-        let QueryReply::ApprovalInput(chunk) = f.query(Query::GetApprovalInput(request.clone()))
-        else {
+        let QueryReply::Approvals(ApprovalsReply::ApprovalInput(chunk)) = f.query(
+            Query::Approvals(ApprovalsQuery::GetApprovalInput(request.clone())),
+        ) else {
             panic!()
         };
         complete.push_str(&chunk.text);
@@ -2059,9 +2172,9 @@ fn approval_input_masks_before_chunking_and_accepts_exactly_one_mib() {
         },
         Duration::from_secs(3600),
     );
-    let QueryReply::ApprovalInput(chunk) =
-        f.query(Query::GetApprovalInput(approval_input_request(&largest)))
-    else {
+    let QueryReply::Approvals(ApprovalsReply::ApprovalInput(chunk)) = f.query(Query::Approvals(
+        ApprovalsQuery::GetApprovalInput(approval_input_request(&largest)),
+    )) else {
         panic!()
     };
     assert_eq!(chunk.total_bytes, ByteOffset(1024 * 1024));

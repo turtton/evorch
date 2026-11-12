@@ -35,6 +35,11 @@ async fn every_entry_refuses_a_deleted_thread_or_run() {
     assert!(runtime.bind_thread_root("other-thread", gone).is_err());
     // Restoring a run.
     assert_deleted(runtime.resume_chat(gone, RunConfig::default()));
+    assert_deleted(runtime.resume_chat_observed(
+        gone,
+        RunConfig::default(),
+        runtime.observe_chat_resume(gone),
+    ));
     assert_deleted(runtime.wake_chat(gone, RunConfig::default()));
     assert_deleted(runtime.continue_goal(gone, "again".into(), RunConfig::default()));
     // Starting a chat on the thread, plain or seeded from a deleted run.

@@ -8,11 +8,12 @@ use std::{
 };
 use storage::lanes::LaneRecord;
 use workbench_protocol::{
-    commands::{CommandDisposition, CommandReply},
+    commands::{CommandDisposition, CommandReply, CommandResult},
     envelope::{Actor, Provenance},
     errors::{ErrorCode, RetryAdvice, WorkbenchError},
     ids::ThreadId,
     lane_management as wire,
+    namespaces::LanesResult,
     wire::Revision,
 };
 
@@ -275,8 +276,8 @@ fn family(
 }
 impl CommandHost {
     /// Human close or discard of a lane's ledger entry. Reached by the wire
-    /// `Command::CloseLane` and by in-process human callers. No agent tool, MCP method or
-    /// agent dispatch reaches it: an agent provenance is refused, so a claimed human actor
+    /// `lanes/close_lane` command and by in-process human callers. No agent tool, MCP method
+    /// or agent dispatch reaches it: an agent provenance is refused, so a claimed human actor
     /// in a message cannot close.
     pub fn close_lane_human(
         &mut self,
@@ -331,12 +332,7 @@ impl CommandHost {
             } else {
                 CommandDisposition::Accepted
             },
-            thread_revision: None,
-            conversation: None,
-            lane_management: None,
-            lane_close: Some(Box::new(result)),
-            submission_id: None,
-            run_id: None,
+            ..CommandReply::with_result(CommandResult::Lanes(LanesResult::Closed(result)))
         })
     }
     pub fn with_lane_sidebar_path(mut self, path: PathBuf) -> Self {
@@ -415,12 +411,7 @@ impl CommandHost {
             } else {
                 CommandDisposition::Accepted
             },
-            thread_revision: None,
-            conversation: None,
-            lane_management: Some(Box::new(result)),
-            lane_close: None,
-            submission_id: None,
-            run_id: None,
+            ..CommandReply::with_result(CommandResult::Lanes(LanesResult::Managed(result)))
         })
     }
     pub(crate) fn lane_management_state(

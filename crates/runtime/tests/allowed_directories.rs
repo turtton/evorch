@@ -81,7 +81,8 @@ async fn run_in(runtime: &AgentRuntime, thread: &str, role: Role, root: &Path) -
 
 // Given: a project with one trusted allowed directory and one that no longer exists,
 //        declared through a link to the project root, and a second project with none
-// When: a Worker and a Reviewer run in the first project and a Worker in the second
+// When: a Worker and an Advisor (read-only role; Reviewer now has shell and so read-write)
+//       run in the first project and a Worker in the second
 // Then: each run mounts only its project's list, with read-write access for the role
 //       that changes files and read-only access otherwise, and file tools follow it
 #[tokio::test]
@@ -95,12 +96,12 @@ async fn runs_use_their_project_list_with_the_access_of_their_role() {
         Ok(tool_response("worker-read", "read", json!({"path": seed}))),
         Ok(text_response("done", FinishReason::Stop)),
         Ok(tool_response(
-            "reviewer-read",
+            "readonly-read",
             "read",
             json!({"path": seed}),
         )),
         Ok(tool_response(
-            "reviewer-diff",
+            "readonly-diff",
             "git_diff",
             json!({"cwd": dirs.allowed}),
         )),
@@ -130,7 +131,7 @@ async fn runs_use_their_project_list_with_the_access_of_their_role() {
 
     for (thread, role, root) in [
         ("thread-a", Role::Worker, &dirs.repo),
-        ("thread-b", Role::Reviewer, &dirs.repo),
+        ("thread-b", Role::Advisor, &dirs.repo),
         ("thread-c", Role::Worker, &dirs.other),
     ] {
         assert_eq!(
@@ -160,8 +161,8 @@ async fn runs_use_their_project_list_with_the_access_of_their_role() {
     assert_eq!(declared(2), (Vec::new(), PathAccess::ReadWrite));
     let observed = model.observed().await;
     assert!(tool_output(&observed, "worker-read").contains(SEED));
-    assert!(tool_output(&observed, "reviewer-read").contains(SEED));
-    assert!(tool_output(&observed, "reviewer-diff").contains("+changed"));
+    assert!(tool_output(&observed, "readonly-read").contains(SEED));
+    assert!(tool_output(&observed, "readonly-diff").contains("+changed"));
     let other = tool_output(&observed, "other-read");
     assert!(other.contains("outside the sandbox boundary"), "{other}");
 }

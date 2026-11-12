@@ -2,6 +2,7 @@ mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::*;
+use workbench_protocol::namespaces::ConversationCommand;
 fn thread(value: &str) -> workbench_protocol::ids::ThreadId {
     workbench_protocol::ids::ThreadId::new(value).unwrap()
 }
@@ -49,7 +50,7 @@ fn resolve_known_project_without_inventing_trust_or_registering_paths() {
         )
         .unwrap();
     assert_eq!(
-        *resolved.conversation.unwrap(),
+        conversation_result(resolved),
         ConversationResult::ProjectResolved { project: project() }
     );
     for root in ["/not/a/project", "."] {
@@ -94,7 +95,7 @@ fn validated_images_are_scoped_and_commands_are_correlatable_by_receipt() {
         host.command_receipt(&session, &request).unwrap().state,
         CommandReceiptState::Applied { .. }
     ));
-    let ConversationResult::ImageUploaded(reference) = *reply.conversation.unwrap() else {
+    let ConversationResult::ImageUploaded(reference) = conversation_result(reply) else {
         panic!()
     };
     let mut chat = send("thread-1", "image-input", "");
@@ -102,9 +103,12 @@ fn validated_images_are_scoped_and_commands_are_correlatable_by_receipt() {
     let mut other = chat.clone();
     other.thread = thread("thread-2");
     assert_eq!(
-        host.handle_command(Command::SendChat(other), web())
-            .unwrap_err()
-            .code,
+        host.handle_command(
+            Command::Conversation(ConversationCommand::SendChat(other)),
+            web()
+        )
+        .unwrap_err()
+        .code,
         ErrorCode::PermissionDenied
     );
     let first = host
@@ -113,7 +117,12 @@ fn validated_images_are_scoped_and_commands_are_correlatable_by_receipt() {
             local_desktop(),
         )
         .unwrap();
-    let repeated = host.handle_command(Command::SendChat(chat), web()).unwrap();
+    let repeated = host
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(chat)),
+            web(),
+        )
+        .unwrap();
     assert_eq!(repeated.disposition, CommandDisposition::AlreadyApplied);
     assert_eq!(repeated.run_id, first.run_id);
     assert_eq!(
@@ -196,12 +205,12 @@ fn released_offline_legacy_thread_claims_canonically_and_restores_on_continue() 
     assert_eq!(after.lease.generation, before.lease.generation + 1);
     let reply = host
         .handle_command(
-            Command::ContinueChat(ContinueChat {
+            Command::Conversation(ConversationCommand::ContinueChat(ContinueChat {
                 project: project(),
                 thread: thread("thread-1"),
                 composer_role: ComposerRole::Worker,
                 model_preference: None,
-            }),
+            })),
             web(),
         )
         .unwrap();
@@ -261,4 +270,12 @@ fn new_team_goal_uses_the_desktop_delegation_meaning_without_a_synthetic_chat() 
     let run = reply.run_id.unwrap().as_str().parse().unwrap();
     runtime.cancel(run).unwrap();
     rt.block_on(runtime.wait(run)).unwrap();
+}
+
+/// The conversation result a command answered with.
+fn conversation_result(reply: workbench_protocol::commands::CommandReply) -> ConversationResult {
+    match reply.result.map(|result| *result) {
+        Some(workbench_protocol::commands::CommandResult::Conversation(result)) => result,
+        other => panic!("expected a conversation result, got {other:?}"),
+    }
 }

@@ -62,6 +62,12 @@ jobs:
       # that Cargo.lock binds.
       - name: CEF pin consistency
         run: scripts/tests/test_setup_cef_pin.sh
+      # The cached CEF extraction is only used when it matches the pinned digest,
+      # and the evidence matrix must fail when any capture fails.
+      - name: CEF cache digest and GUI evidence matrix scripts
+        run: |
+          scripts/tests/test_cef_tree_digest.sh
+          scripts/tests/test_gui_evidence_matrix.sh
       # ADR 0045 §11: workbench-protocol stays free of workspace crates and
       # workbench-client depends only on it. gui and evorch may not gain
       # workspace dependencies beyond scripts/workbench-boundary-allowlist.txt.
@@ -464,25 +470,30 @@ jobs:
           scripts/push-attic.sh ./result-attic ./result-default ./result-deps ./result-cef-deps
 
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
-  # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。
+  # ignored の GUI テストを実行する（ADR 0009 / issue #9 の受理基準）。
+  # 証跡マトリクスと native/Wayland 検査は並列の gui-evidence job が担う。
   offscreen-gate:
     runs-on: ubuntu-latest
-    # Warm runs took 10-23 min; leave room for a cold rust-cache.
     timeout-minutes: 60
     env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
+      # The shared dependency cache of the ci jobs (written by cache-save on main
+      # pushes). Its key hashes the job-level CARGO_* / RUSTFLAGS env, so this job
+      # sets exactly cache-save's.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-cargo
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ${{ runner.os }}-ci-workspace
+          save-if: false
       # The Azure Ubuntu mirror once served packages at tens of kB/s for over an
-      # hour (2026-10-23). Every job restores one shared .deb cache; this job's
-      # package set covers the others', so only it saves (on main).
+      # hour (2026-10-23). Every job restores one shared .deb cache; this package
+      # set covers the others', so only offscreen-gate saves (on main).
       - name: Install headless rendering and isolated X11/Wayland deps
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
@@ -499,22 +510,94 @@ jobs:
           tool: cargo-nextest
       # The ignored html_preview tests start a real CEF; the cef-e2e job runs them.
       - name: Run all ignored GUI tests (required real render)
-        run: cargo nextest run -p gui --tests --test-threads 1 --run-ignored only -E 'not (package(=gui) & kind(lib) & test(/^html_preview::tests::/))' --success-output immediate --no-tests fail
+        # Selects the packages and features of the gui test group, which cache-save
+        # builds (scripts/ci-test-groups.json): rust-cache only reuses dependency
+        # artifacts whose feature resolution matches, and `-p gui` alone resolves
+        # differently. The filter keeps the gui package's tests that the earlier
+        # `-p gui --tests` run selected.
+        run: |
+          sel=$(jq -r '.groups.gui | [(.packages[] | "-p " + .), (.features[]? | "-F " + .)] | join(" ")' scripts/ci-test-groups.json)
+          cargo nextest run --locked $sel --test-threads 1 --run-ignored only -E 'package(=gui) & not (kind(lib) & test(/^html_preview::tests::/))' --success-output immediate --no-tests fail
         env:
+          CARGO_TARGET_DIR: target/ci-shared
           EVORCH_REQUIRE_ADAPTER: "1"
           # Cargo runs tests from the crate directory, not the workspace root.
           EVORCH_METADATA_EVIDENCE: ${{ github.workspace }}/target/gui-evidence/model-metadata
           WGPU_BACKEND: vulkan
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: gui-test-evidence
+          if-no-files-found: warn
+          include-hidden-files: true
+          path: |
+            target/gui-evidence
+            .opencode/v04-captures
+            /tmp/opencode/*.png
+
+  # The evidence matrix (3 themes x 40 PNGs), the native Xvfb check and the
+  # Wayland idle check. headless_capture and native_qa_window are built once and
+  # started directly, so this job needs the gui library but none of the test
+  # binaries that offscreen-gate builds.
+  gui-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
+    # into its key, so a different set restores nothing. CARGO_TARGET_DIR is set on
+    # the steps that run cargo only.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.0
+      # The shared dependency cache of the ci jobs (written by cache-save on main
+      # pushes). Its key hashes the job-level CARGO_* / RUSTFLAGS env, so this job
+      # sets exactly cache-save's.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ${{ runner.os }}-ci-workspace
+          save-if: false
+      # The Azure Ubuntu mirror once served packages at tens of kB/s for over an
+      # hour (2026-10-23). Every job restores one shared .deb cache; this package
+      # set covers the others', so offscreen-gate saves it (on main).
+      - name: Install headless rendering and isolated X11/Wayland deps
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
+          save: false
+      # Only a libcef.so link: the distribution's own Vulkan loader would shadow
+      # the system one the lavapipe renders below go through.
+      - uses: ./.github/actions/setup-cef
+      - name: Prepare evidence directories
+        run: mkdir -p target/gui-evidence
+      - name: Build the evidence binaries
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        # Same selection as offscreen-gate, for the same cache reason. Naming one
+        # small integration test makes Cargo resolve features with the dev
+        # dependencies, as the gui group's test build does, without building every
+        # test binary.
+        run: |
+          sel=$(jq -r '.groups.gui | [(.packages[] | "-p " + .), (.features[]? | "-F " + .)] | join(" ")' scripts/ci-test-groups.json)
+          cargo build --locked $sel --bin headless_capture --bin native_qa_window --test evidence_policy
       - name: Capture size and DPI evidence matrix
         run: scripts/gui-evidence-matrix.sh
         env:
+          HEADLESS_CAPTURE_BIN: ${{ github.workspace }}/target/ci-shared/debug/headless_capture
           WGPU_BACKEND: vulkan
-      - name: Build native GUI fixture window
-        run: cargo build -p gui --bin native_qa_window
       - name: Exercise native GUI in a private Xvfb
         run: scripts/check-gui-native.sh target/gui-evidence/native
+        env:
+          GUI_BIN: ${{ github.workspace }}/target/ci-shared/debug/native_qa_window
       - name: Check Wayland redraw wait and idle budgets in a private Weston
         run: scripts/check-gui-wayland-idle.sh target/gui-evidence/wayland-idle
+        env:
+          GUI_BIN: ${{ github.workspace }}/target/ci-shared/debug/native_qa_window
       - name: Prepare representative PR screenshots
         if: github.event_name == 'pull_request'
         env:
@@ -542,10 +625,7 @@ jobs:
           name: gui-evidence
           if-no-files-found: warn
           include-hidden-files: true
-          path: |
-            target/gui-evidence
-            .opencode/v04-captures
-            /tmp/opencode/*.png
+          path: target/gui-evidence
 
   browser-e2e:
     runs-on: ubuntu-latest

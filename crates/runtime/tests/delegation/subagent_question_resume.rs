@@ -430,51 +430,69 @@ async fn live_waiting_child_reads_parent_answer_once() {
 
 #[tokio::test]
 async fn failed_child_restore_reports_error_and_identical_answer_can_retry() {
-    let fixture = fixture(false, false).await;
-    assert_eq!(
-        fixture.runtime.wait(fixture.child).await.unwrap(),
-        AgentRunPhase::Done
-    );
-    let question = fixture
-        .runtime
-        .user_answers(fixture.child)
-        .unwrap()
-        .remove(0);
-    let before = fixture.model.observed().await.len();
-    let connection = rusqlite::Connection::open(&fixture.config.db_path).unwrap();
-    connection.execute_batch("CREATE TRIGGER reject_consume BEFORE UPDATE ON run_contexts WHEN NEW.restorable = 0 BEGIN SELECT RAISE(ABORT, 'injected consume failure'); END;").unwrap();
-    let error = fixture
-        .runtime
-        .answer_subagent_question(fixture.parent, &question.id, "Use A")
-        .await
-        .unwrap_err();
-    assert!(error.contains("injected consume failure"), "{error}");
-    assert_eq!(
+    for table in ["run_contexts", "resume_intents"] {
+        let fixture = fixture(false, false).await;
+        assert_eq!(
+            fixture.runtime.wait(fixture.child).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        let question = fixture
+            .runtime
+            .user_answers(fixture.child)
+            .unwrap()
+            .remove(0);
+        let before = fixture.model.observed().await.len();
+        let connection = rusqlite::Connection::open(&fixture.config.db_path).unwrap();
+        let condition = if table == "run_contexts" {
+            "NEW.restorable = 0".into()
+        } else {
+            format!("NEW.run_id = '{}'", fixture.child)
+        };
+        let before_record = storage::Database::open(&fixture.config)
+            .unwrap()
+            .run_context(&fixture.child.to_string())
+            .unwrap();
+        connection.execute_batch(&format!("CREATE TRIGGER reject_consume BEFORE UPDATE ON {table} WHEN {condition} BEGIN SELECT RAISE(ABORT, 'injected consume failure'); END;")).unwrap();
+        let error = fixture
+            .runtime
+            .answer_subagent_question(fixture.parent, &question.id, "Use A")
+            .await
+            .unwrap_err();
+        assert!(error.contains("injected consume failure"), "{error}");
+        assert_eq!(
+            fixture
+                .runtime
+                .user_question(&question.id)
+                .unwrap()
+                .unwrap()
+                .answer
+                .as_deref(),
+            Some("Use A")
+        );
+        assert_eq!(fixture.model.observed().await.len(), before);
+        assert_eq!(
+            storage::Database::open(&fixture.config)
+                .unwrap()
+                .run_context(&fixture.child.to_string())
+                .unwrap(),
+            before_record
+        );
+        connection
+            .execute_batch("DROP TRIGGER reject_consume")
+            .unwrap();
         fixture
             .runtime
-            .user_question(&question.id)
-            .unwrap()
-            .unwrap()
-            .answer
-            .as_deref(),
-        Some("Use A")
-    );
-    assert_eq!(fixture.model.observed().await.len(), before);
-    connection
-        .execute_batch("DROP TRIGGER reject_consume")
-        .unwrap();
-    fixture
-        .runtime
-        .answer_subagent_question(fixture.parent, &question.id, "Use A")
-        .await
-        .unwrap();
-    assert_eq!(
-        fixture.runtime.wait(fixture.child).await.unwrap(),
-        AgentRunPhase::Done
-    );
-    assert_eq!(fixture.model.observed().await.len(), before + 1);
-    fixture.runtime.cancel(fixture.parent).unwrap();
-    fixture.runtime.wait(fixture.parent).await.unwrap();
+            .answer_subagent_question(fixture.parent, &question.id, "Use A")
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.runtime.wait(fixture.child).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        assert_eq!(fixture.model.observed().await.len(), before + 1);
+        fixture.runtime.cancel(fixture.parent).unwrap();
+        fixture.runtime.wait(fixture.parent).await.unwrap();
+    }
 }
 
 #[tokio::test]

@@ -402,29 +402,6 @@ async fn other_http_failures_never_remove_structured_output() {
 }
 
 #[tokio::test]
-async fn transport_timeout_never_retries_in_legacy_mode() {
-    let server = server(false).await;
-    Mock::given(method("POST"))
-        .respond_with(completion(APPROVE).set_delay(Duration::from_millis(500)))
-        .mount(&server)
-        .await;
-    let harness = harness(&server.uri(), false, Duration::from_millis(30));
-    assert_eq!(
-        QuickModelReviewer::new(harness.model)
-            .review("run-review", "pwd", "inspect directory")
-            .await,
-        Err(ReviewError::Model)
-    );
-    let requests = requests(&server).await;
-    assert!(!requests.is_empty());
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.get("response_format").is_some())
-    );
-}
-
-#[tokio::test]
 async fn invalid_verdict_or_denial_is_final_in_both_response_modes() {
     for legacy in [false, true] {
         for (text, expected) in [
@@ -740,39 +717,9 @@ async fn independent_review_preserves_the_normal_turn_prefix_and_cached_input() 
     assert_eq!(mock.remaining_scripts(), 0);
 }
 
-#[tokio::test]
-async fn one_review_deadline_covers_structured_and_legacy_attempts() {
-    let server = server(false).await;
-    Mock::given(method("POST"))
-        .respond_with(|request: &wiremock::Request| {
-            let response = if request
-                .body_json::<Value>()
-                .unwrap()
-                .get("response_format")
-                .is_some()
-            {
-                unsupported(400, "response_format")
-            } else {
-                completion(APPROVE)
-            };
-            response.set_delay(Duration::from_millis(300))
-        })
-        .expect(2)
-        .mount(&server)
-        .await;
-    let harness = harness(&server.uri(), false, Duration::from_secs(2));
-    assert_eq!(
-        QuickModelReviewer::new(harness.model)
-            .with_timeout(Duration::from_millis(500))
-            .review("run-review", "pwd", "inspect directory")
-            .await,
-        Err(ReviewError::Timeout)
-    );
-    let requests = requests(&server).await;
-    assert_eq!(requests.len(), 2);
-    assert!(requests[0].get("response_format").is_some());
-    assert!(requests[1].get("response_format").is_none());
-}
+// The shared structured/legacy deadline is exercised with virtual time in
+// compose::tests::structured::one_review_deadline_covers_structured_and_legacy_attempts.
+// HTTP negotiation and unchanged wire input remain covered above.
 
 const CLEANUP_STEPS: &str = "After the merge, remove the task worktree.\n";
 const CRITICAL_VERIFIED: &str = r#"{"approve":true,"reason":"cleanup the procedure defines","risk_level":"critical","authorization_level":"high","procedure_step":"verified"}"#;

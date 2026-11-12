@@ -124,6 +124,7 @@ struct Work {
 const RUN_TABLES: &[(&str, &str)] = &[
     ("run_ledger", "run_id = ?1"),
     ("host_input_receipts", "run_id = ?1"),
+    ("resume_intents", "run_id = ?1"),
     ("host_chat_submissions", "run_id = ?1"),
     ("review_evidence", "root_run_id = ?1 OR target_run_id = ?1"),
     (
@@ -457,12 +458,12 @@ fn run_tables(
     if table == "run_message_provenance" {
         return provenance_entries(tx, family, cursor, &run);
     }
-    if table == "host_chat_submissions" {
+    if matches!(table, "host_chat_submissions" | "resume_intents") {
         // A database converted from an older layout reaches this before it has the table.
         let present: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \
-             AND name = 'host_chat_submissions')",
-            [],
+             AND name = ?1)",
+            [table],
             |row| row.get(0),
         )?;
         if !present {

@@ -84,6 +84,7 @@ pub mod pull_request_auto_fix;
 pub mod pull_requests;
 mod read;
 mod repo;
+pub mod resume_intent;
 mod review;
 mod run;
 pub mod sidebar_projection;

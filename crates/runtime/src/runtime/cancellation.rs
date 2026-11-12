@@ -1,7 +1,15 @@
 use super::*;
 
+pub(super) struct PendingChatResume {
+    pub authority: Option<RunConfig>,
+    pub observation: super::ChatResumeObservation,
+    pub valid: Arc<AtomicBool>,
+}
+
 /// One execution's immutable cancellation channel and monotonic publication fence.
 pub(crate) struct ExecutionControl {
+    pub(super) pending_resume: Mutex<Option<PendingChatResume>>,
+    pub(crate) startup_failure: Mutex<Option<String>>,
     publication: PublicationToken,
     pub(super) cancel_tx: watch::Sender<RunInterrupt>,
     pub(crate) approvals: Arc<sandbox::approval::ApprovalOwner>,
@@ -23,6 +31,8 @@ impl ExecutionControl {
             approvals.close();
         }
         Arc::new(Self {
+            startup_failure: Mutex::new(None),
+            pending_resume: Mutex::new(None),
             approvals,
             publication: PublicationToken(Arc::new(PublicationFence {
                 gate: Mutex::new(()),
@@ -45,7 +55,38 @@ impl ExecutionControl {
         self.publication.0.cancelled.load(Ordering::Acquire)
     }
 
+    pub(super) fn clear_deferred_resume(&self) {
+        if let Some(pending) = self
+            .pending_resume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            pending.valid.store(false, Ordering::Release);
+        }
+    }
+
+    pub(super) fn commit_resume<T>(
+        &self,
+        run: RunId,
+        commit: impl FnOnce() -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let _gate = self
+            .publication
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.cancelled() {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run.to_string(),
+            });
+        }
+        commit()
+    }
+
     fn forbid_publication(&self) {
+        self.clear_deferred_resume();
         self.publication.0.cancelled.store(true, Ordering::Release);
         self.cancel_tx.send_replace(RunInterrupt::Cancel);
         self.approvals.close();
@@ -85,6 +126,9 @@ pub(super) struct SpawnIntent {
     pub(super) parent: Option<RunId>,
     // A subtree tombstone outlives the execution it cancelled.
     pub(super) cancelled: bool,
+    // Rotated under I before subtree notification, including repeated Cancel.
+    // An opaque allocation avoids generation wraparound/ABA while tokens exist.
+    pub(super) cancellation_generation: Arc<()>,
     pub(super) execution: Option<Arc<ExecutionControl>>,
 }
 
@@ -160,6 +204,20 @@ impl AgentRuntime {
                 && Arc::ptr_eq(&admission.execution, &execution)
             {
                 admission.cancelled = true;
+                let queued = self.note_intent_stop(
+                    run,
+                    &execution.publication().incarnation(),
+                    crate::quiesce::StopReason::Cancelled,
+                );
+                if queued {
+                    admission.finish_queued(run);
+                }
+            } else {
+                self.note_intent_stop(
+                    run,
+                    &execution.publication().incarnation(),
+                    crate::quiesce::StopReason::Cancelled,
+                );
             }
             execution.forbid_publication();
             drop(runs);
@@ -251,6 +309,7 @@ impl AgentRuntime {
                 parent: Some(parent),
                 cancelled,
                 execution: None,
+                ..Default::default()
             },
         );
     }
@@ -294,6 +353,9 @@ pub(crate) enum HookPoint {
     AdmissionFailed,
     RootGoalUpdated,
     RootRestoreValidated,
+    ResumeRegistered,
+    StopGateAcquired,
+    StopGateBlocked,
     HandoffBeforeReserve,
     AdmissionCompleted,
     AdmissionGoalCheckpoint,
@@ -319,6 +381,30 @@ impl AgentRuntime {
         };
         if let Ok(execution) = self.execution_snapshot(run) {
             self.execution_hook(point, &execution);
+        }
+    }
+
+    pub(super) fn lock_stop_test_gate<'a>(
+        &self,
+        run: RunId,
+        gate: &'a Mutex<()>,
+    ) -> std::sync::MutexGuard<'a, ()> {
+        let execution = self.execution_snapshot(run).ok();
+        match gate.try_lock() {
+            Ok(guard) => {
+                if let Some(execution) = execution {
+                    self.execution_hook(HookPoint::StopGateAcquired, &execution);
+                }
+                guard
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if let Some(execution) = execution {
+                    self.execution_hook(HookPoint::StopGateBlocked, &execution);
+                }
+                gate.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            }
         }
     }
 

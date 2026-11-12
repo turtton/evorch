@@ -3,16 +3,35 @@
 use crate::commands::CommandReply;
 use crate::errors::WorkbenchError;
 use crate::events::{EventCursor, SnapshotItem};
-use crate::handshake::{Capability, CoreStatus, WireLimits};
+use crate::handshake::{Capability, WireLimits};
 use crate::ids::{
     ApprovalId, BodyId, PageCursor, ProjectId, RequestId, RunId, SnapshotId, ThreadId,
 };
-use crate::limits::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MIN_BODY_CHUNK_BYTES};
-use crate::validation::ValidationError;
-use crate::views::{
-    ApprovalView, BodyChunk, CommittedMessage, InputReceipt, Page, ProjectSummary, QuestionView,
-    RunSummary, ThreadSummary, ThreadView,
+use crate::limits::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
+use crate::namespaces::{
+    approvals::{ApprovalsQuery, ApprovalsReply},
+    artifacts::{ArtifactsQuery, ArtifactsReply},
+    auth::{AuthQuery, AuthReply},
+    browser::{BrowserQuery, BrowserReply},
+    conversation::{ConversationQuery, ConversationReply},
+    diagnostics::{DiagnosticsQuery, DiagnosticsReply},
+    evaluation::{EvaluationQuery, EvaluationReply},
+    execution::{ExecutionQuery, ExecutionReply},
+    improvement::{ImprovementQuery, ImprovementReply},
+    lanes::{LanesQuery, LanesReply},
+    lifecycle::{LifecycleQuery, LifecycleReply},
+    maintenance::{MaintenanceQuery, MaintenanceReply},
+    mcp::{McpQuery, McpReply},
+    memory::{MemoryQuery, MemoryReply},
+    projection::{ProjectionQuery, ProjectionReply},
+    pull_requests::{PullRequestsQuery, PullRequestsReply},
+    questions::{QuestionsQuery, QuestionsReply},
+    settings::{SettingsQuery, SettingsReply},
+    teams::{TeamsQuery, TeamsReply},
+    workspace::{WorkspaceQuery, WorkspaceReply},
 };
+use crate::validation::ValidationError;
+use crate::views::Page;
 use crate::wire::{ByteOffset, InstanceEpoch, Revision};
 use serde::{Deserialize, Serialize};
 
@@ -196,7 +215,8 @@ pub struct SnapshotPage {
     pub page: Page<SnapshotItem>,
 }
 
-/// Every read-only request a client may send.
+/// Every read-only request a client may send: one namespace, then one of its
+/// operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -205,77 +225,79 @@ pub struct SnapshotPage {
     deny_unknown_fields
 )]
 pub enum Query {
-    GetLaneManagement {
-        lane_id: crate::lane_attention::LaneId,
-    },
-    GetCoreStatus,
-    ListProjects(PageRequest),
-    ListThreads(ListThreads),
-    GetThread(crate::commands::ThreadTarget),
-    ListRuns(ThreadQuery),
-    ListQuestions(PendingQuery),
-    ListApprovals(PendingQuery),
-    GetInputReceipts(ThreadQuery),
-    /// What became of an earlier command, looked up by its request id.
-    GetCommandReceipt {
-        request_id: RequestId,
-    },
-    ReadCommittedHistory(ReadCommittedHistory),
-    ReadBody(ReadBody),
-    GetApprovalInput(GetApprovalInput),
-    ReadSnapshot(ReadSnapshot),
+    Conversation(ConversationQuery),
+    Workspace(WorkspaceQuery),
+    Execution(ExecutionQuery),
+    Questions(QuestionsQuery),
+    Approvals(ApprovalsQuery),
+    Lanes(LanesQuery),
+    Lifecycle(LifecycleQuery),
+    Projection(ProjectionQuery),
+    Settings(SettingsQuery),
+    Auth(AuthQuery),
+    Mcp(McpQuery),
+    Teams(TeamsQuery),
+    Diagnostics(DiagnosticsQuery),
+    Memory(MemoryQuery),
+    Evaluation(EvaluationQuery),
+    Improvement(ImprovementQuery),
+    PullRequests(PullRequestsQuery),
+    Browser(BrowserQuery),
+    Artifacts(ArtifactsQuery),
+    Maintenance(MaintenanceQuery),
 }
 
 impl Query {
-    /// Wire names of every variant, for rejecting unknown ones precisely.
-    pub const TYPES: [&'static str; 14] = [
-        "get_lane_management",
-        "get_core_status",
-        "list_projects",
-        "list_threads",
-        "get_thread",
-        "list_runs",
-        "list_questions",
-        "list_approvals",
-        "get_input_receipts",
-        "get_command_receipt",
-        "read_committed_history",
-        "read_body",
-        "get_approval_input",
-        "read_snapshot",
-    ];
+    /// Wire names of every namespace, for rejecting unknown ones precisely.
+    pub const TYPES: [&'static str; 20] = crate::namespaces::NAMESPACE_NAMES;
 
     pub fn required_capability(&self) -> Capability {
         match self {
-            Self::ListQuestions(_) => Capability::Questions,
-            Self::ListApprovals(_) | Self::GetApprovalInput(_) => Capability::Approvals,
-            Self::GetInputReceipts(_) => Capability::InputReceipts,
-            Self::GetCommandReceipt { .. } => Capability::Commands,
-            Self::ReadCommittedHistory(_) | Self::ReadBody(_) => Capability::CommittedBodies,
-            _ => Capability::Queries,
+            Self::Conversation(q) => q.required_capability(),
+            Self::Workspace(q) => q.required_capability(),
+            Self::Execution(q) => q.required_capability(),
+            Self::Questions(q) => q.required_capability(),
+            Self::Approvals(q) => q.required_capability(),
+            Self::Lanes(q) => q.required_capability(),
+            Self::Lifecycle(q) => q.required_capability(),
+            Self::Projection(q) => q.required_capability(),
+            Self::Settings(q) => q.required_capability(),
+            Self::Auth(q) => q.required_capability(),
+            Self::Mcp(q) => q.required_capability(),
+            Self::Teams(q) => q.required_capability(),
+            Self::Diagnostics(q) => q.required_capability(),
+            Self::Memory(q) => q.required_capability(),
+            Self::Evaluation(q) => q.required_capability(),
+            Self::Improvement(q) => q.required_capability(),
+            Self::PullRequests(q) => q.required_capability(),
+            Self::Browser(q) => q.required_capability(),
+            Self::Artifacts(q) => q.required_capability(),
+            Self::Maintenance(q) => q.required_capability(),
         }
     }
 
     pub fn validate(&self, limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
-            Self::GetLaneManagement { .. } => Ok(()),
-            Self::GetCoreStatus | Self::GetThread(_) | Self::GetCommandReceipt { .. } => Ok(()),
-            Self::ListProjects(page) => page.validate(),
-            Self::ListThreads(q) => q.page.validate(),
-            Self::ListRuns(q) | Self::GetInputReceipts(q) => q.page.validate(),
-            Self::ListQuestions(q) | Self::ListApprovals(q) => q.page.validate(),
-            Self::ReadCommittedHistory(q) => q.page.validate(),
-            Self::ReadSnapshot(q) => q.page.validate(),
-            Self::ReadBody(ReadBody { max_bytes, .. })
-            | Self::GetApprovalInput(GetApprovalInput { max_bytes, .. }) => {
-                if *max_bytes < MIN_BODY_CHUNK_BYTES || *max_bytes > limits.max_body_chunk_bytes {
-                    return Err(ValidationError::OutOfRange {
-                        field: "max_bytes",
-                        reason: "outside the negotiated body chunk range",
-                    });
-                }
-                Ok(())
-            }
+            Self::Conversation(q) => q.validate(limits),
+            Self::Workspace(q) => q.validate(limits),
+            Self::Execution(q) => q.validate(limits),
+            Self::Questions(q) => q.validate(limits),
+            Self::Approvals(q) => q.validate(limits),
+            Self::Lanes(q) => q.validate(limits),
+            Self::Lifecycle(q) => q.validate(limits),
+            Self::Projection(q) => q.validate(limits),
+            Self::Settings(q) => q.validate(limits),
+            Self::Auth(q) => q.validate(limits),
+            Self::Mcp(q) => q.validate(limits),
+            Self::Teams(q) => q.validate(limits),
+            Self::Diagnostics(q) => q.validate(limits),
+            Self::Memory(q) => q.validate(limits),
+            Self::Evaluation(q) => q.validate(limits),
+            Self::Improvement(q) => q.validate(limits),
+            Self::PullRequests(q) => q.validate(limits),
+            Self::Browser(q) => q.validate(limits),
+            Self::Artifacts(q) => q.validate(limits),
+            Self::Maintenance(q) => q.validate(limits),
         }
     }
 }
@@ -302,24 +324,35 @@ pub struct CommandReceipt {
     pub state: CommandReceiptState,
 }
 
-/// Success answer to a query.
+/// Success answer to a query, from the same namespace the query named.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum QueryReply {
-    LaneManagement(crate::lane_management::LaneManagementState),
-    CoreStatus(CoreStatus),
-    Projects(Page<ProjectSummary>),
-    Threads(Page<ThreadSummary>),
-    Thread(ThreadView),
-    Runs(Page<RunSummary>),
-    Questions(Page<QuestionView>),
-    Approvals(Page<ApprovalView>),
-    InputReceipts(Page<InputReceipt>),
-    CommandReceipt(CommandReceipt),
-    CommittedHistory(Page<CommittedMessage>),
-    Body(BodyChunk),
-    ApprovalInput(ApprovalInputChunk),
-    Snapshot(SnapshotPage),
+    Conversation(ConversationReply),
+    Workspace(WorkspaceReply),
+    Execution(ExecutionReply),
+    Questions(QuestionsReply),
+    Approvals(ApprovalsReply),
+    Lanes(LanesReply),
+    Lifecycle(LifecycleReply),
+    Projection(ProjectionReply),
+    Settings(SettingsReply),
+    Auth(AuthReply),
+    Mcp(McpReply),
+    Teams(TeamsReply),
+    Diagnostics(DiagnosticsReply),
+    Memory(MemoryReply),
+    Evaluation(EvaluationReply),
+    Improvement(ImprovementReply),
+    PullRequests(PullRequestsReply),
+    Browser(BrowserReply),
+    Artifacts(ArtifactsReply),
+    Maintenance(MaintenanceReply),
 }
 
 impl CommandReceipt {
@@ -337,20 +370,26 @@ impl QueryReply {
     /// is never handed to application code.
     pub fn validate(&self, limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
-            Self::LaneManagement(_) => Ok(()),
-            Self::CoreStatus(status) => status.validate(),
-            Self::Projects(page) => page.validate_with(ProjectSummary::validate),
-            Self::Threads(page) => page.validate_with(ThreadSummary::validate),
-            Self::Thread(view) => view.validate(),
-            Self::Runs(page) => page.validate(),
-            Self::Questions(page) => page.validate_with(QuestionView::validate),
-            Self::Approvals(page) => page.validate_with(ApprovalView::validate),
-            Self::InputReceipts(page) => page.validate_with(InputReceipt::validate),
-            Self::CommandReceipt(receipt) => receipt.validate(),
-            Self::CommittedHistory(page) => page.validate_with(CommittedMessage::validate),
-            Self::Body(chunk) => chunk.validate(limits.max_body_chunk_bytes),
-            Self::ApprovalInput(chunk) => chunk.validate(limits.max_body_chunk_bytes),
-            Self::Snapshot(snapshot) => snapshot.page.validate_with(SnapshotItem::validate),
+            Self::Conversation(r) => r.validate(limits),
+            Self::Workspace(r) => r.validate(limits),
+            Self::Execution(r) => r.validate(limits),
+            Self::Questions(r) => r.validate(limits),
+            Self::Approvals(r) => r.validate(limits),
+            Self::Lanes(r) => r.validate(limits),
+            Self::Lifecycle(r) => r.validate(limits),
+            Self::Projection(r) => r.validate(limits),
+            Self::Settings(r) => r.validate(limits),
+            Self::Auth(r) => r.validate(limits),
+            Self::Mcp(r) => r.validate(limits),
+            Self::Teams(r) => r.validate(limits),
+            Self::Diagnostics(r) => r.validate(limits),
+            Self::Memory(r) => r.validate(limits),
+            Self::Evaluation(r) => r.validate(limits),
+            Self::Improvement(r) => r.validate(limits),
+            Self::PullRequests(r) => r.validate(limits),
+            Self::Browser(r) => r.validate(limits),
+            Self::Artifacts(r) => r.validate(limits),
+            Self::Maintenance(r) => r.validate(limits),
         }
     }
 }

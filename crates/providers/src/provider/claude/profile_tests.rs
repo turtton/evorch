@@ -16,6 +16,11 @@ fn model_effort_levels_match_accepted_reasoning_controls() {
         ("claude-mythos-preview", required),
         ("claude-sonnet-5-5", required_xhigh),
         ("claude-fable-5-1-20261017", required_xhigh),
+        ("claude-fable-5-2", required_xhigh),
+        ("claude-fable-5-2-20261017", required_xhigh),
+        ("claude-mythos-5-2-20261017", required_xhigh),
+        ("claude-fable-5-2-custom", &[][..]),
+        ("claude-fable-5-20", &[][..]),
         ("claude-opus-4-7-custom", &[][..]),
         ("claude-opus-4-70", &[][..]),
         ("unknown", &[][..]),
@@ -206,8 +211,10 @@ fn current_adaptive_models_validate_effort_and_reject_impossible_disable() {
         ("claude-sonnet-5-5", false),
         ("claude-fable-5", false),
         ("claude-fable-5-1", false),
+        ("claude-fable-5-2", false),
         ("claude-mythos-5", false),
         ("claude-mythos-5-1", false),
+        ("claude-mythos-5-2", false),
     ] {
         for effort in ["low", "medium", "high", "xhigh", "max"] {
             let controls = profile.reasoning(model, 8192, Some(effort)).unwrap();

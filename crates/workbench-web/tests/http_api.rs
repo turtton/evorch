@@ -77,7 +77,7 @@ async fn client_supplied_provenance_is_refused_not_ignored() {
     let mut top_level = command_request("req-3");
     top_level["provenance"] = provenance.clone();
     let mut in_payload = command_request("req-4");
-    in_payload["payload"]["payload"]["provenance"] = provenance;
+    in_payload["payload"]["payload"]["payload"]["provenance"] = provenance;
 
     for body in [top_level, in_payload] {
         let response = send(&app(&backend), post_json(&body)).await;
@@ -173,7 +173,7 @@ async fn malformed_and_unknown_requests_are_rejected_without_the_backend() {
     assert_eq!(error_of(&body)["code"], "unsupported_capability");
 
     let mut bad_field = command_request("req-9");
-    bad_field["payload"]["payload"]["thread"] = json!("");
+    bad_field["payload"]["payload"]["payload"]["thread"] = json!("");
     assert_eq!(
         send(&router, post_json(&bad_field)).await.status(),
         StatusCode::BAD_REQUEST
@@ -215,7 +215,7 @@ async fn oversized_bodies_are_refused_before_decoding() {
     let router = app_with(config, &backend);
 
     let mut big = command_request("req-12");
-    big["payload"]["payload"]["padding"] = json!("x".repeat(1024));
+    big["payload"]["payload"]["payload"]["padding"] = json!("x".repeat(1024));
     let response = send(&router, post_json(&big)).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let body = body_json(response).await;
@@ -607,7 +607,7 @@ async fn health_reports_core_status_or_the_mapped_error() {
     assert_eq!(body["status"], "ok");
     assert_eq!(body["adapter"]["name"], "workbench-web");
     let hello = &body["hello"];
-    assert_eq!(hello["protocol_version"], 1);
+    assert_eq!(hello["protocol_version"], 2);
     assert_eq!(hello["server_build"]["version"], "9.9.9");
     assert_eq!(hello["instance_epoch"], "7");
     assert_eq!(hello["core"], "core-test");

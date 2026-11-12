@@ -176,6 +176,20 @@ impl World {
         }
     }
 
+    async fn waiting_after_request(&mut self, run: RunId, before: usize) {
+        loop {
+            // Another run's wait can already have consumed this run's Waiting
+            // event. Check its state, but require a new request so an earlier
+            // idle turn cannot satisfy the wait before delivery starts.
+            let requested = self.model.requests.lock().unwrap()[&run.to_string()] > before;
+            if requested && self.runtime.inspect_agent(run).unwrap().phase == AgentRunPhase::Waiting
+            {
+                return;
+            }
+            self.next_event().await;
+        }
+    }
+
     /// Waits until every run in `runs` has reached `wanted`, in whatever order they do.
     async fn all_phase(&mut self, runs: &[RunId], wanted: AgentRunPhase) {
         let mut pending: HashSet<String> = runs.iter().map(ToString::to_string).collect();
@@ -313,6 +327,37 @@ fn open(world: &World, lead: RunId, key: &str) -> runtime::lanes::LaneOpened {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lead_that_became_waiting_before_the_lane_is_not_waited_for_twice() {
+    fn ready(future: impl std::future::Future<Output = ()>) -> bool {
+        let mut future = std::pin::pin!(future);
+        future
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            .is_ready()
+    }
+
+    let mut world = World::new();
+    let mut sink = world.sink(None, true);
+    let lead = start_lead(&mut sink);
+    // Force the lead's Waiting event to be consumed before the lane's event,
+    // as can happen while lane_asks waits for its own run on the shared bus.
+    world.phase(lead, AgentRunPhase::Waiting).await;
+    let lane = open(&world, lead, "lead-first");
+    world.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+
+    let completed_requests = world.model.requests.lock().unwrap()[&lead.to_string()];
+    assert!(completed_requests > 0);
+    assert!(
+        ready(world.waiting_after_request(lead, 0)),
+        "the lead is already waiting; consuming its event while waiting for a lane must not lose completion"
+    );
+    assert!(
+        !ready(world.waiting_after_request(lead, completed_requests)),
+        "the previous Waiting state must not stand in for a new provider request"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bound_host_restores_a_finished_lead_for_an_attached_lane_question() {
     let mut world = World::new();
     let owners = ShortPrivateDirectory::new();
@@ -347,7 +392,7 @@ async fn a_bound_host_restores_a_finished_lead_for_an_attached_lane_question() {
     let before = world.model.requests.lock().unwrap()[&lead.to_string()];
 
     world.lane_asks(&lane).await;
-    world.phase(lead, AgentRunPhase::Waiting).await;
+    world.waiting_after_request(lead, before).await;
 
     let question = world.question(LEAD);
     assert!(matches!(
@@ -436,7 +481,7 @@ async fn an_unbound_thread_resolves_through_the_runtimes_saved_root_not_a_name()
     world.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
     let before = world.model.requests.lock().unwrap()[&lead.to_string()];
     world.lane_asks(&lane).await;
-    world.phase(lead, AgentRunPhase::Waiting).await;
+    world.waiting_after_request(lead, before).await;
 
     assert!(
         world.model.requests.lock().unwrap()[&lead.to_string()] > before,
@@ -591,8 +636,8 @@ async fn a_lead_answer_restores_the_finished_lane_through_the_gui_host_and_the_l
         .all_phase(&[lead, lane.root_run_id], AgentRunPhase::Waiting)
         .await;
     // Both deliveries finished their runs; their drivers are the barrier before the ACKs.
-    world.drive(LEAD).await;
-    world.drive(&lane.thread_id).await;
+    let lead_delivery = world.drive(LEAD).await;
+    let lane_delivery = world.drive(&lane.thread_id).await;
 
     let stored = world.runtime.user_question(&question.id).unwrap().unwrap();
     assert!(matches!(
@@ -605,14 +650,41 @@ async fn a_lead_answer_restores_the_finished_lane_through_the_gui_host_and_the_l
             .any(|request| request.contains("agent task-scope decision")),
         "the restored lane could read the stored answer"
     );
-    assert!(
-        world
-            .storage
-            .handle()
-            .pending_lane_delivery_destinations(String::new())
-            .unwrap()
-            .is_empty(),
-        "both notifications were acknowledged"
+    // The recovery scan also includes ACKed but not yet presented snapshots.
+    // It is not an ACK barrier: check the two question-specific outbox rows.
+    let connection = rusqlite::Connection::open(&world.config.db_path).unwrap();
+    let mut notifications = connection
+        .prepare("SELECT payload, state FROM lane_notifications")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(|row| {
+            let (payload, state) = row.unwrap();
+            let notification: event_bus::lane::LaneNotification =
+                serde_json::from_str(&payload).unwrap();
+            (notification, state)
+        })
+        .filter_map(|(notification, state)| match &notification.kind {
+            event_bus::lane::LaneNotificationKind::Question { question_id, .. }
+            | event_bus::lane::LaneNotificationKind::Answer { question_id, .. }
+                if question_id == &question.id =>
+            {
+                Some((notification.destination_thread_id, state))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    notifications.sort();
+    let mut expected = vec![
+        (LEAD.to_owned(), "acked".to_owned()),
+        (lane.thread_id.clone(), "acked".to_owned()),
+    ];
+    expected.sort();
+    assert_eq!(
+        notifications, expected,
+        "both notifications were acknowledged: lead={lead_delivery:?}, lane={lane_delivery:?}"
     );
 }
 

@@ -169,7 +169,7 @@ define_categories! {
         role: "reviewer",
         settings_visible: true,
         delegation: Delegation::Public {
-            guidance: "review a planner-produced plan before execution: requirement coverage, feasibility, task decomposition, dependency ordering, risks, and missing acceptance criteria.",
+            guidance: "review a plan before implementation, including design boundaries, performance premises and acceptance criteria; for an approved plan returns the agreed design constraints.",
         },
         overlay_preset: "category-plan-review",
         overlay_body: include_str!("../assets/presets/category-plan-review.md"),

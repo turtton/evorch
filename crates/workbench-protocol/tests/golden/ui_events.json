@@ -1,159 +1,186 @@
 {
-  "approval_changed": {
+  "approvals/approval_changed": {
     "payload": {
-      "approval": {
-        "core_epoch": "7",
-        "decided_by": {
-          "actor": "human",
-          "client_id": "client-1",
-          "surface": "web"
-        },
-        "id": "ap-1",
-        "input_bytes": "22",
-        "revision": "2",
-        "run": "run-1",
-        "state": "pending",
-        "summary": "rm -rf build",
-        "summary_truncated": false,
-        "thread": "thr-1",
-        "tool_name": "shell"
-      }
-    },
-    "type": "approval_changed"
-  },
-  "core_status_changed": {
-    "payload": {
-      "status": {
-        "retention_reasons": [
-          "active_turn",
-          "connected_clients"
-        ],
-        "running": {
-          "clients": 3,
-          "shell_jobs": 1,
-          "tool_calls": 2,
-          "turns": 1,
-          "waiting_lanes": 0
-        },
-        "state": "ready"
-      }
-    },
-    "type": "core_status_changed"
-  },
-  "input_receipt_changed": {
-    "payload": {
-      "receipt": {
-        "revision": "8",
-        "run": "run-1",
-        "sent_by": {
-          "actor": "human",
-          "client_id": "client-1",
-          "surface": "web"
-        },
-        "state": "delivered",
-        "submission_id": "sub-a",
-        "thread": "thr-1"
-      }
-    },
-    "type": "input_receipt_changed"
-  },
-  "message_committed": {
-    "payload": {
-      "message": {
-        "content": {
-          "payload": {
-            "body_id": "body-1",
-            "total_bytes": "1099511627776"
-          },
-          "type": "body"
-        },
-        "index": "17",
-        "role": "assistant",
-        "run": "run-1",
-        "thread": "thr-1"
-      }
-    },
-    "type": "message_committed"
-  },
-  "question_changed": {
-    "payload": {
-      "question": {
-        "answer": {
-          "answered_by": {
+      "payload": {
+        "approval": {
+          "core_epoch": "7",
+          "decided_by": {
             "actor": "human",
             "client_id": "client-1",
             "surface": "web"
           },
-          "text": "yes"
-        },
-        "blocking": true,
-        "id": "q-1",
-        "management_revision": "2",
-        "options": [
-          "yes",
-          "no"
-        ],
-        "raised_by": {
-          "actor": "agent",
-          "agent_run_id": "run-1",
-          "surface": "none"
-        },
-        "requester": {
-          "root_run": "run-root",
+          "id": "ap-1",
+          "input_bytes": "22",
+          "revision": "2",
+          "run": "run-1",
+          "state": "pending",
+          "summary": "rm -rf build",
+          "summary_truncated": false,
+          "thread": "thr-1",
+          "tool_name": "shell"
+        }
+      },
+      "type": "approval_changed"
+    },
+    "type": "approvals"
+  },
+  "conversation/input_receipt_changed": {
+    "payload": {
+      "payload": {
+        "receipt": {
+          "revision": "8",
+          "run": "run-1",
+          "sent_by": {
+            "actor": "human",
+            "client_id": "client-1",
+            "surface": "web"
+          },
+          "state": "delivered",
+          "submission_id": "sub-a",
+          "thread": "thr-1"
+        }
+      },
+      "type": "input_receipt_changed"
+    },
+    "type": "conversation"
+  },
+  "conversation/message_committed": {
+    "payload": {
+      "payload": {
+        "message": {
+          "content": {
+            "payload": {
+              "body_id": "body-1",
+              "total_bytes": "1099511627776"
+            },
+            "type": "body"
+          },
+          "index": "17",
+          "role": "assistant",
           "run": "run-1",
           "thread": "thr-1"
-        },
-        "revision": "5",
-        "routing_revision": "1",
-        "target": {
-          "payload": {
-            "lead_run": "run-lead",
-            "lead_thread": "thr-lead"
+        }
+      },
+      "type": "message_committed"
+    },
+    "type": "conversation"
+  },
+  "execution/run_changed": {
+    "payload": {
+      "payload": {
+        "run": {
+          "id": "run-1",
+          "parent_run": "run-0",
+          "phase": "waiting_for_approval",
+          "revision": "3",
+          "role": "worker",
+          "thread": "thr-1"
+        }
+      },
+      "type": "run_changed"
+    },
+    "type": "execution"
+  },
+  "lifecycle/core_status_changed": {
+    "payload": {
+      "payload": {
+        "status": {
+          "retention_reasons": [
+            "active_turn",
+            "connected_clients"
+          ],
+          "running": {
+            "clients": 3,
+            "shell_jobs": 1,
+            "tool_calls": 2,
+            "turns": 1,
+            "waiting_lanes": 0
           },
-          "type": "lead"
-        },
-        "title": "Proceed?"
-      }
+          "state": "ready"
+        }
+      },
+      "type": "core_status_changed"
     },
-    "type": "question_changed"
+    "type": "lifecycle"
   },
-  "resync_required": {
+  "projection/resync_required": {
     "payload": {
-      "reason": "slow_subscriber"
+      "payload": {
+        "reason": "slow_subscriber"
+      },
+      "type": "resync_required"
     },
-    "type": "resync_required"
+    "type": "projection"
   },
-  "run_changed": {
+  "projection/subscription_closed": {
     "payload": {
-      "run": {
-        "id": "run-1",
-        "parent_run": "run-0",
-        "phase": "waiting_for_approval",
-        "revision": "3",
-        "role": "worker",
-        "thread": "thr-1"
-      }
+      "payload": {
+        "reason": "core_shutting_down"
+      },
+      "type": "subscription_closed"
     },
-    "type": "run_changed"
+    "type": "projection"
   },
-  "subscription_closed": {
+  "questions/question_changed": {
     "payload": {
-      "reason": "core_shutting_down"
+      "payload": {
+        "question": {
+          "answer": {
+            "answered_by": {
+              "actor": "human",
+              "client_id": "client-1",
+              "surface": "web"
+            },
+            "text": "yes"
+          },
+          "blocking": true,
+          "id": "q-1",
+          "management_revision": "2",
+          "options": [
+            "yes",
+            "no"
+          ],
+          "raised_by": {
+            "actor": "agent",
+            "agent_run_id": "run-1",
+            "surface": "none"
+          },
+          "requester": {
+            "root_run": "run-root",
+            "run": "run-1",
+            "thread": "thr-1"
+          },
+          "revision": "5",
+          "routing_revision": "1",
+          "target": {
+            "payload": {
+              "lead_run": "run-lead",
+              "lead_thread": "thr-lead"
+            },
+            "type": "lead"
+          },
+          "title": "Proceed?"
+        }
+      },
+      "type": "question_changed"
     },
-    "type": "subscription_closed"
+    "type": "questions"
   },
-  "thread_changed": {
+  "workspace/thread_changed": {
     "payload": {
-      "thread": {
-        "id": "thr-1",
-        "lead_thread": "thr-lead",
-        "project": "proj-1",
-        "revision": "12",
-        "state": "waiting_for_user",
-        "title": "Fix login",
-        "updated_at": "1793799134000"
-      }
+      "payload": {
+        "thread": {
+          "id": "thr-1",
+          "lead_thread": "thr-lead",
+          "project": "proj-1",
+          "revision": "12",
+          "state": "waiting_for_user",
+          "title": "Fix login",
+          "updated_at": "1793799134000"
+        }
+      },
+      "type": "thread_changed"
     },
-    "type": "thread_changed"
+    "type": "workspace"
   }
 }

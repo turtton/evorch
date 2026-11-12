@@ -36,6 +36,7 @@ use workbench_protocol::events::{
     SubscriptionScope, UiEvent,
 };
 use workbench_protocol::ids::{ClientId, ProjectId, SubscriptionId, ThreadId};
+use workbench_protocol::namespaces::ProjectionEvent;
 use workbench_protocol::wire::{InstanceEpoch, Sequence, parse_u64};
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +134,7 @@ fn resync_item<B: WorkbenchBackend>(
             subscription_id: subscription_id.clone(),
             cursor: last,
             caused_by_request_id: None,
-            event: UiEvent::ResyncRequired { reason },
+            event: UiEvent::Projection(ProjectionEvent::ResyncRequired { reason }),
         },
         false,
     )

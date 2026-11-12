@@ -7,6 +7,14 @@ use workbench_protocol::errors::*;
 use workbench_protocol::events::*;
 use workbench_protocol::handshake::*;
 use workbench_protocol::ids::*;
+use workbench_protocol::namespaces::{
+    ApprovalsCommand, ApprovalsEvent, ApprovalsQuery, ApprovalsReply, ConversationCommand,
+    ConversationEvent, ConversationQuery, ConversationReply, ExecutionCommand, ExecutionEvent,
+    ExecutionQuery, ExecutionReply, LanesCommand, LanesQuery, LanesReply, LifecycleEvent,
+    LifecycleQuery, LifecycleReply, ProjectionEvent, ProjectionQuery, ProjectionReply,
+    QuestionsCommand, QuestionsEvent, QuestionsQuery, QuestionsReply, WorkspaceEvent,
+    WorkspaceQuery, WorkspaceReply,
+};
 use workbench_protocol::queries::*;
 use workbench_protocol::views::*;
 use workbench_protocol::wire::*;
@@ -135,29 +143,29 @@ pub fn target() -> ThreadTarget {
     ThreadTarget { thread: thread() }
 }
 
-/// One sample per `Command` variant, in `Command::TYPES` order.
+/// One sample per command operation of every namespace.
 pub fn commands() -> Vec<Command> {
     vec![
-        Command::SendChat(send_chat()),
-        Command::ContinueChat(ContinueChat {
+        Command::Conversation(ConversationCommand::SendChat(send_chat())),
+        Command::Conversation(ConversationCommand::ContinueChat(ContinueChat {
             project: project(),
             thread: thread(),
             composer_role: ComposerRole::Worker,
             model_preference: None,
-        }),
-        Command::CompactChat(target()),
-        Command::StopChat(target()),
-        Command::StopRun(StopRun {
+        })),
+        Command::Conversation(ConversationCommand::CompactChat(target())),
+        Command::Execution(ExecutionCommand::StopChat(target())),
+        Command::Execution(ExecutionCommand::StopRun(StopRun {
             thread: thread(),
             run: run(),
-        }),
-        Command::DeliverFollowUpsNextTurn(target()),
-        Command::WithdrawFollowUp(WithdrawFollowUp {
+        })),
+        Command::Conversation(ConversationCommand::DeliverFollowUpsNextTurn(target())),
+        Command::Conversation(ConversationCommand::WithdrawFollowUp(WithdrawFollowUp {
             thread: thread(),
             run: run(),
             submission_id: SubmissionId::new("sub-a").unwrap(),
-        }),
-        Command::SubmitGoal(SubmitGoal {
+        })),
+        Command::Execution(ExecutionCommand::SubmitGoal(SubmitGoal {
             project: project(),
             thread: thread(),
             objective: "ship it".into(),
@@ -169,40 +177,66 @@ pub fn commands() -> Vec<Command> {
             delegation: Some(Delegation::Reference {
                 value: "packet-3".into(),
             }),
-        }),
-        Command::SetGoalReview(SetGoalReview {
+        })),
+        Command::Execution(ExecutionCommand::SetGoalReview(SetGoalReview {
             thread: thread(),
             goal: GoalId::new("goal-1").unwrap(),
             enabled: true,
-        }),
-        Command::SetGoalChecksPaused(SetGoalChecksPaused {
+        })),
+        Command::Execution(ExecutionCommand::SetGoalChecksPaused(SetGoalChecksPaused {
             thread: thread(),
             goal: GoalId::new("goal-1").unwrap(),
             paused: false,
-        }),
-        Command::AnswerUserQuestion(AnswerUserQuestion {
+        })),
+        Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {
             thread: thread(),
             question_id: QuestionId::new("q-1").unwrap(),
             answer: "yes".into(),
             question_revision: Revision(4),
-        }),
-        Command::DecideToolApproval(DecideToolApproval {
+        })),
+        Command::Approvals(ApprovalsCommand::DecideToolApproval(DecideToolApproval {
             approval_id: ApprovalId::new("ap-1").unwrap(),
             core_epoch: InstanceEpoch(7),
             approval_revision: Revision(2),
             decision: ApprovalDecision::Deny,
+        })),
+        Command::Execution(ExecutionCommand::SetAgentWebToolsEnabled(SetAgentWebToolsEnabled { enabled: true })),
+        Command::Conversation(ConversationCommand::ResolveProject {
+            root: "/work/project".into(),
         }),
-        Command::SetAgentWebToolsEnabled(SetAgentWebToolsEnabled { enabled: true }),
-        Command::Conversation(workbench_protocol::conversation::ConversationCommand::ResolveProject { root: "/work/project".into() }),
-        Command::ManageLane(workbench_protocol::lane_management::ManageLane { request: serde_json::from_value(serde_json::json!({"operation_id":"manage-1","lane_id":"lane-1","expected_management_revision":"1","action":{"type":"set_policy","payload":{"policy":"summary"}}})).unwrap(), expected_family_revision: None }),
-        Command::CloseLane(workbench_protocol::lane_management::CloseLane {
+        Command::Conversation(ConversationCommand::CreateExecution(send_chat())),
+        Command::Conversation(ConversationCommand::CreateGoal(SubmitGoal {
+            project: project(),
+            thread: thread(),
+            objective: "ship it".into(),
+            references: Vec::new(),
+            constraints: Vec::new(),
+            delegation: Some(Delegation::Team {
+                value: "review".into(),
+            }),
+        })),
+        Command::Conversation(ConversationCommand::PrepareExistingThread {
+            project: project(),
+            thread: thread(),
+        }),
+        Command::Conversation(ConversationCommand::UploadImage {
+            project: project(),
+            thread: thread(),
+            mime_type: "image/png".into(),
+            data: "AA==".into(),
+        }),
+        Command::Conversation(ConversationCommand::DiscardAttachment {
+            attachment_id: AttachmentId::new("att-1").unwrap(),
+        }),
+        Command::Lanes(LanesCommand::ManageLane(workbench_protocol::lane_management::ManageLane { request: serde_json::from_value(serde_json::json!({"operation_id":"manage-1","lane_id":"lane-1","expected_management_revision":"1","action":{"type":"set_policy","payload":{"policy":"summary"}}})).unwrap(), expected_family_revision: None })),
+        Command::Lanes(LanesCommand::CloseLane(workbench_protocol::lane_management::CloseLane {
             lane_id: workbench_protocol::lane_attention::LaneId::new("lane-1").unwrap(),
             kind: workbench_protocol::lane_management::HumanLaneCloseKind::Discard,
             ready_seq: Some(workbench_protocol::wire::Sequence(3)),
             expected_management_revision: Revision(1),
             expected_request_revision: Revision(2),
             note: "superseded by another lane".into(),
-        }),
+        })),
     ]
 }
 
@@ -229,55 +263,57 @@ pub fn pending() -> PendingQuery {
     }
 }
 
-/// One sample per `Query` variant, in `Query::TYPES` order.
+/// One sample per query operation of every namespace.
 pub fn queries() -> Vec<Query> {
     let mut values = vec![
-        Query::GetCoreStatus,
-        Query::ListProjects(page_req()),
-        Query::ListThreads(ListThreads {
+        Query::Lifecycle(LifecycleQuery::GetCoreStatus),
+        Query::Workspace(WorkspaceQuery::ListProjects(page_req())),
+        Query::Workspace(WorkspaceQuery::ListThreads(ListThreads {
             project: project(),
             page: PageRequest::default(),
-        }),
-        Query::GetThread(target()),
-        Query::ListRuns(ThreadQuery {
+        })),
+        Query::Workspace(WorkspaceQuery::GetThread(target())),
+        Query::Execution(ExecutionQuery::ListRuns(ThreadQuery {
             thread: thread(),
             page: page_req(),
-        }),
-        Query::ListQuestions(pending()),
-        Query::ListApprovals(pending()),
-        Query::GetInputReceipts(ThreadQuery {
+        })),
+        Query::Questions(QuestionsQuery::ListQuestions(pending())),
+        Query::Approvals(ApprovalsQuery::ListApprovals(pending())),
+        Query::Conversation(ConversationQuery::GetInputReceipts(ThreadQuery {
             thread: thread(),
             page: page_req(),
-        }),
-        Query::GetCommandReceipt {
+        })),
+        Query::Projection(ProjectionQuery::GetCommandReceipt {
             request_id: request(3),
-        },
-        Query::ReadCommittedHistory(ReadCommittedHistory {
-            direction: Default::default(),
-            thread: thread(),
-            run: Some(run()),
-            page: page_req(),
         }),
-        Query::ReadBody(ReadBody {
+        Query::Conversation(ConversationQuery::ReadCommittedHistory(
+            ReadCommittedHistory {
+                direction: Default::default(),
+                thread: thread(),
+                run: Some(run()),
+                page: page_req(),
+            },
+        )),
+        Query::Projection(ProjectionQuery::ReadBody(ReadBody {
             body_id: BodyId::new("body-1").unwrap(),
             offset: ByteOffset(65_536),
             max_bytes: 65_536,
-        }),
-        Query::GetApprovalInput(GetApprovalInput {
+        })),
+        Query::Approvals(ApprovalsQuery::GetApprovalInput(GetApprovalInput {
             approval_id: ApprovalId::new("ap-1").unwrap(),
             core_epoch: InstanceEpoch(7),
             approval_revision: Revision(2),
             offset: ByteOffset(0),
             max_bytes: 65_536,
-        }),
-        Query::ReadSnapshot(ReadSnapshot {
+        })),
+        Query::Projection(ProjectionQuery::ReadSnapshot(ReadSnapshot {
             snapshot_id: SnapshotId::new("snap-1").unwrap(),
             page: page_req(),
-        }),
+        })),
     ];
-    values.push(Query::GetLaneManagement {
+    values.push(Query::Lanes(LanesQuery::GetLaneManagement {
         lane_id: workbench_protocol::lane_attention::LaneId::new("lane-1").unwrap(),
-    });
+    }));
     values
 }
 
@@ -387,43 +423,41 @@ pub fn body_ref() -> BodyRef {
 
 pub fn command_reply() -> CommandReply {
     CommandReply {
-        conversation: None,
-        lane_management: None,
-        lane_close: None,
         disposition: CommandDisposition::Accepted,
         submission_id: Some(SubmissionId::new("sub-a").unwrap()),
         run_id: Some(run()),
         thread_revision: Some(Revision(13)),
+        result: None,
     }
 }
 
-/// One sample per `UiEvent` variant, in `UiEvent::TYPES` order.
+/// One sample per event of every namespace.
 pub fn ui_events() -> Vec<UiEvent> {
     vec![
-        UiEvent::CoreStatusChanged { status: status() },
-        UiEvent::ThreadChanged {
+        UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged { status: status() }),
+        UiEvent::Workspace(WorkspaceEvent::ThreadChanged {
             thread: thread_summary(),
-        },
-        UiEvent::RunChanged { run: run_summary() },
-        UiEvent::InputReceiptChanged { receipt: receipt() },
-        UiEvent::QuestionChanged {
+        }),
+        UiEvent::Execution(ExecutionEvent::RunChanged { run: run_summary() }),
+        UiEvent::Conversation(ConversationEvent::InputReceiptChanged { receipt: receipt() }),
+        UiEvent::Questions(QuestionsEvent::QuestionChanged {
             question: question(QuestionTarget::Lead {
                 lead_thread: ThreadId::new("thr-lead").unwrap(),
                 lead_run: RunId::new("run-lead").unwrap(),
             }),
-        },
-        UiEvent::ApprovalChanged {
+        }),
+        UiEvent::Approvals(ApprovalsEvent::ApprovalChanged {
             approval: approval(),
-        },
-        UiEvent::MessageCommitted {
+        }),
+        UiEvent::Conversation(ConversationEvent::MessageCommitted {
             message: message(MessageContent::Body(body_ref())),
-        },
-        UiEvent::ResyncRequired {
+        }),
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
             reason: ResyncReason::SlowSubscriber,
-        },
-        UiEvent::SubscriptionClosed {
+        }),
+        UiEvent::Projection(ProjectionEvent::SubscriptionClosed {
             reason: CloseReason::CoreShuttingDown,
-        },
+        }),
     ]
 }
 
@@ -442,53 +476,57 @@ pub fn error() -> WorkbenchError {
 
 pub fn query_replies() -> Vec<QueryReply> {
     vec![
-        QueryReply::LaneManagement(workbench_protocol::lane_management::LaneManagementState {
-            lane_id: workbench_protocol::lane_attention::LaneId::new("lane-1").unwrap(),
-            thread_id: thread(),
-            lead_thread_id: None,
-            policy: workbench_protocol::lane_management::LaneManagementPolicy::Detached,
-            management_revision: Revision(2),
-            detached_since_management_revision: Some(Revision(2)),
-            family_revision: None,
-        }),
-        QueryReply::CoreStatus(status()),
-        QueryReply::Projects(page(vec![ProjectSummary {
+        QueryReply::Lanes(LanesReply::LaneManagement(
+            workbench_protocol::lane_management::LaneManagementState {
+                lane_id: workbench_protocol::lane_attention::LaneId::new("lane-1").unwrap(),
+                thread_id: thread(),
+                lead_thread_id: None,
+                policy: workbench_protocol::lane_management::LaneManagementPolicy::Detached,
+                management_revision: Revision(2),
+                detached_since_management_revision: Some(Revision(2)),
+                family_revision: None,
+            },
+        )),
+        QueryReply::Lifecycle(LifecycleReply::CoreStatus(status())),
+        QueryReply::Workspace(WorkspaceReply::Projects(page(vec![ProjectSummary {
             id: project(),
             display_name: "evorch".into(),
             thread_count: 4,
             revision: Revision(1),
-        }])),
-        QueryReply::Threads(page(vec![thread_summary()])),
-        QueryReply::Thread(ThreadView {
+        }]))),
+        QueryReply::Workspace(WorkspaceReply::Threads(page(vec![thread_summary()]))),
+        QueryReply::Workspace(WorkspaceReply::Thread(ThreadView {
             summary: thread_summary(),
             root_run: Some(run()),
             active_run: None,
             pending_questions: 1,
             pending_approvals: 0,
             queued_follow_ups: 2,
-        }),
-        QueryReply::Runs(page(vec![run_summary()])),
-        QueryReply::Questions(page(vec![question(QuestionTarget::User)])),
-        QueryReply::Approvals(page(vec![approval()])),
-        QueryReply::InputReceipts(page(vec![receipt()])),
-        QueryReply::CommandReceipt(CommandReceipt {
+        })),
+        QueryReply::Execution(ExecutionReply::Runs(page(vec![run_summary()]))),
+        QueryReply::Questions(QuestionsReply::Questions(page(vec![question(
+            QuestionTarget::User,
+        )]))),
+        QueryReply::Approvals(ApprovalsReply::Approvals(page(vec![approval()]))),
+        QueryReply::Conversation(ConversationReply::InputReceipts(page(vec![receipt()]))),
+        QueryReply::Projection(ProjectionReply::CommandReceipt(CommandReceipt {
             request_id: request(3),
             state: CommandReceiptState::Applied {
                 reply: command_reply(),
             },
-        }),
-        QueryReply::CommittedHistory(page(vec![
+        })),
+        QueryReply::Conversation(ConversationReply::CommittedHistory(page(vec![
             message(MessageContent::Inline { text: "hi".into() }),
             message(MessageContent::Body(body_ref())),
-        ])),
-        QueryReply::Body(BodyChunk {
+        ]))),
+        QueryReply::Projection(ProjectionReply::Body(BodyChunk {
             body_id: BodyId::new("body-1").unwrap(),
             offset: ByteOffset(0),
             text: "héllo".into(),
             total_bytes: ByteOffset(10),
             next_offset: Some(ByteOffset(6)),
-        }),
-        QueryReply::ApprovalInput(ApprovalInputChunk {
+        })),
+        QueryReply::Approvals(ApprovalsReply::ApprovalInput(ApprovalInputChunk {
             approval_id: ApprovalId::new("ap-1").unwrap(),
             core_epoch: InstanceEpoch(7),
             approval_revision: Revision(2),
@@ -496,19 +534,19 @@ pub fn query_replies() -> Vec<QueryReply> {
             text: "héllo".into(),
             total_bytes: ByteOffset(10),
             next_offset: Some(ByteOffset(6)),
-        }),
-        QueryReply::Snapshot(SnapshotPage {
+        })),
+        QueryReply::Projection(ProjectionReply::Snapshot(SnapshotPage {
             snapshot_id: SnapshotId::new("snap-1").unwrap(),
             high_water: cursor(7, 40),
             page: page(vec![SnapshotItem::CoreStatus(status())]),
-        }),
+        })),
     ]
 }
 
 pub fn reply_payloads() -> Vec<ReplyPayload> {
     vec![
         ReplyPayload::Command(command_reply()),
-        ReplyPayload::Query(QueryReply::CoreStatus(status())),
+        ReplyPayload::Query(QueryReply::Lifecycle(LifecycleReply::CoreStatus(status()))),
         ReplyPayload::SubscriptionStarted(SubscriptionStarted {
             subscription_id: sub(),
             snapshot_id: Some(SnapshotId::new("snap-1").unwrap()),

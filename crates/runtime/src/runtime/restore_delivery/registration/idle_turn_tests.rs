@@ -123,6 +123,7 @@ impl Fixture {
                     restored,
                     &trigger,
                     None,
+                    false,
                 )
                 .unwrap();
         }

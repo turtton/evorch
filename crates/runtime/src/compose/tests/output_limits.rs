@@ -1,7 +1,21 @@
 use super::*;
 
-async fn metadata_catalog() -> catalog::ModelCatalog {
+pub(super) async fn metadata_catalog() -> Arc<catalog::ModelCatalog> {
+    models_catalog(&[("catalog-model", 128_000), ("large-model", 4_294_967_296)]).await
+}
+
+/// A fresh models.dev cache holding the given `(model, output limit)` pairs.
+pub(super) async fn models_catalog(models: &[(&str, u64)]) -> Arc<catalog::ModelCatalog> {
     let directory = tempfile::tempdir().unwrap();
+    let models: serde_json::Map<String, serde_json::Value> = models
+        .iter()
+        .map(|(id, limit)| {
+            (
+                (*id).to_owned(),
+                serde_json::json!({"id": id, "limit": {"output": limit}}),
+            )
+        })
+        .collect();
     let fetched_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -9,17 +23,16 @@ async fn metadata_catalog() -> catalog::ModelCatalog {
     std::fs::write(
         directory.path().join("models-dev.json"),
         serde_json::json!({"fetched_at": fetched_at, "api": {
-            "anthropic": {"models": {
-                "catalog-model": {"id": "catalog-model", "limit": {"output": 128000}},
-                "large-model": {"id": "large-model", "limit": {"output": 4294967296_u64}}
-            }}
+            "anthropic": {"models": models}
         }})
         .to_string(),
     )
     .unwrap();
-    catalog::ModelCatalog::load_or_refresh(directory.path())
-        .await
-        .unwrap()
+    Arc::new(
+        catalog::ModelCatalog::load_or_refresh(directory.path())
+            .await
+            .unwrap(),
+    )
 }
 
 pub(super) async fn fixture(model_id: &str) -> (RoutedModel, Arc<Mutex<Vec<ChatRequest>>>) {
@@ -41,7 +54,7 @@ pub(super) async fn fixture(model_id: &str) -> (RoutedModel, Arc<Mutex<Vec<ChatR
     (model, requests)
 }
 
-fn preset(model: &mut RoutedModel, profile: &str, entry: &str, limit: u64) {
+pub(super) fn preset(model: &mut RoutedModel, profile: &str, entry: &str, limit: u64) {
     let name = format!("{profile}/{entry}");
     model.model_presets.insert(
         name.clone(),

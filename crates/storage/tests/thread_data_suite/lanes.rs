@@ -585,6 +585,7 @@ fn v45_migration_keeps_pending_v44_intents_recoverable() {
         let conn = Connection::open(&config.db_path).unwrap();
         conn.execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v60.sql"),
                 include_str!("../../undo/undo_v59.sql"),
                 include_str!("../../undo/undo_v58.sql"),
                 include_str!("../../undo/undo_v57.sql"),

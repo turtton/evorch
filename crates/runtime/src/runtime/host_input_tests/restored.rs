@@ -56,6 +56,7 @@ async fn restored_delivery_panic_seals_followup_before_error() {
                 restored,
                 &trigger,
                 None,
+                false,
             )
             .unwrap();
     }

@@ -409,9 +409,23 @@ fn a_validation_retry_continues_through_the_immediate_hook() {
     // The worker meets a busy guard, backs off, and asks for the retry.
     assert!(pump.drain().is_empty());
     continuation.recv().expect("retry continuation");
-    // The retry validates the batch and announces it ready.
+    // Force the try_lock interleaving that a worker reacquiring the handoff
+    // after repaint can cause, without depending on scheduler timing.
+    let handoff = Arc::clone(&pump.handoff);
+    let held = handoff.delivery.lock().unwrap();
     assert!(pump.drain().is_empty());
-    continuation.recv().expect("ready continuation");
-    assert_eq!(pump.drain(), vec![expected]);
+    drop(held);
+    // A wake-up requests another drain; it does not promise that try_lock will
+    // acquire the handoff. The worker may have reacquired it to wait for the
+    // consumer, or the guard may have expired before this thread was scheduled.
+    let delivered = loop {
+        continuation.recv().expect("validation continuation");
+        let events = pump.drain();
+        if !events.is_empty() {
+            break events;
+        }
+    };
+    assert_eq!(delivered, vec![expected]);
+    assert!(attempts.load(Ordering::Relaxed) >= 2);
     assert!(arrival.try_recv().is_err());
 }

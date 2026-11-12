@@ -150,7 +150,7 @@ impl Database {
     pub fn persisted_run_ids(&self) -> Result<Vec<String>, StorageError> {
         let mut statement = self
             .conn
-            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links UNION SELECT target_run_id FROM review_evidence UNION SELECT root_run_id FROM review_evidence UNION SELECT child_run_id FROM review_lineage_edges UNION SELECT parent_run_id FROM review_lineage_edges UNION SELECT source_run_id FROM assistant_references UNION SELECT root_run_id FROM thread_start_states")?;
+            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links UNION SELECT target_run_id FROM review_evidence UNION SELECT root_run_id FROM review_evidence UNION SELECT child_run_id FROM review_lineage_edges UNION SELECT parent_run_id FROM review_lineage_edges UNION SELECT source_run_id FROM assistant_references UNION SELECT root_run_id FROM thread_start_states UNION SELECT run_id FROM resume_intents")?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
         Ok(ids.collect::<Result<_, _>>()?)
     }

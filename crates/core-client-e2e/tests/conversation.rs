@@ -9,9 +9,11 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use workbench_protocol::{
-    commands::*, conversation::ConversationCommand, envelope::*, ids::*, queries::*,
+use workbench_protocol::namespaces::{
+    ApprovalsCommand, ApprovalsQuery, ApprovalsReply, ConversationCommand, ExecutionCommand,
+    ProjectionQuery, ProjectionReply, QuestionsCommand, QuestionsQuery, QuestionsReply,
 };
+use workbench_protocol::{commands::*, envelope::*, ids::*, queries::*};
 
 struct Provider {
     requests: tokio::sync::mpsc::UnboundedSender<(
@@ -163,8 +165,8 @@ async fn proxy(
             while let Ok(mut bytes) = packet(&mut core_read).await {
                 if fault.unknown_receipt
                     && let Ok(ServerFrame::Reply(mut reply)) = serde_json::from_slice(&bytes)
-                    && let ReplyResult::Success(ReplyPayload::Query(QueryReply::CommandReceipt(
-                        receipt,
+                    && let ReplyResult::Success(ReplyPayload::Query(QueryReply::Projection(
+                        ProjectionReply::CommandReceipt(receipt),
                     ))) = &mut reply.result
                 {
                     receipt.state = CommandReceiptState::Unknown;
@@ -308,13 +310,12 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         s.connected && s.cache.projects.len() == extra_projects + 1
     })
     .await;
-    assert!(
-        observed
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|request| { matches!(request.body, RequestBody::Query(Query::ReadSnapshot(_))) })
-    );
+    assert!(observed.lock().unwrap().iter().any(|request| {
+        matches!(
+            request.body,
+            RequestBody::Query(Query::Projection(ProjectionQuery::ReadSnapshot(_)))
+        )
+    }));
     let web_server = workbench_web::WebServer::start(
         workbench_web::WebServerConfig {
             enabled: true,
@@ -407,7 +408,7 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
             })
             .collect();
         assert_eq!(uploads.len(), 1, "upload must never be replayed");
-        assert!(trace.iter().any(|r| matches!(&r.body, RequestBody::Query(Query::GetCommandReceipt { request_id }) if request_id.as_str() == upload_request) && r.session_id == uploads[0].session_id));
+        assert!(trace.iter().any(|r| matches!(&r.body, RequestBody::Query(Query::Projection(ProjectionQuery::GetCommandReceipt { request_id })) if request_id.as_str() == upload_request) && r.session_id == uploads[0].session_id));
     }
     let image = shared.lock().unwrap().image_drafts["t"][0]
         .reference
@@ -478,7 +479,7 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         let receipt = trace
             .iter()
             .find(|request| {
-                matches!(&request.body, RequestBody::Query(Query::GetCommandReceipt { request_id }) if request_id.as_str() == unknown)
+                matches!(&request.body, RequestBody::Query(Query::Projection(ProjectionQuery::GetCommandReceipt { request_id })) if request_id.as_str() == unknown)
             })
             .expect("desktop must query the exact lost request");
         assert_eq!(receipt.session_id, creations[0].session_id);
@@ -488,7 +489,10 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     // the acceptance order, not a scheduler-dependent preferred winner.
     actions
         .send(Action::Command {
-            command: Command::SendChat(send("desktop-followup", "desktop queued")),
+            command: Command::Conversation(ConversationCommand::SendChat(send(
+                "desktop-followup",
+                "desktop queued",
+            ))),
             draft: None,
         })
         .await
@@ -497,7 +501,10 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         &http,
         &root,
         "web-followup",
-        RequestBody::Command(Command::SendChat(send("web-followup", "web queued"))),
+        RequestBody::Command(Command::Conversation(ConversationCommand::SendChat(send(
+            "web-followup",
+            "web queued",
+        )))),
     )
     .await;
     changed(&shared, |s| {
@@ -516,12 +523,12 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         .request_user_question(run, "format?".into(), vec!["JSON".into()], true)
         .unwrap();
     bridge.flush().unwrap();
-    let query = Query::ListQuestions(PendingQuery {
+    let query = Query::Questions(QuestionsQuery::ListQuestions(PendingQuery {
         thread: Some(ThreadId::new("t").unwrap()),
         pending_only: true,
         page: Default::default(),
-    });
-    let ReplyPayload::Query(QueryReply::Questions(page)) =
+    }));
+    let ReplyPayload::Query(QueryReply::Questions(QuestionsReply::Questions(page))) =
         web(&http, &root, "questions", RequestBody::Query(query)).await
     else {
         panic!()
@@ -535,12 +542,14 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         &http,
         &root,
         "answer",
-        RequestBody::Command(Command::AnswerUserQuestion(AnswerUserQuestion {
-            thread: ThreadId::new("t").unwrap(),
-            question_id: q.id.clone(),
-            answer: "JSON".into(),
-            question_revision: q.routing_revision,
-        })),
+        RequestBody::Command(Command::Questions(QuestionsCommand::AnswerUserQuestion(
+            AnswerUserQuestion {
+                thread: ThreadId::new("t").unwrap(),
+                question_id: q.id.clone(),
+                answer: "JSON".into(),
+                question_revision: q.routing_revision,
+            },
+        ))),
     )
     .await;
     assert_eq!(
@@ -562,12 +571,12 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         },
         Duration::from_secs(3600),
     );
-    let query = Query::ListApprovals(PendingQuery {
+    let query = Query::Approvals(ApprovalsQuery::ListApprovals(PendingQuery {
         thread: Some(ThreadId::new("t").unwrap()),
         pending_only: true,
         page: Default::default(),
-    });
-    let ReplyPayload::Query(QueryReply::Approvals(page)) =
+    }));
+    let ReplyPayload::Query(QueryReply::Approvals(ApprovalsReply::Approvals(page))) =
         web(&http, &root, "approvals", RequestBody::Query(query)).await
     else {
         panic!()
@@ -577,12 +586,14 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         &http,
         &root,
         "approve",
-        RequestBody::Command(Command::DecideToolApproval(DecideToolApproval {
-            approval_id: approval.id.clone(),
-            core_epoch: approval.core_epoch,
-            approval_revision: approval.revision,
-            decision: ApprovalDecision::Approve,
-        })),
+        RequestBody::Command(Command::Approvals(ApprovalsCommand::DecideToolApproval(
+            DecideToolApproval {
+                approval_id: approval.id.clone(),
+                core_epoch: approval.core_epoch,
+                approval_revision: approval.revision,
+                decision: ApprovalDecision::Approve,
+            },
+        ))),
     )
     .await;
     assert_eq!(
@@ -632,7 +643,10 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         assert!(trace.iter().any(|r| matches!(&r.body, RequestBody::Command(Command::Conversation(ConversationCommand::DiscardAttachment { attachment_id })) if *attachment_id == unused)));
         assert!(!trace.iter().any(|r| matches!(
             r.body,
-            RequestBody::Command(Command::StopRun(_) | Command::StopChat(_))
+            RequestBody::Command(
+                Command::Execution(ExecutionCommand::StopRun(_))
+                    | Command::Execution(ExecutionCommand::StopChat(_))
+            )
         )));
     }
     assert!(matches!(

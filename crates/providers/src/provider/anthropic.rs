@@ -153,11 +153,13 @@ impl AnthropicClient {
             wire.max_tokens,
             request.reasoning_effort.as_deref(),
         )?;
-        // Thinking needs the default temperature on every transport; the stricter
-        // per-model sampling rule is only applied to the pinned Claude subscription profile.
+        // Thinking needs the default temperature on every transport, and so does a model
+        // whose thinking is always on even when no effort is selected. The stricter rule for
+        // models that can switch thinking off applies only to the pinned subscription profile.
         if reasoning
             .as_ref()
             .is_some_and(ClaudeReasoningControls::is_enabled)
+            || ClaudeWireProfile.always_thinks(&request.model)
             || (self.claude_oauth && ClaudeWireProfile.requires_default_temperature(&request.model))
         {
             if wire.temperature.is_some_and(|value| value != 1.0) {

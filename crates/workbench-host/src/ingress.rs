@@ -14,21 +14,21 @@
 //! service's execution entry points are crate-private, so this type is the only
 //! way to run a command and none of the steps can be skipped.
 
-mod conversation;
+mod namespaces;
 
 use workbench_protocol::commands::{
-    AnswerUserQuestion, Command, CommandDisposition, CommandReply, ComposerRole as WireRole,
-    ContinueChat, Delegation, ModelPreference, ReferenceKind as WireReferenceKind, SendChat,
-    SubmitGoal, WithdrawFollowUp,
+    Command, CommandDisposition, CommandReply, ComposerRole as WireRole, Delegation,
+    ModelPreference, ReferenceKind as WireReferenceKind, SendChat, SubmitGoal, WithdrawFollowUp,
 };
 use workbench_protocol::envelope::Provenance;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::ids::{ProjectId, RequestId, SessionId, SubmissionId};
+use workbench_protocol::namespaces::QuestionsCommand;
 use workbench_protocol::queries::{CommandReceipt, Query, QueryReply};
 
 use crate::commands::{
-    ChatInput, CommandService, ComposerRole, ContinueInput, GoalInput, HostCommand, HostEvent,
-    NoticeOutcome, PacketReference, ReferenceKind, RejectKind,
+    ChatInput, CommandService, ComposerRole, GoalInput, HostCommand, HostEvent, NoticeOutcome,
+    PacketReference, ReferenceKind, RejectKind,
 };
 use crate::projects::{ProjectDirectory, StaticProjects};
 use crate::receipts::fingerprint::chat_fingerprint;
@@ -37,7 +37,7 @@ use crate::receipts::{Receipts, SubmissionRecord};
 /// The command service together with what the host remembers about commands.
 pub struct CommandHost {
     service: CommandService,
-    conversation: conversation::ConversationState,
+    conversation: namespaces::conversation::ConversationState,
     pub(crate) lane_sidebar_path: Option<std::path::PathBuf>,
     receipts: Receipts,
     projects: Box<dyn ProjectDirectory>,
@@ -163,32 +163,18 @@ impl CommandHost {
     ) -> Result<CommandReply, WorkbenchError> {
         provenance.validate()?;
         command.validate()?;
-        match command {
-            Command::Conversation(input) => self.conversation_command(input, &provenance),
-            Command::ManageLane(input) => self.manage_lane_command(input, &provenance),
-            Command::CloseLane(input) => self.close_lane_command(input, &provenance),
-            Command::SendChat(send) => self.send_chat(&send, &provenance),
-            Command::WithdrawFollowUp(withdraw) => self.withdraw_follow_up(&withdraw),
-            Command::DecideToolApproval(decide) => self.decide_approval(&decide, &provenance),
-            other => {
-                if let Command::AnswerUserQuestion(answer) = &other
-                    && let Ok(Some(question)) = self
-                        .service
-                        .runtime()
-                        .user_question(answer.question_id.as_str())
-                    && question.answer.is_none()
-                    && question.routing_revision != answer.question_revision.get()
-                {
-                    return Err(reject_error(
-                        RejectKind::Conflict,
-                        "question routing changed; refresh before answering",
-                    ));
-                }
-                let host_command = self.translate(other)?;
-                let events = self.authorize_and_execute(host_command, &provenance)?;
-                reply_from_events(events, None)
-            }
-        }
+        self.dispatch_command(command, &provenance)
+    }
+
+    /// Run a command through ownership, the submission ledger and the command
+    /// service, and report what it produced.
+    fn run_host_command(
+        &mut self,
+        command: HostCommand,
+        provenance: &Provenance,
+    ) -> Result<CommandReply, WorkbenchError> {
+        let events = self.authorize_and_execute(command, provenance)?;
+        reply_from_events(events, None)
     }
 
     /// Like [`Self::handle_command`], and remember the outcome under `session` and
@@ -201,7 +187,7 @@ impl CommandHost {
         provenance: Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
         let subject = match &command {
-            Command::AnswerUserQuestion(q) => self
+            Command::Questions(QuestionsCommand::AnswerUserQuestion(q)) => self
                 .service
                 .runtime()
                 .user_question(q.question_id.as_str())
@@ -244,27 +230,7 @@ impl CommandHost {
         session: &SessionId,
         query: &Query,
     ) -> Result<QueryReply, WorkbenchError> {
-        match query {
-            Query::GetLaneManagement { lane_id } => Ok(QueryReply::LaneManagement(
-                self.lane_management_state(lane_id.as_str())?,
-            )),
-            Query::GetCommandReceipt { request_id } => Ok(QueryReply::CommandReceipt(
-                self.command_receipt(session, request_id)?,
-            )),
-            Query::GetApprovalInput(q) => {
-                query.validate(&Default::default())?;
-                let input = self.approval_input_value(
-                    &q.approval_id,
-                    q.core_epoch,
-                    q.approval_revision,
-                    crate::queries::approval::registry_error,
-                )?;
-                Ok(QueryReply::ApprovalInput(crate::queries::approval::chunk(
-                    q, input,
-                )?))
-            }
-            other => self.projection.query(other),
-        }
+        self.dispatch_query(session, query)
     }
 
     /// Complete immutable arguments for an authenticated human's confirmation.
@@ -385,15 +351,7 @@ impl CommandHost {
         if let Err(error) = self.projection.approval_changed(&decided.id) {
             tracing::warn!(code = ?error.code, "approval resolved; projection refresh failed");
         }
-        Ok(CommandReply {
-            conversation: None,
-            lane_management: None,
-            lane_close: None,
-            disposition: CommandDisposition::Accepted,
-            submission_id: None,
-            run_id: None,
-            thread_revision: None,
-        })
+        Ok(CommandReply::accepted())
     }
 
     /// What became of `request` in `session`. An applied request whose submission or
@@ -749,13 +707,10 @@ impl CommandHost {
         let permit = self.service.authorize(&command).map_err(refusal_error)?;
         match self.execute(command, permit, provenance) {
             Executed::Duplicate { run_id, .. } => Ok(CommandReply {
-                conversation: None,
-                lane_management: None,
-                lane_close: None,
                 disposition: CommandDisposition::AlreadyApplied,
                 submission_id: Some(send.submission_id.clone()),
                 run_id: run_id.and_then(|run| workbench_protocol::ids::RunId::new(run).ok()),
-                thread_revision: None,
+                ..CommandReply::accepted()
             }),
             Executed::Events(events) => reply_from_events(events, Some(send.submission_id.clone())),
         }
@@ -786,69 +741,6 @@ impl CommandHost {
                 source_run_id: seed.source_run_id.as_str().to_owned(),
                 context_len: seed.context_len.get(),
             }),
-        })
-    }
-
-    fn translate(&self, command: Command) -> Result<HostCommand, WorkbenchError> {
-        Ok(match command {
-            Command::ContinueChat(ContinueChat {
-                project,
-                thread,
-                composer_role: role,
-                model_preference: preference,
-            }) => HostCommand::ContinueChat(ContinueInput {
-                project_root: Some(self.project_root(&project)?),
-                thread_id: thread.as_str().to_owned(),
-                composer_role: composer_role(role),
-                model_preference: preference.as_ref().map(model_preference),
-                // Automatic continuations are the core's own decision.
-                automatic: false,
-            }),
-            Command::CompactChat(target) => HostCommand::CompactChat {
-                thread_id: target.thread.as_str().to_owned(),
-            },
-            Command::StopChat(target) => HostCommand::StopChat {
-                thread_id: target.thread.as_str().to_owned(),
-            },
-            Command::StopRun(stop) => HostCommand::StopRun {
-                thread_id: stop.thread.as_str().to_owned(),
-                run_id: stop.run.as_str().to_owned(),
-            },
-            Command::DeliverFollowUpsNextTurn(target) => HostCommand::DeliverFollowUpsNextTurn {
-                thread_id: target.thread.as_str().to_owned(),
-            },
-            Command::SubmitGoal(goal) => HostCommand::SubmitGoal(self.goal_input(&goal)?),
-            Command::SetGoalReview(set) => HostCommand::SetGoalReview {
-                thread_id: set.thread.as_str().to_owned(),
-                goal_id: set.goal.as_str().to_owned(),
-                enabled: set.enabled,
-            },
-            Command::SetGoalChecksPaused(set) => HostCommand::SetGoalChecksPaused {
-                thread_id: set.thread.as_str().to_owned(),
-                goal_id: set.goal.as_str().to_owned(),
-                paused: set.paused,
-            },
-            Command::AnswerUserQuestion(AnswerUserQuestion {
-                thread,
-                question_id,
-                answer,
-                question_revision: _,
-            }) => HostCommand::AnswerUserQuestion {
-                thread_id: thread.as_str().to_owned(),
-                question_id: question_id.as_str().to_owned(),
-                answer,
-            },
-            Command::SetAgentWebToolsEnabled(set) => HostCommand::SetWebToolsEnabled {
-                enabled: set.enabled,
-            },
-            Command::Conversation(_)
-            | Command::ManageLane(_)
-            | Command::CloseLane(_)
-            | Command::SendChat(_)
-            | Command::WithdrawFollowUp(_)
-            | Command::DecideToolApproval(_) => {
-                unreachable!("handled before translation")
-            }
         })
     }
 
@@ -910,13 +802,9 @@ impl CommandHost {
             .withdraw_follow_up(thread, withdraw.submission_id.as_str())
         {
             Ok(()) => Ok(CommandReply {
-                conversation: None,
-                lane_management: None,
-                lane_close: None,
-                disposition: CommandDisposition::Accepted,
                 submission_id: Some(withdraw.submission_id.clone()),
                 run_id: Some(withdraw.run.clone()),
-                thread_revision: None,
+                ..CommandReply::accepted()
             }),
             Err(runtime::RuntimeError::FollowUpWithdrawal(
                 runtime::FollowUpWithdrawalError::Unknown,
@@ -979,13 +867,8 @@ fn reply_from_events(
     submission_id: Option<SubmissionId>,
 ) -> Result<CommandReply, WorkbenchError> {
     let mut reply = CommandReply {
-        conversation: None,
-        lane_management: None,
-        lane_close: None,
-        disposition: CommandDisposition::Accepted,
         submission_id,
-        run_id: None,
-        thread_revision: None,
+        ..CommandReply::accepted()
     };
     let mut not_applied = None;
     let mut applied = false;

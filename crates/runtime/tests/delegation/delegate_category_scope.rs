@@ -217,7 +217,6 @@ fn reviewer_categories_keep_standard_reviewer_capabilities() {
         );
         assert_eq!(policy, standard);
         for tool in [
-            "shell",
             "edit",
             "write",
             "submit_lesson_review",
@@ -228,5 +227,9 @@ fn reviewer_categories_keep_standard_reviewer_capabilities() {
                 "{category} must not grant {tool}"
             );
         }
+        assert!(
+            policy.authorize("shell").is_ok(),
+            "{category} keeps the standard Reviewer shell"
+        );
     }
 }
