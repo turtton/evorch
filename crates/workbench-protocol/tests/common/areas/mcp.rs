@@ -143,6 +143,7 @@ pub fn settings() -> McpSettings {
                     reason: Some(McpErrorCode::NeedsApproval),
                 },
                 secret_references: vec!["docs-token".into()],
+                secret_states: [("docs-token".to_owned(), McpSecretState::Present)].into(),
             },
             McpServerView {
                 server_id: "local".into(),
@@ -156,6 +157,7 @@ pub fn settings() -> McpSettings {
                     reason: None,
                 },
                 secret_references: vec![],
+                secret_states: Default::default(),
             },
         ],
     }

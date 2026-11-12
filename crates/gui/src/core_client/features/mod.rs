@@ -124,6 +124,8 @@ pub struct FeatureError {
     pub message: String,
     /// The command may or may not have been applied. It is not resent.
     pub outcome_unknown: bool,
+    /// The code of the core's refusal, when the core answered with one.
+    pub code: Option<workbench_protocol::errors::ErrorCode>,
 }
 
 impl FeatureError {
@@ -131,6 +133,7 @@ impl FeatureError {
         Self {
             message: message.into(),
             outcome_unknown: false,
+            code: None,
         }
     }
 
@@ -138,7 +141,13 @@ impl FeatureError {
         Self {
             message: message.into(),
             outcome_unknown: true,
+            code: None,
         }
+    }
+
+    pub fn with_code(mut self, code: workbench_protocol::errors::ErrorCode) -> Self {
+        self.code = Some(code);
+        self
     }
 }
 

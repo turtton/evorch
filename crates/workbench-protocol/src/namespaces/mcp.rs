@@ -591,9 +591,24 @@ pub struct McpServerView {
     pub definition: Option<McpServerDefinition>,
     pub diagnostics: Vec<McpDiagnostic>,
     pub state: McpServerState,
-    /// Keychain names the definition refers to. Whether a value is stored shows
-    /// in `state` (`secret_missing`, `secret_locked`, ...); a value never does.
+    /// Keychain names the definition refers to.
     pub secret_references: Vec<String>,
+    /// Whether each referenced keychain entry holds a value, as the core
+    /// looked when it read the settings. A value is never part of it; a name
+    /// that is absent was not looked up.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_states: BTreeMap<String, McpSecretState>,
+}
+
+/// Whether a keychain entry holds a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpSecretState {
+    Present,
+    Missing,
+    Locked,
+    Unavailable,
+    Denied,
 }
 
 /// A project's MCP settings as the core last read them.

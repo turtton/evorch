@@ -130,6 +130,7 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
     let mut clients = tokio::task::JoinSet::new();
     let mut events = host.runtime.event_bus().subscribe();
     let background = host.host.lock().unwrap().service().background_work_notify();
+    let area_work = host.area_work_notify();
     let mut idle = IdleGrace::new(Duration::from_secs(host.config.core.idle_grace_secs));
     let outcome = loop {
         host.host.lock().unwrap().service_mut().poll();
@@ -144,6 +145,7 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
             _ = terminate.recv() => break Ok(()),
             _ = interrupt.recv() => break Ok(()),
             _ = background.notified() => (),
+            _ = area_work.notified() => (),
             _ = expired => {
                 if !host.busy() { break Ok(()); }
             },

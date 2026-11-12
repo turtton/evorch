@@ -401,6 +401,9 @@
             "secret_references": [
               "docs-token"
             ],
+            "secret_states": {
+              "docs-token": "present"
+            },
             "server_id": "docs",
             "state": {
               "reason": {

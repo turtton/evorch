@@ -10,7 +10,6 @@ use providers::{ChatResponse, Message, ToolSpec};
 use runtime::{AgentInvocationContext, AgentModel, Role, RuntimeError};
 use sandbox::{CredentialStore, FileCredentialStore, Secret, error::CredentialError};
 use std::{
-    collections::BTreeMap,
     path::PathBuf,
     sync::{
         Arc,
@@ -95,6 +94,8 @@ struct Area {
     started: Arc<AtomicUsize>,
     root: PathBuf,
     next: usize,
+    /// What the started peers report over the control socket.
+    peer_events: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
     _dir: tempfile::TempDir,
 }
 
@@ -112,13 +113,6 @@ fn literal(text: &str) -> McpTemplate {
 }
 fn session() -> SessionId {
     SessionId::new("mcp-area").unwrap()
-}
-
-fn find_in_path(program: &str) -> PathBuf {
-    std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|dir| dir.join(program))
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| panic!("{program} is not on PATH"))
 }
 
 impl Area {
@@ -140,11 +134,20 @@ impl Area {
         let listener = UnixListener::bind(root.join("control")).unwrap();
         let started = Arc::new(AtomicUsize::new(0));
         let counter = started.clone();
+        let (events, peer_events) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
-            let mut held = Vec::new();
             while let Ok((stream, _)) = listener.accept().await {
                 counter.fetch_add(1, Ordering::SeqCst);
-                held.push(stream);
+                let events = events.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncBufReadExt;
+                    let mut lines = tokio::io::BufReader::new(stream).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if let Ok(event) = serde_json::from_str(&line) {
+                            let _ = events.send(event);
+                        }
+                    }
+                });
             }
         });
         let command = PathBuf::from(std::env::var("CARGO_BIN_EXE_core-mcp-test-peer").unwrap())
@@ -212,6 +215,7 @@ impl Area {
             started,
             root,
             next: 0,
+            peer_events,
             _dir: dir,
         }
     }
@@ -379,6 +383,54 @@ impl Area {
                 outcome: McpOutcome::ApprovalConfirmed
             }
         );
+    }
+
+    /// Add `hang`: a copy of `fixture` whose peer never answers the handshake.
+    /// Returns the revision it was saved at; the server is approved.
+    async fn add_hanging(&mut self) -> McpRevision {
+        let (settings, definition) = self.definition("fixture").await;
+        let mut hang = definition.clone();
+        let McpTransport::Stdio { env, .. } = &mut hang.transport else {
+            panic!("fixture is a stdio server");
+        };
+        env.insert(
+            "HANG".into(),
+            McpValueSource::Template {
+                template: literal("1"),
+            },
+        );
+        let add = self.save(&settings.revision, "hang", hang);
+        let done = self.run(add).await;
+        let McpOperationState::Succeeded {
+            outcome: McpOutcome::Settings { revision },
+        } = done.state
+        else {
+            panic!("saved settings expected: {done:?}");
+        };
+        self.seed_token("hang");
+        self.approve("hang", &revision).await;
+        revision
+    }
+
+    /// Wait until a peer received the handshake request; its process id.
+    async fn handshake_reached_a_peer(&mut self) -> u32 {
+        let mut pid = None;
+        loop {
+            let event = self.peer_events.recv().await.expect("peers stay connected");
+            match event["event"].as_str() {
+                Some("started") => pid = event["pid"].as_u64().map(|p| p as u32),
+                Some("discover") => return pid.expect("a peer starts before it is asked"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Wait, woken by each end of an operation, until the host may stop on idle.
+    async fn until_idle(&self) {
+        let ended = self.boot.area_work_notify();
+        while self.boot.busy() {
+            ended.notified().await;
+        }
     }
 
     fn test(&mut self, server: &str, revision: &McpRevision) -> McpCommand {
@@ -580,50 +632,47 @@ async fn add_approve_test_revoke_delete_goes_through_the_same_approval_path() {
 }
 
 #[tokio::test]
-async fn cancel_ends_a_running_connection_test() {
+async fn cancel_ends_a_running_connection_test_reaps_its_child_and_returns_the_permit() {
     let mut area = Area::open().await;
-    let (settings, definition) = area.definition("fixture").await;
-    // A server that never answers: `sleep` keeps the handshake open.
-    let hang = McpServerDefinition {
-        transport: McpTransport::Stdio {
-            command: literal(find_in_path("sleep").to_str().unwrap()),
-            args: vec![literal("600")],
-            cwd: None,
-            env: BTreeMap::new(),
-        },
-        ..definition
-    };
-    let add = area.save(&settings.revision, "hang", hang);
-    let done = area.run(add).await;
-    let McpOperationState::Succeeded {
-        outcome: McpOutcome::Settings { revision },
-    } = done.state
-    else {
-        panic!("saved settings expected: {done:?}");
-    };
-    area.approve("hang", &revision).await;
-    let test = area.test("hang", &revision);
-    let id = test.operation_id().clone();
-    let (view, _) = area.submit(test).unwrap();
-    assert_eq!(view.state, McpOperationState::Running);
-    let (cancelled, _) = area
-        .submit(McpCommand::CancelOperation(CancelOperation {
-            operation_id: id.clone(),
-        }))
-        .unwrap();
-    assert_eq!(cancelled.operation_id, id);
-    let done = area.completed(&id).await;
-    assert!(
-        matches!(
-            done.state,
-            McpOperationState::Cancelled
-                | McpOperationState::Failed {
-                    error: McpErrorCode::Cancelled
-                }
-        ),
-        "{done:?}"
-    );
+    let revision = area.add_hanging().await;
+    let mut last = None;
+    // One more round than the project may run at once: a permit that was not
+    // returned by a cancelled test would refuse the last one.
+    for _ in 0..=tools::mcp::types::MAX_STDIO_PER_PROJECT {
+        let test = area.test("hang", &revision);
+        let id = test.operation_id().clone();
+        let (view, _) = area.submit(test).unwrap();
+        assert_eq!(view.state, McpOperationState::Running);
+        // Cancel only once the mock holds the open handshake.
+        let pid = area.handshake_reached_a_peer().await;
+        let (cancelled, _) = area
+            .submit(McpCommand::CancelOperation(CancelOperation {
+                operation_id: id.clone(),
+            }))
+            .unwrap();
+        assert_eq!(cancelled.operation_id, id);
+        let done = area.completed(&id).await;
+        assert!(
+            matches!(
+                done.state,
+                McpOperationState::Cancelled
+                    | McpOperationState::Failed {
+                        error: McpErrorCode::Cancelled
+                    }
+            ),
+            "{done:?}"
+        );
+        // A child that was not waited for would stay as a zombie entry.
+        #[cfg(target_os = "linux")]
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "the cancelled test's child process was reaped"
+        );
+        let _ = pid;
+        last = Some((id, done));
+    }
     // The outcome stays readable, and a finished operation cannot be cancelled again.
+    let (id, done) = last.unwrap();
     let McpReply::Operation(again) = area
         .query(McpQuery::GetOperation { operation_id: id })
         .unwrap()
@@ -631,6 +680,68 @@ async fn cancel_ends_a_running_connection_test() {
         panic!("operation expected");
     };
     assert_eq!(again, done);
+}
+
+#[tokio::test]
+async fn a_running_operation_keeps_the_host_busy_and_a_status_watcher_does_not() {
+    let mut area = Area::open().await;
+    let revision = area.add_hanging().await;
+    // Operations ran, so the status watcher of the project is up. It is not work.
+    area.until_idle().await;
+    assert!(!area.boot.busy());
+    let test = area.test("hang", &revision);
+    let id = test.operation_id().clone();
+    area.submit(test).unwrap();
+    assert!(area.boot.busy(), "a running operation stops an idle exit");
+    area.handshake_reached_a_peer().await;
+    area.submit(McpCommand::CancelOperation(CancelOperation {
+        operation_id: id.clone(),
+    }))
+    .unwrap();
+    area.completed(&id).await;
+    // Its end wakes the idle decision, which then finds nothing running.
+    area.until_idle().await;
+    assert!(!area.boot.busy());
+}
+
+#[tokio::test]
+async fn settings_tell_whether_each_keychain_reference_holds_a_value_and_never_the_value() {
+    let mut area = Area::open().await;
+    let (settings, definition) = area.definition("fixture").await;
+    let fixture = settings
+        .servers
+        .iter()
+        .find(|s| s.server_id == "fixture")
+        .unwrap();
+    assert_eq!(
+        fixture.secret_states.get("token"),
+        Some(&McpSecretState::Present)
+    );
+    // A copy refers to its own, not yet stored, entry.
+    let add = area.save(&settings.revision, "copy", definition);
+    area.run(add).await;
+    let after = area.settings().await;
+    let copy = after
+        .servers
+        .iter()
+        .find(|s| s.server_id == "copy")
+        .unwrap();
+    assert_eq!(
+        copy.secret_states.get("token"),
+        Some(&McpSecretState::Missing)
+    );
+    area.seed_token("copy");
+    let after = area.settings().await;
+    let copy = after
+        .servers
+        .iter()
+        .find(|s| s.server_id == "copy")
+        .unwrap();
+    assert_eq!(
+        copy.secret_states.get("token"),
+        Some(&McpSecretState::Present)
+    );
+    area.assert_secret_absent("peer-token");
 }
 
 #[tokio::test]

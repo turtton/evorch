@@ -20,18 +20,20 @@ use crate::mcp_settings::{
 use config::mcp::{MCP_ROLE_KEYS, McpServerEntry, McpSource};
 use egui::{RichText, Ui};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use workbench_host::areas::mcp::{config_definition, wire_definition};
+use workbench_host::areas::mcp::{config_definition, describe, wire_definition};
 use workbench_protocol::{
     commands::{Command, CommandResult},
+    errors::ErrorCode,
     events::UiEvent,
     handshake::Capability,
     ids::ProjectId,
     namespaces::mcp::{
         CancelOperation, ConfirmApproval, DeleteSecret, McpApprovalPreview, McpCommand,
         McpErrorCode, McpEvent, McpMutation, McpOperationId, McpOperationKind, McpOperationState,
-        McpOperationView, McpOrigin, McpOutcome, McpQuery, McpReply, McpResult, McpScope,
-        McpSecretValue, McpServerStatus, McpServerView, McpSettings, PreviewApproval, Refresh,
-        RevokeApproval, SaveOverride, SaveSecret, SetEnabled, TestConnection,
+        McpOperationView, McpOrigin, McpOutcome, McpQuery, McpReply, McpResult, McpRevision,
+        McpScope, McpSecretState, McpSecretValue, McpServerStatus, McpServerView, McpSettings,
+        PreviewApproval, Refresh, RevokeApproval, SaveOverride, SaveSecret, SetEnabled,
+        TestConnection,
     },
     queries::{Query, QueryReply},
 };
@@ -42,10 +44,13 @@ const REQUIRED: &[Capability] = &[Capability::Commands, Capability::Queries];
 /// arrive after the connection was replaced.
 #[derive(Debug, Clone)]
 enum Pending {
-    /// A command that started `operation`.
+    /// A command that started `operation`, and what it acts on.
     Command {
         operation: McpOperationId,
+        project: ProjectId,
     },
+    /// Asking the core to cancel an operation (which keeps running until it says so).
+    Cancel,
     /// Reading `operation` again (reconciliation after a reconnect).
     Lookup {
         operation: McpOperationId,
@@ -70,6 +75,9 @@ pub enum RowNote {
     Tested(McpServerStatus),
     Failed(McpErrorCode),
     Cancelled,
+    /// The core no longer holds the result of the request: it may or may not
+    /// have been applied.
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,19 +95,55 @@ pub enum Notice {
     Failed(String),
     /// A command's outcome is not known; the core is asked about it.
     Unknown,
+    /// The core no longer holds the result of a request; reload to see what
+    /// the state is now.
+    Expired,
 }
 
 enum Review {
-    Loading { operation: McpOperationId },
+    Loading {
+        operation: McpOperationId,
+    },
     Ready(Box<McpApprovalPreview>),
-    Confirming(Box<McpApprovalPreview>),
+    Confirming {
+        preview: Box<McpApprovalPreview>,
+        operation: McpOperationId,
+    },
     Stale,
     Failed(McpErrorCode),
 }
 
+/// A form being edited. It is tied to the project and the settings revision it
+/// was opened on: whatever is selected or reloaded later, a save goes to this
+/// project and quotes this revision, and only an explicit action moves it.
 struct Editor {
+    project: ProjectId,
+    revision: McpRevision,
     draft: McpServerDraft,
     secret: Option<SecretEntry>,
+    /// The operation that is saving this form. Its end closes this form and
+    /// no other.
+    saving: Option<McpOperationId>,
+}
+
+impl Editor {
+    fn new(project: ProjectId, revision: McpRevision, draft: McpServerDraft) -> Self {
+        Self {
+            project,
+            revision,
+            draft,
+            secret: None,
+            saving: None,
+        }
+    }
+}
+
+/// What a request of ours acts on, kept until its end is known.
+#[derive(Debug, Clone)]
+struct Target {
+    project: ProjectId,
+    server: Option<String>,
+    kind: McpOperationKind,
 }
 
 /// The masked value being typed. Deliberately without `Debug`.
@@ -126,6 +170,10 @@ pub struct McpFeature {
     operations: BTreeMap<McpOperationId, McpOperationView>,
     /// Commands whose reply was lost; asked for after the next snapshot.
     unknown: HashSet<McpOperationId>,
+    /// What each operation of `mine` that has not ended acts on.
+    targets: HashMap<McpOperationId, Target>,
+    /// The connection test started from each row (project, server).
+    tests: HashMap<(String, String), McpOperationId>,
     notes: HashMap<(String, String), RowNote>,
     notice: Option<Notice>,
     editor: Option<Editor>,
@@ -203,9 +251,18 @@ pub fn error_text(code: McpErrorCode) -> String {
         McpErrorCode::NeedsApproval => {
             "Not started: it is not approved. Approve it to use it from the next new run.".into()
         }
-        McpErrorCode::SecretUnavailable => "The OS keychain is not available. Nothing was stored.".into(),
-        McpErrorCode::SecretLocked => "The OS keychain is locked. Unlock it and try again.".into(),
-        McpErrorCode::SecretDenied => "Access to the OS keychain was denied. Nothing was stored.".into(),
+        McpErrorCode::SecretUnavailable => {
+            "The OS keychain is not available. The value may not have been stored.".into()
+        }
+        McpErrorCode::SecretLocked => {
+            "The OS keychain is locked. Unlock it and try again; the value may not have been stored.".into()
+        }
+        McpErrorCode::SecretDenied => {
+            "Access to the OS keychain was denied. The value may not have been stored.".into()
+        }
+        McpErrorCode::OutcomeUnknown => {
+            "The result is not known: the keychain entry may have been changed although the settings were not saved. The list is reloaded; check it before trying again.".into()
+        }
         McpErrorCode::SecretMissing => "The keychain entry has no stored value yet.".into(),
         other => format!("Failed: {other:?}"),
     }
@@ -231,10 +288,151 @@ impl McpFeature {
     }
 
     fn queue_command(&mut self, command: McpCommand, operation: McpOperationId) {
-        self.outbox.push(Outgoing::Command(
-            Command::Mcp(command),
-            Pending::Command { operation },
-        ));
+        let pending = match &command {
+            McpCommand::CancelOperation(_) => Pending::Cancel,
+            other => {
+                let (project, kind, server) = describe(other);
+                let project = project.expect("every command but a cancel names a project");
+                self.targets.insert(
+                    operation.clone(),
+                    Target {
+                        project: project.clone(),
+                        server,
+                        kind,
+                    },
+                );
+                Pending::Command { operation, project }
+            }
+        };
+        self.outbox
+            .push(Outgoing::Command(Command::Mcp(command), pending));
+    }
+
+    /// Release what a request that ended without an effect we know of was
+    /// holding: the row's "working" note, the review waiting for it, the
+    /// loading flag, the connection test it was and the editor it was saving.
+    fn unwind(&mut self, operation: &McpOperationId) {
+        let Some(target) = self.targets.remove(operation) else {
+            return;
+        };
+        let server = target.server.clone().unwrap_or_default();
+        let key = (target.project.as_str().to_owned(), server);
+        if matches!(self.notes.get(&key), Some(RowNote::Working(_))) {
+            self.notes.remove(&key);
+        }
+        if self.tests.get(&key) == Some(operation) {
+            self.tests.remove(&key);
+        }
+        if target.kind == McpOperationKind::Refresh
+            && let Some(state) = self.projects.get_mut(target.project.as_str())
+        {
+            state.loading = false;
+        }
+        let waiting = match &self.review {
+            Some((_, Review::Loading { operation: waits })) => waits == operation,
+            Some((
+                _,
+                Review::Confirming {
+                    operation: waits, ..
+                },
+            )) => waits == operation,
+            _ => false,
+        };
+        if waiting {
+            self.review = None;
+        }
+        if let Some(editor) = &mut self.editor
+            && editor.saving.as_ref() == Some(operation)
+        {
+            editor.saving = None;
+        }
+    }
+
+    /// The end of the operation that was saving the form: that form closes
+    /// (when the save is what the user asked for) or is released to be edited
+    /// again; a form opened since is never touched.
+    fn editor_settled(
+        &mut self,
+        operation: &McpOperationId,
+        close: bool,
+        revision: Option<&McpRevision>,
+    ) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        if editor.saving.as_ref() != Some(operation) {
+            return;
+        }
+        if close {
+            self.editor = None;
+        } else {
+            editor.saving = None;
+            if let Some(revision) = revision {
+                editor.revision = revision.clone();
+            }
+        }
+    }
+
+    /// The core no longer holds `operation` (or it was lost on the way): what
+    /// happened is not known, and it is not claimed either way.
+    fn settle_unknown(&mut self, operation: &McpOperationId) {
+        self.unknown.remove(operation);
+        self.mine.remove(operation);
+        self.operations.remove(operation);
+        let target = self.targets.get(operation).cloned();
+        self.unwind(operation);
+        if let Some(target) = target {
+            if let Some(server) = &target.server
+                && matches!(
+                    target.kind,
+                    McpOperationKind::SetEnabled
+                        | McpOperationKind::RevokeApproval
+                        | McpOperationKind::TestConnection
+                        | McpOperationKind::SaveSecret
+                        | McpOperationKind::DeleteSecret
+                )
+            {
+                self.notes.insert(
+                    (target.project.as_str().to_owned(), server.clone()),
+                    RowNote::Unknown,
+                );
+            }
+            self.queue_settings(&target.project);
+        }
+        self.notice = Some(Notice::Expired);
+    }
+
+    /// Ask the core to cancel the connection test started from this row.
+    /// Another row's (or project's) test is never touched.
+    fn cancel_test(&mut self, project: &ProjectId, server: &str) -> bool {
+        let key = (project.as_str().to_owned(), server.to_owned());
+        let Some(operation) = self.tests.get(&key).cloned() else {
+            return false;
+        };
+        self.queue_command(
+            McpCommand::CancelOperation(CancelOperation {
+                operation_id: operation.clone(),
+            }),
+            operation,
+        );
+        true
+    }
+
+    fn start_test(&mut self, project: &ProjectId, revision: &McpRevision, server: &str) {
+        let operation = self.fresh_operation();
+        self.tests.insert(
+            (project.as_str().to_owned(), server.to_owned()),
+            operation.clone(),
+        );
+        self.queue_command(
+            McpCommand::TestConnection(TestConnection {
+                operation_id: operation.clone(),
+                scope: Self::scope(project, server),
+                expected_revision: revision.clone(),
+            }),
+            operation,
+        );
+        self.working(project, server, McpOperationKind::TestConnection);
     }
 
     fn queue_settings(&mut self, project: &ProjectId) {
@@ -290,11 +488,22 @@ impl McpFeature {
         }
         let server = view.server_id.clone().unwrap_or_default();
         let key = (project.as_str().to_owned(), server.clone());
+        self.targets.remove(&view.operation_id);
+        if self.tests.get(&key) == Some(&view.operation_id) {
+            self.tests.remove(&key);
+        }
         match (&view.state, view.kind) {
             (McpOperationState::Succeeded { outcome }, kind) => match outcome {
                 McpOutcome::Settings { revision } => {
                     let known = self.settings_of(&project).map(|s| s.revision.clone());
-                    if known.as_ref() != Some(revision) {
+                    // A secret changes what the settings show (which entries hold
+                    // a value) without a new revision.
+                    if known.as_ref() != Some(revision)
+                        || matches!(
+                            kind,
+                            McpOperationKind::SaveSecret | McpOperationKind::DeleteSecret
+                        )
+                    {
                         self.queue_settings(&project);
                     }
                     if let Some(state) = self.projects.get_mut(project.as_str()) {
@@ -309,13 +518,11 @@ impl McpFeature {
                         _ => self.notice = Some(Notice::Saved),
                     }
                     self.notes.remove(&key);
-                    if matches!(
+                    let close = matches!(
                         kind,
                         McpOperationKind::SaveOverride | McpOperationKind::SaveSecret
-                    ) && self.editor.is_some()
-                    {
-                        self.editor = None;
-                    }
+                    );
+                    self.editor_settled(&view.operation_id, close, Some(revision));
                 }
                 McpOutcome::ApprovalPreview { preview } => {
                     if let Some((_, Review::Loading { operation, .. })) = &self.review
@@ -336,7 +543,18 @@ impl McpFeature {
                     self.notes.insert(key, RowNote::Tested(*status));
                 }
             },
-            (McpOperationState::Partial { keychain_error, .. }, _) => {
+            (
+                McpOperationState::Partial {
+                    outcome,
+                    keychain_error,
+                },
+                _,
+            ) => {
+                let revision = match outcome {
+                    McpOutcome::Settings { revision } => Some(revision),
+                    _ => None,
+                };
+                self.editor_settled(&view.operation_id, false, revision);
                 self.notice = Some(Notice::SecretDeletePartial {
                     name: server.clone(),
                     reason: *keychain_error,
@@ -345,15 +563,28 @@ impl McpFeature {
                 self.notes.remove(&key);
             }
             (McpOperationState::Cancelled, _) => {
+                self.editor_settled(&view.operation_id, false, None);
                 self.notes.insert(key, RowNote::Cancelled);
             }
             (McpOperationState::Failed { error }, kind) => {
+                let key2 = key.clone();
                 match (*error, kind) {
                     (McpErrorCode::StalePreview, McpOperationKind::ConfirmApproval) => {
                         self.review = Some((server.clone(), Review::Stale));
                     }
-                    (error, McpOperationKind::PreviewApproval) => {
+                    (
+                        error,
+                        McpOperationKind::PreviewApproval | McpOperationKind::ConfirmApproval,
+                    ) => {
                         self.review = Some((server.clone(), Review::Failed(error)));
+                    }
+                    (McpErrorCode::OutcomeUnknown, kind) => {
+                        // The keychain may have changed while the settings did not
+                        // save: say so, and show what is stored now.
+                        let _ = kind;
+                        self.notice =
+                            Some(Notice::Failed(error_text(McpErrorCode::OutcomeUnknown)));
+                        self.queue_settings(&project);
                     }
                     (McpErrorCode::ConfigConflict, _) => {
                         self.notice = Some(Notice::Conflict);
@@ -366,6 +597,10 @@ impl McpFeature {
                         self.notes.insert(key, RowNote::Failed(error));
                     }
                     (error, _) => self.notice = Some(Notice::Failed(error_text(error))),
+                }
+                self.editor_settled(&view.operation_id, false, None);
+                if matches!(self.notes.get(&key2), Some(RowNote::Working(_))) {
+                    self.notes.remove(&key2);
                 }
                 if let Some(state) = self.projects.get_mut(project.as_str()) {
                     state.loading = false;
@@ -488,15 +723,34 @@ impl Feature for McpFeature {
             })) => {
                 // The tag stays: the resolved reply arrives for it later, and
                 // the operation is looked up by id after the next snapshot.
-                if let Pending::Command { operation } = pending {
+                if let Pending::Command { operation, .. } = pending {
                     self.unknown.insert(operation);
                     self.notice = Some(Notice::Unknown);
                 }
             }
             FeatureReply::Command(Err(error)) => {
+                // The core refused the command at once: nothing runs, so what
+                // it held (working notes, a waiting review, the loading flag,
+                // the form being saved) is released now.
                 self.pending.remove(&tag);
-                if let Pending::Command { operation } = pending {
+                if let Pending::Command {
+                    operation, project, ..
+                } = pending
+                {
                     self.mine.remove(&operation);
+                    self.operations.remove(&operation);
+                    self.unknown.remove(&operation);
+                    self.unwind(&operation);
+                    if matches!(
+                        error.code,
+                        Some(
+                            ErrorCode::Conflict
+                                | ErrorCode::StaleRevision
+                                | ErrorCode::ResyncRequired
+                        )
+                    ) {
+                        self.queue_settings(&project);
+                    }
                 }
                 self.notice = Some(Notice::Failed(error.message));
             }
@@ -521,12 +775,18 @@ impl Feature for McpFeature {
             FeatureReply::Query(Err(error)) => {
                 self.pending.remove(&tag);
                 match pending {
-                    // The core has no such operation: the command never took
-                    // effect (an applied command is always remembered).
                     Pending::Lookup { operation } => {
-                        self.unknown.remove(&operation);
-                        self.mine.remove(&operation);
-                        self.notice = Some(Notice::Failed("The request was not applied.".into()));
+                        if error.code == Some(ErrorCode::NotFound) {
+                            // The core holds no such operation: it may be evicted
+                            // or never have arrived. That is not proof the request
+                            // was not applied, so it is not reported as such.
+                            self.settle_unknown(&operation);
+                        } else {
+                            // The lookup itself failed: the result is still not
+                            // known, so it stays tracked and is asked for again.
+                            self.unknown.insert(operation);
+                            self.notice = Some(Notice::Unknown);
+                        }
                     }
                     Pending::Settings { project } => {
                         if let Some(state) = self.projects.get_mut(project.as_str()) {
@@ -534,7 +794,7 @@ impl Feature for McpFeature {
                         }
                         self.notice = Some(Notice::Failed(error.message));
                     }
-                    Pending::Command { .. } => {}
+                    Pending::Command { .. } | Pending::Cancel => {}
                 }
             }
         }
@@ -555,6 +815,16 @@ impl Feature for McpFeature {
 
     fn unsupported(&self) -> Option<&'static str> {
         None
+    }
+}
+
+fn secret_state_label(state: McpSecretState) -> &'static str {
+    match state {
+        McpSecretState::Present => "a value is stored",
+        McpSecretState::Missing => "no value is stored yet",
+        McpSecretState::Locked => "the keychain is locked",
+        McpSecretState::Unavailable => "the keychain is not available",
+        McpSecretState::Denied => "access to the keychain was denied",
     }
 }
 
@@ -580,9 +850,16 @@ impl McpFeature {
                 Notice::Unknown => {
                     "The result of a request is not known yet; it is being looked up.".to_owned()
                 }
+                Notice::Expired => {
+                    "The core no longer holds the result of a request, so it is not known whether it was applied. The list is reloaded; check it before trying again.".to_owned()
+                }
             };
+            let unknown = matches!(notice, Notice::Unknown);
             ui.horizontal(|ui| {
                 ui.label(text);
+                if unknown && ui.small_button("Look up again").clicked() {
+                    self.reconcile();
+                }
                 if ui.small_button("Dismiss").clicked() {
                     self.notice = None;
                 }
@@ -597,10 +874,11 @@ impl McpFeature {
                 self.refresh(project);
             }
             if ui.button("Add MCP server").clicked() {
-                self.editor = Some(Editor {
-                    draft: McpServerDraft::new_server(),
-                    secret: None,
-                });
+                self.editor = Some(Editor::new(
+                    project.clone(),
+                    settings.revision.clone(),
+                    McpServerDraft::new_server(),
+                ));
             }
         });
         if settings.preparation_blocked {
@@ -612,8 +890,8 @@ impl McpFeature {
         for server in &settings.servers {
             self.server_row(ui, project, &settings, server);
         }
-        self.review_dialog(ui, project, &settings);
-        self.editor_dialog(ui, project, &settings);
+        self.review_dialog(ui, project);
+        self.editor_dialog(ui, project);
     }
 
     fn server_row(
@@ -635,6 +913,11 @@ impl McpFeature {
                 ui.label(RichText::new(&id).strong());
                 ui.label(status_label(server));
             });
+            for (name, state) in &server.secret_states {
+                if *state != McpSecretState::Present {
+                    ui.label(format!("Keychain entry {name}: {}", secret_state_label(*state)));
+                }
+            }
             if let Some(note) = &note {
                 ui.label(match note {
                     RowNote::Working(kind) => format!("Working: {kind:?}"),
@@ -643,14 +926,18 @@ impl McpFeature {
                     RowNote::Tested(status) => format!("Test result: {status:?}"),
                     RowNote::Failed(error) => error_text(*error),
                     RowNote::Cancelled => "Cancelled.".into(),
+                    RowNote::Unknown => {
+                        "The result is not known (the core no longer holds it). Check the state before trying again.".into()
+                    }
                 });
             }
             ui.horizontal_wrapped(|ui| {
                 if actions.edit && ui.button("Edit").clicked() {
-                    self.editor = Some(Editor {
-                        draft: McpServerDraft::from_entry(&id, &entry_of(server)),
-                        secret: None,
-                    });
+                    self.editor = Some(Editor::new(
+                        project.clone(),
+                        settings.revision.clone(),
+                        McpServerDraft::from_entry(&id, &entry_of(server)),
+                    ));
                 }
                 if let Some(enabled) = actions.set_enabled
                     && ui
@@ -748,35 +1035,15 @@ impl McpFeature {
             self.working(project, id, McpOperationKind::RevokeApproval);
         }
         if busy {
-            if let Some(operation) = self
-                .operations
-                .values()
-                .find(|op| {
-                    op.kind == McpOperationKind::TestConnection
-                        && op.server_id.as_deref() == Some(id)
-                        && !op.state.is_finished()
-                })
-                .map(|op| op.operation_id.clone())
+            if self
+                .tests
+                .contains_key(&(project.as_str().to_owned(), id.clone()))
                 && ui.button("Cancel test").clicked()
             {
-                self.queue_command(
-                    McpCommand::CancelOperation(CancelOperation {
-                        operation_id: operation.clone(),
-                    }),
-                    operation,
-                );
+                self.cancel_test(project, id);
             }
         } else if ui.button("Test connection").clicked() {
-            let operation = self.fresh_operation();
-            self.queue_command(
-                McpCommand::TestConnection(TestConnection {
-                    operation_id: operation.clone(),
-                    scope: Self::scope(project, id),
-                    expected_revision: settings.revision.clone(),
-                }),
-                operation,
-            );
-            self.working(project, id, McpOperationKind::TestConnection);
+            self.start_test(project, &settings.revision, id);
         }
     }
 
@@ -798,7 +1065,7 @@ impl McpFeature {
         );
     }
 
-    fn review_dialog(&mut self, ui: &mut Ui, project: &ProjectId, settings: &McpSettings) {
+    fn review_dialog(&mut self, ui: &mut Ui, project: &ProjectId) {
         let Some((server, review)) = &self.review else {
             return;
         };
@@ -808,7 +1075,7 @@ impl McpFeature {
             Review::Loading { .. } => {
                 ui.label("Reading what approving would allow…");
             }
-            Review::Ready(preview) | Review::Confirming(preview) => {
+            Review::Ready(preview) | Review::Confirming { preview, .. } => {
                 ui.label(RichText::new(format!("Approve {server}?")).strong());
                 if let Some(destination) = &preview.summary.destination {
                     ui.label(format!(
@@ -828,7 +1095,7 @@ impl McpFeature {
                         preview.summary.secret_references.join(", ")
                     ));
                 }
-                let confirming = matches!(review, Review::Confirming(_));
+                let confirming = matches!(review, Review::Confirming { .. });
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(!confirming, egui::Button::new("Approve"))
@@ -858,6 +1125,7 @@ impl McpFeature {
             Some(true) => {
                 if let Some((_, Review::Ready(preview))) = self.review.take() {
                     let operation = self.fresh_operation();
+                    let confirm_operation = operation.clone();
                     self.queue_command(
                         McpCommand::ConfirmApproval(ConfirmApproval {
                             operation_id: operation.clone(),
@@ -868,16 +1136,44 @@ impl McpFeature {
                         }),
                         operation,
                     );
-                    self.review = Some((server, Review::Confirming(preview)));
+                    self.review = Some((
+                        server,
+                        Review::Confirming {
+                            preview,
+                            operation: confirm_operation,
+                        },
+                    ));
                 }
             }
             Some(false) => self.review = None,
             None => {}
         }
-        let _ = settings;
     }
 
-    fn editor_dialog(&mut self, ui: &mut Ui, project: &ProjectId, settings: &McpSettings) {
+    fn editor_dialog(&mut self, ui: &mut Ui, current: &ProjectId) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        if editor.project != *current {
+            // The form belongs to another project and stays there.
+            ui.label(format!(
+                "A form for project {} is open there; it is saved to that project only.",
+                editor.project.as_str()
+            ));
+            return;
+        }
+        let Some(settings) = self.settings_of(&editor.project).cloned() else {
+            return;
+        };
+        let project = editor.project.clone();
+        let stale = editor.revision != settings.revision;
+        let can_write = !stale && editor.saving.is_none();
+        let saved_states = editor
+            .draft
+            .existing_id
+            .as_ref()
+            .and_then(|id| settings.servers.iter().find(|s| &s.server_id == id))
+            .map(|server| server.secret_states.clone());
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -887,6 +1183,7 @@ impl McpFeature {
             .map(|s| s.server_id.clone())
             .collect();
         let check = editor.draft.check(&taken);
+        let mut rebase = false;
         let mut save = false;
         let mut cancel = false;
         let mut secret_request: Option<(SecretTarget, String, String)> = None;
@@ -894,6 +1191,15 @@ impl McpFeature {
         let mut start_secret: Option<SecretTarget> = None;
         ui.group(|ui| {
             let draft = &mut editor.draft;
+            if stale {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "The settings changed since this form was opened, so it cannot be saved as it is.",
+                );
+                if ui.button("Keep my edit on the latest settings").clicked() {
+                    rebase = true;
+                }
+            }
             ui.label(
                 RichText::new(if draft.is_new() {
                     "Add MCP server"
@@ -975,11 +1281,22 @@ impl McpFeature {
             }
             for (target, name) in draft.keychain_references() {
                 ui.horizontal(|ui| {
-                    ui.label(format!("{} → keychain entry {name}", target.label()));
+                    let stored = saved_states
+                        .as_ref()
+                        .and_then(|states| states.get(&name))
+                        .map(|state| format!(" ({})", secret_state_label(*state)))
+                        .unwrap_or_default();
+                    ui.label(format!(
+                        "{} → keychain entry {name}{stored}",
+                        target.label()
+                    ));
                     if ui.small_button("Set value…").clicked() {
                         start_secret = Some(target.clone());
                     }
-                    if ui.small_button("Delete entry").clicked() {
+                    if ui
+                        .add_enabled(can_write, egui::Button::new("Delete entry").small())
+                        .clicked()
+                    {
                         delete_target = Some(target.clone());
                     }
                 });
@@ -989,7 +1306,10 @@ impl McpFeature {
                     ui.label(format!("Value for {}", entry.target.label()));
                     ui.add(egui::TextEdit::singleline(&mut entry.value).password(true));
                     let name = draft.keychain_name(&entry.target);
-                    let ready = !entry.value.is_empty() && name.is_some() && check.is_valid();
+                    let ready = !entry.value.is_empty()
+                        && name.is_some()
+                        && check.is_valid()
+                        && can_write;
                     if ui
                         .add_enabled(ready, egui::Button::new("Store secret"))
                         .clicked()
@@ -1007,7 +1327,10 @@ impl McpFeature {
             }
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(check.is_valid(), egui::Button::new("Save server"))
+                    .add_enabled(
+                        check.is_valid() && can_write,
+                        egui::Button::new("Save server"),
+                    )
                     .clicked()
                 {
                     save = true;
@@ -1023,6 +1346,9 @@ impl McpFeature {
                 value: String::new(),
             });
         }
+        if rebase {
+            editor.revision = settings.revision.clone();
+        }
         let mutation = check
             .definition()
             .map(|(id, definition)| McpMutation::Upsert {
@@ -1032,40 +1358,80 @@ impl McpFeature {
         if let Some((_, name, value)) = secret_request {
             editor.secret = None;
             if let (Some(mutation), Some(definition)) = (mutation.clone(), check.definition()) {
-                let operation = self.fresh_operation();
-                let server = definition.0.clone();
-                self.queue_command(
-                    McpCommand::SaveSecret(Box::new(SaveSecret {
-                        operation_id: operation.clone(),
-                        scope: Self::scope(project, &server),
-                        logical_name: name,
-                        value: McpSecretValue::new(value),
-                        expected_revision: settings.revision.clone(),
-                        mutation,
-                    })),
-                    operation,
-                );
-                self.working(project, &server, McpOperationKind::SaveSecret);
+                self.editor_store_secret(&definition.0, name, value, mutation);
             }
         } else if save && let Some(mutation) = mutation {
-            self.save_mutation(project, settings, mutation);
+            self.editor_save(mutation);
         }
         if let Some(target) = delete_target {
-            self.delete_secret(project, settings, &target);
+            self.delete_secret(&target);
         }
         if cancel {
             self.editor = None;
         }
+        let _ = project;
+    }
+
+    /// Save the form: to the project it was opened on, quoting the revision it
+    /// was opened on, whatever is selected or reloaded since.
+    fn editor_save(&mut self, mutation: McpMutation) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        if editor.saving.is_some() {
+            return;
+        }
+        let (project, revision) = (editor.project.clone(), editor.revision.clone());
+        let operation = self.fresh_operation();
+        if let Some(editor) = &mut self.editor {
+            editor.saving = Some(operation.clone());
+        }
+        self.queue_command(
+            McpCommand::SaveOverride(Box::new(SaveOverride {
+                operation_id: operation.clone(),
+                project,
+                expected_revision: revision,
+                mutation,
+            })),
+            operation,
+        );
+    }
+
+    fn editor_store_secret(
+        &mut self,
+        server: &str,
+        logical_name: String,
+        value: String,
+        mutation: McpMutation,
+    ) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        if editor.saving.is_some() {
+            return;
+        }
+        let (project, revision) = (editor.project.clone(), editor.revision.clone());
+        let operation = self.fresh_operation();
+        if let Some(editor) = &mut self.editor {
+            editor.saving = Some(operation.clone());
+        }
+        self.queue_command(
+            McpCommand::SaveSecret(Box::new(SaveSecret {
+                operation_id: operation.clone(),
+                scope: Self::scope(&project, server),
+                logical_name,
+                value: McpSecretValue::new(value),
+                expected_revision: revision,
+                mutation,
+            })),
+            operation,
+        );
+        self.working(&project, server, McpOperationKind::SaveSecret);
     }
 
     /// Drop every reference to the entry from the form; an entry the saved
     /// server already uses is also deleted from the keychain (which saves).
-    fn delete_secret(
-        &mut self,
-        project: &ProjectId,
-        settings: &McpSettings,
-        target: &SecretTarget,
-    ) {
+    fn delete_secret(&mut self, target: &SecretTarget) {
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -1073,37 +1439,48 @@ impl McpFeature {
             return;
         };
         editor.draft.remove_secret(target);
+        let project = editor.project.clone();
+        let revision = editor.revision.clone();
+        let busy = editor.saving.is_some();
         let still_used = editor
             .draft
             .keychain_references()
             .iter()
             .any(|(_, other)| *other == name);
-        let saved_uses = editor
-            .draft
-            .existing_id
+        let existing = editor.draft.existing_id.clone();
+        let Some(settings) = self.settings_of(&project).cloned() else {
+            return;
+        };
+        let saved_uses = existing
             .as_ref()
             .and_then(|id| settings.servers.iter().find(|s| &s.server_id == id))
             .and_then(|s| s.definition.as_ref())
             .is_some_and(|d| d.keychain_references().contains(&name));
-        if still_used || !saved_uses {
+        if still_used || !saved_uses || busy {
             return;
         }
         let taken: BTreeSet<String> = settings
             .servers
             .iter()
             .map(|s| s.server_id.clone())
-            .filter(|id| Some(id) != editor.draft.existing_id.as_ref())
+            .filter(|id| Some(id) != existing.as_ref())
             .collect();
+        let Some(editor) = &self.editor else {
+            return;
+        };
         let Some((server, definition)) = editor.draft.check(&taken).into_definition() else {
             return;
         };
         let operation = self.fresh_operation();
+        if let Some(editor) = &mut self.editor {
+            editor.saving = Some(operation.clone());
+        }
         self.queue_command(
             McpCommand::DeleteSecret(Box::new(DeleteSecret {
                 operation_id: operation.clone(),
-                scope: Self::scope(project, &server),
+                scope: Self::scope(&project, &server),
                 logical_name: name,
-                expected_revision: settings.revision.clone(),
+                expected_revision: revision,
                 mutation: McpMutation::Upsert {
                     server_id: server.clone(),
                     definition: wire_definition(&definition),
@@ -1111,7 +1488,7 @@ impl McpFeature {
             })),
             operation,
         );
-        self.working(project, &server, McpOperationKind::DeleteSecret);
+        self.working(&project, &server, McpOperationKind::DeleteSecret);
     }
 }
 
@@ -1284,6 +1661,7 @@ mod tests {
             7,
             Pending::Command {
                 operation: id.clone(),
+                project: project(),
             },
         );
         feature.reply(
@@ -1321,22 +1699,275 @@ mod tests {
         assert_eq!(feature.notice, Some(Notice::Conflict));
     }
 
-    #[test]
-    fn a_lookup_the_core_does_not_know_means_the_request_was_not_applied() {
-        let mut feature = McpFeature::default();
-        let id = started(&mut feature, McpOperationKind::SaveOverride);
-        feature.unknown.insert(id.clone());
+    fn revision(c: char) -> McpRevision {
+        McpRevision::new(c.to_string().repeat(64)).unwrap()
+    }
+
+    fn settings_of(project: &str, revision: McpRevision) -> McpSettings {
+        McpSettings {
+            project: ProjectId::new(project).unwrap(),
+            revision,
+            preparation_blocked: false,
+            diagnostics: vec![],
+            servers: vec![],
+        }
+    }
+
+    fn lookup(feature: &mut McpFeature, id: &McpOperationId) -> u64 {
+        let tag = feature.tag();
         feature.pending.insert(
-            3,
+            tag,
             Pending::Lookup {
                 operation: id.clone(),
             },
         );
-        feature.reply(
-            3,
-            FeatureReply::Query(Err(FeatureError::new("unknown operation"))),
+        tag
+    }
+
+    fn queued_commands(feature: &McpFeature) -> Vec<&McpCommand> {
+        feature
+            .outbox
+            .iter()
+            .filter_map(|out| match out {
+                Outgoing::Command(Command::Mcp(command), _) => Some(command),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lookup_the_core_does_not_hold_is_not_reported_as_not_applied() {
+        let mut feature = McpFeature::default();
+        let id = started(&mut feature, McpOperationKind::SetEnabled);
+        feature.queue_command(
+            McpCommand::SetEnabled(SetEnabled {
+                operation_id: id.clone(),
+                scope: McpFeature::scope(&project(), "fixture"),
+                expected_revision: revision('a'),
+                enabled: true,
+            }),
+            id.clone(),
         );
-        assert!(!feature.unknown.contains(&id));
+        feature.working(&project(), "fixture", McpOperationKind::SetEnabled);
+        feature.unknown.insert(id.clone());
+        let tag = lookup(&mut feature, &id);
+        feature.reply(
+            tag,
+            FeatureReply::Query(Err(
+                FeatureError::new("unknown operation").with_code(ErrorCode::NotFound)
+            )),
+        );
+        assert_eq!(feature.notice, Some(Notice::Expired));
+        assert_eq!(note(&feature), Some(&RowNote::Unknown));
+        assert!(
+            !feature.unknown.contains(&id),
+            "nothing more can be learned"
+        );
+        assert!(!matches!(feature.notice, Some(Notice::Failed(_))));
+    }
+
+    #[test]
+    fn a_failed_lookup_keeps_the_operation_tracked_as_unknown() {
+        let mut feature = McpFeature::default();
+        let id = started(&mut feature, McpOperationKind::SaveOverride);
+        feature.unknown.insert(id.clone());
+        let tag = lookup(&mut feature, &id);
+        feature.reply(
+            tag,
+            FeatureReply::Query(Err(FeatureError::new("connection reset"))),
+        );
+        assert!(feature.unknown.contains(&id));
+        assert!(feature.mine.contains(&id));
+        assert_eq!(feature.notice, Some(Notice::Unknown));
+        feature.reset();
+        assert!(
+            feature.outbox.iter().any(|out| matches!(
+                out,
+                Outgoing::Query(Query::Mcp(McpQuery::GetOperation { .. }), _)
+            )),
+            "it is asked for again, the command is never resent"
+        );
+        assert!(queued_commands(&feature).is_empty());
+    }
+
+    #[test]
+    fn a_command_refused_at_once_releases_what_it_held_and_a_conflict_reloads() {
+        let mut feature = McpFeature::default();
+        let id = feature.fresh_operation();
+        feature.queue_command(
+            McpCommand::PreviewApproval(PreviewApproval {
+                operation_id: id.clone(),
+                scope: McpFeature::scope(&project(), "fixture"),
+                expected_revision: revision('a'),
+            }),
+            id.clone(),
+        );
+        feature.working(&project(), "fixture", McpOperationKind::PreviewApproval);
+        feature.review = Some((
+            "fixture".into(),
+            Review::Loading {
+                operation: id.clone(),
+            },
+        ));
+        let Some(Outgoing::Command(_, pending)) = feature.outbox.pop() else {
+            panic!("the command is queued");
+        };
+        feature.pending.insert(4, pending);
+        feature.reply(
+            4,
+            FeatureReply::Command(Err(
+                FeatureError::new("settings changed").with_code(ErrorCode::Conflict)
+            )),
+        );
+        assert!(feature.review.is_none(), "no preview is waited for");
+        assert_eq!(note(&feature), None);
+        assert!(!feature.mine.contains(&id));
+        assert!(
+            feature.outbox.iter().any(|out| matches!(
+                out,
+                Outgoing::Query(Query::Mcp(McpQuery::GetSettings { .. }), _)
+            )),
+            "the settings are read again after a conflict"
+        );
+    }
+
+    #[test]
+    fn a_refused_refresh_stops_the_loading_state() {
+        let mut feature = McpFeature::default();
+        feature.refresh(&project());
+        assert!(feature.projects["p"].loading);
+        let Some(Outgoing::Command(_, pending)) = feature.outbox.pop() else {
+            panic!("the refresh is queued");
+        };
+        feature.pending.insert(2, pending);
+        feature.reply(2, FeatureReply::Command(Err(FeatureError::new("busy"))));
+        assert!(!feature.projects["p"].loading);
+    }
+
+    fn open_editor(feature: &mut McpFeature, project: &str, revision: McpRevision) {
+        feature.editor = Some(Editor::new(
+            ProjectId::new(project).unwrap(),
+            revision,
+            McpServerDraft::new_server(),
+        ));
+    }
+
+    fn disable() -> McpMutation {
+        McpMutation::Disable {
+            server_id: "fixture".into(),
+        }
+    }
+
+    #[test]
+    fn an_edit_is_saved_to_its_own_project_and_its_own_revision() {
+        let mut feature = McpFeature::default();
+        for (name, rev) in [("a", 'a'), ("b", 'b')] {
+            feature.projects.entry(name.into()).or_default().settings =
+                Some(settings_of(name, revision(rev)));
+        }
+        open_editor(&mut feature, "a", revision('a'));
+        // Project b is selected and reloaded to a newer revision meanwhile.
+        feature.projects.get_mut("b").unwrap().settings = Some(settings_of("b", revision('c')));
+        feature.projects.get_mut("a").unwrap().settings = Some(settings_of("a", revision('d')));
+        feature.editor_save(disable());
+        let commands = queued_commands(&feature);
+        let [McpCommand::SaveOverride(save)] = commands.as_slice() else {
+            panic!("one save is queued");
+        };
+        assert_eq!(save.project.as_str(), "a");
+        assert_eq!(save.expected_revision, revision('a'));
+    }
+
+    #[test]
+    fn a_secret_is_stored_and_deleted_against_the_edit_it_started_from() {
+        let mut feature = McpFeature::default();
+        feature.projects.entry("a".into()).or_default().settings =
+            Some(settings_of("a", revision('b')));
+        open_editor(&mut feature, "a", revision('a'));
+        feature.editor_store_secret("fixture", "token".into(), "value".into(), disable());
+        let commands = queued_commands(&feature);
+        let [McpCommand::SaveSecret(save)] = commands.as_slice() else {
+            panic!("one secret save is queued");
+        };
+        assert_eq!(save.scope.project.as_str(), "a");
+        assert_eq!(save.expected_revision, revision('a'));
+    }
+
+    #[test]
+    fn a_connection_test_is_cancelled_only_from_its_own_row() {
+        let mut feature = McpFeature::default();
+        let first = ProjectId::new("p1").unwrap();
+        let second = ProjectId::new("p2").unwrap();
+        feature.start_test(&first, &revision('a'), "fixture");
+        feature.outbox.clear();
+        assert!(!feature.cancel_test(&second, "fixture"));
+        assert!(!feature.cancel_test(&first, "other"));
+        assert!(queued_commands(&feature).is_empty());
+        assert!(feature.cancel_test(&first, "fixture"));
+        let commands = queued_commands(&feature);
+        let [McpCommand::CancelOperation(cancel)] = commands.as_slice() else {
+            panic!("a cancel is queued");
+        };
+        let started = feature.tests[&("p1".to_owned(), "fixture".to_owned())].clone();
+        assert_eq!(cancel.operation_id, started);
+    }
+
+    #[test]
+    fn the_end_of_a_save_closes_only_the_form_that_was_saving() {
+        let mut feature = McpFeature::default();
+        open_editor(&mut feature, "p", revision('a'));
+        feature.editor_save(disable());
+        let saving = feature.editor.as_ref().unwrap().saving.clone().unwrap();
+        // The user abandons that form and opens another one while it saves.
+        open_editor(&mut feature, "p", revision('a'));
+        feature.operations.insert(
+            saving.clone(),
+            view(
+                &saving,
+                McpOperationKind::SaveOverride,
+                McpOperationState::Running,
+            ),
+        );
+        feature.event(&completed(view(
+            &saving,
+            McpOperationKind::SaveOverride,
+            McpOperationState::Succeeded {
+                outcome: McpOutcome::Settings {
+                    revision: revision('b'),
+                },
+            },
+        )));
+        assert!(feature.editor.is_some(), "the newer draft survives");
+        // The form that is saving is closed by its own operation.
+        feature.editor_save(disable());
+        let own = feature.editor.as_ref().unwrap().saving.clone().unwrap();
+        feature.mine.insert(own.clone());
+        feature.event(&completed(view(
+            &own,
+            McpOperationKind::SaveOverride,
+            McpOperationState::Succeeded {
+                outcome: McpOutcome::Settings {
+                    revision: revision('c'),
+                },
+            },
+        )));
+        assert!(feature.editor.is_none());
+    }
+
+    #[test]
+    fn a_failed_save_releases_its_form_for_another_try() {
+        let mut feature = McpFeature::default();
+        open_editor(&mut feature, "p", revision('a'));
+        feature.editor_save(disable());
+        let own = feature.editor.as_ref().unwrap().saving.clone().unwrap();
+        feature.event(&completed(view(
+            &own,
+            McpOperationKind::SaveOverride,
+            McpOperationState::Failed {
+                error: McpErrorCode::OutcomeUnknown,
+            },
+        )));
+        assert!(feature.editor.as_ref().unwrap().saving.is_none());
         assert!(matches!(feature.notice, Some(Notice::Failed(_))));
     }
 
@@ -1348,6 +1979,7 @@ mod tests {
             1,
             Pending::Command {
                 operation: id.clone(),
+                project: project(),
             },
         );
         let running = view(&id, McpOperationKind::Refresh, McpOperationState::Running);

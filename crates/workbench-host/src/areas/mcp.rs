@@ -29,7 +29,8 @@ use crate::bootstrap::BootstrapError;
 use config::mcp as cfg;
 use runtime::mcp::{
     ApprovalScope, CancelContext, ConfirmMcpApproval, DeleteMcpSecret, McpErrorKind, McpGuiService,
-    McpSettingsView, McpStatusEvent, SaveMcpSecret,
+    McpSecretPresence, McpSecretRollback, McpSecretWrite, McpSettingsView, McpStatusEvent,
+    SaveMcpSecret, SaveMcpSecretReport,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -210,7 +211,7 @@ impl McpArea {
         }
         let task_inner = inner.clone();
         let task_id = id.clone();
-        let spawned = inner.tasks.spawn("mcp-operation", move |stop| {
+        let spawned = inner.tasks.spawn_counted("mcp-operation", move |stop| {
             task_inner.run(task_id, project, work, stop)
         });
         if let Err(refused) = spawned {
@@ -505,8 +506,31 @@ impl Inner {
             None => None,
         };
         let mut done = self.execute_in(&root, work).await;
+        if let Some(settings) = &mut done.settings {
+            self.fill_secret_states(&root, settings).await;
+        }
         done.root = Some(root);
         done
+    }
+
+    /// Look up whether each keychain reference holds a value (never which).
+    async fn fill_secret_states(&self, root: &Path, settings: &mut wire::McpSettings) {
+        for server in &mut settings.servers {
+            if server.secret_references.is_empty() {
+                continue;
+            }
+            let scope = ApprovalScope {
+                canonical_root: root.to_owned(),
+                server_id: server.server_id.clone(),
+            };
+            server.secret_states = self
+                .gui
+                .secret_presence(scope, server.secret_references.clone())
+                .await
+                .into_iter()
+                .map(|(name, presence)| (name, secret_state(presence)))
+                .collect();
+        }
     }
 
     async fn execute_in(&self, root: &Path, work: Work) -> Done {
@@ -640,9 +664,9 @@ impl Inner {
                 revision,
                 mutation,
                 ..
-            } => settled_view(
+            } => secret_saved(
                 &project,
-                gui.save_secret(SaveMcpSecret {
+                gui.save_secret_report(SaveMcpSecret {
                     scope: scope(server_id),
                     logical_name,
                     value,
@@ -746,6 +770,31 @@ fn settled_view(project: &ProjectId, result: Result<McpSettingsView, McpErrorKin
             }
         }
         Err(kind) => Done::failed(code(kind)),
+    }
+}
+
+/// The end of a `SaveSecret`. A failure is only reported as such when the
+/// keychain is known to be as it was (or the write itself failed); once the
+/// entry was written and not taken back, the settings did not save and the
+/// keychain may differ: the outcome is unknown, never "nothing was written".
+fn secret_saved(project: &ProjectId, report: SaveMcpSecretReport) -> Done {
+    match report.result {
+        Ok(view) => settled_view(project, Ok(view)),
+        Err(kind) => Done::failed(match (report.write, report.rollback) {
+            (McpSecretWrite::NotAttempted | McpSecretWrite::Failed(_), _)
+            | (McpSecretWrite::Stored, McpSecretRollback::Deleted) => code(kind),
+            _ => wire::McpErrorCode::OutcomeUnknown,
+        }),
+    }
+}
+
+fn secret_state(presence: McpSecretPresence) -> wire::McpSecretState {
+    match presence {
+        McpSecretPresence::Present => wire::McpSecretState::Present,
+        McpSecretPresence::Missing => wire::McpSecretState::Missing,
+        McpSecretPresence::Locked => wire::McpSecretState::Locked,
+        McpSecretPresence::Unavailable => wire::McpSecretState::Unavailable,
+        McpSecretPresence::Denied => wire::McpSecretState::Denied,
     }
 }
 
@@ -944,8 +993,11 @@ impl Work {
     }
 }
 
-/// Project, kind and server of a command, for its operation view.
-fn describe(command: &McpCommand) -> (Option<ProjectId>, wire::McpOperationKind, Option<String>) {
+/// Project, kind and server of a command, for its operation view (also used by
+/// the desktop to know what a request in flight stands for).
+pub fn describe(
+    command: &McpCommand,
+) -> (Option<ProjectId>, wire::McpOperationKind, Option<String>) {
     use wire::McpOperationKind as K;
     match command {
         McpCommand::Refresh(c) => (Some(c.project.clone()), K::Refresh, None),
@@ -1289,6 +1341,7 @@ pub fn settings_view(project: &ProjectId, view: &McpSettingsView) -> wire::McpSe
                     .as_ref()
                     .map(wire::McpServerDefinition::keychain_references)
                     .unwrap_or_default(),
+                secret_states: Default::default(),
                 definition,
                 diagnostics: entry.diagnostics.iter().map(diagnostic).collect(),
                 state,
@@ -1357,5 +1410,51 @@ fn approval_preview(
             .iter()
             .map(ToString::to_string)
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed(write: McpSecretWrite, rollback: McpSecretRollback) -> wire::McpOperationState {
+        let report = SaveMcpSecretReport {
+            result: Err(McpErrorKind::ConfigConflict),
+            write,
+            rollback,
+        };
+        secret_saved(&ProjectId::new("p").unwrap(), report).state
+    }
+
+    fn error(code: wire::McpErrorCode) -> wire::McpOperationState {
+        wire::McpOperationState::Failed { error: code }
+    }
+
+    #[test]
+    fn a_secret_save_is_a_plain_failure_only_when_the_keychain_is_known_to_be_as_before() {
+        use McpSecretRollback as R;
+        use McpSecretWrite as W;
+        let conflict = wire::McpErrorCode::ConfigConflict;
+        assert_eq!(failed(W::NotAttempted, R::NotNeeded), error(conflict));
+        assert_eq!(
+            failed(W::Failed(McpErrorKind::SecretLocked), R::NotNeeded),
+            error(conflict),
+            "the failure code is the classified one of the request"
+        );
+        assert_eq!(failed(W::Stored, R::Deleted), error(conflict));
+    }
+
+    #[test]
+    fn a_secret_save_that_may_have_changed_the_keychain_is_never_reported_as_nothing_written() {
+        use McpSecretRollback as R;
+        use McpSecretWrite as W;
+        let unknown = error(wire::McpErrorCode::OutcomeUnknown);
+        assert_eq!(failed(W::Stored, R::Kept), unknown);
+        assert_eq!(
+            failed(W::Stored, R::Failed(McpErrorKind::SecretDenied)),
+            unknown
+        );
+        assert_eq!(failed(W::Stored, R::NotNeeded), unknown);
+        assert_eq!(failed(W::Unknown, R::Unknown), unknown);
     }
 }
