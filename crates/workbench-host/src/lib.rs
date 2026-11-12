@@ -11,6 +11,7 @@
 //! check (`scripts/check-workbench-boundaries.sh`) keeps GUI and client crates
 //! out of its dependency graph.
 
+pub mod areas;
 pub mod bootstrap;
 pub mod commands;
 pub mod ingress;

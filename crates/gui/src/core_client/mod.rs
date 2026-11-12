@@ -2,6 +2,7 @@
 //! construct a runtime, read a sidebar, or own an agent lifecycle.
 pub mod cache;
 pub mod connection;
+pub mod features;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use connection::Action;
@@ -47,6 +48,10 @@ pub struct Shared {
     pub connected: bool,
     pub status: String,
     pub changed: Arc<tokio::sync::Notify>,
+    /// What the connected core offers; features are shown only for what it does.
+    pub capabilities: Vec<Capability>,
+    /// The per-area features, fed by the shared connection (`features/`).
+    pub features: features::Features,
 }
 
 impl Shared {
@@ -222,6 +227,11 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
     }
     if let Err(error) = tx.try_send(action) {
         match error.into_inner() {
+            Action::Feature(action) => {
+                shared
+                    .features
+                    .refuse(&action, "client queue is full or closed");
+            }
             Action::Command {
                 draft: Some((thread, _)),
                 ..
@@ -258,6 +268,11 @@ impl eframe::App for CoreClientApp {
                 egui::Color32::YELLOW,
                 format!("OutcomeUnknown: {request}（再送していません）"),
             );
+        }
+        let capabilities = shared.capabilities.clone();
+        let connected = shared.connected;
+        for action in shared.features.render(ui, connected, &capabilities) {
+            enqueue(&self.actions, &mut shared, Action::Feature(action));
         }
         ui.collapsing("未移行の機能 — Unsupported", |ui| {
             ui.label("設定変更・モデル設定・project 追加・lane 管理・PR 管理・ファイル/terminal/browser・fork/rewind・削除/アーカイブ等はこのモードでは使用できません。直接 DB を開いて補完しません。");

@@ -14,7 +14,7 @@ use workbench_protocol::namespaces::{
 use workbench_protocol::{
     commands::{Command, CommandReply},
     conversation::{ConversationCommand, ConversationResult},
-    events::{EventEnvelope, Subscribe, SubscriptionScope},
+    events::{EventEnvelope, Subscribe, SubscriptionScope, UiEvent},
     ids::{BodyId, ProjectId, RequestId, ThreadId},
     queries::{
         CommandReceiptState, HistoryDirection, PageRequest, Query, QueryReply, ReadBody,
@@ -23,7 +23,11 @@ use workbench_protocol::{
     wire::ByteOffset,
 };
 
-use super::{Shared, cache::Cache};
+use super::{
+    Shared,
+    cache::Cache,
+    features::{FeatureAction, FeatureError, FeatureId, FeatureReply, FeatureRequest},
+};
 
 pub enum Action {
     Command {
@@ -39,6 +43,9 @@ pub enum Action {
         mime: String,
         data: String,
     },
+    /// A request of a feature (`features/`): typed, tagged, answered through
+    /// `Shared::features`. The feature gets no connection of its own.
+    Feature(FeatureAction),
     Reconnect,
     Shutdown,
 }
@@ -59,11 +66,17 @@ fn update(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, f: impl FnOnce(&mut 
 enum Pending {
     Command(Option<(String, u64)>),
     Upload { thread: String, id: uuid::Uuid },
+    Feature { feature: FeatureId, tag: u64 },
 }
 
 impl Pending {
-    fn rejected(&self, state: &mut Shared) {
+    fn rejected(&self, state: &mut Shared, error: &str) {
         match self {
+            Self::Feature { feature, tag } => state.features.reply(
+                *feature,
+                *tag,
+                FeatureReply::Command(Err(FeatureError::new(error))),
+            ),
             Self::Command(Some((thread, _))) => {
                 state.sending.remove(thread);
             }
@@ -86,10 +99,22 @@ impl Pending {
 const SNAPSHOT_BUFFER_EVENTS: usize = 256;
 const SNAPSHOT_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 
+/// The projection at the snapshot cut.
 pub async fn snapshot(
     client: &WorkbenchClient,
     subscription: &mut Subscription,
 ) -> Result<Cache, String> {
+    snapshot_delivering(client, subscription)
+        .await
+        .map(|(cache, _)| cache)
+}
+
+/// [`snapshot`], and the events that arrived while it was being read and apply
+/// after it (the features rebuild from them).
+async fn snapshot_delivering(
+    client: &WorkbenchClient,
+    subscription: &mut Subscription,
+) -> Result<(Cache, Vec<UiEvent>), String> {
     let started = subscription.started().clone();
     let mut cache = Cache::default();
     let Some(id) = started.snapshot_id else {
@@ -143,12 +168,13 @@ pub async fn snapshot(
         }
     }
     cache.at(started.high_water);
+    let mut delivered = Vec::new();
     for event in buffered {
-        if !cache.event(event) {
+        if !cache.event_delivering(event, |event| delivered.push(event.clone())) {
             return Err("snapshot epoch changed; resync required".into());
         }
     }
-    Ok(cache)
+    Ok((cache, delivered))
 }
 
 pub async fn serve(
@@ -193,7 +219,7 @@ pub async fn serve(
                         }
                         CommandReceiptState::Rejected { error } => update(&shared, &ctx, |s| {
                             s.outcome_unknown.remove(request.as_str());
-                            pending.rejected(s);
+                            pending.rejected(s, &error.to_string());
                             s.status = error.to_string();
                         }),
                         CommandReceiptState::Unknown => {
@@ -229,9 +255,15 @@ pub async fn serve(
                     break;
                 }
             };
-            match snapshot(&client, &mut stream).await {
-                Ok(cache) => update(&shared, &ctx, |s| {
+            let capabilities = client.server_hello().capabilities.clone();
+            match snapshot_delivering(&client, &mut stream).await {
+                Ok((cache, delivered)) => update(&shared, &ctx, |s| {
                     s.replace_projection(cache);
+                    s.capabilities = capabilities;
+                    s.features.reset();
+                    for event in &delivered {
+                        s.features.event(event);
+                    }
                     s.connected = true;
                     s.status = "core-client: 接続済み".into();
                 }),
@@ -252,7 +284,7 @@ pub async fn serve(
                     event = stream.next() => {
                         let Some(event) = event else { break };
                         let mut valid = false;
-                        update(&shared, &ctx, |s| valid = s.cache.event(event));
+                        update(&shared, &ctx, |s| valid = s.cache.event_delivering(event, |e| s.features.event(e)));
                         if !valid { resync = true; break; }
                     }
                     action = actions.recv() => {
@@ -261,17 +293,17 @@ pub async fn serve(
                         if matches!(action, Action::Shutdown) { discard_unused(&client, &shared).await; return; }
                         match action {
                             Action::Command { command, draft } => {
-                                let pending = Pending::Command(draft);
-                                match client.command(command).await {
-                                    Ok(reply) => accepted(&client, &shared, &ctx, reply, pending).await,
-                                    Err(ClientError::Transport(TransportError::OutcomeUnknown { request_id })) => {
-                                        uncertain.push((request_id.clone(), pending.clone()));
-                                        update(&shared, &ctx, |s| { s.outcome_unknown.insert(request_id.to_string()); });
-                                        update(&shared, &ctx, |s| s.status = format!("OutcomeUnknown: {request_id}。再接続後 receipt を照合します。"));
-                                    }
-                                    Err(e) => update(&shared, &ctx, |s| { pending.rejected(s); s.status = e.to_string(); }),
-                                }
+                                send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Command(draft)).await;
                             }
+                            Action::Feature(FeatureAction { feature, tag, request }) => match request {
+                                FeatureRequest::Command(command) => {
+                                    send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Feature { feature, tag }).await;
+                                }
+                                FeatureRequest::Query(query) => {
+                                    let result = client.query(query).await.map_err(|e| FeatureError::new(e.to_string()));
+                                    update(&shared, &ctx, |s| s.features.reply(feature, tag, FeatureReply::Query(result)));
+                                }
+                            },
                             Action::History(thread, older) => {
                                 let cursor = if older { shared.lock().unwrap().cache.older.get(thread.as_str()).cloned().flatten() } else { None };
                                 let reply = client.query(Query::Conversation(ConversationQuery::ReadCommittedHistory(ReadCommittedHistory {
@@ -332,7 +364,7 @@ pub async fn serve(
                                             s.status = format!("OutcomeUnknown: {request_id}。画像は再割当てせず receipt を照合します。");
                                         });
                                     }
-                                    Err(e) => update(&shared, &ctx, |s| { pending.rejected(s); s.status = e.to_string(); }),
+                                    Err(e) => update(&shared, &ctx, |s| { pending.rejected(s, &e.to_string()); s.status = e.to_string(); }),
                                 }
                             }
                             Action::Reconnect | Action::Shutdown => unreachable!(),
@@ -348,6 +380,41 @@ pub async fn serve(
         if !wait_reconnect(&mut actions, &shared, &ctx).await {
             return;
         }
+    }
+}
+
+/// Send one command. A lost reply is reconciled after the next connect through
+/// its receipt, never replayed.
+async fn send_command(
+    client: &WorkbenchClient,
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &egui::Context,
+    uncertain: &mut Vec<(RequestId, Pending)>,
+    command: Command,
+    pending: Pending,
+) {
+    match client.command(command).await {
+        Ok(reply) => accepted(client, shared, ctx, reply, pending).await,
+        Err(ClientError::Transport(TransportError::OutcomeUnknown { request_id })) => {
+            uncertain.push((request_id.clone(), pending.clone()));
+            update(shared, ctx, |s| {
+                s.outcome_unknown.insert(request_id.to_string());
+                s.status = format!("OutcomeUnknown: {request_id}。再接続後 receipt を照合します。");
+                if let Pending::Feature { feature, tag } = &pending {
+                    s.features.reply(
+                        *feature,
+                        *tag,
+                        FeatureReply::Command(Err(FeatureError::outcome_unknown(format!(
+                            "OutcomeUnknown: {request_id}"
+                        )))),
+                    );
+                }
+            });
+        }
+        Err(e) => update(shared, ctx, |s| {
+            pending.rejected(s, &e.to_string());
+            s.status = e.to_string();
+        }),
     }
 }
 
@@ -382,6 +449,11 @@ async fn accepted(
     update(shared, ctx, |s| {
         let draft = match pending {
             Pending::Command(draft) => draft,
+            Pending::Feature { feature, tag } => {
+                s.features
+                    .reply(feature, tag, FeatureReply::Command(Ok(reply.clone())));
+                None
+            }
             Pending::Upload { thread, id } => {
                 if let Some(workbench_protocol::commands::CommandResult::Conversation(result)) =
                     reply.result.as_deref()
@@ -459,6 +531,7 @@ async fn wait_reconnect(
                 } => {
                     s.image_draft(thread.as_str(), mime, data).uploading = false;
                 }
+                Action::Feature(action) => s.features.refuse(&action, "disconnected"),
                 _ => (),
             }
             s.status =

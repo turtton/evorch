@@ -235,3 +235,35 @@ async fn restart_quiesce_keeps_owner_alive_until_explicit_operator_shutdown() {
         runtime::ownership::OwnerState::Released
     );
 }
+
+#[tokio::test]
+async fn area_tasks_are_stopped_and_drained_by_the_bootstrap_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut boot = BootstrappedHost::open(BootstrapOptions {
+        config_dir: root.clone(),
+        project_root: root.clone(),
+        ownership_root: root.join("owners"),
+    })
+    .await
+    .unwrap();
+    let (drained, completed) = tokio::sync::oneshot::channel();
+    boot.area_tasks
+        .spawn("probe", |mut stop| async move {
+            stop.stopped().await;
+            drained.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(boot.area_tasks.active(), 1);
+    boot.shutdown().await.unwrap();
+    // The task ran its drain before shutdown returned, and nothing new starts.
+    completed.await.unwrap();
+    assert_eq!(boot.area_tasks.active(), 0);
+    assert_eq!(
+        boot.area_tasks
+            .spawn("late", |_| async { Ok(()) })
+            .unwrap_err(),
+        crate::areas::SpawnError::Closed
+    );
+}

@@ -4,11 +4,13 @@
 //! pick the namespace; each adapter translates its namespace's operations and
 //! runs them through the shared machinery in `ingress` (ownership check,
 //! submission ledger, [`crate::commands::CommandService`]). A later PR that adds
-//! operations to a namespace edits that namespace's protocol module and its
-//! adapter here, not this dispatch. The reserved namespaces have an adapter
-//! file each too, with no operations: their types are empty, so the compiler,
-//! not a runtime check, refuses them, and the PR that implements one fills in
-//! its own file.
+//! operations to a namespace edits that namespace's protocol module, its
+//! adapter here and (for the `workspace`, `mcp`, `execution`, `teams` and `lanes`
+//! areas) its service in `crate::areas`, which the adapter reaches as
+//! `self.areas.<area>`; this dispatch stays as it is. The reserved namespaces
+//! have an adapter file each too, with no operations: their types are empty, so
+//! the compiler, not a runtime check, refuses them, and the PR that implements
+//! one fills in its own file.
 
 mod approvals;
 mod artifacts;

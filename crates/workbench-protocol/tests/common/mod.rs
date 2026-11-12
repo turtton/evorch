@@ -1,6 +1,8 @@
 //! Sample values for every wire variant, shared by the integration tests.
 #![allow(dead_code)]
 
+pub mod areas;
+
 use workbench_protocol::commands::*;
 use workbench_protocol::envelope::*;
 use workbench_protocol::errors::*;
@@ -566,4 +568,25 @@ pub fn envelope(n: u32, body: RequestBody) -> RequestEnvelope {
         session_id: session(),
         body,
     }
+}
+
+/// Every command sample: the ones in this module and those of the areas (see
+/// [`areas`]). Use these where the whole protocol is meant.
+pub fn all_commands() -> Vec<Command> {
+    commands().into_iter().chain(areas::commands()).collect()
+}
+
+pub fn all_queries() -> Vec<Query> {
+    queries().into_iter().chain(areas::queries()).collect()
+}
+
+pub fn all_ui_events() -> Vec<UiEvent> {
+    ui_events().into_iter().chain(areas::ui_events()).collect()
+}
+
+pub fn all_query_replies() -> Vec<QueryReply> {
+    query_replies()
+        .into_iter()
+        .chain(areas::query_replies())
+        .collect()
 }

@@ -17,20 +17,15 @@ use workbench_protocol::namespaces::{
 };
 use workbench_protocol::{ErrorCode, ProtocolVersion};
 
-const RESERVED: [&str; 12] = [
-    "settings",
-    "auth",
-    "mcp",
-    "teams",
-    "diagnostics",
-    "memory",
-    "evaluation",
-    "improvement",
-    "pull_requests",
-    "browser",
-    "artifacts",
-    "maintenance",
-];
+/// The namespaces no operation is declared for. Derived, so implementing one
+/// (in its own module) needs no change here.
+fn reserved() -> Vec<&'static str> {
+    NAMESPACES
+        .iter()
+        .filter(|n| n.status == NamespaceStatus::Reserved)
+        .map(|n| n.name)
+        .collect()
+}
 
 fn decode(value: Value) -> Result<(), RequestRejection> {
     decode_request(&serde_json::to_vec(&value).unwrap(), &WireLimits::default()).map(|_| ())
@@ -78,9 +73,9 @@ fn the_operation_table_and_the_enums_are_one_list() {
         assert_eq!(names.len(), unique.len(), "an operation is sampled twice");
         unique
     };
-    assert_eq!(sampled(samples(commands())), declared(|n| n.commands));
-    assert_eq!(sampled(samples(queries())), declared(|n| n.queries));
-    assert_eq!(sampled(samples(ui_events())), declared(|n| n.events));
+    assert_eq!(sampled(samples(all_commands())), declared(|n| n.commands));
+    assert_eq!(sampled(samples(all_queries())), declared(|n| n.queries));
+    assert_eq!(sampled(samples(all_ui_events())), declared(|n| n.events));
 
     // An operation name belongs to exactly one namespace per request kind.
     for pick in [
@@ -112,15 +107,15 @@ fn the_operation_table_and_the_enums_are_one_list() {
 
 #[test]
 fn every_operation_round_trips_and_decodes_as_a_request() {
-    for (name, wire) in samples(commands()) {
+    for (name, wire) in samples(all_commands()) {
         let value = request("command", wire.clone());
         decode(value).unwrap_or_else(|e| panic!("command {name}: {:?}", e.error));
     }
-    for (name, wire) in samples(queries()) {
+    for (name, wire) in samples(all_queries()) {
         let value = request("query", wire.clone());
         decode(value).unwrap_or_else(|e| panic!("query {name}: {:?}", e.error));
     }
-    for (name, wire) in samples(ui_events()) {
+    for (name, wire) in samples(all_ui_events()) {
         let event: UiEvent = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(&event).unwrap(), wire, "{name}");
     }
@@ -207,16 +202,17 @@ fn the_core_offers_an_explicit_implemented_set_without_safe_restart() {
         assert!(Capability::ALL.contains(&capability));
     }
     assert_eq!(Capability::IMPLEMENTED.len(), Capability::ALL.len() - 1);
-    // No reserved namespace has an operation, so none has a capability to advertise.
+    // A reserved namespace has no operation, so none has a capability to
+    // advertise; whatever an implemented one asks for must be offered.
     for info in NAMESPACES {
         if info.status == NamespaceStatus::Reserved {
-            assert!(RESERVED.contains(&info.name));
+            assert!(info.commands.is_empty() && info.queries.is_empty() && info.events.is_empty());
         }
     }
-    for command in commands() {
+    for command in all_commands() {
         assert!(Capability::IMPLEMENTED.contains(&command.required_capability()));
     }
-    for query in queries() {
+    for query in all_queries() {
         assert!(Capability::IMPLEMENTED.contains(&query.required_capability()));
     }
 }
@@ -224,7 +220,7 @@ fn the_core_offers_an_explicit_implemented_set_without_safe_restart() {
 #[test]
 fn reserved_namespaces_are_refused_whatever_is_sent_and_never_echoed() {
     let secret = format!("sk-proj-{}", "R".repeat(48));
-    for name in RESERVED {
+    for name in reserved() {
         assert_eq!(namespace(name).unwrap().status, NamespaceStatus::Reserved);
         for kind in ["command", "query"] {
             for payload in [
@@ -436,17 +432,17 @@ fn a_version_1_client_fails_the_handshake_as_a_clear_mismatch() {
 
 #[test]
 fn a_query_is_answered_in_its_own_namespace() {
-    let query_namespaces: BTreeSet<String> = samples(queries())
+    let query_namespaces: BTreeSet<String> = samples(all_queries())
         .into_iter()
         .map(|(name, _)| name.split('/').next().unwrap().to_owned())
         .collect();
-    let reply_namespaces: BTreeSet<String> = samples(query_replies())
+    let reply_namespaces: BTreeSet<String> = samples(all_query_replies())
         .into_iter()
         .map(|(name, _)| name.split('/').next().unwrap().to_owned())
         .collect();
     assert_eq!(query_namespaces, reply_namespaces);
     // Spot-check the pairing the host adapters rely on.
-    let reply_names: BTreeSet<String> = samples(query_replies())
+    let reply_names: BTreeSet<String> = samples(all_query_replies())
         .into_iter()
         .map(|(n, _)| n)
         .collect();
@@ -492,6 +488,25 @@ fn a_command_receipt_has_no_per_namespace_optional_fields() {
         );
     }
     // A reserved namespace has no result to put there.
-    let reserved = json!({"disposition": "accepted", "result": {"type": "settings", "payload": {"type": "x"}}});
+    let name = reserved()[0];
+    let reserved =
+        json!({"disposition": "accepted", "result": {"type": name, "payload": {"type": "x"}}});
     assert!(serde_json::from_value::<CommandReply>(reserved).is_err());
+}
+
+#[test]
+fn an_event_names_its_namespace_and_only_projection_notices_end_a_subscription() {
+    for (name, wire) in samples(all_ui_events()) {
+        let event: UiEvent = serde_json::from_value(wire).unwrap();
+        assert_eq!(event.namespace(), name.split('/').next().unwrap(), "{name}");
+        assert_eq!(
+            event.ends_subscription(),
+            event.namespace() == "projection"
+                && matches!(
+                    name.as_str(),
+                    "projection/resync_required" | "projection/subscription_closed"
+                ),
+            "{name}"
+        );
+    }
 }

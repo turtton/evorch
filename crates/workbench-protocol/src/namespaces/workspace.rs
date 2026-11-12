@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const COMMAND_OPERATIONS: &[&str] = &[];
 pub const QUERY_OPERATIONS: &[&str] = &["list_projects", "list_threads", "get_thread"];
 pub const EVENT_TYPES: &[&str] = &["thread_changed"];
+/// Tagged choices inside a command's payload that classification names (none).
+pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
 no_commands!(WorkspaceCommand);
 no_results!(WorkspaceResult);

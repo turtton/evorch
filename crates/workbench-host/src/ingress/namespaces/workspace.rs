@@ -17,11 +17,18 @@ impl CommandHost {
         match command {}
     }
 
+    /// The projection serves the operations listed here. An operation the
+    /// workspace area adds later gets its own arm, answered by
+    /// `self.areas.workspace`; the compiler asks for it.
     pub(in crate::ingress) fn workspace_query(
         &self,
         query: &Query,
-        _namespace_query: &WorkspaceQuery,
+        namespace_query: &WorkspaceQuery,
     ) -> Result<QueryReply, WorkbenchError> {
-        self.projection.query(query)
+        match namespace_query {
+            WorkspaceQuery::ListProjects(_)
+            | WorkspaceQuery::ListThreads(_)
+            | WorkspaceQuery::GetThread(_) => self.projection.query(query),
+        }
     }
 }
