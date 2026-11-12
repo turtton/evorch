@@ -4,6 +4,18 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+# The mock MCP server of the screen test: the same native peer the core's own
+# tests use, built here so that this package's tests can start it
+# (CARGO_BIN_EXE_e2e-mcp-peer).
+[[bin]]
+name = "e2e-mcp-peer"
+path = "../evorch-core/tests/support/mcp_peer.rs"
+test = false
+bench = false
+
+[dependencies]
+serde_json = { workspace = true }
+
 # A test-only composition root keeps rendering out of the core and Web adapter.
 [dev-dependencies]
 gui = { path = "../gui", default-features = false }
@@ -11,7 +23,8 @@ evorch-core = { path = "../evorch-core" }
 core-instance = { path = "../core-instance" }
 core-launcher = { path = "../core-launcher" }
 workbench-protocol = { path = "../workbench-protocol" }
-workbench-host = { path = "../workbench-host" }
+workbench-host = { path = "../workbench-host", features = ["test-support"] }
+egui_kittest = { workspace = true }
 workbench-web = { path = "../workbench-web" }
 runtime = { path = "../runtime" }
 event-bus = { path = "../event-bus" }
