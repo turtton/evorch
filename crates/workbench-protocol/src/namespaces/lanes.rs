@@ -3,7 +3,9 @@
 use crate::{
     handshake::{Capability, WireLimits},
     lane_attention::LaneId,
-    lane_management::{CloseLane, LaneCloseResult, LaneManagementResult, LaneManagementState, ManageLane},
+    lane_management::{
+        CloseLane, LaneCloseResult, LaneManagementResult, LaneManagementState, ManageLane,
+    },
     validation::ValidationError,
 };
 use serde::{Deserialize, Serialize};
