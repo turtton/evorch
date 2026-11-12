@@ -153,6 +153,16 @@ const RUN_STEPS: &[Step] = &[
          WHERE run_id = ?1 AND parent_run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM lanes l WHERE l.root_run_id=usage_requests.run_id) AND NOT EXISTS (SELECT 1 FROM thread_runs tr JOIN lanes l ON l.thread_id=tr.thread_id WHERE tr.run_id=usage_requests.run_id) AND rowid > ?2 ORDER BY rowid LIMIT ?3",
         Yields::Run,
     ),
+    // Only live recovery units are indivisible. Activation retires this edge
+    // atomically with every new intent; diagnostic JSON is never a live edge.
+    Step::Paged(
+        "SELECT o.rowid, o.run_id FROM recovery_members o \
+         WHERE o.manifest_id IN (SELECT m.manifest_id FROM recovery_members m \
+         JOIN recovery_manifests f USING(manifest_id) \
+         WHERE m.run_id=?1 AND f.committed=1 AND f.superseded=0) \
+         AND o.run_id<>?1 AND o.rowid>?2 ORDER BY o.rowid LIMIT ?3",
+        Yields::Run,
+    ),
 ];
 
 fn thread_neighbor(conn: &Connection, thread_id: String) -> Result<Neighbor, StorageError> {
@@ -684,3 +694,7 @@ pub(super) fn staged_sets(
 #[cfg(test)]
 #[path = "closure_usage_tests.rs"]
 mod usage_tests;
+
+#[cfg(test)]
+#[path = "closure_recovery_tests.rs"]
+mod recovery_tests;

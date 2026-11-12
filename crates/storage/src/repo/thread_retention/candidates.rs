@@ -194,6 +194,17 @@ pub(super) fn family_blocked(
     if management_projection_pending(conn)? {
         return Ok(Some(BlockReason::Exploring));
     }
+    let prepared: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM retention_staging s \
+         JOIN recovery_claim_members m ON m.run_id=s.id \
+         JOIN recovery_claims c USING(claim_id) \
+         WHERE s.family_key=?1 AND s.kind='run' AND c.state='prepared')",
+        [family_key],
+        |row| row.get(0),
+    )?;
+    if prepared {
+        return Ok(Some(BlockReason::Owner("recovery claim pending".into())));
+    }
     let sidebar: HashMap<&str, &SidebarThread> = input
         .threads
         .iter()
