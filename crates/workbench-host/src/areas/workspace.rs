@@ -65,6 +65,9 @@ struct Service {
     /// Threads the core already registered (or found) in the sidebar, so that
     /// a follow-up message does not take the file lock again.
     registered: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Threads whose family state is saved in the sidebar but did not reach the
+    /// `threads` table. They are projected again with the next write or read.
+    unprojected: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 /// A conversation the core created, to be listed in the sidebar.
@@ -207,6 +210,7 @@ impl WorkspaceArea {
                 pager: Pager::default(),
                 changes: AtomicU64::new(0),
                 registered: Default::default(),
+                unprojected: Default::default(),
             }),
         })
     }
@@ -232,6 +236,7 @@ impl WorkspaceArea {
                 pager: Pager::default(),
                 changes: AtomicU64::new(0),
                 registered: Default::default(),
+                unprojected: Default::default(),
             }),
         }
     }
@@ -320,6 +325,7 @@ impl WorkspaceArea {
         use workbench_protocol::namespaces::WorkspaceQuery as Q;
         let service = self.inner.as_ref().ok_or_else(unwired)?;
         let document = service.read().map_err(|e| internal(&e))?;
+        service.retry_unprojected(&document);
         match query {
             Q::GetProjectAccess(target) => service
                 .access_view(&document, &target.project)
@@ -441,7 +447,7 @@ impl Service {
             .write(&lock, &document)
             .map_err(|e| e.to_string())?;
         drop(lock);
-        self.mirror_family(&document, new.thread);
+        self.project_family(&document, new.thread);
         self.registered
             .lock()
             .unwrap()
@@ -575,8 +581,9 @@ impl Service {
             | WorkspaceCommand::SetFamilyPinned(SetFamilyPinned { thread, .. })
             | WorkspaceCommand::RenameThread(RenameThread { thread, .. }) = command
         {
-            self.mirror_family(&document, thread);
+            self.project_family(&document, thread);
         }
+        self.retry_unprojected(&document);
         Ok(done)
     }
 
@@ -1173,14 +1180,39 @@ impl Service {
     /// every member. The family state of the sidebar stays the source: a
     /// failure here leaves the file as it was written and is only logged, and
     /// the next archive or pin of the family projects it again.
-    fn mirror_family(&self, document: &SidebarDocument, thread: &WireThread) {
+    fn project_family(&self, document: &SidebarDocument, thread: &WireThread) {
+        if self.mirror_family(document, thread) {
+            self.unprojected.lock().unwrap().remove(thread.as_str());
+        } else {
+            self.unprojected
+                .lock()
+                .unwrap()
+                .insert(thread.as_str().to_owned());
+        }
+    }
+
+    /// Projects again every family whose projection failed before.
+    fn retry_unprojected(&self, document: &SidebarDocument) {
+        let pending: Vec<String> = self.unprojected.lock().unwrap().iter().cloned().collect();
+        for thread in pending {
+            match WireThread::new(&thread) {
+                Ok(thread) => self.project_family(document, &thread),
+                Err(_) => {
+                    self.unprojected.lock().unwrap().remove(&thread);
+                }
+            }
+        }
+    }
+
+    /// Whether the family reached the `threads` table (or there is no table).
+    fn mirror_family(&self, document: &SidebarDocument, thread: &WireThread) -> bool {
         let Some(mirror) = &self.mirror else {
-            return;
+            return true;
         };
         let states = document.sidebar.resolve_states();
         let id = ThreadId::new(thread.as_str());
         let Some(family) = states.get(&id).and_then(|s| s.family.as_ref().ok()) else {
-            return;
+            return true;
         };
         let upserts: Vec<storage::threads::ThreadUpsert> = document
             .sidebar
@@ -1218,7 +1250,9 @@ impl Service {
             })
             .collect();
         if let Err(error) = mirror.upsert_threads_host(&upserts) {
-            tracing::warn!(%error, "the family state was saved but not projected into the threads table");
+            tracing::warn!(%error, "the family state was saved but not projected into the threads table; it is retried");
+            return false;
         }
+        true
     }
 }

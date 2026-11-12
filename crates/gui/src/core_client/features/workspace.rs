@@ -504,6 +504,13 @@ impl Feature for WorkspaceFeature {
                         trust_asks.push((project.as_str().to_owned(), next));
                     }
                 });
+            } else {
+                // Same height as the row it stands in for, so that a read in
+                // progress does not move the rows below it under the pointer.
+                ui.horizontal(|ui| {
+                    ui.label("Trust: …");
+                    ui.add_enabled(false, egui::Button::new("…").small());
+                });
             }
             ui.horizontal(|ui| {
                 if ui.small_button("New conversation").clicked() {
