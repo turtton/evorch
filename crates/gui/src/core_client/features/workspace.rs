@@ -531,8 +531,10 @@ mod tests {
 
     #[test]
     fn archive_and_pin_use_the_counters_of_the_family() {
-        let mut feature = WorkspaceFeature::default();
-        feature.stale = true;
+        let mut feature = WorkspaceFeature {
+            stale: true,
+            ..WorkspaceFeature::default()
+        };
         feature.refresh_if_stale();
         let Outgoing::Query(families_tag, _) = feature.take_outbox().remove(0) else {
             panic!()
