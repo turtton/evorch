@@ -292,12 +292,24 @@ fn require(conn: &Connection, lane_id: &str) -> Result<LaneRecord, StorageError>
 
 /// Lanes whose root never started, in lane ID order: creation intents a crash left.
 pub(crate) fn unstarted(conn: &Connection, limit: usize) -> Result<Vec<LaneRecord>, StorageError> {
+    unstarted_excluding(conn, limit, &std::collections::BTreeSet::new())
+}
+
+pub(crate) fn unstarted_excluding(
+    conn: &Connection,
+    limit: usize,
+    excluded_runs: &std::collections::BTreeSet<String>,
+) -> Result<Vec<LaneRecord>, StorageError> {
     let limit = i64::try_from(limit.clamp(1, 200)).unwrap_or(200);
+    let excluded = serde_json::to_string(excluded_runs)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM lanes WHERE generation = 0 AND start_blocked_reason IS NULL AND NOT EXISTS (SELECT 1 FROM lane_handoffs h WHERE h.lane_id=lanes.lane_id AND h.state IN ('preparing','prepared')) AND {LIVE} ORDER BY lane_id LIMIT ?1"
+        "SELECT {COLUMNS} FROM lanes WHERE generation = 0 AND start_blocked_reason IS NULL AND NOT EXISTS (SELECT 1 FROM lane_handoffs h WHERE h.lane_id=lanes.lane_id AND h.state IN ('preparing','prepared')) AND {LIVE} \
+         AND NOT EXISTS (SELECT 1 FROM json_each(?2) excluded WHERE excluded.value=lanes.root_run_id \
+             OR excluded.value=json_extract(lanes.start_seed,'$.run_id')) ORDER BY lane_id LIMIT ?1"
     ))?;
     Ok(statement
-        .query_map([limit], from_row)?
+        .query_map(params![limit, excluded], from_row)?
         .collect::<Result<_, _>>()?)
 }
 

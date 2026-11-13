@@ -294,4 +294,18 @@ impl StorageHandle {
     pub fn unstarted_lanes(&self, limit: usize) -> Result<Vec<LaneRecord>, StorageError> {
         self.lane_read(move |conn| crate::repo::lanes::unstarted(conn, limit))
     }
+
+    /// Exclude graph-owned seed/root IDs before applying the scan limit. The
+    /// initial scan and retry existence check must use the same frozen set.
+    ///
+    /// # Errors
+    /// Returns an error for unreadable seeds, SQLite failure or a closed writer.
+    pub fn unstarted_lanes_excluding(
+        &self,
+        limit: usize,
+        excluded_runs: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<LaneRecord>, StorageError> {
+        let excluded = excluded_runs.clone();
+        self.lane_read(move |conn| crate::repo::lanes::unstarted_excluding(conn, limit, &excluded))
+    }
 }

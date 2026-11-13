@@ -56,6 +56,13 @@ pub struct AgentInvocationContext {
     pub btw: Option<crate::btw::BtwPublisher>,
 }
 
+/// One immutable recovery model plus the concrete identity it represents.
+/// Mutable wrappers retain their invocation semantics without hiding reloads.
+pub struct RecoveryModelSnapshot {
+    pub generation: std::sync::Arc<dyn AgentModel>,
+    pub model: std::sync::Arc<dyn AgentModel>,
+}
+
 /// ロール実行のためのモデル呼び出し境界。
 ///
 /// role→model の解決・フォールバックは v01-routing-profiles がこの境界の実装として
@@ -157,6 +164,13 @@ pub trait AgentModel: Send + Sync {
     /// Mutable composition wrappers expose the model to retain for a whole
     /// invocation, including tool capabilities used after its response arrives.
     fn invocation_snapshot(&self) -> Option<std::sync::Arc<dyn AgentModel>> {
+        None
+    }
+
+    /// Pin the concrete model across recovery validation, durable ACK, adoption
+    /// and execution. Mutable wrappers must identify their actual inner Arc as
+    /// the generation; a fixed semantic wrapper may be the retained model.
+    fn recovery_snapshot(&self) -> Option<RecoveryModelSnapshot> {
         None
     }
 

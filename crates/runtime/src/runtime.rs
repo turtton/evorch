@@ -17,7 +17,12 @@ mod host_prompt;
 mod recovery_activation;
 mod recovery_graph;
 pub(crate) use host_prompt::HostPrompt;
-pub use recovery_activation::{CurrentRecoveryAuthority, PausedRecoveryComponent};
+#[cfg(feature = "recovery-test-support")]
+pub use recovery_activation::RecoveryActivationBoundary;
+pub use recovery_activation::{
+    CurrentRecoveryAuthority, PausedRecoveryComponent, RecoveryClaimHandle, RecoveryCleanupHandle,
+    RecoveryCleanupState, RecoveryModels,
+};
 mod nested_orchestrator;
 mod output;
 mod project;
@@ -200,6 +205,8 @@ pub(crate) struct Shared {
     pub(crate) thread_read_dirs: Mutex<HashMap<String, Vec<PathBuf>>>,
     next_message_id: AtomicU64,
     recovery_message_ids_safe: AtomicBool,
+    #[cfg(feature = "recovery-test-support")]
+    recovery_probe: OnceLock<recovery_activation::RecoveryActivationProbe>,
     next_reference_token: AtomicU64,
     pub(crate) runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
@@ -849,6 +856,8 @@ impl AgentRuntime {
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
                 recovery_message_ids_safe: AtomicBool::new(true),
+                #[cfg(feature = "recovery-test-support")]
+                recovery_probe: OnceLock::new(),
                 next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -1227,6 +1236,8 @@ impl AgentRuntime {
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
                 recovery_message_ids_safe: AtomicBool::new(true),
+                #[cfg(feature = "recovery-test-support")]
+                recovery_probe: OnceLock::new(),
                 next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -1910,6 +1921,7 @@ impl AgentRuntime {
             }
         };
         let task = RunTask {
+            recovery_model: None,
             startup_failure: execution
                 .startup_failure
                 .lock()
@@ -2145,7 +2157,10 @@ impl AgentRuntime {
                     return;
                 };
                 let runtime = AgentRuntime { shared };
-                let model = runtime.shared.model_for(&task.config);
+                let model = task
+                    .recovery_model
+                    .clone()
+                    .unwrap_or_else(|| runtime.shared.model_for(&task.config));
                 if model.requires_admission() {
                     let invocation = crate::AgentInvocationContext {
                         btw: None,

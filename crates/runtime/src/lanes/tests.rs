@@ -1,4 +1,6 @@
 use super::*;
+#[path = "recovery_tests.rs"]
+mod recovery;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, Message, ToolSpec};
 use std::sync::Arc;
@@ -6,6 +8,7 @@ type Request = (String, Vec<Message>, Vec<ToolSpec>);
 #[derive(Default)]
 struct Model {
     requests: Mutex<Vec<Request>>,
+    admissions: Mutex<Vec<String>>,
     hold_admission: std::sync::atomic::AtomicBool,
     reject_admission: std::sync::atomic::AtomicBool,
     hold_execution: std::sync::atomic::AtomicBool,
@@ -79,6 +82,7 @@ impl crate::AgentModel for Model {
         ctx: &crate::AgentInvocationContext,
         _: Role,
     ) -> Result<(), crate::RuntimeError> {
+        self.admissions.lock().unwrap().push(ctx.run_id.clone());
         let is_lead = self.lead.lock().unwrap().as_deref() == Some(ctx.run_id.as_str());
         if !is_lead
             && self

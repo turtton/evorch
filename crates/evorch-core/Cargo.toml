@@ -18,14 +18,19 @@ workbench-web = { path = "../workbench-web" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 runtime = { path = "../runtime" }
+storage = { path = "../storage" }
 secret-guard = { path = "../secret-guard" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time"] }
 uuid = { workspace = true }
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+model = { path = "../model" }
+runtime = { path = "../runtime", features = ["recovery-test-support"] }
+rusqlite = { workspace = true }
 tracing-subscriber = { workspace = true }
 wiremock = { workspace = true }
 mock-openai = { path = "../mock-openai" }
@@ -37,7 +42,6 @@ sandbox = { path = "../sandbox" }
 tools = { path = "../tools" }
 routing = { path = "../routing" }
 recorder = { path = "../recorder" }
-storage = { path = "../storage" }
 workspace-state = { path = "../workspace-state" }
 reqwest = { workspace = true }
 workbench-client = { path = "../workbench-client" }

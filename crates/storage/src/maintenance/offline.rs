@@ -205,6 +205,24 @@ pub struct RecoveryStartupComplete {
 }
 
 impl RecoveryStartupComplete {
+    /// Duplicate process-local startup evidence, retaining the same shared leases.
+    /// Writer-side use still validates both current database/root identities.
+    ///
+    /// # Errors
+    /// Returns an I/O error when either lease handle cannot be duplicated.
+    pub fn try_clone(&self) -> Result<Self, StorageError> {
+        Ok(Self {
+            db: self
+                .db
+                .try_clone()
+                .map_err(|e| StorageError::Io(e.to_string()))?,
+            root: self
+                .root
+                .try_clone()
+                .map_err(|e| StorageError::Io(e.to_string()))?,
+        })
+    }
+
     pub(crate) fn validate(
         &self,
         db_path: &Path,

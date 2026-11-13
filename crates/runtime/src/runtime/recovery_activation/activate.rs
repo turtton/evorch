@@ -31,8 +31,20 @@ impl AgentRuntime {
     /// fetching metadata or modifying the model's pins.
     pub fn activate_component(
         &self,
+        paused: PausedRecoveryComponent,
+        authority: CurrentRecoveryAuthority,
+    ) -> Result<Vec<RunId>, RuntimeError> {
+        let models = self.pin_recovery_models(&authority);
+        self.activate_component_with_models(paused, authority, models)
+    }
+
+    /// Core startup retains these same pins while publishing catalogs. A stale
+    /// context is rejected before ACK; after ACK execution keeps the pinned model.
+    pub fn activate_component_with_models(
+        &self,
         mut paused: PausedRecoveryComponent,
         mut authority: CurrentRecoveryAuthority,
+        models: RecoveryModels,
     ) -> Result<Vec<RunId>, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
         if !Weak::ptr_eq(&paused.runtime, &Arc::downgrade(&self.shared)) {
@@ -55,6 +67,7 @@ impl AgentRuntime {
         if authority.members.keys().copied().collect::<BTreeSet<_>>() != resume {
             return Err(error("current authority membership mismatch"));
         }
+        models.validate_members(self, &resume)?;
         let gates = ids
             .iter()
             .map(|id| self.stop_restore_gate(*id))
@@ -199,7 +212,8 @@ impl AgentRuntime {
                     "recovery candidate failed startup or worker admission",
                 ));
             }
-            self.shared.model.validate_checkpoint_compatibility(
+            let model = models.current(self, id, &candidate.entry.config)?;
+            model.validate_checkpoint_compatibility(
                 &crate::AgentInvocationContext {
                     run_id: id.to_string(),
                     category: candidate.entry.config.category.clone(),
@@ -210,6 +224,7 @@ impl AgentRuntime {
                 &source.intent.route_pins,
                 source.intent.provider_input.as_ref(),
             )?;
+            candidate.task.recovery_model = Some(model);
             relations.connect_candidate(&mut candidate)?;
             let mut intent = source.intent.clone();
             intent.incarnation = execution.publication().incarnation();
@@ -238,14 +253,29 @@ impl AgentRuntime {
             cancellation::HookPoint::RecoveryBeforeActivation,
             &paused.controls[0].1,
         );
+        // Recheck the actual inner model, not only its mutable wrapper, at the
+        // last fallible boundary. Later reloads cannot change pinned execution.
+        for candidate in &candidates {
+            models.current(self, candidate.task.run_id, &candidate.entry.config)?;
+        }
         // On an uncertain ACK, retain the durable claim and the closed gate.
         // Observation is diagnostic only: it never permits release or replay.
+        #[cfg(feature = "recovery-test-support")]
+        self.recovery_activation_probe(RecoveryActivationBoundary::BeforeFullAck)?;
         if let Err(write_error) = store.handle.activate_recovery_claim(request) {
             let observation =
                 store.with_database(|db| db.observe_recovery_activation(&paused.claim));
             return Err(error(format!(
                 "activation ACK uncertain: {write_error}; observation={observation:?}"
             )));
+        }
+        #[cfg(feature = "recovery-test-support")]
+        self.recovery_activation_probe(RecoveryActivationBoundary::AfterFullAck)?;
+        #[cfg(test)]
+        if paused.lose_activation_ack {
+            return Err(error(
+                "activation ACK lost after committed FULL transaction",
+            ));
         }
         #[cfg(test)]
         self.execution_hook(
@@ -260,11 +290,14 @@ impl AgentRuntime {
                 .iter()
                 .any(|(id, _)| *id == source.record.run_id)
             {
-                self.shared.model.adopt_recovery_checkpoint(
-                    &source.record.run_id.to_string(),
-                    &source.intent.route_pins,
-                    source.intent.provider_input.as_ref(),
-                );
+                models
+                    .model(source.record.run_id)
+                    .expect("validated recovery model")
+                    .adopt_recovery_checkpoint(
+                        &source.record.run_id.to_string(),
+                        &source.intent.route_pins,
+                        source.intent.provider_input.as_ref(),
+                    );
             }
         }
         self.shared.quiesce.adopt(intents, true);
@@ -297,12 +330,15 @@ impl AgentRuntime {
         Ok(resume.into_iter().collect())
     }
 
-    fn validate_recovery_authority(
+    pub(super) fn validate_recovery_authority(
         &self,
         source: &RecoverySource,
         config: &RunConfig,
     ) -> Result<(), RuntimeError> {
         let record = &source.record;
+        if record.recipe.settings_reference != crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE {
+            return Err(error("unknown current settings selector"));
+        }
         if !matches!(
             record.recipe.policy,
             crate::quiesce::ResumePolicy::CoreOwned

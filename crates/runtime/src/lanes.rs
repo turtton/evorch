@@ -1,5 +1,6 @@
 //! Independent lane roots and their durable creation intents (ADR 0044).
 use crate::{AgentRuntime, RunConfig, RunId};
+mod recovery;
 mod stops;
 #[cfg(test)]
 mod tests;
@@ -15,6 +16,7 @@ pub(crate) struct LaneRuntime {
     pub(crate) delivery: crate::lane_delivery::DeliveryRuntime,
     // Serialize retries until the run or its admission reservation is installed.
     pub(crate) opening: Mutex<HashSet<String>>,
+    graph_exclusions: std::sync::OnceLock<std::collections::BTreeSet<String>>,
     // Installed before admission; removed only after the durable first start.
     // Cancellation can look up a pending lane without I/O for ordinary runs.
     pub(crate) creation_intents: Mutex<std::collections::HashMap<RunId, String>>,
@@ -349,7 +351,10 @@ impl AgentRuntime {
                 let Some(store) = runtime.shared.run_store.get() else {
                     return;
                 };
-                match store.handle.unstarted_lanes(1) {
+                match store
+                    .handle
+                    .unstarted_lanes_excluding(1, runtime.lane_recovery_exclusions())
+                {
                     Ok(pending) if pending.is_empty() => return,
                     Err(error) => {
                         tracing::warn!(%error, "lane startup recovery scan failed");
@@ -375,7 +380,10 @@ impl AgentRuntime {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;
         let mut recovered = Vec::new();
-        for lane in store.handle.unstarted_lanes(1000)? {
+        for lane in store
+            .handle
+            .unstarted_lanes_excluding(1000, self.lane_recovery_exclusions())?
+        {
             if let Some(id) = self.recover_lane(&lane, host)? {
                 recovered.push(id);
             }
@@ -430,6 +438,7 @@ impl AgentRuntime {
         }
         let seed: StartSeed = serde_json::from_str(&lane.start_seed)
             .map_err(|e| LaneError::new("restore_failed", e))?;
+        self.check_lane_recovery(&lane, &seed)?;
         let Some(ownership) = Self::lane_authority(&lane, &seed, host)? else {
             return Err(LaneError::new(
                 "lane_creation_denied",
@@ -490,6 +499,9 @@ impl AgentRuntime {
     ) -> Result<Option<RunId>, LaneError> {
         let seed: StartSeed = serde_json::from_str(&lane.start_seed)
             .map_err(|e| LaneError::new("restore_failed", e))?;
+        if self.check_lane_recovery(lane, &seed).is_err() {
+            return Ok(None);
+        }
         match Self::lane_authority(lane, &seed, host)? {
             Some(ownership) => self.start_recovered(lane, &seed, ownership),
             None => Ok(None),
@@ -545,6 +557,7 @@ impl AgentRuntime {
         seed: &StartSeed,
         ownership: Option<crate::ownership::OwnerPermit>,
     ) -> Result<Option<RunId>, LaneError> {
+        self.check_lane_recovery(lane, seed)?;
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;
@@ -613,6 +626,9 @@ impl AgentRuntime {
     ) -> Result<(RunId, bool), LaneError> {
         let seed: StartSeed = serde_json::from_str(&lane.start_seed)
             .map_err(|e| LaneError::new("restore_failed", e))?;
+        // Idempotent open_lane retries return the existing ledger row too. Fence
+        // that path before ownership, registration or any admission is attempted.
+        self.check_lane_recovery(lane, &seed)?;
         if let Some(reason) = &lane.start_blocked_reason {
             return Err(LaneError::new("lane_creation_denied", reason));
         }

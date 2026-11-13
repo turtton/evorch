@@ -7,8 +7,46 @@ use std::collections::BTreeSet;
 use storage::recovery::RecoveryClaimRequest;
 
 mod activate;
+mod adopt;
+mod cleanup;
 pub use activate::CurrentRecoveryAuthority;
+pub use cleanup::{RecoveryClaimHandle, RecoveryCleanupHandle, RecoveryCleanupState};
+mod models;
 mod relations;
+pub use models::RecoveryModels;
+
+#[cfg(feature = "recovery-test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryActivationBoundary {
+    Prepared,
+    BeforeFullAck,
+    AfterFullAck,
+}
+#[cfg(feature = "recovery-test-support")]
+pub(crate) type RecoveryActivationProbe =
+    Arc<dyn Fn(RecoveryActivationBoundary) -> Result<(), RuntimeError> + Send + Sync>;
+#[cfg(feature = "recovery-test-support")]
+impl AgentRuntime {
+    /// Local explicit test seam, never installed from environment or persistence.
+    pub fn set_recovery_activation_probe(
+        &self,
+        probe: impl Fn(RecoveryActivationBoundary) -> Result<(), RuntimeError> + Send + Sync + 'static,
+    ) -> Result<(), RuntimeError> {
+        self.shared
+            .recovery_probe
+            .set(Arc::new(probe))
+            .map_err(|_| error("recovery probe already set"))
+    }
+    fn recovery_activation_probe(
+        &self,
+        boundary: RecoveryActivationBoundary,
+    ) -> Result<(), RuntimeError> {
+        self.shared
+            .recovery_probe
+            .get()
+            .map_or(Ok(()), |probe| probe(boundary))
+    }
+}
 
 struct RecoverySource {
     record: RunRecoveryRecord,
@@ -20,6 +58,10 @@ struct RecoverySource {
 pub(super) struct PausedRecoveryIndex {
     pub(super) claim_id: String,
     pub(super) old_incarnation: String,
+    // Only validated adoption may supply current Stop authority.
+    stop_config: Option<RunConfig>,
+    startup: Arc<storage::RecoveryStartupComplete>,
+    ownership_root: std::path::PathBuf,
 }
 
 /// Owns one prepared component's process-local reservations. Dropping it does
@@ -33,9 +75,15 @@ pub struct PausedRecoveryComponent {
     sources: Vec<RecoverySource>,
     relations: Option<relations::PreparedRelations>,
     _reservations: Vec<SnapshotReservation>,
-    _startup: storage::RecoveryStartupComplete,
+    _startup: Arc<storage::RecoveryStartupComplete>,
+    #[cfg(test)]
+    lose_activation_ack: bool,
 }
 impl PausedRecoveryComponent {
+    #[cfg(test)]
+    pub(crate) fn lose_activation_ack_for_test(&mut self) {
+        self.lose_activation_ack = true;
+    }
     pub fn claim(&self) -> &RecoveryClaim {
         &self.claim
     }
@@ -52,6 +100,44 @@ impl AgentRuntime {
         old: &str,
         reason: crate::quiesce::StopReason,
     ) -> Result<(), RuntimeError> {
+        let (claim, permit) = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run)
+            .and_then(|i| i.paused_recovery.as_ref())
+            .map(|p| {
+                (
+                    p.claim_id.clone(),
+                    p.stop_config.as_ref().and_then(|c| c.ownership.clone()),
+                )
+            })
+            .ok_or_else(|| error("paused recovery Stop index missing"))?;
+        let permit =
+            permit.ok_or_else(|| error("paused recovery Stop requires current authority"))?;
+        // Pin this owner generation from re-observation through the durable CAS.
+        let _authority = permit.mutation_guard().map_err(error)?;
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or_else(|| error("no run store"))?;
+        let snapshot = store
+            .with_database(|db| db.recovery_claim_snapshot(&claim))
+            .map_err(error)?;
+        if !cleanup::prepared_stoppable(&snapshot)
+            || snapshot
+                .intents
+                .iter()
+                .find(|i| i.run_id == run.to_string())
+                .and_then(|i| i.intent.as_ref())
+                .is_none_or(|i| i.incarnation != old)
+        {
+            return Err(error(
+                "paused recovery requires quarantine cleanup, not Stop",
+            ));
+        }
         self.shared
             .quiesce
             .update(run, old, self.shared.run_store.get(), |intent| {
@@ -74,6 +160,31 @@ impl AgentRuntime {
             .collect()
     }
 
+    /// Core coordinator phase check: RunStore/high-watermarks must already be
+    /// attached and the current DB/root must match this process-local evidence.
+    pub fn validate_recovery_startup(
+        &self,
+        startup: &storage::RecoveryStartupComplete,
+        ownership_root: &std::path::Path,
+    ) -> Result<(), RuntimeError> {
+        if !self
+            .shared
+            .recovery_message_ids_safe
+            .load(Ordering::Acquire)
+        {
+            return Err(error("run store must precede startup recovery"));
+        }
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or_else(|| error("no run store"))?;
+        store
+            .handle
+            .validate_recovery_startup(startup, &store.db_path, ownership_root)
+            .map_err(error)
+    }
+
     /// Prepare only the currently validated component, after the exclusive
     /// startup phase. Saved recipes never manufacture a RunConfig or permit.
     pub fn prepare_component(
@@ -83,6 +194,7 @@ impl AgentRuntime {
         ownership_root: &std::path::Path,
     ) -> Result<PausedRecoveryComponent, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
+        let startup = Arc::new(startup);
         if !self
             .shared
             .recovery_message_ids_safe
@@ -235,8 +347,13 @@ impl AgentRuntime {
             index.paused_recovery = Some(PausedRecoveryIndex {
                 claim_id: claim.claim_id.clone(),
                 old_incarnation: intent.incarnation,
+                stop_config: None,
+                startup: Arc::clone(&startup),
+                ownership_root: ownership_root.to_path_buf(),
             });
         }
+        #[cfg(feature = "recovery-test-support")]
+        self.recovery_activation_probe(RecoveryActivationBoundary::Prepared)?;
         Ok(PausedRecoveryComponent {
             runtime: Arc::downgrade(&self.shared),
             claim,
@@ -246,12 +363,50 @@ impl AgentRuntime {
             relations: None,
             _reservations: reservations,
             _startup: startup,
+            #[cfg(test)]
+            lose_activation_ack: false,
         })
+    }
+
+    /// Core startup must retain current generation authority across a release
+    /// transaction too. Authority-free release is restricted to crate unit tests;
+    /// production host wrappers must enter through this current-generation fence.
+    pub fn release_prepared_component_with_authority(
+        &self,
+        paused: &PausedRecoveryComponent,
+        authority: &CurrentRecoveryAuthority,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        if !Weak::ptr_eq(&paused.runtime, &Arc::downgrade(&self.shared)) {
+            return Err(error("foreign paused recovery component"));
+        }
+        let expected = paused
+            .controls
+            .iter()
+            .map(|(run, _)| *run)
+            .collect::<BTreeSet<_>>();
+        if authority.members.keys().copied().collect::<BTreeSet<_>>() != expected {
+            return Err(error("release authority membership mismatch"));
+        }
+        for source in &paused.sources {
+            if let Some(config) = authority.members.get(&source.record.run_id) {
+                self.validate_recovery_authority(source, config)?;
+            }
+        }
+        // Keep Stop -> publication -> index -> ownership lock ordering. Taking
+        // registry guards outside release_indexed_recovery would invert Stop.
+        let indexed = paused
+            .members
+            .iter()
+            .map(|intent| intent.run_id)
+            .collect::<BTreeSet<_>>();
+        self.release_indexed_recovery(&paused.claim.claim_id, reason, Some(&indexed), true)
     }
 
     /// Only an unactivated claim may be released. A failed/uncertain ACK retains
     /// the index unless a read-only claim read proves that release committed.
-    pub fn release_prepared_component(
+    #[cfg(test)]
+    pub(crate) fn release_prepared_component(
         &self,
         paused: &PausedRecoveryComponent,
         reason: &str,
@@ -264,7 +419,7 @@ impl AgentRuntime {
             .iter()
             .map(|i| i.run_id)
             .collect::<BTreeSet<_>>();
-        self.release_indexed_recovery(&paused.claim.claim_id, reason, Some(&expected))
+        self.release_indexed_recovery(&paused.claim.claim_id, reason, Some(&expected), false)
     }
 
     fn release_indexed_recovery(
@@ -272,6 +427,7 @@ impl AgentRuntime {
         claim_id: &str,
         reason: &str,
         expected: Option<&BTreeSet<RunId>>,
+        require_current_stop: bool,
     ) -> Result<(), RuntimeError> {
         let members = {
             let indexes = self
@@ -339,6 +495,23 @@ impl AgentRuntime {
             .run_store
             .get()
             .ok_or_else(|| error("no run store"))?;
+        let permits = if require_current_stop {
+            members
+                .iter()
+                .filter(|(_, _, e)| e.is_some())
+                .map(|(id, _, _)| {
+                    indexes
+                        .get(id)
+                        .and_then(|i| i.paused_recovery.as_ref())
+                        .and_then(|p| p.stop_config.as_ref())
+                        .and_then(|c| c.ownership.clone())
+                        .ok_or_else(|| error("shutdown release requires current authority"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        let _authority = crate::ownership::OwnerPermit::mutation_guards(&permits).map_err(error)?;
         if let Err(write_error) = store
             .handle
             .release_recovery_claim(claim_id.into(), reason.into())
@@ -379,9 +552,82 @@ impl AgentRuntime {
             .values()
             .filter_map(|i| i.paused_recovery.as_ref().map(|p| p.claim_id.clone()))
             .collect::<BTreeSet<_>>();
+        let mut failure = None;
         for claim in claims {
-            self.release_indexed_recovery(&claim, "shutdown", None)?;
+            let evidence = {
+                let indexes = self
+                    .shared
+                    .spawn_intents
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let entries = indexes
+                    .iter()
+                    .filter_map(|(id, i)| {
+                        i.paused_recovery
+                            .as_ref()
+                            .filter(|p| p.claim_id == claim)
+                            .map(|p| (*id, p))
+                    })
+                    .collect::<Vec<_>>();
+                entries.first().map(|(_, p)| {
+                    (
+                        Arc::clone(&p.startup),
+                        p.ownership_root.clone(),
+                        CurrentRecoveryAuthority {
+                            members: entries
+                                .iter()
+                                .filter_map(|(id, p)| {
+                                    p.stop_config.clone().map(|config| (*id, config))
+                                })
+                                .collect(),
+                        },
+                    )
+                })
+            };
+            let result = evidence
+                .ok_or_else(|| error("shutdown recovery evidence missing"))
+                .and_then(|(startup, root, authority)| {
+                    self.recover_recovery_claim(
+                        &claim,
+                        startup.try_clone().map_err(error)?,
+                        &root,
+                        &authority,
+                    )
+                })
+                .and_then(|handle| match handle {
+                    RecoveryClaimHandle::Retryable(paused) => {
+                        paused.claim.members.iter().try_for_each(|m| {
+                            self.stop(m.run_id.parse().map_err(error)?, crate::StopScope::SelfOnly)
+                        })?;
+                        self.release_indexed_recovery(&claim, "shutdown", None, true)
+                    }
+                    RecoveryClaimHandle::Quarantined(handle) => {
+                        let snapshot = self
+                            .shared
+                            .run_store
+                            .get()
+                            .ok_or_else(|| error("no run store"))?
+                            .with_database(|db| db.recovery_claim_snapshot(&claim))
+                            .map_err(error)?;
+                        if cleanup::prepared_explicitly_stopped(&snapshot) {
+                            // Diagnostic selection is not authority. This path
+                            // rechecks every current owner and the writer proves
+                            // all members unexecuted (including explicit Stop)
+                            // in its FULL transaction. Never make this Retryable.
+                            self.release_indexed_recovery(&claim, "shutdown after Stop", None, true)
+                        } else {
+                            self.cleanup_recovery_claim(&handle)
+                        }
+                    }
+                });
+            if let Err(err) = result {
+                // End local control even when durable terminality is unproven.
+                if let Ok(handle) = self.recovery_cleanup_handle(&claim) {
+                    let _ = self.cleanup_recovery_claim(&handle);
+                }
+                failure.get_or_insert(err);
+            }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }

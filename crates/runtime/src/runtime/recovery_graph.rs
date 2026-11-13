@@ -18,7 +18,7 @@ fn snapshot_receipt(intent: &ResumeIntent) -> Option<storage::RunContextReceipt>
             _ => None,
         })
 }
-fn edges(records: &[RunRecoveryRecord]) -> Vec<RecoveryEdge> {
+pub(super) fn edges(records: &[RunRecoveryRecord]) -> Vec<RecoveryEdge> {
     let mut edges = BTreeSet::new();
     let captured: BTreeSet<_> = records.iter().map(|record| record.run_id).collect();
     for r in records {
@@ -594,7 +594,9 @@ impl AgentRuntime {
                         }
                         ResumePolicy::Unsupported => return Err(RecoveryReason::UnknownOwnership),
                     }
-                    if r.recipe.settings_reference.trim().is_empty() {
+                    if r.recipe.settings_reference
+                        != crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE
+                    {
                         return Err(RecoveryReason::CurrentSettingsRequired);
                     }
                     if r.recipe.team.is_some() {

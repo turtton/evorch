@@ -215,7 +215,7 @@ async fn assert_recovery_cache(human_after_c3: bool) {
         .capture_recovery_records(&BTreeMap::from([(
             root,
             RecoveryRecipe {
-                settings_reference: "test".into(),
+                settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
                 policy: ResumePolicy::CoreOwned,
                 goal_id: None,
                 team: None,

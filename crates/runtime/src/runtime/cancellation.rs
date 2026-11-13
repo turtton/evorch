@@ -26,6 +26,32 @@ struct PublicationFence {
 
 impl ExecutionControl {
     pub(crate) fn new(cancelled: bool) -> Arc<Self> {
+        Self::with_incarnation(cancelled, crate::run_ids::RunIds::default().next())
+    }
+
+    // Only storage-validated Prepared evidence may select a saved incarnation.
+    pub(super) fn for_prepared(
+        proof: &storage::recovery::ValidatedPreparedClaim,
+        run: RunId,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        let member = proof
+            .claim()
+            .members
+            .iter()
+            .find(|m| m.run_id == run.to_string())
+            .ok_or_else(|| RuntimeError::Model {
+                reason: "run missing from prepared proof".into(),
+            })?;
+        let incarnation = member
+            .new_incarnation
+            .parse()
+            .map_err(|_| RuntimeError::Model {
+                reason: "invalid prepared incarnation".into(),
+            })?;
+        Ok(Self::with_incarnation(false, incarnation))
+    }
+
+    fn with_incarnation(cancelled: bool, incarnation: RunId) -> Arc<Self> {
         let approvals = Arc::new(sandbox::approval::ApprovalOwner::default());
         if cancelled {
             approvals.close();
@@ -36,7 +62,7 @@ impl ExecutionControl {
             approvals,
             publication: PublicationToken(Arc::new(PublicationFence {
                 gate: Mutex::new(()),
-                incarnation: crate::run_ids::RunIds::default().next(),
+                incarnation,
                 cancelled: AtomicBool::new(cancelled),
             })),
             cancel_tx: watch::channel(if cancelled {
@@ -58,6 +84,11 @@ impl ExecutionControl {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+    #[cfg(test)]
+    pub(crate) fn cancelled_for_test(&self) -> bool {
+        self.cancelled()
+    }
+
     pub(super) fn cancelled(&self) -> bool {
         self.publication.0.cancelled.load(Ordering::Acquire)
     }

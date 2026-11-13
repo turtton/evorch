@@ -118,7 +118,7 @@ async fn recover(changed_settings: bool) {
         .capture_recovery_records(&BTreeMap::from([(
             run,
             RecoveryRecipe {
-                settings_reference: "current".into(),
+                settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
                 policy: ResumePolicy::CoreOwned,
                 goal_id: None,
                 team: None,

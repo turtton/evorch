@@ -65,6 +65,8 @@ pub(crate) use tool_calls::{
 
 pub(crate) struct RunTask {
     pub(crate) startup_failure: Option<String>,
+    /// Recovery uses one pinned concrete model even if configuration reloads.
+    pub(crate) recovery_model: Option<Arc<dyn AgentModel>>,
     pub(crate) publication: crate::runtime::PublicationToken,
     pub(crate) run_id: RunId,
     pub(crate) role: Role,
@@ -336,6 +338,9 @@ pub(crate) async fn run_agent(
         .upgrade()
         .and_then(|runtime| runtime.run_project(&task.config));
     let mut loop_shared = loop_shared(&shared, project.as_deref())?;
+    if let Some(model) = &task.recovery_model {
+        loop_shared.model = Arc::clone(model);
+    }
     if let Some(runtime) = shared.upgrade()
         && let Some(resolution) = runtime.model_resolution.get()
     {
