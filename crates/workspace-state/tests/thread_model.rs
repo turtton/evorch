@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use tempfile::tempdir;
-use workspace_ui::{ProjectId, SidebarState, ThreadError, ThreadId, ThreadRunPhase, ThreadState};
+use workspace_state::{
+    ProjectId, SidebarState, ThreadError, ThreadId, ThreadRunPhase, ThreadState,
+};
 
 #[test]
 fn create_switch_pin_unpin_threads_under_project() {
@@ -65,7 +67,7 @@ fn switching_to_another_projects_thread_selects_that_project() {
 fn thread_state_precedence_stopped_error_running_waiting_done_active() {
     // Given: a thread with two run IDs and each possible runtime phase combination.
     let mut thread =
-        workspace_ui::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
+        workspace_state::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
     assert_eq!(thread.state(&BTreeMap::new()), ThreadState::Active);
     thread.run_ids = vec!["r1".to_owned(), "r2".to_owned()];
 
@@ -103,7 +105,7 @@ fn thread_state_precedence_stopped_error_running_waiting_done_active() {
 #[test]
 fn current_root_state_ignores_historical_roots_and_children() {
     let mut thread =
-        workspace_ui::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
+        workspace_state::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
     thread.run_ids = vec!["old-root".into(), "root".into(), "child".into()];
     thread.root_run_id = Some("root".into());
     let mut phases = BTreeMap::from([
@@ -123,7 +125,7 @@ fn current_root_state_ignores_historical_roots_and_children() {
         assert_eq!(thread.state(&phases), expected);
     }
     let saved = serde_json::to_string(&thread).unwrap();
-    let restored: workspace_ui::ThreadRecord = serde_json::from_str(&saved).unwrap();
+    let restored: workspace_state::ThreadRecord = serde_json::from_str(&saved).unwrap();
     assert_eq!(restored.root_run_id.as_deref(), Some("root"));
     assert_eq!(restored.run_ids, thread.run_ids);
 }
@@ -132,7 +134,7 @@ fn current_root_state_ignores_historical_roots_and_children() {
 fn running_subagent_shows_thread_running_while_root_is_idle() {
     // Given: a conversation root with one subagent run.
     let mut thread =
-        workspace_ui::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
+        workspace_state::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
     thread.run_ids = vec!["root".into(), "child".into()];
     thread.root_run_id = Some("root".into());
 

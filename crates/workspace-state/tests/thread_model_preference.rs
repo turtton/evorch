@@ -1,4 +1,4 @@
-use workspace_ui::ThreadRecord;
+use workspace_state::ThreadRecord;
 
 const LEGACY_THREAD: &str = r#"{
     "id":"thread-1","project_id":"project-1","title":"Conversation",

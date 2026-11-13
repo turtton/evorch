@@ -227,7 +227,7 @@ impl CommandHost {
             }
             ConversationCommand::CreateGoal(goal) => {
                 self.goal_input(&goal)?;
-                self.reserve_new_thread(&goal.project, &goal.thread)?;
+                self.reserve_new_thread(&goal.project, &goal.thread, &goal.objective, true, None)?;
                 return self.handle_command(
                     workbench_protocol::commands::Command::Execution(ExecutionCommand::SubmitGoal(
                         goal,

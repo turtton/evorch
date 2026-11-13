@@ -49,7 +49,7 @@ impl AgentRuntime {
     }
 
     /// The canonical directories declared for `thread_id`, in declaration order.
-    pub(crate) fn thread_read_only_directories(&self, thread_id: &str) -> Vec<PathBuf> {
+    pub fn thread_read_only_directories(&self, thread_id: &str) -> Vec<PathBuf> {
         self.thread_read_dirs_lock()
             .get(thread_id)
             .cloned()

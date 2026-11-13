@@ -1,1 +1,245 @@
-{}
+{
+  "command/workspace/register_project": {
+    "payload": {
+      "payload": {
+        "name": "evorch",
+        "path": "/work/evorch"
+      },
+      "type": "register_project"
+    },
+    "type": "workspace"
+  },
+  "command/workspace/rename_project": {
+    "payload": {
+      "payload": {
+        "expected_revision": "7",
+        "name": "evorch core",
+        "project": "proj-1"
+      },
+      "type": "rename_project"
+    },
+    "type": "workspace"
+  },
+  "command/workspace/rename_thread": {
+    "payload": {
+      "payload": {
+        "expected_revision": "3",
+        "thread": "thr-1",
+        "title": "Plan"
+      },
+      "type": "rename_thread"
+    },
+    "type": "workspace"
+  },
+  "command/workspace/set_family_archived": {
+    "payload": {
+      "payload": {
+        "archived": true,
+        "expected_family": {
+          "key": "thr-1",
+          "membership_epoch": 1
+        },
+        "expected_revision": "2",
+        "thread": "thr-1"
+      },
+      "type": "set_family_archived"
+    },
+    "type": "workspace"
+  },
+  "command/workspace/set_family_pinned": {
+    "payload": {
+      "payload": {
+        "expected_family": {
+          "key": "thr-1",
+          "membership_epoch": 1
+        },
+        "expected_revision": "0",
+        "pinned": true,
+        "thread": "thr-1"
+      },
+      "type": "set_family_pinned"
+    },
+    "type": "workspace"
+  },
+  "command/workspace/set_project_trust": {
+    "payload": {
+      "payload": {
+        "expected_revision": "7",
+        "project": "proj-1",
+        "trust": "approved"
+      },
+      "type": "set_project_trust"
+    },
+    "type": "workspace"
+  },
+  "command/workspace/set_thread_extra_read_dirs": {
+    "payload": {
+      "payload": {
+        "dirs": [
+          "/work/reference"
+        ],
+        "expected_revision": "3",
+        "thread": "thr-1"
+      },
+      "type": "set_thread_extra_read_dirs"
+    },
+    "type": "workspace"
+  },
+  "command/workspace/update_allowed_directory": {
+    "payload": {
+      "payload": {
+        "action": {
+          "payload": {
+            "path": "/work/shared",
+            "trust": "approved"
+          },
+          "type": "add"
+        },
+        "expected_revision": "7",
+        "project": "proj-1"
+      },
+      "type": "update_allowed_directory"
+    },
+    "type": "workspace"
+  },
+  "query/workspace/get_project_access": {
+    "payload": {
+      "payload": {
+        "project": "proj-1"
+      },
+      "type": "get_project_access"
+    },
+    "type": "workspace"
+  },
+  "query/workspace/get_retention": {
+    "payload": {
+      "payload": {
+        "limit": 50
+      },
+      "type": "get_retention"
+    },
+    "type": "workspace"
+  },
+  "query/workspace/get_thread_detail": {
+    "payload": {
+      "payload": {
+        "thread": "thr-1"
+      },
+      "type": "get_thread_detail"
+    },
+    "type": "workspace"
+  },
+  "query/workspace/list_families": {
+    "payload": {
+      "payload": {
+        "limit": 50
+      },
+      "type": "list_families"
+    },
+    "type": "workspace"
+  },
+  "query_reply/workspace/families": {
+    "payload": {
+      "payload": {
+        "items": [
+          {
+            "archive_revision": "2",
+            "archived": true,
+            "archived_at": 1700000000,
+            "key": "thr-1",
+            "members": 2,
+            "membership_epoch": 1,
+            "pin_revision": "0",
+            "pinned": false
+          }
+        ],
+        "snapshot_revision": "5"
+      },
+      "type": "families"
+    },
+    "type": "workspace"
+  },
+  "query_reply/workspace/project_access": {
+    "payload": {
+      "payload": {
+        "allowed_directories": [
+          {
+            "live": false,
+            "path": "/work/shared",
+            "trust": "approved"
+          }
+        ],
+        "name": "evorch",
+        "project": "proj-1",
+        "revision": "7",
+        "root": "/work/evorch",
+        "trust": "approved"
+      },
+      "type": "project_access"
+    },
+    "type": "workspace"
+  },
+  "query_reply/workspace/retention": {
+    "payload": {
+      "payload": {
+        "items": [
+          {
+            "state": {
+              "payload": {
+                "days": 3
+              },
+              "type": "due_in"
+            },
+            "thread": "thr-1"
+          },
+          {
+            "state": {
+              "payload": {
+                "block": {
+                  "payload": {
+                    "reason": "member of a committed recovery manifest"
+                  },
+                  "type": "recovery"
+                }
+              },
+              "type": "blocked"
+            },
+            "thread": "thr-1"
+          }
+        ],
+        "snapshot_revision": "5"
+      },
+      "type": "retention"
+    },
+    "type": "workspace"
+  },
+  "query_reply/workspace/thread_detail": {
+    "payload": {
+      "payload": {
+        "active_root": "/work/evorch",
+        "archived": false,
+        "chat_role": "worker",
+        "extra_read_dirs": [],
+        "family": "thr-1",
+        "lineage": "fork",
+        "model_profile": "default",
+        "pinned": true,
+        "project": "proj-1",
+        "revision": "3",
+        "thread": "thr-1",
+        "title": "Plan"
+      },
+      "type": "thread_detail"
+    },
+    "type": "workspace"
+  },
+  "ui_event/workspace/workspace_changed": {
+    "payload": {
+      "payload": {
+        "revision": "11"
+      },
+      "type": "workspace_changed"
+    },
+    "type": "workspace"
+  }
+}

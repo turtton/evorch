@@ -168,6 +168,52 @@ pub struct DeleteMcpSecretOutcome {
     pub view: McpSettingsView,
     pub keychain_error: Option<McpErrorKind>,
 }
+/// What `save_secret` did to the keychain entry. The value is never part of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSecretWrite {
+    /// Nothing was written before the request ended (validation, conflict, a
+    /// backend that is unavailable, or only reads happened).
+    NotAttempted,
+    /// The keychain write itself failed; the entry may or may not have changed.
+    Failed(McpErrorKind),
+    /// The entry now holds the new value.
+    Stored,
+    /// The host cannot tell (a service without step detail).
+    Unknown,
+}
+
+/// What became of a newly created keychain entry after the settings save failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSecretRollback {
+    NotNeeded,
+    /// The entry created by this request was removed again.
+    Deleted,
+    /// The entry was kept: it existed before, is referenced now, or changed.
+    Kept,
+    /// Removing the entry failed; it still holds the value.
+    Failed(McpErrorKind),
+    Unknown,
+}
+
+/// The result of `save_secret` with the keychain steps that led to it, so a
+/// caller can tell "nothing was written" from "the keychain may have changed".
+#[derive(Debug)]
+pub struct SaveMcpSecretReport {
+    pub result: Result<McpSettingsView, McpErrorKind>,
+    pub write: McpSecretWrite,
+    pub rollback: McpSecretRollback,
+}
+
+/// Whether a keychain entry holds a value. Never the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSecretPresence {
+    Present,
+    Missing,
+    Locked,
+    Unavailable,
+    Denied,
+}
+
 /// Privileged GUI-only API. Not an agent tool, not model ask_user approval.
 /// Call on a background executor, never synchronously on the render thread.
 #[async_trait]
@@ -197,6 +243,27 @@ pub trait McpGuiService: Send + Sync {
         cancel: CancelContext,
     ) -> Result<McpServerStatus, McpErrorKind>;
     async fn save_secret(&self, request: SaveMcpSecret) -> Result<McpSettingsView, McpErrorKind>;
+    /// [`Self::save_secret`] with the keychain steps it took. A service that
+    /// cannot report them answers `Unknown`, never "nothing was written".
+    async fn save_secret_report(&self, request: SaveMcpSecret) -> SaveMcpSecretReport {
+        SaveMcpSecretReport {
+            result: self.save_secret(request).await,
+            write: McpSecretWrite::Unknown,
+            rollback: McpSecretRollback::Unknown,
+        }
+    }
+    /// Whether each named keychain entry of `scope` holds a value (never the
+    /// value). Unknown names are not checked beyond the keychain lookup.
+    async fn secret_presence(
+        &self,
+        _scope: ApprovalScope,
+        names: Vec<String>,
+    ) -> Vec<(String, McpSecretPresence)> {
+        names
+            .into_iter()
+            .map(|name| (name, McpSecretPresence::Unavailable))
+            .collect()
+    }
     /// Configuration failure never deletes an existing key. Hosts without this
     /// privileged operation fail closed; it is never an agent-tool capability.
     async fn delete_secret(

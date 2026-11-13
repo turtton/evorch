@@ -5,7 +5,8 @@
 //! Remaining GUI/core differences:
 //! - Core loads strict explicit configuration, without environment overrides.
 //! - Unconfigured core exposes no tools; GUI/demo keeps production tools.
-//! - GUI owns retention/index policy; core only executes confirmed reclaims.
+//! - The core confirms and executes retention deletions (`retention`); a legacy
+//!   GUI runs its own phase only when it holds the exclusive leases.
 //! - GUI retains a 60s storage bridge tick; core retains its 5s tick.
 //! - Project declarations are read-only: saved state cannot manufacture trust.
 pub mod components;
@@ -20,6 +21,7 @@ mod project_models;
 pub mod recovery;
 #[cfg(test)]
 mod recovery_06a_tests;
+pub mod retention;
 pub mod services;
 #[cfg(test)]
 mod tests;
@@ -220,13 +222,17 @@ impl BootstrappedHost {
         })?;
         let bus = Arc::new(EventBus::new(4096));
         let db_path = options.config_dir.join("evorch-events.db");
-        // P7a is an additional owner, not the sidebar's retention authority.
-        // Do not interpret/migrate GUI sidebar state or confirm new deletions.
-        // Shared leases prevent another process doing exclusive maintenance.
-        let lease_db = db_path.clone();
-        let lease_root = options.ownership_root.clone();
+        // The core confirms the deletion of expired archived threads (see
+        // `retention`): exclusive leases for the phase, then shared for its life.
+        let plan = retention::RetentionPlan {
+            db_path: db_path.clone(),
+            ownership_root: options.ownership_root.clone(),
+            sidebar_path: options.config_dir.join("sidebar.json"),
+            artifacts_dir: Some(options.config_dir.join("artifacts")),
+            policy: runtime::thread_retention::policy_from_config(&config.storage),
+        };
         let leases = tokio::task::spawn_blocking(move || {
-            storage::shared_with_wait(&lease_db, &lease_root, Duration::from_secs(30))
+            retention::acquire_leases(&plan, Duration::from_secs(30))
         })
         .await??;
         let storage_config = components::storage_config(&config, db_path);
@@ -425,11 +431,18 @@ impl BootstrappedHost {
             config: Arc::new(config.clone()),
             config_dir: options.config_dir.clone(),
             project_root: options.project_root.clone(),
+            ownership_root: options.ownership_root.clone(),
             bus: bus.clone(),
             storage: handle.clone(),
             mcp: mcp.clone(),
             tasks: area_tasks.clone(),
             projection: command_host.projection().clone(),
+        })?;
+        // What the saved sidebar grants (trust, allowed directories, the
+        // read-only directories of threads) is declared before any run starts
+        // or recovers, so a restart does not lose a permission the user gave.
+        areas.workspace.declare_saved().map_err(|error| {
+            format!("the saved workspace access could not be declared: {error:?}")
         })?;
         let host = Arc::new(Mutex::new(command_host.with_areas(areas)));
         #[cfg(any(test, feature = "test-support"))]
@@ -508,6 +521,12 @@ impl BootstrappedHost {
         Ok(bootstrap)
     }
 
+    /// Woken when an area operation that counts as work ends, so the idle
+    /// decision is taken again (ADR 0045 §2, §3).
+    pub fn area_work_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.area_tasks.counted_ended_notify()
+    }
+
     pub fn busy(&self) -> bool {
         // TODO(P9): once safe-point restart/auto-resume can restore an ordinary
         // chat's Waiting state, count that idle conversation as no work. Until
@@ -517,6 +536,7 @@ impl BootstrappedHost {
             || self.runtime.pending_lane_stop_writes() != 0
             || !self.runtime.pending_lane_admissions().is_empty()
             || self.host.lock().unwrap().service().has_background_work()
+            || self.area_tasks.busy()
             || self.runtime.list_agents().iter().any(|r| {
                 self.executor.has_running_shell_jobs(&r.run_id.to_string())
                     || matches!(

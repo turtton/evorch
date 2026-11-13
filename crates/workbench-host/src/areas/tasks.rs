@@ -11,9 +11,15 @@
 use crate::bootstrap::BootstrapError;
 use std::{
     future::Future,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{
+    sync::{Notify, watch},
+    task::JoinHandle,
+};
 
 /// How many tasks areas may have running at once, together.
 pub const MAX_AREA_TASKS: usize = 64;
@@ -81,6 +87,10 @@ struct Inner {
     runtime: tokio::runtime::Handle,
     stop: watch::Sender<bool>,
     state: Mutex<State>,
+    /// Tasks started with [`AreaTasks::spawn_counted`] that have not ended.
+    counted: Arc<AtomicUsize>,
+    /// Woken each time a counted task ends, so an idle check runs again.
+    counted_ended: Arc<Notify>,
 }
 
 impl Inner {
@@ -112,7 +122,34 @@ impl AreaTasks {
             runtime,
             stop: watch::channel(false).0,
             state: Mutex::default(),
+            counted: Arc::new(AtomicUsize::new(0)),
+            counted_ended: Arc::new(Notify::new()),
         }))
+    }
+
+    /// [`Self::spawn`] for work that keeps the host from stopping on idle:
+    /// while the task runs, [`Self::busy`] is true, and `counted_ended_notify`
+    /// is woken when it ends. A long-lived watcher must use plain `spawn`.
+    ///
+    /// # Errors
+    /// As [`Self::spawn`].
+    pub fn spawn_counted<F, Fut>(&self, name: &'static str, task: F) -> Result<(), SpawnError>
+    where
+        F: FnOnce(StopSignal) -> Fut,
+        Fut: Future<Output = Result<(), BootstrapError>> + Send + 'static,
+    {
+        self.spawn_inner(name, task, true)
+    }
+
+    /// Whether a task started with [`Self::spawn_counted`] is still running.
+    pub fn busy(&self) -> bool {
+        self.0.counted.load(Ordering::SeqCst) != 0
+    }
+
+    /// Woken each time a counted task ends (it keeps one permit when nobody
+    /// waits), so the owner of the idle decision looks again.
+    pub fn counted_ended_notify(&self) -> Arc<Notify> {
+        self.0.counted_ended.clone()
     }
 
     /// Start `name`. `task` receives its stop signal and returns the future
@@ -123,6 +160,19 @@ impl AreaTasks {
     /// [`SpawnError::Closed`] once a stop was requested, [`SpawnError::Full`]
     /// at the limit.
     pub fn spawn<F, Fut>(&self, name: &'static str, task: F) -> Result<(), SpawnError>
+    where
+        F: FnOnce(StopSignal) -> Fut,
+        Fut: Future<Output = Result<(), BootstrapError>> + Send + 'static,
+    {
+        self.spawn_inner(name, task, false)
+    }
+
+    fn spawn_inner<F, Fut>(
+        &self,
+        name: &'static str,
+        task: F,
+        counted: bool,
+    ) -> Result<(), SpawnError>
     where
         F: FnOnce(StopSignal) -> Fut,
         Fut: Future<Output = Result<(), BootstrapError>> + Send + 'static,
@@ -140,6 +190,10 @@ impl AreaTasks {
         // registry's own handle is the only one there is to stop.
         let inner = AbortOnDrop(self.0.runtime.spawn(future));
         let shared = Arc::downgrade(&self.0);
+        let counter = counted.then(|| {
+            self.0.counted.fetch_add(1, Ordering::SeqCst);
+            (self.0.counted.clone(), self.0.counted_ended.clone())
+        });
         // Supervising task: records how `name` ended, so a failure that
         // happens before shutdown is not lost when the entry is pruned.
         let supervisor = self.0.runtime.spawn(async move {
@@ -150,6 +204,10 @@ impl AreaTasks {
             };
             if let (Some(failure), Some(shared)) = (failure, shared.upgrade()) {
                 shared.state().failures.push(failure);
+            }
+            if let Some((counted, ended)) = counter {
+                counted.fetch_sub(1, Ordering::SeqCst);
+                ended.notify_one();
             }
         });
         state.tasks.push(Entry { task: supervisor });
@@ -312,5 +370,30 @@ mod tests {
         failed.await.unwrap();
         let error = tasks.shutdown().await.unwrap_err().to_string();
         assert_eq!(error, "early: early failure");
+    }
+
+    #[tokio::test]
+    async fn only_a_counted_task_keeps_the_host_busy_and_its_end_wakes_the_idle_check() {
+        let tasks = tasks();
+        let ended = tasks.counted_ended_notify();
+        let (finish, finished) = oneshot::channel::<()>();
+        tasks
+            .spawn("watcher", |mut stop| async move {
+                stop.stopped().await;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!tasks.busy(), "a watcher is not work");
+        tasks
+            .spawn_counted("operation", |_| async move {
+                let _ = finished.await;
+                Ok(())
+            })
+            .unwrap();
+        assert!(tasks.busy());
+        finish.send(()).unwrap();
+        ended.notified().await;
+        assert!(!tasks.busy(), "the wake-up comes after the count dropped");
+        tasks.shutdown().await.unwrap();
     }
 }

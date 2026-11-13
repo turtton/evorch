@@ -1,5 +1,5 @@
 use tempfile::{TempDir, tempdir};
-use workspace_ui::{
+use workspace_state::{
     AllowedDirectory, ProjectError, ProjectId, ProjectRecord, SidebarError, SidebarState, ThreadId,
     ThreadRecord, TrustState, load_sidebar, save_sidebar, sidebar_from_json, sidebar_to_json,
 };
@@ -253,7 +253,7 @@ fn projects_saved_without_trust_load_untrusted() {
         "active_thread": null,
     });
 
-    let sidebar = workspace_ui::sidebar_from_json(&json.to_string()).expect("legacy sidebar");
+    let sidebar = workspace_state::sidebar_from_json(&json.to_string()).expect("legacy sidebar");
 
     assert_eq!(sidebar.projects[0].trust, TrustState::Unapproved);
 }

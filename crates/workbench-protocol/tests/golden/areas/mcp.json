@@ -1,1 +1,527 @@
-{}
+{
+  "command/mcp/cancel_operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-7"
+      },
+      "type": "cancel_operation"
+    },
+    "type": "mcp"
+  },
+  "command/mcp/confirm_approval": {
+    "payload": {
+      "payload": {
+        "expected_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "operation_id": "op-5",
+        "preview_id": "33333333333333333333333333333333",
+        "scope": {
+          "project": "project-1",
+          "server_id": "docs"
+        }
+      },
+      "type": "confirm_approval"
+    },
+    "type": "mcp"
+  },
+  "command/mcp/delete_secret": {
+    "payload": {
+      "payload": {
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "logical_name": "docs-token",
+        "mutation": {
+          "definition": {
+            "enabled": false,
+            "request_timeout_ms": 600000,
+            "roles": [],
+            "startup_timeout_ms": 1,
+            "transport": {
+              "args": [
+                [
+                  {
+                    "kind": "literal",
+                    "value": "--stdio"
+                  }
+                ]
+              ],
+              "command": [
+                {
+                  "kind": "literal",
+                  "value": "mcp-server"
+                }
+              ],
+              "cwd": [
+                {
+                  "default": "/tmp",
+                  "kind": "env",
+                  "name": "HOME"
+                }
+              ],
+              "env": {
+                "LEVEL": {
+                  "kind": "template",
+                  "template": [
+                    {
+                      "kind": "literal",
+                      "value": "debug"
+                    }
+                  ]
+                }
+              },
+              "type": "stdio"
+            }
+          },
+          "server_id": "docs",
+          "type": "upsert"
+        },
+        "operation_id": "op-9",
+        "scope": {
+          "project": "project-1",
+          "server_id": "docs"
+        }
+      },
+      "type": "delete_secret"
+    },
+    "type": "mcp"
+  },
+  "command/mcp/preview_approval": {
+    "payload": {
+      "payload": {
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "operation_id": "op-4",
+        "scope": {
+          "project": "project-1",
+          "server_id": "docs"
+        }
+      },
+      "type": "preview_approval"
+    },
+    "type": "mcp"
+  },
+  "command/mcp/refresh": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "project": "project-1"
+      },
+      "type": "refresh"
+    },
+    "type": "mcp"
+  },
+  "command/mcp/revoke_approval": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-6",
+        "scope": {
+          "project": "project-1",
+          "server_id": "docs"
+        }
+      },
+      "type": "revoke_approval"
+    },
+    "type": "mcp"
+  },
+  "command/mcp/save_override": {
+    "payload": {
+      "payload": {
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "mutation": {
+          "definition": {
+            "enabled": true,
+            "request_timeout_ms": 60000,
+            "roles": [
+              "worker"
+            ],
+            "startup_timeout_ms": 10000,
+            "transport": {
+              "headers": {},
+              "token": {
+                "kind": "keychain",
+                "name": "docs-token"
+              },
+              "type": "http",
+              "url": [
+                {
+                  "kind": "literal",
+                  "value": "https://mcp.example.test/rpc"
+                }
+              ]
+            }
+          },
+          "server_id": "docs",
+          "type": "upsert"
+        },
+        "operation_id": "op-2",
+        "project": "project-1"
+      },
+      "type": "save_override"
+    },
+    "type": "mcp"
+  },
+  "command/mcp/save_secret": {
+    "payload": {
+      "payload": {
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "logical_name": "docs-token",
+        "mutation": {
+          "definition": {
+            "enabled": true,
+            "request_timeout_ms": 60000,
+            "roles": [
+              "worker"
+            ],
+            "startup_timeout_ms": 10000,
+            "transport": {
+              "headers": {},
+              "token": {
+                "kind": "keychain",
+                "name": "docs-token"
+              },
+              "type": "http",
+              "url": [
+                {
+                  "kind": "literal",
+                  "value": "https://mcp.example.test/rpc"
+                }
+              ]
+            }
+          },
+          "server_id": "docs",
+          "type": "upsert"
+        },
+        "operation_id": "op-8",
+        "scope": {
+          "project": "project-1",
+          "server_id": "docs"
+        },
+        "value": "placeholder-not-a-real-secret"
+      },
+      "type": "save_secret"
+    },
+    "type": "mcp"
+  },
+  "command/mcp/set_enabled": {
+    "payload": {
+      "payload": {
+        "enabled": false,
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "operation_id": "op-3",
+        "scope": {
+          "project": "project-1",
+          "server_id": "docs"
+        }
+      },
+      "type": "set_enabled"
+    },
+    "type": "mcp"
+  },
+  "command/mcp/test_connection": {
+    "payload": {
+      "payload": {
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "operation_id": "op-7",
+        "scope": {
+          "project": "project-1",
+          "server_id": "docs"
+        }
+      },
+      "type": "test_connection"
+    },
+    "type": "mcp"
+  },
+  "query/mcp/get_operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_operation"
+    },
+    "type": "mcp"
+  },
+  "query/mcp/get_settings": {
+    "payload": {
+      "payload": {
+        "project": "project-1"
+      },
+      "type": "get_settings"
+    },
+    "type": "mcp"
+  },
+  "query/mcp/list_operations": {
+    "payload": {
+      "payload": {
+        "project": "project-1"
+      },
+      "type": "list_operations"
+    },
+    "type": "mcp"
+  },
+  "query_reply/mcp/operation": {
+    "payload": {
+      "payload": {
+        "kind": "test_connection",
+        "operation_id": "op-1",
+        "project": "project-1",
+        "server_id": "docs",
+        "state": {
+          "type": "running"
+        }
+      },
+      "type": "operation"
+    },
+    "type": "mcp"
+  },
+  "query_reply/mcp/operations": {
+    "payload": {
+      "payload": {
+        "operations": [
+          {
+            "kind": "test_connection",
+            "operation_id": "op-1",
+            "project": "project-1",
+            "server_id": "docs",
+            "state": {
+              "outcome": {
+                "preview": {
+                  "approved_ips": [
+                    "203.0.113.7"
+                  ],
+                  "fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+                  "preview_id": "33333333333333333333333333333333",
+                  "previous_fingerprint": "4444444444444444444444444444444444444444444444444444444444444444",
+                  "previous_summary": {
+                    "environment_keys": [],
+                    "secret_references": []
+                  },
+                  "scope": {
+                    "project": "project-1",
+                    "server_id": "docs"
+                  },
+                  "source_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "summary": {
+                    "destination": {
+                      "host": "mcp.example.test",
+                      "port": 443,
+                      "scheme": "https"
+                    },
+                    "environment_keys": [],
+                    "secret_references": [
+                      "docs-token"
+                    ]
+                  },
+                  "warnings": [
+                    "sends_secret_references"
+                  ]
+                },
+                "type": "approval_preview"
+              },
+              "type": "succeeded"
+            }
+          },
+          {
+            "kind": "test_connection",
+            "operation_id": "op-1",
+            "project": "project-1",
+            "server_id": "docs",
+            "state": {
+              "error": {
+                "field": "url",
+                "type": "missing_environment"
+              },
+              "type": "failed"
+            }
+          },
+          {
+            "kind": "test_connection",
+            "operation_id": "op-1",
+            "project": "project-1",
+            "server_id": "docs",
+            "state": {
+              "type": "cancelled"
+            }
+          },
+          {
+            "kind": "test_connection",
+            "operation_id": "op-1",
+            "project": "project-1",
+            "server_id": "docs",
+            "state": {
+              "outcome": {
+                "status": "ready",
+                "type": "tested"
+              },
+              "type": "succeeded"
+            }
+          }
+        ]
+      },
+      "type": "operations"
+    },
+    "type": "mcp"
+  },
+  "query_reply/mcp/settings": {
+    "payload": {
+      "payload": {
+        "diagnostics": [
+          {
+            "code": "syntax",
+            "source": "project_toml"
+          }
+        ],
+        "preparation_blocked": false,
+        "project": "project-1",
+        "revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "servers": [
+          {
+            "definition": {
+              "enabled": true,
+              "request_timeout_ms": 60000,
+              "roles": [
+                "worker"
+              ],
+              "startup_timeout_ms": 10000,
+              "transport": {
+                "headers": {},
+                "token": {
+                  "kind": "keychain",
+                  "name": "docs-token"
+                },
+                "type": "http",
+                "url": [
+                  {
+                    "kind": "literal",
+                    "value": "https://mcp.example.test/rpc"
+                  }
+                ]
+              }
+            },
+            "diagnostics": [],
+            "imported_exists": true,
+            "origin": "imported_json",
+            "secret_references": [
+              "docs-token"
+            ],
+            "secret_states": {
+              "docs-token": "present"
+            },
+            "server_id": "docs",
+            "state": {
+              "reason": {
+                "type": "needs_approval"
+              },
+              "status": "needs_approval"
+            },
+            "tombstone": false
+          },
+          {
+            "definition": {
+              "enabled": false,
+              "request_timeout_ms": 600000,
+              "roles": [],
+              "startup_timeout_ms": 1,
+              "transport": {
+                "args": [
+                  [
+                    {
+                      "kind": "literal",
+                      "value": "--stdio"
+                    }
+                  ]
+                ],
+                "command": [
+                  {
+                    "kind": "literal",
+                    "value": "mcp-server"
+                  }
+                ],
+                "cwd": [
+                  {
+                    "default": "/tmp",
+                    "kind": "env",
+                    "name": "HOME"
+                  }
+                ],
+                "env": {
+                  "LEVEL": {
+                    "kind": "template",
+                    "template": [
+                      {
+                        "kind": "literal",
+                        "value": "debug"
+                      }
+                    ]
+                  }
+                },
+                "type": "stdio"
+              }
+            },
+            "diagnostics": [],
+            "imported_exists": false,
+            "origin": "project_toml",
+            "secret_references": [],
+            "server_id": "local",
+            "state": {
+              "status": "disabled"
+            },
+            "tombstone": false
+          }
+        ]
+      },
+      "type": "settings"
+    },
+    "type": "mcp"
+  },
+  "ui_event/mcp/operation_completed": {
+    "payload": {
+      "payload": {
+        "operation": {
+          "kind": "test_connection",
+          "operation_id": "op-1",
+          "project": "project-1",
+          "server_id": "docs",
+          "state": {
+            "keychain_error": {
+              "type": "secret_locked"
+            },
+            "outcome": {
+              "revision": "1111111111111111111111111111111111111111111111111111111111111111",
+              "type": "settings"
+            },
+            "type": "partial"
+          }
+        }
+      },
+      "type": "operation_completed"
+    },
+    "type": "mcp"
+  },
+  "ui_event/mcp/server_status_changed": {
+    "payload": {
+      "payload": {
+        "scope": {
+          "project": "project-1",
+          "server_id": "docs"
+        },
+        "state": {
+          "reason": {
+            "status": 503,
+            "type": "http_status"
+          },
+          "status": "unavailable"
+        }
+      },
+      "type": "server_status_changed"
+    },
+    "type": "mcp"
+  },
+  "ui_event/mcp/settings_changed": {
+    "payload": {
+      "payload": {
+        "project": "project-1",
+        "revision": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "type": "settings_changed"
+    },
+    "type": "mcp"
+  }
+}

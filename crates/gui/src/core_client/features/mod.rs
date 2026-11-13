@@ -124,6 +124,8 @@ pub struct FeatureError {
     pub message: String,
     /// The command may or may not have been applied. It is not resent.
     pub outcome_unknown: bool,
+    /// The code of the core's refusal, when the core answered with one.
+    pub code: Option<workbench_protocol::errors::ErrorCode>,
 }
 
 impl FeatureError {
@@ -131,6 +133,7 @@ impl FeatureError {
         Self {
             message: message.into(),
             outcome_unknown: false,
+            code: None,
         }
     }
 
@@ -138,7 +141,13 @@ impl FeatureError {
         Self {
             message: message.into(),
             outcome_unknown: true,
+            code: None,
         }
+    }
+
+    pub fn with_code(mut self, code: workbench_protocol::errors::ErrorCode) -> Self {
+        self.code = Some(code);
+        self
     }
 }
 
@@ -307,6 +316,11 @@ pub trait Feature: Send {
     fn render_selector(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) -> bool {
         false
     }
+
+    /// The workspace feature itself, for what observes the sidebar it holds.
+    fn as_workspace(&self) -> Option<&workspace::WorkspaceFeature> {
+        None
+    }
 }
 
 /// The registration of every feature. A PR implementing a feature changes the
@@ -367,6 +381,11 @@ impl Features {
     /// The features shown for a connection with `capabilities`.
     pub fn available(&self, connected: bool, capabilities: &[Capability]) -> Vec<FeatureId> {
         available_ids(&self.features, connected, capabilities)
+    }
+
+    /// The workspace feature, for what observes the sidebar it holds.
+    pub fn workspace(&self) -> Option<&workspace::WorkspaceFeature> {
+        self.features.iter().find_map(|f| f.as_workspace())
     }
 
     /// Draw every available feature and return what they asked for.

@@ -1,7 +1,8 @@
 //! Privileged GUI operations. Never registered as agent tools.
 use super::*;
 use crate::mcp::{
-    DeleteMcpSecret, DeleteMcpSecretOutcome, McpGuiService, McpSettingsView, SaveMcpSecret,
+    DeleteMcpSecret, DeleteMcpSecretOutcome, McpGuiService, McpSecretPresence, McpSecretRollback,
+    McpSecretWrite, McpSettingsView, SaveMcpSecret, SaveMcpSecretReport,
 };
 use config::mcp::{McpOverrideMutation, ProjectMcpConfig};
 use tools::mcp::{
@@ -373,8 +374,13 @@ impl McpGuiService for ProjectMcpService {
         })
     }
     async fn save_secret(&self, request: SaveMcpSecret) -> Result<McpSettingsView, McpErrorKind> {
+        self.save_secret_report(request).await.result
+    }
+    async fn save_secret_report(&self, request: SaveMcpSecret) -> SaveMcpSecretReport {
         let root = request.scope.canonical_root.clone();
-        {
+        let mut write = McpSecretWrite::NotAttempted;
+        let mut rollback = McpSecretRollback::NotNeeded;
+        let committed: Result<(), McpErrorKind> = async {
             let _serial = self
                 .inner
                 .secret_write
@@ -414,11 +420,14 @@ impl McpGuiService for ProjectMcpService {
                 .get(&key)
                 .map_err(|error| secret_error(credential_error_reason(error)))?
                 .is_none();
-            store
-                .set(&key, &request.value)
-                .map_err(|error| secret_error(credential_error_reason(error)))?;
+            if let Err(error) = store.set(&key, &request.value) {
+                let kind = secret_error(credential_error_reason(error));
+                write = McpSecretWrite::Failed(kind);
+                return Err(kind);
+            }
+            write = McpSecretWrite::Stored;
             if let Err(error) =
-                mcp::save_override(&root, request.expected_revision, request.mutation)
+                mcp::save_override(&root, request.expected_revision, request.mutation.clone())
             {
                 // A rotation must never delete a pre-existing key. A concurrent update can
                 // also make a newly-created key useful: keep it if referenced or changed.
@@ -430,22 +439,73 @@ impl McpGuiService for ProjectMcpService {
                             .and_then(|entry| entry.definition.as_ref())
                             .is_some_and(|definition| references(definition, &request.logical_name))
                 });
-                if created
+                let removable = created
                     && unused
                     && store
                         .get(&key)
                         .ok()
                         .flatten()
-                        .is_some_and(|value| value.expose() == request.value.expose())
-                    && let Err(error) = store.delete(&key)
-                {
-                    self.inner
-                        .status(request.scope, secret_error(credential_error_reason(error)));
-                }
+                        .is_some_and(|value| value.expose() == request.value.expose());
+                rollback = if removable {
+                    match store.delete(&key) {
+                        Ok(_) => McpSecretRollback::Deleted,
+                        Err(error) => {
+                            let kind = secret_error(credential_error_reason(error));
+                            self.inner.status(request.scope.clone(), kind);
+                            McpSecretRollback::Failed(kind)
+                        }
+                    }
+                } else {
+                    McpSecretRollback::Kept
+                };
                 return Err(mcp_config_error_kind(error));
             }
+            Ok(())
         }
-        self.settings(root).await
+        .await;
+        let result = match committed {
+            Ok(()) => self.settings(root).await,
+            Err(kind) => Err(kind),
+        };
+        SaveMcpSecretReport {
+            result,
+            write,
+            rollback,
+        }
+    }
+    async fn secret_presence(
+        &self,
+        scope: ApprovalScope,
+        names: Vec<String>,
+    ) -> Vec<(String, McpSecretPresence)> {
+        names
+            .into_iter()
+            .map(|name| {
+                let presence = match &self.inner.credentials {
+                    McpCredentialBackend::Unavailable(reason) => {
+                        presence_of_error(secret_error(*reason))
+                    }
+                    McpCredentialBackend::Available(store) => {
+                        match store.get(&credential_key(&scope, &name)) {
+                            Ok(Some(_)) => McpSecretPresence::Present,
+                            Ok(None) => McpSecretPresence::Missing,
+                            Err(error) => {
+                                presence_of_error(secret_error(credential_error_reason(error)))
+                            }
+                        }
+                    }
+                };
+                (name, presence)
+            })
+            .collect()
+    }
+}
+fn presence_of_error(kind: McpErrorKind) -> McpSecretPresence {
+    match kind {
+        McpErrorKind::SecretLocked => McpSecretPresence::Locked,
+        McpErrorKind::SecretDenied => McpSecretPresence::Denied,
+        McpErrorKind::SecretMissing => McpSecretPresence::Missing,
+        _ => McpSecretPresence::Unavailable,
     }
 }
 fn references(definition: &McpServerDefinition, name: &str) -> bool {

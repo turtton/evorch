@@ -17,6 +17,8 @@ pub trait ProjectDirectory: Send {
     fn entries(&self) -> Vec<(ProjectId, PathBuf)> {
         Vec::new()
     }
+    /// Adds or replaces a project registered after the host started.
+    fn upsert(&mut self, _project: &ProjectId, _root: PathBuf) {}
 }
 
 /// A fixed set of projects, registered by the composing process.
@@ -36,6 +38,9 @@ impl StaticProjects {
 }
 
 impl ProjectDirectory for StaticProjects {
+    fn upsert(&mut self, project: &ProjectId, root: PathBuf) {
+        self.insert(project, root);
+    }
     fn entries(&self) -> Vec<(ProjectId, PathBuf)> {
         self.roots
             .iter()
