@@ -2,6 +2,7 @@ use evorch_core::{
     backend::HostBackend,
     instance::{ConfigIdentity, Instance, InstanceError, LaunchGuard},
     lifecycle::IdleGrace,
+    recovery_service::CoreGraphRecovery,
     unix,
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -72,11 +73,14 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
         .ok_or("cannot resolve ownership state directory")?
         .join("evorch");
     // Same owner registry as the unchanged GUI (ADR 0024).
-    let mut host = BootstrappedHost::open(BootstrapOptions {
-        config_dir,
-        ownership_root: state_dir.join("threads"),
-        project_root: std::env::current_dir()?,
-    })
+    let mut host = BootstrappedHost::open_for_core(
+        BootstrapOptions {
+            config_dir,
+            ownership_root: state_dir.join("threads"),
+            project_root: std::env::current_dir()?,
+        },
+        &CoreGraphRecovery,
+    )
     .await?;
     let backend = Arc::new(HostBackend::new(
         host.host.clone(),
@@ -130,6 +134,7 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
     let mut clients = tokio::task::JoinSet::new();
     let mut events = host.runtime.event_bus().subscribe();
     let background = host.host.lock().unwrap().service().background_work_notify();
+    let area_work = host.area_work_notify();
     let mut idle = IdleGrace::new(Duration::from_secs(host.config.core.idle_grace_secs));
     let outcome = loop {
         host.host.lock().unwrap().service_mut().poll();
@@ -144,6 +149,7 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
             _ = terminate.recv() => break Ok(()),
             _ = interrupt.recv() => break Ok(()),
             _ = background.notified() => (),
+            _ = area_work.notified() => (),
             _ = expired => {
                 if !host.busy() { break Ok(()); }
             },

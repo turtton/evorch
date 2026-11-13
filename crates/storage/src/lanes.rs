@@ -246,6 +246,17 @@ pub struct LaneListItem {
     pub latest_report: Option<LaneReport>,
 }
 
+/// One managed lane as the uncollected-lane accounting reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneCollectionEntry {
+    pub lane_id: String,
+    pub management_revision: u64,
+    pub brief_revision: u64,
+    /// A close (by the lead, a human or a discard) currently stands.
+    pub closed: bool,
+    pub latest_report: Option<LaneReport>,
+}
+
 /// One page of `lane_list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LaneListPage {
@@ -300,5 +311,18 @@ impl crate::Database {
     /// Returns an error if SQLite access or row decoding fails.
     pub fn unstarted_lanes(&self, limit: usize) -> Result<Vec<LaneRecord>, crate::StorageError> {
         crate::repo::lanes::unstarted(&self.conn, limit)
+    }
+
+    /// The same scan and bounds as [`Self::unstarted_lanes`], excluding graph-owned
+    /// root/seed run identities BEFORE LIMIT. Also use this for retry existence checks.
+    ///
+    /// # Errors
+    /// Returns an error on unreadable seeds or SQLite failures (never starts them).
+    pub fn unstarted_lanes_excluding(
+        &self,
+        limit: usize,
+        excluded_runs: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<LaneRecord>, crate::StorageError> {
+        crate::repo::lanes::unstarted_excluding(&self.conn, limit, excluded_runs)
     }
 }

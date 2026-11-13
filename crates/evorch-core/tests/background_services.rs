@@ -11,7 +11,7 @@ use std::{
 };
 use storage::pull_requests::*;
 use storage::{Storage, StorageConfig, StorageHandle};
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 use workbench_host::bootstrap::{
     BootstrapOptions, BootstrappedHost, TestSeams, lane_pr::PullRequestAdapters,
 };
@@ -22,6 +22,7 @@ struct Model {
     calls: AtomicUsize,
     hold_admission: AtomicBool,
     admission: Notify,
+    admission_barrier: std::sync::Mutex<Option<Arc<Barrier>>>,
     release_admission: Notify,
     admitting: AtomicBool,
     skip_admission: AtomicBool,
@@ -48,6 +49,10 @@ impl AgentModel for Model {
         if self.hold_admission.load(Ordering::SeqCst) {
             self.admitting.store(true, Ordering::SeqCst);
             let _active = Active(&self.admitting);
+            let barrier = self.admission_barrier.lock().unwrap().take();
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
             self.admission.notify_one();
             self.release_admission.notified().await;
         }
@@ -492,16 +497,33 @@ async fn concurrent_startup_does_not_steal_a_live_pending_lane_and_stops_retryin
 
 #[tokio::test]
 async fn an_unowned_seed_keeps_the_handoff_fence_while_admission_is_pending() {
-    for (finish_admission, stop_first) in [(true, false), (false, false), (false, true)] {
-        unowned_seed_handoff(finish_admission, stop_first).await;
-    }
+    unowned_seed_handoff(true, false, false).await;
 }
 
-async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool) {
+#[tokio::test]
+async fn an_unowned_seed_cancels_pending_admission_after_handoff() {
+    unowned_seed_handoff(false, false, false).await;
+}
+
+#[tokio::test]
+async fn an_unowned_seed_stops_only_its_admission_after_handoff() {
+    unowned_seed_handoff(false, true, false).await;
+}
+
+#[tokio::test]
+async fn manual_and_background_lane_retries_share_the_handoff_fence() {
+    unowned_seed_handoff(true, false, true).await;
+}
+
+async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool, manual_retry: bool) {
     let f = Fixture::new();
     f.seed_with_ownership(false);
-    let old_model = Arc::new(Model::default());
-    old_model.hold_admission.store(true, Ordering::SeqCst);
+    let old_admission = Arc::new(Barrier::new(2));
+    let old_model = Arc::new(Model {
+        hold_admission: AtomicBool::new(true),
+        admission_barrier: std::sync::Mutex::new(Some(old_admission.clone())),
+        ..Default::default()
+    });
     let mut old = f
         .core(
             old_model.clone(),
@@ -509,8 +531,14 @@ async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool) {
             Arc::new(Logs::default()),
         )
         .await;
-    old_model.admission.notified().await;
-    let next_model = Arc::new(Model::default());
+    old_admission.wait().await;
+    assert!(old_model.admitting.load(Ordering::SeqCst));
+    let next_admission = Arc::new(Barrier::new(2));
+    let next_model = Arc::new(Model {
+        hold_admission: AtomicBool::new(true),
+        admission_barrier: std::sync::Mutex::new(Some(next_admission.clone())),
+        ..Default::default()
+    });
     let mut next = f
         .core(
             next_model.clone(),
@@ -518,7 +546,6 @@ async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool) {
             Arc::new(Logs::default()),
         )
         .await;
-    let mut next_events = next.runtime.event_bus().subscribe();
     let permit = old.owner.owned_permit("lane-thread").unwrap();
     old.owner.handoff(&permit, &next.owner).unwrap();
     if finish_admission {
@@ -531,13 +558,17 @@ async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool) {
     }
     assert!(old.runtime.list_agents().is_empty());
     assert_eq!(old_model.calls.load(Ordering::SeqCst), 0);
-    next.runtime
-        .recover_unstarted_lanes(Some(&next.owner))
-        .unwrap();
-    tokio::select! {
-        _ = next_model.entered.notified() => {},
-        result = next.runtime.wait(RunId::new(42)) => panic!("next lane root ended before model entry: {result:?}, events={:?}", next_events.drain_pending_snapshot()),
+    // Admission entry proves the successor reservation exists. Waiting on the
+    // run before this barrier raced background retry and could return UnknownRun.
+    next_admission.wait().await;
+    assert!(next_model.admitting.load(Ordering::SeqCst));
+    if manual_retry {
+        next.runtime
+            .recover_unstarted_lanes(Some(&next.owner))
+            .unwrap();
     }
+    next_model.release_admission.notify_one();
+    next_model.entered.notified().await;
     assert_eq!(next_model.calls.load(Ordering::SeqCst), 1);
     if stop_first {
         // The old owner can stop its local admission, not the successor's lane.
@@ -569,6 +600,40 @@ async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool) {
         assert!(old.runtime.wait(RunId::new(42)).await.is_err());
     }
     next.shutdown().await.unwrap();
+    let lane = f.handle().lane_by_thread("lane-thread").unwrap().unwrap();
+    assert_eq!(lane.generation, 1);
+    assert!(f.handle().unstarted_lanes(10).unwrap().is_empty());
+    let restarted_model = Arc::new(Model::default());
+    // A new core uses the graph-aware bootstrap; already-started legacy seeds
+    // are still NoCommittedManifest and must never acquire a second admission.
+    let mut restarted = BootstrappedHost::open_for_core_with_test_seams(
+        BootstrapOptions {
+            config_dir: f.root.clone(),
+            ownership_root: f.root.join("owners"),
+            project_root: f.dir.path().canonicalize().unwrap(),
+        },
+        TestSeams {
+            model: restarted_model.clone(),
+            sandbox: Arc::new(Direct),
+        },
+        &evorch_core::recovery_service::CoreGraphRecovery,
+    )
+    .await
+    .unwrap();
+    restarted.shutdown().await.unwrap();
+    assert_eq!(restarted_model.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        restarted_model.admissions_requested.load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        f.handle()
+            .lane_by_thread("lane-thread")
+            .unwrap()
+            .unwrap()
+            .generation,
+        1
+    );
 }
 
 #[tokio::test]

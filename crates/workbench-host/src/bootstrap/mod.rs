@@ -5,10 +5,12 @@
 //! Remaining GUI/core differences:
 //! - Core loads strict explicit configuration, without environment overrides.
 //! - Unconfigured core exposes no tools; GUI/demo keeps production tools.
-//! - GUI owns retention/index policy; core only executes confirmed reclaims.
+//! - The core confirms and executes retention deletions (`retention`); a legacy
+//!   GUI runs its own phase only when it holds the exclusive leases.
 //! - GUI retains a 60s storage bridge tick; core retains its 5s tick.
 //! - Project declarations are read-only: saved state cannot manufacture trust.
 pub mod components;
+pub mod core_startup;
 pub mod evaluation;
 mod host_services;
 pub mod lane_pr;
@@ -20,6 +22,7 @@ mod project_models;
 pub mod recovery;
 #[cfg(test)]
 mod recovery_06a_tests;
+pub mod retention;
 pub mod services;
 #[cfg(test)]
 mod tests;
@@ -112,6 +115,7 @@ pub struct BootstrappedHost {
     pub config: config::Config,
     pub services: services::BackgroundServices,
     pub mcp: runtime::mcp::McpHostServices,
+    pub recovery_diagnostics: Option<Arc<dyn core_startup::CoreStartupDiagnostics>>,
     area_tasks: AreaTasks,
     pub usage_pricing: recorder::pricing::SharedUsagePricing,
     pub evaluator: Arc<evaluation::EvaluatorHost>,
@@ -129,6 +133,7 @@ pub struct BootstrappedHost {
 pub struct CompositionInventory {
     pub tools: Vec<tools::executor::ToolSpec>,
     pub storage: storage::StorageConfig,
+    pub storage_writer: storage::StorageHandle,
     pub model: runtime::compose::ModelIdentity,
 }
 
@@ -139,6 +144,7 @@ impl BootstrappedHost {
             None,
             None,
             lane_pr::PullRequestAdapters::default(),
+            None,
             None,
         )
         .await
@@ -158,6 +164,7 @@ impl BootstrappedHost {
             None,
             lane_pr::PullRequestAdapters::default(),
             None,
+            None,
         )
         .await
     }
@@ -174,6 +181,7 @@ impl BootstrappedHost {
             Some(mcp),
             lane_pr::PullRequestAdapters::default(),
             None,
+            None,
         )
         .await
     }
@@ -184,7 +192,7 @@ impl BootstrappedHost {
         seams: TestSeams,
         adapters: lane_pr::PullRequestAdapters,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, Some(seams), None, adapters, None).await
+        Self::open_composed(options, Some(seams), None, adapters, None, None).await
     }
 
     /// Observe resources before recovery so failed-startup tests can audit cleanup.
@@ -201,6 +209,41 @@ impl BootstrappedHost {
             None,
             adapters,
             Some(Box::new(observe)),
+            None,
+        )
+        .await
+    }
+
+    /// Core-only recovery runs after shared lease acquisition/reload and RunStore
+    /// high-watermarks, but before learning or lane recovery can admit work.
+    pub async fn open_for_core(
+        options: BootstrapOptions,
+        recovery: &dyn core_startup::CoreStartupHook,
+    ) -> Result<Self, BootstrapError> {
+        Self::open_composed(
+            options,
+            None,
+            None,
+            lane_pr::PullRequestAdapters::default(),
+            None,
+            Some(recovery),
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn open_for_core_with_test_seams(
+        options: BootstrapOptions,
+        seams: TestSeams,
+        recovery: &dyn core_startup::CoreStartupHook,
+    ) -> Result<Self, BootstrapError> {
+        Self::open_composed(
+            options,
+            Some(seams),
+            None,
+            lane_pr::PullRequestAdapters::default(),
+            None,
+            Some(recovery),
         )
         .await
     }
@@ -211,6 +254,7 @@ impl BootstrappedHost {
         mcp: Option<runtime::mcp::McpHostServices>,
         adapters: lane_pr::PullRequestAdapters,
         observe: Option<RuntimeObserver>,
+        recovery: Option<&dyn core_startup::CoreStartupHook>,
     ) -> Result<Self, BootstrapError> {
         let config = config::Config::load_strict(&config::LoadOptions {
             user_config_dir: Some(options.config_dir.clone()),
@@ -220,20 +264,31 @@ impl BootstrappedHost {
         })?;
         let bus = Arc::new(EventBus::new(4096));
         let db_path = options.config_dir.join("evorch-events.db");
-        // P7a is an additional owner, not the sidebar's retention authority.
-        // Do not interpret/migrate GUI sidebar state or confirm new deletions.
-        // Shared leases prevent another process doing exclusive maintenance.
-        let lease_db = db_path.clone();
-        let lease_root = options.ownership_root.clone();
+        // The core confirms the deletion of expired archived threads (see
+        // `retention`): exclusive leases for the phase, then shared for its life.
+        let plan = retention::RetentionPlan {
+            db_path: db_path.clone(),
+            ownership_root: options.ownership_root.clone(),
+            sidebar_path: options.config_dir.join("sidebar.json"),
+            artifacts_dir: Some(options.config_dir.join("artifacts")),
+            policy: runtime::thread_retention::policy_from_config(&config.storage),
+        };
         let leases = tokio::task::spawn_blocking(move || {
-            storage::shared_with_wait(&lease_db, &lease_root, Duration::from_secs(30))
+            retention::acquire_leases(&plan, Duration::from_secs(30))
         })
         .await??;
         let storage_config = components::storage_config(&config, db_path);
         let storage =
             storage::Storage::open_with_lease(storage_config.clone(), leases.db_lease()?)?;
         let handle = storage.handle();
+        // This reload must stay AFTER acquire_leases (including any exclusive
+        // maintenance/downgrade), regardless of which PR adds that phase first.
         let tombstones = storage::Database::open(&storage_config)?.tombstones()?;
+        let startup = recovery
+            .map(|_| {
+                leases.recovery_startup_complete(&storage_config.db_path, &options.ownership_root)
+            })
+            .transpose()?;
         let pricing = Arc::new(RwLock::new(UsagePricing::new(
             config.providers.clone(),
             None,
@@ -409,6 +464,7 @@ impl BootstrappedHost {
         for (root, access) in projects.access {
             access.apply(&runtime, root);
         }
+        let recovery_projects = projects.directory.clone();
         let command_host = CommandHost::new(service)
             .with_projects(projects.directory)
             .with_legacy_import(
@@ -425,22 +481,30 @@ impl BootstrappedHost {
             config: Arc::new(config.clone()),
             config_dir: options.config_dir.clone(),
             project_root: options.project_root.clone(),
+            ownership_root: options.ownership_root.clone(),
             bus: bus.clone(),
             storage: handle.clone(),
             mcp: mcp.clone(),
             tasks: area_tasks.clone(),
             projection: command_host.projection().clone(),
         })?;
+        // What the saved sidebar grants (trust, allowed directories, the
+        // read-only directories of threads) is declared before any run starts
+        // or recovers, so a restart does not lose a permission the user gave.
+        areas.workspace.declare_saved().map_err(|error| {
+            format!("the saved workspace access could not be declared: {error:?}")
+        })?;
         let host = Arc::new(Mutex::new(command_host.with_areas(areas)));
         #[cfg(any(test, feature = "test-support"))]
         let composition = CompositionInventory {
             tools: executor.tool_specs(),
             storage: storage_config.clone(),
+            storage_writer: handle.clone(),
             model: routed_identity.unwrap_or(composed.model_identity),
         };
         let reclaim = runtime::thread_retention::ReclaimExecutor::spawn(
             runtime::thread_retention::ExecutorConfig::new(
-                handle,
+                handle.clone(),
                 storage_config.clone(),
                 Some(artifacts),
             ),
@@ -455,6 +519,7 @@ impl BootstrappedHost {
             services: services::BackgroundServices::default(),
             area_tasks,
             mcp,
+            recovery_diagnostics: None,
             usage_pricing: pricing,
             #[cfg(any(test, feature = "test-support"))]
             composition,
@@ -463,6 +528,36 @@ impl BootstrappedHost {
             executor,
             _leases: leases,
         };
+        if let (Some(recovery), Some(startup)) = (recovery, startup) {
+            let work_changed = bootstrap
+                .host
+                .lock()
+                .unwrap()
+                .service()
+                .background_work_notify();
+            let result = recovery
+                .start(
+                    core_startup::CoreStartupInputs {
+                        options: options.clone(),
+                        runtime: bootstrap.runtime.clone(),
+                        owner: bootstrap.owner.clone(),
+                        storage: storage_config.clone(),
+                        writer: handle,
+                        projects: recovery_projects,
+                        startup,
+                        work_changed,
+                    },
+                    &mut bootstrap.services,
+                )
+                .await;
+            match result {
+                Ok(diagnostics) => bootstrap.recovery_diagnostics = Some(diagnostics),
+                Err(error) => {
+                    let _ = bootstrap.shutdown().await;
+                    return Err(error);
+                }
+            }
+        }
         host_services::start(
             &mut bootstrap.services,
             &options,
@@ -508,14 +603,25 @@ impl BootstrappedHost {
         Ok(bootstrap)
     }
 
+    /// Woken when an area operation that counts as work ends, so the idle
+    /// decision is taken again (ADR 0045 §2, §3).
+    pub fn area_work_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.area_tasks.counted_ended_notify()
+    }
+
     pub fn busy(&self) -> bool {
         // TODO(P9): once safe-point restart/auto-resume can restore an ordinary
         // chat's Waiting state, count that idle conversation as no work. Until
         // then retain all Waiting runs conservatively to avoid losing them.
         self.evaluations.is_busy()
+            // A live external owner's lease may outlast idle grace. Keep the
+            // managed retry alive even before it can publish any local RunEntry.
+            || self.recovery_diagnostics.as_ref().is_some_and(|d| d.has_pending_work())
+            || self.runtime.has_paused_recovery()
             || self.runtime.pending_lane_stop_writes() != 0
             || !self.runtime.pending_lane_admissions().is_empty()
             || self.host.lock().unwrap().service().has_background_work()
+            || self.area_tasks.busy()
             || self.runtime.list_agents().iter().any(|r| {
                 self.executor.has_running_shell_jobs(&r.run_id.to_string())
                     || matches!(

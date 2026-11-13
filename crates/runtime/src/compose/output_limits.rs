@@ -167,29 +167,12 @@ impl RoutedModel {
             .await
     }
 
-    pub(super) async fn output_limit(
+    /// Metadata resolution shared by live requests and pure recovery validation.
+    fn configured_output_metadata(
         &self,
-        run_id: &str,
         route: &routing::ResolvedRoute,
-        explicit: Option<u32>,
+        catalog: Option<&catalog::ModelCatalog>,
     ) -> Option<u64> {
-        // Pinned even when the caller overrides the limit, so a later request of the
-        // same run cannot start from a newer generation than its first one.
-        let generation = self.output_limit_state().pin(run_id);
-        if let Some(value) = explicit {
-            return Some(u64::from(value));
-        }
-        let protocol = self.providers.get(&route.profile)?.profile.api_protocol;
-        // Codex backend omits max_output_tokens. The factory accepts `openai-responses` only
-        // for `openai` and pins `openai-codex` to `openai-codex-responses`, so protocol suffices.
-        if !matches!(
-            protocol,
-            model::ApiProtocol::AnthropicMessages
-                | model::ApiProtocol::OpenAiCompletions
-                | model::ApiProtocol::OpenAiResponses
-        ) {
-            return None;
-        }
         let profile = self.provider_configs.get(&route.profile)?;
         let (base_model, _) = config::types::provider::parse_model_speed(&route.model_id);
         let entry = profile
@@ -205,27 +188,87 @@ impl RoutedModel {
             })
             .cloned()
             .unwrap_or_else(|| config::ModelEntryConfig::enabled(base_model));
-        let resolved = crate::model_resolve::resolve_model_metadata(
-            &entry,
-            &self.model_presets,
-            None,
-            Some(&route.profile),
-            Some(profile.provider_type),
-        );
-        if resolved.max_output_tokens.is_some() {
-            return resolved.max_output_tokens;
-        }
-        let catalog = generation
-            .catalog(async { self.metadata_catalog().await.cloned() })
-            .await;
         crate::model_resolve::resolve_model_metadata(
             &entry,
             &self.model_presets,
-            catalog.as_deref(),
+            catalog,
             Some(&route.profile),
             Some(profile.provider_type),
         )
         .max_output_tokens
+    }
+
+    fn uses_output_limit_catalog(&self, route: &routing::ResolvedRoute) -> bool {
+        self.provider_configs.contains_key(&route.profile)
+            && self.providers.get(&route.profile).is_some_and(|provider| {
+                matches!(
+                    provider.profile.api_protocol,
+                    model::ApiProtocol::AnthropicMessages
+                        | model::ApiProtocol::OpenAiCompletions
+                        | model::ApiProtocol::OpenAiResponses
+                )
+            })
+    }
+
+    /// Read-only metadata resolution: never loads a catalog or pins a generation.
+    pub(super) fn checkpoint_output_limit(
+        &self,
+        run_id: &str,
+        route: &routing::ResolvedRoute,
+        explicit: Option<u32>,
+    ) -> Result<Option<u64>, crate::RuntimeError> {
+        if let Some(value) = explicit {
+            return Ok(Some(u64::from(value)));
+        }
+        if !self.uses_output_limit_catalog(route) {
+            return Ok(None);
+        }
+        if let Some(limit) = self.configured_output_metadata(route, None) {
+            return Ok(Some(limit));
+        }
+        let catalogs = self.output_limit_state();
+        let state = catalogs.lock();
+        let generation = state.pinned.get(run_id).unwrap_or(&state.current);
+        let catalog = generation
+            .catalog
+            .get()
+            .cloned()
+            .or_else(|| self.metadata_catalog.get().cloned())
+            .ok_or_else(|| super::model_error("recovery output-limit catalog not loaded"))?;
+        Ok(self.configured_output_metadata(route, catalog.as_deref()))
+    }
+
+    pub(super) async fn output_limit(
+        &self,
+        run_id: &str,
+        route: &routing::ResolvedRoute,
+        explicit: Option<u32>,
+    ) -> Option<u64> {
+        // Pin even when an explicit limit is set, preserving the live contract.
+        let generation = self.output_limit_state().pin(run_id);
+        if let Some(saved) = self
+            .recovery_output_limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(run_id)
+            && saved.profile == route.profile
+            && saved.model == config::types::provider::parse_model_speed(&route.model_id).0
+        {
+            return saved.limit;
+        }
+        if let Some(value) = explicit {
+            return Some(u64::from(value));
+        }
+        if !self.uses_output_limit_catalog(route) {
+            return None;
+        }
+        if let Some(limit) = self.configured_output_metadata(route, None) {
+            return Some(limit);
+        }
+        let catalog = generation
+            .catalog(async { self.metadata_catalog().await.cloned() })
+            .await;
+        self.configured_output_metadata(route, catalog.as_deref())
     }
 }
 

@@ -14,12 +14,52 @@ const OUTCOME_UNKNOWN_NOTICE: &str = "The execution result was not retained in t
     Continue responding to the user. If further work depends on this outcome, inspect the current state before deciding whether to retry; do not blindly repeat the operation.";
 
 impl RestoredState {
+    /// Only an explicit human Continue may abandon validated waits. Append
+    /// results after the immutable sent prefix, without observing child output,
+    /// consuming mailboxes, or redispatching any original tool.
+    pub(crate) fn for_human_recovery_bundle(
+        bundle: &SnapshotBundle,
+    ) -> Result<Self, crate::RuntimeError> {
+        let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&bundle.record.config_json)
+            .map_err(|e| crate::quiesce::runtime::error(e.to_string()))?;
+        if descriptor.recovery_waits.is_empty() {
+            return Self::for_conversation_bundle(bundle);
+        }
+        super::validate_recovery_waits(&bundle.record, &descriptor.recovery_waits)?;
+        let mut messages: Vec<Message> = serde_json::from_str(&bundle.record.messages_json)
+            .map_err(|e| crate::quiesce::runtime::error(e.to_string()))?;
+        let saved_len = messages.len();
+        for wait in &descriptor.recovery_waits {
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: wait.tool_call_id.clone(),
+                    content: vec![providers::ToolResultContent::Text {
+                        text: "Wait aborted by explicit human Continue. The tool was not replayed and child output was not observed; unread messages and notices remain unread.".into(),
+                    }],
+                    is_error: true,
+                }],
+            });
+        }
+        descriptor.recovery_waits.clear();
+        descriptor.recovery_boundary = None;
+        let mut record = bundle.record.clone();
+        record.messages_json =
+            serde_json::to_string(&messages).expect("validated messages serialize");
+        record.config_json =
+            serde_json::to_string(&descriptor).expect("validated descriptor serializes");
+        let mut restored = Self::for_conversation(&record)?;
+        restored.attach_bundle(bundle);
+        restored
+            .provenance
+            .generated_since(&restored.messages, saved_len);
+        Ok(restored)
+    }
+
     /// The bundle's body, provenance and revision all come from one read, so a
     /// later save is conditioned on exactly the snapshot this state was built from.
     pub(crate) fn from_bundle(bundle: &SnapshotBundle) -> Result<Self, crate::RuntimeError> {
-        let mut restored = Self::from_record(&bundle.record)?;
-        restored.attach_bundle(bundle);
-        Ok(restored)
+        Self::from_recovery_bundle(bundle, &[])
     }
 
     /// [`Self::for_conversation`] over one bundle read; see [`Self::from_bundle`].

@@ -70,7 +70,12 @@ impl Tool for GitDiff {
             .get("cwd")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(".");
-        let path = args.get("path").and_then(serde_json::Value::as_str);
+        // 空文字・空白のみの path は未指定として扱う。モデルは省略の代わりに
+        // `path: ""` を送りがちで、`git diff -- ""` は失敗するため。
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.trim().is_empty());
 
         let mut command_args = vec!["diff".to_string()];
         if let Some(path) = path {

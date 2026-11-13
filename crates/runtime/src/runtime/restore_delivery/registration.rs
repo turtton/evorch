@@ -127,6 +127,7 @@ impl AgentRuntime {
         }
         let task = restored.attach_to(RunTask {
             startup_failure: None,
+            recovery_model: None,
             publication: execution.publication(),
             ancestry,
             turn,
@@ -266,6 +267,7 @@ mod review_tests {
                     execution,
                     (run, None, Role::Worker, RunConfig::default(), run),
                     RestoredState {
+                        recovery_waits: Vec::new(),
                         mcp_snapshot: None,
                         harness_notice_pending: false,
                         provenance: Default::default(),

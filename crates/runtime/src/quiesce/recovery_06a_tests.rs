@@ -172,7 +172,7 @@ async fn obsolete_intent_writes_still_fail_shutdown_on_save_or_flush_error() {
 
 fn recipe(policy: ResumePolicy) -> RecoveryRecipe {
     RecoveryRecipe {
-        settings_reference: "current-host-profile".into(),
+        settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
         policy,
         goal_id: Some("goal".into()),
         team: None,
@@ -283,8 +283,27 @@ async fn root_policy_is_inherited_and_unfinished_wait_is_blocked_in_06a() {
                 tool_name: "wait".into(),
                 legacy_result: false,
                 consume_mailbox: true,
+                payload: None,
             },
         });
+    // The 06a reason now means an invalid ToolsWaiting proof, not a blanket
+    // rejection of waits: this forged ID has no unfinished tool-use or boundary.
+    let snapshot = f
+        .runtime
+        .shared
+        .run_store
+        .get()
+        .unwrap()
+        .restore_record(root)
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::restore::validate_recovery_waits(
+            &snapshot,
+            &records.iter().find(|r| r.run_id == root).unwrap().waits,
+        )
+        .is_err()
+    );
     assert_eq!(
         f.runtime
             .save_recovery_graph("wait", &records)
@@ -710,6 +729,89 @@ async fn stopped_child_with_interrupted_tool_does_not_block_its_report_recipient
             .iter()
             .any(|s| s.runs == [child] && s.reason == RecoveryReason::OperatorStopped)
     );
+    // A separate runtime prepares; a second reopen must still adopt the parent
+    // while preserving the stopped endpoint and its interrupted-tool evidence.
+    let first = super::recovery_06b_tests::new_process(&f);
+    let paused = super::recovery_06b_tests::prepare(&f, &first);
+    let claim = paused.claim().clone();
+    drop(paused);
+    drop(first);
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(256));
+    let restored = crate::AgentRuntime::new(
+        bus,
+        f.runtime.shared.executor.lock().unwrap().clone(),
+        f.model.clone(),
+    )
+    .with_run_store(crate::RunStore::open(&f.config, f._storage.handle()).unwrap());
+    let root = f._dir.path().join("ownership");
+    let leases =
+        storage::shared_with_wait(&f.config.db_path, &root, std::time::Duration::ZERO).unwrap();
+    let startup = leases
+        .recovery_startup_complete(&f.config.db_path, &root)
+        .unwrap();
+    let proof = f
+        ._storage
+        .handle()
+        .validate_prepared_claim(claim.claim_id.clone(), &startup, &root)
+        .unwrap();
+    let owner = crate::ownership::OwnerHost::open(
+        &f._dir.path().join("terminal-owner"),
+        Default::default(),
+        std::sync::Arc::new(event_bus::EventBus::new(64)),
+    )
+    .unwrap();
+    let authority = crate::CurrentRecoveryAuthority {
+        members: BTreeMap::from([(
+            parent,
+            RunConfig {
+                ownership: Some(owner.start(&parent.to_string()).unwrap()),
+                keep_alive: true,
+                ..Default::default()
+            },
+        )]),
+    };
+    let db = storage::Database::open(&f.config).unwrap();
+    let before = db.recovery_claim_snapshot(&claim.claim_id).unwrap();
+    let calls = f.model.calls.load(Ordering::SeqCst);
+    let mut adopted = restored
+        .adopt_prepared_claim(proof, startup, &root, &authority)
+        .unwrap();
+    assert_eq!(adopted.claim(), &claim);
+    restored
+        .restore_relations_and_continuations(&mut adopted)
+        .unwrap();
+    assert_eq!(db.recovery_claim_snapshot(&claim.claim_id).unwrap(), before);
+    let terminal =
+        ResumeIntent::decode(db.resume_intent(&child.to_string()).unwrap().unwrap()).unwrap();
+    assert!(!terminal.tool_intent.is_empty());
+    assert_eq!(terminal.stop_reason, Some(StopReason::OperatorStopped));
+    assert!(restored.list_agents().is_empty());
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), calls);
+    let terminal_before = db.resume_intent(&child.to_string()).unwrap();
+    assert_eq!(
+        restored.activate_component(adopted, authority).unwrap(),
+        [parent]
+    );
+    // Drive the one resumed parent turn through a real tool and back to a safe
+    // point. The stopped child must not create a model request or replay its call.
+    f.model.release.add_permits(1);
+    assert_eq!(f.entered.recv().await, Some(0));
+    restored.request_quiesce();
+    f.release[0].add_permits(1);
+    assert_eq!(f.completed.recv().await, Some(0));
+    restored.wait_quiesced().await.unwrap();
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), calls + 1);
+    assert_eq!(
+        f.model.input.lock().unwrap().as_ref().unwrap().affinity_key,
+        parent.to_string()
+    );
+    assert!(f.entered.try_recv().is_err());
+    assert_eq!(
+        db.resume_intent(&child.to_string()).unwrap(),
+        terminal_before
+    );
+    restored.cancel(parent).unwrap();
+    restored.wait(parent).await.unwrap();
     f.cleanup(parent).await;
 }
 
@@ -925,4 +1027,76 @@ async fn blocked_component_reports_all_members_without_orphan_double_accounting(
         f.cleanup(root).await;
         f.cleanup(child).await;
     }
+}
+
+#[tokio::test]
+async fn unknown_settings_selector_is_held_without_execution_or_claim() {
+    for selector in ["", "current-host-profile", "evorch/core/current/v2"] {
+        let f = Fixture::new(0);
+        let run = f.start();
+        let mut current = recipe(ResumePolicy::CoreOwned);
+        current.settings_reference = selector.into();
+        let records = capture(&f, &BTreeMap::from([(run, current)])).await;
+        f.runtime
+            .save_recovery_graph("unknown-settings", &records)
+            .unwrap();
+        let plan = f.runtime.recovery_plan().unwrap();
+        assert!(plan.components.is_empty());
+        assert!(
+            plan.report
+                .blocked
+                .iter()
+                .any(|entry| entry.reason == RecoveryReason::CurrentSettingsRequired)
+        );
+        assert!(
+            storage::Database::open(&f.config)
+                .unwrap()
+                .recovery_claims()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
+        f.cleanup(run).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn tool_approval_pending_is_not_a_restart_safe_point_or_a_durable_continuation() {
+    let f = Fixture::with_approval(1, false, true);
+    let bus = f.runtime.event_bus();
+    let mut events = bus.subscribe();
+    let run = f.start();
+    f.model.release.add_permits(1);
+    loop {
+        if matches!(
+            events.recv().await.unwrap().kind,
+            event_bus::EventKind::Tool(event_bus::ToolEvent::ApprovalRequested { .. })
+        ) {
+            break;
+        }
+    }
+    let registry = sandbox::approval::ApprovalRegistry::for_bus(&bus);
+    assert_eq!(registry.list_pending(None, 10).len(), 1);
+    f.runtime.request_quiesce();
+    assert!(
+        f.runtime
+            .capture_recovery_records(&BTreeMap::from([(run, recipe(ResumePolicy::CoreOwned))]))
+            .is_err()
+    );
+    assert!(!f.intent(run).tool_intent.is_empty());
+    assert!(f.intent(run).checkpoint.is_none());
+    assert_eq!(registry.list_pending(None, 10).len(), 1);
+    assert!(
+        storage::Database::open(&f.config)
+            .unwrap()
+            .recovery_manifests()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        f.entered.is_empty(),
+        "the tool must not execute before approval"
+    );
+    f.cleanup(run).await;
+    assert!(registry.list_pending(None, 10).is_empty());
 }

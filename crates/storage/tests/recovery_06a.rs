@@ -592,3 +592,94 @@ fn fresh_upgrade_and_undo_v61_preserve_previous_intents() {
     storage.close();
     assert!(f.dir.path().is_dir());
 }
+
+#[test]
+fn raw_graph_ownership_excludes_orphans_and_tracks_claims_even_when_superseded() {
+    use std::collections::BTreeSet;
+    let f = Fixture::new();
+    f.seed("orphan");
+    f.commit("current", &["run-a"]);
+    f.commit("old", &["run-b"]);
+    f.sql()
+        .execute(
+            "UPDATE recovery_manifests SET superseded=1 WHERE manifest_id='old'",
+            [],
+        )
+        .unwrap();
+    let ids = || {
+        Database::open(&f.config)
+            .unwrap()
+            .recovery_owned_run_ids(&BTreeSet::new())
+            .unwrap()
+    };
+    assert_eq!(ids(), BTreeSet::from(["run-a".into()]));
+    // Prepared/Activated claims retain ownership independently of manifest flags.
+    let claim = f
+        .storage
+        .handle()
+        .claim_recovery_manifest(RecoveryClaimRequest {
+            claim_id: "claim".into(),
+            manifest_id: "current".into(),
+            incarnations: vec![("run-a".into(), "new".into())],
+        })
+        .unwrap();
+    f.sql().execute_batch("UPDATE recovery_manifests SET superseded=1 WHERE manifest_id='current'; UPDATE recovery_members SET record_json='broken';").unwrap();
+    assert_eq!(ids(), BTreeSet::from(["run-a".into()]));
+    f.sql()
+        .execute(
+            "UPDATE recovery_claims SET state='activated' WHERE claim_id=?1",
+            [&claim.claim_id],
+        )
+        .unwrap();
+    assert_eq!(ids(), BTreeSet::from(["run-a".into()]));
+    f.sql()
+        .execute(
+            "UPDATE recovery_claims SET state='released',release_reason='manual'",
+            [],
+        )
+        .unwrap();
+    assert!(ids().is_empty());
+    assert_eq!(
+        Database::open(&f.config)
+            .unwrap()
+            .recovery_owned_run_ids(&BTreeSet::from(["old".into()]))
+            .unwrap(),
+        BTreeSet::from(["run-b".into()])
+    );
+    f.sql()
+        .execute("DELETE FROM recovery_manifests", [])
+        .unwrap();
+    assert!(
+        Database::open(&f.config)
+            .unwrap()
+            .resume_intent("run-a")
+            .unwrap()
+            .is_some()
+    );
+    assert!(ids().is_empty());
+}
+
+#[test]
+fn graph_ownership_fails_closed_when_member_identity_cannot_be_determined() {
+    use std::collections::BTreeSet;
+    let f = Fixture::new();
+    f.commit("component", &["run-a"]);
+    f.sql()
+        .execute_batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE recovery_manifests SET member_count=2;",
+        )
+        .unwrap();
+    assert!(
+        Database::open(&f.config)
+            .unwrap()
+            .recovery_owned_run_ids(&BTreeSet::new())
+            .is_err()
+    );
+    f.sql().execute_batch("UPDATE recovery_manifests SET member_count=1; UPDATE recovery_members SET run_id=x'ff';").unwrap();
+    assert!(
+        Database::open(&f.config)
+            .unwrap()
+            .recovery_owned_run_ids(&BTreeSet::new())
+            .is_err()
+    );
+}

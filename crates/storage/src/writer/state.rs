@@ -360,7 +360,13 @@ pub(super) fn run_writer_with_index(
                 });
                 let _ = reply.send(result);
             }
-            Ok(Command::SaveSnapshotBundleWithResumeIntent(write, intent, expected, reply)) => {
+            Ok(Command::SaveSnapshotBundleWithResumeIntent(
+                write,
+                intent,
+                expected,
+                revision,
+                reply,
+            )) => {
                 let result = (|| {
                     let previous: i64 =
                         state
@@ -369,7 +375,12 @@ pub(super) fn run_writer_with_index(
                     state.conn.pragma_update(None, "synchronous", "FULL")?;
                     let result = snapshot_transaction(&state, "restore admission", |conn| {
                         let receipt = crate::repo::thread_index::stage_snapshot(conn, &write)?;
-                        crate::resume_intent::save(conn, &intent, expected.as_deref())?;
+                        crate::resume_intent::save_with_revision(
+                            conn,
+                            &intent,
+                            expected.as_deref(),
+                            revision,
+                        )?;
                         Ok(receipt)
                     });
                     // Remaining at FULL is safe if restoring the performance
@@ -387,24 +398,49 @@ pub(super) fn run_writer_with_index(
                 edges,
                 reference_id,
                 host_inputs,
+                recovery_fence,
                 reply,
             )) => {
-                let result = snapshot_transaction(&state, "review", |conn| {
-                    use crate::thread_index::SnapshotTransaction as _;
-                    crate::repo::assistant_reference::consume(conn, reference_id.as_deref())?;
-                    let receipt = crate::repo::thread_index::StagedSnapshot(conn)
-                        .stage_snapshot_bundle(&write)?;
-                    crate::repo::review_evidence::insert(conn, &rows)?;
-                    crate::repo::review_lineage::insert(conn, &edges)?;
-                    let now_ns = crate::system_time_to_ns(std::time::SystemTime::now())?;
-                    let applied = crate::repo::host_input_receipt::apply(
-                        conn,
-                        Some(&write.record),
-                        &host_inputs,
-                        now_ns,
-                    )?;
-                    Ok((receipt, applied))
-                });
+                let full = recovery_fence.is_some();
+                let previous: Result<i64, rusqlite::Error> =
+                    state
+                        .conn
+                        .pragma_query_value(None, "synchronous", |r| r.get(0));
+                let result = (|| {
+                    if full {
+                        state.conn.pragma_update(None, "synchronous", "FULL")?;
+                    }
+                    snapshot_transaction(&state, "review", |conn| {
+                        use crate::thread_index::SnapshotTransaction as _;
+                        crate::repo::assistant_reference::consume(conn, reference_id.as_deref())?;
+                        let receipt = crate::repo::thread_index::StagedSnapshot(conn)
+                            .stage_snapshot_bundle(&write)?;
+                        crate::repo::review_evidence::insert(conn, &rows)?;
+                        crate::repo::review_lineage::insert(conn, &edges)?;
+                        let now_ns = crate::system_time_to_ns(std::time::SystemTime::now())?;
+                        let applied = crate::repo::host_input_receipt::apply(
+                            conn,
+                            Some(&write.record),
+                            &host_inputs,
+                            now_ns,
+                        )?;
+                        if let Some(fence) = &recovery_fence {
+                            crate::resume_intent::save_with_revision(
+                                conn,
+                                &fence.record,
+                                Some(&fence.expected_incarnation),
+                                Some(fence.expected_revision),
+                            )?;
+                        }
+                        Ok((receipt, applied))
+                    })
+                })();
+                if full
+                    && let Ok(previous) = previous
+                    && let Err(error) = state.conn.pragma_update(None, "synchronous", previous)
+                {
+                    tracing::warn!(%error, "manual recovery retained FULL synchronous mode");
+                }
                 let _ = reply.send(result);
             }
             Ok(Command::LatestRunLedger(run_id, reply)) => {

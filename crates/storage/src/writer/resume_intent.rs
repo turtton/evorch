@@ -43,6 +43,64 @@ impl StorageHandle {
                 Box::new(write.clone()),
                 record,
                 expected_incarnation,
+                None,
+                reply,
+            )
+        })
+    }
+
+    /// Manual Continue after a recovery release must fence same-incarnation
+    /// Stop/release revisions as well as snapshot consumption, in one transaction.
+    pub fn save_snapshot_bundle_with_fenced_resume_intent(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+        record: crate::resume_intent::ResumeIntentRecord,
+        expected_incarnation: String,
+        expected_revision: u64,
+    ) -> Result<crate::thread_index::SnapshotReceipt, crate::thread_index::SnapshotApiError> {
+        self.snapshot_request(|reply| {
+            Command::SaveSnapshotBundleWithResumeIntent(
+                Box::new(write.clone()),
+                record,
+                Some(expected_incarnation),
+                Some(expected_revision),
+                reply,
+            )
+        })
+    }
+
+    /// Human recovery Continue preserves the ordinary evidence/input transaction
+    /// while fencing the released revision and admitting its successor atomically.
+    pub fn save_recovery_continue(
+        &self,
+        write: &crate::thread_index::SnapshotWrite,
+        rows: &[crate::ReviewEvidenceRow],
+        consumed_reference_id: Option<&str>,
+        host_inputs: &crate::HostInputWrite,
+        fence: crate::resume_intent::RecoveryContinueFence,
+    ) -> Result<
+        (
+            crate::thread_index::SnapshotReceipt,
+            Vec<crate::HostInputTransition>,
+        ),
+        crate::thread_index::SnapshotApiError,
+    > {
+        if fence.record.run_id != write.record.run_id
+            || fence.record.incarnation.is_empty()
+            || fence.record.incarnation == fence.expected_incarnation
+        {
+            return Err(
+                StorageError::Serialization("recovery Continue identity mismatch".into()).into(),
+            );
+        }
+        self.snapshot_request(|reply| {
+            Command::SaveSnapshotBundleWithEvidence(
+                Box::new(write.clone()),
+                rows.to_vec(),
+                Vec::new(),
+                consumed_reference_id.map(String::from),
+                host_inputs.clone(),
+                Some(fence),
                 reply,
             )
         })

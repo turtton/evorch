@@ -17,6 +17,7 @@ mod benchmark;
 mod capabilities;
 mod category;
 mod chains;
+mod checkpoint;
 mod compaction_window;
 mod edit_tools;
 mod fallback;

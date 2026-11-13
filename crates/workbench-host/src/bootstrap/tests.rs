@@ -65,17 +65,37 @@ async fn saved_access_only_declares_approved_existing_directories_without_rewrit
     let rejected = root.join("unapproved");
     std::fs::create_dir(&allowed).unwrap();
     std::fs::create_dir(&rejected).unwrap();
-    let sidebar = serde_json::json!({
-        "projects": [{"id":"desktop", "repo_root":root, "trust":"approved",
-            "allowed_directories": [
-                {"path": allowed, "trust":"approved"},
-                {"path": allowed, "trust":"approved"},
-                {"path": rejected, "trust":"unapproved"},
-                {"path": root.join("missing"), "trust":"approved"}
-            ]}],
-        "threads": [{"draft":"untouched"}]
-    })
-    .to_string();
+    let mut document = workspace_state::SidebarDocument::default();
+    document
+        .sidebar
+        .projects
+        .push(workspace_state::ProjectRecord {
+            id: workspace_state::ProjectId::new("desktop"),
+            name: "Project".into(),
+            repo_root: root.clone(),
+            trust: workspace_state::TrustState::Approved,
+            allowed_directories: [
+                (allowed.clone(), workspace_state::TrustState::Approved),
+                (allowed.clone(), workspace_state::TrustState::Approved),
+                (rejected, workspace_state::TrustState::Unapproved),
+                (root.join("missing"), workspace_state::TrustState::Approved),
+            ]
+            .into_iter()
+            .map(|(path, trust)| workspace_state::AllowedDirectory { path, trust })
+            .collect(),
+        });
+    document
+        .sidebar
+        .threads
+        .push(workspace_state::ThreadRecord {
+            draft_input: "untouched".into(),
+            ..workspace_state::ThreadRecord::new(
+                workspace_state::ThreadId::new("t1"),
+                workspace_state::ProjectId::new("desktop"),
+                "Conversation",
+            )
+        });
+    let sidebar = serde_json::to_string(&document).unwrap();
     std::fs::write(root.join("sidebar.json"), &sidebar).unwrap();
     let mut boot = BootstrappedHost::open(BootstrapOptions {
         config_dir: root.clone(),

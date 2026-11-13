@@ -1,6 +1,9 @@
 //! Authority-free, versioned graph evidence. Provider inputs remain in resume_intents.
 use crate::{RunId, restore::RunRestoreDescriptor};
 use serde::{Deserialize, Serialize};
+/// Stable selector for CURRENT core configuration; never a stored capability.
+/// PR07 capture must use this exact versioned selector.
+pub const CORE_RECOVERY_SETTINGS_REFERENCE: &str = "evorch/core/current/v1";
 pub use storage::recovery::{
     RecoveryClaim, RecoveryClaimState, RecoveryEdge, RecoveryManifestRecord as RecoveryManifest,
 };
@@ -45,6 +48,35 @@ pub struct WaitContinuation {
     pub tool_name: String,
     pub legacy_result: bool,
     pub consume_mailbox: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<WaitPayload>,
+}
+/// Original batch identity; never an instruction to redispatch a tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitPayload {
+    pub position: usize,
+    pub input: serde_json::Value,
+    pub kind: WaitKind,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WaitKind {
+    Runs,
+    Delegates {
+        calls: Vec<DelegateWaitCall>,
+    },
+    Reply {
+        message_id: String,
+        deadline_unix_ms: u64,
+        delivered_answer_ids: Vec<String>,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegateWaitCall {
+    pub tool_call_id: String,
+    pub child: RunId,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,7 +145,12 @@ pub struct RunRecoveryRecord {
     pub recipe: RecoveryRecipe,
     pub waits: Vec<DurableWait>,
     pub deliveries: Vec<DurableDelivery>,
+    /// Exclusive runtime-wide high-watermark, including completed/expired receipts.
+    /// Required: an older record without this evidence cannot be activated.
+    pub next_message_id: u64,
     pub completion: Option<ObservedGeneration>,
+    #[serde(default)]
+    pub completion_generation: Option<u64>,
     pub auto_wakes: u32,
     pub user_reset_generation: u64,
     pub input_ids: Vec<String>,

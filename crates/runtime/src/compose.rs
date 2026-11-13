@@ -20,6 +20,7 @@ use crate::skill::default_skill_dirs_with_user_config;
 use crate::skill_source::SkillCatalogSource;
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 mod benchmark;
+mod checkpoint;
 mod hosted_search;
 mod image_generation;
 mod images;
@@ -231,6 +232,7 @@ pub struct RoutedModel {
     providers: BTreeMap<String, routing::ComposedProvider>,
     affinity: Mutex<SessionAffinity>,
     checkpoint_inputs: Mutex<BTreeMap<String, crate::quiesce::ProviderInput>>,
+    recovery_output_limits: Mutex<BTreeMap<String, checkpoint::RecoveryOutputLimit>>,
     /// 失敗したプロファイル・モデルのクールダウン。両 Router と共有する。
     health: Arc<routing::ProviderHealth>,
     image_health: Arc<routing::ProviderHealth>,
@@ -299,6 +301,7 @@ impl RoutedModel {
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
             checkpoint_inputs: Mutex::default(),
+            recovery_output_limits: Mutex::default(),
             agents,
             admission_routes: Vec::new(),
             max_retry_after_wait: std::time::Duration::from_secs(
@@ -1076,6 +1079,36 @@ struct FallbackAttempt<'a> {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn validate_checkpoint_compatibility(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        pins: &[crate::RoutePinRecord],
+        input: Option<&crate::quiesce::ProviderInput>,
+    ) -> Result<(), RuntimeError> {
+        self.validate_recovery_checkpoint(invocation, role, pins, input)
+    }
+    fn adopt_recovery_checkpoint(
+        &self,
+        run_id: &str,
+        pins: &[crate::RoutePinRecord],
+        input: Option<&crate::quiesce::ProviderInput>,
+    ) {
+        self.restore_route_pins(run_id, pins);
+        if let Some(input) = input {
+            self.recovery_output_limits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    run_id.to_owned(),
+                    checkpoint::RecoveryOutputLimit {
+                        profile: input.profile.clone(),
+                        model: input.request.model.clone(),
+                        limit: input.request.max_tokens,
+                    },
+                );
+        }
+    }
     fn restore_checkpoint_provider_state(
         &self,
         run_id: &str,
@@ -1129,6 +1162,10 @@ impl AgentModel for RoutedModel {
         role: Role,
         selected: &str,
     ) {
+        self.recovery_output_limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&invocation.run_id);
         if let Some(edit_tool) = selected
             .split_once('/')
             .and_then(|(profile, model)| self.route_edit_tool(profile, model))

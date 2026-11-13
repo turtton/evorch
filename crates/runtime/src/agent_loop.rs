@@ -32,6 +32,7 @@ mod run_js_host;
 mod stop_context;
 mod team;
 mod tool_calls;
+pub(crate) mod tools_waiting;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
@@ -64,6 +65,8 @@ pub(crate) use tool_calls::{
 
 pub(crate) struct RunTask {
     pub(crate) startup_failure: Option<String>,
+    /// Recovery uses one pinned concrete model even if configuration reloads.
+    pub(crate) recovery_model: Option<Arc<dyn AgentModel>>,
     pub(crate) publication: crate::runtime::PublicationToken,
     pub(crate) run_id: RunId,
     pub(crate) role: Role,
@@ -153,6 +156,8 @@ fn unobserved_jobs_reminder(jobs: &[String]) -> String {
 }
 
 pub(crate) struct LoopState {
+    pub(crate) recovery_waits: Vec<crate::quiesce::DurableWait>,
+    pub(crate) delegate_wait_calls: Vec<crate::quiesce::DelegateWaitCall>,
     pub(crate) last_provider_input: Option<crate::quiesce::ProviderInput>,
     pub(crate) provider_request_started: bool,
     pub(crate) consumed_intent_inputs: Vec<String>,
@@ -254,6 +259,8 @@ impl LoopState {
             ..Default::default()
         };
         Self {
+            recovery_waits: Vec::new(),
+            delegate_wait_calls: Vec::new(),
             last_provider_input: None,
             provider_request_started: false,
             consumed_intent_inputs: Vec::new(),
@@ -331,6 +338,9 @@ pub(crate) async fn run_agent(
         .upgrade()
         .and_then(|runtime| runtime.run_project(&task.config));
     let mut loop_shared = loop_shared(&shared, project.as_deref())?;
+    if let Some(model) = &task.recovery_model {
+        loop_shared.model = Arc::clone(model);
+    }
     if let Some(runtime) = shared.upgrade()
         && let Some(resolution) = runtime.model_resolution.get()
     {
@@ -385,6 +395,10 @@ pub(crate) async fn run_agent(
             .as_ref()
             .and_then(|state| state.mcp_snapshot.clone())
     };
+    let recovery_waits = restored
+        .as_ref()
+        .map(|s| s.recovery_waits.clone())
+        .unwrap_or_default();
     let is_restored = restored.is_some();
     let mut review_skill_refs = restored
         .as_ref()
@@ -501,6 +515,7 @@ pub(crate) async fn run_agent(
     state.benchmark = benchmark;
     state.benchmark_checked = benchmark_replay;
     state.benchmark_replay = benchmark_replay;
+    state.recovery_waits = recovery_waits;
     state.resumed = is_restored;
     state.completed_turn_end = completed_turn_end;
     state.host_input_ledger =
@@ -995,6 +1010,9 @@ impl LoopState {
     }
 
     async fn execute(&mut self) {
+        if !self.resume_recovery_waits().await {
+            return;
+        }
         loop {
             if !self
                 .quiesce_safe_point(crate::checkpoint::CheckpointBoundary::BeforeModelRequest)

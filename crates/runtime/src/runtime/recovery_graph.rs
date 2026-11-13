@@ -18,7 +18,7 @@ fn snapshot_receipt(intent: &ResumeIntent) -> Option<storage::RunContextReceipt>
             _ => None,
         })
 }
-fn edges(records: &[RunRecoveryRecord]) -> Vec<RecoveryEdge> {
+pub(super) fn edges(records: &[RunRecoveryRecord]) -> Vec<RecoveryEdge> {
     let mut edges = BTreeSet::new();
     let captured: BTreeSet<_> = records.iter().map(|record| record.run_id).collect();
     for r in records {
@@ -106,7 +106,15 @@ fn delivery(
     };
     Ok(DurableDelivery {
         message_id: q.message.message_id.clone(),
-        sender: q.message.sender_run_id.parse().map_err(graph_error)?,
+        sender: match &q.origin {
+            MessageOrigin::QuestionNotice(n) => {
+                if q.message.sender_run_id != "runtime" {
+                    return Err(graph_error("question notice body sender mismatch"));
+                }
+                n.child
+            }
+            _ => q.message.sender_run_id.parse().map_err(graph_error)?,
+        },
         recipient: q.message.recipient_run_id.parse().map_err(graph_error)?,
         sequence,
         state,
@@ -212,6 +220,19 @@ impl AgentRuntime {
                 recipe.descriptor = Some(descriptor);
             }
             let descriptor = recipe.descriptor.as_ref();
+            let waits = descriptor
+                .map(|d| d.recovery_waits.clone())
+                .unwrap_or_default();
+            if intent
+                .checkpoint
+                .as_ref()
+                .is_some_and(|c| c.boundary == crate::checkpoint::CheckpointBoundary::ToolsWaiting)
+                != !waits.is_empty()
+            {
+                return Err(graph_error(
+                    "intent/descriptor ToolsWaiting boundary mismatch",
+                ));
+            }
             let mut deliveries = Vec::new();
             if let Some(entry) = runs.get(&intent.run_id) {
                 for (index, q) in entry.mailbox.recovery_messages().iter().enumerate() {
@@ -264,9 +285,13 @@ impl AgentRuntime {
                 project: descriptor.and_then(|d| d.project_root.clone()),
                 role: intent.role.clone(),
                 recipe,
-                waits: Vec::new(),
+                waits,
                 deliveries,
+                next_message_id: self.shared.next_message_id.load(Ordering::Acquire),
                 completion,
+                completion_generation: runs
+                    .get(&intent.run_id)
+                    .map(|entry| entry.completion_notice.generation),
                 auto_wakes: wakes.get(&root).copied().unwrap_or_default(),
                 user_reset_generation: resets.get(&root).copied().unwrap_or_default(),
                 input_ids: intent
@@ -418,7 +443,9 @@ impl AgentRuntime {
                 .into_iter()
                 .filter_map(|id| id.parse::<RunId>().ok())
                 .collect();
-            covered.extend(component_runs.iter().copied());
+            if !load.record.as_ref().is_ok_and(|m| m.superseded) {
+                covered.extend(component_runs.iter().copied());
+            }
             let mut candidates = Vec::new();
             let mut required = vec![
                 RequiredRecoveryAuthority::CurrentOwnership,
@@ -445,6 +472,31 @@ impl AgentRuntime {
                     .collect::<Result<Vec<_>, _>>()?;
                 if edges(&records) != manifest.edges {
                     return Err(RecoveryReason::MissingEdge);
+                }
+                // A durable paused Stop increments the old revision. Identity and
+                // explicit Stop win over that expected conflict or PendingClaim.
+                for member in manifest.members.iter().filter(|m| m.resume) {
+                    let intent = store
+                        .with_database(|db| db.resume_intent(&member.run_id))
+                        .map_err(|_| RecoveryReason::CorruptComponent)?
+                        .ok_or(RecoveryReason::CorruptComponent)?;
+                    let intent = ResumeIntent::decode(intent)
+                        .map_err(|_| RecoveryReason::CorruptComponent)?;
+                    if intent.incarnation == member.incarnation {
+                        match intent.stop_reason {
+                            Some(StopReason::OperatorStopped) => {
+                                return Err(RecoveryReason::OperatorStopped);
+                            }
+                            Some(StopReason::Cancelled) => return Err(RecoveryReason::Cancelled),
+                            Some(StopReason::CliDisconnected) => {
+                                return Err(RecoveryReason::CliDisconnected);
+                            }
+                            _ => {}
+                        }
+                        if !intent.active {
+                            return Err(RecoveryReason::Terminal);
+                        }
+                    }
                 }
                 for (_, claim) in claims.iter().filter(|(manifest, _)| manifest == &id) {
                     let claim = claim
@@ -501,11 +553,20 @@ impl AgentRuntime {
                     if !intent.tool_intent.is_empty() {
                         return Err(RecoveryReason::UnconfirmedEffects);
                     }
-                    if !r.waits.is_empty() {
+                    if intent.checkpoint.as_ref().is_some_and(|c| {
+                        c.boundary == crate::checkpoint::CheckpointBoundary::ToolsWaiting
+                    }) != !r.waits.is_empty()
+                    {
+                        return Err(RecoveryReason::UnfinishedWaitUnsupportedIn06a);
+                    }
+                    if !r.waits.is_empty() && snapshot.is_none() {
                         return Err(RecoveryReason::UnfinishedWaitUnsupportedIn06a);
                     }
                     if let Some(receipt) = &member.snapshot {
                         let snapshot = snapshot.ok_or(RecoveryReason::MissingSnapshot)?;
+                        if crate::restore::validate_recovery_waits(&snapshot, &r.waits).is_err() {
+                            return Err(RecoveryReason::UnfinishedWaitUnsupportedIn06a);
+                        }
                         if !receipt.matches(&snapshot) {
                             return Err(RecoveryReason::MissingSnapshot);
                         }
@@ -533,7 +594,9 @@ impl AgentRuntime {
                         }
                         ResumePolicy::Unsupported => return Err(RecoveryReason::UnknownOwnership),
                     }
-                    if r.recipe.settings_reference.trim().is_empty() {
+                    if r.recipe.settings_reference
+                        != crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE
+                    {
                         return Err(RecoveryReason::CurrentSettingsRequired);
                     }
                     if r.recipe.team.is_some() {
@@ -552,6 +615,23 @@ impl AgentRuntime {
                             required_authority: required,
                         });
                     }
+                }
+                Err(reason)
+                    if matches!(
+                        reason,
+                        RecoveryReason::SupersededManifest
+                            | RecoveryReason::IntentRevisionConflict
+                            | RecoveryReason::OperatorStopped
+                            | RecoveryReason::Cancelled
+                            | RecoveryReason::CliDisconnected
+                            | RecoveryReason::Terminal
+                    ) =>
+                {
+                    plan.report.skipped.push(RecoveryOutcome {
+                        manifest_id: Some(id),
+                        runs: component_runs,
+                        reason,
+                    });
                 }
                 Err(reason) => plan.report.blocked.push(RecoveryOutcome {
                     manifest_id: Some(id),

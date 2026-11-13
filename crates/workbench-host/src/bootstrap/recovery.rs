@@ -1,6 +1,14 @@
 //! Read-only planning and explicit safe-point capture. No activation loop.
 //! The caller stops ingress/producers before capture. 06b/c will acquire current
 //! authorities and register the entire graph before activating any component.
+#[path = "recovery_authority.rs"]
+pub mod authority;
+#[path = "recovery_bindings.rs"]
+pub mod bindings;
+#[path = "recovery_catalog.rs"]
+pub mod catalog;
+#[path = "recovery_current.rs"]
+pub mod current;
 use super::BootstrapError;
 use runtime::{
     AgentRuntime, RunId,
@@ -10,6 +18,36 @@ use std::collections::BTreeMap;
 
 pub fn plan(runtime: &AgentRuntime) -> Result<RecoveryPlan, BootstrapError> {
     Ok(runtime.recovery_plan()?)
+}
+
+/// Explicit only: a read-only startup plan must never admit a provider task.
+/// PR 06c supplies the lease-bound evidence after exclusive startup is complete.
+pub fn prepare(
+    runtime: &AgentRuntime,
+    component: &runtime::quiesce::RecoveryComponent,
+    startup: storage::RecoveryStartupComplete,
+    ownership_root: &std::path::Path,
+) -> Result<runtime::PausedRecoveryComponent, BootstrapError> {
+    Ok(runtime.prepare_component(component, startup, ownership_root)?)
+}
+
+pub fn release(
+    runtime: &AgentRuntime,
+    component: &runtime::PausedRecoveryComponent,
+    authority: &runtime::CurrentRecoveryAuthority,
+    reason: &str,
+) -> Result<(), BootstrapError> {
+    Ok(runtime.release_prepared_component_with_authority(component, authority, reason)?)
+}
+
+/// Current authority is supplied explicitly; startup planning never calls this.
+pub fn activate(
+    runtime: &AgentRuntime,
+    mut component: runtime::PausedRecoveryComponent,
+    authority: runtime::CurrentRecoveryAuthority,
+) -> Result<Vec<RunId>, BootstrapError> {
+    runtime.restore_relations_and_continuations(&mut component)?;
+    Ok(runtime.activate_component(component, authority)?)
 }
 
 /// `capture_id` is unique per attempt, including retries. Components commit

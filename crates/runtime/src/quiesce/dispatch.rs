@@ -270,6 +270,7 @@ impl AgentRuntime {
         loop {
             if matches!(fence.kind, FenceKind::Shutdown) {
                 self.drain_lane_admissions().await.map_err(error)?;
+                self.release_shutdown_recovery()?;
                 let mut live = self.dispatch_pending_admissions();
                 live.extend(
                     self.list_agents()

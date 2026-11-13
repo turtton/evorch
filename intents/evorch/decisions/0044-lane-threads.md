@@ -328,9 +328,9 @@ artifact revision の有無・一致、clean な checkout、PR facts（[ADR 0043
 
 #### 人間による close と破棄
 
-- 人間による close（`human_closed`）と破棄（`discarded`）は、**台帳上の終結だけ**を行う（run の停止、thread／worktree の削除、detach は別の操作）。
+- 人間による close（`human_closed`）と破棄（`discarded`）は、**台帳上の終結だけ**を行う（run の停止、thread／worktree の削除、detach は別の操作。PR #566）。
 - verified close（設けない）や `lead_closed` とは区別して記録する（人間は Ready がない状態でも終結できる）。
-- agent の tool・MCP・dispatch や wire の `Command` からは到達できない、信頼された host 経路（`AgentRuntime::close_lane_from_host` / `CommandHost::close_lane_human` / `HumanLaneManagement::close_lane`、`Actor::Human` のみ許可）に限る。GUI の操作画面（および wire の `Command` 接続）は後続 PR で対応する。
+- 実行経路は、認証済みの人間が使う wire 経路（`Command::CloseLane`、namespace `lanes/close_lane`、host が provenance を付与）と、GUI の Close…／Discard… の確認画面（理由 `note` の入力が必須、成果物の参照等を参考情報として表示）から実行できる。agent の tool、MCP、dispatch からは到達できない（信頼された host 経路 `HumanLaneManagement::close_lane_as`、`Actor::Human` のみ許可。PR #566）。
 
 detached はこの管理から外れる。既存 goal checks や通常のレビュー運用は使えるが、元 lead による lane close を要求しない。detach は close ではなく、管理関係の終了である。
 
@@ -428,9 +428,15 @@ Phase 1b で、既存の「未回収の起動に対する進捗 credit」を chi
 
 共通 spawn credit とは独立して、完成済み成果を未回収のまま継続する新規 lane 作成を診断する。未回収とは、現在の lead の管理下にあり、latest Report が現行 brief/management revision の Ready または Failed で、モデルへの初回提示を観測していない lane である。基準となる未回収 lane 集合が残る間に成立した新規作成 intent を identity ごとに一度数え、初期閾値100に達した後の新規 lane_open だけを一時抑止する。既存 intent の冪等再試行、既存 lane の実行・回収・回答は続行する。
 
-成果が provider に提示された場合は当該 lane のみを基準集合から除き、集合が解消されたら連続作成区間を終了する。管理終了した lane も対象から除くが、detach 自体は completion 観測や共通 credit 回復ではない。別 lane の completion、Report 採番・heartbeat・通常 tool は古い集合と回数をリセットしない。running の数や経過時間だけでは抑止しない。
+成果が provider に提示された場合は当該 lane のみを基準集合から除き、集合が解消されたら連続作成区間を終了する。管理終了（detach）した lane、および lead の `lane_close`、人間の close、破棄（`lead_closed` / `human_closed` / `discarded`）で現行の close が成立している lane も対象から除く（PR #581）。lead の close は、Ready の seq を指定した回収とみなす。いずれも台帳の状態から lane_open ごとに導出し、cohort が解消されれば連続作成区間を終了する。detach と close は、completion の観測でも共通 spawn credit の回復でもない。新しい入力・Report・brief／management の変更で close が解除された lane は、未観測で現行 revision の terminal な結果であれば、再び未回収の候補に戻る。cohort identity には世代番号（`uncollected_cohort_generation`）を含め、同じ lane が再参入したときは別の episode として扱われ、診断も別の発生として記録される。別 lane の completion、Report 採番・heartbeat・通常 tool は古い集合と回数をリセットしない。running の数や経過時間だけでは抑止しない。
 
-これは lane 総数・同時数の上限ではなく、共通 credit 20 とその全回復の仕様は維持する。初期値100と20の比較は4Eで評価し、既定値を20へ変更するにはユーザーの追加確認を要する。
+これは lane 総数・同時数の上限ではなく、共通 credit 20 とその全回復の仕様は維持する。PR #579（Phase 4E 統合検証）において上限 100 と 20 を実測比較した。暴走場面（未読のまま作成継続）では 100 個／20 個でそれぞれ正当に抑止され、完了を直ちに読む通常場面ではどちらも抑止されない。一方、30 lane の広い fan-out では、先に完了した 1 件が未読のまま連続作成すると、閾値 20 の場合のみ 21 個目で 1 回誤って抑止される（100 では抑止なし）。この比較結果を踏まえ、ユーザー決定（question-0b6fc2c6）により上限は 100 を維持する。
+
+既知の制約として、intent を永続化してから計数を保存するまでの間に crash すると、その未保存分の計数は補修されず、抑止が遅れる（テストシナリオでは1件。PR #564）。
+
+また、未回収作成の抑止や復帰停止は診断コードとして追跡・通知する（Phase 4D D1、PR #571）。未回収作成抑止時は `LaneUncollectedCreationSuppressed`（HarnessImprovement）を、自動復帰が3回失敗して停止したときは `LaneRestoreRetrySuppressed`（TransientOrExternal）を発行する。いずれも再試行や復元で重複発行せず、cohort（または recovery episode）ごとに1回だけ発行する。
+
+Phase 4D D2（PR #575）により、`evorch inspect run <run>` の JSON に `lane_diagnostics` が追加され、保存済みの値（`stored`）と ledger の現在値（`current`）、および D1 の診断（`LaneUncollectedCreationSuppressed` / `LaneRestoreRetrySuppressed`）との相関・wake guard・stall・recovery を一続きで確認できるようになった。
 
 ### 14. workspace
 

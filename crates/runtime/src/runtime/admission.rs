@@ -779,7 +779,12 @@ impl AgentRuntime {
         Ok(())
     }
     pub(crate) fn try_seal_dispatch(&self, restart: bool) -> bool {
-        // Same registration order. tails is innermost and never held over A/R acquisition.
+        // Recovery and registration both use I -> A -> R.
+        let intents = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let admissions = self
             .shared
             .admissions
@@ -787,7 +792,8 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runs = lock_runs(&self.shared.runs);
         if !restart
-            && (admissions.values().any(|a| a.result.borrow().is_none())
+            && (intents.values().any(|i| i.paused_recovery.is_some())
+                || admissions.values().any(|a| a.result.borrow().is_none())
                 || runs.values().any(is_live))
         {
             return false;

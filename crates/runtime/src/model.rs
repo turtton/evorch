@@ -56,6 +56,13 @@ pub struct AgentInvocationContext {
     pub btw: Option<crate::btw::BtwPublisher>,
 }
 
+/// One immutable recovery model plus the concrete identity it represents.
+/// Mutable wrappers retain their invocation semantics without hiding reloads.
+pub struct RecoveryModelSnapshot {
+    pub generation: std::sync::Arc<dyn AgentModel>,
+    pub model: std::sync::Arc<dyn AgentModel>,
+}
+
 /// ロール実行のためのモデル呼び出し境界。
 ///
 /// role→model の解決・フォールバックは v01-routing-profiles がこの境界の実装として
@@ -64,6 +71,37 @@ pub struct AgentInvocationContext {
 /// (routing profiles) がモデル解決に使う引数である。
 #[async_trait]
 pub trait AgentModel: Send + Sync {
+    /// Pure, fail-closed recovery check. No provider/tool calls or shared route mutation.
+    ///
+    /// Callers must load and publish any output-limit catalog needed to prove
+    /// the effective settings before validation/activation. This method never
+    /// loads missing catalog data as a side effect.
+    fn validate_checkpoint_compatibility(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        pins: &[RoutePinRecord],
+        input: Option<&crate::quiesce::ProviderInput>,
+    ) -> Result<(), RuntimeError> {
+        if input.is_none() && pins.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeError::Model {
+                reason: "model cannot validate recovery checkpoint".into(),
+            })
+        }
+    }
+
+    /// Infallible adoption of a previously validated checkpoint, after durable ACK.
+    fn adopt_recovery_checkpoint(
+        &self,
+        run_id: &str,
+        pins: &[RoutePinRecord],
+        _input: Option<&crate::quiesce::ProviderInput>,
+    ) {
+        self.restore_route_pins(run_id, pins);
+    }
+
     /// Exact last provider input, not a reconstruction from current settings.
     /// Models that cannot expose it cannot produce restart-safe checkpoints.
     fn checkpoint_provider_input(&self, _run_id: &str) -> Option<crate::quiesce::ProviderInput> {
@@ -126,6 +164,13 @@ pub trait AgentModel: Send + Sync {
     /// Mutable composition wrappers expose the model to retain for a whole
     /// invocation, including tool capabilities used after its response arrives.
     fn invocation_snapshot(&self) -> Option<std::sync::Arc<dyn AgentModel>> {
+        None
+    }
+
+    /// Pin the concrete model across recovery validation, durable ACK, adoption
+    /// and execution. Mutable wrappers must identify their actual inner Arc as
+    /// the generation; a fixed semantic wrapper may be the retained model.
+    fn recovery_snapshot(&self) -> Option<RecoveryModelSnapshot> {
         None
     }
 

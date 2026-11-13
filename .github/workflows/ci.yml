@@ -82,6 +82,13 @@ jobs:
         run: |
           scripts/tests/test_verify_test_inventory.sh
           scripts/verify-test-inventory.sh --check-config
+      # The cached .debs of apt-install are only installed after they verify against
+      # the runner's Ubuntu archive keyring, and its failure paths (dpkg, apt-get,
+      # an unverified cache, what may be saved) behave as documented.
+      - name: apt-install cache verification and install paths
+        run: |
+          scripts/tests/test_apt_verify_cache.sh
+          scripts/tests/test_apt_install.sh
 
   # Whole-workspace lint. `gui` enables CEF by default, so the build links
   # libcef.so (setup-cef); nothing here starts CEF.
@@ -492,14 +499,13 @@ jobs:
           shared-key: ${{ runner.os }}-ci-workspace
           save-if: false
       # The Azure Ubuntu mirror once served packages at tens of kB/s for over an
-      # hour (2026-10-23). Every job restores one shared .deb cache; this package
-      # set covers the others', so only offscreen-gate saves (on main).
+      # hour (2026-10-23). The action caches the .debs per package set and runner
+      # image, and a verified cache installs without reaching any mirror.
       - name: Install headless rendering and isolated X11/Wayland deps
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
-          save: ${{ github.ref == 'refs/heads/main' }}
       # Only a libcef.so link: the distribution's own Vulkan loader would shadow
       # the system one the lavapipe renders below go through.
       - uses: ./.github/actions/setup-cef
@@ -562,14 +568,13 @@ jobs:
           shared-key: ${{ runner.os }}-ci-workspace
           save-if: false
       # The Azure Ubuntu mirror once served packages at tens of kB/s for over an
-      # hour (2026-10-23). Every job restores one shared .deb cache; this package
-      # set covers the others', so offscreen-gate saves it (on main).
+      # hour (2026-10-23). The action caches the .debs per package set and runner
+      # image, and a verified cache installs without reaching any mirror.
       - name: Install headless rendering and isolated X11/Wayland deps
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
-          save: false
       # Only a libcef.so link: the distribution's own Vulkan loader would shadow
       # the system one the lavapipe renders below go through.
       - uses: ./.github/actions/setup-cef

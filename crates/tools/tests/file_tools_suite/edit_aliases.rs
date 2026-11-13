@@ -190,3 +190,63 @@ async fn edit_still_rejects_null_required_fields() {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
     }
 }
+
+#[tokio::test]
+async fn edit_reads_edits_serialized_as_a_json_string() {
+    // Given: a file and a call whose `edits` is the JSON text of the array, as models
+    // that stringify nested parameters send it (aliases inside it included).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.md");
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    let edits = json!([
+        {"old_string": "one", "new_string": "ONE"},
+        {"old_str": "two", "new_str": "TWO"},
+    ]);
+
+    // When: the executor validates and runs the call.
+    executor()
+        .execute(
+            &context(),
+            "edit",
+            "c1",
+            json!({"path": path, "edits": edits.to_string()}),
+        )
+        .await
+        .unwrap();
+
+    // Then: the string is read as the array it holds.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\nTWO\n");
+}
+
+#[tokio::test]
+async fn edit_rejects_edits_strings_that_are_not_a_json_array() {
+    // Given: a file and `edits` strings that do not hold an array of replacements.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.md");
+    std::fs::write(&path, "one\n").unwrap();
+    for edits in [
+        "not json",
+        "[{\"old_string\": \"one\"",
+        "{\"old_string\": \"one\", \"new_string\": \"ONE\"}",
+        "[]",
+        "[\"one\"]",
+    ] {
+        // When: the executor validates the call.
+        let error = executor()
+            .execute(
+                &context(),
+                "edit",
+                "c1",
+                json!({"path": path, "edits": edits}),
+            )
+            .await
+            .unwrap_err();
+
+        // Then: nothing is guessed and the file is unchanged.
+        assert!(
+            matches!(error, ToolError::InvalidArgs { .. }),
+            "{edits}: {error:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
+    }
+}

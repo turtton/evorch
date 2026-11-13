@@ -196,7 +196,81 @@ impl ExclusiveLeases {
     }
 }
 
+/// Process-local evidence that the exclusive startup phase has ended. The handles
+/// keep both shared leases alive; neither persistence nor a boolean can forge it.
+#[derive(Debug)]
+pub struct RecoveryStartupComplete {
+    db: File,
+    root: File,
+}
+
+impl RecoveryStartupComplete {
+    /// Duplicate process-local startup evidence, retaining the same shared leases.
+    /// Writer-side use still validates both current database/root identities.
+    ///
+    /// # Errors
+    /// Returns an I/O error when either lease handle cannot be duplicated.
+    pub fn try_clone(&self) -> Result<Self, StorageError> {
+        Ok(Self {
+            db: self
+                .db
+                .try_clone()
+                .map_err(|e| StorageError::Io(e.to_string()))?,
+            root: self
+                .root
+                .try_clone()
+                .map_err(|e| StorageError::Io(e.to_string()))?,
+        })
+    }
+
+    pub(crate) fn validate(
+        &self,
+        db_path: &Path,
+        ownership_root: &Path,
+    ) -> Result<(), StorageError> {
+        same_lease(&self.db, &lease_path(db_path)?)?;
+        same_lease(&self.root, &ownership_root.join(".ownership-lock"))
+    }
+}
+
+fn same_lease(file: &File, path: &Path) -> Result<(), StorageError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held = file
+            .metadata()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        let target = fs::metadata(path).map_err(|e| StorageError::Io(e.to_string()))?;
+        if held.dev() != target.dev() || held.ino() != target.ino() {
+            return Err(invalid("recovery startup lease identity mismatch"));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        Err(invalid(
+            "recovery startup lease identity is unsupported on this platform",
+        ))
+    }
+}
+
 impl SharedLeases {
+    /// Only shared leases can issue startup-complete evidence. Both identities
+    /// are checked before cloning, so a token from a different DB/root is refused.
+    pub fn recovery_startup_complete(
+        &self,
+        db_path: &Path,
+        ownership_root: &Path,
+    ) -> Result<RecoveryStartupComplete, StorageError> {
+        same_lease(&self.db, &lease_path(db_path)?)?;
+        same_lease(&self.root, &ownership_root.join(".ownership-lock"))?;
+        Ok(RecoveryStartupComplete {
+            db: self.db_lease()?,
+            root: self.root_lease()?,
+        })
+    }
+
     /// A handle on the same database lock for `Storage::open_with_lease`; the
     /// lock lasts until every handle is dropped.
     ///

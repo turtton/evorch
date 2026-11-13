@@ -9,6 +9,10 @@ use tokio::sync::watch;
 mod fixture;
 #[cfg(test)]
 mod recovery_06a_tests;
+#[cfg(test)]
+mod recovery_06b_tests;
+#[cfg(test)]
+mod recovery_cache_tests;
 pub(crate) mod runtime;
 mod safe_point;
 #[cfg(test)]
@@ -20,6 +24,8 @@ pub(crate) mod dispatch;
 pub use dispatch::DispatchDrainFence;
 mod recovery;
 pub use recovery::*;
+mod continuity;
+pub use continuity::*;
 
 pub(crate) struct Coordinator {
     inner: Mutex<Inner>,
@@ -271,6 +277,31 @@ impl Coordinator {
         inner.intents.insert(intent.run_id, intent);
         self.changed();
         Ok((start, receipt))
+    }
+    /// Caller has fenced the entire component and has either retained its old
+    /// durable intents or received the atomic activation ACK. Never write again.
+    pub(crate) fn adopt(&self, intents: impl IntoIterator<Item = ResumeIntent>, persisted: bool) {
+        let mut inner = self.lock();
+        for intent in intents {
+            if persisted {
+                inner.persisted.insert(intent.run_id);
+            }
+            inner.intents.insert(intent.run_id, intent);
+        }
+        self.changed();
+    }
+    /// Forget only the indexed old incarnation after a durable release ACK.
+    pub(crate) fn forget_released(&self, run: RunId, incarnation: &str) {
+        let mut inner = self.lock();
+        if inner
+            .intents
+            .get(&run)
+            .is_some_and(|intent| intent.incarnation == incarnation)
+        {
+            inner.intents.remove(&run);
+            inner.persisted.remove(&run);
+            self.changed();
+        }
     }
     pub(crate) fn update(
         &self,

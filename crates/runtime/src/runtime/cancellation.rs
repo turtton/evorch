@@ -26,6 +26,32 @@ struct PublicationFence {
 
 impl ExecutionControl {
     pub(crate) fn new(cancelled: bool) -> Arc<Self> {
+        Self::with_incarnation(cancelled, crate::run_ids::RunIds::default().next())
+    }
+
+    // Only storage-validated Prepared evidence may select a saved incarnation.
+    pub(super) fn for_prepared(
+        proof: &storage::recovery::ValidatedPreparedClaim,
+        run: RunId,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        let member = proof
+            .claim()
+            .members
+            .iter()
+            .find(|m| m.run_id == run.to_string())
+            .ok_or_else(|| RuntimeError::Model {
+                reason: "run missing from prepared proof".into(),
+            })?;
+        let incarnation = member
+            .new_incarnation
+            .parse()
+            .map_err(|_| RuntimeError::Model {
+                reason: "invalid prepared incarnation".into(),
+            })?;
+        Ok(Self::with_incarnation(false, incarnation))
+    }
+
+    fn with_incarnation(cancelled: bool, incarnation: RunId) -> Arc<Self> {
         let approvals = Arc::new(sandbox::approval::ApprovalOwner::default());
         if cancelled {
             approvals.close();
@@ -36,7 +62,7 @@ impl ExecutionControl {
             approvals,
             publication: PublicationToken(Arc::new(PublicationFence {
                 gate: Mutex::new(()),
-                incarnation: crate::run_ids::RunIds::default().next(),
+                incarnation,
                 cancelled: AtomicBool::new(cancelled),
             })),
             cancel_tx: watch::channel(if cancelled {
@@ -51,6 +77,18 @@ impl ExecutionControl {
     pub(crate) fn publication(&self) -> PublicationToken {
         self.publication.clone()
     }
+    pub(super) fn publication_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.publication
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    #[cfg(test)]
+    pub(crate) fn cancelled_for_test(&self) -> bool {
+        self.cancelled()
+    }
+
     pub(super) fn cancelled(&self) -> bool {
         self.publication.0.cancelled.load(Ordering::Acquire)
     }
@@ -130,6 +168,7 @@ pub(super) struct SpawnIntent {
     // An opaque allocation avoids generation wraparound/ABA while tokens exist.
     pub(super) cancellation_generation: Arc<()>,
     pub(super) execution: Option<Arc<ExecutionControl>>,
+    pub(super) paused_recovery: Option<super::recovery_activation::PausedRecoveryIndex>,
 }
 
 pub(super) fn current_execution(
@@ -198,6 +237,15 @@ impl AgentRuntime {
                 drop(intents);
                 drop(gate);
                 continue;
+            }
+            if let Some(paused) = intents.get(&run).and_then(|i| i.paused_recovery.as_ref()) {
+                let old = paused.old_incarnation.clone();
+                drop(runs);
+                drop(admissions);
+                drop(intents);
+                execution.forbid_publication();
+                self.fence_paused_stop(run, &old, crate::quiesce::StopReason::Cancelled)?;
+                return Ok(());
             }
             let ownership = Self::pending_lane_cancellation_ownership(run, &runs, &admissions);
             if let Some(admission) = admissions.get_mut(&run)
@@ -269,6 +317,14 @@ impl AgentRuntime {
         parent: Option<RunId>,
         intents: &HashMap<RunId, SpawnIntent>,
     ) -> Result<Arc<ExecutionControl>, RuntimeError> {
+        if intents
+            .get(&run)
+            .is_some_and(|i| i.paused_recovery.is_some())
+        {
+            return Err(RuntimeError::Model {
+                reason: "run belongs to a paused recovery component".into(),
+            });
+        }
         if intents.get(&run).is_some_and(|i| i.cancelled)
             || parent
                 .and_then(|p| intents.get(&p))
@@ -350,6 +406,7 @@ pub(crate) enum HookPoint {
     SubtreeCollected,
     AdmissionRegistered,
     LaneOwnershipValidated,
+    LaneStopWriteStarted,
     LaneStopWriteFailed,
     LaneStopPersisted,
     AdmissionFailed,
@@ -367,6 +424,10 @@ pub(crate) enum HookPoint {
     ContinuationSnapshotPrepared,
     QuestionMailboxClosing,
     QuestionChildPrepared,
+    RecoveryBeforeActivation,
+    RecoveryActivated,
+    RecoveryPublished,
+    RecoveryGateOpened,
 }
 #[cfg(test)]
 type ExecutionHook = (HookPoint, Weak<ExecutionControl>, Box<dyn FnOnce() + Send>);
@@ -375,12 +436,7 @@ type ExecutionHook = (HookPoint, Weak<ExecutionControl>, Box<dyn FnOnce() + Send
 pub(super) struct TestHooks(Mutex<Vec<ExecutionHook>>);
 #[cfg(test)]
 impl AgentRuntime {
-    pub(crate) fn lane_stop_write_hook(&self, run: RunId, persisted: bool) {
-        let point = if persisted {
-            HookPoint::LaneStopPersisted
-        } else {
-            HookPoint::LaneStopWriteFailed
-        };
+    pub(crate) fn lane_stop_write_hook(&self, run: RunId, point: HookPoint) {
         if let Ok(execution) = self.execution_snapshot(run) {
             self.execution_hook(point, &execution);
         }

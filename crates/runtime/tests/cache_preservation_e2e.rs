@@ -16,6 +16,7 @@ mod lane_cache;
 mod procedure_boundary_cache;
 #[path = "read_alias_cache/mod.rs"]
 mod read_alias_cache;
+mod recovery_activation_cache;
 #[path = "run_js_cache/mod.rs"]
 mod run_js_cache;
 mod support;

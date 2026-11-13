@@ -123,6 +123,23 @@ impl WaitArgs {
     }
 }
 
+/// One parser owns both live waits and durable continuation validation.
+pub(crate) fn durable_contract(
+    input: &Value,
+) -> Result<(Vec<RunId>, crate::quiesce::DurableWaitMode, bool), String> {
+    let mut input = input.clone();
+    drop_ignored_arguments("wait", &mut input);
+    let request = parse::<WaitArgs>(input).and_then(WaitArgs::validate)?;
+    Ok((
+        request.runs,
+        match request.mode {
+            WaitMode::Any => crate::quiesce::DurableWaitMode::Any,
+            WaitMode::All => crate::quiesce::DurableWaitMode::All,
+        },
+        request.legacy,
+    ))
+}
+
 /// The model's `wait`: agent messages that end it are returned in the result
 /// and consumed, so no separate `inbox` call is needed.
 pub(in crate::meta) async fn wait(
@@ -159,6 +176,18 @@ async fn wait_with(
     }
     request.reported.clone_from(&state.reported_questions);
     request.delivered = state.delivered_answer_ids();
+    if let Some(saved) = state
+        .recovery_waits
+        .iter()
+        .find(|w| Some(&w.tool_call_id) == state.meta_call_id.as_ref())
+    {
+        request
+            .reported
+            .extend(saved.questions.iter().map(|g| g.id.clone()));
+        request
+            .delivered
+            .extend(saved.answers.iter().map(|g| g.id.clone()));
+    }
     if state.transition(AgentRunPhase::Waiting, None).is_err() {
         return error("parent run could not enter Waiting");
     }
@@ -169,6 +198,8 @@ async fn wait_with(
         // Another wait in this same tool batch may already have received input.
         user_input_response(runtime, caller, &request)
     } else {
+        let mut quiesce = runtime.shared.quiesce.subscribe();
+        state.quiesce_tools_waiting(None).await;
         let observation = observe(runtime, caller, &request, state.channels.cancel_rx.clone());
         tokio::pin!(observation);
         loop {
@@ -177,6 +208,7 @@ async fn wait_with(
                 // Keep observation alive when discarding a withdrawn input;
                 // receiving a tombstone must not interrupt the wait.
                 result = &mut observation => break result,
+                _ = quiesce.changed() => state.quiesce_tools_waiting(None).await,
                 Some(message) = state.channels.inbox_rx.recv() => {
                     // Inject after ToolResults, never between ToolUse and ToolResult.
                     state.queue_user_message(message);

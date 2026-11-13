@@ -14,6 +14,7 @@ description = "Core-side command handling for the evorch workbench protocol (ADR
 base64 = { workspace = true }
 image = { workspace = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 workbench-protocol = { path = "../workbench-protocol" }
+workspace-state = { path = "../workspace-state" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 eval = { path = "../eval" }

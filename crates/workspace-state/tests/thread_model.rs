@@ -1,0 +1,195 @@
+use std::collections::BTreeMap;
+
+use tempfile::tempdir;
+use workspace_state::{
+    ProjectId, SidebarState, ThreadError, ThreadId, ThreadRunPhase, ThreadState,
+};
+
+#[test]
+fn create_switch_pin_unpin_threads_under_project() {
+    // Given: a sidebar containing one project.
+    let directory = tempdir().expect("temporary directory must be created");
+    let mut sidebar = SidebarState::default();
+    let project_id = ProjectId::new("p1");
+    sidebar
+        .add_project(project_id.clone(), "One", directory.path())
+        .expect("project must be added");
+
+    // When: two threads are created, switched, pinned, and unpinned.
+    let first = ThreadId::new("t1");
+    let second = ThreadId::new("t2");
+    sidebar
+        .create_thread(first.clone(), project_id.clone(), "First")
+        .expect("first thread must be created");
+    sidebar
+        .create_thread(second.clone(), project_id, "Second")
+        .expect("second thread must be created");
+    sidebar
+        .switch_thread(&second)
+        .expect("second thread must be selected");
+    sidebar
+        .set_pinned(&first, true)
+        .expect("first thread must pin");
+    sidebar
+        .set_pinned(&first, false)
+        .expect("first thread must unpin");
+
+    // Then: selection and pin state reflect the operator actions.
+    assert_eq!(sidebar.active_thread, Some(second));
+    assert!(!sidebar.threads[0].pinned);
+}
+
+#[test]
+fn switching_to_another_projects_thread_selects_that_project() {
+    let first_dir = tempdir().expect("temporary directory must be created");
+    let second_dir = tempdir().expect("temporary directory must be created");
+    let mut sidebar = SidebarState::default();
+    let (first, second) = (ProjectId::new("p1"), ProjectId::new("p2"));
+    sidebar
+        .add_project(first.clone(), "One", first_dir.path())
+        .expect("first project must be added");
+    sidebar
+        .add_project(second.clone(), "Two", second_dir.path())
+        .expect("second project must be added");
+    sidebar.select_project(&first).expect("project must select");
+    let thread = ThreadId::new("t2");
+    sidebar
+        .create_thread(thread.clone(), second.clone(), "Second")
+        .expect("thread must be created");
+
+    sidebar.switch_thread(&thread).expect("thread must switch");
+
+    assert_eq!(sidebar.selected_project, Some(second));
+    assert_eq!(sidebar.active_thread, Some(thread));
+}
+
+#[test]
+fn thread_state_precedence_stopped_error_running_waiting_done_active() {
+    // Given: a thread with two run IDs and each possible runtime phase combination.
+    let mut thread =
+        workspace_state::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
+    assert_eq!(thread.state(&BTreeMap::new()), ThreadState::Active);
+    thread.run_ids = vec!["r1".to_owned(), "r2".to_owned()];
+
+    // When: phase maps exercise precedence from done through error and a stopped run.
+    let done = BTreeMap::from([
+        ("r1".to_owned(), ThreadRunPhase::Done),
+        ("r2".to_owned(), ThreadRunPhase::Done),
+    ]);
+    let waiting = BTreeMap::from([
+        ("r1".to_owned(), ThreadRunPhase::Done),
+        ("r2".to_owned(), ThreadRunPhase::Waiting),
+    ]);
+    let running = BTreeMap::from([
+        ("r1".to_owned(), ThreadRunPhase::Waiting),
+        ("r2".to_owned(), ThreadRunPhase::Pending),
+    ]);
+    let error = BTreeMap::from([
+        ("r1".to_owned(), ThreadRunPhase::Running),
+        ("r2".to_owned(), ThreadRunPhase::Error),
+    ]);
+
+    let stopped = BTreeMap::from([
+        ("r1".to_owned(), ThreadRunPhase::Stopped),
+        ("r2".to_owned(), ThreadRunPhase::Error),
+    ]);
+
+    // Then: the thread state follows the runtime phases, with stopped taking precedence.
+    assert_eq!(thread.state(&done), ThreadState::Done);
+    assert_eq!(thread.state(&waiting), ThreadState::Waiting);
+    assert_eq!(thread.state(&running), ThreadState::Running);
+    assert_eq!(thread.state(&error), ThreadState::Error);
+    assert_eq!(thread.state(&stopped), ThreadState::Stopped);
+}
+
+#[test]
+fn current_root_state_ignores_historical_roots_and_children() {
+    let mut thread =
+        workspace_state::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
+    thread.run_ids = vec!["old-root".into(), "root".into(), "child".into()];
+    thread.root_run_id = Some("root".into());
+    let mut phases = BTreeMap::from([
+        ("old-root".into(), ThreadRunPhase::Error),
+        ("child".into(), ThreadRunPhase::Stopped),
+    ]);
+    assert_eq!(thread.state(&phases), ThreadState::Active);
+    for (phase, expected) in [
+        (ThreadRunPhase::Pending, ThreadState::Running),
+        (ThreadRunPhase::Running, ThreadState::Running),
+        (ThreadRunPhase::Waiting, ThreadState::Waiting),
+        (ThreadRunPhase::Done, ThreadState::Done),
+        (ThreadRunPhase::Stopped, ThreadState::Stopped),
+        (ThreadRunPhase::Error, ThreadState::Error),
+    ] {
+        phases.insert("root".into(), phase);
+        assert_eq!(thread.state(&phases), expected);
+    }
+    let saved = serde_json::to_string(&thread).unwrap();
+    let restored: workspace_state::ThreadRecord = serde_json::from_str(&saved).unwrap();
+    assert_eq!(restored.root_run_id.as_deref(), Some("root"));
+    assert_eq!(restored.run_ids, thread.run_ids);
+}
+
+#[test]
+fn running_subagent_shows_thread_running_while_root_is_idle() {
+    // Given: a conversation root with one subagent run.
+    let mut thread =
+        workspace_state::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
+    thread.run_ids = vec!["root".into(), "child".into()];
+    thread.root_run_id = Some("root".into());
+
+    for (root, child, expected) in [
+        // When: the root waits on the subagent or ended its turn.
+        (
+            Some(ThreadRunPhase::Waiting),
+            ThreadRunPhase::Running,
+            ThreadState::Running,
+        ),
+        (
+            Some(ThreadRunPhase::Done),
+            ThreadRunPhase::Pending,
+            ThreadState::Running,
+        ),
+        (None, ThreadRunPhase::Running, ThreadState::Running),
+        // Then: a finished subagent leaves the root's own state.
+        (
+            Some(ThreadRunPhase::Waiting),
+            ThreadRunPhase::Done,
+            ThreadState::Waiting,
+        ),
+        (
+            Some(ThreadRunPhase::Waiting),
+            ThreadRunPhase::Waiting,
+            ThreadState::Waiting,
+        ),
+        // Operator stops and root failures still take precedence.
+        (
+            Some(ThreadRunPhase::Stopped),
+            ThreadRunPhase::Running,
+            ThreadState::Stopped,
+        ),
+        (
+            Some(ThreadRunPhase::Error),
+            ThreadRunPhase::Running,
+            ThreadState::Error,
+        ),
+    ] {
+        let mut phases = BTreeMap::from([("child".to_owned(), child)]);
+        if let Some(root) = root {
+            phases.insert("root".into(), root);
+        }
+        assert_eq!(thread.state(&phases), expected, "{root:?} / {child:?}");
+    }
+}
+
+#[test]
+fn thread_creation_rejects_unknown_project() {
+    // Given: an empty sidebar.
+    let mut sidebar = SidebarState::default();
+
+    // When: a thread references an unknown project.
+    let result = sidebar.create_thread(ThreadId::new("t1"), ProjectId::new("missing"), "Thread");
+
+    // Then: creation fails closed with a typed error.
+    assert_eq!(result, Err(ThreadError::UnknownProject));
+}

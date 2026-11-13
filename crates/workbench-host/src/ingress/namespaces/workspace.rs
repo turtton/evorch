@@ -1,5 +1,6 @@
-//! Workspace namespace adapter: project and thread listings and details are read from the projection. The
-//! namespace has no commands, so its command type is empty.
+//! Workspace namespace adapter: listings and details of projects and threads are
+//! read from the projection; everything the shared sidebar owns (trust, allowed
+//! directories, families, renames) is done by `self.areas.workspace`.
 use workbench_protocol::commands::CommandReply;
 use workbench_protocol::envelope::Provenance;
 use workbench_protocol::errors::WorkbenchError;
@@ -12,14 +13,21 @@ impl CommandHost {
     pub(in crate::ingress) fn workspace_command(
         &mut self,
         command: WorkspaceCommand,
-        _provenance: &Provenance,
+        provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
-        match command {}
+        let changes_projects = matches!(
+            command,
+            WorkspaceCommand::RegisterProject(_) | WorkspaceCommand::RenameProject(_)
+        );
+        let reply = self.areas.workspace.command(command, provenance)?;
+        if changes_projects {
+            // The sidebar is saved. The directory the commands resolve project
+            // ids with, and the projection that lists them, follow it.
+            self.sync_projects()?;
+        }
+        Ok(reply)
     }
 
-    /// The projection serves the operations listed here. An operation the
-    /// workspace area adds later gets its own arm, answered by
-    /// `self.areas.workspace`; the compiler asks for it.
     pub(in crate::ingress) fn workspace_query(
         &self,
         query: &Query,
@@ -29,6 +37,14 @@ impl CommandHost {
             WorkspaceQuery::ListProjects(_)
             | WorkspaceQuery::ListThreads(_)
             | WorkspaceQuery::GetThread(_) => self.projection.query(query),
+            WorkspaceQuery::GetProjectAccess(_)
+            | WorkspaceQuery::ListFamilies(_)
+            | WorkspaceQuery::GetThreadDetail(_)
+            | WorkspaceQuery::GetRetention(_) => self
+                .areas
+                .workspace
+                .query(namespace_query)
+                .map(QueryReply::Workspace),
         }
     }
 }

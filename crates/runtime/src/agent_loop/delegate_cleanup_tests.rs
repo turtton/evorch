@@ -97,6 +97,8 @@ fn fixture_with_model(
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     let mailbox = Arc::new(RunMailbox::new());
     let state = LoopState {
+        recovery_waits: Vec::new(),
+        delegate_wait_calls: Vec::new(),
         last_provider_input: None,
         provider_request_started: false,
         consumed_intent_inputs: Vec::new(),
@@ -114,6 +116,7 @@ fn fixture_with_model(
         inherited_mcp_snapshot: None,
         task: RunTask {
             startup_failure: None,
+            recovery_model: None,
             publication: crate::runtime::ExecutionControl::new(false).publication(),
             ancestry: Default::default(),
             turn: providers::RequestTurnContext::unattributed(false),

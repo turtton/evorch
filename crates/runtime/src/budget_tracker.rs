@@ -149,10 +149,15 @@ pub struct SpawnCredits {
     #[serde(default)]
     uncollected_lane_ids: BTreeSet<String>,
     /// Identity of the current uncollected cohort: a digest of the lane IDs it was
-    /// seeded with, so a restored run names the same cohort. Absent in a snapshot
-    /// that predates it; derived from the remaining IDs when first needed.
+    /// seeded with and of `uncollected_cohort_generation`, so a restored run names the
+    /// same cohort while a later cohort of the same lanes is a different one. Absent in
+    /// a snapshot that predates it; derived from the remaining IDs when first needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     uncollected_cohort_id: Option<String>,
+    /// How many cohorts this lead has seeded. A cohort that resolved and later forms
+    /// again from the same lane IDs (a closed lane that reports anew) is a new episode.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    uncollected_cohort_generation: u32,
     /// The suppression of `uncollected_cohort_id` was already reported as a diagnostic.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     uncollected_suppression_reported: bool,
@@ -165,9 +170,14 @@ pub struct SpawnCredits {
 /// Not a lane-count limit; only further model-authored creation is suppressed.
 pub(crate) const UNCOLLECTED_LANE_OPEN_LIMIT: u32 = 100;
 
-fn cohort_identity(ids: &BTreeSet<String>) -> String {
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn cohort_identity(ids: &BTreeSet<String>, generation: u32) -> String {
     use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();
+    hash.update(generation.to_le_bytes());
     for id in ids {
         hash.update(id.as_bytes());
         hash.update([0]);
@@ -231,8 +241,16 @@ impl SpawnCredits {
                 .filter(|id| !self.observed.contains(&format!("lane:{id}")))
                 .cloned()
                 .collect();
-            self.uncollected_cohort_id = (!self.uncollected_lane_ids.is_empty())
-                .then(|| cohort_identity(&self.uncollected_lane_ids));
+            if self.uncollected_lane_ids.is_empty() {
+                self.uncollected_cohort_id = None;
+            } else {
+                self.uncollected_cohort_generation =
+                    self.uncollected_cohort_generation.saturating_add(1);
+                self.uncollected_cohort_id = Some(cohort_identity(
+                    &self.uncollected_lane_ids,
+                    self.uncollected_cohort_generation,
+                ));
+            }
             self.uncollected_suppression_reported = false;
         }
         self.uncollected_lane_open_count >= limit
@@ -262,10 +280,13 @@ impl SpawnCredits {
         if self.uncollected_suppression_reported || self.uncollected_lane_ids.is_empty() {
             return None;
         }
-        let ids = &self.uncollected_lane_ids;
+        let (ids, generation) = (
+            &self.uncollected_lane_ids,
+            self.uncollected_cohort_generation,
+        );
         let cohort_id = self
             .uncollected_cohort_id
-            .get_or_insert_with(|| cohort_identity(ids))
+            .get_or_insert_with(|| cohort_identity(ids, generation))
             .clone();
         self.uncollected_suppression_reported = true;
         Some(UncollectedSuppression {
@@ -288,6 +309,96 @@ impl SpawnCredits {
             "message": "New lane_open temporarily suppressed. Collect the listed lanes' current ready/failed reports with lane_list or notification delivery. Existing lanes, collection and answers remain available; this is not a lane-count limit."
         }).to_string()
     }
+}
+
+/// The uncollected-lane marker of a stored run snapshot, as a diagnostic reads it
+/// (`evorch inspect run`). A value stored in the snapshot, not the ledger's current
+/// state: the cohort may have been collected since.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StoredUncollectedLanes {
+    /// Identity of the cohort the suppression diagnostic names. When the snapshot
+    /// predates the stored identity it is derived from the remaining IDs
+    /// (`cohort_id_derived`), which may differ from the one reported earlier.
+    pub cohort_id: Option<String>,
+    pub cohort_id_derived: bool,
+    /// Successful creation intents while the cohort remained uncollected.
+    pub uncollected_lane_open_count: u32,
+    pub lane_ids: Vec<String>,
+    /// The cohort's suppression diagnostic was already emitted.
+    pub suppression_reported: bool,
+    /// The creation threshold of a normal runtime; a test may inject another, which
+    /// the snapshot does not record.
+    pub default_threshold: u32,
+}
+
+/// Why the uncollected-lane marker of a stored run configuration cannot be shown.
+/// A snapshot without the marker is never read as "nothing uncollected".
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StoredSpawnCreditsError {
+    #[error("the stored run configuration has no spawn_credits")]
+    Missing,
+    #[error("the stored spawn_credits cannot be read: {0}")]
+    Malformed(String),
+}
+
+impl SpawnCredits {
+    /// The uncollected-lane marker, for diagnosis. Read only.
+    #[must_use]
+    pub fn stored_uncollected_lanes(&self) -> StoredUncollectedLanes {
+        let derived = self.uncollected_cohort_id.is_none() && !self.uncollected_lane_ids.is_empty();
+        StoredUncollectedLanes {
+            cohort_id: self.uncollected_cohort_id.clone().or_else(|| {
+                (!self.uncollected_lane_ids.is_empty()).then(|| {
+                    cohort_identity(
+                        &self.uncollected_lane_ids,
+                        self.uncollected_cohort_generation,
+                    )
+                })
+            }),
+            cohort_id_derived: derived,
+            uncollected_lane_open_count: self.uncollected_lane_open_count,
+            lane_ids: self.uncollected_lane_ids.iter().cloned().collect(),
+            suppression_reported: self.uncollected_suppression_reported,
+            default_threshold: UNCOLLECTED_LANE_OPEN_LIMIT,
+        }
+    }
+}
+
+/// Fields `SpawnCredits` always serializes (it skips only the optional cohort identity,
+/// the reported flag and empty presentations), so a stored value without them was not
+/// written with the uncollected marker and is not read as an empty one.
+const STORED_UNCOLLECTED_FIELDS: [&str; 2] =
+    ["uncollected_lane_open_count", "uncollected_lane_ids"];
+
+/// Reads the uncollected-lane marker out of a stored run configuration document
+/// (`run_contexts.config_json`, resolved). It decodes `spawn_credits` with the
+/// type the runtime serializes it from, so the stored form and this reader cannot
+/// drift apart unnoticed.
+///
+/// # Errors
+/// [`StoredSpawnCreditsError`] when the document has no `spawn_credits`, it does
+/// not decode, or it lacks a field that is always stored; never a zero value in
+/// their place.
+pub fn stored_uncollected_lanes(
+    run_config: &serde_json::Value,
+) -> Result<StoredUncollectedLanes, StoredSpawnCreditsError> {
+    let credits = run_config
+        .get("spawn_credits")
+        .ok_or(StoredSpawnCreditsError::Missing)?;
+    let object = credits.as_object().ok_or_else(|| {
+        StoredSpawnCreditsError::Malformed("spawn_credits is not an object".into())
+    })?;
+    if let Some(field) = STORED_UNCOLLECTED_FIELDS
+        .iter()
+        .find(|field| !object.contains_key(**field))
+    {
+        return Err(StoredSpawnCreditsError::Malformed(format!(
+            "spawn_credits has no {field}"
+        )));
+    }
+    let credits: SpawnCredits = serde_json::from_value(credits.clone())
+        .map_err(|error| StoredSpawnCreditsError::Malformed(error.to_string()))?;
+    Ok(credits.stored_uncollected_lanes())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
