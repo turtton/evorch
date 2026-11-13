@@ -1127,3 +1127,20 @@ fn a_stored_snapshot_without_the_cohort_identity_derives_it_and_says_so() {
             .cohort_id
     );
 }
+
+#[test]
+fn an_old_snapshot_without_generation_derives_its_identity_from_generation_zero() {
+    let mut credits = SpawnCredits::default();
+    let managed = BTreeSet::from(["A".into()]);
+    credits.reconcile_uncollected_lanes_at(&managed, &managed, 100);
+    let mut config = stored_config(&credits);
+    let stored_credits = config["spawn_credits"].as_object_mut().unwrap();
+    stored_credits.remove("uncollected_cohort_id");
+    stored_credits.remove("uncollected_cohort_generation");
+
+    let stored = stored_uncollected_lanes(&config).unwrap();
+    let expected = cohort_identity(&BTreeSet::from(["A".into()]), 0);
+
+    assert!(stored.cohort_id_derived);
+    assert_eq!(stored.cohort_id.as_deref(), Some(expected.as_str()));
+}
