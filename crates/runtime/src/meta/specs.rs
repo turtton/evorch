@@ -339,7 +339,7 @@ pub(super) fn user_answers(name: &str) -> ToolSpec {
 pub(super) fn subagent_questions(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Read questions from one direct child run, including pending state and original requester. Use after wait reports attention for that child. Listed questions count as reported, so a later wait does not return for them. Decide whether to answer from available context or ask the user on your own run. Only the direct Orchestrator parent may read these questions.",
+        "Read questions from one direct child run, including pending state and original requester: every unanswered question and the 32 most recent answered ones, oldest first. Use after wait reports attention for that child. Listed questions count as reported, so a later wait does not return for them. Decide whether to answer from available context or ask the user on your own run. Only the direct Orchestrator parent may read these questions.",
         json!({"run_id":run_id()}),
         &["run_id"],
         true,
