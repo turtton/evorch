@@ -13,25 +13,21 @@ impl AgentRuntime {
     /// Stop opening turns; never abort a provider/tool future. Dropping the waiter
     /// does not undo the request. Concurrent callers join the same transaction.
     pub fn request_quiesce(&self) {
-        self.shared.quiesce.begin();
+        let _ = self.shared.quiesce.begin();
     }
     /// Only success permits the host to exit; no elapsed-time escape hatch.
     pub async fn wait_quiesced(&self) -> Result<(), RuntimeError> {
         let mut version = self.shared.quiesce.subscribe();
         loop {
-            if self
-                .shared
-                .quiesce
-                .complete(self.shared.run_store.get())
-                .map_err(error)?
-            {
+            let complete = self.complete_restart_safe_points()?;
+            if complete {
                 return Ok(());
             }
             version.changed().await.map_err(error)?;
         }
     }
     pub async fn quiesce(&self) -> Result<(), RuntimeError> {
-        self.request_quiesce();
+        self.begin_restart_quiesce()?;
         self.wait_quiesced().await
     }
     /// Read-only evidence. PR 06 must validate current authority and the

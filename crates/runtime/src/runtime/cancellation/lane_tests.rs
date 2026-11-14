@@ -432,10 +432,11 @@ async fn lane_stop_writeback_retries_storage_recovery_and_stop_interrupts_its_ba
         f.model.admission_entered.notified().await;
         let lock = rusqlite::Connection::open(f.dir.path().join("lanes.db")).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        assert!(matches!(
-            f.runtime.stop(f.run, StopScope::SelfOnly),
-            Err(RuntimeError::LaneCancellation { .. })
-        ));
+        let stopped = f.runtime.stop(f.run, StopScope::SelfOnly);
+        assert!(
+            matches!(stopped, Err(RuntimeError::LaneCancellation { .. })),
+            "unexpected Stop result: {stopped:?}"
+        );
         assert!(f.runtime.wait(f.run).await.is_err());
         assert_eq!(f.runtime.pending_lane_stop_writes(), 1);
         let execution = f.runtime.execution_snapshot(f.run).unwrap();

@@ -10,6 +10,7 @@ pub(super) struct PendingChatResume {
 pub(crate) struct ExecutionControl {
     pub(super) pending_resume: Mutex<Option<PendingChatResume>>,
     pub(crate) startup_failure: Mutex<Option<String>>,
+    pub(crate) terminal_dispatch: Mutex<Option<crate::quiesce::dispatch::DispatchGuard>>,
     publication: PublicationToken,
     pub(super) cancel_tx: watch::Sender<RunInterrupt>,
     pub(crate) approvals: Arc<sandbox::approval::ApprovalOwner>,
@@ -58,6 +59,7 @@ impl ExecutionControl {
         }
         Arc::new(Self {
             startup_failure: Mutex::new(None),
+            terminal_dispatch: Mutex::new(None),
             pending_resume: Mutex::new(None),
             approvals,
             publication: PublicationToken(Arc::new(PublicationFence {
@@ -74,6 +76,12 @@ impl ExecutionControl {
         })
     }
 
+    pub(crate) fn track_terminal_dispatch(&self, guard: crate::quiesce::dispatch::DispatchGuard) {
+        self.terminal_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert(guard);
+    }
     pub(crate) fn publication(&self) -> PublicationToken {
         self.publication.clone()
     }
@@ -206,6 +214,9 @@ impl AgentRuntime {
     /// Global locks never wait for a gate. Retry drops the old gate before
     /// selecting a new generation; the notification uses only that generation.
     pub fn cancel(&self, run: RunId) -> Result<(), RuntimeError> {
+        self.with_terminal_dispatch(|| self.cancel_with_dispatch(run))
+    }
+    fn cancel_with_dispatch(&self, run: RunId) -> Result<(), RuntimeError> {
         loop {
             let execution = self.execution_snapshot(run)?;
             #[cfg(test)]
@@ -246,6 +257,9 @@ impl AgentRuntime {
                 execution.forbid_publication();
                 self.fence_paused_stop(run, &old, crate::quiesce::StopReason::Cancelled)?;
                 return Ok(());
+            }
+            if runs.get(&run).is_some_and(is_live) {
+                execution.track_terminal_dispatch(self.shared.dispatch_tails.register(true)?);
             }
             let ownership = Self::pending_lane_cancellation_ownership(run, &runs, &admissions);
             if let Some(admission) = admissions.get_mut(&run)
@@ -402,6 +416,7 @@ pub(super) fn lane_cancellation_error(run: RunId, error: crate::lanes::LaneError
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookPoint {
     CancelSnapshot,
+    TerminalRegistered,
     CancelGate,
     SubtreeCollected,
     AdmissionRegistered,

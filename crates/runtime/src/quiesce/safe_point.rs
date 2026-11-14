@@ -12,18 +12,51 @@ impl LoopState {
         if runtime.shared.quiesce.running() {
             return true;
         }
-        if let Err(error) = self.capture_safe_point(boundary) {
-            runtime.shared.quiesce.fail(error);
-        }
-        // Park the incarnation, keeping inboxes, pending inputs and tools alive.
-        // A failed capture never masquerades as terminal/safe to exit.
+        let mut changes = runtime.shared.quiesce.subscribe();
+        let parked_generation = runtime.shared.quiesce.lock().generation;
         loop {
             if let Some(kind) = self.interrupted() {
                 self.finish_interrupted(kind);
                 return false;
             }
-            if self.channels.cancel_rx.changed().await.is_err() {
-                return false;
+            if runtime.shared.quiesce.resume_permitted(parked_generation) {
+                return true;
+            }
+            {
+                let _checkpoint = runtime
+                    .shared
+                    .quiesce
+                    .checkpoint_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let generation = {
+                    let inner = runtime.shared.quiesce.lock();
+                    (inner.requested
+                        && !inner.cancelling
+                        && !inner.shutting_down
+                        && !matches!(inner.phase, QuiesceState::Failed { .. }))
+                    .then_some(inner.generation)
+                };
+                if let Some(generation) = generation
+                    && !runtime
+                        .shared
+                        .quiesce
+                        .acknowledged(self.task.run_id, &self.task.publication.incarnation())
+                {
+                    match self.capture_safe_point(boundary) {
+                        Ok(()) => runtime.shared.quiesce.acknowledge(
+                            self.task.run_id,
+                            &self.task.publication.incarnation(),
+                            generation,
+                        ),
+                        Err(error) => runtime.shared.quiesce.fail(error),
+                    }
+                }
+            }
+            tokio::select! {
+                biased;
+                changed = self.channels.cancel_rx.changed() => { if changed.is_err() { return false; } }
+                changed = changes.changed() => { if changed.is_err() { return false; } }
             }
         }
     }

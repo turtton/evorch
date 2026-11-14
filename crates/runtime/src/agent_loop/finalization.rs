@@ -191,7 +191,7 @@ impl LoopState {
             }
         }
         if let Some(runtime) = self.runtime()
-            && !runtime.shared.quiesce.running()
+            && runtime.shared.quiesce.strict_restart_accounting()
             && (!drained || !authority || !saved || !released)
         {
             // Ordinary completion keeps ADR 0027's non-fatal snapshot policy,

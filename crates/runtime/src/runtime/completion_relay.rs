@@ -63,7 +63,24 @@ impl AgentRuntime {
         event: LifecycleEvent,
     ) -> Option<crate::quiesce::dispatch::DispatchGuard> {
         // Registered BEFORE phase publication: runtime.wait may return inside relay.
-        let dispatch = self.shared.dispatch_tails.register(true).ok();
+        let stop_guard = self.execution_snapshot(run_id).ok().and_then(|execution| {
+            execution
+                .terminal_dispatch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        });
+        let dispatch = if let Some(guard) = stop_guard {
+            guard
+                .enter(|| self.shared.dispatch_tails.register(true))
+                .ok()
+        } else {
+            self.shared.dispatch_tails.register(true).ok()
+        };
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(run_id) {
+            self.execution_hook(cancellation::HookPoint::TerminalRegistered, &execution);
+        }
         let publish = || {
             self.publish_terminal_relay(run_id, event);
             self.resume_deferred_chat(run_id);

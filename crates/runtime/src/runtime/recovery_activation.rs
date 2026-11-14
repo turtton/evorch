@@ -332,7 +332,7 @@ impl AgentRuntime {
                     .map(|execution| (record.run_id, execution.clone()))
             })
             .collect();
-        self.shared.quiesce.adopt(members.clone(), true);
+        self.shared.quiesce.adopt_unstarted(members.clone());
         let mut retained = Vec::new();
         for (record, intent, bundle, snapshot, execution) in sources {
             retained.push(RecoverySource {

@@ -11,6 +11,8 @@ use tokio::sync::watch;
 struct State {
     epoch: u64,
     capture_started: bool,
+    capture_invalidated: bool,
+    terminal_only: bool,
     count: usize,
     closed: bool,
     failure: Option<String>,
@@ -126,6 +128,45 @@ impl DispatchTails {
         self.changed();
         Ok(())
     }
+    pub(crate) fn capture_started(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .capture_started
+    }
+    pub(crate) fn capture_valid(&self) -> bool {
+        !self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .capture_invalidated
+    }
+    /// Preserve capture/failure evidence; only terminal descendants may enter.
+    pub(crate) fn terminal_handoff(&self) -> Result<(), RuntimeError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            if state.count != 0 {
+                return Err(error("live tails in closed dispatch"));
+            }
+            state.epoch = state
+                .epoch
+                .checked_add(1)
+                .ok_or_else(|| error("dispatch epoch exhausted"))?;
+            state.closed = false;
+            state.drained = false;
+        }
+        state.terminal_only = true;
+        state.capture_invalidated |= state.capture_started;
+        drop(state);
+        self.changed();
+        Ok(())
+    }
+    pub(crate) fn register_terminal(self: &Arc<Self>) -> Result<DispatchGuard, RuntimeError> {
+        self.register_root(false, true)
+    }
     fn changed(&self) {
         self.version.send_modify(|n| *n = n.wrapping_add(1));
     }
@@ -164,11 +205,18 @@ impl DispatchTails {
         if let Some(parent) = parent {
             return Ok(parent.fork());
         }
+        self.register_root(required, false)
+    }
+    fn register_root(
+        self: &Arc<Self>,
+        required: bool,
+        terminal: bool,
+    ) -> Result<DispatchGuard, RuntimeError> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.closed {
+        if state.closed || (state.terminal_only && !terminal) {
             if required {
                 state.failure.get_or_insert_with(|| {
                     "unregistered dispatch tail after producer fence".into()
@@ -218,7 +266,7 @@ impl DispatchTails {
             }
         }
     }
-    fn result(&self) -> Result<(), RuntimeError> {
+    pub(crate) fn result(&self) -> Result<(), RuntimeError> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -302,23 +350,6 @@ impl AgentRuntime {
         }
         Ok(())
     }
-    /// Cancel only dispatch sealing, never grant permission to execute a turn.
-    pub fn reopen_restart_dispatch(&self, fence: &DispatchDrainFence) -> Result<(), RuntimeError> {
-        let mut inner = self.shared.quiesce.lock();
-        if !Arc::ptr_eq(&fence.tails, &self.shared.dispatch_tails)
-            || fence.kind != FenceKind::Restart
-            || fence.attempt != inner.generation
-            || fence.epoch != self.shared.dispatch_tails.epoch()
-        {
-            return Err(error("stale or foreign restart fence"));
-        }
-        self.shared.dispatch_tails.reopen()?;
-        inner.generation = inner
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| error("attempt exhausted"))?;
-        Ok(())
-    }
     /// Claims capture under the same boundary as reopen. Capture is irreversible
     /// here; partial writes require the future restart transaction (07b).
     pub fn begin_recovery_capture(&self, fence: &DispatchDrainFence) -> Result<(), RuntimeError> {
@@ -337,6 +368,7 @@ impl AgentRuntime {
             || !s.closed
             || !s.drained
             || s.failure.is_some()
+            || s.capture_invalidated
         {
             return Err(error("invalid recovery capture fence"));
         }
@@ -366,6 +398,7 @@ impl AgentRuntime {
         Fut: Future<Output = Result<(), E>>,
         E: std::fmt::Display,
     {
+        self.begin_dispatch_shutdown()?;
         stop().await.map_err(error)?;
         Ok(DispatchDrainFence {
             tails: self.shared.dispatch_tails.clone(),
@@ -409,11 +442,24 @@ impl AgentRuntime {
             return Err(error("foreign dispatch fence"));
         }
         let tails = &self.shared.dispatch_tails;
+        if fence.is_restart() {
+            let mut inner = self.shared.quiesce.lock();
+            if inner.generation != fence.attempt {
+                return Err(error("stale restart sealer"));
+            }
+            inner.sealing = true;
+        }
         loop {
             self.validate_dispatch_fence(fence)?;
+            if self.dispatch_drained() {
+                return tails.result();
+            }
             if matches!(fence.kind, FenceKind::Shutdown) {
                 self.drain_lane_admissions().await.map_err(error)?;
-                self.release_shutdown_recovery()?;
+                self.shared
+                    .dispatch_tails
+                    .register_terminal()?
+                    .enter(|| self.release_shutdown_recovery())?;
                 let mut live = self.dispatch_pending_admissions();
                 live.extend(
                     self.list_agents()

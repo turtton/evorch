@@ -205,11 +205,12 @@ async fn explicit_current_config_and_core_policy_capture_a_candidate_but_never_a
 async fn stale_restart_fence_cannot_capture_after_reopen_and_reseal() {
     let dir = tempfile::tempdir().unwrap();
     let (_owners, boot) = open(dir.path()).await;
-    let _run = start(&boot);
+    let attempt = boot.runtime.begin_restart_quiesce().unwrap();
     boot.quiesce_for_restart().await.unwrap();
     let old = boot.runtime.fence_dispatch_restart().await.unwrap();
     boot.runtime.drain_dispatch_tails(&old).await.unwrap();
-    boot.runtime.reopen_restart_dispatch(&old).unwrap();
+    boot.runtime.cancel_restart_quiesce(&attempt).unwrap();
+    let next_attempt = boot.runtime.begin_restart_quiesce().unwrap();
     let current = boot.runtime.fence_dispatch_restart().await.unwrap();
     boot.runtime.drain_dispatch_tails(&current).await.unwrap();
     assert!(
@@ -227,7 +228,7 @@ async fn stale_restart_fence_cannot_capture_after_reopen_and_reseal() {
         .capture_recovery_records(&current, &BTreeMap::new())
         .unwrap();
     assert!(
-        boot.runtime.reopen_restart_dispatch(&current).is_err(),
+        boot.runtime.cancel_restart_quiesce(&next_attempt).is_err(),
         "capture must exclude reopen, even before graph writes"
     );
 }

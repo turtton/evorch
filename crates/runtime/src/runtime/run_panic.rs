@@ -14,7 +14,7 @@ impl AgentRuntime {
     ) -> Option<crate::quiesce::dispatch::DispatchGuard> {
         let id = run_id.to_string();
         // Panic is never a safe-point checkpoint, even after successful cleanup.
-        if !self.shared.quiesce.running() {
+        if self.shared.quiesce.strict_restart_accounting() {
             self.shared
                 .quiesce
                 .fail(format!("run {run_id} panicked before a safe point"));

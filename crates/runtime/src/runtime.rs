@@ -3005,6 +3005,9 @@ impl AgentRuntime {
     /// # Errors
     /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
     pub fn stop(&self, run_id: RunId, scope: StopScope) -> Result<(), RuntimeError> {
+        self.with_terminal_dispatch(|| self.stop_with_dispatch(run_id, scope))
+    }
+    fn stop_with_dispatch(&self, run_id: RunId, scope: StopScope) -> Result<(), RuntimeError> {
         // Collect before taking admissions: spawning locks intents before admissions.
         let mut targets = match scope {
             StopScope::SelfOnly => vec![run_id],
@@ -3100,6 +3103,13 @@ impl AgentRuntime {
                 && admission.result.borrow().is_none()
             {
                 admission.cancelled = true;
+                if runs.get(&target).is_some_and(|entry| {
+                    is_live(entry) && Arc::ptr_eq(&entry.execution, &admission.execution)
+                }) {
+                    admission
+                        .execution
+                        .track_terminal_dispatch(self.shared.dispatch_tails.register(true)?);
+                }
                 admission.execution.stop_admission();
                 let incarnation = admission.execution.publication().incarnation();
                 let queued = self.note_fenced_intent_stop(
@@ -3113,6 +3123,11 @@ impl AgentRuntime {
                     admission.finish_queued(target);
                 }
             } else if let Some(entry) = runs.get(&target) {
+                if is_live(entry) {
+                    entry
+                        .execution
+                        .track_terminal_dispatch(self.shared.dispatch_tails.register(true)?);
+                }
                 entry.execution.clear_deferred_resume();
                 self.note_intent_stop(
                     target,
@@ -3203,6 +3218,9 @@ impl AgentRuntime {
     /// or [`RuntimeError::LaneCancellation`] if a pending lane cannot be durably
     /// cancelled. No success is acknowledged before its intent is blocked.
     pub fn cancel_subtree(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        self.with_terminal_dispatch(|| self.cancel_subtree_with_dispatch(run_id))
+    }
+    fn cancel_subtree_with_dispatch(&self, run_id: RunId) -> Result<(), RuntimeError> {
         let mut targets = self.run_subtree_ids(run_id).into_iter().collect::<Vec<_>>();
         targets.sort_unstable();
         // Ordinary cancellation must still interrupt a Continue which holds its
@@ -3289,6 +3307,9 @@ impl AgentRuntime {
                         &execution.publication().incarnation(),
                         crate::quiesce::StopReason::Cancelled,
                     );
+                }
+                if runs.get(&target).is_some_and(is_live) {
+                    execution.track_terminal_dispatch(self.shared.dispatch_tails.register(true)?);
                 }
                 cancellations.push(execution);
             }

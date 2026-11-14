@@ -91,6 +91,24 @@ impl Admission {
 }
 
 impl AgentRuntime {
+    pub(crate) fn complete_restart_safe_points(&self) -> Result<bool, RuntimeError> {
+        // I -> quiesce. Prepared has no live LoopState and only activation can
+        // open its start gate; that producer must acquire I and dispatch first.
+        let indexes = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let unstarted = indexes
+            .iter()
+            .filter_map(|(id, index)| index.paused_recovery.as_ref().map(|_| *id))
+            .collect();
+        self.shared
+            .quiesce
+            .complete(self.shared.run_store.get(), &unstarted)
+            .map_err(crate::quiesce::runtime::error)
+    }
+
     /// Lane root admissions not yet finished, including ones absent from list_agents.
     pub fn pending_lane_admissions(&self) -> Vec<RunId> {
         let mut runs: Vec<_> = {
@@ -501,7 +519,7 @@ impl AgentRuntime {
             }).await;
             let admission_panicked = admission.is_err();
             let mut admitted = admission.unwrap_or_else(|panic| {
-                if !runtime.shared.quiesce.running() {
+                if runtime.shared.quiesce.strict_restart_accounting() {
                     runtime
                         .shared
                         .quiesce

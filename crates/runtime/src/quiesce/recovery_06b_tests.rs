@@ -512,6 +512,8 @@ async fn planned_restart_does_not_release_or_publish_a_paused_component() {
     let run = saved(&f).await;
     let runtime = new_process(&f);
     let paused = prepare(&f, &runtime);
+    let before = runtime.resume_intents().unwrap();
+    let attempt = runtime.begin_restart_quiesce().unwrap();
     let fence = runtime.fence_dispatch_restart().await.unwrap();
     runtime.drain_dispatch_tails(&fence).await.unwrap();
     let db = storage::Database::open(&f.config).unwrap();
@@ -525,6 +527,9 @@ async fn planned_restart_does_not_release_or_publish_a_paused_component() {
         db.resume_intent_revision(&run.to_string()).unwrap(),
         Some(paused.claim().members[0].reserved_revision)
     );
+    runtime.cancel_restart_quiesce(&attempt).unwrap();
+    assert_eq!(runtime.resume_intents().unwrap(), before);
+    assert!(runtime.has_paused_recovery());
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
 }
 
