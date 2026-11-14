@@ -122,6 +122,7 @@ impl AgentRuntime {
                 with_current_revisions(store, &lane_id, error)
             })?;
         drop(guard);
+        self.announce_lane_closed(store, &result);
         LaneQuestionBindingSource::schedule_lane_question_delivery(self, &lead);
         Ok(result)
     }
@@ -169,11 +170,31 @@ impl AgentRuntime {
             })
             .map_err(storage_error)?;
         drop(host_authority);
+        self.announce_lane_closed(store, &result);
         if let Ok(Some(lane)) = store.handle.lane(&request.lane_id)
             && let Some(lead) = lane.lead_thread_id
         {
             LaneQuestionBindingSource::schedule_lane_question_delivery(self, &lead);
         }
         Ok(result)
+    }
+}
+
+impl AgentRuntime {
+    /// A close that was just recorded changes what a lane view shows, and it appends no ledger
+    /// event: tell the hosts to read the lane again, whoever closed it. A close that already
+    /// stood is not news.
+    fn announce_lane_closed(&self, store: &crate::run_store::RunStore, result: &LaneCloseResult) {
+        if result.outcome != LaneCloseOutcome::Closed {
+            return;
+        }
+        if let Ok(Some(lane)) = store.handle.lane(&result.lane_id) {
+            self.lane_state_changed(
+                &lane.thread_id,
+                event_bus::DiagnosticSeverity::Info,
+                event_bus::event::diagnostic_codes::LANE_CLOSED,
+                &result.close_id,
+            );
+        }
     }
 }

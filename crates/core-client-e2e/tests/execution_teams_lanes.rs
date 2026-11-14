@@ -837,6 +837,332 @@ async fn lane_operations_on_the_screen_reach_the_ledger_and_survive_a_thread_swi
     }
 }
 
+/// The lane ledger's own record of closes and of the close notices, read straight from the
+/// database the core writes.
+fn ledger(world: &World, lane_id: &str) -> (Vec<String>, i64) {
+    let db = rusqlite::Connection::open_with_flags(
+        world
+            ._dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("evorch-events.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let kinds = db
+        .prepare("SELECT kind FROM lane_closes WHERE lane_id=?1 ORDER BY rowid")
+        .unwrap()
+        .query_map([lane_id], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let notices = db
+        .query_row(
+            "SELECT COUNT(*) FROM lane_notifications WHERE lane_id=?1 AND event_kind='closed'",
+            [lane_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (kinds, notices)
+}
+
+impl World {
+    async fn web_close_preview(
+        &self,
+        id: &str,
+        lane: &str,
+    ) -> workbench_protocol::namespaces::lanes::LaneClosePreview {
+        let QueryReply::Lanes(LanesReply::LaneClosePreview(preview)) = self
+            .web(
+                id,
+                Query::Lanes(LanesQuery::GetLaneClosePreview {
+                    lane_id: workbench_protocol::lane_attention::LaneId::new(lane).unwrap(),
+                }),
+            )
+            .await
+        else {
+            panic!("a close preview was expected");
+        };
+        *preview
+    }
+}
+
+impl Desktop {
+    async fn type_reason(&mut self, text: &str) {
+        let input = self.harness.get_by_role(egui::accesskit::Role::TextInput);
+        input.focus();
+        self.flush().await;
+        self.harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text(text);
+        self.flush().await;
+    }
+
+    /// The close dialog is open and has read the lane from the core.
+    async fn until_close_dialog_read(&mut self, title: &str) {
+        self.until(|d| d.shows(title) && !d.shows_part("読み込んでいます"))
+            .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lane_closed_from_the_screen_is_the_ledgers_record_for_every_client_and_a_resend_adds_none()
+ {
+    use workbench_protocol::commands::CommandResult;
+    use workbench_protocol::lane_management::{CloseLane, HumanLaneCloseKind, LaneCloseRecordKind};
+    use workbench_protocol::namespaces::{LanesCommand, LanesResult};
+
+    let world = start().await;
+    let lane = world
+        .boot
+        .runtime
+        .open_lane(world.lead, "e2e-close", brief())
+        .unwrap();
+    waiting(&world.boot.runtime, lane.root_run_id).await;
+    let mut desktop = world.desktop();
+    desktop.select(LEAD);
+    desktop.until(|d| d.shows(OBJECTIVE)).await;
+    let phase = |world: &World| {
+        (
+            world
+                .boot
+                .runtime
+                .inspect_agent(lane.root_run_id)
+                .unwrap()
+                .phase,
+            world.boot.runtime.inspect_agent(world.lead).unwrap().phase,
+        )
+    };
+    let phases = phase(&world);
+
+    // Another client's reading of what the dialog is about to show.
+    let seen = world.web_close_preview("web-preview", &lane.lane_id).await;
+    assert!(seen.ready.is_none() && seen.current_close.is_none());
+    assert_eq!(seen.objective, OBJECTIVE);
+
+    // Cancelling changes nothing.
+    desktop.click("人間の判断で閉じる…").await;
+    desktop
+        .until_close_dialog_read("lane を閉じる（未検証）")
+        .await;
+    assert!(desktop.shows_part("Ready を報告していません"));
+    desktop.click("キャンセル").await;
+    desktop.until(|d| !d.shows("lane を閉じる（未検証）")).await;
+    assert_eq!(ledger(&world, &lane.lane_id), (vec![], 0));
+
+    // Close it with a reason.
+    desktop.click("人間の判断で閉じる…").await;
+    desktop
+        .until_close_dialog_read("lane を閉じる（未検証）")
+        .await;
+    desktop.type_reason("checked by hand").await;
+    desktop.click("lane を閉じる").await;
+    desktop
+        .until(|d| {
+            d.shows_part("として記録しました") && d.shows("close 済み: 人の判断で完了（未検証）")
+        })
+        .await;
+    assert_eq!(
+        ledger(&world, &lane.lane_id),
+        (vec!["human_closed".to_owned()], 1)
+    );
+    // Another client sees the same record in the listing and in the preview.
+    let listed = world.web_lanes("web-closed", false).await;
+    assert_eq!(listed.items.len(), 1);
+    let standing = listed.items[0].current_close.clone().expect("a close");
+    assert_eq!(standing.kind, LaneCloseRecordKind::HumanClosed);
+    let after = world.web_close_preview("web-after", &lane.lane_id).await;
+    assert_eq!(after.current_close, Some(standing.clone()));
+    // Nothing else moved: the lane's run and the lead keep their phases.
+    assert_eq!(phase(&world), phases);
+
+    // The same request sent again by another client is answered with the record that
+    // stands; no record and no notice is added.
+    let ReplyPayload::Command(reply) = request(
+        &world.backend,
+        "resend",
+        RequestBody::Command(Command::Lanes(LanesCommand::CloseLane(CloseLane {
+            lane_id: workbench_protocol::lane_attention::LaneId::new(&lane.lane_id).unwrap(),
+            kind: HumanLaneCloseKind::Complete,
+            ready_seq: None,
+            expected_management_revision: seen.management_revision,
+            expected_request_revision: seen.request_revision,
+            note: "checked by hand".into(),
+        }))),
+    ) else {
+        panic!("a command reply was expected");
+    };
+    let Some(CommandResult::Lanes(LanesResult::Closed(again))) = reply.result.map(|r| *r) else {
+        panic!("a close result was expected");
+    };
+    assert!(again.already_closed);
+    assert_eq!(again.close_id, standing.close_id);
+    assert_eq!(
+        ledger(&world, &lane.lane_id),
+        (vec!["human_closed".to_owned()], 1)
+    );
+
+    // A window that connects later shows the badge from the ledger.
+    let mut restarted = world.restarted_desktop().await;
+    restarted.select(LEAD);
+    restarted
+        .until(|d| d.shows("close 済み: 人の判断で完了（未検証）"))
+        .await;
+    for run in [lane.root_run_id, world.lead] {
+        let _ = world.boot.runtime.cancel(run);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lane_discarded_from_the_screen_is_recorded_as_discarded_and_its_run_keeps_going() {
+    let world = start().await;
+    let lane = world
+        .boot
+        .runtime
+        .open_lane(world.lead, "e2e-discard", brief())
+        .unwrap();
+    waiting(&world.boot.runtime, lane.root_run_id).await;
+    let mut desktop = world.desktop();
+    desktop.select(LEAD);
+    desktop.until(|d| d.shows(OBJECTIVE)).await;
+    let before = world
+        .boot
+        .runtime
+        .inspect_agent(lane.root_run_id)
+        .unwrap()
+        .phase;
+
+    desktop.click("破棄する…").await;
+    desktop.until_close_dialog_read("lane の破棄").await;
+    // Discarding claims no completion, so the missing Ready is not warned about.
+    assert!(!desktop.shows_part("Ready を報告していません"));
+    desktop.type_reason("not needed any more").await;
+    desktop.click("lane を破棄する").await;
+    desktop
+        .until(|d| d.shows_part("として記録しました") && d.shows("close 済み: 破棄"))
+        .await;
+    assert_eq!(
+        ledger(&world, &lane.lane_id),
+        (vec!["discarded".to_owned()], 1)
+    );
+    let after = world.web_close_preview("web-discard", &lane.lane_id).await;
+    assert_eq!(
+        after.current_close.map(|close| close.kind),
+        Some(workbench_protocol::lane_management::LaneCloseRecordKind::Discarded)
+    );
+    assert_eq!(
+        world
+            .boot
+            .runtime
+            .inspect_agent(lane.root_run_id)
+            .unwrap()
+            .phase,
+        before
+    );
+    assert_eq!(
+        world
+            .web_lanes("web-still-managed", false)
+            .await
+            .items
+            .len(),
+        1
+    );
+    for run in [lane.root_run_id, world.lead] {
+        let _ = world.boot.runtime.cancel(run);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_clients_close_puts_a_badge_on_an_open_window_and_a_new_report_takes_it_off() {
+    use workbench_protocol::commands::CommandResult;
+    use workbench_protocol::lane_management::{CloseLane, HumanLaneCloseKind};
+    use workbench_protocol::namespaces::LanesCommand;
+
+    let world = start().await;
+    let lane = world
+        .boot
+        .runtime
+        .open_lane(world.lead, "e2e-badge", brief())
+        .unwrap();
+    waiting(&world.boot.runtime, lane.root_run_id).await;
+    // A window of its own (its own connection and subscription), left alone from here on:
+    // nothing below reloads it, so only the core's events can change what it shows.
+    let mut window = world.restarted_desktop().await;
+    window.select(LEAD);
+    window.until(|d| d.shows(OBJECTIVE)).await;
+    assert!(!window.shows_part("close 済み"));
+
+    let seen = world.web_close_preview("web-badge", &lane.lane_id).await;
+    let ReplyPayload::Command(reply) = request(
+        &world.backend,
+        "badge-close",
+        RequestBody::Command(Command::Lanes(LanesCommand::CloseLane(CloseLane {
+            lane_id: workbench_protocol::lane_attention::LaneId::new(&lane.lane_id).unwrap(),
+            kind: HumanLaneCloseKind::Discard,
+            ready_seq: None,
+            expected_management_revision: seen.management_revision,
+            expected_request_revision: seen.request_revision,
+            note: "from another client".into(),
+        }))),
+    ) else {
+        panic!("a command reply was expected");
+    };
+    assert!(matches!(
+        reply.result.map(|r| *r),
+        Some(CommandResult::Lanes(_))
+    ));
+    window.until(|d| d.shows("close 済み: 破棄")).await;
+
+    // The lane reports again, as its run does: the ledger lifts the close and the core
+    // announces the report.
+    let side = storage::Storage::open(storage::StorageConfig {
+        db_path: world
+            ._dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("evorch-events.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    let appended = side
+        .handle()
+        .append_lane_report_with_delivery(
+            lane.lane_id.clone(),
+            seen.management_revision.0,
+            event_bus::LaneReportInput {
+                status: event_bus::LaneStatus::Working,
+                summary: "going again".into(),
+                artifact_revision: None,
+                failure_episode: None,
+                artifact_refs: vec![],
+                needs_human: false,
+                question_refs: vec![],
+                reason_code: None,
+                producer: event_bus::lane::LaneReportProducer::LaneAgent,
+            },
+            1,
+        )
+        .unwrap();
+    world.boot.runtime.event_bus().emit(event_bus::Event::new(
+        appended
+            .lane
+            .report_appended_event(&appended.report, Some(lane.root_run_id.to_string())),
+    ));
+    window.until(|d| !d.shows_part("close 済み")).await;
+    assert!(
+        world
+            .web_close_preview("web-lifted", &lane.lane_id)
+            .await
+            .current_close
+            .is_none()
+    );
+    for run in [lane.root_run_id, world.lead] {
+        let _ = world.boot.runtime.cancel(run);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_click_on_a_team_task_opens_the_detail_the_core_and_the_web_client_report() {
     let world = start().await;

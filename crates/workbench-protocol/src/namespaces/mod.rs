@@ -14,7 +14,7 @@
 //! | `execution` | `stop_chat`, `stop_run`, `submit_goal`, `set_goal_review`, `set_goal_checks_paused`, `set_agent_web_tools_enabled` | `list_runs` | `run_changed` |
 //! | `questions` | `answer_user_question` | `list_questions` | `question_changed` |
 //! | `approvals` | `decide_tool_approval` | `list_approvals`, `get_approval_input` | `approval_changed` |
-//! | `lanes` | `manage_lane`, `close_lane` | `get_lane_management` | - |
+//! | `lanes` | `manage_lane`, `close_lane` | `get_lane_management`, `list_lanes`, `get_lane`, `get_lane_close_preview` | `lane_changed` |
 //! | `lifecycle` | - | `get_core_status` | `core_status_changed` |
 //! | `projection` | - | `get_command_receipt`, `read_body`, `read_snapshot` | `resync_required`, `subscription_closed` |
 //!

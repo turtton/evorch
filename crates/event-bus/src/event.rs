@@ -506,6 +506,9 @@ pub mod diagnostic_codes {
     pub const LANE_STALL_CHANGED: &str = "lane_stall_changed";
     /// A nudge input receipt committed; re-query the lane state.
     pub const LANE_NUDGE_ACCEPTED: &str = "lane_nudge_accepted";
+    /// A lane's close was newly recorded (by its lead or by a person); re-query the lane.
+    /// A close appends no ledger event, so this is the signal a lane view reads again on.
+    pub const LANE_CLOSED: &str = "lane_closed";
 
     /// A lead's `lane_open` was refused because its uncollected-lane cohort reached
     /// the creation threshold. Only further model-authored lane creation is
@@ -522,6 +525,7 @@ pub mod diagnostic_codes {
     pub const ALL: &[&str] = &[
         LANE_STALL_CHANGED,
         LANE_NUDGE_ACCEPTED,
+        LANE_CLOSED,
         LANE_UNCOLLECTED_CREATION_SUPPRESSED,
         LANE_RESTORE_RETRY_SUPPRESSED,
         BUDGET_WARNING,

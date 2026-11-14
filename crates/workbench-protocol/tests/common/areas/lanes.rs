@@ -18,7 +18,22 @@ fn summary() -> Value {
         "policy": "attached", "management_revision": "3", "brief_revision": "2",
         "objective_preview": "build the thing", "root_run": "run-9", "generation": "1",
         "start": "started", "last_activity_at": "1700000000000",
-        "latest_report_status": "ready", "revision": "11"
+        "latest_report_status": "ready",
+        "current_close": {"close_id": "close-1", "kind": "human_closed", "ready_seq": "4"},
+        "revision": "11"
+    })
+}
+
+fn close_preview() -> Value {
+    json!({
+        "lane_id": "lane-1", "thread_id": "thread-2", "objective": "build the thing",
+        "acceptance_criteria": ["it builds"], "brief_revision": "2",
+        "management_revision": "3", "request_revision": "5",
+        "ready": {"report_seq": "4", "brief_revision": "1", "summary": "done",
+            "artifact_revision": {"kind": "commit_sha", "value": "abc123"},
+            "artifact_refs": ["https://example.test/pull/1"], "artifact_ref_count": 1},
+        "open_question_count": 2, "running": true,
+        "current_close": {"close_id": "close-1", "kind": "discarded"}
     })
 }
 
@@ -51,6 +66,10 @@ pub fn samples() -> AreaSamples {
                 json!({"type": "lanes", "payload": {"type": "get_lane", "payload": {
                 "lane_id": "lane-1"}}}),
             ),
+            de::<Query>(
+                json!({"type": "lanes", "payload": {"type": "get_lane_close_preview", "payload": {
+                "lane_id": "lane-1"}}}),
+            ),
         ],
         ui_events: vec![de::<UiEvent>(json!({"type": "lanes", "payload": {
             "type": "lane_changed", "payload": {"lane": summary()}}}))],
@@ -61,6 +80,9 @@ pub fn samples() -> AreaSamples {
             ),
             de::<QueryReply>(
                 json!({"type": "lanes", "payload": {"type": "lane", "payload": detail()}}),
+            ),
+            de::<QueryReply>(
+                json!({"type": "lanes", "payload": {"type": "lane_close_preview", "payload": close_preview()}}),
             ),
         ],
     }

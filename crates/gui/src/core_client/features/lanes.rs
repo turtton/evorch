@@ -1,22 +1,25 @@
 //! Desktop feature of the `lanes` area: the lanes the selected thread leads,
 //! one lane opened for its detail, and the human operations on a lane: set its
-//! policy, detach it, reattach it, and deliver again the notices held for its
-//! lead.
+//! policy, detach it, reattach it, deliver again the notices held for its
+//! lead, and end it by a person's decision (close it as done, unverified, or
+//! discard it; see `close`).
 //!
 //! The lane ledger is the truth. Lists and details are read from the core; an
 //! event only names a lane that changed and the reads are repeated, so a late
 //! event never moves the screen back. Every operation names the management
 //! revision the screen showed, and the lead's current root run where one is
-//! needed; the core refuses an older one. Closing or continuing a lane has no
-//! gate here.
+//! needed; the core refuses an older one. Continuing a lane has no gate here.
 use std::collections::BTreeMap;
+
+mod close;
 
 use super::layout::bounded_list;
 use super::{
     Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, Navigation,
 };
 use workbench_protocol::{
-    commands::Command,
+    commands::{Command, CommandResult},
+    errors::ErrorCode,
     events::UiEvent,
     handshake::Capability,
     ids::{PageCursor, RunId, ThreadId},
@@ -27,6 +30,7 @@ use workbench_protocol::{
     },
     namespaces::{
         ExecutionQuery, ExecutionReply, LanesCommand, LanesEvent, LanesQuery, LanesReply,
+        LanesResult,
         execution::{RunDetailsQuery, RunScope},
         lanes::{
             LaneDetail, LaneReportStatus, LaneStartState, LaneSummary, ListLanes,
@@ -39,12 +43,34 @@ use workbench_protocol::{
 
 #[derive(Debug, Clone)]
 enum Pending {
-    List { thread: ThreadId, append: bool },
-    Detail { lane: LaneId },
-    LeadRoot { thread: ThreadId },
-    Detached { thread: ThreadId, append: bool },
-    Management { lane: LaneId },
+    List {
+        thread: ThreadId,
+        append: bool,
+    },
+    Detail {
+        lane: LaneId,
+    },
+    LeadRoot {
+        thread: ThreadId,
+    },
+    Detached {
+        thread: ThreadId,
+        append: bool,
+    },
+    Management {
+        lane: LaneId,
+    },
     Command(&'static str),
+    /// The read of the close preview the open dialog waits for (its `read_seq`).
+    ClosePreview {
+        generation: u64,
+        seq: u64,
+    },
+    /// A close or discard that was sent, for the dialog of `generation`; at most one is in
+    /// flight.
+    CloseCommand {
+        generation: u64,
+    },
 }
 
 /// A reattach waits for the lane's management state (its family revision) and
@@ -75,6 +101,10 @@ pub struct LanesFeature {
     detached_pages: usize,
     detached_target_pages: usize,
     reattach: Option<Reattach>,
+    /// The confirmation for closing or discarding a lane, while it is open.
+    close: Option<close::CloseDialog>,
+    /// The generation the next dialog opens with.
+    close_generation: u64,
     status: String,
     list_stale: bool,
     detached_stale: bool,
@@ -104,6 +134,7 @@ impl LanesFeature {
         self.detached_pages = 0;
         self.detached_target_pages = 0;
         self.reattach = None;
+        self.close = None;
         self.status.clear();
         self.list_stale = self.thread.is_some();
         self.detached_stale = self.thread.is_some();
@@ -151,6 +182,53 @@ impl LanesFeature {
                 expected_family_revision: family,
             })),
         );
+    }
+
+    fn refresh_after_command(&mut self) {
+        self.list_stale = true;
+        self.detached_stale = true;
+        self.detail_stale = self.opened.is_some();
+        self.root_stale = true;
+    }
+
+    /// Reads what the open confirmation needs, draws it and runs its answer.
+    fn drive_close(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+        if let Some(dialog) = &mut self.close
+            && dialog.read_due
+        {
+            dialog.read_due = false;
+            dialog.read_seq += 1;
+            dialog.phase = close::ClosePhase::Loading;
+            dialog.stale = false;
+            let (lane, generation, seq) = (dialog.lane.clone(), dialog.generation, dialog.read_seq);
+            let tag = self.tag(Pending::ClosePreview { generation, seq });
+            ctx.query(
+                tag,
+                Query::Lanes(LanesQuery::GetLaneClosePreview { lane_id: lane }),
+            );
+        }
+        let sending = self
+            .pending
+            .values()
+            .any(|pending| matches!(pending, Pending::CloseCommand { .. }));
+        let Some(dialog) = &mut self.close else {
+            return;
+        };
+        match close::draw(ui.ctx(), dialog, sending) {
+            Some(close::DialogAction::Confirm) => {
+                if let Some(order) = dialog.order(sending) {
+                    let generation = dialog.generation;
+                    let tag = self.tag(Pending::CloseCommand { generation });
+                    ctx.command(tag, Command::Lanes(LanesCommand::CloseLane(order)));
+                }
+            }
+            Some(close::DialogAction::Reload) => {
+                dialog.read_due = true;
+                dialog.notice = None;
+            }
+            Some(close::DialogAction::Cancel) => self.close = None,
+            None => {}
+        }
     }
 
     fn drive_reattach(&mut self, ctx: &mut FeatureContext<'_>) {
@@ -254,6 +332,22 @@ impl LanesFeature {
                         None,
                     );
                 }
+                if lane.policy != LaneManagementPolicy::Detached {
+                    for choice in [close::CloseChoice::Complete, close::CloseChoice::Discard] {
+                        if ui.button(choice.button()).clicked() {
+                            self.close_generation += 1;
+                            self.close = Some(close::CloseDialog::new(
+                                self.close_generation,
+                                lane.lane_id.clone(),
+                                choice,
+                                lane.objective_preview.clone(),
+                            ));
+                        }
+                    }
+                }
+                if let Some(current) = &lane.current_close {
+                    ui.label(close::badge(current));
+                }
             });
         });
     }
@@ -271,6 +365,9 @@ impl LanesFeature {
             detail.summary.brief_revision.0,
             detail.summary.generation.0
         ));
+        if let Some(current) = &detail.summary.current_close {
+            ui.label(close::badge(current));
+        }
         if let Some(report) = &detail.latest_report {
             ui.label(format!(
                 "最新報告 #{}: {} — {}{}",
@@ -401,6 +498,12 @@ impl Feature for LanesFeature {
         self.detached_stale = self.thread.is_some();
         self.root_stale = self.thread.is_some();
         self.detail_stale = self.opened.is_some();
+        // What the dialog showed came from the core: it is read again, and nothing is sent
+        // from the old reading. A close that was sent keeps its tag.
+        if let Some(dialog) = &mut self.close {
+            dialog.phase = close::ClosePhase::Loading;
+            dialog.read_due = true;
+        }
     }
 
     fn event(&mut self, event: &UiEvent) {
@@ -423,6 +526,12 @@ impl Feature for LanesFeature {
         }
         if self.opened.as_ref() == Some(&lane.lane_id) {
             self.detail_stale = true;
+        }
+        if let Some(dialog) = &mut self.close
+            && dialog.lane == lane.lane_id
+            && dialog.moved_by(lane)
+        {
+            dialog.stale = true;
         }
     }
 
@@ -447,6 +556,87 @@ impl Feature for LanesFeature {
                 self.detached_stale = true;
                 self.detail_stale = self.opened.is_some();
                 self.root_stale = true;
+            }
+            (Pending::CloseCommand { generation }, FeatureReply::Command(Ok(reply))) => {
+                let closed = match reply.result.as_deref() {
+                    Some(CommandResult::Lanes(LanesResult::Closed(result))) => Some(result.clone()),
+                    _ => None,
+                };
+                self.status = match closed {
+                    Some(result) if result.already_closed => format!(
+                        "lane の close: 既に終了済みでした（{}）。新しい記録は作っていません",
+                        close::close_label(result.kind)
+                    ),
+                    Some(result) => format!(
+                        "lane の close: {} として記録しました。run の停止や削除は行っていません",
+                        close::close_label(result.kind)
+                    ),
+                    None => "lane の close: 受け付けました".to_owned(),
+                };
+                // Only the confirmation that sent it is finished by the answer.
+                if self
+                    .close
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.generation == generation)
+                {
+                    self.close = None;
+                }
+                self.refresh_after_command();
+            }
+            (Pending::CloseCommand { generation }, FeatureReply::Command(Err(error))) => {
+                let mine = self
+                    .close
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.generation == generation);
+                if error.outcome_unknown {
+                    // Not a success: the same tag answers again with what the core resolved.
+                    self.pending
+                        .insert(tag, Pending::CloseCommand { generation });
+                    self.status = failure("lane の close", &error);
+                    if let Some(dialog) = self.close.as_mut().filter(|_| mine) {
+                        dialog.notice = Some(
+                            "結果が分かりません。成功とは見なさず、台帳を読み直しています。"
+                                .to_owned(),
+                        );
+                        dialog.phase = close::ClosePhase::Loading;
+                        dialog.read_due = true;
+                    }
+                } else if let Some(dialog) = self.close.as_mut().filter(|_| mine) {
+                    let stale = error.code == Some(ErrorCode::StaleRevision)
+                        || error.message.starts_with("stale");
+                    dialog.stale |= stale;
+                    dialog.notice = Some(if stale {
+                        format!(
+                            "lane が変わっていたため記録していません（{}）。Reload すると今の状態が確認対象になります。",
+                            error.message
+                        )
+                    } else {
+                        format!("記録していません: {}", error.message)
+                    });
+                } else {
+                    self.status = failure("lane の close", &error);
+                }
+                self.refresh_after_command();
+            }
+            (
+                Pending::ClosePreview { generation, seq },
+                FeatureReply::Query(Ok(QueryReply::Lanes(LanesReply::LaneClosePreview(preview)))),
+            ) => {
+                if let Some(dialog) = &mut self.close
+                    && dialog.generation == generation
+                    && dialog.read_seq == seq
+                {
+                    dialog.phase = close::ClosePhase::Loaded(preview);
+                    dialog.stale = false;
+                }
+            }
+            (Pending::ClosePreview { generation, seq }, FeatureReply::Query(Err(error))) => {
+                if let Some(dialog) = &mut self.close
+                    && dialog.generation == generation
+                    && dialog.read_seq == seq
+                {
+                    dialog.phase = close::ClosePhase::Unavailable(error.message);
+                }
             }
             (_, FeatureReply::Query(Err(error))) => self.status = error.message,
             (
@@ -652,6 +842,7 @@ impl Feature for LanesFeature {
             self.detached_more_requested = true;
         }
         self.draw_detail(ui, ctx);
+        self.drive_close(ui, ctx);
     }
 }
 

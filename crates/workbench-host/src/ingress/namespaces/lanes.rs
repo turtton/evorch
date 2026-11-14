@@ -52,7 +52,9 @@ impl CommandHost {
             LanesQuery::GetLaneManagement { lane_id } => Ok(QueryReply::Lanes(
                 LanesReply::LaneManagement(self.lane_management_state(lane_id.as_str())?),
             )),
-            LanesQuery::ListLanes(_) | LanesQuery::GetLane { .. } => self
+            LanesQuery::ListLanes(_)
+            | LanesQuery::GetLane { .. }
+            | LanesQuery::GetLaneClosePreview { .. } => self
                 .areas
                 .lanes
                 .query(&Query::Lanes(lanes_query.clone()), lanes_query),

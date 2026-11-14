@@ -88,8 +88,12 @@ impl Fixture {
         let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current())
             .with_ownership(owner.clone());
         service.bind_lane_delivery();
-        let host =
-            CommandHost::new(service).with_lane_sidebar_path(dir.path().join("sidebar.json"));
+        let host = CommandHost::new(service)
+            .with_lane_sidebar_path(dir.path().join("sidebar.json"))
+            .with_areas(workbench_host::areas::Areas {
+                lanes: workbench_host::areas::lanes::LanesArea::with_runtime(runtime.clone()),
+                ..Default::default()
+            });
         Self {
             dir,
             storage,
@@ -572,5 +576,142 @@ async fn a_wire_close_is_recorded_under_the_authenticated_provenance_and_a_stale
     assert_eq!(again.disposition, CommandDisposition::AlreadyApplied);
     assert_eq!(close_result(again).close_id, result.close_id);
     assert_eq!(f.state().policy, LaneManagementPolicy::Attached);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn the_close_preview_is_the_ledgers_and_follows_the_close_and_detach() {
+    use workbench_protocol::namespaces::lanes::LaneClosePreview;
+    let mut f = Fixture::new().await;
+    let lane_id = workbench_protocol::lane_attention::LaneId::new(&f.lane.lane_id).unwrap();
+    let session = workbench_protocol::ids::SessionId::new("wire").unwrap();
+    let preview =
+        |f: &Fixture| -> Result<LaneClosePreview, workbench_protocol::errors::WorkbenchError> {
+            match f.host.handle_query(
+                &session,
+                &Query::Lanes(LanesQuery::GetLaneClosePreview {
+                    lane_id: lane_id.clone(),
+                }),
+            )? {
+                QueryReply::Lanes(LanesReply::LaneClosePreview(preview)) => Ok(*preview),
+                other => panic!("{other:?}"),
+            }
+        };
+    let summary = |f: &Fixture| match f
+        .host
+        .handle_query(
+            &session,
+            &Query::Lanes(LanesQuery::GetLane {
+                lane_id: lane_id.clone(),
+            }),
+        )
+        .unwrap()
+    {
+        QueryReply::Lanes(LanesReply::Lane(detail)) => detail.summary,
+        other => panic!("{other:?}"),
+    };
+
+    // What the wire shows is what the ledger's own preview holds.
+    let stored = f
+        .storage
+        .handle()
+        .lane_close_context(f.lane.lane_id.clone())
+        .unwrap();
+    let shown = preview(&f).unwrap();
+    assert_eq!(shown.management_revision.0, stored.management_revision);
+    assert_eq!(shown.request_revision.0, stored.request_revision);
+    assert_eq!(shown.brief_revision.0, stored.brief_revision);
+    assert_eq!(shown.objective, "independent work");
+    assert_eq!(shown.acceptance_criteria, ["review"]);
+    assert!(shown.ready.is_none());
+    assert_eq!(shown.open_question_count, 0);
+    assert!(shown.running, "the lane's root run is live");
+    assert!(shown.current_close.is_none());
+    assert!(summary(&f).current_close.is_none());
+
+    // A close shows as the standing record in the preview, the detail and the listing.
+    let reply = f
+        .host
+        .handle_command(
+            Command::Lanes(LanesCommand::CloseLane(CloseLane {
+                lane_id: lane_id.clone(),
+                kind: HumanLaneCloseKind::Discard,
+                ready_seq: None,
+                expected_management_revision: shown.management_revision,
+                expected_request_revision: shown.request_revision,
+                note: "not needed".into(),
+            })),
+            common::web(),
+        )
+        .unwrap();
+    let closed = close_result(reply);
+    let after = preview(&f).unwrap();
+    let standing = after.current_close.expect("the close stands");
+    assert_eq!(standing.close_id, closed.close_id);
+    assert_eq!(standing.kind, LaneCloseRecordKind::Discarded);
+    assert!(after.running, "closing stops no run");
+    assert_eq!(summary(&f).current_close, Some(standing.clone()));
+    let listed = match f
+        .host
+        .handle_query(
+            &session,
+            &Query::Lanes(LanesQuery::ListLanes(
+                workbench_protocol::namespaces::lanes::ListLanes {
+                    lead_thread: workbench_protocol::ids::ThreadId::new("lead").unwrap(),
+                    policy: None,
+                    detached: false,
+                    page: Default::default(),
+                },
+            )),
+        )
+        .unwrap()
+    {
+        QueryReply::Lanes(LanesReply::Lanes(page)) => page.items,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].current_close, Some(standing));
+
+    // A new Report lifts the close: the badge is gone in the detail and the preview.
+    f.storage
+        .handle()
+        .append_lane_report(
+            &f.lane.lane_id,
+            stored.management_revision,
+            event_bus::LaneReportInput {
+                status: event_bus::lane::LaneStatus::Working,
+                summary: "still going".into(),
+                artifact_revision: None,
+                failure_episode: None,
+                artifact_refs: vec![],
+                needs_human: false,
+                question_refs: vec![],
+                reason_code: None,
+                producer: event_bus::lane::LaneReportProducer::LaneAgent,
+            },
+            1,
+        )
+        .unwrap();
+    assert!(summary(&f).current_close.is_none());
+    let lifted = preview(&f).unwrap();
+    assert!(lifted.current_close.is_none());
+    assert!(lifted.request_revision.0 > after.request_revision.0);
+
+    // A detached lane has no close preview, and an unknown lane is not found.
+    let detach = f.command(
+        "detach",
+        stored.management_revision,
+        LaneManagementAction::Detach,
+    );
+    f.host.handle_command(detach, common::web()).unwrap();
+    assert_eq!(preview(&f).unwrap_err().code, ErrorCode::Conflict);
+    assert!(summary(&f).current_close.is_none());
+    let unknown = f.host.handle_query(
+        &session,
+        &Query::Lanes(LanesQuery::GetLaneClosePreview {
+            lane_id: workbench_protocol::lane_attention::LaneId::new("no-such-lane").unwrap(),
+        }),
+    );
+    assert_eq!(unknown.unwrap_err().code, ErrorCode::NotFound);
     f.stop().await;
 }

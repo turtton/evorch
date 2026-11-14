@@ -5,8 +5,8 @@ use crate::{
     ids::{RunId, ThreadId},
     lane_attention::{LaneAttentionAction, LaneId, LaneReadyState},
     lane_management::{
-        CloseLane, LaneCloseResult, LaneManagementPolicy, LaneManagementResult,
-        LaneManagementState, ManageLane, ManagedLanePolicy,
+        CloseLane, LaneCloseRecordKind, LaneCloseResult, LaneManagementPolicy,
+        LaneManagementResult, LaneManagementState, ManageLane, ManagedLanePolicy,
     },
     limits::MAX_TITLE_BYTES,
     queries::PageRequest,
@@ -27,11 +27,24 @@ pub const NESTED_COMMANDS: &[super::NestedOperation] = &[super::NestedOperation 
     pointer: "/request/action/type",
     known: MANAGE_LANE_ACTIONS,
 }];
-pub const QUERY_OPERATIONS: &[&str] = &["get_lane_management", "list_lanes", "get_lane"];
+pub const QUERY_OPERATIONS: &[&str] = &[
+    "get_lane_management",
+    "list_lanes",
+    "get_lane",
+    "get_lane_close_preview",
+];
 pub const EVENT_TYPES: &[&str] = &["lane_changed"];
 
 /// Most attention entries one [`LaneDetail`] shows.
 pub const MAX_LANE_DETAIL_ATTENTION: usize = 16;
+/// Most acceptance criteria a [`LaneClosePreview`] shows.
+pub const MAX_CLOSE_PREVIEW_CRITERIA: usize = 16;
+/// Most artifact references a [`LaneClosePreviewReady`] lists; the rest are counted.
+pub const MAX_CLOSE_PREVIEW_ARTIFACT_REFS: usize = 8;
+/// Longest brief objective a [`LaneClosePreview`] carries, in bytes (cut, not refused).
+pub const MAX_CLOSE_PREVIEW_OBJECTIVE_BYTES: usize = 4096;
+/// Longest criterion or artifact reference in a [`LaneClosePreview`], in bytes.
+pub const MAX_CLOSE_PREVIEW_ITEM_BYTES: usize = 512;
 /// The most threads a lane change names besides its lane thread and current lead.
 pub const MAX_LANE_EVENT_THREADS: usize = 4;
 
@@ -56,6 +69,19 @@ pub enum LaneReportStatus {
     Blocked,
     Ready,
     Failed,
+}
+
+/// The close that stands for a managed lane now, as the ledger records it. It is a record of
+/// a judgement, never a state of any run: a later Report lifts it, and the lane then reads as
+/// active again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneCurrentClose {
+    pub close_id: String,
+    pub kind: LaneCloseRecordKind,
+    /// The Ready the close was about; none for a human close without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_seq: Option<Sequence>,
 }
 
 /// One lane as a listing shows it.
@@ -83,6 +109,10 @@ pub struct LaneSummary {
     pub last_activity_at: UnixMillis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_report_status: Option<LaneReportStatus>,
+    /// The close that stands now; absent when none, once a Report lifted it, and for a
+    /// detached lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_close: Option<LaneCurrentClose>,
     /// Changes with anything above; compare for equality only.
     pub revision: Revision,
 }
@@ -193,6 +223,113 @@ impl LaneDetail {
     }
 }
 
+/// How a Ready's fixed artifact revision is spelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneArtifactRevisionKind {
+    CommitSha,
+    Sha256,
+}
+
+/// The fixed artifact revision a Ready names, exactly as the lane reported it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneArtifactRevisionView {
+    pub kind: LaneArtifactRevisionKind,
+    pub value: String,
+}
+
+/// The Ready a close would be about, as the lane reported it. Nothing here is checked
+/// against Git, GitHub or the artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneClosePreviewReady {
+    pub report_seq: Sequence,
+    /// The brief revision the Ready was reported for. A Ready for an earlier brief than
+    /// [`LaneClosePreview::brief_revision`] is for reference only.
+    pub brief_revision: Revision,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_revision: Option<LaneArtifactRevisionView>,
+    /// At most [`MAX_CLOSE_PREVIEW_ARTIFACT_REFS`] of the references, in the order reported.
+    pub artifact_refs: Vec<String>,
+    /// How many references the Ready names in all.
+    pub artifact_ref_count: u32,
+}
+
+/// What a person reads before ending a managed lane, from one snapshot of the ledger, with
+/// the revisions a [`CloseLane`] must name. Read only: no part of it is a condition of the
+/// close, and a close stops no run and deletes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneClosePreview {
+    pub lane_id: LaneId,
+    pub thread_id: ThreadId,
+    /// The start of the brief's objective, cut at [`MAX_CLOSE_PREVIEW_OBJECTIVE_BYTES`].
+    pub objective: String,
+    pub acceptance_criteria: Vec<String>,
+    pub brief_revision: Revision,
+    /// The revisions `CloseLane` compares; send these, not newer ones.
+    pub management_revision: Revision,
+    pub request_revision: Revision,
+    /// The latest report when it is a Ready for the current management.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<LaneClosePreviewReady>,
+    /// Questions raised by the lane's own runs that nobody has answered (saturating). A close
+    /// leaves them open.
+    pub open_question_count: u32,
+    /// A run of the lane's thread is working now (not idle between turns, not finished). A
+    /// close does not stop it.
+    pub running: bool,
+    /// The close that stands now, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_close: Option<LaneCurrentClose>,
+}
+
+impl LaneClosePreview {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_bytes(
+            "objective",
+            &self.objective,
+            MAX_CLOSE_PREVIEW_OBJECTIVE_BYTES,
+            true,
+        )?;
+        check_count(
+            "acceptance_criteria",
+            self.acceptance_criteria.len(),
+            MAX_CLOSE_PREVIEW_CRITERIA,
+        )?;
+        for item in &self.acceptance_criteria {
+            check_bytes(
+                "acceptance_criteria",
+                item,
+                MAX_CLOSE_PREVIEW_ITEM_BYTES,
+                true,
+            )?;
+        }
+        if let Some(ready) = &self.ready {
+            check_bytes("summary", &ready.summary, MAX_TITLE_BYTES, true)?;
+            check_count(
+                "artifact_refs",
+                ready.artifact_refs.len(),
+                MAX_CLOSE_PREVIEW_ARTIFACT_REFS,
+            )?;
+            for item in &ready.artifact_refs {
+                check_bytes("artifact_refs", item, MAX_CLOSE_PREVIEW_ITEM_BYTES, true)?;
+            }
+            if let Some(revision) = &ready.artifact_revision {
+                check_bytes(
+                    "artifact_revision",
+                    &revision.value,
+                    MAX_CLOSE_PREVIEW_ITEM_BYTES,
+                    true,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The lanes a lead manages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -279,9 +416,18 @@ pub enum LanesResult {
     deny_unknown_fields
 )]
 pub enum LanesQuery {
-    GetLaneManagement { lane_id: LaneId },
+    GetLaneManagement {
+        lane_id: LaneId,
+    },
     ListLanes(ListLanes),
-    GetLane { lane_id: LaneId },
+    GetLane {
+        lane_id: LaneId,
+    },
+    /// What a person reads before closing or discarding a managed lane, with the revisions
+    /// the `close_lane` command must name.
+    GetLaneClosePreview {
+        lane_id: LaneId,
+    },
 }
 
 impl LanesQuery {
@@ -291,7 +437,9 @@ impl LanesQuery {
 
     pub fn validate(&self, _limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
-            Self::GetLaneManagement { .. } | Self::GetLane { .. } => Ok(()),
+            Self::GetLaneManagement { .. }
+            | Self::GetLane { .. }
+            | Self::GetLaneClosePreview { .. } => Ok(()),
             Self::ListLanes(q) => q.page.validate(),
         }
     }
@@ -308,6 +456,7 @@ pub enum LanesReply {
     LaneManagement(LaneManagementState),
     Lanes(Page<LaneSummary>),
     Lane(Box<LaneDetail>),
+    LaneClosePreview(Box<LaneClosePreview>),
 }
 
 impl LanesReply {
@@ -316,6 +465,7 @@ impl LanesReply {
             Self::LaneManagement(_) => Ok(()),
             Self::Lanes(page) => page.validate_with(LaneSummary::validate),
             Self::Lane(lane) => lane.validate(),
+            Self::LaneClosePreview(preview) => preview.validate(),
         }
     }
 }

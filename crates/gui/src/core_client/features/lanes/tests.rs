@@ -6,7 +6,7 @@ use crate::core_client::features::execution::tests::{
     answer, asked, command_of, ok_command, query_of, query_reply, screen,
 };
 use crate::core_client::features::{FeatureAction, FeatureRequest};
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::{Value, json};
 
 fn summary(id: &str, policy: &str, revision: u64) -> Value {
@@ -464,4 +464,382 @@ fn an_answer_for_another_lead_or_lane_is_dropped_and_events_of_other_leads_are_i
             .iter()
             .any(|a| matches!(&a.request, FeatureRequest::Query(q) if is_list(q)))
     );
+}
+
+fn preview(management: u64, request: u64, ready_brief: u64) -> FeatureReply {
+    query_reply(
+        json!({"type": "lanes", "payload": {"type": "lane_close_preview", "payload": {
+        "lane_id": "l1", "thread_id": "thread-l1", "objective": "the whole objective",
+        "acceptance_criteria": ["it builds"], "brief_revision": "2",
+        "management_revision": management.to_string(), "request_revision": request.to_string(),
+        "ready": {"report_seq": "4", "brief_revision": ready_brief.to_string(),
+            "summary": "all done", "artifact_refs": ["https://example.test/pull/1"],
+            "artifact_ref_count": 3},
+        "open_question_count": 2, "running": true}}}),
+    )
+}
+
+fn closed(kind: &str, already: bool) -> FeatureReply {
+    FeatureReply::Command(Ok(serde_json::from_value(
+        json!({"disposition": "accepted", "result": {"type": "lanes", "payload": {
+            "type": "closed", "payload": {"lane_id": "l1", "close_id": "close-1", "kind": kind,
+            "ready_seq": "4", "management_revision": "7", "request_revision": "9",
+            "already_closed": already}}}}),
+    )
+    .expect("a close reply")))
+}
+
+fn close_of(action: &FeatureAction) -> &workbench_protocol::lane_management::CloseLane {
+    match command_of(action) {
+        Command::Lanes(LanesCommand::CloseLane(close)) => close,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn is_preview(query: &Query) -> bool {
+    matches!(query, Query::Lanes(LanesQuery::GetLaneClosePreview { .. }))
+}
+
+fn type_reason(
+    screen: &mut egui_kittest::Harness<
+        'static,
+        crate::core_client::features::execution::tests::Screen,
+    >,
+    text: &str,
+) {
+    use egui::accesskit::Role;
+    screen.get_by_role(Role::TextInput).focus();
+    screen.run_steps(4);
+    screen.get_by_role(Role::TextInput).type_text(text);
+    screen.run_steps(4);
+}
+
+fn disabled(
+    screen: &egui_kittest::Harness<'static, crate::core_client::features::execution::tests::Screen>,
+    label: &str,
+) -> bool {
+    screen.get_by_label(label).accesskit_node().is_disabled()
+}
+
+/// A screen with lane `l1` listed and its close dialog open on the preview `reply`.
+fn with_close_dialog(
+    button: &str,
+    reply: FeatureReply,
+) -> egui_kittest::Harness<'static, crate::core_client::features::execution::tests::Screen> {
+    let mut screen = screen(Box::<LanesFeature>::default(), Some("lead"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        tag_of(&first, is_list),
+        lanes(vec![summary("l1", "attached", 3)]),
+    );
+    screen.get_by_label(button).click();
+    let read = asked(&mut screen);
+    let tag = tag_of(&read, is_preview);
+    answer(&mut screen, tag, reply);
+    screen
+}
+
+#[test]
+fn a_close_reads_the_preview_and_sends_the_revisions_it_named_once() {
+    let mut screen = screen(Box::<LanesFeature>::default(), Some("lead"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        tag_of(&first, is_list),
+        lanes(vec![summary("l1", "attached", 3)]),
+    );
+    screen.get_by_label("人間の判断で閉じる…").click();
+    let read = asked(&mut screen);
+    let Query::Lanes(LanesQuery::GetLaneClosePreview { lane_id }) = query_of(&read[0]) else {
+        panic!("the close preview was expected");
+    };
+    assert_eq!(lane_id.as_str(), "l1");
+    // Until the preview is read nothing can be confirmed.
+    assert!(disabled(&screen, "lane を閉じる"));
+    // The Ready was for brief revision 1; the lane is at 2.
+    answer(&mut screen, read[0].tag, preview(7, 9, 1));
+
+    screen.get_by_label(close::MEANING);
+    screen.get_by_label(close::REMAINS);
+    screen.get_by_label(close::RUNNING_WARNING);
+    screen.get_by_label(close::OLDER_BRIEF_WARNING);
+    screen.get_by_label("この lane には未回答の質問が 2 件あります。close しても質問は残ります。");
+    screen.get_by_label("最新の Ready（#4）— 参考（以前の brief）");
+    screen.get_by_label("ほか 2 件の参照");
+    assert!(screen.query_by_label_contains("未回収").is_none());
+
+    // A reason is required before anything can be sent.
+    assert!(disabled(&screen, "lane を閉じる"));
+    type_reason(&mut screen, "  done by hand  ");
+    assert!(!disabled(&screen, "lane を閉じる"));
+    screen.get_by_label("lane を閉じる").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    let close = close_of(&sent[0]);
+    assert_eq!(close.lane_id.as_str(), "l1");
+    assert_eq!(
+        close.kind,
+        workbench_protocol::lane_management::HumanLaneCloseKind::Complete
+    );
+    // The revisions are the preview's (7 and 9), not the listed row's (3).
+    assert_eq!(close.expected_management_revision, Revision(7));
+    assert_eq!(close.expected_request_revision, Revision(9));
+    assert_eq!(close.ready_seq.map(|seq| seq.0), Some(4));
+    assert_eq!(close.note, "done by hand");
+
+    // While the request is out, confirming again sends nothing.
+    assert!(disabled(&screen, "lane を閉じる"));
+    screen.get_by_label("lane を閉じる").click();
+    assert!(asked(&mut screen).is_empty());
+
+    // The answer names the record's kind, and the lane is read again.
+    answer(&mut screen, sent[0].tag, closed("human_closed", false));
+    screen.get_by_label("lane の close: 人の判断で完了（未検証） として記録しました。run の停止や削除は行っていません");
+    assert!(screen.query_by_label("lane を閉じる（未検証）").is_none());
+    assert!(
+        asked(&mut screen)
+            .iter()
+            .any(|a| matches!(&a.request, FeatureRequest::Query(q) if is_list(q)))
+    );
+}
+
+#[test]
+fn a_discard_is_sent_as_a_discard_and_an_already_closed_answer_says_so() {
+    let mut screen = with_close_dialog("破棄する…", preview(3, 5, 2));
+    screen.get_by_label("lane を破棄する");
+    // No claim of completion: the Ready warning belongs to closing as done.
+    assert!(screen.query_by_label(close::NO_READY_WARNING).is_none());
+    assert!(screen.query_by_label(close::OLDER_BRIEF_WARNING).is_none());
+    type_reason(&mut screen, "not needed");
+    screen.get_by_label("lane を破棄する").click();
+    let sent = asked(&mut screen);
+    assert_eq!(
+        close_of(&sent[0]).kind,
+        workbench_protocol::lane_management::HumanLaneCloseKind::Discard
+    );
+    answer(&mut screen, sent[0].tag, closed("discarded", true));
+    screen.get_by_label("lane の close: 既に終了済みでした（破棄）。新しい記録は作っていません");
+}
+
+#[test]
+fn a_stale_refusal_is_shown_and_only_a_reload_makes_a_new_screen_the_one_to_confirm() {
+    let mut screen = with_close_dialog("人間の判断で閉じる…", preview(3, 5, 2));
+    type_reason(&mut screen, "done");
+    screen.get_by_label("lane を閉じる").click();
+    let sent = asked(&mut screen);
+    let mut refusal = FeatureError::new("stale_request");
+    refusal.code = Some(workbench_protocol::errors::ErrorCode::StaleRevision);
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(refusal)),
+    );
+    screen.get_by_label("lane が変わっていたため記録していません（stale_request）。Reload すると今の状態が確認対象になります。");
+    // Nothing is resent by itself, and the old screen cannot be confirmed again.
+    let after = asked(&mut screen);
+    assert!(
+        !after
+            .iter()
+            .any(|a| matches!(a.request, FeatureRequest::Command(_)))
+    );
+    assert!(disabled(&screen, "lane を閉じる"));
+
+    screen.get_by_label("Reload").click();
+    let reread = asked(&mut screen);
+    answer(&mut screen, tag_of(&reread, is_preview), preview(4, 6, 2));
+    assert!(!disabled(&screen, "lane を閉じる"));
+    screen.run_steps(4);
+    screen.get_by_label("lane を閉じる").click();
+    let again = asked(&mut screen);
+    let close = close_of(&again[0]);
+    assert_eq!(close.expected_management_revision, Revision(4));
+    assert_eq!(close.expected_request_revision, Revision(6));
+}
+
+#[test]
+fn a_lost_answer_is_not_a_success_and_the_ledger_is_read_again() {
+    let mut screen = with_close_dialog("人間の判断で閉じる…", preview(3, 5, 2));
+    type_reason(&mut screen, "done");
+    screen.get_by_label("lane を閉じる").click();
+    let sent = asked(&mut screen);
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+    );
+    screen.get_by_label("結果が分かりません。成功とは見なさず、台帳を読み直しています。");
+    let reread = asked(&mut screen);
+    assert!(
+        reread
+            .iter()
+            .any(|a| matches!(&a.request, FeatureRequest::Query(q) if is_preview(q)))
+    );
+    assert!(
+        !reread
+            .iter()
+            .any(|a| matches!(a.request, FeatureRequest::Command(_)))
+    );
+    answer(&mut screen, tag_of(&reread, is_preview), preview(3, 5, 2));
+    // The first request may still resolve: a second one is not offered meanwhile.
+    assert!(disabled(&screen, "lane を閉じる"));
+    // The same tag later answers with what the core resolved.
+    answer(&mut screen, sent[0].tag, closed("human_closed", false));
+    assert!(screen.query_by_label("lane を閉じる（未検証）").is_none());
+}
+
+#[test]
+fn cancel_sends_nothing_and_a_reason_over_two_kib_cannot_be_sent() {
+    let mut screen = with_close_dialog("人間の判断で閉じる…", preview(3, 5, 2));
+    type_reason(&mut screen, &"x".repeat(2049));
+    screen.get_by_label("理由が長すぎます（2KiB まで）。");
+    assert!(disabled(&screen, "lane を閉じる"));
+    screen.get_by_label("キャンセル").click();
+    let after = asked(&mut screen);
+    assert!(
+        !after
+            .iter()
+            .any(|a| matches!(a.request, FeatureRequest::Command(_)))
+    );
+    assert!(screen.query_by_label("lane を閉じる（未検証）").is_none());
+}
+
+#[test]
+fn a_standing_close_is_a_badge_not_something_to_record_again_and_detached_lanes_have_no_button() {
+    let mut screen = screen(Box::<LanesFeature>::default(), Some("lead"));
+    let first = asked(&mut screen);
+    let mut closed_lane = summary("l1", "attached", 3);
+    closed_lane["current_close"] = json!({"close_id": "close-1", "kind": "human_closed"});
+    answer(
+        &mut screen,
+        tag_of(&first, is_list),
+        lanes(vec![closed_lane]),
+    );
+    answer(
+        &mut screen,
+        tag_of(&first, is_detached_list),
+        lanes(vec![summary("l2", "detached", 4)]),
+    );
+    screen.get_by_label("close 済み: 人の判断で完了（未検証）");
+    // The one row with a button is the managed lane; the detached lane has none.
+    assert_eq!(screen.get_all_by_label("人間の判断で閉じる…").count(), 1);
+    assert_eq!(screen.get_all_by_label("破棄する…").count(), 1);
+
+    screen.get_by_label("破棄する…").click();
+    let read = asked(&mut screen);
+    let mut standing = json!({"close_id": "close-1", "kind": "human_closed"});
+    standing["ready_seq"] = json!("4");
+    let reply = query_reply(
+        json!({"type": "lanes", "payload": {"type": "lane_close_preview",
+        "payload": {"lane_id": "l1", "thread_id": "thread-l1", "objective": "o",
+        "acceptance_criteria": [], "brief_revision": "2", "management_revision": "3",
+        "request_revision": "5", "open_question_count": 0, "running": false,
+        "current_close": standing}}}),
+    );
+    answer(&mut screen, tag_of(&read, is_preview), reply);
+    screen.get_by_label("この lane は既に終了が記録されています（人の判断で完了（未検証））。記録するものはありません。");
+    type_reason(&mut screen, "again");
+    assert!(disabled(&screen, "lane を破棄する"));
+}
+
+#[test]
+fn a_lane_that_moved_while_the_dialog_is_open_must_be_reloaded_before_confirming() {
+    let mut screen = with_close_dialog("人間の判断で閉じる…", preview(3, 5, 2));
+    type_reason(&mut screen, "done");
+    assert!(!disabled(&screen, "lane を閉じる"));
+    let moved = UiEvent::Lanes(LanesEvent::LaneChanged {
+        lane: serde_json::from_value(summary("l1", "attached", 4)).unwrap(),
+        also_for: vec![],
+    });
+    screen.state_mut().feature.event(&moved);
+    screen.run_steps(2);
+    screen
+        .get_by_label("この画面を読んだ後に lane が変わりました。Reload してから決めてください。");
+    assert!(disabled(&screen, "lane を閉じる"));
+}
+
+fn open_close_dialog(
+    screen: &mut egui_kittest::Harness<
+        'static,
+        crate::core_client::features::execution::tests::Screen,
+    >,
+) -> u64 {
+    screen.get_by_label("人間の判断で閉じる…").click();
+    let read = asked(screen);
+    tag_of(&read, is_preview)
+}
+
+#[test]
+fn a_late_answer_to_a_close_that_was_sent_never_acts_on_a_later_confirmation() {
+    let mut screen = with_close_dialog("人間の判断で閉じる…", preview(3, 5, 2));
+    type_reason(&mut screen, "done");
+    screen.get_by_label("lane を閉じる").click();
+    let sent = asked(&mut screen);
+    let first = sent[0].tag;
+    // The person gives up waiting, and opens the confirmation of the same lane again.
+    screen.get_by_label("キャンセル").click();
+    let again = open_close_dialog(&mut screen);
+    answer(&mut screen, again, preview(4, 6, 2));
+
+    // The old close is refused late: the new confirmation shows none of it.
+    let mut refusal = FeatureError::new("stale_request");
+    refusal.code = Some(workbench_protocol::errors::ErrorCode::StaleRevision);
+    answer(&mut screen, first, FeatureReply::Command(Err(refusal)));
+    assert!(
+        screen
+            .query_by_label_contains("lane が変わっていたため記録していません")
+            .is_none()
+    );
+    type_reason(&mut screen, "second");
+    assert!(!disabled(&screen, "lane を閉じる"));
+
+    // Had it been recorded instead, the new confirmation is still the one on screen.
+    screen.get_by_label("lane を閉じる").click();
+    let resent = asked(&mut screen);
+    let second = resent
+        .iter()
+        .find(|a| matches!(a.request, FeatureRequest::Command(_)))
+        .expect("the new confirmation is sent");
+    assert_eq!(close_of(second).expected_request_revision, Revision(6));
+    answer(&mut screen, second.tag, closed("human_closed", false));
+    assert!(screen.query_by_label("lane を閉じる（未検証）").is_none());
+}
+
+#[test]
+fn a_late_close_answer_does_not_finish_the_confirmation_opened_after_it() {
+    let mut screen = with_close_dialog("人間の判断で閉じる…", preview(3, 5, 2));
+    type_reason(&mut screen, "done");
+    screen.get_by_label("lane を閉じる").click();
+    let first = asked(&mut screen)[0].tag;
+    screen.get_by_label("キャンセル").click();
+    let again = open_close_dialog(&mut screen);
+    answer(&mut screen, again, preview(4, 6, 2));
+    // The first close was recorded after all: its answer reports it, and the open
+    // confirmation stays for the person to decide.
+    answer(&mut screen, first, closed("human_closed", false));
+    screen.get_by_label("lane を閉じる（未検証）");
+}
+
+#[test]
+fn a_late_preview_of_an_earlier_opening_is_not_what_a_reopened_dialog_confirms() {
+    let mut screen = screen(Box::<LanesFeature>::default(), Some("lead"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        tag_of(&first, is_list),
+        lanes(vec![summary("l1", "attached", 3)]),
+    );
+    let old_read = open_close_dialog(&mut screen);
+    screen.get_by_label("キャンセル").click();
+    let new_read = open_close_dialog(&mut screen);
+    answer(&mut screen, old_read, preview(3, 5, 2));
+    // Still waiting for its own reading: nothing can be confirmed yet.
+    assert!(screen.query_by_label_contains("読み込んでいます").is_some());
+    answer(&mut screen, new_read, preview(4, 6, 2));
+    type_reason(&mut screen, "done");
+    screen.get_by_label("lane を閉じる").click();
+    let sent = asked(&mut screen);
+    let close = close_of(&sent[0]);
+    assert_eq!(close.expected_management_revision, Revision(4));
+    assert_eq!(close.expected_request_revision, Revision(6));
 }

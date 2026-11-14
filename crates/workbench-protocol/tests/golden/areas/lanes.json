@@ -20,6 +20,15 @@
     },
     "type": "lanes"
   },
+  "query/lanes/get_lane_close_preview": {
+    "payload": {
+      "payload": {
+        "lane_id": "lane-1"
+      },
+      "type": "get_lane_close_preview"
+    },
+    "type": "lanes"
+  },
   "query/lanes/list_lanes": {
     "payload": {
       "payload": {
@@ -67,6 +76,11 @@
         },
         "summary": {
           "brief_revision": "2",
+          "current_close": {
+            "close_id": "close-1",
+            "kind": "human_closed",
+            "ready_seq": "4"
+          },
           "generation": "1",
           "lane_id": "lane-1",
           "last_activity_at": "1700000000000",
@@ -85,12 +99,53 @@
     },
     "type": "lanes"
   },
+  "query_reply/lanes/lane_close_preview": {
+    "payload": {
+      "payload": {
+        "acceptance_criteria": [
+          "it builds"
+        ],
+        "brief_revision": "2",
+        "current_close": {
+          "close_id": "close-1",
+          "kind": "discarded"
+        },
+        "lane_id": "lane-1",
+        "management_revision": "3",
+        "objective": "build the thing",
+        "open_question_count": 2,
+        "ready": {
+          "artifact_ref_count": 1,
+          "artifact_refs": [
+            "https://example.test/pull/1"
+          ],
+          "artifact_revision": {
+            "kind": "commit_sha",
+            "value": "abc123"
+          },
+          "brief_revision": "1",
+          "report_seq": "4",
+          "summary": "done"
+        },
+        "request_revision": "5",
+        "running": true,
+        "thread_id": "thread-2"
+      },
+      "type": "lane_close_preview"
+    },
+    "type": "lanes"
+  },
   "query_reply/lanes/lanes": {
     "payload": {
       "payload": {
         "items": [
           {
             "brief_revision": "2",
+            "current_close": {
+              "close_id": "close-1",
+              "kind": "human_closed",
+              "ready_seq": "4"
+            },
             "generation": "1",
             "lane_id": "lane-1",
             "last_activity_at": "1700000000000",
@@ -116,6 +171,11 @@
       "payload": {
         "lane": {
           "brief_revision": "2",
+          "current_close": {
+            "close_id": "close-1",
+            "kind": "human_closed",
+            "ready_seq": "4"
+          },
           "generation": "1",
           "lane_id": "lane-1",
           "last_activity_at": "1700000000000",
