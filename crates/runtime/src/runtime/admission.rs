@@ -1,5 +1,8 @@
 use super::*;
 use event_bus::event::diagnostic_codes;
+#[path = "queued_restart.rs"]
+mod queued_restart;
+pub(super) use queued_restart::QueuedLaunch;
 
 pub(super) type Admissions = Mutex<HashMap<RunId, Admission>>;
 /// Host-owned lane producers can still be waiting before a RunEntry exists.
@@ -52,6 +55,7 @@ impl LaneAdmissions {
 pub(super) type RegistrationHook = Arc<dyn Fn(RunId) + Send + Sync>;
 
 pub(super) struct Admission {
+    pub(super) queued: Option<QueuedLaunch>,
     parent: Option<RunId>,
     lane_root: bool,
     pub(super) cancelled: bool,
@@ -234,6 +238,7 @@ impl AgentRuntime {
                 }
             }
         }
+        self.discard_cancelled_restart_launches();
         failure.map_or(Ok(()), Err)
     }
 
@@ -323,6 +328,7 @@ impl AgentRuntime {
         admissions.insert(
             run_id,
             Admission {
+                queued: None,
                 parent,
                 lane_root,
                 cancelled: execution.cancelled(),
@@ -561,6 +567,10 @@ impl AgentRuntime {
             #[cfg(test)]
             if admitted.is_err() {
                 runtime.execution_hook(cancellation::HookPoint::AdmissionFailed, &execution);
+            }
+            #[cfg(test)]
+            if admitted.is_ok() {
+                runtime.execution_hook(cancellation::HookPoint::AdmissionReady, &execution);
             }
             // Registration and generation replacement share I -> A. Never
             // acquire a publication gate under these global locks.

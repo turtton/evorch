@@ -1605,6 +1605,8 @@ impl AgentRuntime {
             },
         );
         match if preadmitted.is_some() {
+            // Durable recovery intent is already admitted, not a queued launch.
+            // The original I/dispatch fence owns initial provider admission.
             Ok(true)
         } else {
             self.admit_intent(
@@ -1627,6 +1629,20 @@ impl AgentRuntime {
                     Arc::clone(&execution),
                     parent.is_none() && config.lane_scope == Some(event_bus::LaneScope::Lane),
                 );
+                self.shared
+                    .admissions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(&run_id)
+                    .expect("reserved queued admission")
+                    .queued = Some(admission::QueuedLaunch {
+                    parent,
+                    role,
+                    prompt,
+                    config,
+                    continuation,
+                    review_seed,
+                });
                 return Ok(RunAdmission {
                     run: run_id,
                     execution,

@@ -419,6 +419,7 @@ pub(crate) enum HookPoint {
     TerminalRegistered,
     CancelGate,
     SubtreeCollected,
+    AdmissionReady,
     AdmissionRegistered,
     LaneOwnershipValidated,
     LaneStopWriteStarted,

@@ -61,6 +61,12 @@ impl Coordinator {
 }
 
 impl AgentRuntime {
+    pub(crate) fn require_manual_resume_open(&self) -> Result<(), RuntimeError> {
+        if !self.shared.quiesce.running() {
+            return Err(RuntimeError::RestartBusy);
+        }
+        Ok(())
+    }
     pub fn begin_restart_quiesce(&self) -> Result<RestartAttempt, RuntimeError> {
         self.shared.dispatch_tails.result()?;
         let generation = self.shared.quiesce.begin().map_err(runtime::error)?;
@@ -109,6 +115,21 @@ impl AgentRuntime {
     }
 
     fn finish_restart_cancellation(&self, generation: u64) -> Result<ResumeReceipt, RuntimeError> {
+        // A new attempt must not close the gate between durable claim and
+        // scheduling the claimed launch under I.
+        let _manual = self
+            .shared
+            .quiesce
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let receipt =
+            self.with_restart_launch_fence(|| self.invalidate_parked_intents(generation))?;
+        self.replay_restart_wakes();
+        Ok(receipt)
+    }
+
+    fn invalidate_parked_intents(&self, generation: u64) -> Result<ResumeReceipt, RuntimeError> {
         let coordinator = &self.shared.quiesce;
         // This operation is synchronous with checkpoint capture. No await may
         // occur while holding these locks.
@@ -123,7 +144,11 @@ impl AgentRuntime {
             return Err(runtime::error(reason));
         }
         for (run, old) in inner.intents.clone() {
-            if !old.active || old.checkpoint.is_none() || inner.unstarted.contains(&run) {
+            let queued = old.wait == ResumeWait::AdmissionQueued;
+            if !old.active
+                || (!queued && old.checkpoint.is_none())
+                || inner.unstarted.contains(&run)
+            {
                 continue;
             }
             let mut intent = old.clone();
@@ -134,6 +159,9 @@ impl AgentRuntime {
                     .map(|checkpoint| checkpoint.snapshot.clone());
             }
             intent.checkpoint = None;
+            if queued {
+                intent.wait = ResumeWait::Admission;
+            }
             let expected = inner
                 .persisted
                 .contains(&run)
@@ -204,6 +232,7 @@ impl AgentRuntime {
         // Do not hold the checkpoint gate under I/A/R: snapshots may need R.
         drop(_checkpoint);
         let result = guard.enter(call);
+        self.discard_cancelled_restart_launches();
         if let Some(generation) = cancel_generation {
             let _checkpoint = self
                 .shared

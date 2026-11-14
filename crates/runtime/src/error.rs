@@ -7,6 +7,8 @@ use crate::RunId;
 /// エージェント実行ランタイムのエラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("runtime is busy preparing restart; retry the manual continuation after cancellation")]
+    RestartBusy,
     #[error("cannot withdraw follow-up: {0}")]
     FollowUpWithdrawal(#[from] crate::runtime::FollowUpWithdrawalError),
     #[error("review evidence for {run_id} is unavailable: {reason}")]

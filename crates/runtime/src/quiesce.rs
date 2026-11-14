@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard};
 use tokio::sync::watch;
 
+mod deferred;
 #[cfg(test)]
 mod fixture;
 #[cfg(test)]
@@ -17,6 +18,8 @@ mod restart;
 pub(crate) mod runtime;
 mod safe_point;
 pub use restart::{RestartAttempt, ResumeReceipt};
+#[cfg(test)]
+mod queued_tests;
 #[cfg(test)]
 mod restart_tests;
 #[cfg(test)]
@@ -35,6 +38,7 @@ pub(crate) struct Coordinator {
     inner: Mutex<Inner>,
     version: watch::Sender<u64>,
     pub(crate) checkpoint_gate: Mutex<()>,
+    pub(crate) manual_launch_gate: Mutex<()>,
     #[cfg(test)]
     fault: Mutex<Option<StorageStep>>,
 }
@@ -52,6 +56,7 @@ struct Inner {
     acks: BTreeMap<RunId, (u64, String, u64)>,
     // Prepared recovery has no running turn; its activation start gate is closed.
     unstarted: BTreeSet<RunId>,
+    deferred_wakes: BTreeMap<RunId, String>,
     intents: BTreeMap<RunId, ResumeIntent>,
     persisted: BTreeSet<RunId>,
 }
@@ -101,6 +106,7 @@ impl Default for Coordinator {
             inner: Mutex::default(),
             version: watch::channel(0).0,
             checkpoint_gate: Mutex::new(()),
+            manual_launch_gate: Mutex::new(()),
             #[cfg(test)]
             fault: Mutex::default(),
         }
@@ -499,6 +505,12 @@ impl Coordinator {
     }
 
     pub(crate) fn begin(&self) -> Result<u64, String> {
+        // Manual restoration is synchronous. Finish or reject it before the
+        // attempt can close admission, rather than retaining it as queued work.
+        let _manual = self
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut inner = self.lock();
         if let QuiesceState::Failed { reason } = &inner.phase {
             return Err(reason.clone());

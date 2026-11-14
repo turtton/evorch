@@ -163,6 +163,14 @@ impl AgentRuntime {
         attach_guard: Option<LaneAttachGuard>,
         permits: &[crate::ownership::OwnerPermit],
     ) -> Result<LaneManagementOutcome, LaneError> {
+        let _manual = self
+            .shared
+            .quiesce
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.require_manual_resume_open()
+            .map_err(|e| LaneError::new("restart_busy", e.to_string()))?;
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;

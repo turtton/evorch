@@ -78,6 +78,99 @@ async fn shutdown(f: &Fixture, runs: &[RunId]) {
 }
 
 #[tokio::test]
+async fn restart_busy_rejects_lane_producers_before_any_ledger_write_and_allows_explicit_retry() {
+    for operation in 0..3 {
+        let mut f = Fixture::new();
+        let (lead, _) = f.lead().await;
+        let lane = f.lane(lead, "existing").await;
+        project(&f);
+        if operation == 1 {
+            detach(&f, &lane, 1);
+        }
+        let before = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
+        let intents = serde_json::to_value(f.runtime.resume_intents().unwrap()).unwrap();
+        let counts = || {
+            rusqlite::Connection::open(&f.config.db_path)
+                .unwrap()
+                .query_row(
+                    "SELECT (SELECT count(*) FROM threads), (SELECT count(*) FROM lanes)",
+                    [],
+                    |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?)),
+                )
+                .unwrap()
+        };
+        let count = counts();
+        let attempt = f.runtime.begin_restart_quiesce().unwrap();
+        // No yield: these calls are made in Preparing, before a safe-point ACK.
+        let invoke = || -> Result<Option<crate::lanes::LaneOpened>, crate::lanes::LaneError> {
+            match operation {
+                0 => f
+                    .runtime
+                    .open_lane(
+                        lead,
+                        "explicit-open",
+                        event_bus::LaneBrief {
+                            verification_requirements: Default::default(),
+                            objective: "new producer".into(),
+                            inputs: vec![],
+                            deliverables: vec!["artifact".into()],
+                            acceptance_criteria: vec!["review".into()],
+                            constraints: vec![],
+                            workspace: Default::default(),
+                            report_policy: event_bus::LanePolicy::Attached,
+                        },
+                    )
+                    .map(Some),
+                1 => f
+                    .runtime
+                    .reattach_lane(
+                        LaneHumanContext,
+                        attach_request(&lane, "explicit-attach", 2, lead, "delivery-lead"),
+                        LaneAttachGuard {
+                            pinned: false,
+                            archived: false,
+                        },
+                    )
+                    .map(|_| None),
+                _ => f
+                    .runtime
+                    .manage_lane_from_host(
+                        LaneHumanContext,
+                        request(
+                            &lane,
+                            "explicit-manage",
+                            1,
+                            LaneManagementAction::SetPolicy {
+                                policy: ManagedLanePolicy::Summary,
+                            },
+                        ),
+                        None,
+                        &[],
+                    )
+                    .map(|_| None),
+            }
+        };
+        assert_eq!(invoke().unwrap_err().code, "restart_busy");
+        assert_eq!(counts(), count);
+        assert_eq!(
+            f.storage.handle().lane(&lane.lane_id).unwrap().unwrap(),
+            before
+        );
+        assert_eq!(
+            serde_json::to_value(f.runtime.resume_intents().unwrap()).unwrap(),
+            intents
+        );
+        f.runtime.cancel_restart_quiesce(&attempt).unwrap();
+        let opened = invoke().unwrap();
+        if let Some(opened) = opened {
+            f.phase(opened.root_run_id, AgentRunPhase::Waiting).await;
+            shutdown(&f, &[opened.root_run_id]).await;
+        }
+        shutdown(&f, &[lane.root_run_id, lead]).await;
+    }
+}
+
+#[tokio::test]
 async fn policy_roundtrip_preserves_execution_progress_and_routes_existing_questions_only_to_user()
 {
     let mut f = Fixture::new();
