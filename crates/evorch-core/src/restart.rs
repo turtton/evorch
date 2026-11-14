@@ -259,7 +259,9 @@ impl RestartCoordinator {
                 state.sealed = Some(Arc::new(sealed));
                 self.publish(&mut state, RestartPhase::Sealed);
             }
-            Err(_) => {
+            Err(error) => {
+                // Keep runtime Stop terminal-only too, not merely the host ingress closed.
+                let _ = self.0.runtime.fail_restart_attempt(&attempt, error);
                 self.0
                     .gate
                     .transition(id.generation, HostRestartPhase::FailedClosed);

@@ -84,7 +84,8 @@ async fn explicit_refresh_survives_an_in_flight_failure() {
 #[tokio::test(start_paused = true)]
 async fn repeated_producer_notifications_resume_one_pending_fetch_without_self_retriggering() {
     let world = World::new();
-    let mut process = world.process(enabled());
+    let process = world.process(enabled());
+    let _owner = process.permit("t1");
     let producers = process.service.producer_gate();
     let mut pause = producers.pause();
     process.link_directly("t1", 1);
@@ -99,8 +100,10 @@ async fn repeated_producer_notifications_resume_one_pending_fetch_without_self_r
     process.service.inner().wake.notify_one();
     answer.arrived().await;
     assert_eq!(process.source.calls().len(), 1);
+    let flight = process.service.inner().lock().flights[&key(1)].clone();
     answer.release_ok(open_passing(1));
-    process.quiet_events().await;
+    flight.wait().await;
+    process.service.inner().round().await;
     assert_eq!(process.source.calls().len(), 1);
     process.service.shutdown_and_drain().await.unwrap();
 }

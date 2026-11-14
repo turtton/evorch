@@ -73,7 +73,7 @@ async fn shell_wait(root: &std::path::Path) {
         run_id: "restart-process-shell".into(),
         ..Default::default()
     };
-    shell.execute_with_context(&context, serde_json::json!({"command":format!(r#"IFS= read -r line < '{}'; printf 'normal:%s' "$line""#, fifo.display()), "yield_ms":0})).await.unwrap();
+    let started = shell.execute_with_context(&context, serde_json::json!({"command":format!(r#"IFS= read -r line < '{}'; printf 'normal:%s' "$line""#, fifo.display()), "yield_ms":0})).await.unwrap();
     let identity = shell.shell_job_snapshots(&context.run_id)[0]
         .identity
         .clone();
@@ -87,6 +87,16 @@ async fn shell_wait(root: &std::path::Path) {
     let terminal = shell.wait_shell_job_terminal(&identity).await.unwrap();
     assert_eq!(terminal.exit_code, Some(0));
     assert!(!terminal.observed);
+    let job = started.detail.as_ref().unwrap()["shell_job"]["job_id"]
+        .as_str()
+        .unwrap();
+    let result = shell
+        .execute_with_context(&context, serde_json::json!({"action":"poll", "job_id":job}))
+        .await
+        .unwrap();
+    assert!(result.content.contains("normal:released"));
+    assert!(shell.shell_job_snapshots(&context.run_id)[0].observed);
+    shell.release_shell_jobs(&context.run_id).unwrap();
     emit("shell-finished");
 }
 fn emit(phase: &str) {
@@ -175,8 +185,8 @@ async fn restart_subprocess_worker() {
     host.shutdown().await.unwrap();
     assert_eq!(
         model.0.load(Ordering::SeqCst),
-        1,
-        "sealed operator shutdown must not resume the second run"
+        2,
+        "sealed operator shutdown must not resume the third run"
     );
     emit("stopped");
     drop(instance);
@@ -216,7 +226,7 @@ async fn prepare_cancel_retains_lifetime_lock_and_sigterm_uses_shared_driver() {
     let identity = ConfigIdentity::new(&root.path().join("c")).unwrap();
     assert!(LaunchGuard::acquire(&identity).is_err());
     let pid = child.id().unwrap();
-    for command in ["prepare", "cancel", "shell", "prepare"] {
+    for command in ["prepare", "cancel", "prepare", "cancel", "shell", "prepare"] {
         child
             .stdin
             .as_mut()

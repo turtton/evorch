@@ -271,7 +271,9 @@ async fn sealing_marker_binds_owner_and_stop_before_drain_invalidates_fence() {
         .await
         .unwrap();
     f.runtime.begin_restart_sealing(&attempt).unwrap();
+    let changes = f.runtime.subscribe_restart_state();
     f.runtime.begin_restart_sealing(&attempt).unwrap();
+    assert!(!changes.has_changed().unwrap());
     // Host permit gate is closed, but runtime tail drain has not been polled.
     f.runtime.stop(run, crate::StopScope::SelfOnly).unwrap();
     f.runtime.wait(run).await.unwrap();
@@ -286,4 +288,31 @@ async fn sealing_marker_binds_owner_and_stop_before_drain_invalidates_fence() {
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
     f.runtime.cancel_restart_quiesce(&next).unwrap();
     other.runtime.cancel_restart_quiesce(&foreign).unwrap();
+}
+
+#[tokio::test]
+async fn host_failure_is_attempt_bound_and_preserves_the_first_diagnosis() {
+    let f = Fixture::new(0);
+    let a = f.runtime.begin_restart_quiesce().unwrap();
+    f.runtime.cancel_restart_quiesce(&a).unwrap();
+    let b = f.runtime.begin_restart_quiesce().unwrap();
+    assert!(f.runtime.fail_restart_attempt(&a, "old failure").is_err());
+    assert!(!matches!(
+        f.runtime.quiesce_state(),
+        QuiesceState::Failed { .. }
+    ));
+    f.runtime.begin_restart_sealing(&b).unwrap();
+    f.runtime
+        .fail_restart_attempt(&b, "host drain failed")
+        .unwrap();
+    f.runtime
+        .fail_restart_attempt(&b, "replacement diagnosis")
+        .unwrap();
+    assert_eq!(
+        f.runtime.quiesce_state(),
+        QuiesceState::Failed {
+            reason: "host drain failed".into()
+        }
+    );
+    assert!(f.runtime.cancel_restart_quiesce(&b).is_err());
 }

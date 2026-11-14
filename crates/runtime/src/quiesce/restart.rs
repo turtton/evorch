@@ -109,7 +109,34 @@ impl AgentRuntime {
         if let QuiesceState::Failed { reason } = &inner.phase {
             return Err(runtime::error(reason));
         }
-        inner.sealing = true;
+        if !inner.sealing {
+            inner.sealing = true;
+            self.shared.quiesce.changed();
+        }
+        Ok(())
+    }
+    /// Fail this attempt closed after a host-side sealing/drain error. Stale callers
+    /// cannot affect a replacement attempt; an existing failure is never overwritten.
+    pub fn fail_restart_attempt(
+        &self,
+        attempt: &RestartAttempt,
+        reason: impl ToString,
+    ) -> Result<(), RuntimeError> {
+        let mut inner = self.shared.quiesce.lock();
+        if !Arc::ptr_eq(&attempt.owner, &self.shared.dispatch_tails)
+            || attempt.generation != inner.generation
+            || !inner.requested
+            || inner.cancelling
+            || inner.shutting_down
+        {
+            return Err(runtime::error("stale restart failure"));
+        }
+        if !matches!(inner.phase, QuiesceState::Failed { .. }) {
+            inner.phase = QuiesceState::Failed {
+                reason: reason.to_string(),
+            };
+        }
+        drop(inner);
         self.shared.quiesce.changed();
         Ok(())
     }

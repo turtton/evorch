@@ -772,9 +772,10 @@ impl CommandHost {
         send: &SendChat,
         provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
-        // Reserve only after the common host gate accepted this command.
-        self.reserve_chat_after_gate(send)?;
+        // Validate attachments before creating even an owner row; the common
+        // host gate has already accepted this command.
         let command = HostCommand::SendChat(self.chat_input(send)?);
+        self.reserve_chat_after_gate(send)?;
         let permit = self.service.authorize(&command).map_err(refusal_error)?;
         match self.execute(command, permit, provenance) {
             Executed::Duplicate { run_id, .. } => Ok(CommandReply {
