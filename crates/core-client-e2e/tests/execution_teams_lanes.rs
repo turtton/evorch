@@ -25,8 +25,9 @@ use workbench_protocol::namespaces::{
 };
 use workbench_protocol::{envelope::*, ids::*, queries::*};
 
-/// Every turn only says it is idle, so a conversation run saves its context and waits.
-struct HeldModel(tokio::sync::Notify);
+/// Every turn only says it is idle, so a conversation run saves its context and waits. While
+/// the gate (`.1`) is closed a turn does not answer at all: its run stays live and running.
+struct HeldModel(tokio::sync::Notify, tokio::sync::watch::Sender<bool>);
 
 #[async_trait]
 impl runtime::AgentModel for HeldModel {
@@ -38,6 +39,7 @@ impl runtime::AgentModel for HeldModel {
         _: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
         self.0.notify_one();
+        let _ = self.1.subscribe().wait_for(|open| *open).await;
         Ok(providers::ChatResponse {
             usage_reported: true,
             message: providers::Message {
@@ -258,18 +260,11 @@ async fn waiting(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
     }
 }
 
-/// Until the run has stopped moving: waiting for input, or ended.
-async fn settled(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
-    while runtime
-        .inspect_agent(run)
-        .map(|agent| agent.phase)
-        .ok()
-        .is_none_or(|phase| {
-            matches!(
-                phase,
-                event_bus::AgentRunPhase::Pending | event_bus::AgentRunPhase::Running
-            )
-        })
+/// Until the run is in its turn (the held model does not answer), so that its state, and with
+/// it a listing's snapshot, no longer changes.
+async fn running(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
+    while runtime.inspect_agent(run).map(|agent| agent.phase).ok()
+        != Some(event_bus::AgentRunPhase::Running)
     {
         tokio::task::yield_now().await;
     }
@@ -287,7 +282,10 @@ async fn start() -> World {
         serde_json::json!({"version":workspace_state::SIDEBAR_SCHEMA_VERSION,"projects":[],"threads":[]}).to_string(),
     )
     .unwrap();
-    let model = Arc::new(HeldModel(tokio::sync::Notify::new()));
+    let model = Arc::new(HeldModel(
+        tokio::sync::Notify::new(),
+        tokio::sync::watch::channel(true).0,
+    ));
     let boot = BootstrappedHost::open_with_test_seams(
         BootstrapOptions {
             config_dir: root_dir.clone(),
@@ -1074,6 +1072,8 @@ async fn web_children(
 async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_pointer_alone() {
     let world = start().await;
     let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
+    // The children's turns are held, so all of them stay live runs of the lead for the test.
+    world.model.1.send_replace(false);
     let mut kids = std::collections::BTreeMap::new();
     for n in 0..count {
         let kid = world
@@ -1092,7 +1092,7 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
         kids.insert(kid.to_string(), kid);
     }
     for kid in kids.values() {
-        settled(&world.boot.runtime, *kid).await;
+        running(&world.boot.runtime, *kid).await;
     }
     // The run behind the cursor is the one with a run of its own below it.
     let first = web_children(&world, "web-kids-1", world.lead, None).await;
@@ -1113,7 +1113,7 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
             },
         )
         .unwrap();
-    settled(&world.boot.runtime, grandchild).await;
+    running(&world.boot.runtime, grandchild).await;
     let grandchild_name =
         web_children(&world, "web-grandkids", kids[far.summary.id.as_str()], None)
             .await
