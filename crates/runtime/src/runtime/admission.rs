@@ -778,7 +778,11 @@ impl AgentRuntime {
         }
         Ok(())
     }
-    pub(crate) fn try_seal_dispatch(&self, restart: bool) -> bool {
+    pub(crate) fn try_seal_dispatch(
+        &self,
+        fence: &crate::quiesce::DispatchDrainFence,
+    ) -> Result<bool, RuntimeError> {
+        let restart = fence.is_restart();
         // Recovery and registration both use I -> A -> R.
         let intents = self
             .shared
@@ -796,9 +800,9 @@ impl AgentRuntime {
                 || admissions.values().any(|a| a.result.borrow().is_none())
                 || runs.values().any(is_live))
         {
-            return false;
+            return Ok(false);
         }
-        self.shared.dispatch_tails.try_close()
+        self.seal_dispatch_fence(fence)
     }
 }
 

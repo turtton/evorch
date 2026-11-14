@@ -183,7 +183,9 @@ fn recipe(policy: ResumePolicy) -> RecoveryRecipe {
 async fn capture(f: &Fixture, recipes: &BTreeMap<RunId, RecoveryRecipe>) -> Vec<RunRecoveryRecord> {
     let fence = f.runtime.fence_dispatch_restart().await.unwrap();
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
-    f.runtime.capture_recovery_records(recipes).unwrap()
+    f.runtime
+        .capture_recovery_records(&f.runtime.fence_dispatch_restart().await.unwrap(), recipes)
+        .unwrap()
 }
 
 #[tokio::test]
@@ -475,7 +477,10 @@ async fn file_backed_reopen_isolates_bad_member_payload_attributes_edges_and_int
         if damage == "intent" {
             let captured = f
                 .runtime
-                .capture_recovery_records(&BTreeMap::new())
+                .capture_recovery_records(
+                    &f.runtime.fence_dispatch_restart().await.unwrap(),
+                    &BTreeMap::new(),
+                )
                 .unwrap();
             assert!(captured.iter().any(|r| r.run_id == healthy));
             assert!(!captured.iter().any(|r| r.run_id == bad));
@@ -651,7 +656,10 @@ async fn a_corrupt_snapshot_descriptor_does_not_abort_other_components_capture()
             host_inputs_json: "[]".into(),
         })
         .unwrap();
-    let captured = f.runtime.capture_recovery_records(&recipes).unwrap();
+    let captured = f
+        .runtime
+        .capture_recovery_records(&f.runtime.fence_dispatch_restart().await.unwrap(), &recipes)
+        .unwrap();
     assert_eq!(
         captured.iter().map(|r| r.run_id).collect::<Vec<_>>(),
         vec![healthy]
@@ -883,10 +891,10 @@ async fn historical_deliveries_keep_receipts_without_requiring_missing_or_tombst
         drop(sql);
         let records = f
             .runtime
-            .capture_recovery_records(&BTreeMap::from([(
-                recipient,
-                recipe(ResumePolicy::CoreOwned),
-            )]))
+            .capture_recovery_records(
+                &f.runtime.fence_dispatch_restart().await.unwrap(),
+                &BTreeMap::from([(recipient, recipe(ResumePolicy::CoreOwned))]),
+            )
             .unwrap();
         assert_eq!(records.len(), 1);
         let deliveries = &records[0].deliveries;
@@ -1078,9 +1086,17 @@ async fn tool_approval_pending_is_not_a_restart_safe_point_or_a_durable_continua
     let registry = sandbox::approval::ApprovalRegistry::for_bus(&bus);
     assert_eq!(registry.list_pending(None, 10).len(), 1);
     f.runtime.request_quiesce();
+    let fence = f
+        .runtime
+        .fence_dispatch_shutdown(|| async { Ok::<_, String>(()) })
+        .await
+        .unwrap();
     assert!(
         f.runtime
-            .capture_recovery_records(&BTreeMap::from([(run, recipe(ResumePolicy::CoreOwned))]))
+            .capture_recovery_records(
+                &fence,
+                &BTreeMap::from([(run, recipe(ResumePolicy::CoreOwned))])
+            )
             .is_err()
     );
     assert!(!f.intent(run).tool_intent.is_empty());

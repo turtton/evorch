@@ -63,6 +63,6 @@ pub async fn capture(
     let fence = fence.ok_or("recovery capture requires a producer fence")?;
     runtime.validate_restart_dispatch_fence(fence)?;
     runtime.drain_dispatch_tails(fence).await?;
-    let records = runtime.capture_recovery_records(recipes)?;
+    let records = runtime.capture_recovery_records(fence, recipes)?;
     Ok(runtime.save_recovery_graph(capture_id, &records)?)
 }

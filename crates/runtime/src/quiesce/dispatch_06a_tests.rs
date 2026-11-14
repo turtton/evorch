@@ -205,3 +205,28 @@ fn tail_aborted_before_its_first_poll_cannot_look_like_successful_drain() {
     assert!(tails.try_close());
     assert!(tails.result().is_err());
 }
+
+#[tokio::test]
+async fn reopen_before_seal_preserves_live_tail_and_failure() {
+    let tails = Arc::new(DispatchTails::default());
+    let parent = tails.register(false).unwrap();
+    let epoch = tails.epoch();
+    tails.reopen().unwrap();
+    let child = parent.fork();
+    assert_eq!(tails.epoch(), epoch);
+    assert_eq!(tails.state.lock().unwrap().count, 2);
+    drop(parent);
+    assert!(!tails.try_close());
+    drop(child);
+    tails.idle().await;
+    assert!(tails.result().is_ok());
+    assert!(tails.try_close());
+    tails.state.lock().unwrap().drained = true;
+    assert!(tails.register(true).is_err());
+    tails.reopen().unwrap();
+    assert_ne!(tails.epoch(), epoch);
+    assert!(
+        tails.result().is_err(),
+        "reopen must never clear a required-tail failure"
+    );
+}

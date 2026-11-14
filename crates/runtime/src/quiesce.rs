@@ -38,6 +38,7 @@ struct Inner {
     phase: QuiesceState,
     // Storage health is sticky, but only an explicit request gates normal turns.
     requested: bool,
+    generation: u64,
     intents: BTreeMap<RunId, ResumeIntent>,
     persisted: BTreeSet<RunId>,
 }
@@ -457,6 +458,9 @@ impl Coordinator {
 
     pub(crate) fn begin(&self) {
         let mut inner = self.lock();
+        if !inner.requested {
+            inner.generation += 1;
+        }
         inner.requested = true;
         if inner.phase == QuiesceState::Running {
             inner.phase = QuiesceState::Quiescing;

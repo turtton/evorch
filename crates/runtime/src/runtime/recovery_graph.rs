@@ -129,8 +129,10 @@ impl AgentRuntime {
     /// Missing recipes remain Unsupported rather than guessing CoreOwned.
     pub fn capture_recovery_records(
         &self,
+        fence: &DispatchDrainFence,
         recipes: &BTreeMap<RunId, RecoveryRecipe>,
     ) -> Result<Vec<RunRecoveryRecord>, RuntimeError> {
+        self.begin_recovery_capture(fence)?;
         if self.quiesce_state() != QuiesceState::Checkpointed || !self.dispatch_drained() {
             return Err(graph_error(
                 "recovery capture requires Checkpointed and dispatch drain",

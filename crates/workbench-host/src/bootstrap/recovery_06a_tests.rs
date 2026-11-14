@@ -200,3 +200,34 @@ async fn explicit_current_config_and_core_policy_capture_a_candidate_but_never_a
     );
     // Drop simulates process replacement: capture is not an operator Stop.
 }
+
+#[tokio::test]
+async fn stale_restart_fence_cannot_capture_after_reopen_and_reseal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_owners, boot) = open(dir.path()).await;
+    let _run = start(&boot);
+    boot.quiesce_for_restart().await.unwrap();
+    let old = boot.runtime.fence_dispatch_restart().await.unwrap();
+    boot.runtime.drain_dispatch_tails(&old).await.unwrap();
+    boot.runtime.reopen_restart_dispatch(&old).unwrap();
+    let current = boot.runtime.fence_dispatch_restart().await.unwrap();
+    boot.runtime.drain_dispatch_tails(&current).await.unwrap();
+    assert!(
+        recovery::capture(&boot.runtime, Some(&old), "stale", &BTreeMap::new())
+            .await
+            .is_err()
+    );
+    assert!(recovery::plan(&boot.runtime).unwrap().components.is_empty());
+    assert!(
+        boot.runtime
+            .capture_recovery_records(&old, &BTreeMap::new())
+            .is_err()
+    );
+    boot.runtime
+        .capture_recovery_records(&current, &BTreeMap::new())
+        .unwrap();
+    assert!(
+        boot.runtime.reopen_restart_dispatch(&current).is_err(),
+        "capture must exclude reopen, even before graph writes"
+    );
+}

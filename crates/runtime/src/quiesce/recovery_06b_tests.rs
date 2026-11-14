@@ -21,7 +21,10 @@ async fn saved(f: &Fixture) -> RunId {
     };
     let records = f
         .runtime
-        .capture_recovery_records(&BTreeMap::from([(run, recipe)]))
+        .capture_recovery_records(
+            &f.runtime.fence_dispatch_restart().await.unwrap(),
+            &BTreeMap::from([(run, recipe)]),
+        )
         .unwrap();
     f.runtime
         .save_recovery_graph("paused-test", &records)
@@ -154,7 +157,10 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
     let records = f
         .runtime
-        .capture_recovery_records(&BTreeMap::from([(root, recipe.clone()), (other, recipe)]))
+        .capture_recovery_records(
+            &f.runtime.fence_dispatch_restart().await.unwrap(),
+            &BTreeMap::from([(root, recipe.clone()), (other, recipe)]),
+        )
         .unwrap();
     assert!(records.iter().all(|r| r.deliveries.is_empty()));
     assert!(records.iter().all(|r| r.next_message_id > 2));
@@ -575,17 +581,20 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
     let records = f
         .runtime
-        .capture_recovery_records(&BTreeMap::from([(
-            root,
-            RecoveryRecipe {
-                settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
-                policy: ResumePolicy::CoreOwned,
-                goal_id: None,
-                team: None,
-                lane: None,
-                descriptor: None,
-            },
-        )]))
+        .capture_recovery_records(
+            &f.runtime.fence_dispatch_restart().await.unwrap(),
+            &BTreeMap::from([(
+                root,
+                RecoveryRecipe {
+                    settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                    policy: ResumePolicy::CoreOwned,
+                    goal_id: None,
+                    team: None,
+                    lane: None,
+                    descriptor: None,
+                },
+            )]),
+        )
         .unwrap();
     let question_delivery = records
         .iter()
@@ -861,17 +870,20 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
     let records = f
         .runtime
-        .capture_recovery_records(&BTreeMap::from([(
-            run,
-            RecoveryRecipe {
-                settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
-                policy: ResumePolicy::CoreOwned,
-                goal_id: None,
-                team: None,
-                lane: None,
-                descriptor: None,
-            },
-        )]))
+        .capture_recovery_records(
+            &f.runtime.fence_dispatch_restart().await.unwrap(),
+            &BTreeMap::from([(
+                run,
+                RecoveryRecipe {
+                    settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                    policy: ResumePolicy::CoreOwned,
+                    goal_id: None,
+                    team: None,
+                    lane: None,
+                    descriptor: None,
+                },
+            )]),
+        )
         .unwrap();
     f.runtime
         .save_recovery_graph("admission-gate", &records)
