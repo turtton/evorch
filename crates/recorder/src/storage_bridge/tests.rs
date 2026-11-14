@@ -3,8 +3,8 @@ use event_bus::{LifecycleEvent, OwnershipAction, OwnershipEvent, UsageEvent};
 use std::time::{Duration, UNIX_EPOCH};
 use storage::{Database, Storage, StorageConfig};
 
-fn fixture() -> (tempfile::TempDir, Storage, Database) {
-    let dir = tempfile::tempdir().unwrap();
+fn fixture() -> (test_socket_dir::SplitDir, Storage, Database) {
+    let dir = test_socket_dir::SplitDir::new();
     let config = StorageConfig {
         db_path: dir.path().join("events.db"),
         ..StorageConfig::default()
@@ -407,7 +407,7 @@ async fn filtering_affects_only_durable_rows_and_leaves_live_observations_intact
 async fn real_owner_handoff_still_rejects_an_already_queued_old_generation() {
     let (dir, storage, db) = fixture();
     let bus = Arc::new(EventBus::new(64));
-    let root = dir.path().join("owners");
+    let root = dir.sockets().to_path_buf();
     let first =
         runtime::ownership::OwnerHost::open(&root, Default::default(), bus.clone()).unwrap();
     let successor =

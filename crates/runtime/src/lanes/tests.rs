@@ -120,11 +120,11 @@ struct Fixture {
     model: Arc<Model>,
     storage: storage::Storage,
     events: event_bus::EventReceiver,
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("lanes.db"),
             ..Default::default()

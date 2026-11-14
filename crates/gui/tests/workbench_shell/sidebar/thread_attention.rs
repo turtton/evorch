@@ -14,6 +14,7 @@ use gui::panes::sidebar::sidebar_pane_with_retention;
 use runtime::ownership::OwnerHost;
 use storage::{Database, Storage, StorageConfig};
 use tempfile::TempDir;
+use test_socket_dir::SplitDir;
 use workspace_ui::{ThreadId, ThreadRunPhase, UiSettings};
 
 const EXTERNAL_ROW: &str = "Thread attention: Working in another window or process";
@@ -21,14 +22,14 @@ const EXTERNAL_SPINNER: &str = "Thread status: Running in another window or proc
 const OWN_SPINNER: &str = "Thread status: Running";
 
 struct Shared {
-    dir: TempDir,
+    dir: SplitDir,
     project: TempDir,
     config: StorageConfig,
 }
 
 impl Shared {
     fn new() -> Self {
-        let dir = TempDir::new().expect("temp dir");
+        let dir = test_socket_dir::SplitDir::new();
         let config = StorageConfig {
             db_path: dir.path().join("events.db"),
             ..StorageConfig::default()
@@ -52,12 +53,8 @@ fn open_window(shared: &Shared, stream: &str) -> Window {
     let storage = Storage::open(shared.config.clone()).expect("storage must open");
     let bus = Arc::new(EventBus::new(64));
     let host = Arc::new(
-        OwnerHost::open(
-            &shared.dir.path().join("threads"),
-            Default::default(),
-            Arc::clone(&bus),
-        )
-        .expect("owner host must open"),
+        OwnerHost::open(shared.dir.sockets(), Default::default(), Arc::clone(&bus))
+            .expect("owner host must open"),
     );
     let sidebar_path = shared.dir.path().join("sidebar.json");
     let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())

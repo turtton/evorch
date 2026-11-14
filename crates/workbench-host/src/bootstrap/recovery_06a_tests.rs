@@ -31,12 +31,8 @@ impl runtime::SandboxFactory for Direct {
         Ok(Arc::new(sandbox::DirectSandbox::new_unchecked()))
     }
 }
-async fn open(root: &std::path::Path) -> (tempfile::TempDir, BootstrappedHost) {
-    let owners = tempfile::Builder::new()
-        .prefix("6")
-        .rand_bytes(3)
-        .tempdir()
-        .unwrap();
+async fn open(root: &std::path::Path) -> (test_socket_dir::SocketDir, BootstrappedHost) {
+    let owners = test_socket_dir::SocketDir::new();
     let boot = BootstrappedHost::open_with_test_seams(
         BootstrapOptions {
             config_dir: root.into(),

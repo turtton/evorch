@@ -38,7 +38,7 @@ fn child_owner_process() {
 #[test]
 fn two_process_attach_and_quiesce_preserve_generation() {
     use std::io::{BufRead, BufReader};
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let mut registry = Registry::open(&directory.path().join("owners.db")).expect("registry");
     let lease = Lease {
         owner_id: "child".into(),

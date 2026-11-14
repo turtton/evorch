@@ -71,7 +71,7 @@ impl AgentModel for EscalatingModel {
 
 #[test]
 fn child_composer_continues_same_orchestrator_after_completion_and_while_alive() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let config = storage::StorageConfig {
         db_path: dir.path().join("runs.db"),
         ..Default::default()
@@ -84,12 +84,8 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
         .unwrap();
     let bus = Arc::new(EventBus::new(512));
     let owner = Arc::new(
-        runtime::ownership::OwnerHost::open(
-            &dir.path().join("owners"),
-            Default::default(),
-            bus.clone(),
-        )
-        .unwrap(),
+        runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
+            .unwrap(),
     );
     let mut receiver = bus.subscribe();
     let requests = Requests::default();

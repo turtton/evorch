@@ -152,11 +152,12 @@ impl runtime::SandboxFactory for Direct {
         Ok(Arc::new(sandbox::DirectSandbox::new_unchecked()))
     }
 }
-fn options(root: &std::path::Path) -> BootstrapOptions {
+fn options(dir: &test_socket_dir::SplitDir) -> BootstrapOptions {
     BootstrapOptions {
-        config_dir: root.into(),
-        ownership_root: root.join("owners"),
-        project_root: root.into(),
+        config_dir: dir.path().into(),
+        // Sockets live in the short directory so a long TMPDIR cannot exceed SUN_LEN.
+        ownership_root: dir.sockets().into(),
+        project_root: dir.path().into(),
     }
 }
 fn write_config(root: &std::path::Path) {
@@ -182,9 +183,9 @@ enabled = false
     )
     .unwrap();
 }
-async fn open(root: &std::path::Path, model: Arc<Model>) -> BootstrappedHost {
+async fn open(dir: &test_socket_dir::SplitDir, model: Arc<Model>) -> BootstrappedHost {
     BootstrappedHost::open_with_test_seams(
-        options(root),
+        options(dir),
         TestSeams {
             model,
             sandbox: Arc::new(Direct),
@@ -216,7 +217,7 @@ fn candidates(root: &std::path::Path) -> Vec<storage::improvement::ImprovementCa
 
 #[tokio::test]
 async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
     write_config(root);
     let spool = root.join("self-improvement/drafts/crash-spool");
@@ -228,7 +229,7 @@ async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
     )
     .unwrap();
     let model = Arc::new(Model::default());
-    let mut boot = open(root, model.clone()).await;
+    let mut boot = open(&dir, model.clone()).await;
     let services = boot.services.names().collect::<Vec<_>>();
     // All shared factories coexist; additional services must not break this
     // learning/drain contract or remove the lane producer shutdown participants.
@@ -288,12 +289,12 @@ async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
 
 #[tokio::test]
 async fn gui_factory_and_core_partition_thread_and_global_work_on_one_database() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
     write_config(root);
     let model = Arc::new(Model::default());
-    let mut core = open(root, model.clone()).await;
-    let (_store, gui, gui_owner, mut services) = gui_factory(root, &core, model.clone());
+    let mut core = open(&dir, model.clone()).await;
+    let (_store, gui, gui_owner, mut services) = gui_factory(&dir, &core, model.clone());
     let bus = gui.event_bus();
     let permit = core.owner.start("core-thread").unwrap();
     assert!(gui_owner.start("core-thread").is_err());
@@ -341,13 +342,13 @@ async fn gui_factory_and_core_partition_thread_and_global_work_on_one_database()
 
 #[tokio::test]
 async fn partial_startup_failure_releases_services_and_database_collector_lease() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
     write_config(root);
     // Evaluation is already registered when the improvement factory hits this error.
     std::fs::create_dir_all(root.join("self-improvement")).unwrap();
     std::fs::write(root.join("self-improvement/drafts"), "not a directory").unwrap();
-    let error = BootstrappedHost::open(options(root))
+    let error = BootstrappedHost::open(options(&dir))
         .await
         .err()
         .expect("spool path must fail");
@@ -364,8 +365,8 @@ async fn partial_startup_failure_releases_services_and_database_collector_lease(
 
 #[tokio::test]
 async fn disabled_learning_evidence_path_is_inert_and_repeated_shutdown_drains() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut boot = BootstrappedHost::open(options(dir.path())).await.unwrap();
+    let dir = test_socket_dir::SplitDir::new();
+    let mut boot = BootstrappedHost::open(options(&dir)).await.unwrap();
     assert!(!dir.path().join("self-improvement").exists());
     boot.shutdown().await.unwrap();
     boot.shutdown().await.unwrap();
@@ -375,9 +376,9 @@ async fn disabled_learning_evidence_path_is_inert_and_repeated_shutdown_drains()
 #[tokio::test]
 async fn evaluation_host_reload_uses_strict_saved_configuration() {
     use eval::evaluator::EvaluatorHost;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     write_config(dir.path());
-    let mut boot = BootstrappedHost::open(options(dir.path())).await.unwrap();
+    let mut boot = BootstrappedHost::open(options(&dir)).await.unwrap();
     boot.evaluator.reload_config().unwrap();
     std::fs::write(dir.path().join("config.toml"), "[invalid").unwrap();
     assert!(boot.evaluator.reload_config().is_err());
@@ -386,11 +387,11 @@ async fn evaluation_host_reload_uses_strict_saved_configuration() {
 
 #[tokio::test]
 async fn shutdown_drains_an_inflight_lesson_review_before_collector_and_lease_release() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     write_config(dir.path());
     let model = Arc::new(Model::default());
     model.hold_review.store(true, Ordering::SeqCst);
-    let mut boot = open(dir.path(), model.clone()).await;
+    let mut boot = open(&dir, model.clone()).await;
     let permit = boot.owner.start("draining-learning").unwrap();
     let run = boot.runtime.delegate_background(
         Role::Worker,
@@ -417,7 +418,7 @@ async fn shutdown_drains_an_inflight_lesson_review_before_collector_and_lease_re
 }
 
 fn gui_factory(
-    root: &std::path::Path,
+    dir: &test_socket_dir::SplitDir,
     core: &BootstrappedHost,
     model: Arc<Model>,
 ) -> (
@@ -426,12 +427,12 @@ fn gui_factory(
     Arc<OwnerHost>,
     services::BackgroundServices,
 ) {
-    let db = components::storage_config(&core.config, root.join("evorch-events.db"));
-    learning_factory(root, &core.config, model, db)
+    let db = components::storage_config(&core.config, dir.path().join("evorch-events.db"));
+    learning_factory(dir, &core.config, model, db)
 }
 
 fn learning_factory(
-    root: &std::path::Path,
+    dir: &test_socket_dir::SplitDir,
     config: &config::Config,
     model: Arc<Model>,
     db: storage::StorageConfig,
@@ -444,9 +445,8 @@ fn learning_factory(
     // Construct precisely the factory the legacy GUI calls, on a second runtime.
     let bus = Arc::new(EventBus::new(64));
     let store = storage::Storage::open(db.clone()).unwrap();
-    let gui_owner = Arc::new(
-        OwnerHost::open(&root.join("owners"), config.ownership.clone(), bus.clone()).unwrap(),
-    );
+    let gui_owner =
+        Arc::new(OwnerHost::open(dir.sockets(), config.ownership.clone(), bus.clone()).unwrap());
     let gui = learning::configure(
         AgentRuntime::new(
             bus.clone(),
@@ -456,7 +456,7 @@ fn learning_factory(
         config,
         db.clone(),
         store.handle(),
-        root,
+        dir.path(),
     );
     let mut services = services::BackgroundServices::default();
     let evaluation = eval::evaluator::EvaluationService::default();
@@ -482,7 +482,7 @@ fn learning_factory(
 
 #[tokio::test]
 async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
     write_config(root);
     let mut config = config::Config::default();
@@ -491,7 +491,7 @@ async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
     // The actual writer starts suspended, not a mock persistence failure.
     db.hard_limits.max_db_bytes = 0;
     let model = Arc::new(Model::default());
-    let (store, runtime, owner, mut services) = learning_factory(root, &config, model.clone(), db);
+    let (store, runtime, owner, mut services) = learning_factory(&dir, &config, model.clone(), db);
     let spool = root.join("self-improvement/drafts/crash-spool");
     runtime::self_improvement::spool_fault(
         &spool,
@@ -513,7 +513,7 @@ async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
     );
     assert!(candidates(root).is_empty());
     drop((services, runtime, owner, store));
-    let mut next = open(root, model).await;
+    let mut next = open(&dir, model).await;
     next.shutdown().await.unwrap();
     assert!(!file.exists(), "acknowledged spool must be removed");
     let rows = candidates(root);
@@ -524,12 +524,12 @@ async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
 
 #[tokio::test]
 async fn review_m1_non_elected_bus_diagnostics_are_collected_without_broadcasting() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
     write_config(root);
     let model = Arc::new(Model::default());
-    let mut core = open(root, model.clone()).await;
-    let (_store, gui, _owner, mut services) = gui_factory(root, &core, model);
+    let mut core = open(&dir, model.clone()).await;
+    let (_store, gui, _owner, mut services) = gui_factory(&dir, &core, model);
     gui.event_bus().emit(diagnostic(None));
     gui.event_bus().emit(event_bus::Event::new(
         event_bus::FaultEvent::SkillDiagnostic {
@@ -553,12 +553,12 @@ async fn review_m1_non_elected_bus_diagnostics_are_collected_without_broadcastin
 
 #[tokio::test]
 async fn review_m2_remaining_host_collects_events_and_spool_after_first_host_exits() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
     write_config(root);
     let model = Arc::new(Model::default());
-    let mut first = open(root, model.clone()).await;
-    let (_store, remaining, _owner, mut services) = gui_factory(root, &first, model);
+    let mut first = open(&dir, model.clone()).await;
+    let (_store, remaining, _owner, mut services) = gui_factory(&dir, &first, model);
     first.shutdown().await.unwrap();
     runtime::self_improvement::spool_fault(
         &root.join("self-improvement/drafts/crash-spool"),
@@ -580,8 +580,8 @@ async fn review_m2_remaining_host_collects_events_and_spool_after_first_host_exi
 
 #[tokio::test]
 async fn review_m3_evaluation_work_prevents_idle_exit_until_it_is_drained() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut core = BootstrappedHost::open(options(dir.path())).await.unwrap();
+    let dir = test_socket_dir::SplitDir::new();
+    let mut core = BootstrappedHost::open(options(&dir)).await.unwrap();
     assert!(!core.busy());
     let sh = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|p| p.join("sh"))
@@ -656,7 +656,7 @@ impl AgentModel for LateLaneAdmission {
 #[tokio::test]
 async fn review_m6_late_lane_admission_terminal_diagnostic_survives_shutdown() {
     use super::services::ServicePhase;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
     write_config(root);
     {
@@ -691,7 +691,7 @@ async fn review_m6_late_lane_admission_terminal_diagnostic_survives_shutdown() {
     }
     let model = Arc::new(LateLaneAdmission::default());
     let mut boot = BootstrappedHost::open_with_test_seams(
-        options(root),
+        options(&dir),
         TestSeams {
             model: model.clone(),
             sandbox: Arc::new(Direct),

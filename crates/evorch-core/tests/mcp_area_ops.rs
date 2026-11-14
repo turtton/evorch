@@ -102,7 +102,7 @@ struct Area {
     next: usize,
     /// What the started peers report over the control socket.
     peer_events: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
 }
 
 fn project() -> ProjectId {
@@ -124,10 +124,7 @@ fn session() -> SessionId {
 impl Area {
     async fn open() -> Self {
         traces::capture();
-        let dir = tempfile::Builder::new()
-            .prefix("m11-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir(root.join(".evorch")).unwrap();
         std::fs::write(
@@ -137,7 +134,7 @@ impl Area {
         .unwrap();
         // The peer connects here when it starts; the count says whether a
         // server process was started at all.
-        let listener = UnixListener::bind(root.join("control")).unwrap();
+        let listener = UnixListener::bind(dir.sockets().join("control")).unwrap();
         let started = Arc::new(AtomicUsize::new(0));
         let counter = started.clone();
         let (events, peer_events) = tokio::sync::mpsc::unbounded_channel();
@@ -163,7 +160,7 @@ impl Area {
             root.join(".evorch/mcp.toml"),
             format!(
                 "version=1\n[servers.fixture]\ntype=\"stdio\"\ncommand={command:?}\nargs=[{:?}]\nroles=[\"worker\"]\n[servers.fixture.env]\nTOKEN={{keychain=\"token\"}}\n",
-                root.join("control")
+                dir.sockets().join("control")
             ),
         )
         .unwrap();
@@ -194,7 +191,7 @@ impl Area {
             BootstrapOptions {
                 config_dir: root.clone(),
                 project_root: root.clone(),
-                ownership_root: root.join("owners"),
+                ownership_root: dir.sockets().to_path_buf(),
             },
             TestSeams {
                 model: Arc::new(Idle),

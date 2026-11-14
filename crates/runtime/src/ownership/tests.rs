@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn observed_owner_loss_closes_pending_approvals_even_before_wait_is_polled() {
     use sandbox::approval::{ApprovalOwner, ApprovalRegistry, ApprovalRequest, ApprovalState};
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::SocketDir::new();
     let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
     let registry = ApprovalRegistry::for_bus(&bus);
     let permit = OwnerPermit {
@@ -59,7 +59,7 @@ async fn observed_owner_loss_closes_pending_approvals_even_before_wait_is_polled
 #[cfg(unix)]
 #[test]
 fn host_release_allows_explicit_claim_and_fences_old_permit() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
     let first = OwnerHost::open(
         directory.path(),
@@ -163,7 +163,7 @@ fn claim_fences_previous_generation() {
 
 #[test]
 fn permit_commits_metadata_before_clearing_active_turn() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut registry = Registry::open(&path).expect("registry");
     let mut original = owner();
@@ -194,7 +194,7 @@ fn permit_commits_metadata_before_clearing_active_turn() {
 
 #[test]
 fn registry_attach_never_starts_an_absent_thread() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let registry = Registry::open(&directory.path().join("owners.db")).expect("registry");
     assert!(matches!(
         registry.attach("absent"),
@@ -204,7 +204,7 @@ fn registry_attach_never_starts_an_absent_thread() {
 
 #[test]
 fn registry_commits_claim_and_rolls_back_competing_generation() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut registry = Registry::open(&path).expect("registry");
     let original = owner();
@@ -234,7 +234,7 @@ fn registry_commits_claim_and_rolls_back_competing_generation() {
 #[cfg(unix)]
 #[test]
 fn claim_refuses_reachable_owner_even_when_lease_is_stale() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let socket = directory.path().join("owner.sock");
     let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("listener");
     let mut registry = Registry::open(&directory.path().join("owners.db")).expect("registry");
@@ -263,7 +263,7 @@ fn claim_refuses_reachable_owner_even_when_lease_is_stale() {
 fn saturated_owner_endpoint_protects_runs_without_waiting_for_accept() {
     use socket2::{Domain, SockAddr, Socket, Type};
 
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let owner_id = "a".repeat(32);
     let path = directory.path().join(format!("{owner_id}.sock"));
     let address = SockAddr::unix(&path).expect("socket address");
@@ -292,7 +292,7 @@ fn saturated_owner_endpoint_protects_runs_without_waiting_for_accept() {
 
 #[test]
 fn missing_registry_probes_and_permits_never_create_a_database() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let owner = owner();
     let permit = OwnerPermit {
@@ -314,7 +314,7 @@ fn missing_registry_probes_and_permits_never_create_a_database() {
 
 #[test]
 fn existing_registry_opens_do_not_initialize_schema() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let connection = rusqlite::Connection::open(&path).expect("empty database");
 
@@ -338,7 +338,7 @@ fn existing_registry_opens_do_not_initialize_schema() {
 
 #[test]
 fn reused_readonly_registry_observes_external_generation_changes() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut writer = Registry::open(&path).expect("registry");
     let original = owner();
@@ -358,7 +358,7 @@ fn reused_readonly_registry_observes_external_generation_changes() {
 
 #[test]
 fn readonly_mutation_guard_holds_the_generation_snapshot_until_dropped() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut registry = Registry::open(&path).expect("registry");
     let original = owner();
@@ -614,7 +614,7 @@ async fn compound_event_fences_release_readers_before_waiting_and_revalidate_eve
 #[cfg(unix)]
 #[test]
 fn host_probes_observe_turns_and_handoff_after_reusing_the_reader() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
     let first =
         OwnerHost::open(directory.path(), quiet_ownership_settings(), bus.clone()).expect("first");
@@ -652,7 +652,7 @@ fn host_probes_observe_turns_and_handoff_after_reusing_the_reader() {
 #[cfg(unix)]
 #[test]
 fn repeated_host_and_permit_probes_do_not_repair_or_write_schema() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let path = directory.path().join("owners.db");
     let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
     let host = OwnerHost::open(directory.path(), quiet_ownership_settings(), bus).expect("host");
@@ -712,7 +712,7 @@ fn repeated_host_display_probes_have_bounded_read_io() {
             .expect("read byte count")
     }
 
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
     let host = OwnerHost::open(directory.path(), quiet_ownership_settings(), bus).expect("host");
     host.start("thread").expect("start");
@@ -736,7 +736,7 @@ fn repeated_host_display_probes_have_bounded_read_io() {
 #[cfg(unix)]
 #[tokio::test]
 async fn deferred_quiesce_keeps_generation_valid_through_checkpoint_and_heartbeats() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::SocketDir::new();
     let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
     let settings = config::OwnershipConfig {
         heartbeat_ms: std::num::NonZeroU64::new(10).unwrap(),
@@ -796,7 +796,7 @@ fn delayed_turn_and_child_start_renew_the_current_generation() {
 #[test]
 fn expired_permit_recovers_active_work_before_the_heartbeat_worker() {
     for run_id in [None, Some("parent")] {
-        let directory = tempfile::tempdir().expect("directory");
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("owners.db");
         let mut original = owner();
         let token = original.lease.clone();
@@ -843,7 +843,7 @@ fn expired_permit_recovers_active_work_before_the_heartbeat_worker() {
 
 #[test]
 fn expired_permit_rechecks_a_claim_committed_after_its_read() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut original = owner();
     let token = original.lease.clone();
@@ -886,7 +886,7 @@ fn expired_permit_rechecks_a_claim_committed_after_its_read() {
 
 #[test]
 fn expired_permit_cannot_revive_a_run_checkpointed_after_its_read() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut original = owner();
     let token = original.lease.clone();
@@ -921,7 +921,7 @@ fn expired_permit_cannot_revive_a_run_checkpointed_after_its_read() {
 
 #[test]
 fn quiescing_runs_can_recover_and_drain_without_reviving_released_owners() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut original = owner();
     let token = original.lease.clone();
@@ -1015,7 +1015,7 @@ fn scratch_file(host: &OwnerHost, thread: &str, name: &str) -> std::path::PathBu
 #[cfg(unix)]
 #[test]
 fn ownership_transitions_empty_and_delete_the_thread_scratch() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let _parent = ScratchParent::of(directory.path());
     let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
     let open = || {
@@ -1059,7 +1059,7 @@ fn ownership_transitions_empty_and_delete_the_thread_scratch() {
 #[cfg(unix)]
 #[test]
 fn startup_sweep_deletes_scratch_of_threads_without_a_live_owner() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let _parent = ScratchParent::of(directory.path());
     let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
     let open = || {
@@ -1101,7 +1101,7 @@ fn startup_sweep_deletes_scratch_of_threads_without_a_live_owner() {
 #[cfg(unix)]
 #[test]
 fn ipc_release_deletes_the_scratch_before_responding() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::SocketDir::new();
     let _parent = ScratchParent::of(directory.path());
     let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
     let host =
@@ -1261,7 +1261,7 @@ fn one_heartbeat_tick_writes_every_due_thread_in_a_single_transaction() {
 // lease expiry), and removal deletes rows and checkpoints of the named threads only.
 #[test]
 fn retention_classifies_owner_rows_and_removes_only_named_threads() {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = tempfile::tempdir().unwrap();
     let mut registry = Registry::open(&directory.path().join("owners.db")).expect("registry");
     let row = |thread: &str| {
         ThreadOwner::new(
@@ -1329,4 +1329,41 @@ fn retention_classifies_owner_rows_and_removes_only_named_threads() {
         )
         .expect("count");
     assert_eq!(checkpoints, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn open_rejects_an_ownership_root_too_long_for_a_socket_before_touching_disk() {
+    let root = std::path::PathBuf::from("/").join("o".repeat(host::SOCKET_PATH_LIMIT));
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(8));
+    let error = match OwnerHost::open(&root, config::OwnershipConfig::default(), bus) {
+        Ok(_) => panic!("an overlong root must not open"),
+        Err(error) => error,
+    };
+    let RegistryError::Io(error) = error else {
+        panic!("expected an I/O error, got {error:?}");
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let message = error.to_string();
+    assert!(message.contains("ownership root"), "{message}");
+    assert!(message.contains(&root.display().to_string()), "{message}");
+    assert!(!root.exists(), "the root must not be created");
+}
+
+#[cfg(unix)]
+#[test]
+fn socket_path_limit_is_exclusive_and_matches_what_bind_accepts() {
+    let directory = test_socket_dir::SocketDir::new();
+    let root = directory.path();
+    let name = format!("{}.sock", "a".repeat(32));
+    let fill = host::SOCKET_PATH_LIMIT - 1 - (root.as_os_str().len() + 1 + name.len());
+    // A root of exactly `limit - 1` bytes plus the socket name still fits.
+    let longest = root.join("d".repeat(fill - 1)).join(&name);
+    assert_eq!(longest.as_os_str().len(), host::SOCKET_PATH_LIMIT - 1);
+    host::check_socket_path(longest.parent().unwrap(), &longest).expect("fits");
+    std::fs::create_dir_all(longest.parent().unwrap()).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&longest).expect("the kernel agrees");
+    let overflow = root.join("d".repeat(fill)).join(&name);
+    assert_eq!(overflow.as_os_str().len(), host::SOCKET_PATH_LIMIT);
+    assert!(host::check_socket_path(overflow.parent().unwrap(), &overflow).is_err());
 }

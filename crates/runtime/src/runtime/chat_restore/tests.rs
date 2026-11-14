@@ -60,7 +60,7 @@ fn normalized(mut record: storage::RunContextRecord) -> storage::RunContextRecor
 struct Fixture {
     runtime: AgentRuntime,
     storage: storage::Storage,
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
 }
 
 impl Fixture {
@@ -75,7 +75,7 @@ impl Fixture {
     }
 
     fn with_model(model: Arc<dyn AgentModel>) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("goal.sqlite3"),
             ..storage::StorageConfig::default()

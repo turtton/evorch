@@ -44,7 +44,7 @@ impl Skills {
                 &format!("Steps of {letter}.\n"),
             );
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("mentions.sqlite3"),
             ..storage::StorageConfig::default()

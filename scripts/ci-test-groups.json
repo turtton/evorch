@@ -34,7 +34,8 @@
         "browser",
         "js-engine",
         "sandbox",
-        "test-support"
+        "test-support",
+        "test-socket-dir"
       ],
       "features": [
         "storage/test-support",

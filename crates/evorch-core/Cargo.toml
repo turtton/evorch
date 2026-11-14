@@ -28,6 +28,7 @@ uuid = { workspace = true }
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+test-socket-dir = { path = "../test-socket-dir" }
 model = { path = "../model" }
 runtime = { path = "../runtime", features = ["recovery-test-support"] }
 rusqlite = { workspace = true }

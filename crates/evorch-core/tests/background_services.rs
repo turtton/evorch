@@ -95,18 +95,15 @@ impl PullRequestLogSource for Logs {
     }
 }
 struct Fixture {
-    dir: tempfile::TempDir,
+    dir: test_socket_dir::SplitDir,
     storage: Storage,
     root: std::path::PathBuf,
 }
 impl Fixture {
     fn new() -> Self {
-        // Kept relative: both executors bind an owner socket below this root.
-        let dir = tempfile::Builder::new()
-            .prefix(".bg-")
-            .tempdir_in(".")
-            .unwrap();
-        let root = std::path::PathBuf::from(dir.path().file_name().unwrap());
+        // Both executors bind an owner socket below this root.
+        let dir = test_socket_dir::SplitDir::new();
+        let root = dir.path().to_path_buf();
         std::fs::write(
             root.join("config.toml"),
             "[pull_requests]\nenabled = true\n",
@@ -143,7 +140,7 @@ impl Fixture {
         BootstrappedHost::open_with_service_seams(
             BootstrapOptions {
                 config_dir: self.root.clone(),
-                ownership_root: self.root.join("owners"),
+                ownership_root: self.dir.sockets().to_path_buf(),
                 project_root: self.dir.path().canonicalize().unwrap(),
             },
             TestSeams {
@@ -609,7 +606,7 @@ async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool, manual_r
     let mut restarted = BootstrappedHost::open_for_core_with_test_seams(
         BootstrapOptions {
             config_dir: f.root.clone(),
-            ownership_root: f.root.join("owners"),
+            ownership_root: f.dir.sockets().to_path_buf(),
             project_root: f.dir.path().canonicalize().unwrap(),
         },
         TestSeams {
@@ -650,7 +647,7 @@ async fn partial_recovery_failure_drains_registered_roots_and_reserved_admission
         let result = BootstrappedHost::open_with_service_observer(
             BootstrapOptions {
                 config_dir: f.root.clone(),
-                ownership_root: f.root.join("owners"),
+                ownership_root: f.dir.sockets().to_path_buf(),
                 project_root: f.dir.path().canonicalize().unwrap(),
             },
             TestSeams {

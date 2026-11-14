@@ -95,7 +95,7 @@ struct World {
     _instance: evorch_core::instance::Instance,
     // Dropped last: the sockets and the database live below it.
     _web: workbench_web::WebServer,
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
 }
 
 fn brief() -> event_bus::LaneBrief {
@@ -285,10 +285,7 @@ async fn running(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
 
 async fn start() -> World {
     // The sockets live below the directory, so the path stays short.
-    let dir = tempfile::Builder::new()
-        .prefix("p12-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root_dir = dir.path().canonicalize().unwrap();
     std::fs::write(
         root_dir.join("sidebar.json"),
@@ -304,7 +301,7 @@ async fn start() -> World {
         BootstrapOptions {
             config_dir: root_dir.clone(),
             project_root: root_dir.clone(),
-            ownership_root: root_dir.join("owners"),
+            ownership_root: dir.sockets().to_path_buf(),
         },
         TestSeams {
             model: model.clone(),
@@ -315,10 +312,9 @@ async fn start() -> World {
     .unwrap();
 
     let identity = core_instance::ConfigIdentity::new(&root_dir.join("gui-identity")).unwrap();
-    std::fs::create_dir_all(root_dir.join("instance")).unwrap();
     let instance = evorch_core::instance::Instance::acquire(
         &core_instance::LaunchGuard::acquire(&identity).unwrap(),
-        &root_dir.join("instance"),
+        dir.sockets(),
     )
     .unwrap();
     let backend = Arc::new(evorch_core::backend::HostBackend::new(

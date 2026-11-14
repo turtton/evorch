@@ -2418,7 +2418,7 @@ mod storage_shutdown_tests {
 
     #[test]
     fn startup_resource_guard_keeps_the_host_alive_until_fenced_writes_drain() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_socket_dir::SplitDir::new();
         let config = StorageConfig {
             db_path: directory.path().join("events.db"),
             ..Default::default()
@@ -2426,7 +2426,7 @@ mod storage_shutdown_tests {
         let storage = Storage::open(config.clone()).unwrap();
         let db = Database::open(&config).unwrap();
         let bus = Arc::new(EventBus::new(64));
-        let root = directory.path().join("owners");
+        let root = directory.sockets().to_path_buf();
         let host = Arc::new(
             runtime::ownership::OwnerHost::open(&root, Default::default(), bus.clone()).unwrap(),
         );

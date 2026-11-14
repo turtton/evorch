@@ -168,13 +168,13 @@ struct Fixture {
     model: Arc<Model>,
     storage: storage::Storage,
     events: event_bus::EventReceiver,
-    dir: tempfile::TempDir,
+    dir: test_socket_dir::SplitDir,
     lead: RunId,
     lane: crate::lanes::LaneOpened,
 }
 impl Fixture {
     async fn new(mode: Mode) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         std::fs::write(dir.path().join("artifact.txt"), b"verified contents").unwrap();
         let config = storage::StorageConfig {
             db_path: dir.path().join("lanes.db"),
@@ -1428,7 +1428,7 @@ async fn an_owned_lane_refreshes_pr_facts_on_verify_and_close_never_fetches() {
     require_pr(&f);
     let host = Arc::new(
         crate::ownership::OwnerHost::open(
-            &f.dir.path().join("owners"),
+            f.dir.sockets(),
             config::OwnershipConfig::default(),
             f.runtime.shared.bus.clone(),
         )
@@ -1471,7 +1471,7 @@ async fn verify_still_starts_with_a_caveat_when_owned_pr_refresh_times_out() {
     require_pr(&f);
     let owner = Arc::new(
         crate::ownership::OwnerHost::open(
-            &f.dir.path().join("owners"),
+            f.dir.sockets(),
             Default::default(),
             f.runtime.shared.bus.clone(),
         )

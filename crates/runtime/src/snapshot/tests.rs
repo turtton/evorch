@@ -114,7 +114,8 @@ fn benchmark_snapshot_preserves_crlf_bytes_and_unix_modes_despite_git_defaults()
 #[cfg(unix)]
 #[test]
 fn benchmark_snapshot_rejects_special_files_and_attributes_before_index_or_workspace_changes() {
-    let temp = tempfile::tempdir().unwrap();
+    // The trial tree holds a socket, so the whole fixture directory has to be short.
+    let temp = test_socket_dir::SocketDir::new();
     let root = temp.path().join("trial");
     fs::create_dir_all(root.join("nested")).unwrap();
     fs::write(root.join("file"), "original").unwrap();
@@ -157,7 +158,7 @@ fn benchmark_snapshot_rejects_special_files_and_attributes_before_index_or_works
 #[test]
 fn store_rejects_repository_symlink() {
     // Given: a previously initialized store whose repository was replaced by a symlink.
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("project");
     fs::create_dir(&root).expect("root");
     let directory = temp.path().join("snapshots");

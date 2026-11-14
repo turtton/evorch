@@ -64,7 +64,7 @@ async fn commands_round_trip_over_a_socket_pair() {
 
 #[tokio::test]
 async fn connecting_to_a_socket_path_works_and_a_missing_one_is_a_disconnect() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let path = dir.path().join("core.sock");
     assert_eq!(
         UnixTransport::connect(&path).await.err(),

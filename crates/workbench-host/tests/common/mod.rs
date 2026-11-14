@@ -153,18 +153,18 @@ pub struct LostOwnership {
     pub owner: Arc<runtime::ownership::OwnerHost>,
     pub permit: runtime::ownership::OwnerPermit,
     _successor: runtime::ownership::OwnerHost,
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
 }
 
 pub fn lost_ownership(thread: &str) -> LostOwnership {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let bus = Arc::new(EventBus::new(64));
-    let owner =
-        runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone()).unwrap();
+    let owner = runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
+        .unwrap();
     owner.start(thread).unwrap();
     let permit = owner.owned_permit(thread).unwrap();
     let successor =
-        runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
+        runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus).unwrap();
     owner.handoff(&permit, &successor).unwrap();
     LostOwnership {
         owner: Arc::new(owner),

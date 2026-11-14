@@ -22,12 +22,15 @@ use event_bus::{
     EventBus,
     lane::{LaneCloseActor, LaneCloseKind, LaneReportInput, LaneReportProducer, LaneStatus},
 };
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 use storage::{Storage, StorageConfig};
 use workbench_protocol::lane_attention::LaneAttentionKind;
 use workspace_ui::ThreadId;
 
-fn closing_window(dir: &Path) -> (WorkbenchState<DemoSource>, Storage, AgentRuntime) {
+fn closing_window(
+    split: &test_socket_dir::SplitDir,
+) -> (WorkbenchState<DemoSource>, Storage, AgentRuntime) {
+    let dir = split.path();
     let (ui, storage, _) = setup(dir);
     let bus = Arc::new(EventBus::new(128));
     let runtime = AgentRuntime::new(
@@ -47,7 +50,7 @@ fn closing_window(dir: &Path) -> (WorkbenchState<DemoSource>, Storage, AgentRunt
     );
     let owner = Arc::new(
         ::runtime::ownership::OwnerHost::open(
-            &dir.join("owners"),
+            split.sockets(),
             Default::default(),
             runtime.event_bus(),
         )
@@ -138,8 +141,8 @@ fn standing(storage: &Storage) -> Option<event_bus::lane::LaneCloseResult> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_person_closes_a_ready_lane_and_the_lane_then_reads_as_unverified_and_not_as_the_leads() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, runtime) = closing_window(&dir);
     report_ready(&storage, "all done", 5);
     settle(&mut ui);
     let item = listed_ready(&ui);
@@ -191,8 +194,8 @@ async fn a_person_closes_a_ready_lane_and_the_lane_then_reads_as_unverified_and_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_person_can_discard_a_lane_and_it_is_not_recorded_as_done() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, _runtime) = closing_window(&dir);
     report_ready(&storage, "half done", 5);
     settle(&mut ui);
     let item = listed_ready(&ui);
@@ -212,8 +215,8 @@ async fn a_person_can_discard_a_lane_and_it_is_not_recorded_as_done() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_screen_older_than_the_ledger_is_refused_by_the_revisions_and_records_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, _runtime) = closing_window(&dir);
     report_ready(&storage, "first ready", 5);
     settle(&mut ui);
     let item = listed_ready(&ui);
@@ -258,8 +261,8 @@ async fn a_screen_older_than_the_ledger_is_refused_by_the_revisions_and_records_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_list_item_the_ledger_no_longer_holds_opens_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, _runtime) = closing_window(&dir);
     report_ready(&storage, "ready", 5);
     settle(&mut ui);
     let (id, revision) = listed_ready(&ui);
@@ -273,8 +276,8 @@ async fn a_list_item_the_ledger_no_longer_holds_opens_nothing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_confirmation_is_drawn_with_its_meaning_and_confirm_waits_for_a_reason() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (ui, storage, _runtime) = closing_window(&dir);
     let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
     report_ready(&storage, "all done", 5);
     window.state_mut().refresh_lane_attention();
@@ -309,8 +312,8 @@ async fn the_confirmation_is_drawn_with_its_meaning_and_confirm_waits_for_a_reas
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_artifacts_a_ready_names_are_listed_collapsed_and_capped_as_reference_only() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (ui, storage, _runtime) = closing_window(&dir);
     let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
     let sha = "a".repeat(40);
     let refs: Vec<String> = (1..=8)
@@ -373,8 +376,8 @@ fn open_from_sidebar(ui: &mut WorkbenchState<DemoSource>, choice: CloseChoice) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lane_chosen_in_the_sidebar_ends_without_attention_or_ready_and_cancel_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, runtime) = closing_window(&dir);
     settle(&mut ui);
     // No Ready and nothing on the attention list: the sidebar is the only way in.
     assert!(ui.lane_attention().items().is_empty());
@@ -436,8 +439,8 @@ async fn a_lane_chosen_in_the_sidebar_ends_without_attention_or_ready_and_cancel
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_sidebar_close_refused_as_stale_is_reloaded_and_confirmed_again_by_the_person() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, _runtime) = closing_window(&dir);
     report_ready(&storage, "first ready", 5);
     settle(&mut ui);
     open_from_sidebar(&mut ui, CloseChoice::Discard);
@@ -467,8 +470,8 @@ async fn a_sidebar_close_refused_as_stale_is_reloaded_and_confirmed_again_by_the
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closing_a_lane_someone_else_just_ended_shows_the_standing_record_and_adds_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, _runtime) = closing_window(&dir);
     open_from_sidebar(&mut ui, CloseChoice::Complete);
     type_reason(&mut ui, "my reason");
 
@@ -507,8 +510,8 @@ async fn closing_a_lane_someone_else_just_ended_shows_the_standing_record_and_ad
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_detached_lane_cannot_be_ended_from_the_sidebar() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, _runtime) = closing_window(&dir);
     ui.manage_lane(super::detach(1), None).unwrap();
     settle(&mut ui);
 
@@ -527,8 +530,8 @@ async fn the_confirmation_warns_of_a_running_lane_and_a_close_without_ready_and_
  {
     use crate::model::lane_close::{NO_READY_WARNING, REMAINS, RUNNING_WARNING};
     use workspace_ui::ThreadRunPhase;
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, _runtime) = closing_window(&dir);
     let lane = ui
         .sidebar
         .threads
@@ -557,8 +560,8 @@ async fn the_confirmation_warns_of_a_running_lane_and_a_close_without_ready_and_
     );
 
     // A discard needs no Ready and says nothing about one.
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, _storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, _storage, _runtime) = closing_window(&dir);
     open_from_sidebar(&mut ui, CloseChoice::Discard);
     let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
     window.run();
@@ -569,8 +572,8 @@ async fn the_confirmation_warns_of_a_running_lane_and_a_close_without_ready_and_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_sidebar_menu_leads_through_the_confirmation_stale_reload_and_the_badge() {
     use super::runtime::context_action;
-    let dir = tempfile::tempdir().unwrap();
-    let (ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (ui, storage, _runtime) = closing_window(&dir);
     let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
     window.run();
     report_ready(&storage, "first ready", 5);
@@ -619,8 +622,8 @@ async fn the_sidebar_menu_leads_through_the_confirmation_stale_reload_and_the_ba
 async fn a_ready_for_an_earlier_brief_is_marked_for_reference_and_still_does_not_block_a_human_close()
  {
     use crate::model::lane_close::{NO_READY_WARNING, OLDER_BRIEF_WARNING};
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, _runtime) = closing_window(&dir);
     report_ready(&storage, "old result", 5);
     let mut brief = storage.handle().lane("lane").unwrap().unwrap().brief;
     brief.objective = "a revised objective".into();
@@ -648,8 +651,8 @@ async fn a_ready_for_an_earlier_brief_is_marked_for_reference_and_still_does_not
     assert_eq!(stored.ready_seq, Some(1));
 
     // A Ready for the current brief reads without that warning.
-    let dir = tempfile::tempdir().unwrap();
-    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let dir = test_socket_dir::SplitDir::new();
+    let (mut ui, storage, _runtime) = closing_window(&dir);
     let mut brief = storage.handle().lane("lane").unwrap().unwrap().brief;
     brief.objective = "a revised objective".into();
     storage

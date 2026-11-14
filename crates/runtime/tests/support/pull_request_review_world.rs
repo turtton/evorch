@@ -185,7 +185,7 @@ pub struct World {
     pub host: Arc<OwnerHost>,
     pub storage: storage::Storage,
     pub events: tokio::sync::Mutex<EventReceiver>,
-    pub _directory: tempfile::TempDir,
+    pub _directory: test_socket_dir::SplitDir,
     ownership: Arc<ReviewOwnership>,
 }
 
@@ -212,7 +212,7 @@ pub fn world_with(
     bus: Arc<EventBus>,
     settings: PullRequestsConfig,
 ) -> World {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::SplitDir::new();
     let storage_config = storage::StorageConfig {
         db_path: directory.path().join("review-cache.db"),
         ..Default::default()
@@ -229,7 +229,7 @@ pub fn world_with(
     );
     let host = Arc::new(
         OwnerHost::open(
-            &directory.path().join("owners"),
+            directory.sockets(),
             config::OwnershipConfig::default(),
             Arc::clone(&bus),
         )

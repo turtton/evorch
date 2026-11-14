@@ -504,7 +504,7 @@ fn retention_deletes_a_lead_with_its_managed_lanes_and_never_with_a_detached_one
     use storage::threads::ThreadUpsert;
 
     // Given: a stored lead, an attached lane and a detached lane, as the runtime writes them
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let config = storage::StorageConfig {
         db_path: dir.path().join("events.db"),
         ..Default::default()
@@ -1154,7 +1154,7 @@ fn a_delivery_change_names_the_thread_to_refresh_even_when_another_thread_is_sho
 fn acquiring_ownership_of_a_thread_asks_the_runtime_to_redrive_its_deliveries() {
     use event_bus::{OwnershipAction, OwnershipEvent};
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let host = Arc::new(
         runtime::ownership::OwnerHost::open(
             dir.path(),

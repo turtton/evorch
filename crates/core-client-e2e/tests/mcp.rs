@@ -126,10 +126,7 @@ fn shows(window: &Window, text: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the_core() {
-    let dir = tempfile::Builder::new()
-        .prefix("e2e-mcp-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     std::fs::create_dir(root.join(".evorch")).unwrap();
     std::fs::write(
@@ -138,7 +135,7 @@ async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the
     )
     .unwrap();
     // The mock MCP server connects here when it starts.
-    let control = tokio::net::UnixListener::bind(root.join("control")).unwrap();
+    let control = tokio::net::UnixListener::bind(dir.sockets().join("control")).unwrap();
     let started = Arc::new(AtomicUsize::new(0));
     let counter = started.clone();
     tokio::spawn(async move {
@@ -157,7 +154,7 @@ async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the
         BootstrapOptions {
             config_dir: root.clone(),
             project_root: root.clone(),
-            ownership_root: root.join("owners"),
+            ownership_root: dir.sockets().to_path_buf(),
         },
         TestSeams {
             model: Arc::new(Idle),
@@ -173,7 +170,7 @@ async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the
     let identity = core_instance::ConfigIdentity::new(&root.join("config")).unwrap();
     let instance = evorch_core::instance::Instance::acquire(
         &core_instance::LaunchGuard::acquire(&identity).unwrap(),
-        &root,
+        dir.sockets(),
     )
     .unwrap();
     let listener = instance.bind().unwrap();
@@ -245,7 +242,7 @@ async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the
         &mut window,
         Role::MultilineTextInput,
         0,
-        root.join("control").to_str().unwrap(),
+        dir.sockets().join("control").to_str().unwrap(),
     );
     click(&mut window, "Set value…");
     let secret_role = if window.get_all_by_role(Role::PasswordInput).next().is_some() {

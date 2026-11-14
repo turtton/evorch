@@ -39,8 +39,8 @@ use workbench_protocol::views::Page;
 use workbench_protocol::wire::Revision;
 
 struct Fixture {
-    dir: tempfile::TempDir,
-    _owners: tempfile::TempDir,
+    dir: test_socket_dir::SplitDir,
+    _owners: test_socket_dir::SocketDir,
     storage: storage::Storage,
     runtime: AgentRuntime,
     owner: Arc<runtime::ownership::OwnerHost>,
@@ -61,14 +61,10 @@ fn brief(objective: &str) -> event_bus::LaneBrief {
 
 impl Fixture {
     async fn new(lane_count: usize) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         // The owner's Unix socket lives below this directory: keep it under SUN_LEN whatever
         // TMPDIR is.
-        let owners = tempfile::Builder::new()
-            .prefix("6")
-            .rand_bytes(3)
-            .tempdir_in("/tmp")
-            .unwrap();
+        let owners = test_socket_dir::SocketDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("host.db"),
             ..Default::default()

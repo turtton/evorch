@@ -29,7 +29,7 @@ impl CommandSink for Sink {
         self.submit(WorkbenchCommand::SendChat(chat))
     }
 }
-fn host(dir: &tempfile::TempDir) -> Arc<OwnerHost> {
+fn host(dir: &test_socket_dir::SocketDir) -> Arc<OwnerHost> {
     Arc::new(OwnerHost::open(dir.path(), Default::default(), Arc::new(EventBus::new(64))).unwrap())
 }
 fn state(host: Arc<OwnerHost>) -> (WorkbenchState<DemoSource>, Arc<Mutex<Observed>>) {
@@ -58,7 +58,7 @@ fn state(host: Arc<OwnerHost>) -> (WorkbenchState<DemoSource>, Arc<Mutex<Observe
 #[test]
 fn submit_autostarts_unowned_thread() {
     // Given
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let owner = host(&dir);
     let (mut state, observed) = state(owner.clone());
     // When
@@ -76,7 +76,7 @@ fn submit_autostarts_unowned_thread() {
 #[test]
 fn submit_sends_when_self_owned() {
     // Given
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let owner = host(&dir);
     let permit = owner.start("thread").unwrap();
     let (mut state, observed) = state(owner);
@@ -94,7 +94,7 @@ fn submit_sends_when_self_owned() {
 #[test]
 fn owner_responsive_shows_notice_without_sending() {
     // Given: two independent hosts, with live sockets on the same registry.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let other = host(&dir);
     other.start("thread").unwrap();
     let (mut state, observed) = state(host(&dir));
@@ -111,7 +111,7 @@ fn owner_responsive_shows_notice_without_sending() {
 #[test]
 fn exists_race_rechecks_owned_permit() {
     // Given: another submit won start after the initial absent observation.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let owner = host(&dir);
     owner.start("thread").unwrap();
     let result = owner.start("thread");
@@ -165,7 +165,7 @@ fn runtime_sink(
 #[test]
 fn composer_autostart_reaches_real_runtime() {
     // Given
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let owner = host(&dir);
     let (_rt, sink, runtime) = runtime_sink(owner.clone());
     let (state, _) = state(owner);
@@ -181,7 +181,7 @@ fn composer_autostart_reaches_real_runtime() {
 #[test]
 fn sink_rejects_old_permit_even_after_same_host_reclaims() {
     // Given: same host ID but a new generation before sink dispatch.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let owner = host(&dir);
     let stale = owner.start("thread").unwrap();
     owner.quiesce().unwrap();
@@ -213,7 +213,7 @@ fn sink_rejects_old_permit_even_after_same_host_reclaims() {
 #[test]
 fn exists_race_with_other_owner_does_not_return_a_permit() {
     // Given
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let other = host(&dir);
     other.start("thread").unwrap();
     let owner = host(&dir);
@@ -226,7 +226,7 @@ fn exists_race_with_other_owner_does_not_return_a_permit() {
 #[test]
 fn renewed_generation_does_not_reuse_previous_chat_run() {
     // Given
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let owner = host(&dir);
     let first = owner.start("thread").unwrap();
     let (_rt, mut sink, _) = runtime_sink(owner.clone());
@@ -265,7 +265,7 @@ fn renewed_generation_does_not_reuse_previous_chat_run() {
 
 #[test]
 fn continue_respects_read_only_attach() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let other = host(&dir);
     other.start("thread").unwrap();
     let (mut state, observed) = state(host(&dir));

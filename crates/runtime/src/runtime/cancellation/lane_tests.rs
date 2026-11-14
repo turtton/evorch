@@ -44,20 +44,19 @@ struct Fixture {
     storage: storage::Storage,
     owner: OwnerHost,
     run: RunId,
-    dir: tempfile::TempDir,
+    dir: test_socket_dir::SplitDir,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("lanes.db"),
             ..Default::default()
         };
         let storage = storage::Storage::open(config.clone()).unwrap();
         let bus = Arc::new(EventBus::new(128));
-        let owner =
-            OwnerHost::open(&dir.path().join("owners"), Default::default(), bus.clone()).unwrap();
+        let owner = OwnerHost::open(dir.sockets(), Default::default(), bus.clone()).unwrap();
         let model = Arc::new(Model::default());
         let runtime =
             AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
@@ -116,7 +115,7 @@ async fn handoff_after_lane_preflight_cannot_write_initial_context_or_failure_re
     );
     reached.recv().unwrap();
     let next = OwnerHost::open(
-        &f.dir.path().join("owners"),
+        f.dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(128)),
     )
@@ -361,7 +360,7 @@ async fn queued_lane_stop_cannot_write_after_handoff_and_reports_the_unrecorded_
         .await;
     contention.lock.execute_batch("ROLLBACK").unwrap();
     let next = OwnerHost::open(
-        &f.dir.path().join("owners"),
+        f.dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(128)),
     )
@@ -399,7 +398,7 @@ async fn settled_unregistered_lane_keeps_its_permit_without_an_existing_stop_que
     contention.lock.execute_batch("ROLLBACK").unwrap();
     f.runtime.drain_lane_stop_writes().await.unwrap();
     let next = OwnerHost::open(
-        &f.dir.path().join("owners"),
+        f.dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(128)),
     )
