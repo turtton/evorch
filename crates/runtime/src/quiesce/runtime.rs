@@ -17,8 +17,15 @@ impl AgentRuntime {
     }
     /// Only success permits the host to exit; no elapsed-time escape hatch.
     pub async fn wait_quiesced(&self) -> Result<(), RuntimeError> {
-        let generation = self.shared.quiesce.lock().generation;
-        self.wait_quiesced_generation(generation).await
+        // Observers may subscribe before a request (for example admission).
+        // Authority-bearing restart waiters instead bind an existing attempt.
+        let mut version = self.shared.quiesce.subscribe();
+        loop {
+            if self.complete_restart_safe_points()? {
+                return Ok(());
+            }
+            version.changed().await.map_err(error)?;
+        }
     }
     pub(crate) async fn wait_quiesced_generation(
         &self,
