@@ -1,28 +1,67 @@
 use super::{billing_header, finalize_billing_checksum, version_suffix};
 
-// Generated independently with Bun 1.4.2 (node:crypto SHA-256 and Bun.hash.xxHash64).
-// The ASCII suffix also matches a captured Claude Code 2.1.295 request.
+// Generated independently with Bun 1.4.2 (node:crypto SHA-256 and Bun.hash.xxHash64), then
+// re-derived with Node's SHA-256 and a standalone BigInt XXH64 for 2.1.322. The ASCII suffix
+// matches captured Claude Code 2.1.295 and 2.1.322 requests; the checksum formula is unchanged.
 #[test]
 fn suffix_matches_javascript_utf16_and_utf8_golden_vectors() {
     for (text, version, expected) in [
+        ("Reply LOCAL_CAPTURE_OK.", "2.1.322", "951"),
+        ("", "2.1.322", "aaf"),
+        ("abc", "2.1.322", "aaf"),
+        ("0123😀67😀0123456789😀end", "2.1.322", "511"),
+        (
+            "日本語の入力です。あいうえおかきくけこさしすせそ",
+            "2.1.322",
+            "9b1",
+        ),
+        ("0123😀😀0123456789012X", "2.1.322", "d5f"),
+        // The version is part of the digest: other versions must not collide.
         ("Reply LOCAL_CAPTURE_OK.", "2.1.295", "bef"),
         ("Reply LOCAL_CAPTURE_OK.", "2.1.280", "976"),
         ("", "2.1.295", "8a8"),
-        ("abc", "2.1.295", "8a8"),
         ("0123😀67😀0123456789😀end", "2.1.295", "be6"),
-        (
-            "日本語の入力です。あいうえおかきくけこさしすせそ",
-            "2.1.295",
-            "388",
-        ),
-        ("0123😀😀0123456789012X", "2.1.295", "62f"),
     ] {
         assert_eq!(version_suffix(text, version), expected, "{text:?}");
     }
     assert_eq!(
-        billing_header("2.1.295", "Reply LOCAL_CAPTURE_OK."),
-        "x-anthropic-billing-header: cc_version=2.1.295.bef; cc_entrypoint=cli; cch=00000;"
+        billing_header("2.1.322", "Reply LOCAL_CAPTURE_OK."),
+        "x-anthropic-billing-header: cc_version=2.1.322.951; cc_entrypoint=cli; cch=00000;"
     );
+}
+
+#[test]
+fn profile_version_selects_the_native_322_suffix() {
+    let header = billing_header(
+        crate::provider::claude::profile::CLAUDE_CODE_VERSION,
+        "Reply LOCAL_CAPTURE_OK.",
+    );
+    assert!(header.contains("cc_version=2.1.322.951;"), "{header}");
+}
+
+#[test]
+fn checksum_matches_standalone_322_vectors_with_unchanged_formula() {
+    // Expected values come from a standalone BigInt XXH64 (standard empty/"a" vectors checked)
+    // applying the native exclusions to the final bytes; no production function was used.
+    for (original, checksum) in [
+        (
+            r#"{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":[{"type":"text","text":"Reply LOCAL_CAPTURE_OK."}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.322.951; cc_entrypoint=cli; cch=00000;"}],"stream":true}"#,
+            "f360b",
+        ),
+        (
+            r#"{"model":"claude-fable-5-2","fallbacks":[["primary",{"nested":["]","\""]}]],"fallback_credit_token":"token","max_tokens":128000,"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.322.951; cc_entrypoint=cli; cch=00000;"}],"tools":[{"input_schema":{"model":"nested-model","max_tokens":42}}],"stream":true}"#,
+            "34e39",
+        ),
+    ] {
+        let mut body = original.as_bytes().to_vec();
+        finalize_billing_checksum(&mut body).unwrap();
+        assert_eq!(
+            body,
+            original
+                .replacen("cch=00000;", &format!("cch={checksum};"), 1)
+                .as_bytes()
+        );
+    }
 }
 
 #[test]

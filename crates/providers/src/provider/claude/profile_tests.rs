@@ -58,7 +58,7 @@ fn oauth_headers_match_cli_identity_without_authentication_or_credit_opt_in() {
         assert!(CLAUDE_SYSTEM_IDENTITY.starts_with("You are Claude Code,"));
         assert_eq!(headers["x-claude-code-session-id"], "session-id");
         assert_eq!(headers["x-stainless-package-version"], "0.128.0");
-        assert_eq!(headers["x-stainless-runtime-version"], "v26.3.0");
+        assert_eq!(headers["x-stainless-runtime-version"], "v26.12.1");
         assert_eq!(headers["accept-encoding"], "gzip, deflate, br, zstd");
         assert_eq!(headers["anthropic-dangerous-direct-browser-access"], "true");
         let betas = headers["anthropic-beta"].to_str().unwrap();

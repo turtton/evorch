@@ -2,11 +2,11 @@ use super::*;
 use crate::cache_contract::{CacheProtocol, assert_append_only};
 
 // Independent Bun 1.4.2 xxHash64 golden, using the native request exclusions.
-const GOLDEN: &str = r#"{"model":"claude-test","messages":[{"role":"user","content":[{"type":"text","text":"Reply LOCAL_CAPTURE_OK.","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.295.bef; cc_entrypoint=cli; cch=1fed0;"},{"type":"text","text":"Keep instructions."}],"tools":[{"name":"_read","input_schema":{"type":"object"}}],"max_tokens":1024,"stream":true}"#;
+const GOLDEN: &str = r#"{"model":"claude-test","messages":[{"role":"user","content":[{"type":"text","text":"Reply LOCAL_CAPTURE_OK.","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.322.951; cc_entrypoint=cli; cch=3d9f0;"},{"type":"text","text":"Keep instructions."}],"tools":[{"name":"_read","input_schema":{"type":"object"}}],"max_tokens":1024,"stream":true}"#;
 
-// Bun's hash of a separately constructed normalized body is 2b794. Nested
+// Bun's hash of a separately constructed normalized body is fd948. Nested
 // routing fields are excluded too; similarly named schema properties remain.
-const NESTED_GOLDEN: &str = r#"{"model":"claude-test","max_tokens":1024,"messages":[{"role":"user","content":"Reply LOCAL_CAPTURE_OK."},{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"_read","input":{"model":"nested-model","max_tokens":7,"fallbacks":[["primary",{"nested":["]","\""]}]],"fallback_credit_token":"nested-token","keep":"literal cch=00000;"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.295.bef; cc_entrypoint=cli; cch=2b794;"},{"type":"text","text":"Keep instructions."}],"tools":[{"name":"_read","input_schema":{"type":"object","properties":{"model":{"type":"string"},"max_tokens":{"type":"integer"},"fallbacks":{"type":"array"},"fallback_credit_token":{"type":"string"}},"examples":[{"model":"example","max_tokens":9},{"max_tokens":11},{"fallbacks":[]},{"fallback_credit_token":"secret"}]}}],"fallbacks":["root-fallback"],"fallback_credit_token":"root-token","stream":true}"#;
+const NESTED_GOLDEN: &str = r#"{"model":"claude-test","max_tokens":1024,"messages":[{"role":"user","content":"Reply LOCAL_CAPTURE_OK."},{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"_read","input":{"model":"nested-model","max_tokens":7,"fallbacks":[["primary",{"nested":["]","\""]}]],"fallback_credit_token":"nested-token","keep":"literal cch=00000;"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.322.951; cc_entrypoint=cli; cch=fd948;"},{"type":"text","text":"Keep instructions."}],"tools":[{"name":"_read","input_schema":{"type":"object","properties":{"model":{"type":"string"},"max_tokens":{"type":"integer"},"fallbacks":{"type":"array"},"fallback_credit_token":{"type":"string"}},"examples":[{"model":"example","max_tokens":9},{"max_tokens":11},{"fallbacks":[]},{"fallback_credit_token":"secret"}]}}],"fallbacks":["root-fallback"],"fallback_credit_token":"root-token","stream":true}"#;
 
 fn signed(request: Value) -> Vec<u8> {
     signed_with_context(request, "")
@@ -110,12 +110,12 @@ fn native_checksum_golden_accepts_middle_and_final_max_tokens() {
 #[test]
 fn tampering_or_unexpected_control_format_is_rejected() {
     for raw in [
-        GOLDEN.replace("cch=1fed0", "cch=00000"),
+        GOLDEN.replace("cch=3d9f0", "cch=00000"),
         GOLDEN.replace("Keep instructions.", "Changed instructions."),
-        GOLDEN.replace("2.1.295.bef", "2.1.295.000"),
-        GOLDEN.replace("cch=1fed0", "cch=1FED0"),
+        GOLDEN.replace("2.1.322.951", "2.1.322.000"),
+        GOLDEN.replace("cch=3d9f0", "cch=3D9F0"),
         GOLDEN.replace("cc_entrypoint=cli", "cc_entrypoint=sdk-cli"),
-        GOLDEN.replace("2.1.295", "2.1.280"),
+        GOLDEN.replace("2.1.322", "2.1.295"),
     ] {
         assert!(claude_model_input(raw.as_bytes()).is_err(), "{raw}");
     }
@@ -133,7 +133,7 @@ fn nested_routing_exclusions_match_bun_without_mutating_any_payload() {
     let mut expected: Value = serde_json::from_slice(&raw).unwrap();
     expected["system"].as_array_mut().unwrap().remove(0);
     assert_eq!(model_input, expected);
-    let placeholder = NESTED_GOLDEN.replacen("cch=2b794;", "cch=00000;", 1);
+    let placeholder = NESTED_GOLDEN.replacen("cch=fd948;", "cch=00000;", 1);
     assert_eq!(raw.len(), placeholder.len());
     assert_eq!(
         raw.iter()
@@ -147,7 +147,7 @@ fn nested_routing_exclusions_match_bun_without_mutating_any_payload() {
             &checksum_input(placeholder.as_bytes()).unwrap(),
             0x4d65_9218_e32a_3268
         ) & 0xfffff,
-        0x2b794
+        0xfd948
     );
     for (original, changed) in [
         ("nested-model", "different-model"),
@@ -167,9 +167,9 @@ fn nested_routing_exclusions_match_bun_without_mutating_any_payload() {
 
 #[test]
 fn fingerprint_matches_javascript_utf16_and_missing_text_vectors() {
-    assert_eq!(version_suffix("abcd😀xxz0000000000😀"), "9fa");
-    assert_eq!(version_suffix(""), "8a8");
-    assert_eq!(version_suffix("012345678901234567890"), "4eb");
+    assert_eq!(version_suffix("abcd😀xxz0000000000😀"), "a3a");
+    assert_eq!(version_suffix(""), "aaf");
+    assert_eq!(version_suffix("012345678901234567890"), "155");
     let mut request: Value = serde_json::from_str(GOLDEN).unwrap();
     request["messages"][0]["content"] = json!("abcd😀xxz0000000000😀");
     claude_model_input(&signed(request)).unwrap();
@@ -179,7 +179,7 @@ fn fingerprint_matches_javascript_utf16_and_missing_text_vectors() {
 fn only_verified_first_control_block_and_direct_ttl_are_removed() {
     let mut request: Value = serde_json::from_str(GOLDEN).unwrap();
     let sentinel =
-        "x-anthropic-billing-header: cc_version=2.1.295.bef; cc_entrypoint=cli; cch=00000;";
+        "x-anthropic-billing-header: cc_version=2.1.322.951; cc_entrypoint=cli; cch=00000;";
     request["system"][1]["text"] = json!(sentinel);
     request["system"][1]["cache_control"] = json!({"type": "ephemeral", "ttl": "1h"});
     request["tools"][0]["input_schema"]["properties"] = json!({"text": {"const": sentinel}, "cache_control": {"const": {"type": "ephemeral", "ttl": "1h"}}});

@@ -10,30 +10,76 @@ synthetic workspace、`CLAUDE_CONFIG_DIR`、出力先をそこへ置く。必要
 保存理由と破棄・保持範囲を決める。環境変数は allowlist で構成し、dummy OAuth token
 を明示する。通常 home、credential/config、keyring socket を見せない。
 
-外向き通信の遮断と loopback 接続を OS/container 側で担保する。Linux では network
-namespace と bwrap を使える。macOS/Windows では同等の隔離環境を用意し、用意できなければ
-採取を未実施として静的解析までに留める。proxy 設定だけで安全とみなさない。
+外向き通信の遮断と loopback 接続を OS/container 側で担保する。macOS/Windows では同等の
+隔離環境を用意し、用意できなければ採取を未実施として静的解析までに留める。proxy 設定だけで安全と
+みなさない。
 
-Linux で capture server と CLI を同じ namespace 内に置く場合の launcher の形:
+### Linux: 最小 launcher と positive control
+
+ホストに必要な道具（bubblewrap、iproute2、Node、OpenSSL 等）が無くても、特権や global install
+なしで Nix の一時ツール（`nix run` / `nix shell`）から揃えられる。sudo、システム設定の変更、
+通常 profile への追加はしない。rate limit 等で取得できなければ、そこで採取を未実施にして理由を残す。
+
+launcher は **レビュー可能な短さ**にし、内容 hash を証跡に残す。`--ro-bind / /` で host 全体を
+見せるより、Nix store の read-only 公開と今回専用の scratch だけを公開する形を優先する
+（2.1.322 の採取で動作を確認した形。`$native` はレビュー済み binary、`$node` は `readlink -f` した実体）:
 
 ```sh
-bwrap --unshare-net --unshare-pid --ro-bind / / \
-  --tmpfs /home --tmpfs /root --tmpfs /run/user \
-  --tmpfs /tmp --tmpfs /var/tmp \
+bwrap --unshare-user --unshare-net --unshare-pid --unshare-ipc --unshare-uts \
+  --die-with-parent --new-session \
+  --ro-bind /nix/store /nix/store --proc /proc --dev /dev \
+  --tmpfs /tmp --dir /home --dir /root --dir /run --dir /etc \
   --bind "$analysis_scratch" "$analysis_scratch" \
-  --proc /proc --dev /dev --die-with-parent \
-  --chdir "$analysis_scratch" \
-  env -i PATH="$analysis_tool_path" LANG=C.UTF-8 \
-  "$analysis_node_binary" "$analysis_scratch/capture.mjs"
+  --ro-bind "$native" /native/claude \
+  --chdir "$analysis_scratch/work" --clearenv \
+  --setenv PATH "$analysis_tool_path" --setenv HOME "$analysis_scratch/home" \
+  --setenv LANG C.UTF-8 --setenv TMPDIR "$analysis_scratch/private" \
+  -- "$analysis_node_binary" "$analysis_scratch/harness.mjs" "$@"
 ```
 
-PID namespace と専用 `/proc` を分離して host process の環境・root への参照を防ぎ、
-host の一時ファイルも隠して scratch だけを再公開する。
-これは環境に合わせて作る launcher の例であり、`capture.mjs` は対象版の mock と採取器を
-用意する。実 home の位置と executable の依存が mount 設定に合うこと、namespace 内に
-loopback 以外の interface/外向き route がないことを起動時に検査する。
-capture は response/stream/process の終了イベントで完了させ、外側の watchdog 期限を
-超えた場合は測定不能とする。期限切れを成功や再開なしの証拠にしない。
+user/network/PID namespace により、非特権でも host process の環境・root・他の scratch への
+参照と外向き経路が消える。host の `/home`、`/root`、`~/.claude`、`~/.config`、credential、
+socket、repo、他作業の資料は mount しない。環境は `--clearenv` と allowlist で渡す。
+
+**positive control を CLI/mock の起動より先に実行し、不合格なら throw して起動しない。**
+同じ namespace 内の harness の先頭で毎回次を検査し、結果を証跡へ保存する。
+
+| Control | 合格条件 |
+| --- | --- |
+| interface | `lo` のみで UP |
+| IPv4/IPv6 route | ともに空 |
+| loopback listener への TCP | 成功 |
+| 文書化用アドレス（例 `192.0.2.1:443`、`[2001:db8::1]:443`）への直接接続 | `ENETUNREACH` |
+
+namespace 内に `lo` 以外が見えるか route がある場合は、採取を中止する。proxy の許可リストや
+loopback 接続の成功だけでは外向き通信の遮断を示せない。capture は response/stream/process の
+終了イベントで完了させ、外側の watchdog 期限を超えた場合は測定不能とする。期限切れを成功や
+再開なしの証拠にしない。
+
+### Nix で入手した native の起動
+
+`npm` の wrapper を使わず、取得した platform package の native binary を直接実行する。Nix store
+の glibc の動的 loader を明示すると、host の `/lib64` が無くても動く:
+`"$glibc/lib/ld-linux-x86-64.so.2" /native/claude ...`（loader は store の実体を確認して指定。
+過去の store path を転記しない）。wrapper を外すと失われる sandbox/環境を意識し、起動して得た
+version と binary SHA-256 を一緒に記録する。registry の tarball integrity は **tarball** の digest で
+あり、展開した native binary の SHA-256 とは別物。pin には両方を区別して書く。
+
+### interactive の PTY 採取
+
+interactive の main request は PTY で採る。手入力の自動化（起動後に文字列を書き込んで Enter）は、
+terminal protocol や入力受付のタイミングで**送信が成立しないことがある**（2.1.322 の最初の 2 試行は
+Messages 0 件）。初期 prompt を **CLI の引数**で渡し、PTY は画面とプロセスを維持する役目に絞る
+ほうが再現しやすい。送信が成立したかは UI の見た目でなく、mock が受けた Messages で確認する。
+成功した採取でも、SSE の完了とプロセスの意図的な終了（UI を閉じる操作）を、watchdog の期限切れと
+区別して記録する。
+
+### synthetic settings と feature flags
+
+settings/policy/model 等への synthetic 応答（`{}` など）は、実アカウントの remote feature flags、
+plan、managed policy を再現しない。UI に managed settings の parse failure が出ることもある。
+採取した request に beta や field が無くても、それは「この mock 条件で送らなかった」にとどまり、
+実アカウントが決して送らないことを示さない。送信条件は静的解析で別に確かめ、未測定として残す。
 
 ## Official host の TLS mock
 

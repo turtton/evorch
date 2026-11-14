@@ -7,10 +7,10 @@ use std::borrow::Cow;
 
 use crate::ProviderError;
 
-pub(crate) const CLAUDE_CODE_VERSION: &str = "2.1.295";
+pub(crate) const CLAUDE_CODE_VERSION: &str = "2.1.322";
 pub(crate) const CLAUDE_SDK_VERSION: &str = "0.128.0";
-pub(crate) const CLAUDE_RUNTIME_VERSION: &str = "v26.3.0";
-pub const CLAUDE_USER_AGENT: &str = "claude-cli/2.1.295 (external, cli)";
+pub(crate) const CLAUDE_RUNTIME_VERSION: &str = "v26.12.1";
+pub const CLAUDE_USER_AGENT: &str = "claude-cli/2.1.322 (external, cli)";
 pub const CLAUDE_SYSTEM_IDENTITY: &str =
     "You are Claude Code, Anthropic's official CLI for Claude.";
 pub const CLAUDE_INFERENCE_BETAS: &str = concat!(

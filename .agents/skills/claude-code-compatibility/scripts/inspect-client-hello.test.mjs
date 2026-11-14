@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { compareStreams, createRecordParser, inspectStream, runCli } from './inspect-client-hello.mjs';
 
-const fixture = readFileSync(new URL('../../../../crates/providers/fixtures/claude-transport/native-2.1.295-client-hello.bin', import.meta.url));
+const fixture = readFileSync(new URL('../../../../crates/providers/fixtures/claude-transport/native-2.1.322-client-hello.bin', import.meta.url));
 const u16 = value => { const b = Buffer.alloc(2); b.writeUInt16BE(value); return b; };
 const vector = (bytes, width = 2) => Buffer.concat([width === 1 ? Buffer.from([bytes.length]) : u16(bytes.length), bytes]);
 const extension = (type, bytes) => Buffer.concat([u16(type), vector(bytes)]);
@@ -34,8 +34,8 @@ function hello({ seed = 1, sessionLength = 4, cipher = 0x1301, group = 29, keyLe
 
 test('independent native fixture preserves its cipher, extension and key-share structure', () => {
   const inspected = inspectStream(fixture);
-  assert.equal(inspected.byteLength, 1504);
-  assert.deepEqual(inspected.records, [{ type: 22, version: 0x0301, length: 1499, offset: 0 }]);
+  assert.equal(inspected.byteLength, 1508);
+  assert.deepEqual(inspected.records, [{ type: 22, version: 0x0301, length: 1503, offset: 0 }]);
   assert.equal(inspected.clientHellos.length, 1);
   const result = inspected.clientHellos[0];
   assert.equal(result.version, 0x0303);
@@ -43,7 +43,8 @@ test('independent native fixture preserves its cipher, extension and key-share s
   assert.deepEqual(result.ciphers, [4865, 4866, 4867, 49195, 49199, 49196, 49200, 52393, 52392, 49161, 49171, 49162, 49172, 156, 157, 47, 53]);
   assert.deepEqual(result.extensions.map(e => e.type), [0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43]);
   assert.deepEqual(result.extensions.find(e => e.type === 51).detail.entries, [{ group: 4588, length: 1216 }, { group: 29, length: 32 }]);
-  assert.equal(result.normalizedSha256, '8845ac2401a951ffc4acef2824c3422124c7883e0c9bc4b5f90d3c6be05da2f9');
+  assert.deepEqual(result.extensions.find(e => e.type === 13).detail.values, [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601, 0x0807, 0x0603, 0x0201]);
+  assert.equal(result.normalizedSha256, '9569a6874c8b7cf244156851025369ec23d063d16f2a5401b37b3c7ffeb76722');
 });
 
 test('only transient random, session ID and key bytes are normalized by default', () => {
