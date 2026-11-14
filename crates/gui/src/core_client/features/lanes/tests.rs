@@ -329,6 +329,72 @@ fn detached_lanes_past_the_first_page_are_loaded_with_the_cursor_and_can_be_reat
 }
 
 #[test]
+fn a_reattach_to_another_lead_from_another_client_refreshes_the_detached_rows_and_cursor() {
+    let moved_to_b = |also_for: Vec<&str>| {
+        UiEvent::Lanes(LanesEvent::LaneChanged {
+            lane: serde_json::from_value(
+                json!({"lane_id": "l1", "thread_id": "thread-l1", "lead_thread_id": "lead-b",
+                    "policy": "attached", "management_revision": "9", "brief_revision": "2",
+                    "objective_preview": "objective l1", "generation": "1",
+                    "start": "started", "last_activity_at": "1", "revision": "1"}),
+            )
+            .unwrap(),
+            also_for: also_for
+                .into_iter()
+                .map(|t| ThreadId::new(t).unwrap())
+                .collect(),
+        })
+    };
+    // Whether the event names this thread, or only the lane it already shows, the rows and
+    // the page cursor are read again.
+    for also_for in [vec!["lead"], vec![]] {
+        let mut screen = screen(Box::<LanesFeature>::default(), Some("lead"));
+        let first = asked(&mut screen);
+        answer(&mut screen, tag_of(&first, is_list), lanes(vec![]));
+        answer(
+            &mut screen,
+            tag_of(&first, is_detached_list),
+            lanes_then(vec![summary("l1", "detached", 4)], "page-2"),
+        );
+        screen.get_by_label("切り離し済み: objective l1");
+
+        screen.state_mut().feature.event(&moved_to_b(also_for));
+        let again = asked(&mut screen);
+        let tag = tag_of(&again, is_detached_list);
+        answer(
+            &mut screen,
+            tag,
+            lanes_then(vec![summary("l2", "detached", 5)], "page-9"),
+        );
+        assert!(
+            screen
+                .query_by_label("切り離し済み: objective l1")
+                .is_none(),
+            "the lane that moved to another lead is gone"
+        );
+        screen.get_by_label("切り離し済み: objective l2");
+        screen.get_by_label("切り離し済みをさらに読み込む").click();
+        let more = asked(&mut screen);
+        let cursor = more
+            .iter()
+            .find_map(|a| match &a.request {
+                FeatureRequest::Query(Query::Lanes(LanesQuery::ListLanes(list)))
+                    if list.detached =>
+                {
+                    Some(list.page.cursor.clone())
+                }
+                _ => None,
+            })
+            .expect("a detached list was asked for");
+        assert_eq!(
+            cursor.map(|c| c.as_str().to_owned()).as_deref(),
+            Some("page-9"),
+            "the cursor is the one of the page read after the move"
+        );
+    }
+}
+
+#[test]
 fn held_notices_are_resumed_for_the_current_lead_root_and_revision_only() {
     let mut screen = screen(Box::<LanesFeature>::default(), Some("lead"));
     let first = asked(&mut screen);

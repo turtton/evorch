@@ -57,13 +57,25 @@ fn display_queries() -> Vec<Query> {
             page: Default::default(),
         })),
         Query::Lanes(LanesQuery::ListLanes(ListLanes {
-            lead_thread: thread,
+            lead_thread: thread.clone(),
             policy: None,
             detached: false,
             page: Default::default(),
         })),
+        Query::Teams(TeamsQuery::GetTeamTask(
+            workbench_protocol::namespaces::teams::TeamTaskRef {
+                thread,
+                task_id: "task-claimed".into(),
+            },
+        )),
+        Query::Lanes(LanesQuery::GetLane {
+            lane_id: workbench_protocol::lane_attention::LaneId::new(DISPLAY_LANE).unwrap(),
+        }),
     ]
 }
+
+/// A lane stored in the ledger but never started, so reading it makes no provider request.
+const DISPLAY_LANE: &str = "lane-display";
 
 async fn turn(events: &mut event_bus::EventReceiver, run: runtime::RunId) {
     loop {
@@ -278,6 +290,27 @@ context_window_tokens = 1000000
             .unwrap();
     }
     board.claim("task-claimed", "worker-1", 1).unwrap();
+    bridge
+        .handle()
+        .create_lane(storage::lanes::NewLane {
+            lane_id: DISPLAY_LANE.into(),
+            thread_id: "thread-lane-display".into(),
+            origin_thread_id: "thread".into(),
+            origin_run_id: run.to_string(),
+            creation_key: "open-display".into(),
+            brief: serde_json::from_value(serde_json::json!({
+                "objective": "display", "inputs": [], "deliverables": ["patch"],
+                "acceptance_criteria": ["review"], "constraints": [], "workspace": {},
+                "report_policy": "attached"
+            }))
+            .unwrap(),
+            start_seed: "{}".into(),
+            project_id: Some("project".into()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            title: None,
+            at_ns: 1,
+        })
+        .unwrap();
     let display = display_queries();
     let QueryReply::Execution(ExecutionReply::RunDetails(runs)) =
         client.query(display[0].clone()).await.unwrap()
@@ -285,9 +318,10 @@ context_window_tokens = 1000000
         panic!("run details reply")
     };
     assert_eq!(runs.items.len(), 1, "the thread's one root run is listed");
-    // The thread has one root run and a saved team board but no lane (a lane would add provider
-    // requests of its own): every read must succeed with what exists, or the prefix check below
-    // would only prove that failing queries leave it alone.
+    // The thread has one root run, a saved team board and a stored lane that has not started
+    // (a started lane would add provider requests of its own): every read must succeed with
+    // what exists, or the prefix check below would only prove that failing queries leave it
+    // alone.
     let QueryReply::Execution(ExecutionReply::ThreadExecution(execution)) =
         client.query(display[1].clone()).await.unwrap()
     else {
@@ -320,7 +354,30 @@ context_window_tokens = 1000000
     else {
         panic!("lanes reply")
     };
-    assert!(lanes.items.is_empty());
+    assert_eq!(
+        lanes
+            .items
+            .iter()
+            .map(|lane| lane.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        [DISPLAY_LANE],
+        "the stored lane is listed"
+    );
+    let QueryReply::Teams(workbench_protocol::namespaces::teams::TeamsReply::Task(task)) =
+        client.query(display[5].clone()).await.unwrap()
+    else {
+        panic!("team task reply")
+    };
+    assert_eq!(
+        (task.task_id.as_str(), task.owner.as_deref()),
+        ("task-claimed", Some("worker-1"))
+    );
+    let QueryReply::Lanes(LanesReply::Lane(lane_detail)) =
+        client.query(display[6].clone()).await.unwrap()
+    else {
+        panic!("lane detail reply")
+    };
+    assert_eq!(lane_detail.summary.lane_id.as_str(), DISPLAY_LANE);
     let QueryReply::Execution(ExecutionReply::Run(run_detail)) = client
         .query(Query::Execution(ExecutionQuery::GetRun(
             workbench_protocol::namespaces::execution::RunRef {

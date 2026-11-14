@@ -36,6 +36,9 @@ use workbench_protocol::{
     wire::Revision,
 };
 
+/// The height at which a list of lanes starts to scroll.
+const LIST_MAX_HEIGHT: f32 = 240.0;
+
 #[derive(Debug, Clone)]
 enum Pending {
     List { thread: ThreadId, append: bool },
@@ -177,6 +180,35 @@ impl LanesFeature {
             },
             state.family_revision,
         );
+    }
+
+    fn draw_detached_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &mut FeatureContext<'_>,
+        detached: LaneSummary,
+    ) {
+        let lane = detached.lane_id;
+        ui.push_id(("detached", lane.as_str()), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("切り離し済み: {}", detached.objective_preview));
+                if self.reattach.is_none() && ui.button("再接続").clicked() {
+                    self.reattach = Some(Reattach {
+                        lane: lane.clone(),
+                        state: None,
+                    });
+                    let tag = self.tag(Pending::Management { lane: lane.clone() });
+                    ctx.query(
+                        tag,
+                        Query::Lanes(LanesQuery::GetLaneManagement {
+                            lane_id: lane.clone(),
+                        }),
+                    );
+                    self.lead_root = None;
+                    self.root_stale = true;
+                }
+            });
+        });
     }
 
     fn draw_lane_row(
@@ -372,12 +404,16 @@ impl Feature for LanesFeature {
     }
 
     fn event(&mut self, event: &UiEvent) {
-        let UiEvent::Lanes(LanesEvent::LaneChanged { lane, .. }) = event else {
+        let UiEvent::Lanes(LanesEvent::LaneChanged { lane, also_for }) = event else {
             return;
         };
+        // A lane another client moved to a lead that is not ours has no tie to us in the
+        // event except `also_for`, or the row we already show for it.
         let ours = self.thread.is_some()
             && (lane.lead_thread_id == self.thread
-                || self.lanes.iter().any(|l| l.lane_id == lane.lane_id));
+                || self.thread.as_ref().is_some_and(|t| also_for.contains(t))
+                || self.lanes.iter().any(|l| l.lane_id == lane.lane_id)
+                || self.detached.iter().any(|l| l.lane_id == lane.lane_id));
         if ours {
             self.list_stale = true;
         }
@@ -592,34 +628,30 @@ impl Feature for LanesFeature {
         if self.lanes.is_empty() {
             ui.label("この会話が管理している lane はありません。");
         }
-        for lane in self.lanes.clone() {
-            self.draw_lane_row(ui, ctx, &lane);
+        // Each list scrolls in its own bounded area, so that however many lanes the core
+        // holds, the buttons that page through them stay inside the window.
+        if !self.lanes.is_empty() {
+            egui::ScrollArea::vertical()
+                .id_salt("lanes-managed")
+                .max_height(LIST_MAX_HEIGHT)
+                .show(ui, |ui| {
+                    for lane in self.lanes.clone() {
+                        self.draw_lane_row(ui, ctx, &lane);
+                    }
+                });
         }
         if self.next_cursor.is_some() && ui.button("さらに読み込む").clicked() {
             self.more_requested = true;
         }
-        for detached in self.detached.clone() {
-            let lane = detached.lane_id;
-            ui.push_id(("detached", lane.as_str()), |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(format!("切り離し済み: {}", detached.objective_preview));
-                    if self.reattach.is_none() && ui.button("再接続").clicked() {
-                        self.reattach = Some(Reattach {
-                            lane: lane.clone(),
-                            state: None,
-                        });
-                        let tag = self.tag(Pending::Management { lane: lane.clone() });
-                        ctx.query(
-                            tag,
-                            Query::Lanes(LanesQuery::GetLaneManagement {
-                                lane_id: lane.clone(),
-                            }),
-                        );
-                        self.lead_root = None;
-                        self.root_stale = true;
+        if !self.detached.is_empty() {
+            egui::ScrollArea::vertical()
+                .id_salt("lanes-detached")
+                .max_height(LIST_MAX_HEIGHT)
+                .show(ui, |ui| {
+                    for detached in self.detached.clone() {
+                        self.draw_detached_row(ui, ctx, detached);
                     }
                 });
-            });
         }
         if self.detached_next.is_some() && ui.button("切り離し済みをさらに読み込む").clicked()
         {

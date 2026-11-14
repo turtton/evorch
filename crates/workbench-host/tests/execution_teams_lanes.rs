@@ -40,6 +40,7 @@ use workbench_protocol::wire::Revision;
 
 struct Fixture {
     dir: tempfile::TempDir,
+    _owners: tempfile::TempDir,
     storage: storage::Storage,
     runtime: AgentRuntime,
     owner: Arc<runtime::ownership::OwnerHost>,
@@ -61,6 +62,13 @@ fn brief(objective: &str) -> event_bus::LaneBrief {
 impl Fixture {
     async fn new(lane_count: usize) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        // The owner's Unix socket lives below this directory: keep it under SUN_LEN whatever
+        // TMPDIR is.
+        let owners = tempfile::Builder::new()
+            .prefix("6")
+            .rand_bytes(3)
+            .tempdir_in("/tmp")
+            .unwrap();
         let config = storage::StorageConfig {
             db_path: dir.path().join("host.db"),
             ..Default::default()
@@ -75,12 +83,7 @@ impl Fixture {
         )
         .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
         let owner = Arc::new(
-            runtime::ownership::OwnerHost::open(
-                &dir.path().join("owners"),
-                Default::default(),
-                bus,
-            )
-            .unwrap(),
+            runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus).unwrap(),
         );
         let permit = owner.start("lead").unwrap();
         let lead = runtime
@@ -136,6 +139,7 @@ impl Fixture {
             .with_areas(areas(&runtime));
         Self {
             dir,
+            _owners: owners,
             storage,
             runtime,
             owner,

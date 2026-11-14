@@ -7,6 +7,7 @@
 //! late can never move a client back to an older state. Closing or continuing
 //! a lane has no gate of its own here, and a Ready is shown against the brief
 //! revision the lane had received when it reported.
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use event_bus::RecvError;
@@ -25,7 +26,7 @@ use workbench_protocol::lane_management::{LaneManagementPolicy, ManagedLanePolic
 use workbench_protocol::namespaces::lanes::{
     LaneAttentionBrief, LaneAttentionTag, LaneDeliveriesResumed, LaneDeliveryView, LaneDetail,
     LaneReadyView, LaneReportStatus, LaneReportView, LaneStartState, LaneSummary, ListLanes,
-    MAX_LANE_DETAIL_ATTENTION, ResumeLaneDeliveries,
+    MAX_LANE_DETAIL_ATTENTION, MAX_LANE_EVENT_THREADS, ResumeLaneDeliveries,
 };
 use workbench_protocol::namespaces::{LanesEvent, LanesQuery, LanesReply};
 use workbench_protocol::queries::{Query, QueryReply};
@@ -52,13 +53,14 @@ impl LanesArea {
         handles
             .tasks
             .spawn("lanes-events", move |mut stop| async move {
+                let mut leads = BTreeMap::new();
                 loop {
                     let event = tokio::select! {
                         () = stop.stopped() => break,
                         event = events.recv() => event,
                     };
                     match event {
-                        Ok(event) => publish_change(&runtime, &source, &event.kind),
+                        Ok(event) => publish_change(&runtime, &source, &mut leads, &event.kind),
                         Err(RecvError::Lagged(_)) => {}
                         Err(RecvError::Closed) => break,
                     }
@@ -158,7 +160,16 @@ impl LanesArea {
 /// The runtime's source name for a delivery-visible state change (Stop, held notices, resume).
 const DELIVERY_SOURCE: &str = "lane_delivery";
 
-fn publish_change(runtime: &AgentRuntime, source: &ProjectionSource, kind: &EventKind) {
+/// The lead each lane had when it was last announced, so that the next change tells the lead
+/// it left even when the ledger has moved on to another lead by the time it is read.
+type AnnouncedLeads = BTreeMap<String, ThreadId>;
+
+fn publish_change(
+    runtime: &AgentRuntime,
+    source: &ProjectionSource,
+    leads: &mut AnnouncedLeads,
+    kind: &EventKind,
+) {
     let summaries = match kind {
         EventKind::Ledger(event) => {
             let lane_id = match event {
@@ -184,13 +195,43 @@ fn publish_change(runtime: &AgentRuntime, source: &ProjectionSource, kind: &Even
         }
         _ => return,
     };
-    for (lane, also_for) in summaries {
+    for (lane, mut also_for) in summaries {
+        let at_event = match kind {
+            EventKind::Ledger(LedgerEvent::LaneManagementChanged { lead_thread_id, .. }) => {
+                lead_thread_id
+                    .as_deref()
+                    .and_then(|thread| ThreadId::new(thread).ok())
+            }
+            _ => lane.lead_thread_id.clone(),
+        };
+        tell_leads(leads, &lane, at_event, &mut also_for);
         if let Err(error) =
             source.publish(UiEvent::Lanes(LanesEvent::LaneChanged { lane, also_for }))
         {
             tracing::warn!(?error.code, "lanes event was not published");
         }
     }
+}
+
+/// Adds to `also_for` the lead `lane` had at the event and the one it had at the previous
+/// event, whichever the ledger names now: operations can run ahead of the events, and a lead
+/// that was left would otherwise never hear of it.
+fn tell_leads(
+    leads: &mut AnnouncedLeads,
+    lane: &LaneSummary,
+    at_event: Option<ThreadId>,
+    also_for: &mut Vec<ThreadId>,
+) {
+    let before = match &at_event {
+        Some(lead) => leads.insert(lane.lane_id.as_str().to_owned(), lead.clone()),
+        None => leads.remove(lane.lane_id.as_str()),
+    };
+    for thread in [before, at_event].into_iter().flatten() {
+        if lane.lead_thread_id.as_ref() != Some(&thread) && !also_for.contains(&thread) {
+            also_for.push(thread);
+        }
+    }
+    also_for.truncate(MAX_LANE_EVENT_THREADS);
 }
 
 /// The summaries of the lanes `lanes` reads, each with the threads that show it besides its
@@ -490,4 +531,45 @@ pub fn resume_deliveries(
         lead_thread_id: request.lead_thread_id.clone(),
         root_run_id: request.expected_lead_root_run_id.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lane(current_lead: Option<&str>) -> LaneSummary {
+        serde_json::from_value(serde_json::json!({
+            "lane_id": "l1", "thread_id": "thread-l1", "lead_thread_id": current_lead,
+            "policy": "attached", "management_revision": "1", "brief_revision": "1",
+            "objective_preview": "o", "generation": "1", "start": "started",
+            "last_activity_at": "1", "revision": "1"
+        }))
+        .unwrap()
+    }
+
+    fn thread(id: &str) -> ThreadId {
+        ThreadId::new(id).unwrap()
+    }
+
+    /// Lead A hands the lane to B, which detaches it, and C takes it, all before the first
+    /// event is read: each event is read against the ledger as it is by then (led by C).
+    #[test]
+    fn a_lead_left_by_the_lane_hears_of_the_change_even_when_the_ledger_ran_ahead() {
+        let mut leads = AnnouncedLeads::new();
+        let told = |leads: &mut AnnouncedLeads, at_event: Option<&str>| {
+            let mut also_for = Vec::new();
+            tell_leads(
+                leads,
+                &lane(Some("lead-c")),
+                at_event.map(thread),
+                &mut also_for,
+            );
+            also_for
+        };
+        assert_eq!(told(&mut leads, Some("lead-b")), [thread("lead-b")]);
+        // The detach: B was the lead before it, and is named though the ledger says C.
+        assert_eq!(told(&mut leads, None), [thread("lead-b")]);
+        // C takes it after the detach: the detach already told B, and nothing is left over.
+        assert!(told(&mut leads, Some("lead-c")).is_empty());
+    }
 }

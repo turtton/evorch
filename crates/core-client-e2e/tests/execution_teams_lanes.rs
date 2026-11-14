@@ -69,6 +69,9 @@ impl runtime::SandboxFactory for Unisolated {
 }
 
 const LEAD: &str = "lead";
+/// The height at which the lanes screen's lists scroll (its own bound, to see the list from
+/// outside).
+const LIST_HEIGHT: f32 = 240.0;
 const OBJECTIVE: &str = "e2e objective";
 
 struct World {
@@ -392,26 +395,28 @@ impl Desktop {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let harness = {
             let (shared, thread, asked) = (shared.clone(), thread.clone(), asked.clone());
-            Harness::new_ui(move |ui| {
-                let selection = Selection {
-                    project: Some(project.clone()),
-                    thread: thread
-                        .lock()
-                        .unwrap()
-                        .as_deref()
-                        .map(|id| ThreadId::new(id).unwrap()),
-                };
-                let mut state = shared.lock().unwrap();
-                let state = &mut *state;
-                let view = FeatureView {
-                    connected: state.connected,
-                    capabilities: &state.capabilities,
-                    cache: &state.cache,
-                    selection: &selection,
-                };
-                let frame = state.features.render(ui, view);
-                asked.lock().unwrap().extend(frame.actions);
-            })
+            Harness::builder()
+                .with_size(egui::vec2(1024.0, 768.0))
+                .build_ui(move |ui| {
+                    let selection = Selection {
+                        project: Some(project.clone()),
+                        thread: thread
+                            .lock()
+                            .unwrap()
+                            .as_deref()
+                            .map(|id| ThreadId::new(id).unwrap()),
+                    };
+                    let mut state = shared.lock().unwrap();
+                    let state = &mut *state;
+                    let view = FeatureView {
+                        connected: state.connected,
+                        capabilities: &state.capabilities,
+                        cache: &state.cache,
+                        selection: &selection,
+                    };
+                    let frame = state.features.render(ui, view);
+                    asked.lock().unwrap().extend(frame.actions);
+                })
         };
         Self {
             harness,
@@ -462,6 +467,31 @@ impl Desktop {
     async fn click(&mut self, label: &str) {
         self.harness.get_by_label(label).click();
         self.flush().await;
+    }
+
+    /// Turns the mouse wheel over the list that starts at its first row, until the centre of
+    /// `target` lies inside the list's visible height.
+    async fn wheel_until_visible(
+        &mut self,
+        first_row: &str,
+        target: impl Fn(&Desktop) -> egui::Rect,
+    ) {
+        let top_left = self.harness.get_by_label(first_row).rect().min;
+        let visible = egui::Rect::from_min_size(top_left, egui::vec2(1024.0, LIST_HEIGHT));
+        for _ in 0..400 {
+            if visible.contains(target(self).center()) {
+                return;
+            }
+            self.harness.hover_at(top_left + egui::vec2(10.0, 10.0));
+            self.harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -120.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+            self.flush().await;
+        }
+        panic!("the wheel did not bring the button into the list's view");
     }
 }
 
@@ -869,13 +899,10 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
         !desktop.shows(&far_label),
         "the far lane is behind the cursor"
     );
-    // Both buttons are far below the visible rows, so they are activated through the
-    // accessibility tree, as a screen reader would (a pointer click would land off screen).
-    desktop
-        .harness
-        .get_by_label("切り離し済みをさらに読み込む")
-        .click_accesskit();
-    desktop.flush().await;
+    // The window is 1024x768, the screen lists 50 rows and its buttons are used as a person
+    // does: the load button below the list is clicked with the pointer, the far lane's row is
+    // brought into view with the mouse wheel and its reconnect button is clicked likewise.
+    desktop.click("切り離し済みをさらに読み込む").await;
     desktop.until(|d| d.shows(&far_label)).await;
     assert_eq!(
         desktop
@@ -885,12 +912,22 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
         count
     );
     // The far lane is drawn last, so its reconnect button is the last one.
+    let first_row = format!("切り離し済み: {}", first.items[0].objective_preview);
+    desktop
+        .wheel_until_visible(&first_row, |d| {
+            d.harness
+                .get_all_by_label("再接続")
+                .last()
+                .expect("a reconnect button")
+                .rect()
+        })
+        .await;
     desktop
         .harness
         .get_all_by_label("再接続")
         .last()
         .expect("a reconnect button")
-        .click_accesskit();
+        .click();
     desktop.flush().await;
     desktop.until(|d| !d.shows(&far_label)).await;
     let attached = world.web_lanes("web-attached", false).await;
