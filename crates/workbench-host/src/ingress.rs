@@ -227,8 +227,8 @@ impl CommandHost {
     ) -> Result<CommandReply, WorkbenchError> {
         provenance.validate()?;
         command.validate()?;
-        let _permit = self.restart_command_permit(&command)?;
-        self.dispatch_command(command, &provenance)
+        let permit = self.restart_command_permit(&command)?;
+        self.dispatch_command(command, &provenance, permit.clone())
     }
 
     /// Run a command through ownership, the submission ledger and the command
@@ -238,7 +238,16 @@ impl CommandHost {
         command: HostCommand,
         provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
-        let events = self.authorize_and_execute(command, provenance)?;
+        self.run_host_command_tracked(command, provenance, None)
+    }
+
+    fn run_host_command_tracked(
+        &mut self,
+        command: HostCommand,
+        provenance: &Provenance,
+        restart: Option<crate::bootstrap::restart::HostCommandPermit>,
+    ) -> Result<CommandReply, WorkbenchError> {
+        let events = self.authorize_and_execute(command, provenance, restart)?;
         reply_from_events(events, None)
     }
 
@@ -565,11 +574,11 @@ impl CommandHost {
         permit: Option<runtime::ownership::OwnerPermit>,
         provenance: &Provenance,
     ) -> Vec<HostEvent> {
-        let _restart = match self.restart_local_permit(&command) {
+        let restart = match self.restart_local_permit(&command) {
             Ok(permit) => permit,
             Err(refusal) => return vec![refusal],
         };
-        match self.execute(command, permit, provenance) {
+        match self.execute(command, permit, provenance, Some(restart.clone())) {
             Executed::Duplicate { thread_id, run_id } => vec![HostEvent::ChatAccepted {
                 thread_id,
                 run_id: run_id.unwrap_or_default(),
@@ -582,9 +591,10 @@ impl CommandHost {
         &mut self,
         command: HostCommand,
         provenance: &Provenance,
+        restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Result<Vec<HostEvent>, WorkbenchError> {
         let permit = self.service.authorize(&command).map_err(refusal_error)?;
-        match self.execute(command, permit, provenance) {
+        match self.execute(command, permit, provenance, restart) {
             Executed::Events(events) => Ok(events),
             Executed::Duplicate { .. } => unreachable!("only a chat can be a duplicate"),
         }
@@ -596,6 +606,7 @@ impl CommandHost {
         command: HostCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
         provenance: &Provenance,
+        restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Executed {
         let submission = match &command {
             HostCommand::SendChat(chat) if !chat.submission_id.is_empty() => Some(chat.clone()),
@@ -619,7 +630,9 @@ impl CommandHost {
                 }
             }
         }
-        let events = self.service.submit_authorized(command, permit);
+        let events = self
+            .service
+            .submit_authorized_tracked(command, permit, restart);
         for event in &events {
             match event {
                 HostEvent::ChatAccepted { run_id, .. } => {
@@ -777,7 +790,7 @@ impl CommandHost {
         let command = HostCommand::SendChat(self.chat_input(send)?);
         self.reserve_chat_after_gate(send)?;
         let permit = self.service.authorize(&command).map_err(refusal_error)?;
-        match self.execute(command, permit, provenance) {
+        match self.execute(command, permit, provenance, None) {
             Executed::Duplicate { run_id, .. } => Ok(CommandReply {
                 disposition: CommandDisposition::AlreadyApplied,
                 submission_id: Some(send.submission_id.clone()),

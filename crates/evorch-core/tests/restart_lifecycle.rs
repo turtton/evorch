@@ -127,6 +127,20 @@ async fn restart_subprocess_worker() {
     )
     .await
     .unwrap();
+    let ownership_sockets: Vec<_> = std::fs::read_dir(root.join("o"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "sock")
+        })
+        .collect();
+    assert!(!ownership_sockets.is_empty());
+    assert!(
+        ownership_sockets
+            .iter()
+            .all(|path| path.as_os_str().as_encoded_bytes().len() < 108)
+    );
     let backend = Arc::new(HostBackend::new(
         host.host.clone(),
         instance.identity.clone(),
@@ -194,7 +208,7 @@ async fn restart_subprocess_worker() {
 }
 #[tokio::test]
 async fn prepare_cancel_retains_lifetime_lock_and_sigterm_uses_shared_driver() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in("/tmp").unwrap();
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--ignored",

@@ -32,7 +32,14 @@ struct Inner {
 }
 #[derive(Clone)]
 pub struct HostRestartGate(Arc<Inner>);
-pub struct HostCommandPermit(HostRestartGate);
+/// Clones share one accepted command; synchronous reply and async persistence must both finish.
+pub struct HostCommandPermit(Arc<HostCommandLease>);
+struct HostCommandLease(HostRestartGate);
+impl Clone for HostCommandPermit {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
 impl Default for HostRestartGate {
     fn default() -> Self {
         Self(Arc::new(Inner {
@@ -86,7 +93,7 @@ impl HostRestartGate {
             return Err(RuntimeError::RestartBusy);
         }
         state.active += 1;
-        Ok(HostCommandPermit(self.clone()))
+        Ok(HostCommandPermit(Arc::new(HostCommandLease(self.clone()))))
     }
     pub async fn drained(&self) {
         let mut changed = self.subscribe();
@@ -124,7 +131,7 @@ impl HostRestartGate {
         })
     }
 }
-impl Drop for HostCommandPermit {
+impl Drop for HostCommandLease {
     fn drop(&mut self) {
         let mut state = self.0.0.state.lock().unwrap();
         state.active -= 1;

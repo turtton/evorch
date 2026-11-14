@@ -51,8 +51,10 @@ impl runtime::SandboxFactory for Direct {
 async fn boot() -> (tempfile::TempDir, BootstrappedHost) {
     boot_with_model(Arc::new(Model::default())).await
 }
-async fn boot_with_model(model: Arc<Model>) -> (tempfile::TempDir, BootstrappedHost) {
-    let dir = tempfile::tempdir().unwrap();
+async fn boot_with_model(
+    model: Arc<dyn runtime::AgentModel>,
+) -> (tempfile::TempDir, BootstrappedHost) {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
     let root = dir.path().canonicalize().unwrap();
     let mut sidebar = workspace_state::SidebarState::default();
     sidebar
@@ -76,7 +78,24 @@ async fn boot_with_model(model: Arc<Model>) -> (tempfile::TempDir, BootstrappedH
     )
     .await
     .unwrap();
+    assert_owner_socket_paths(&root.join("o"));
     (dir, boot)
+}
+fn assert_owner_socket_paths(root: &std::path::Path) {
+    let sockets: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "sock")
+        })
+        .collect();
+    assert!(!sockets.is_empty());
+    assert!(
+        sockets
+            .iter()
+            .all(|path| path.as_os_str().as_encoded_bytes().len() < 108)
+    );
 }
 async fn phase(core: &RestartCoordinator, expected: RestartPhase) {
     let mut changes = core.subscribe();
@@ -519,4 +538,313 @@ async fn shutdown_during_host_permit_drain_never_reopens_or_calls_provider() {
         event_bus::AgentRunPhase::Stopped
     );
     assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[derive(Default)]
+struct CompactionBarrier {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait::async_trait]
+impl runtime::AgentModel for CompactionBarrier {
+    fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
+        "compaction-barrier".into()
+    }
+    async fn complete(
+        &self,
+        invocation: &runtime::AgentInvocationContext,
+        _: runtime::Role,
+        _: &[providers::Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, RuntimeError> {
+        if invocation.purpose == event_bus::RequestPurpose::Compaction {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(providers::ChatResponse {
+            message: providers::Message {
+                role: providers::Role::Assistant,
+                content: vec![providers::ContentBlock::Text {
+                    text: "saved older analysis ".repeat(30),
+                }],
+            },
+            usage: Default::default(),
+            usage_reported: true,
+            finish_reason: providers::FinishReason::Stop,
+        })
+    }
+}
+#[tokio::test]
+async fn accepted_saved_compaction_retains_its_ingress_permit_until_persisted() {
+    for protocol in [false, true] {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("saved.db"),
+            ..Default::default()
+        };
+        let store = storage::Storage::open(config.clone()).unwrap();
+        let model = Arc::new(CompactionBarrier::default());
+        let bus = Arc::new(event_bus::EventBus::new(128));
+        let mut events = bus.subscribe();
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(tools::ToolExecutor::new(bus)),
+            model.clone(),
+        )
+        .with_run_store(runtime::RunStore::open(&config, store.handle()).unwrap())
+        .with_compaction(config::CompactionConfig {
+            context_window_tokens: 1_000_000,
+            keep_recent_tokens: 1,
+            ..Default::default()
+        });
+        let run = runtime.delegate_background(
+            runtime::Role::Worker,
+            "older turn".into(),
+            Default::default(),
+        );
+        runtime.wait(run).await.unwrap();
+        runtime
+            .continue_goal(run, "recent turn".into(), Default::default())
+            .unwrap();
+        loop {
+            if matches!(events.recv().await.unwrap().kind, event_bus::EventKind::Lifecycle(
+                event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Waiting, .. }
+            ) if run_id == run.to_string())
+            {
+                break;
+            }
+        }
+        runtime.stop(run, StopScope::SelfOnly).unwrap();
+        runtime.wait(run).await.unwrap();
+        let mut host =
+            workbench_host::CommandHost::new(workbench_host::commands::CommandService::new(
+                runtime.clone(),
+                tokio::runtime::Handle::current(),
+            ));
+        host.service_mut()
+            .bind_goal_context("thread", "project", &run.to_string());
+        let gate = host.service().restart_gate();
+        let core = RestartCoordinator::from_parts(
+            runtime.clone(),
+            gate.clone(),
+            vec![runtime.producer_gate()],
+        );
+        let provenance = workbench_host::provenance::local_desktop();
+        if protocol {
+            host.handle_command(
+                workbench_protocol::commands::Command::Conversation(
+                    workbench_protocol::namespaces::ConversationCommand::CompactChat(
+                        workbench_protocol::commands::ThreadTarget {
+                            thread: workbench_protocol::ids::ThreadId::new("thread").unwrap(),
+                        },
+                    ),
+                ),
+                provenance,
+            )
+            .unwrap();
+        } else {
+            let result = host.submit_local(
+                workbench_host::commands::HostCommand::CompactChat {
+                    thread_id: "thread".into(),
+                },
+                &provenance,
+            );
+            assert!(
+                matches!(result.as_slice(), [workbench_host::commands::HostEvent::ChatNotice { text, .. }]
+                if text.starts_with("Compacting saved"))
+            );
+        }
+        model.entered.notified().await;
+        let id = core.request().unwrap();
+        phase(&core, RestartPhase::Sealing).await;
+        let mut sealed = Box::pin(core.wait_sealed(id));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                sealed.as_mut().poll(cx).is_pending()
+            ))
+            .await
+        );
+        assert_eq!(gate.phase(), HostRestartPhase::Sealing);
+        model.release.notify_one();
+        let proof = sealed.await.unwrap();
+        proof.validate(&runtime).unwrap();
+        let result = host.service_mut().poll();
+        assert!(
+            matches!(result.as_slice(), [workbench_host::commands::HostEvent::ChatNotice { text, .. }]
+            if text.contains("complete. Use /continue"))
+        );
+        core.cancel(id).unwrap();
+    }
+}
+async fn direct_runtime_stop_reconciles(sealing: bool) {
+    let model = Arc::new(Model::default());
+    let (_dir, mut host) = boot_with_model(model.clone()).await;
+    let core = RestartCoordinator::new(&host);
+    let gate = host.host.lock().unwrap().service().restart_gate();
+    let input = sealing.then(|| {
+        gate.enter(workbench_host::bootstrap::restart::CommandAccess::ExistingInput)
+            .unwrap()
+    });
+    let target = host.runtime.delegate_background(
+        runtime::Role::Worker,
+        "target".into(),
+        Default::default(),
+    );
+    let other =
+        host.runtime
+            .delegate_background(runtime::Role::Worker, "other".into(), Default::default());
+    let id = core.request().unwrap();
+    let attempt = core.0.state.lock().unwrap().attempt.clone().unwrap();
+    let proof = if sealing {
+        phase(&core, RestartPhase::Sealing).await;
+        None
+    } else {
+        Some(core.wait_sealed(id).await.unwrap())
+    };
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    host.runtime.stop(target, StopScope::SelfOnly).unwrap();
+    phase(&core, RestartPhase::Running).await;
+    assert_eq!(
+        host.runtime.quiesce_state(),
+        runtime::quiesce::QuiesceState::Running
+    );
+    assert_eq!(gate.phase(), HostRestartPhase::Open);
+    assert!(
+        host.restart_producers()
+            .iter()
+            .all(|producer| producer.try_enter().is_some())
+    );
+    assert!(core.snapshot().id.is_none());
+    if let Some(proof) = proof {
+        assert!(proof.validate(&host.runtime).is_err());
+    }
+    assert!(core.wait_sealed(id).await.is_err());
+    assert_eq!(
+        host.runtime.wait(target).await.unwrap(),
+        event_bus::AgentRunPhase::Stopped
+    );
+    assert_eq!(
+        host.runtime.wait(other).await.unwrap(),
+        event_bus::AgentRunPhase::Done
+    );
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(input);
+    let next = core.request().unwrap();
+    core.wait_sealed(next).await.unwrap();
+    assert_eq!(
+        host.runtime.restart_attempt_state(&attempt),
+        runtime::quiesce::RestartAttemptState::Superseded
+    );
+    assert!(core.cancel(id).is_err());
+    assert_eq!(core.snapshot().phase, RestartPhase::Sealed);
+    assert_eq!(gate.phase(), HostRestartPhase::Sealed);
+    assert!(host.runtime.producer_gate().try_enter().is_none());
+    core.cancel(next).unwrap();
+    host.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn direct_runtime_stop_after_seal_reopens_core_host_and_producers() {
+    direct_runtime_stop_reconciles(false).await;
+}
+#[tokio::test]
+async fn direct_runtime_stop_in_host_permit_window_is_cancellation_not_failure() {
+    direct_runtime_stop_reconciles(true).await;
+}
+#[tokio::test]
+async fn direct_runtime_stop_invalidation_failure_does_not_reopen_host_or_producers() {
+    let model = Arc::new(Model::default());
+    let (_dir, mut host) = boot_with_model(model.clone()).await;
+    let core = RestartCoordinator::new(&host);
+    let target = host.runtime.delegate_background(
+        runtime::Role::Worker,
+        "target".into(),
+        Default::default(),
+    );
+    let other =
+        host.runtime
+            .delegate_background(runtime::Role::Worker, "other".into(), Default::default());
+    let id = core.request().unwrap();
+    core.wait_sealed(id).await.unwrap();
+    let db = rusqlite::Connection::open(&host.composition.storage.db_path).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_cancel BEFORE UPDATE ON resume_intents BEGIN SELECT RAISE(ABORT, 'cancel failed'); END;").unwrap();
+    assert!(host.runtime.stop(target, StopScope::SelfOnly).is_err());
+    phase(&core, RestartPhase::FailedClosed).await;
+    assert!(host.runtime.producer_gate().try_enter().is_none());
+    assert_eq!(
+        host.host.lock().unwrap().service().restart_gate().phase(),
+        HostRestartPhase::FailedClosed
+    );
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // Parking retains the public Running phase; completion/provider execution must stay blocked.
+    let mut waiting = Box::pin(host.runtime.wait(other));
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(waiting.as_mut().poll(cx).is_pending()))
+            .await
+    );
+    assert!(matches!(
+        host.runtime.quiesce_state(),
+        runtime::quiesce::QuiesceState::Failed { .. }
+    ));
+    drop(waiting);
+    db.execute_batch("DROP TRIGGER reject_cancel;").unwrap();
+    assert!(host.shutdown().await.is_err());
+}
+
+#[tokio::test]
+async fn accepted_unpolled_mcp_operation_finishes_before_seal_and_late_request_is_busy() {
+    use workbench_protocol::{
+        commands::Command,
+        ids::{ProjectId, SessionId},
+        namespaces::mcp::{self, McpCommand, McpQuery, McpReply},
+        queries::{Query, QueryReply},
+    };
+    let (_dir, mut host) = boot().await;
+    let core = RestartCoordinator::new(&host);
+    let operation_id = mcp::McpOperationId::new("accepted-mcp").unwrap();
+    let command = |operation_id| {
+        Command::Mcp(McpCommand::Refresh(mcp::Refresh {
+            operation_id,
+            project: ProjectId::new("p").unwrap(),
+        }))
+    };
+    host.host
+        .lock()
+        .unwrap()
+        .handle_command(
+            command(operation_id.clone()),
+            workbench_host::provenance::local_desktop(),
+        )
+        .unwrap();
+    // The current-thread executor has not polled the accepted operation yet.
+    let id = core.request().unwrap();
+    let gate = host.host.lock().unwrap().service().restart_gate();
+    let mut drained = Box::pin(gate.drained());
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(drained.as_mut().poll(cx).is_pending()))
+            .await
+    );
+    core.wait_sealed(id).await.unwrap();
+    let result = host
+        .host
+        .lock()
+        .unwrap()
+        .handle_query(
+            &SessionId::new("test").unwrap(),
+            &Query::Mcp(McpQuery::GetOperation { operation_id }),
+        )
+        .unwrap();
+    assert!(matches!(result, QueryReply::Mcp(McpReply::Operation(view))
+        if matches!(view.state, mcp::McpOperationState::Succeeded { .. })));
+    let late = host
+        .host
+        .lock()
+        .unwrap()
+        .handle_command(
+            command(mcp::McpOperationId::new("late-mcp").unwrap()),
+            workbench_host::provenance::local_desktop(),
+        )
+        .unwrap_err();
+    assert_eq!(late.code, workbench_protocol::errors::ErrorCode::Busy);
+    core.cancel(id).unwrap();
+    host.shutdown().await.unwrap();
 }

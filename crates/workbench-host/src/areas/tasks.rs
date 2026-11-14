@@ -140,7 +140,22 @@ impl AreaTasks {
         F: FnOnce(StopSignal) -> Fut,
         Fut: Future<Output = Result<(), BootstrapError>> + Send + 'static,
     {
-        self.spawn_inner(name, task, true)
+        self.spawn_counted_tracked(name, None, task)
+    }
+
+    /// An ingress-accepted operation must finish even when producers are paused.
+    /// Its original admission guard (never a fresh admission) stays through persistence.
+    pub(crate) fn spawn_counted_tracked<F, Fut>(
+        &self,
+        name: &'static str,
+        accepted: Option<crate::bootstrap::restart::HostCommandPermit>,
+        task: F,
+    ) -> Result<(), SpawnError>
+    where
+        F: FnOnce(StopSignal) -> Fut,
+        Fut: Future<Output = Result<(), BootstrapError>> + Send + 'static,
+    {
+        self.spawn_inner(name, task, true, accepted)
     }
 
     /// Admission of new counted operations; passive area watchers remain running.
@@ -171,7 +186,7 @@ impl AreaTasks {
         F: FnOnce(StopSignal) -> Fut,
         Fut: Future<Output = Result<(), BootstrapError>> + Send + 'static,
     {
-        self.spawn_inner(name, task, false)
+        self.spawn_inner(name, task, false, None)
     }
 
     fn spawn_inner<F, Fut>(
@@ -179,6 +194,7 @@ impl AreaTasks {
         name: &'static str,
         task: F,
         counted: bool,
+        accepted: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Result<(), SpawnError>
     where
         F: FnOnce(StopSignal) -> Fut,
@@ -196,7 +212,8 @@ impl AreaTasks {
         let producers = self.0.producers.clone();
         let mut stop = StopSignal(self.0.stop.subscribe());
         let future = async move {
-            let _permit = if counted {
+            let _accepted = accepted;
+            let _permit = if counted && _accepted.is_none() {
                 tokio::select! { biased; _ = stop.stopped() => return Ok(()), permit = producers.enter() => {
                     let Some(permit) = permit else { return Ok(()); };
                     Some(permit)
@@ -313,6 +330,48 @@ mod tests {
         stopped.shutdown().await.unwrap();
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert!(!stopped.busy());
+    }
+
+    #[tokio::test]
+    async fn ingress_accepted_unpolled_work_bypasses_pause_but_holds_drain_until_finished() {
+        use crate::bootstrap::restart::{CommandAccess, HostRestartGate, HostRestartPhase};
+        let tasks = tasks();
+        let host = HostRestartGate::default();
+        let accepted = host.enter(CommandAccess::NewWork).unwrap();
+        let synchronous_reply = accepted.clone();
+        let (started, observed) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        tasks
+            .spawn_counted_tracked("accepted", Some(accepted), move |_| async move {
+                started.send(()).unwrap();
+                released.await.unwrap();
+                Ok(())
+            })
+            .unwrap();
+        // No await: the accepted task has not been polled before the pause.
+        tasks.producer_gate().pause();
+        host.transition(1, HostRestartPhase::Sealing);
+        assert!(host.enter(CommandAccess::NewWork).is_err());
+        observed.await.unwrap();
+        let mut drained = Box::pin(host.drained());
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                drained.as_mut().poll(cx).is_pending()
+            ))
+            .await
+        );
+        release.send(()).unwrap();
+        tasks.shutdown().await.unwrap();
+        // Even if async persistence finishes first, the original reply still owns admission.
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                drained.as_mut().poll(cx).is_pending()
+            ))
+            .await
+        );
+        drop(synchronous_reply);
+        drained.await;
+        assert!(!tasks.busy());
     }
 
     fn tasks() -> AreaTasks {

@@ -215,6 +215,54 @@ impl RestartCoordinator {
             .sealed(&self.0.runtime, id.generation, fence)
             .await
     }
+    // Called only in coordinator -> runtime order. Watch notifications are hints;
+    // the opaque attempt is rechecked under runtime's lock on every observation.
+    fn synchronize_attempt(
+        &self,
+        state: &mut State,
+        attempt: &RestartAttempt,
+    ) -> runtime::quiesce::RestartAttemptState {
+        use runtime::quiesce::RestartAttemptState as Status;
+        let status = self.0.runtime.restart_attempt_state(attempt);
+        match status {
+            Status::Active => {}
+            Status::Cancelling => {
+                state.sealed = None;
+                if state.phase != RestartPhase::Cancelling {
+                    self.0
+                        .gate
+                        .transition(state.generation, HostRestartPhase::Cancelling);
+                    self.publish(state, RestartPhase::Cancelling);
+                }
+            }
+            Status::Cancelled => {
+                state.worker = None;
+                state.sealed = None;
+                self.reopened(state);
+            }
+            Status::Failed | Status::Superseded => {
+                state.worker = None;
+                state.sealed = None;
+                self.0
+                    .gate
+                    .transition(state.generation, HostRestartPhase::FailedClosed);
+                self.publish(state, RestartPhase::FailedClosed);
+            }
+            Status::ShuttingDown => {
+                state.worker = None;
+                state.sealed = None;
+                state.id = None;
+                for producer in &self.0.producers {
+                    producer.close();
+                }
+                self.0
+                    .gate
+                    .transition(state.generation, HostRestartPhase::ShuttingDown);
+                self.publish(state, RestartPhase::ShuttingDown);
+            }
+        }
+        status
+    }
     async fn drive(&self, id: RestartId, attempt: RestartAttempt) {
         {
             let mut state = self.0.state.lock().unwrap();
@@ -232,9 +280,41 @@ impl RestartCoordinator {
             .collect();
         let prepare = self.prepare(id, &attempt);
         tokio::pin!(prepare);
-        let result = loop {
+        let mut prepared = false;
+        loop {
+            {
+                let mut state = self.0.state.lock().unwrap();
+                if state.id != Some(id) {
+                    return;
+                }
+                use runtime::quiesce::RestartAttemptState as Status;
+                if !matches!(
+                    self.synchronize_attempt(&mut state, &attempt),
+                    Status::Active | Status::Cancelling
+                ) {
+                    return;
+                }
+            }
             tokio::select! {
-                result = &mut prepare => break result,
+                result = &mut prepare, if !prepared => {
+                    prepared = true;
+                    let mut state = self.0.state.lock().unwrap();
+                    if state.id != Some(id) { return; }
+                    if self.synchronize_attempt(&mut state, &attempt) == runtime::quiesce::RestartAttemptState::Active {
+                        match result {
+                            Ok(sealed) => {
+                                state.sealed = Some(Arc::new(sealed));
+                                self.publish(&mut state, RestartPhase::Sealed);
+                            }
+                            Err(error) => {
+                                // A concurrent direct Stop may have invalidated prepare.
+                                // Atomically fail only an active attempt, then observe again.
+                                let _ = self.0.runtime.fail_restart_attempt(&attempt, error);
+                                self.synchronize_attempt(&mut state, &attempt);
+                            }
+                        }
+                    }
+                }
                 _ = producer_change(&mut producer_changes) => {
                     let mut state = self.0.state.lock().unwrap();
                     if state.id != Some(id) { return; }
@@ -244,29 +324,10 @@ impl RestartCoordinator {
                     if changed.is_err() { return; }
                     let mut state = self.0.state.lock().unwrap();
                     if state.id != Some(id) { return; }
-                    let phase = state.phase;
-                    self.publish(&mut state, phase);
+                    let phase = state.phase; self.publish(&mut state, phase);
                 }
             }
-        };
-        let mut state = self.0.state.lock().unwrap();
-        if state.id != Some(id) {
-            return;
-        }
-        state.worker = None;
-        match result {
-            Ok(sealed) => {
-                state.sealed = Some(Arc::new(sealed));
-                self.publish(&mut state, RestartPhase::Sealed);
-            }
-            Err(error) => {
-                // Keep runtime Stop terminal-only too, not merely the host ingress closed.
-                let _ = self.0.runtime.fail_restart_attempt(&attempt, error);
-                self.0
-                    .gate
-                    .transition(id.generation, HostRestartPhase::FailedClosed);
-                self.publish(&mut state, RestartPhase::FailedClosed);
-            }
+            // Remain alive after Sealed: direct runtime Stop is an existing API.
         }
     }
     pub async fn wait_sealed(&self, id: RestartId) -> Result<Arc<SealedRestart>, RuntimeError> {
@@ -320,28 +381,14 @@ impl RestartCoordinator {
         {
             return Err(RuntimeError::RestartBusy);
         }
-        Self::abort_worker(&mut state);
         self.0
             .gate
             .transition(id.generation, HostRestartPhase::Cancelling);
         self.publish(&mut state, RestartPhase::Cancelling);
-        match self
-            .0
-            .runtime
-            .cancel_restart_quiesce(state.attempt.as_ref().unwrap())
-        {
-            Ok(_) => {
-                self.reopened(&mut state);
-                Ok(())
-            }
-            Err(error) => {
-                self.0
-                    .gate
-                    .transition(id.generation, HostRestartPhase::FailedClosed);
-                self.publish(&mut state, RestartPhase::FailedClosed);
-                Err(error)
-            }
-        }
+        let attempt = state.attempt.as_ref().unwrap().clone();
+        let result = self.0.runtime.cancel_restart_quiesce(&attempt);
+        self.synchronize_attempt(&mut state, &attempt);
+        result.map(|_| ())
     }
     /// Only operator shutdown calls the destructive host drain; this just closes admission.
     pub fn transition_to_shutdown(&self) {
@@ -360,27 +407,17 @@ impl RestartCoordinator {
 impl RestartStopHandler for RestartCoordinator {
     fn stop(&self, run: RunId, scope: StopScope) -> Result<(), RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
-        let cancelling = matches!(state.phase, RestartPhase::Sealing | RestartPhase::Sealed);
-        if cancelling {
-            Self::abort_worker(&mut state);
+        if matches!(state.phase, RestartPhase::Sealing | RestartPhase::Sealed) {
+            state.sealed = None;
             self.0
                 .gate
                 .transition(state.generation, HostRestartPhase::Cancelling);
             self.publish(&mut state, RestartPhase::Cancelling);
         }
-        // Runtime first prepares dispatch, then delivers Stop, then durably resumes others.
+        // Runtime prepares dispatch, delivers Stop, then durably resumes others.
         let result = self.0.runtime.stop(run, scope);
-        if cancelling {
-            if result.is_ok()
-                && self.0.runtime.quiesce_state() == runtime::quiesce::QuiesceState::Running
-            {
-                self.reopened(&mut state);
-            } else {
-                self.0
-                    .gate
-                    .transition(state.generation, HostRestartPhase::FailedClosed);
-                self.publish(&mut state, RestartPhase::FailedClosed);
-            }
+        if let Some(attempt) = state.attempt.clone() {
+            self.synchronize_attempt(&mut state, &attempt);
         }
         result
     }

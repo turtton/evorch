@@ -155,6 +155,7 @@ impl CommandHost {
         &mut self,
         input: ConversationCommand,
         provenance: &Provenance,
+        restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         let result = match input {
             ConversationCommand::SendChat(send) => return self.send_chat(&send, provenance),
@@ -180,11 +181,12 @@ impl CommandHost {
                 );
             }
             ConversationCommand::CompactChat(target) => {
-                return self.run_host_command(
+                return self.run_host_command_tracked(
                     HostCommand::CompactChat {
                         thread_id: target.thread.as_str().to_owned(),
                     },
                     provenance,
+                    Some(restart),
                 );
             }
             ConversationCommand::DeliverFollowUpsNextTurn(target) => {

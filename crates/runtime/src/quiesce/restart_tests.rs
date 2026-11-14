@@ -31,7 +31,15 @@ async fn cancelling_park_invalidates_checkpoint_before_same_execution_resumes() 
     );
     f.runtime.wait_quiesced().await.unwrap();
     assert!(f.intent(run).checkpoint.is_some());
+    assert_eq!(
+        f.runtime.restart_attempt_state(&attempt),
+        RestartAttemptState::Active
+    );
     f.runtime.cancel_restart_quiesce(&attempt).unwrap();
+    assert_eq!(
+        f.runtime.restart_attempt_state(&attempt),
+        RestartAttemptState::Cancelled
+    );
     assert!(f.intent(run).checkpoint.is_none());
     assert!(f.intent(run).snapshot.is_some());
     assert!(std::sync::Arc::ptr_eq(
@@ -53,6 +61,10 @@ async fn failed_checkpoint_invalidation_keeps_park_and_failure_sticky() {
     *f.runtime.shared.quiesce.fault.lock().unwrap() = Some(StorageStep::Save);
     assert!(f.runtime.cancel_restart_quiesce(&attempt).is_err());
     assert!(!f.runtime.shared.quiesce.running());
+    assert_eq!(
+        f.runtime.restart_attempt_state(&attempt),
+        RestartAttemptState::Failed
+    );
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
     assert!(f.runtime.begin_restart_quiesce().is_err());
     assert!(f.runtime.cancel_restart_quiesce(&attempt).is_err());

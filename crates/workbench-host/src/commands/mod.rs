@@ -491,7 +491,16 @@ impl CommandService {
         command: HostCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
     ) -> Vec<HostEvent> {
-        let events = self.dispatch_authorized(command, permit);
+        self.submit_authorized_tracked(command, permit, None)
+    }
+
+    pub(crate) fn submit_authorized_tracked(
+        &mut self,
+        command: HostCommand,
+        permit: Option<runtime::ownership::OwnerPermit>,
+        restart: Option<crate::bootstrap::restart::HostCommandPermit>,
+    ) -> Vec<HostEvent> {
+        let events = self.dispatch_authorized(command, permit, restart);
         self.publish_lane_bindings();
         events
     }
@@ -500,6 +509,7 @@ impl CommandService {
         &mut self,
         command: HostCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
+        restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Vec<HostEvent> {
         if let Some(thread) = Self::compaction_excluded_thread(&command)
             && self.compaction_jobs.contains_key(thread)
@@ -533,7 +543,7 @@ impl CommandService {
                 }
                 Vec::new()
             }
-            HostCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit),
+            HostCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit, restart),
             HostCommand::ResumeLaneDeliveries { thread_id } => {
                 self.resume_lane_deliveries(thread_id, permit)
             }

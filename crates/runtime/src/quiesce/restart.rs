@@ -16,6 +16,17 @@ impl RestartAttempt {
     }
 }
 
+/// Read-only, attempt-bound lifecycle observation. No callback or authority is issued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestartAttemptState {
+    Active,
+    Cancelling,
+    Cancelled,
+    Failed,
+    Superseded,
+    ShuttingDown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResumeReceipt {
     generation: u64,
@@ -140,6 +151,43 @@ impl AgentRuntime {
         self.shared.quiesce.changed();
         Ok(())
     }
+    /// Combine with subscribe_restart_state; stale watch notifications cannot reopen a newer attempt.
+    /// Cancelled is published only after durable invalidation and accepted resume/wake replay.
+    pub fn restart_attempt_state(&self, attempt: &RestartAttempt) -> RestartAttemptState {
+        let inner = self.shared.quiesce.lock();
+        if !Arc::ptr_eq(&attempt.owner, &self.shared.dispatch_tails) {
+            return RestartAttemptState::Superseded;
+        }
+        if inner.generation == attempt.generation {
+            return if matches!(inner.phase, QuiesceState::Failed { .. }) {
+                RestartAttemptState::Failed
+            } else if inner.requested {
+                RestartAttemptState::Active
+            } else {
+                RestartAttemptState::Superseded
+            };
+        }
+        if attempt.generation.checked_add(1) != Some(inner.generation) {
+            return RestartAttemptState::Superseded;
+        }
+        if inner.shutting_down {
+            return RestartAttemptState::ShuttingDown;
+        }
+        if inner.cancellation_finished_through == attempt.generation
+            && !inner.requested
+            && !inner.cancelling
+        {
+            return RestartAttemptState::Cancelled;
+        }
+        if matches!(inner.phase, QuiesceState::Failed { .. }) {
+            return RestartAttemptState::Failed;
+        }
+        if inner.cancelling || inner.resumed_through == attempt.generation {
+            return RestartAttemptState::Cancelling;
+        }
+        RestartAttemptState::Superseded
+    }
+
     pub fn subscribe_restart_state(&self) -> watch::Receiver<u64> {
         self.shared.quiesce.subscribe()
     }
@@ -191,6 +239,15 @@ impl AgentRuntime {
             self.with_restart_launch_fence(|| self.invalidate_parked_intents(generation))?;
         self.replay_restart_wakes();
         self.replay_accepted_chat_resumes();
+        let mut inner = self.shared.quiesce.lock();
+        if inner.generation == generation.saturating_add(1)
+            && !inner.requested
+            && !inner.cancelling
+            && inner.phase == QuiesceState::Running
+        {
+            inner.cancellation_finished_through = generation;
+            self.shared.quiesce.changed();
+        }
         Ok(receipt)
     }
 
@@ -284,6 +341,7 @@ impl AgentRuntime {
                 .checked_add(1)
                 .ok_or_else(|| runtime::error("restart generation exhausted"))?;
             inner.cancelling = true;
+            self.shared.quiesce.changed();
             Some(generation)
         } else {
             if terminal_only {
