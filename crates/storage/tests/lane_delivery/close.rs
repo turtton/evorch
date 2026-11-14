@@ -755,6 +755,47 @@ fn the_preview_counts_every_unanswered_question_of_the_lane_whether_or_not_it_wa
 }
 
 #[test]
+fn the_preview_counts_an_unanswered_question_from_a_previous_lane_root() {
+    let f = Fixture::new();
+    started(&f);
+
+    // Persist both roots as roots of this thread, as a restored/restarted thread does.
+    let mut old_root = snapshot().record;
+    old_root.run_id = "run-1".into();
+    old_root.name = "chat:Orchestrator:thread-1".into();
+    old_root.parent_run_id = None;
+    f.h().upsert_run_context(&old_root).unwrap();
+
+    let q = question(1, 0);
+    f.h().create_user_question(&q).unwrap();
+    let open = |f: &Fixture| {
+        f.db()
+            .lane_close_preview("lane-1")
+            .unwrap()
+            .open_question_count
+    };
+    assert_eq!(open(&f), 1);
+
+    f.h().start_lane_run("lane-1", 1, "run-2", 4).unwrap();
+    let mut new_root = old_root;
+    new_root.run_id = "run-2".into();
+    new_root.updated_at_ns = 11;
+    f.h().upsert_run_context(&new_root).unwrap();
+
+    assert_eq!(open(&f), 1);
+    f.h()
+        .answer_user_question(
+            &q.id,
+            "go on",
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
+        .unwrap();
+    assert_eq!(open(&f), 0);
+}
+
+#[test]
 fn answered_questions_and_those_of_a_deleted_run_are_not_counted_and_other_lanes_are_not_mixed_in()
 {
     let f = Fixture::new();
