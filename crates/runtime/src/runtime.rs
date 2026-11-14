@@ -5,9 +5,13 @@ mod artifacts;
 mod benchmark;
 pub(crate) use benchmark::production_executor as benchmark_executor;
 mod cancellation;
+#[cfg(feature = "recovery-test-support")]
+mod restart_test_support;
 #[cfg(test)]
 pub(crate) use cancellation::HookPoint;
 pub(crate) use cancellation::{ExecutionControl, PublicationToken};
+#[cfg(feature = "recovery-test-support")]
+pub use restart_test_support::TerminalTailLease;
 mod chat_restore;
 pub use chat_restore::ChatResumeObservation;
 mod child_renewal;
@@ -145,6 +149,7 @@ pub(crate) struct Shared {
     pub(crate) auto_wakes: Mutex<HashMap<RunId, u32>>,
     pub(crate) wake_reset_generations: Mutex<HashMap<RunId, u64>>,
     pub(crate) question_delivery: Mutex<questions::delivery::QuestionDelivery>,
+    pub(crate) producers: crate::producer::ProducerGate,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) self_improvement: OnceLock<crate::self_improvement::ImprovementSettings>,
     pub(crate) self_improvement_task: OnceLock<crate::self_improvement::lifecycle::ObserverTask>,
@@ -207,6 +212,8 @@ pub(crate) struct Shared {
     recovery_message_ids_safe: AtomicBool,
     #[cfg(feature = "recovery-test-support")]
     recovery_probe: OnceLock<recovery_activation::RecoveryActivationProbe>,
+    #[cfg(feature = "recovery-test-support")]
+    terminal_probe: OnceLock<restart_test_support::TerminalProbe>,
     next_reference_token: AtomicU64,
     pub(crate) runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
@@ -808,6 +815,7 @@ impl AgentRuntime {
                 wake_reset_generations: Mutex::new(HashMap::new()),
                 question_delivery: Mutex::new(Default::default()),
                 topology: OnceLock::new(),
+                producers: crate::producer::ProducerGate::default(),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
                 self_improvement_task: OnceLock::new(),
@@ -858,6 +866,8 @@ impl AgentRuntime {
                 recovery_message_ids_safe: AtomicBool::new(true),
                 #[cfg(feature = "recovery-test-support")]
                 recovery_probe: OnceLock::new(),
+                #[cfg(feature = "recovery-test-support")]
+                terminal_probe: OnceLock::new(),
                 next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -1219,6 +1229,7 @@ impl AgentRuntime {
                 escalation_denials: crate::escalation_review::DenialStreaks::default(),
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 sandbox_factory: Some(factory),
+                producers: crate::producer::ProducerGate::default(),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
                 self_improvement_task: OnceLock::new(),
@@ -1238,6 +1249,8 @@ impl AgentRuntime {
                 recovery_message_ids_safe: AtomicBool::new(true),
                 #[cfg(feature = "recovery-test-support")]
                 recovery_probe: OnceLock::new(),
+                #[cfg(feature = "recovery-test-support")]
+                terminal_probe: OnceLock::new(),
                 next_reference_token: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),

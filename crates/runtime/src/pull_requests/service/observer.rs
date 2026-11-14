@@ -44,13 +44,22 @@ struct Observer {
 pub(super) async fn run(inner: Arc<Inner>, mut receiver: event_bus::EventReceiver) {
     let mut shutdown = inner.shutdown.subscribe();
     let mut observer = Observer::default();
+    let mut pending = std::collections::VecDeque::new();
     loop {
         if *shutdown.borrow() {
             break;
         }
         tokio::select! {
+            permit = inner.producers.enter(), if !pending.is_empty() => {
+                if let Some(_permit) = permit {
+                    if let Some(event) = pending.pop_front() { observer.handle(&inner, &event).await; }
+                } else { break; }
+            },
             event = receiver.recv() => match event {
-                Ok(event) => observer.handle(&inner, &event).await,
+                Ok(event) => {
+                    if pending.is_empty() && let Some(_producer) = inner.producers.try_enter() { observer.handle(&inner, &event).await; }
+                    else { pending.push_back(event); }
+                },
                 Err(RecvError::Lagged(_)) => {
                     // Lost correlation is never permission to attribute a later head.
                     inner.lock().attribution = Default::default();
@@ -67,6 +76,10 @@ pub(super) async fn run(inner: Arc<Inner>, mut receiver: event_bus::EventReceive
                 }
             }
         }
+    }
+    let (events, _) = receiver.drain_pending_snapshot_counting_lag();
+    for event in pending.into_iter().chain(events) {
+        observer.handle(&inner, &event).await;
     }
 }
 

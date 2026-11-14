@@ -44,10 +44,15 @@ pub(super) async fn run(inner: Arc<Inner>) {
     let mut shutdown = inner.shutdown.subscribe();
     let mut applied = *settings.borrow();
     let mut announced = 0;
+    let mut producer_changes = inner.producers.subscribe_admission();
     loop {
         if *shutdown.borrow() {
             break;
         }
+        let Some(producer) = inner.producers.try_enter() else {
+            tokio::select! { _ = producer_changes.changed() => (), _ = shutdown.changed() => () }
+            continue;
+        };
         let config = *settings.borrow_and_update();
         // Whatever woke the loop, new settings are applied once: judged by the value, not by
         // which branch of the select won.
@@ -65,7 +70,9 @@ pub(super) async fn run(inner: Arc<Inner>) {
         } else {
             None
         };
+        drop(producer);
         tokio::select! {
+            _ = producer_changes.changed() => {}
             () = inner.wake.notified() => {}
             changed = settings.changed() => {
                 if changed.is_err() {

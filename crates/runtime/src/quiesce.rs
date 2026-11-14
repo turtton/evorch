@@ -19,7 +19,7 @@ mod recovery_cache_tests;
 mod restart;
 pub(crate) mod runtime;
 mod safe_point;
-pub use restart::{RestartAttempt, ResumeReceipt};
+pub use restart::{RestartAttempt, RestartAttemptState, ResumeReceipt};
 #[cfg(test)]
 mod accepted_resume_tests;
 #[cfg(test)]
@@ -53,6 +53,7 @@ struct Inner {
     requested: bool,
     generation: u64,
     resumed_through: u64,
+    cancellation_finished_through: u64,
     cancelling: bool,
     shutting_down: bool,
     sealing: bool,

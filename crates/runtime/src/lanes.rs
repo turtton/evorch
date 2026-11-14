@@ -347,12 +347,13 @@ impl AgentRuntime {
     ) -> Result<impl std::future::Future<Output = ()> + Send + use<>, LaneError> {
         self.recover_unstarted_lanes(Some(host))?;
         let runtime = self.downgrade();
+        let mut producer_changes = self.producer_gate().subscribe_admission();
         let host = std::sync::Arc::downgrade(host);
         Ok(async move {
             // External host death/lease expiry has no in-process notification.
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
-                tick.tick().await;
+                tokio::select! { _ = tick.tick() => (), _ = producer_changes.changed() => () }
                 let (Some(runtime), Some(host)) = (runtime.upgrade(), host.upgrade()) else {
                     return;
                 };
@@ -384,6 +385,9 @@ impl AgentRuntime {
         &self,
         host: Option<&crate::ownership::OwnerHost>,
     ) -> Result<Vec<RunId>, LaneError> {
+        let Some(_producer) = self.producer_gate().try_enter() else {
+            return Ok(Vec::new());
+        };
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;

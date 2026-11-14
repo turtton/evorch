@@ -280,6 +280,9 @@ impl Tool for StartEvaluation {
                 problem: planned.problem,
             })
             .collect();
+        let Some(producer) = self.0.lifecycle.producers.enter().await else {
+            return Ok(ToolResult::error("evaluation host is stopping"));
+        };
         let record = match groups::launch(&self.0, &ctx.run_id, &args.candidate, launches) {
             Ok(record) => record,
             Err(message) => {
@@ -288,6 +291,7 @@ impl Tool for StartEvaluation {
                 )));
             }
         };
+        drop(producer);
         let evaluations: Vec<Value> = record
             .members
             .iter()

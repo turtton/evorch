@@ -46,7 +46,7 @@ impl CommandService {
                 text: "The agent is no longer active in this conversation".into(),
             }];
         };
-        match self.runtime.stop(target, runtime::StopScope::SelfOnly) {
+        match self.stop_for_host(target, runtime::StopScope::SelfOnly) {
             Ok(()) => Vec::new(),
             Err(error) => vec![HostEvent::ChatNotice {
                 outcome: NoticeOutcome::NotApplied,
@@ -103,7 +103,7 @@ impl CommandService {
                 }
             }
         };
-        if let Err(error) = self.runtime.stop(run_id, scope) {
+        if let Err(error) = self.stop_for_host(run_id, scope) {
             return vec![HostEvent::ChatRejected {
                 kind: RejectKind::Failed,
                 thread_id,

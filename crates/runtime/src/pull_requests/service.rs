@@ -78,6 +78,9 @@ impl WallClock for SystemWallClock {
 /// Why a service call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum PullRequestError {
+    /// The automatic producer supervisor has stopped.
+    #[error("pull request producers stopped")]
+    ProducerStopped,
     /// `[pull_requests] enabled` is false.
     #[error("pull request tracking is disabled")]
     Disabled,
@@ -262,6 +265,7 @@ pub(crate) enum Stage {
 }
 
 pub(crate) struct Inner {
+    pub(crate) producers: crate::producer::ProducerGate,
     pub(crate) storage: StorageHandle,
     pub(crate) source: Arc<dyn PullRequestSource>,
     pub(crate) logs: Arc<dyn super::PullRequestLogSource>,
@@ -683,6 +687,7 @@ impl PullRequestService {
         let (settings, _) = watch::channel(parts.settings);
         let (shutdown, _) = watch::channel(false);
         let inner = Arc::new(Inner {
+            producers: Default::default(),
             storage: parts.storage,
             source: parts.source,
             logs,
@@ -1102,6 +1107,10 @@ impl PullRequestService {
     }
 
     /// Stops the background tasks now (they also stop when the last clone is dropped).
+    pub fn producer_gate(&self) -> crate::producer::ProducerGate {
+        self.inner.producers.clone()
+    }
+
     pub fn shutdown(&self) {
         self.inner.shutdown.send_replace(true);
     }

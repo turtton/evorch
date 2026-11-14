@@ -421,6 +421,9 @@ impl AgentRuntime {
         &self,
         thread: &str,
     ) -> Result<LaneDeliveryOutcome, LaneError> {
+        let Some(_producer) = self.producer_gate().try_enter() else {
+            return Ok(LaneDeliveryOutcome::Busy);
+        };
         let delivery = &self.shared.lanes.delivery;
         let host = delivery
             .host

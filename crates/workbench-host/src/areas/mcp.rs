@@ -143,6 +143,15 @@ impl McpArea {
         command: McpCommand,
         root: Option<PathBuf>,
     ) -> Result<Submitted, WorkbenchError> {
+        self.submit_tracked(command, root, None)
+    }
+
+    pub(crate) fn submit_tracked(
+        &self,
+        command: McpCommand,
+        root: Option<PathBuf>,
+        accepted: Option<crate::bootstrap::restart::HostCommandPermit>,
+    ) -> Result<Submitted, WorkbenchError> {
         let inner = self.inner()?;
         if let McpCommand::CancelOperation(cancel) = &command {
             return inner.cancel(&cancel.operation_id);
@@ -211,9 +220,11 @@ impl McpArea {
         }
         let task_inner = inner.clone();
         let task_id = id.clone();
-        let spawned = inner.tasks.spawn_counted("mcp-operation", move |stop| {
-            task_inner.run(task_id, project, work, stop)
-        });
+        let spawned = inner
+            .tasks
+            .spawn_counted_tracked("mcp-operation", accepted, move |stop| {
+                task_inner.run(task_id, project, work, stop)
+            });
         if let Err(refused) = spawned {
             lock(&inner.state).forget(&id);
             return Err(error(

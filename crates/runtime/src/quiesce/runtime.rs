@@ -45,6 +45,14 @@ impl AgentRuntime {
             }
             let complete = self.complete_restart_safe_points()?;
             if complete {
+                let inner = self.shared.quiesce.lock();
+                if inner.generation != generation
+                    || !inner.requested
+                    || inner.cancelling
+                    || inner.shutting_down
+                {
+                    return Err(error("stale restart waiter"));
+                }
                 return Ok(());
             }
             version.changed().await.map_err(error)?;
