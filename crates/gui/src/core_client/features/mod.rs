@@ -470,8 +470,7 @@ fn render_all(
     view: FeatureView<'_>,
 ) -> FeatureFrame {
     let mut frame = FeatureFrame::default();
-    // The features are stacked in a window that does not scroll: this keeps what is below the
-    // first screenful reachable.
+    // The features are stacked in one scrolling column, as tall as the space given to it.
     egui::ScrollArea::vertical()
         .id_salt("features")
         .auto_shrink([false, true])

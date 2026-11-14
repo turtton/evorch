@@ -10,15 +10,15 @@ use async_trait::async_trait;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use gui::core_client::{
-    Shared,
+    CoreClientScreen, Shared,
     connection::{Action, serve},
     features::{FeatureAction, FeatureView, Selection},
 };
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
 use workbench_protocol::commands::{Command, ComposerRole, ContinueChat, SendChat, ThreadTarget};
 use workbench_protocol::namespaces::{
-    ConversationCommand, ExecutionQuery, ExecutionReply, LanesQuery, LanesReply, WorkspaceQuery,
-    WorkspaceReply,
+    ConversationCommand, ExecutionCommand, ExecutionQuery, ExecutionReply, LanesQuery, LanesReply,
+    WorkspaceQuery, WorkspaceReply,
     execution::{RunDetailsQuery, RunScope},
     lanes::ListLanes,
     teams::{TeamTaskRef, TeamsQuery, TeamsReply},
@@ -27,7 +27,11 @@ use workbench_protocol::{envelope::*, ids::*, queries::*};
 
 /// Every turn only says it is idle, so a conversation run saves its context and waits. While
 /// the gate (`.1`) is closed a turn does not answer at all: its run stays live and running.
-struct HeldModel(tokio::sync::Notify, tokio::sync::watch::Sender<bool>);
+struct HeldModel(
+    tokio::sync::Notify,
+    tokio::sync::watch::Sender<bool>,
+    std::sync::atomic::AtomicUsize,
+);
 
 #[async_trait]
 impl runtime::AgentModel for HeldModel {
@@ -38,6 +42,7 @@ impl runtime::AgentModel for HeldModel {
         _: &[providers::Message],
         _: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        self.2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.0.notify_one();
         let _ = self.1.subscribe().wait_for(|open| *open).await;
         Ok(providers::ChatResponse {
@@ -260,6 +265,14 @@ async fn waiting(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
     }
 }
 
+/// Until the model has been asked `turns` times in all: every run that was started is then in
+/// its (held) turn.
+async fn turns_reached(model: &HeldModel, turns: usize) {
+    while model.2.load(std::sync::atomic::Ordering::SeqCst) < turns {
+        model.0.notified().await;
+    }
+}
+
 /// Until the run is in its turn (the held model does not answer), so that its state, and with
 /// it a listing's snapshot, no longer changes.
 async fn running(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
@@ -285,6 +298,7 @@ async fn start() -> World {
     let model = Arc::new(HeldModel(
         tokio::sync::Notify::new(),
         tokio::sync::watch::channel(true).0,
+        std::sync::atomic::AtomicUsize::new(0),
     ));
     let boot = BootstrappedHost::open_with_test_seams(
         BootstrapOptions {
@@ -398,9 +412,42 @@ struct Desktop {
     thread: Arc<Mutex<Option<String>>>,
     asked: Arc<Mutex<Vec<FeatureAction>>>,
     actions: tokio::sync::mpsc::Sender<Action>,
+    /// Set when the whole page is drawn: what the page asked for, before it reaches the core.
+    inbox: Option<tokio::sync::mpsc::Receiver<Action>>,
+    /// The commands the page asked for and that were not sent (the page's own controls).
+    commands: Vec<&'static str>,
 }
 
 impl Desktop {
+    /// The whole page the window draws (the features and the conversation controls below
+    /// them) for `thread`. Its queries reach the core; its commands are only recorded.
+    fn page(
+        shared: Arc<Mutex<Shared>>,
+        actions: tokio::sync::mpsc::Sender<Action>,
+        project: ProjectId,
+        thread: &str,
+    ) -> Self {
+        let (outbox, inbox) = tokio::sync::mpsc::channel(64);
+        let mut screen = CoreClientScreen::new(
+            shared.clone(),
+            outbox,
+            Some(project),
+            Some(ThreadId::new(thread).unwrap()),
+        );
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1024.0, 768.0))
+            .build_ui(move |ui| screen.ui(ui));
+        Self {
+            harness,
+            shared,
+            thread: Arc::new(Mutex::new(None)),
+            asked: Arc::new(Mutex::new(Vec::new())),
+            actions,
+            inbox: Some(inbox),
+            commands: Vec::new(),
+        }
+    }
+
     fn new(
         shared: Arc<Mutex<Shared>>,
         actions: tokio::sync::mpsc::Sender<Action>,
@@ -439,6 +486,8 @@ impl Desktop {
             thread,
             asked,
             actions,
+            inbox: None,
+            commands: Vec::new(),
         }
     }
 
@@ -451,6 +500,30 @@ impl Desktop {
         let asked = std::mem::take(&mut *self.asked.lock().unwrap());
         for action in asked {
             self.actions.send(Action::Feature(action)).await.unwrap();
+        }
+        if let Some(inbox) = self.inbox.as_mut() {
+            while let Ok(action) = inbox.try_recv() {
+                match &action {
+                    Action::Command {
+                        command: Command::Conversation(ConversationCommand::ContinueChat(_)),
+                        ..
+                    } => self.commands.push("continue"),
+                    Action::Command {
+                        command: Command::Execution(ExecutionCommand::StopChat(_)),
+                        ..
+                    } => self.commands.push("stop"),
+                    Action::Command {
+                        command:
+                            Command::Conversation(
+                                ConversationCommand::SendChat(_)
+                                | ConversationCommand::CreateExecution(_),
+                            ),
+                        ..
+                    } => self.commands.push("send"),
+                    Action::Command { .. } => self.commands.push("other"),
+                    _ => self.actions.send(action).await.unwrap(),
+                }
+            }
         }
     }
 
@@ -1024,7 +1097,8 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
         .expect("a reconnect button")
         .click();
     desktop.flush().await;
-    desktop.until(|d| !d.shows(&far_label)).await;
+    // The lane is a managed one again: the screen says so only after the core's event.
+    desktop.until(|d| d.shows(&far.objective_preview)).await;
     let attached = world.web_lanes("web-attached", false).await;
     assert_eq!(
         attached
@@ -1074,6 +1148,7 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
     let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
     // The children's turns are held, so all of them stay live runs of the lead for the test.
     world.model.1.send_replace(false);
+    let asked_before = world.model.2.load(std::sync::atomic::Ordering::SeqCst);
     let mut kids = std::collections::BTreeMap::new();
     for n in 0..count {
         let kid = world
@@ -1094,6 +1169,7 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
     for kid in kids.values() {
         running(&world.boot.runtime, *kid).await;
     }
+    turns_reached(&world.model, asked_before + count).await;
     // The run behind the cursor is the one with a run of its own below it.
     let first = web_children(&world, "web-kids-1", world.lead, None).await;
     assert_eq!(first.items.len(), count - 1);
@@ -1114,6 +1190,7 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
         )
         .unwrap();
     running(&world.boot.runtime, grandchild).await;
+    turns_reached(&world.model, asked_before + count + 1).await;
     let grandchild_name =
         web_children(&world, "web-grandkids", kids[far.summary.id.as_str()], None)
             .await
@@ -1224,4 +1301,143 @@ async fn a_task_past_the_first_page_is_paged_and_opened_with_its_detail_in_view(
 
     world.boot.runtime.cancel(world.lead).unwrap();
     let _ = world.boot.runtime.wait(world.lead).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_conversation_controls_stay_reachable_below_a_screenful_of_features() {
+    let world = start().await;
+    let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
+    // The ledger is written first: the runs below keep the database busy.
+    let side = storage::Storage::open(storage::StorageConfig {
+        db_path: world
+            ._dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("evorch-events.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    side.handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: LEAD.to_owned(),
+            project_id: Some(world.project.as_str().to_owned()),
+            project_root: Some(
+                world
+                    ._dir
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..Default::default()
+        }])
+        .unwrap();
+    let board = runtime::team::TeamBoard::durable(
+        side.handle(),
+        format!("{}:{LEAD}", world.project.as_str()),
+    );
+    for n in 0..count {
+        board
+            .enqueue(runtime::team::TaskSpec {
+                id: format!("task-{n:03}"),
+                paths: vec![std::path::PathBuf::from(format!("src/file-{n}.rs"))],
+            })
+            .unwrap();
+    }
+
+    world.model.1.send_replace(false);
+    let mut kids = Vec::new();
+    for n in 0..count {
+        kids.push(
+            world
+                .boot
+                .runtime
+                .delegate_background_as_child(
+                    world.lead,
+                    runtime::Role::Worker,
+                    format!("kid {n}"),
+                    runtime::RunConfig {
+                        project_root: Some(world._dir.path().canonicalize().unwrap()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        );
+    }
+    world
+        .boot
+        .runtime
+        .create_thread_goal(
+            LEAD,
+            world.lead,
+            "ship it".into(),
+            (0..8).map(|n| format!("criterion {n}")).collect(),
+        )
+        .unwrap();
+    world
+        .boot
+        .runtime
+        .restore_thread_todo(event_bus::ThreadTodoSnapshot {
+            list_id: "list-1".into(),
+            thread_id: LEAD.into(),
+            revision: 1,
+            items: (0..8)
+                .map(|n| event_bus::ThreadTodoItem {
+                    content: format!("step {n}"),
+                    status: event_bus::ThreadTodoStatus::Pending,
+                })
+                .collect(),
+        })
+        .unwrap();
+    // The page the window draws: every feature has a long list, and the controls of the
+    // conversation sit below the features. Each is reached by the wheel and the pointer.
+    let mut desktop = Desktop::page(
+        world.shared.clone(),
+        world.actions.clone(),
+        world.project.clone(),
+        LEAD,
+    );
+    desktop.until(|d| d.shows("task-000")).await;
+    desktop.until(|d| d.shows_part("criterion 7")).await;
+    desktop.until(|d| d.shows_part("step 7")).await;
+    let anchors = [
+        "再接続 / 再同期",
+        "履歴更新",
+        "続行",
+        "停止",
+        "送信 / follow-up",
+    ];
+    // The page's own controls are the last of their name (the run rows have a "停止" too).
+    for control in ["続行", "停止", "送信 / follow-up"] {
+        desktop
+            .wheel_until(
+                control,
+                |d| d.anchor(&anchors).unwrap_or(Desktop::window().center()),
+                |d| {
+                    let center = d
+                        .harness
+                        .get_all_by_label(control)
+                        .last()
+                        .expect("the control")
+                        .rect()
+                        .center();
+                    Desktop::window().contains(center)
+                },
+            )
+            .await;
+        desktop
+            .harness
+            .get_all_by_label(control)
+            .last()
+            .expect("the control")
+            .click();
+        desktop.flush().await;
+    }
+    assert_eq!(desktop.commands, ["continue", "stop", "send"]);
+
+    for run in kids.into_iter().chain([world.lead]) {
+        let _ = world.boot.runtime.cancel(run);
+    }
 }

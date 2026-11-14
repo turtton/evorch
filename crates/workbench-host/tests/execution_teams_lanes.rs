@@ -916,3 +916,30 @@ async fn detached_lanes_page_past_the_first_page_and_ignore_the_policy_filter() 
     );
     f.stop().await;
 }
+
+/// A restarted host announced nothing yet: the leads it starts from are the persisted lanes',
+/// and the first change that moves a lane away names the lead it left.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_leads_a_restarted_host_starts_from_are_the_persisted_lanes_and_the_first_change_names_the_one_left()
+ {
+    let f = Fixture::new(2).await;
+    let mut leads = workbench_host::areas::lanes::announced_leads(&f.runtime);
+    let expected: std::collections::BTreeMap<String, ThreadId> = f
+        .lanes
+        .iter()
+        .map(|lane| (lane.lane_id.clone(), ThreadId::new("lead").unwrap()))
+        .collect();
+    assert_eq!(leads, expected);
+
+    // The ledger already names another lead when the first event is read.
+    let mut moved = f.lane_page(None, page_request(2, None)).items[0].clone();
+    moved.lead_thread_id = Some(ThreadId::new("lead-b").unwrap());
+    let mut also_for = Vec::new();
+    workbench_host::areas::lanes::tell_leads(
+        &mut leads,
+        &moved,
+        moved.lead_thread_id.clone(),
+        &mut also_for,
+    );
+    assert_eq!(also_for, [ThreadId::new("lead").unwrap()]);
+}

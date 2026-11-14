@@ -164,11 +164,11 @@ const DELIVERY_SOURCE: &str = "lane_delivery";
 
 /// The lead each lane had when it was last announced, so that the next change tells the lead
 /// it left even when the ledger has moved on to another lead by the time it is read.
-type AnnouncedLeads = BTreeMap<String, ThreadId>;
+pub type AnnouncedLeads = BTreeMap<String, ThreadId>;
 
 /// The lead each lane has now, as the ledger names it: what a restarted host has not announced
 /// yet, but every lane's next change must tell the lead it leaves.
-fn announced_leads(runtime: &AgentRuntime) -> AnnouncedLeads {
+pub fn announced_leads(runtime: &AgentRuntime) -> AnnouncedLeads {
     let rows = runtime
         .with_storage_reader(|db| db.managed_lane_leads())
         .ok()
@@ -231,7 +231,7 @@ fn publish_change(
 /// Adds to `also_for` the lead `lane` had at the event and the one it had at the previous
 /// event, whichever the ledger names now: operations can run ahead of the events, and a lead
 /// that was left would otherwise never hear of it.
-fn tell_leads(
+pub fn tell_leads(
     leads: &mut AnnouncedLeads,
     lane: &LaneSummary,
     at_event: Option<ThreadId>,
