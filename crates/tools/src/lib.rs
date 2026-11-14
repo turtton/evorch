@@ -23,6 +23,8 @@ pub mod sanitize;
 pub(crate) mod schema;
 pub mod search;
 mod shell_handles;
+mod shell_jobs;
+pub use shell_jobs::{ShellJobIdentity, ShellJobSnapshot, ShellJobState};
 pub mod tool;
 pub mod tools;
 

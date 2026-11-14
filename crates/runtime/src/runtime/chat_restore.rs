@@ -63,6 +63,7 @@ impl AgentRuntime {
     /// Other live runs are unchanged. Images and goal creation belong to a new
     /// human submission through `continue_goal`, not to this scheduling operation.
     pub fn resume_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
+        self.require_manual_resume_open()?;
         let _dispatch = self.dispatch_registration_guard()?;
         self.deny_deleted_run(&run_id.to_string())
             .map_err(|deleted| RuntimeError::RunRestoreFailed {
@@ -81,6 +82,13 @@ impl AgentRuntime {
         authority: RunConfig,
         observation: ChatResumeObservation,
     ) -> Result<RunId, RuntimeError> {
+        let _manual = self
+            .shared
+            .quiesce
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.require_manual_resume_open()?;
         let _dispatch = self.dispatch_registration_guard()?;
         self.deny_deleted_run(&run_id.to_string())
             .map_err(|deleted| RuntimeError::RunRestoreFailed {
@@ -161,6 +169,18 @@ impl AgentRuntime {
         prompt: String,
         authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        let _manual = self
+            .shared
+            .quiesce
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !lock_runs(&self.shared.runs)
+            .get(&run_id)
+            .is_some_and(is_live)
+        {
+            self.require_manual_resume_open()?;
+        }
         let _dispatch = self.dispatch_registration_guard()?;
         self.continue_chat(run_id, ChatContinuation::Followup(prompt), authority)
     }
@@ -313,6 +333,9 @@ impl AgentRuntime {
                 )?;
             }
             return Ok(run_id);
+        }
+        if operator_resume {
+            self.require_manual_resume_open()?;
         }
         let store = store.ok_or_else(|| fail(RunRestoreFailure::StorageNotConfigured))?;
         let bundle = store

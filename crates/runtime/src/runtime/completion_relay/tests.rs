@@ -1,4 +1,6 @@
 use super::*;
+#[path = "terminal_tail_tests.rs"]
+mod terminal_tail;
 
 struct PendingModel;
 

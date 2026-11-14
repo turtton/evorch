@@ -13,26 +13,46 @@ impl AgentRuntime {
     /// Stop opening turns; never abort a provider/tool future. Dropping the waiter
     /// does not undo the request. Concurrent callers join the same transaction.
     pub fn request_quiesce(&self) {
-        self.shared.quiesce.begin();
+        let _ = self.shared.quiesce.begin();
     }
     /// Only success permits the host to exit; no elapsed-time escape hatch.
     pub async fn wait_quiesced(&self) -> Result<(), RuntimeError> {
+        // Observers may subscribe before a request (for example admission).
+        // Authority-bearing restart waiters instead bind an existing attempt.
         let mut version = self.shared.quiesce.subscribe();
         loop {
-            if self
-                .shared
-                .quiesce
-                .complete(self.shared.run_store.get())
-                .map_err(error)?
+            if self.complete_restart_safe_points()? {
+                return Ok(());
+            }
+            version.changed().await.map_err(error)?;
+        }
+    }
+    pub(crate) async fn wait_quiesced_generation(
+        &self,
+        generation: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut version = self.shared.quiesce.subscribe();
+        loop {
             {
+                let inner = self.shared.quiesce.lock();
+                if inner.generation != generation
+                    || !inner.requested
+                    || inner.cancelling
+                    || inner.shutting_down
+                {
+                    return Err(error("stale restart waiter"));
+                }
+            }
+            let complete = self.complete_restart_safe_points()?;
+            if complete {
                 return Ok(());
             }
             version.changed().await.map_err(error)?;
         }
     }
     pub async fn quiesce(&self) -> Result<(), RuntimeError> {
-        self.request_quiesce();
-        self.wait_quiesced().await
+        let attempt = self.begin_restart_quiesce()?;
+        self.wait_quiesced_generation(attempt.generation()).await
     }
     /// Read-only evidence. PR 06 must validate current authority and the
     /// incarnation/receipt before admission; these rows are not permits.

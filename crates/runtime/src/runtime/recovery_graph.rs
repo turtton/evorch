@@ -129,9 +129,20 @@ impl AgentRuntime {
     /// Missing recipes remain Unsupported rather than guessing CoreOwned.
     pub fn capture_recovery_records(
         &self,
+        fence: &DispatchDrainFence,
         recipes: &BTreeMap<RunId, RecoveryRecipe>,
     ) -> Result<Vec<RunRecoveryRecord>, RuntimeError> {
-        if self.quiesce_state() != QuiesceState::Checkpointed || !self.dispatch_drained() {
+        let _capture = self
+            .shared
+            .quiesce
+            .checkpoint_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.begin_recovery_capture(fence)?;
+        if self.quiesce_state() != QuiesceState::Checkpointed
+            || !self.dispatch_drained()
+            || !self.shared.dispatch_tails.capture_valid()
+        {
             return Err(graph_error(
                 "recovery capture requires Checkpointed and dispatch drain",
             ));
@@ -317,7 +328,16 @@ impl AgentRuntime {
         capture_id: &str,
         records: &[RunRecoveryRecord],
     ) -> Result<Vec<String>, RuntimeError> {
-        if self.quiesce_state() != QuiesceState::Checkpointed || !self.dispatch_drained() {
+        let _capture = self
+            .shared
+            .quiesce
+            .checkpoint_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.quiesce_state() != QuiesceState::Checkpointed
+            || !self.dispatch_drained()
+            || !self.shared.dispatch_tails.capture_valid()
+        {
             return Err(graph_error(
                 "recovery commit requires Checkpointed and dispatch drain",
             ));
@@ -422,6 +442,9 @@ impl AgentRuntime {
     /// Read-only: candidates still require CURRENT authority. No automatic
     /// registration, provider call, claim consumption or activation occurs.
     pub fn recovery_plan(&self) -> Result<RecoveryPlan, RuntimeError> {
+        if !self.shared.dispatch_tails.capture_valid() {
+            return Err(graph_error("capture invalidated by terminal handoff"));
+        }
         let store = self
             .shared
             .run_store

@@ -14,7 +14,7 @@ impl AgentRuntime {
     ) -> Option<crate::quiesce::dispatch::DispatchGuard> {
         let id = run_id.to_string();
         // Panic is never a safe-point checkpoint, even after successful cleanup.
-        if !self.shared.quiesce.running() {
+        if self.shared.quiesce.strict_restart_accounting() {
             self.shared
                 .quiesce
                 .fail(format!("run {run_id} panicked before a safe point"));
@@ -49,6 +49,7 @@ impl AgentRuntime {
         // Keep the intent active until actual shell cleanup, never just until
         // a panic/timeout has ended the Rust future.
         if let Ok(execution) = self.execution_snapshot(run_id) {
+            self.prepare_terminal_dispatch(run_id);
             self.end_intent(
                 run_id,
                 &execution.publication().incarnation(),

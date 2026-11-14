@@ -85,22 +85,25 @@ impl AgentRuntime {
         caller: RunId,
         request: LaneCloseRequest,
     ) -> Result<LaneCloseResult, LaneError> {
+        self.require_manual_resume_open()
+            .map_err(|e| LaneError::new("restart_busy", e.to_string()))?;
         let (lead, config, _) = self.verification_lead(caller, &request.lane_id)?;
         let store = self.verification_store()?;
         let lane_id = request.lane_id.clone();
         // A Stop or restart that replaced the lead's root after the authorization above is
         // not raced here: storage compares the caller's root with the lead thread's
         // current root inside the close transaction.
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_CLOSE_COMMIT.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
+        let _manual = self.lane_close_restart_gate()?;
         let guard = config
             .ownership
             .as_ref()
             .map(|p| p.mutation_guard())
             .transpose()
             .map_err(|_| operation(LaneOperationError::OwnershipLost))?;
-        #[cfg(test)]
-        if let Some(hook) = BEFORE_CLOSE_COMMIT.with(|h| h.borrow_mut().take()) {
-            hook();
-        }
         let result = store
             .handle
             .close_lane(CloseLane {
@@ -142,6 +145,7 @@ impl AgentRuntime {
         request: HumanLaneCloseRequest,
         permits: &[crate::ownership::OwnerPermit],
     ) -> Result<LaneCloseResult, LaneError> {
+        let _manual = self.lane_close_restart_gate()?;
         let store = self.verification_store()?;
         let host_authority = permits
             .iter()
@@ -181,6 +185,18 @@ impl AgentRuntime {
 }
 
 impl AgentRuntime {
+    fn lane_close_restart_gate(&self) -> Result<std::sync::MutexGuard<'_, ()>, LaneError> {
+        let guard = self
+            .shared
+            .quiesce
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.require_manual_resume_open()
+            .map_err(|e| LaneError::new("restart_busy", e.to_string()))?;
+        Ok(guard)
+    }
+
     /// A close that was just recorded changes what a lane view shows, and it appends no ledger
     /// event: tell the hosts to read the lane again, whoever closed it. A close that already
     /// stood is not news.

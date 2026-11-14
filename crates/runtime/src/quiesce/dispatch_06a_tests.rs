@@ -205,3 +205,71 @@ fn tail_aborted_before_its_first_poll_cannot_look_like_successful_drain() {
     assert!(tails.try_close());
     assert!(tails.result().is_err());
 }
+
+#[tokio::test]
+async fn reopen_before_seal_preserves_live_tail_and_failure() {
+    let tails = Arc::new(DispatchTails::default());
+    let parent = tails.register(false).unwrap();
+    let epoch = tails.epoch();
+    tails.reopen().unwrap();
+    let child = parent.fork();
+    assert_eq!(tails.epoch(), epoch);
+    assert_eq!(tails.state.lock().unwrap().count, 2);
+    drop(parent);
+    assert!(!tails.try_close());
+    drop(child);
+    tails.idle().await;
+    assert!(tails.result().is_ok());
+    assert!(tails.try_close());
+    tails.state.lock().unwrap().drained = true;
+    assert!(tails.register(true).is_err());
+    tails.reopen().unwrap();
+    assert_ne!(tails.epoch(), epoch);
+    assert!(
+        tails.result().is_err(),
+        "reopen must never clear a required-tail failure"
+    );
+}
+
+#[tokio::test]
+async fn repeated_shutdown_preserves_the_already_drained_epoch() {
+    let f = Fixture::new(0);
+    let first = f
+        .runtime
+        .fence_dispatch_shutdown(|| async { Ok::<_, String>(()) })
+        .await
+        .unwrap();
+    f.runtime.drain_dispatch_tails(&first).await.unwrap();
+    let epoch = f.runtime.shared.dispatch_tails.epoch();
+    let generation = f.runtime.shared.quiesce.lock().generation;
+    let second = f
+        .runtime
+        .fence_dispatch_shutdown(|| async { Ok::<_, String>(()) })
+        .await
+        .unwrap();
+    assert_eq!(f.runtime.shared.dispatch_tails.epoch(), epoch);
+    assert_eq!(f.runtime.shared.quiesce.lock().generation, generation);
+    assert!(f.runtime.dispatch_drained());
+    f.runtime.drain_dispatch_tails(&first).await.unwrap();
+    f.runtime.drain_dispatch_tails(&second).await.unwrap();
+}
+
+#[tokio::test]
+async fn natural_terminal_registration_is_required_but_not_ordinary_admission() {
+    let tails = Arc::new(DispatchTails::default());
+    tails.terminal_handoff().unwrap();
+    assert!(tails.register(false).is_err());
+    let terminal = tails.register_required_terminal().unwrap();
+    let child = terminal.enter(|| tails.register(true)).unwrap();
+    drop(terminal);
+    assert!(!tails.try_close());
+    drop(child);
+    tails.idle().await;
+    assert!(tails.result().is_ok());
+    assert!(tails.try_close());
+    assert!(tails.register_required_terminal().is_err());
+    assert!(
+        tails.result().is_err(),
+        "terminal registration after close must remain a sticky violation"
+    );
+}

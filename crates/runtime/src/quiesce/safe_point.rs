@@ -12,19 +12,84 @@ impl LoopState {
         if runtime.shared.quiesce.running() {
             return true;
         }
-        if let Err(error) = self.capture_safe_point(boundary) {
-            runtime.shared.quiesce.fail(error);
-        }
-        // Park the incarnation, keeping inboxes, pending inputs and tools alive.
-        // A failed capture never masquerades as terminal/safe to exit.
+        let mut changes = runtime.shared.quiesce.subscribe();
+        let mut shell_changes = self.shared.executor.subscribe_shell_job_changes();
+        let parked_generation = runtime.shared.quiesce.lock().generation;
         loop {
             if let Some(kind) = self.interrupted() {
                 self.finish_interrupted(kind);
                 return false;
             }
-            if self.channels.cancel_rx.changed().await.is_err() {
-                return false;
+            if runtime.shared.quiesce.resume_permitted(parked_generation) {
+                return true;
             }
+            {
+                let _checkpoint = runtime
+                    .shared
+                    .quiesce
+                    .checkpoint_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let generation = {
+                    let inner = runtime.shared.quiesce.lock();
+                    (inner.requested
+                        && !inner.cancelling
+                        && !inner.shutting_down
+                        && !matches!(inner.phase, QuiesceState::Failed { .. }))
+                    .then_some(inner.generation)
+                };
+                if let Some(generation) = generation
+                    && !runtime
+                        .shared
+                        .quiesce
+                        .acknowledged(self.task.run_id, &self.task.publication.incarnation())
+                {
+                    let incarnation = self.task.publication.incarnation();
+                    if let Some(kind) = self.restart_safety_blocker() {
+                        runtime
+                            .shared
+                            .quiesce
+                            .block(self.task.run_id, &incarnation, kind);
+                    } else {
+                        runtime
+                            .shared
+                            .quiesce
+                            .clear_blocker(self.task.run_id, &incarnation);
+                        match self.capture_safe_point(boundary) {
+                            Ok(()) => runtime.shared.quiesce.acknowledge(
+                                self.task.run_id,
+                                &self.task.publication.incarnation(),
+                                generation,
+                            ),
+                            Err(error) => runtime.shared.quiesce.fail(error),
+                        }
+                    }
+                }
+            }
+            tokio::select! {
+                biased;
+                changed = self.channels.cancel_rx.changed() => { if changed.is_err() { return false; } }
+                changed = changes.changed() => { if changed.is_err() { return false; } }
+                changed = async {
+                    match shell_changes.as_mut() {
+                        Some(changes) => changes.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => { if changed.is_err() { shell_changes = None; } }
+            }
+        }
+    }
+
+    fn restart_safety_blocker(&self) -> Option<RestartBlockerKind> {
+        let run = self.task.run_id.to_string();
+        if self.shared.executor.has_running_shell_jobs(&run) {
+            Some(RestartBlockerKind::ShellRunning)
+        } else if self.shared.executor.has_unobserved_shell_jobs(&run) {
+            Some(RestartBlockerKind::ShellResultUnobserved)
+        } else if self.run_js_unconfirmed_detail().is_some() {
+            Some(RestartBlockerKind::UnconfirmedRunJs)
+        } else {
+            None
         }
     }
 
@@ -95,10 +160,21 @@ impl LoopState {
             Some(crate::InterruptKind::Cancel) => StopReason::Cancelled,
             None => StopReason::Terminal,
         };
+        #[cfg(test)]
+        if let Ok(execution) = runtime.execution_snapshot(self.task.run_id) {
+            runtime.execution_hook(crate::runtime::HookPoint::TerminalRetiring, &execution);
+        }
+        // The active intent and its terminal tail must overlap. No sealer may
+        // observe neither after finalization has closed the mailbox.
+        runtime.prepare_terminal_dispatch(self.task.run_id);
         runtime.end_intent(
             self.task.run_id,
             &self.task.publication.incarnation(),
             reason,
         );
+        #[cfg(test)]
+        if let Ok(execution) = runtime.execution_snapshot(self.task.run_id) {
+            runtime.execution_hook(crate::runtime::HookPoint::TerminalIntentRetired, &execution);
+        }
     }
 }

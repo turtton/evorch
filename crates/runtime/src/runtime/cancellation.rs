@@ -10,9 +10,16 @@ pub(super) struct PendingChatResume {
 pub(crate) struct ExecutionControl {
     pub(super) pending_resume: Mutex<Option<PendingChatResume>>,
     pub(crate) startup_failure: Mutex<Option<String>>,
+    terminal_dispatch: Mutex<TerminalDispatch>,
     publication: PublicationToken,
     pub(super) cancel_tx: watch::Sender<RunInterrupt>,
     pub(crate) approvals: Arc<sandbox::approval::ApprovalOwner>,
+}
+
+#[derive(Default)]
+struct TerminalDispatch {
+    guard: Option<crate::quiesce::dispatch::DispatchGuard>,
+    relayed: bool,
 }
 
 #[derive(Clone)]
@@ -58,6 +65,7 @@ impl ExecutionControl {
         }
         Arc::new(Self {
             startup_failure: Mutex::new(None),
+            terminal_dispatch: Mutex::default(),
             pending_resume: Mutex::new(None),
             approvals,
             publication: PublicationToken(Arc::new(PublicationFence {
@@ -74,6 +82,46 @@ impl ExecutionControl {
         })
     }
 
+    pub(crate) fn track_terminal_dispatch(&self, guard: crate::quiesce::dispatch::DispatchGuard) {
+        let mut terminal = self
+            .terminal_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Once transferred to the relay, a duplicate Stop must not leave a new
+        // lease in ExecutionControl after the run task has already consumed it.
+        if !terminal.relayed {
+            terminal.guard.get_or_insert(guard);
+        }
+    }
+    pub(crate) fn prepare_terminal_dispatch(
+        &self,
+        tails: &Arc<crate::quiesce::dispatch::DispatchTails>,
+    ) {
+        let mut terminal = self
+            .terminal_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !terminal.relayed && terminal.guard.is_none() {
+            terminal.guard = tails.register_required_terminal().ok();
+        }
+    }
+    pub(crate) fn take_terminal_dispatch(
+        &self,
+        tails: &Arc<crate::quiesce::dispatch::DispatchTails>,
+    ) -> Option<crate::quiesce::dispatch::DispatchGuard> {
+        let mut terminal = self
+            .terminal_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if terminal.relayed {
+            return None;
+        }
+        terminal.relayed = true;
+        terminal
+            .guard
+            .take()
+            .or_else(|| tails.register_required_terminal().ok())
+    }
     pub(crate) fn publication(&self) -> PublicationToken {
         self.publication.clone()
     }
@@ -91,6 +139,16 @@ impl ExecutionControl {
 
     pub(super) fn cancelled(&self) -> bool {
         self.publication.0.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(super) fn has_accepted_resume(&self) -> bool {
+        self.pending_resume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.authority.is_some() && pending.valid.load(Ordering::Acquire)
+            })
     }
 
     pub(super) fn clear_deferred_resume(&self) {
@@ -206,6 +264,9 @@ impl AgentRuntime {
     /// Global locks never wait for a gate. Retry drops the old gate before
     /// selecting a new generation; the notification uses only that generation.
     pub fn cancel(&self, run: RunId) -> Result<(), RuntimeError> {
+        self.with_terminal_dispatch(|| self.cancel_with_dispatch(run))
+    }
+    fn cancel_with_dispatch(&self, run: RunId) -> Result<(), RuntimeError> {
         loop {
             let execution = self.execution_snapshot(run)?;
             #[cfg(test)]
@@ -246,6 +307,12 @@ impl AgentRuntime {
                 execution.forbid_publication();
                 self.fence_paused_stop(run, &old, crate::quiesce::StopReason::Cancelled)?;
                 return Ok(());
+            }
+            if runs
+                .get(&run)
+                .is_some_and(|entry| !entry.completion_relayed)
+            {
+                execution.track_terminal_dispatch(self.shared.dispatch_tails.register(true)?);
             }
             let ownership = Self::pending_lane_cancellation_ownership(run, &runs, &admissions);
             if let Some(admission) = admissions.get_mut(&run)
@@ -402,8 +469,12 @@ pub(super) fn lane_cancellation_error(run: RunId, error: crate::lanes::LaneError
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookPoint {
     CancelSnapshot,
+    TerminalRegistered,
+    TerminalRetiring,
+    TerminalIntentRetired,
     CancelGate,
     SubtreeCollected,
+    AdmissionReady,
     AdmissionRegistered,
     LaneOwnershipValidated,
     LaneStopWriteStarted,
@@ -478,7 +549,7 @@ impl AgentRuntime {
             Box::new(hook),
         ));
     }
-    pub(super) fn execution_hook(&self, point: HookPoint, execution: &Arc<ExecutionControl>) {
+    pub(crate) fn execution_hook(&self, point: HookPoint, execution: &Arc<ExecutionControl>) {
         let hook = {
             let mut hooks = self.shared.execution_hooks.0.lock().unwrap();
             hooks

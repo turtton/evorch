@@ -174,8 +174,53 @@ impl AgentRuntime {
         Ok(true)
     }
 
+    /// Accepted before the restart gate closed; unlike a rejected manual command,
+    /// this continuation must survive cancellation of the restart attempt.
+    pub(crate) fn accepted_chat_resumes(&self) -> std::collections::BTreeMap<RunId, String> {
+        lock_runs(&self.shared.runs)
+            .iter()
+            .filter(|(_, entry)| entry.execution.has_accepted_resume())
+            .map(|(run, entry)| (*run, entry.execution.publication().incarnation()))
+            .collect()
+    }
+
+    /// Called only after shutdown closed the manual launch gate.
+    pub(crate) fn discard_accepted_chat_resumes(&self) -> Result<(), RuntimeError> {
+        for run in self.accepted_chat_resumes().into_keys() {
+            // Reuse the terminal lease, observation invalidation and durable
+            // resume_requested reset of an explicit Stop, including settled runs.
+            self.stop(run, crate::StopScope::SelfOnly)?;
+        }
+        Ok(())
+    }
+
+    /// The caller holds manual_launch_gate, after the durable resume grant.
+    pub(crate) fn replay_accepted_chat_resumes(&self) {
+        for run in self.accepted_chat_resumes().into_keys() {
+            self.resume_deferred_chat_with_gate(run);
+        }
+    }
+
     pub(in crate::runtime) fn resume_deferred_chat(&self, run: RunId) {
+        let _manual = self
+            .shared
+            .quiesce
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.resume_deferred_chat_with_gate(run);
+    }
+
+    fn resume_deferred_chat_with_gate(&self, run: RunId) {
+        if self.require_manual_resume_open().is_err() {
+            return;
+        }
         let deferred = {
+            let intents = self
+                .shared
+                .spawn_intents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let runs = lock_runs(&self.shared.runs);
             let Some(entry) = runs.get(&run) else {
                 return;
@@ -193,6 +238,13 @@ impl AgentRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             pending.as_mut().and_then(|pending| {
+                if !pending.valid.load(Ordering::Acquire)
+                    || !pending
+                        .observation
+                        .is_current(Some(&entry.execution), intents.get(&run))
+                {
+                    return None;
+                }
                 pending.authority.take().map(|authority| {
                     (
                         authority,

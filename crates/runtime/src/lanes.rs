@@ -279,6 +279,14 @@ impl AgentRuntime {
         creation_key: &str,
         brief: LaneBrief,
     ) -> Result<LaneOpened, LaneError> {
+        let _manual = self
+            .shared
+            .quiesce
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.require_manual_resume_open()
+            .map_err(|e| LaneError::new("restart_busy", e.to_string()))?;
         brief
             .validate()
             .map_err(|e| LaneError::new("invalid_brief", e))?;
@@ -404,6 +412,14 @@ impl AgentRuntime {
         lane_id: &str,
         host: Option<&crate::ownership::OwnerHost>,
     ) -> Result<Option<RunId>, LaneError> {
+        let _manual = self
+            .shared
+            .quiesce
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.require_manual_resume_open()
+            .map_err(|e| LaneError::new("restart_busy", e.to_string()))?;
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;

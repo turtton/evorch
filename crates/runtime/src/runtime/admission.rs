@@ -1,5 +1,8 @@
 use super::*;
 use event_bus::event::diagnostic_codes;
+#[path = "queued_restart.rs"]
+mod queued_restart;
+pub(super) use queued_restart::QueuedLaunch;
 
 pub(super) type Admissions = Mutex<HashMap<RunId, Admission>>;
 /// Host-owned lane producers can still be waiting before a RunEntry exists.
@@ -52,6 +55,7 @@ impl LaneAdmissions {
 pub(super) type RegistrationHook = Arc<dyn Fn(RunId) + Send + Sync>;
 
 pub(super) struct Admission {
+    pub(super) queued: Option<QueuedLaunch>,
     parent: Option<RunId>,
     lane_root: bool,
     pub(super) cancelled: bool,
@@ -91,6 +95,28 @@ impl Admission {
 }
 
 impl AgentRuntime {
+    pub(crate) fn complete_restart_safe_points(&self) -> Result<bool, RuntimeError> {
+        // I -> quiesce. Prepared has no live LoopState and only activation can
+        // open its start gate; that producer must acquire I and dispatch first.
+        let indexes = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let unstarted = indexes
+            .iter()
+            .filter_map(|(id, index)| index.paused_recovery.as_ref().map(|_| *id))
+            .collect();
+        self.shared
+            .quiesce
+            .complete(
+                self.shared.run_store.get(),
+                &unstarted,
+                !self.accepted_chat_resumes().is_empty(),
+            )
+            .map_err(crate::quiesce::runtime::error)
+    }
+
     /// Lane root admissions not yet finished, including ones absent from list_agents.
     pub fn pending_lane_admissions(&self) -> Vec<RunId> {
         let mut runs: Vec<_> = {
@@ -216,6 +242,7 @@ impl AgentRuntime {
                 }
             }
         }
+        self.discard_cancelled_restart_launches();
         failure.map_or(Ok(()), Err)
     }
 
@@ -305,6 +332,7 @@ impl AgentRuntime {
         admissions.insert(
             run_id,
             Admission {
+                queued: None,
                 parent,
                 lane_root,
                 cancelled: execution.cancelled(),
@@ -501,7 +529,7 @@ impl AgentRuntime {
             }).await;
             let admission_panicked = admission.is_err();
             let mut admitted = admission.unwrap_or_else(|panic| {
-                if !runtime.shared.quiesce.running() {
+                if runtime.shared.quiesce.strict_restart_accounting() {
                     runtime
                         .shared
                         .quiesce
@@ -543,6 +571,10 @@ impl AgentRuntime {
             #[cfg(test)]
             if admitted.is_err() {
                 runtime.execution_hook(cancellation::HookPoint::AdmissionFailed, &execution);
+            }
+            #[cfg(test)]
+            if admitted.is_ok() {
+                runtime.execution_hook(cancellation::HookPoint::AdmissionReady, &execution);
             }
             // Registration and generation replacement share I -> A. Never
             // acquire a publication gate under these global locks.
@@ -778,7 +810,11 @@ impl AgentRuntime {
         }
         Ok(())
     }
-    pub(crate) fn try_seal_dispatch(&self, restart: bool) -> bool {
+    pub(crate) fn try_seal_dispatch(
+        &self,
+        fence: &crate::quiesce::DispatchDrainFence,
+    ) -> Result<bool, RuntimeError> {
+        let restart = fence.is_restart();
         // Recovery and registration both use I -> A -> R.
         let intents = self
             .shared
@@ -791,14 +827,21 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runs = lock_runs(&self.shared.runs);
+        if restart
+            && runs
+                .values()
+                .any(|entry| entry.execution.has_accepted_resume())
+        {
+            return Ok(false);
+        }
         if !restart
             && (intents.values().any(|i| i.paused_recovery.is_some())
                 || admissions.values().any(|a| a.result.borrow().is_none())
                 || runs.values().any(is_live))
         {
-            return false;
+            return Ok(false);
         }
-        self.shared.dispatch_tails.try_close()
+        self.seal_dispatch_fence(fence)
     }
 }
 

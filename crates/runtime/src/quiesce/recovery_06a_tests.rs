@@ -183,7 +183,9 @@ fn recipe(policy: ResumePolicy) -> RecoveryRecipe {
 async fn capture(f: &Fixture, recipes: &BTreeMap<RunId, RecoveryRecipe>) -> Vec<RunRecoveryRecord> {
     let fence = f.runtime.fence_dispatch_restart().await.unwrap();
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
-    f.runtime.capture_recovery_records(recipes).unwrap()
+    f.runtime
+        .capture_recovery_records(&f.runtime.fence_dispatch_restart().await.unwrap(), recipes)
+        .unwrap()
 }
 
 #[tokio::test]
@@ -475,7 +477,10 @@ async fn file_backed_reopen_isolates_bad_member_payload_attributes_edges_and_int
         if damage == "intent" {
             let captured = f
                 .runtime
-                .capture_recovery_records(&BTreeMap::new())
+                .capture_recovery_records(
+                    &f.runtime.fence_dispatch_restart().await.unwrap(),
+                    &BTreeMap::new(),
+                )
                 .unwrap();
             assert!(captured.iter().any(|r| r.run_id == healthy));
             assert!(!captured.iter().any(|r| r.run_id == bad));
@@ -651,7 +656,10 @@ async fn a_corrupt_snapshot_descriptor_does_not_abort_other_components_capture()
             host_inputs_json: "[]".into(),
         })
         .unwrap();
-    let captured = f.runtime.capture_recovery_records(&recipes).unwrap();
+    let captured = f
+        .runtime
+        .capture_recovery_records(&f.runtime.fence_dispatch_restart().await.unwrap(), &recipes)
+        .unwrap();
     assert_eq!(
         captured.iter().map(|r| r.run_id).collect::<Vec<_>>(),
         vec![healthy]
@@ -883,10 +891,10 @@ async fn historical_deliveries_keep_receipts_without_requiring_missing_or_tombst
         drop(sql);
         let records = f
             .runtime
-            .capture_recovery_records(&BTreeMap::from([(
-                recipient,
-                recipe(ResumePolicy::CoreOwned),
-            )]))
+            .capture_recovery_records(
+                &f.runtime.fence_dispatch_restart().await.unwrap(),
+                &BTreeMap::from([(recipient, recipe(ResumePolicy::CoreOwned))]),
+            )
             .unwrap();
         assert_eq!(records.len(), 1);
         let deliveries = &records[0].deliveries;
@@ -1062,7 +1070,7 @@ async fn unknown_settings_selector_is_held_without_execution_or_claim() {
 
 #[tokio::test(start_paused = true)]
 async fn tool_approval_pending_is_not_a_restart_safe_point_or_a_durable_continuation() {
-    let f = Fixture::with_approval(1, false, true);
+    let mut f = Fixture::with_approval(1, false, true);
     let bus = f.runtime.event_bus();
     let mut events = bus.subscribe();
     let run = f.start();
@@ -1076,27 +1084,45 @@ async fn tool_approval_pending_is_not_a_restart_safe_point_or_a_durable_continua
         }
     }
     let registry = sandbox::approval::ApprovalRegistry::for_bus(&bus);
-    assert_eq!(registry.list_pending(None, 10).len(), 1);
-    f.runtime.request_quiesce();
-    assert!(
-        f.runtime
-            .capture_recovery_records(&BTreeMap::from([(run, recipe(ResumePolicy::CoreOwned))]))
-            .is_err()
-    );
+    let pending = registry.list_pending(None, 10);
+    assert_eq!(pending.len(), 1);
+    let waiter = f.runtime.fence_dispatch_restart();
+    tokio::pin!(waiter);
+    assert!(futures_util::poll!(&mut waiter).is_pending());
     assert!(!f.intent(run).tool_intent.is_empty());
     assert!(f.intent(run).checkpoint.is_none());
-    assert_eq!(registry.list_pending(None, 10).len(), 1);
-    assert!(
-        storage::Database::open(&f.config)
-            .unwrap()
-            .recovery_manifests()
-            .unwrap()
-            .is_empty()
-    );
     assert!(
         f.entered.is_empty(),
         "the tool must not execute before approval"
     );
-    f.cleanup(run).await;
+    registry
+        .resolve(
+            &pending[0].id,
+            pending[0].revision,
+            sandbox::approval::ApprovalDecision::Approve,
+            sandbox::approval::ApprovalProvenance {
+                actor: sandbox::approval::ApprovalActor::Human,
+                surface: sandbox::approval::ApprovalSurface::Cli,
+            },
+        )
+        .unwrap();
+    assert_eq!(f.entered.recv().await, Some(0));
+    assert!(
+        futures_util::poll!(&mut waiter).is_pending(),
+        "approval alone does not complete the tool"
+    );
+    f.release[0].add_permits(1);
+    assert_eq!(f.completed.recv().await, Some(0));
+    let fence = waiter.await.unwrap();
+    f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+    let records = f
+        .runtime
+        .capture_recovery_records(
+            &fence,
+            &BTreeMap::from([(run, recipe(ResumePolicy::CoreOwned))]),
+        )
+        .unwrap();
+    assert!(records.iter().any(|record| record.run_id == run));
     assert!(registry.list_pending(None, 10).is_empty());
+    f.cleanup(run).await;
 }

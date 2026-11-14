@@ -44,6 +44,44 @@ fn corrupt_graph(f: &Fixture, runs: &[RunId]) {
     }
     tx.commit().unwrap();
 }
+
+#[tokio::test]
+async fn restart_busy_preserves_stopped_lane_until_explicit_retry() {
+    let mut f = Fixture::new();
+    let lead = f.lead().await;
+    let run = f.runtime.shared.run_ids.next();
+    let lane = seed_lane(&f, lead, 0, run);
+    f.storage
+        .handle()
+        .block_lane_start(&lane.lane_id, storage::lanes::LANE_START_OPERATOR_STOP, 2)
+        .unwrap();
+    let before = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
+    let intents = serde_json::to_value(f.runtime.resume_intents().unwrap()).unwrap();
+    let attempt = f.runtime.begin_restart_quiesce().unwrap();
+    assert_eq!(
+        f.runtime
+            .resume_stopped_lane(&lane.lane_id, None)
+            .unwrap_err()
+            .code,
+        "restart_busy"
+    );
+    assert_eq!(
+        f.storage.handle().lane(&lane.lane_id).unwrap().unwrap(),
+        before
+    );
+    assert_eq!(
+        serde_json::to_value(f.runtime.resume_intents().unwrap()).unwrap(),
+        intents
+    );
+    f.runtime.cancel_restart_quiesce(&attempt).unwrap();
+    assert_eq!(
+        f.runtime.resume_stopped_lane(&lane.lane_id, None).unwrap(),
+        Some(run)
+    );
+    f.phase(run, AgentRunPhase::Waiting).await;
+    f.cancel(run).await;
+    f.cancel(lead).await;
+}
 #[tokio::test]
 async fn graph_exclusion_precedes_limit_and_only_the_201st_lane_is_admitted() {
     let mut f = Fixture::new();

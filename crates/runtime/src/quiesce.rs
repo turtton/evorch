@@ -5,6 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard};
 use tokio::sync::watch;
 
+mod blockers;
+pub use blockers::{RestartBlocker, RestartBlockerKind};
+mod deferred;
 #[cfg(test)]
 mod fixture;
 #[cfg(test)]
@@ -13,8 +16,16 @@ mod recovery_06a_tests;
 mod recovery_06b_tests;
 #[cfg(test)]
 mod recovery_cache_tests;
+mod restart;
 pub(crate) mod runtime;
 mod safe_point;
+pub use restart::{RestartAttempt, ResumeReceipt};
+#[cfg(test)]
+mod accepted_resume_tests;
+#[cfg(test)]
+mod queued_tests;
+#[cfg(test)]
+mod restart_tests;
 #[cfg(test)]
 mod tests;
 
@@ -30,6 +41,8 @@ pub use continuity::*;
 pub(crate) struct Coordinator {
     inner: Mutex<Inner>,
     version: watch::Sender<u64>,
+    pub(crate) checkpoint_gate: Mutex<()>,
+    pub(crate) manual_launch_gate: Mutex<()>,
     #[cfg(test)]
     fault: Mutex<Option<StorageStep>>,
 }
@@ -38,6 +51,17 @@ struct Inner {
     phase: QuiesceState,
     // Storage health is sticky, but only an explicit request gates normal turns.
     requested: bool,
+    generation: u64,
+    resumed_through: u64,
+    cancelling: bool,
+    shutting_down: bool,
+    sealing: bool,
+    revisions: BTreeMap<RunId, u64>,
+    acks: BTreeMap<RunId, (u64, String, u64)>,
+    // Prepared recovery has no running turn; its activation start gate is closed.
+    unstarted: BTreeSet<RunId>,
+    deferred_wakes: BTreeMap<RunId, String>,
+    blockers: BTreeMap<RunId, RestartBlocker>,
     intents: BTreeMap<RunId, ResumeIntent>,
     persisted: BTreeSet<RunId>,
 }
@@ -86,6 +110,8 @@ impl Default for Coordinator {
         Self {
             inner: Mutex::default(),
             version: watch::channel(0).0,
+            checkpoint_gate: Mutex::new(()),
+            manual_launch_gate: Mutex::new(()),
             #[cfg(test)]
             fault: Mutex::default(),
         }
@@ -139,9 +165,13 @@ impl Coordinator {
         !self.lock().requested
     }
     pub(crate) fn fail(&self, reason: impl ToString) {
-        self.lock().phase = QuiesceState::Failed {
-            reason: reason.to_string(),
-        };
+        let mut inner = self.lock();
+        if !matches!(inner.phase, QuiesceState::Failed { .. }) {
+            inner.phase = QuiesceState::Failed {
+                reason: reason.to_string(),
+            };
+        }
+        drop(inner);
         self.changed();
     }
     fn save(
@@ -281,12 +311,32 @@ impl Coordinator {
     /// Caller has fenced the entire component and has either retained its old
     /// durable intents or received the atomic activation ACK. Never write again.
     pub(crate) fn adopt(&self, intents: impl IntoIterator<Item = ResumeIntent>, persisted: bool) {
+        self.adopt_kind(intents, persisted, false);
+    }
+    pub(crate) fn adopt_unstarted(&self, intents: impl IntoIterator<Item = ResumeIntent>) {
+        self.adopt_kind(intents, true, true);
+    }
+    fn adopt_kind(
+        &self,
+        intents: impl IntoIterator<Item = ResumeIntent>,
+        persisted: bool,
+        unstarted: bool,
+    ) {
         let mut inner = self.lock();
         for intent in intents {
             if persisted {
                 inner.persisted.insert(intent.run_id);
             }
+            if unstarted {
+                inner.unstarted.insert(intent.run_id);
+            } else {
+                inner.unstarted.remove(&intent.run_id);
+            }
+            inner.acks.remove(&intent.run_id);
             inner.intents.insert(intent.run_id, intent);
+            if inner.requested && inner.phase == QuiesceState::Checkpointed {
+                inner.phase = QuiesceState::WaitingForSafePoints;
+            }
         }
         self.changed();
     }
@@ -337,7 +387,11 @@ impl Coordinator {
         if store.is_some() {
             inner.persisted.insert(run);
         }
+        *inner.revisions.entry(run).or_default() += 1;
         inner.intents.insert(run, intent);
+        if inner.requested && inner.phase == QuiesceState::Checkpointed {
+            inner.phase = QuiesceState::WaitingForSafePoints;
+        }
         self.changed();
         Ok(())
     }
@@ -455,28 +509,62 @@ impl Coordinator {
         Ok(())
     }
 
-    pub(crate) fn begin(&self) {
+    pub(crate) fn begin(&self) -> Result<u64, String> {
+        // Manual restoration is synchronous. Finish or reject it before the
+        // attempt can close admission, rather than retaining it as queued work.
+        let _manual = self
+            .manual_launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut inner = self.lock();
-        inner.requested = true;
-        if inner.phase == QuiesceState::Running {
-            inner.phase = QuiesceState::Quiescing;
-            self.changed();
+        if let QuiesceState::Failed { reason } = &inner.phase {
+            return Err(reason.clone());
+        }
+        if inner.shutting_down || inner.cancelling {
+            return Err("runtime is not accepting restart requests".into());
+        }
+        if !inner.requested {
+            inner.generation = inner
+                .generation
+                .checked_add(1)
+                .ok_or("restart generation exhausted")?;
+            inner.acks.clear();
+            inner.blockers.clear();
+            inner.requested = true;
             inner.phase = QuiesceState::WaitingForSafePoints;
             self.changed();
         }
+        Ok(inner.generation)
     }
-    fn complete(&self, store: Option<&RunStore>) -> Result<bool, String> {
+    pub(crate) fn complete(
+        &self,
+        store: Option<&RunStore>,
+        unstarted: &BTreeSet<RunId>,
+        accepted_resume_pending: bool,
+    ) -> Result<bool, String> {
         let mut inner = self.lock();
         match &inner.phase {
             QuiesceState::Failed { reason } => return Err(reason.clone()),
-            QuiesceState::Checkpointed => return Ok(true),
+            QuiesceState::Checkpointed if !accepted_resume_pending => return Ok(true),
+            QuiesceState::Checkpointed => {}
             QuiesceState::WaitingForSafePoints => {}
             _ => return Ok(false),
         }
+        // No successor serialization exists for accepted resume authority yet.
+        if accepted_resume_pending {
+            return Ok(false);
+        }
         if inner.intents.values().any(|intent| {
             intent.active
-                && intent.checkpoint.is_none()
+                && !unstarted.contains(&intent.run_id)
                 && intent.wait != ResumeWait::AdmissionQueued
+                && !inner.acks.get(&intent.run_id).is_some_and(
+                    |(generation, incarnation, revision)| {
+                        *generation == inner.generation
+                            && *incarnation == intent.incarnation
+                            && *revision == *inner.revisions.get(&intent.run_id).unwrap_or(&0)
+                    },
+                )
         }) {
             return Ok(false);
         }

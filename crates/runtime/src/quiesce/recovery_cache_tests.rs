@@ -212,17 +212,20 @@ async fn assert_recovery_cache(human_after_c3: bool) {
     let fence = runtime.fence_dispatch_restart().await.unwrap();
     runtime.drain_dispatch_tails(&fence).await.unwrap();
     let records = runtime
-        .capture_recovery_records(&BTreeMap::from([(
-            root,
-            RecoveryRecipe {
-                settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
-                policy: ResumePolicy::CoreOwned,
-                goal_id: None,
-                team: None,
-                lane: None,
-                descriptor: None,
-            },
-        )]))
+        .capture_recovery_records(
+            &fence,
+            &BTreeMap::from([(
+                root,
+                RecoveryRecipe {
+                    settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                    policy: ResumePolicy::CoreOwned,
+                    goal_id: None,
+                    team: None,
+                    lane: None,
+                    descriptor: None,
+                },
+            )]),
+        )
         .unwrap();
     assert_eq!(
         records

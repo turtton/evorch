@@ -115,17 +115,20 @@ async fn recover(changed_settings: bool) {
     let fence = old.fence_dispatch_restart().await.unwrap();
     old.drain_dispatch_tails(&fence).await.unwrap();
     let records = old
-        .capture_recovery_records(&BTreeMap::from([(
-            run,
-            RecoveryRecipe {
-                settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
-                policy: ResumePolicy::CoreOwned,
-                goal_id: None,
-                team: None,
-                lane: None,
-                descriptor: None,
-            },
-        )]))
+        .capture_recovery_records(
+            &fence,
+            &BTreeMap::from([(
+                run,
+                RecoveryRecipe {
+                    settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                    policy: ResumePolicy::CoreOwned,
+                    goal_id: None,
+                    team: None,
+                    lane: None,
+                    descriptor: None,
+                },
+            )]),
+        )
         .unwrap();
     old.save_recovery_graph("routed-wire", &records).unwrap();
     let before = h

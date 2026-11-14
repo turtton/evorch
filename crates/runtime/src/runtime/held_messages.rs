@@ -147,21 +147,49 @@ impl AgentRuntime {
 
     /// Wake `run` after its locks are released, unless the operator stopped it.
     pub(super) fn schedule_wake(&self, run: RunId) {
-        if self.operator_stopped(run) || !self.shared.quiesce.running() {
+        if self.operator_stopped(run) {
             return;
         }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             tracing::debug!(%run, "no async runtime to wake a held recipient");
             return;
         };
-        let Ok(dispatch) = self.dispatch_registration_guard() else {
+        // Terminal publication can call this while holding R. Identity comes
+        // from the intent ledger; the asynchronous wake rechecks R before debit.
+        let Some(incarnation) = self.shared.quiesce.wake_incarnation(run) else {
+            return;
+        };
+        let Ok(Some(dispatch)) = self.dispatch_wake_or_defer(run, &incarnation) else {
             return;
         };
         let runtime = self.clone();
-        handle.spawn(dispatch.scope(async move { runtime.wake(run).await }));
+        handle.spawn(
+            dispatch.scope(async move { runtime.wake_incarnation(run, &incarnation).await }),
+        );
     }
 
+    pub(crate) fn replay_restart_wakes(&self) {
+        for (run, incarnation) in self.shared.quiesce.take_deferred_wakes() {
+            let current = lock_runs(&self.shared.runs)
+                .get(&run)
+                .is_some_and(|entry| entry.execution.publication().incarnation() == incarnation);
+            if current && !self.operator_stopped(run) {
+                self.schedule_wake(run);
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(in crate::runtime) async fn wake(&self, run: RunId) {
+        let incarnation = {
+            let runs = lock_runs(&self.shared.runs);
+            let Some(entry) = runs.get(&run) else { return };
+            entry.execution.publication().incarnation()
+        };
+        self.wake_incarnation(run, &incarnation).await;
+    }
+
+    async fn wake_incarnation(&self, run: RunId, incarnation: &str) {
         // A parent still finishing closed its mailbox; wake it once it settles.
         loop {
             let finishing = {
@@ -203,6 +231,9 @@ impl AgentRuntime {
         // the empty-queue check and emit a spurious host continuation request.
         let runs = lock_runs(&self.shared.runs);
         let Some(entry) = runs.get(&run) else { return };
+        if entry.execution.publication().incarnation() != incarnation {
+            return;
+        }
         if self
             .shared
             .question_delivery
@@ -243,6 +274,9 @@ impl AgentRuntime {
         if self.operator_stopped(run) {
             return;
         }
+        let Some(wake_permit) = self.shared.quiesce.permit_wake(run, incarnation) else {
+            return;
+        };
         let root = questions::delivery::conversation_root(&runs, run);
         let auto_available = self
             .shared
@@ -271,6 +305,7 @@ impl AgentRuntime {
                 .root_requests
                 .insert(run);
         }
+        drop(wake_permit);
         match parent {
             None => {
                 self.shared
@@ -354,6 +389,9 @@ impl AgentRuntime {
         }
     }
 }
+
+#[cfg(test)]
+mod restart_tests;
 
 #[cfg(test)]
 mod tests {

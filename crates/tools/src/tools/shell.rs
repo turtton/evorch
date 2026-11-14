@@ -301,6 +301,19 @@ impl Tool for Shell {
         self.jobs.reserve_handles(next)
     }
 
+    fn shell_job_snapshots(&self, run_id: &str) -> Vec<crate::ShellJobSnapshot> {
+        self.jobs.snapshots(run_id)
+    }
+    fn subscribe_shell_job_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.jobs.subscribe())
+    }
+    async fn wait_shell_job_terminal(
+        &self,
+        identity: &crate::ShellJobIdentity,
+    ) -> Result<crate::ShellJobSnapshot, ToolError> {
+        self.jobs.wait_terminal(identity).await
+    }
+
     fn cancel_shell_jobs(&self, run_id: &str) {
         self.jobs.cancel(run_id);
     }

@@ -36,6 +36,7 @@ fn job() -> (Arc<Job>, mpsc::Receiver<Input>, watch::Receiver<bool>) {
             last_seen: None,
         }),
         changed,
+        registry_changes: watch::channel(0).0,
         cancel,
         input,
         escalated: None,
