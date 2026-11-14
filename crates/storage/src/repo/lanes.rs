@@ -205,6 +205,18 @@ pub(crate) fn get(conn: &Connection, lane_id: &str) -> Result<Option<LaneRecord>
         .optional()?)
 }
 
+/// Every live lane that a lead manages now, as `(lane_id, lead_thread_id)` in lane ID order.
+pub(crate) fn managed_lane_leads(conn: &Connection) -> Result<Vec<(String, String)>, StorageError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT lane_id, lead_thread_id FROM lanes WHERE lead_thread_id IS NOT NULL AND {LIVE} \
+         ORDER BY lane_id"
+    ))?;
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 /// Internal live membership scan; unlike lane_list it creates no cursor snapshot.
 pub(crate) fn managed_lanes(
     conn: &Connection,

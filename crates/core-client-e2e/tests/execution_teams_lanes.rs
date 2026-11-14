@@ -258,6 +258,23 @@ async fn waiting(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
     }
 }
 
+/// Until the run has stopped moving: waiting for input, or ended.
+async fn settled(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
+    while runtime
+        .inspect_agent(run)
+        .map(|agent| agent.phase)
+        .ok()
+        .is_none_or(|phase| {
+            matches!(
+                phase,
+                event_bus::AgentRunPhase::Pending | event_bus::AgentRunPhase::Running
+            )
+        })
+    {
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn start() -> World {
     // The sockets live below the directory, so the path stays short.
     let dir = tempfile::Builder::new()
@@ -469,20 +486,58 @@ impl Desktop {
         self.flush().await;
     }
 
-    /// Turns the mouse wheel over the list that starts at its first row, until the centre of
-    /// `target` lies inside the list's visible height.
-    async fn wheel_until_visible(
+    /// The window the screens are drawn in.
+    fn window() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 768.0))
+    }
+
+    /// The centre of the first label that contains one of `parts` and lies in the window: a
+    /// point outside every list, where the wheel moves the window's own scroll.
+    fn anchor(&self, parts: &[&str]) -> Option<egui::Pos2> {
+        parts.iter().find_map(|part| {
+            self.harness
+                .query_all_by_label_contains(part)
+                .map(|node| node.rect().center())
+                .find(|center| Self::window().contains(*center))
+        })
+    }
+
+    /// The rectangle of the bounded list whose first row is `first_row`: where it starts, and
+    /// the height at which it scrolls.
+    fn list_of(&self, first_row: &str) -> egui::Rect {
+        let top_left = self
+            .harness
+            .query_all_by_label(first_row)
+            .next()
+            .expect("the list's first row")
+            .rect()
+            .min;
+        egui::Rect::from_min_size(top_left, egui::vec2(1024.0, LIST_HEIGHT))
+    }
+
+    /// Whether the first label named `label` lies inside `region` and the window.
+    fn within(&self, label: &str, region: egui::Rect) -> bool {
+        self.harness
+            .query_all_by_label(label)
+            .next()
+            .is_some_and(|node| {
+                let center = node.rect().center();
+                region.contains(center) && Self::window().contains(center)
+            })
+    }
+
+    /// Turns the mouse wheel over `hover` until `done`, as a person scrolls to a control.
+    async fn wheel_until(
         &mut self,
-        first_row: &str,
-        target: impl Fn(&Desktop) -> egui::Rect,
+        control: &str,
+        hover: impl Fn(&Desktop) -> egui::Pos2,
+        done: impl Fn(&Desktop) -> bool,
     ) {
-        let top_left = self.harness.get_by_label(first_row).rect().min;
-        let visible = egui::Rect::from_min_size(top_left, egui::vec2(1024.0, LIST_HEIGHT));
         for _ in 0..400 {
-            if visible.contains(target(self).center()) {
+            if done(self) {
                 return;
             }
-            self.harness.hover_at(top_left + egui::vec2(10.0, 10.0));
+            self.harness.hover_at(hover(self));
             self.harness.event(egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
                 delta: egui::vec2(0.0, -120.0),
@@ -491,7 +546,37 @@ impl Desktop {
             });
             self.flush().await;
         }
-        panic!("the wheel did not bring the button into the list's view");
+        let at = self
+            .harness
+            .query_all_by_label(control)
+            .map(|node| node.rect())
+            .collect::<Vec<_>>();
+        panic!(
+            "the wheel did not bring \"{control}\" into view: it is at {at:?}, hovering at {:?}",
+            hover(self)
+        );
+    }
+
+    /// Scrolls the window (not a list) until the first label named `label` is in view.
+    async fn scroll_window_to(&mut self, label: &str, anchors: &[&str]) {
+        self.wheel_until(
+            label,
+            |d| d.anchor(anchors).unwrap_or(Self::window().center()),
+            |d| d.within(label, Self::window()),
+        )
+        .await;
+    }
+
+    /// Scrolls the list whose first row is `first_row` until the first label named `label`
+    /// is inside the list's visible height.
+    async fn scroll_list_to(&mut self, first_row: &str, label: &str) {
+        let list = self.list_of(first_row);
+        self.wheel_until(
+            label,
+            |_| list.min + egui::vec2(10.0, 10.0),
+            |d| d.within(label, list),
+        )
+        .await;
     }
 }
 
@@ -911,16 +996,28 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
             .count(),
         count
     );
-    // The far lane is drawn last, so its reconnect button is the last one.
+    // The far lane is drawn last, so its reconnect button is the last one. The screen is
+    // scrolled the way a person does: the window to the list, then the list to the row.
     let first_row = format!("切り離し済み: {}", first.items[0].objective_preview);
     desktop
-        .wheel_until_visible(&first_row, |d| {
-            d.harness
-                .get_all_by_label("再接続")
-                .last()
-                .expect("a reconnect button")
-                .rect()
-        })
+        .scroll_window_to(&first_row, &["切り離し済みをさらに読み込む", "lane"])
+        .await;
+    let list = desktop.list_of(&first_row);
+    desktop
+        .wheel_until(
+            "再接続",
+            |_| list.min + egui::vec2(10.0, 10.0),
+            |d| {
+                let button = d
+                    .harness
+                    .get_all_by_label("再接続")
+                    .last()
+                    .expect("a reconnect button")
+                    .rect()
+                    .center();
+                list.contains(button) && Desktop::window().contains(button)
+            },
+        )
         .await;
     desktop
         .harness
@@ -943,4 +1040,188 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
         let _ = world.boot.runtime.cancel(lane.root_run_id);
     }
     let _ = world.boot.runtime.cancel(world.lead);
+}
+
+/// The pages of `parent`'s child runs as the Web client lists them.
+async fn web_children(
+    world: &World,
+    tag: &str,
+    parent: runtime::RunId,
+    cursor: Option<PageCursor>,
+) -> workbench_protocol::views::Page<workbench_protocol::namespaces::execution::RunDetail> {
+    let QueryReply::Execution(ExecutionReply::RunDetails(page)) = world
+        .web(
+            tag,
+            Query::Execution(ExecutionQuery::ListRunDetails(RunDetailsQuery {
+                thread: ThreadId::new(LEAD).unwrap(),
+                scope: RunScope::Children {
+                    parent: RunId::new(parent.to_string()).unwrap(),
+                },
+                page: PageRequest {
+                    cursor,
+                    ..Default::default()
+                },
+            })),
+        )
+        .await
+    else {
+        panic!("run details expected");
+    };
+    page
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_pointer_alone() {
+    let world = start().await;
+    let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
+    let mut kids = std::collections::BTreeMap::new();
+    for n in 0..count {
+        let kid = world
+            .boot
+            .runtime
+            .delegate_background_as_child(
+                world.lead,
+                runtime::Role::Worker,
+                format!("kid {n}"),
+                runtime::RunConfig {
+                    project_root: Some(world._dir.path().canonicalize().unwrap()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        kids.insert(kid.to_string(), kid);
+    }
+    for kid in kids.values() {
+        settled(&world.boot.runtime, *kid).await;
+    }
+    // The run behind the cursor is the one with a run of its own below it.
+    let first = web_children(&world, "web-kids-1", world.lead, None).await;
+    assert_eq!(first.items.len(), count - 1);
+    let second = web_children(&world, "web-kids-2", world.lead, first.next_cursor.clone()).await;
+    assert_eq!(second.items.len(), 1);
+    let far = second.items[0].clone();
+    let grandchild = world
+        .boot
+        .runtime
+        .delegate_background_as_child(
+            kids[far.summary.id.as_str()],
+            runtime::Role::Worker,
+            "grandkid",
+            runtime::RunConfig {
+                project_root: Some(world._dir.path().canonicalize().unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    settled(&world.boot.runtime, grandchild).await;
+    let grandchild_name =
+        web_children(&world, "web-grandkids", kids[far.summary.id.as_str()], None)
+            .await
+            .items[0]
+            .name
+            .clone();
+
+    // The window is 1024x768 and the screen is used as a person does: every control is
+    // reached by turning the wheel and clicked with the pointer.
+    let mut desktop = world.desktop();
+    desktop.select(LEAD);
+    let drill = format!("子 run ({count})");
+    desktop.until(|d| d.shows(&drill)).await;
+    desktop.scroll_window_to(&drill, &["Execution"]).await;
+    desktop.click(&drill).await;
+    desktop.until(|d| d.shows("さらに読み込む")).await;
+    let rows = |d: &Desktop| d.harness.query_all_by_label("Worker").count();
+    let before = rows(&desktop);
+    desktop
+        .scroll_window_to("さらに読み込む", &["Execution", "ゴール"])
+        .await;
+    desktop.click("さらに読み込む").await;
+    desktop.until(|d| rows(d) > before).await;
+
+    // The far run's own drill-down button is the only one: bring it into the list's view.
+    let first_row = first.items[0].name.clone();
+    desktop.scroll_list_to(&first_row, "子 run (1)").await;
+    desktop.click("子 run (1)").await;
+    desktop.until(|d| d.shows(&grandchild_name)).await;
+    assert!(
+        desktop.shows(far.summary.id.as_str()),
+        "the path shows the run that was entered"
+    );
+
+    for run in kids.values().copied().chain([grandchild, world.lead]) {
+        let _ = world.boot.runtime.cancel(run);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_past_the_first_page_is_paged_and_opened_with_its_detail_in_view() {
+    let world = start().await;
+    let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
+    let side = storage::Storage::open(storage::StorageConfig {
+        db_path: world
+            ._dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("evorch-events.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    side.handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: LEAD.to_owned(),
+            project_id: Some(world.project.as_str().to_owned()),
+            project_root: Some(
+                world
+                    ._dir
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..Default::default()
+        }])
+        .unwrap();
+    let board = runtime::team::TeamBoard::durable(
+        side.handle(),
+        format!("{}:{LEAD}", world.project.as_str()),
+    );
+    let id = |n: usize| format!("task-{n:03}");
+    for n in 0..count {
+        board
+            .enqueue(runtime::team::TaskSpec {
+                id: id(n),
+                paths: vec![std::path::PathBuf::from(format!("src/file-{n}.rs"))],
+            })
+            .unwrap();
+    }
+
+    let mut desktop = world.desktop();
+    desktop.select(LEAD);
+    desktop.until(|d| d.shows(&id(0))).await;
+    assert!(
+        !desktop.shows(&id(count - 1)),
+        "the last task is behind the cursor"
+    );
+    desktop
+        .scroll_window_to("さらに読み込む", &["Teams", "待機"])
+        .await;
+    desktop.click("さらに読み込む").await;
+    desktop.until(|d| d.shows(&id(count - 1))).await;
+
+    // The last task is drawn last: the list is scrolled to it, and the click opens its detail,
+    // which must then be reachable in the window.
+    desktop.scroll_list_to(&id(0), &id(count - 1)).await;
+    desktop.click(&id(count - 1)).await;
+    let title = format!("タスク {}", id(count - 1));
+    desktop.until(|d| d.shows(&title)).await;
+    let path = format!("src/file-{}.rs", count - 1);
+    desktop
+        .scroll_window_to(&path, &["Teams", "待機", &title])
+        .await;
+    assert!(desktop.shows(&path));
+
+    world.boot.runtime.cancel(world.lead).unwrap();
+    let _ = world.boot.runtime.wait(world.lead).await;
 }

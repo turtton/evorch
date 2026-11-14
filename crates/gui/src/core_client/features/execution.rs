@@ -8,6 +8,7 @@
 //! run of the shown thread only; the core refuses a run it no longer holds.
 use std::collections::BTreeMap;
 
+use super::layout::{bounded_list, paged_list};
 use super::{Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply};
 use workbench_protocol::{
     commands::{Command, SetGoalChecksPaused, SetGoalReview, StopRun, ThreadTarget},
@@ -147,37 +148,45 @@ impl ExecutionFeature {
         }
         let mut drill = None;
         let mut stop = None;
-        for run in &self.runs {
-            ui.push_id(run.summary.id.as_str(), |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.strong(&run.name);
-                    ui.label(format!("{:?}", run.summary.role));
-                    ui.colored_label(
-                        lifecycle_color(run.lifecycle),
-                        lifecycle_label(run.lifecycle, run.source),
-                    );
-                    ui.label(format!("{:?}", run.summary.phase));
-                    if let Some(model) = &run.model {
-                        ui.label(model);
-                    }
-                    if run.child_count > 0
-                        && ui.button(format!("子 run ({})", run.child_count)).clicked()
-                    {
-                        drill = Some(run.summary.id.clone());
-                    }
-                    if is_stoppable(run) && ui.button("停止").clicked() {
-                        stop = Some(run.summary.id.clone());
-                    }
-                });
-            });
-        }
+        let runs = &self.runs;
+        let more = paged_list(
+            ui,
+            "execution-runs",
+            self.next_cursor.is_some().then_some("さらに読み込む"),
+            |ui| {
+                for run in runs {
+                    ui.push_id(run.summary.id.as_str(), |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.strong(&run.name);
+                            ui.label(format!("{:?}", run.summary.role));
+                            ui.colored_label(
+                                lifecycle_color(run.lifecycle),
+                                lifecycle_label(run.lifecycle, run.source),
+                            );
+                            ui.label(format!("{:?}", run.summary.phase));
+                            if let Some(model) = &run.model {
+                                ui.label(model);
+                            }
+                            if run.child_count > 0
+                                && ui.button(format!("子 run ({})", run.child_count)).clicked()
+                            {
+                                drill = Some(run.summary.id.clone());
+                            }
+                            if is_stoppable(run) && ui.button("停止").clicked() {
+                                stop = Some(run.summary.id.clone());
+                            }
+                        });
+                    });
+                }
+            },
+        );
         if let Some(run) = drill {
             self.drill_into(run);
         }
         if let Some(run) = stop {
             self.command(ctx, "run の停止", stop_run(thread, run));
         }
-        if self.next_cursor.is_some() && ui.button("さらに読み込む").clicked() {
+        if more {
             self.more_requested = true;
         }
     }
@@ -207,22 +216,24 @@ impl ExecutionFeature {
         if let Some(reason) = &goal.reason {
             ui.label(format!("理由: {reason}"));
         }
-        for (index, criterion) in goal.criteria.iter().enumerate() {
-            let met = goal
-                .checks
-                .iter()
-                .find(|check| usize::try_from(check.criterion).is_ok_and(|c| c == index))
-                .map(|check| check.met);
-            let mark = match met {
-                Some(true) => "✔",
-                Some(false) => "✘",
-                None => "·",
-            };
-            ui.label(format!("{mark} {criterion}"));
-        }
-        for finding in &goal.findings {
-            ui.label(format!("指摘: {finding}"));
-        }
+        bounded_list(ui, "execution-criteria", |ui| {
+            for (index, criterion) in goal.criteria.iter().enumerate() {
+                let met = goal
+                    .checks
+                    .iter()
+                    .find(|check| usize::try_from(check.criterion).is_ok_and(|c| c == index))
+                    .map(|check| check.met);
+                let mark = match met {
+                    Some(true) => "✔",
+                    Some(false) => "✘",
+                    None => "·",
+                };
+                ui.label(format!("{mark} {criterion}"));
+            }
+            for finding in &goal.findings {
+                ui.label(format!("指摘: {finding}"));
+            }
+        });
         let mut review = goal.review_enabled;
         if ui.checkbox(&mut review, "ゴールレビュー").changed() {
             self.command(
@@ -247,13 +258,17 @@ impl ExecutionFeature {
         };
         if let Some(todo) = &execution.todo {
             ui.strong("Todo");
-            for item in &todo.items {
-                ui.label(format!("{} {}", todo_mark(item.status), item.content));
-            }
+            bounded_list(ui, "execution-todo", |ui| {
+                for item in &todo.items {
+                    ui.label(format!("{} {}", todo_mark(item.status), item.content));
+                }
+            });
         }
         if let Some(ledger) = &execution.ledger {
             ui.collapsing("台帳 (ledger)", |ui| {
-                ui.label(&ledger.body);
+                bounded_list(ui, "execution-ledger", |ui| {
+                    ui.label(&ledger.body);
+                });
                 if ledger.truncated {
                     ui.label("（長いため先頭のみ表示）");
                 }

@@ -290,6 +290,16 @@ impl crate::Database {
         crate::repo::lanes::get_by_thread(&self.conn, thread_id)
     }
 
+    /// Every live lane that a lead manages now, as `(lane_id, lead_thread_id)` in lane ID
+    /// order. A read-only scan, used to learn who each lane's lead is when nothing has
+    /// announced it yet (after a restart).
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn managed_lane_leads(&self) -> Result<Vec<(String, String)>, crate::StorageError> {
+        crate::repo::lanes::managed_lane_leads(&self.conn)
+    }
+
     /// The lanes `lead_thread_id` currently manages, in lane ID order. A read
     /// only membership scan: unlike `lane_list` it stores no cursor listing.
     ///

@@ -1494,6 +1494,10 @@ fn creation_lookup_and_internal_membership_are_read_only_and_policy_independent(
         .unwrap();
     assert_eq!(handle.managed_lanes("lead").unwrap(), vec![pending.clone()]);
     assert!(handle.managed_lanes("other").unwrap().is_empty());
+    assert_eq!(
+        fixture.database().managed_lane_leads().unwrap(),
+        vec![(pending.lane_id.clone(), "lead".to_owned())]
+    );
     let after: i64 = fixture
         .sql()
         .query_row("SELECT count(*) FROM lane_list_snapshots", [], |r| r.get(0))

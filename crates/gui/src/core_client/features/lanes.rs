@@ -11,6 +11,7 @@
 //! gate here.
 use std::collections::BTreeMap;
 
+use super::layout::bounded_list;
 use super::{
     Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, Navigation,
 };
@@ -35,9 +36,6 @@ use workbench_protocol::{
     queries::{PageRequest, Query, QueryReply},
     wire::Revision,
 };
-
-/// The height at which a list of lanes starts to scroll.
-const LIST_MAX_HEIGHT: f32 = 240.0;
 
 #[derive(Debug, Clone)]
 enum Pending {
@@ -297,9 +295,11 @@ impl LanesFeature {
                 }
             ));
         }
-        for item in &detail.attention {
-            ui.label(format!("要対応 {:?}: {}", item.tag, item.summary));
-        }
+        bounded_list(ui, "lanes-attention", |ui| {
+            for item in &detail.attention {
+                ui.label(format!("要対応 {:?}: {}", item.tag, item.summary));
+            }
+        });
         if detail.delivery.held {
             ui.label(format!(
                 "lead への通知が保留されています（{} 件）",
@@ -631,27 +631,21 @@ impl Feature for LanesFeature {
         // Each list scrolls in its own bounded area, so that however many lanes the core
         // holds, the buttons that page through them stay inside the window.
         if !self.lanes.is_empty() {
-            egui::ScrollArea::vertical()
-                .id_salt("lanes-managed")
-                .max_height(LIST_MAX_HEIGHT)
-                .show(ui, |ui| {
-                    for lane in self.lanes.clone() {
-                        self.draw_lane_row(ui, ctx, &lane);
-                    }
-                });
+            bounded_list(ui, "lanes-managed", |ui| {
+                for lane in self.lanes.clone() {
+                    self.draw_lane_row(ui, ctx, &lane);
+                }
+            });
         }
         if self.next_cursor.is_some() && ui.button("さらに読み込む").clicked() {
             self.more_requested = true;
         }
         if !self.detached.is_empty() {
-            egui::ScrollArea::vertical()
-                .id_salt("lanes-detached")
-                .max_height(LIST_MAX_HEIGHT)
-                .show(ui, |ui| {
-                    for detached in self.detached.clone() {
-                        self.draw_detached_row(ui, ctx, detached);
-                    }
-                });
+            bounded_list(ui, "lanes-detached", |ui| {
+                for detached in self.detached.clone() {
+                    self.draw_detached_row(ui, ctx, detached);
+                }
+            });
         }
         if self.detached_next.is_some() && ui.button("切り離し済みをさらに読み込む").clicked()
         {

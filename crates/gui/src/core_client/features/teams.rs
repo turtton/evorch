@@ -6,6 +6,7 @@
 //! the tasks are then asked for again.
 use std::collections::BTreeMap;
 
+use super::layout::{bounded_list, paged_list};
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
 use workbench_protocol::{
     commands::ThreadTarget,
@@ -235,33 +236,43 @@ impl Feature for TeamsFeature {
             team.claimed,
             team.complete
         ));
-        for member in &team.members {
-            ui.label(format!(
-                "メンバー {} ({} 件担当){}",
-                member.owner,
-                member.claimed_tasks,
-                member
-                    .run
-                    .as_ref()
-                    .map_or(String::new(), |run| format!(" run {}", run.as_str()))
-            ));
-        }
+        bounded_list(ui, "teams-members", |ui| {
+            for member in &team.members {
+                ui.label(format!(
+                    "メンバー {} ({} 件担当){}",
+                    member.owner,
+                    member.claimed_tasks,
+                    member
+                        .run
+                        .as_ref()
+                        .map_or(String::new(), |run| format!(" run {}", run.as_str()))
+                ));
+            }
+        });
         ui.separator();
         let mut open = None;
-        for task in &self.tasks {
-            ui.push_id(&task.task_id, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button(&task.task_id).clicked() {
-                        open = Some(task.task_id.clone());
-                    }
-                    ui.label(task_state_label(task.state));
-                    if let Some(owner) = &task.owner {
-                        ui.label(owner);
-                    }
-                });
-            });
-        }
-        if self.next_cursor.is_some() && ui.button("さらに読み込む").clicked() {
+        let tasks = &self.tasks;
+        let more = paged_list(
+            ui,
+            "teams-tasks",
+            self.next_cursor.is_some().then_some("さらに読み込む"),
+            |ui| {
+                for task in tasks {
+                    ui.push_id(&task.task_id, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button(&task.task_id).clicked() {
+                                open = Some(task.task_id.clone());
+                            }
+                            ui.label(task_state_label(task.state));
+                            if let Some(owner) = &task.owner {
+                                ui.label(owner);
+                            }
+                        });
+                    });
+                }
+            },
+        );
+        if more {
             self.more_requested = true;
         }
         if let Some(task_id) = open {
@@ -283,9 +294,11 @@ impl Feature for TeamsFeature {
             if let Some(run) = &task.owner_run {
                 ui.label(format!("担当 run: {}", run.as_str()));
             }
-            for path in &task.paths {
-                ui.label(path);
-            }
+            bounded_list(ui, "teams-task-paths", |ui| {
+                for path in &task.paths {
+                    ui.label(path);
+                }
+            });
         }
     }
 }

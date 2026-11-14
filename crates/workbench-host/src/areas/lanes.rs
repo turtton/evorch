@@ -50,10 +50,12 @@ impl LanesArea {
         let source = handles.source("lanes")?;
         let runtime = handles.runtime.clone();
         let mut events = handles.bus.subscribe();
+        // Subscribed first, so a change during the read is still announced; the leads the
+        // ledger names now are the ones the first change after a restart has left.
+        let mut leads = announced_leads(&runtime);
         handles
             .tasks
             .spawn("lanes-events", move |mut stop| async move {
-                let mut leads = BTreeMap::new();
                 loop {
                     let event = tokio::select! {
                         () = stop.stopped() => break,
@@ -163,6 +165,19 @@ const DELIVERY_SOURCE: &str = "lane_delivery";
 /// The lead each lane had when it was last announced, so that the next change tells the lead
 /// it left even when the ledger has moved on to another lead by the time it is read.
 type AnnouncedLeads = BTreeMap<String, ThreadId>;
+
+/// The lead each lane has now, as the ledger names it: what a restarted host has not announced
+/// yet, but every lane's next change must tell the lead it leaves.
+fn announced_leads(runtime: &AgentRuntime) -> AnnouncedLeads {
+    let rows = runtime
+        .with_storage_reader(|db| db.managed_lane_leads())
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    rows.into_iter()
+        .filter_map(|(lane, lead)| Some((lane, ThreadId::new(lead).ok()?)))
+        .collect()
+}
 
 fn publish_change(
     runtime: &AgentRuntime,
@@ -571,5 +586,18 @@ mod tests {
         assert_eq!(told(&mut leads, None), [thread("lead-b")]);
         // C takes it after the detach: the detach already told B, and nothing is left over.
         assert!(told(&mut leads, Some("lead-c")).is_empty());
+    }
+
+    #[test]
+    fn a_lead_known_from_the_ledger_at_start_hears_of_the_first_change_after_a_restart() {
+        let mut leads = AnnouncedLeads::from([("l1".to_owned(), thread("lead-a"))]);
+        let mut also_for = Vec::new();
+        tell_leads(
+            &mut leads,
+            &lane(Some("lead-b")),
+            Some(thread("lead-b")),
+            &mut also_for,
+        );
+        assert_eq!(also_for, [thread("lead-a")]);
     }
 }
