@@ -101,6 +101,16 @@ impl ExecutionControl {
         self.publication.0.cancelled.load(Ordering::Acquire)
     }
 
+    pub(super) fn has_accepted_resume(&self) -> bool {
+        self.pending_resume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.authority.is_some() && pending.valid.load(Ordering::Acquire)
+            })
+    }
+
     pub(super) fn clear_deferred_resume(&self) {
         if let Some(pending) = self
             .pending_resume

@@ -21,6 +21,8 @@ pub(crate) mod runtime;
 mod safe_point;
 pub use restart::{RestartAttempt, ResumeReceipt};
 #[cfg(test)]
+mod accepted_resume_tests;
+#[cfg(test)]
 mod queued_tests;
 #[cfg(test)]
 mod restart_tests;
@@ -538,13 +540,19 @@ impl Coordinator {
         &self,
         store: Option<&RunStore>,
         unstarted: &BTreeSet<RunId>,
+        accepted_resume_pending: bool,
     ) -> Result<bool, String> {
         let mut inner = self.lock();
         match &inner.phase {
             QuiesceState::Failed { reason } => return Err(reason.clone()),
-            QuiesceState::Checkpointed => return Ok(true),
+            QuiesceState::Checkpointed if !accepted_resume_pending => return Ok(true),
+            QuiesceState::Checkpointed => {}
             QuiesceState::WaitingForSafePoints => {}
             _ => return Ok(false),
+        }
+        // No successor serialization exists for accepted resume authority yet.
+        if accepted_resume_pending {
+            return Ok(false);
         }
         if inner.intents.values().any(|intent| {
             intent.active

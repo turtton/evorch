@@ -4,6 +4,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartBlockerKind {
     InFlightAdmission,
+    AcceptedResumePending,
     AwaitingSafePoint,
     ShellRunning,
     ShellResultUnobserved,
@@ -63,6 +64,7 @@ impl Coordinator {
 impl crate::AgentRuntime {
     /// Only bounded identities and categories, never tool arguments or output.
     pub fn restart_blockers(&self) -> Vec<RestartBlocker> {
+        let accepted = self.accepted_chat_resumes();
         let inner = self.shared.quiesce.lock();
         if !inner.requested {
             return Vec::new();
@@ -72,7 +74,8 @@ impl crate::AgentRuntime {
             .values()
             .filter_map(|intent| {
                 let run = intent.run_id;
-                if !intent.active
+                if accepted.contains_key(&run)
+                    || !intent.active
                     || inner.unstarted.contains(&run)
                     || intent.wait == ResumeWait::AdmissionQueued
                 {
@@ -110,6 +113,12 @@ impl crate::AgentRuntime {
                         })
                     })
             })
+            .chain(accepted.iter().map(|(run, incarnation)| RestartBlocker {
+                run: *run,
+                incarnation: incarnation.clone(),
+                generation: inner.generation,
+                kind: RestartBlockerKind::AcceptedResumePending,
+            }))
             .collect()
     }
 }

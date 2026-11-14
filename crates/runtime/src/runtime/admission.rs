@@ -109,7 +109,11 @@ impl AgentRuntime {
             .collect();
         self.shared
             .quiesce
-            .complete(self.shared.run_store.get(), &unstarted)
+            .complete(
+                self.shared.run_store.get(),
+                &unstarted,
+                !self.accepted_chat_resumes().is_empty(),
+            )
             .map_err(crate::quiesce::runtime::error)
     }
 
@@ -823,6 +827,13 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runs = lock_runs(&self.shared.runs);
+        if restart
+            && runs
+                .values()
+                .any(|entry| entry.execution.has_accepted_resume())
+        {
+            return Ok(false);
+        }
         if !restart
             && (intents.values().any(|i| i.paused_recovery.is_some())
                 || admissions.values().any(|a| a.result.borrow().is_none())

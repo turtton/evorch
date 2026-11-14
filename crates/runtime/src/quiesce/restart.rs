@@ -126,6 +126,7 @@ impl AgentRuntime {
         let receipt =
             self.with_restart_launch_fence(|| self.invalidate_parked_intents(generation))?;
         self.replay_restart_wakes();
+        self.replay_accepted_chat_resumes();
         Ok(receipt)
     }
 

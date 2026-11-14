@@ -411,6 +411,7 @@ impl AgentRuntime {
         E: std::fmt::Display,
     {
         self.begin_dispatch_shutdown()?;
+        self.discard_accepted_chat_resumes()?;
         stop().await.map_err(error)?;
         Ok(DispatchDrainFence {
             tails: self.shared.dispatch_tails.clone(),
