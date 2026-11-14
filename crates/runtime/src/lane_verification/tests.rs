@@ -1,6 +1,7 @@
 use super::*;
 use crate::lane_close::{BEFORE_CLOSE_COMMIT, LaneCloseRequest};
 mod management;
+mod restart;
 use agents::Role;
 use event_bus::{EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, FinishReason, Message, ToolSpec};
@@ -22,11 +23,15 @@ struct Model {
     mode: Mutex<Mode>,
     override_id: Mutex<Option<String>>,
     requests: Mutex<Vec<RecordedRequest>>,
+    provider_inputs: Mutex<std::collections::HashMap<String, crate::quiesce::ProviderInput>>,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
 #[async_trait::async_trait]
 impl crate::AgentModel for Model {
+    fn checkpoint_provider_input(&self, run: &str) -> Option<crate::quiesce::ProviderInput> {
+        self.provider_inputs.lock().unwrap().get(run).cloned()
+    }
     async fn complete(
         &self,
         ctx: &crate::AgentInvocationContext,
@@ -34,6 +39,31 @@ impl crate::AgentModel for Model {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<providers::ChatResponse, crate::RuntimeError> {
+        // Record the fixed mock provider's exact input at the call boundary,
+        // so the real safe-point/seal path can be exercised without a bypass.
+        self.provider_inputs.lock().unwrap().insert(
+            ctx.run_id.clone(),
+            crate::quiesce::ProviderInput {
+                profile: "test".into(),
+                protocol: model::ApiProtocol::OpenAiCompletions,
+                edit_tool: config::EditToolConfig::Edit,
+                affinity_key: ctx.run_id.clone(),
+                replay: None,
+                request: providers::ChatRequest {
+                    model: "test".into(),
+                    messages: messages.to_vec(),
+                    tools: tools.to_vec(),
+                    tool_choice: None,
+                    temperature: None,
+                    max_tokens: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                    output_schema: None,
+                    observation: None,
+                    responses_replay: None,
+                },
+            },
+        );
         self.requests
             .lock()
             .unwrap()

@@ -184,3 +184,24 @@ async fn stop_before_sealing_keeps_attempt_and_other_parked_execution() {
     f.model.entered.notified().await;
     f.cleanup(other).await;
 }
+
+#[tokio::test]
+async fn storage_health_failed_before_request_does_not_gate_manual_chat_resume() {
+    let f = Fixture::new(0);
+    let run = f.start();
+    f.model.entered.notified().await;
+    f.runtime.stop(run, crate::StopScope::SelfOnly).unwrap();
+    f.runtime.wait(run).await.unwrap();
+    f.runtime.shared.quiesce.fail("previous storage failure");
+    let failed = f.runtime.quiesce_state();
+    assert!(f.runtime.begin_restart_quiesce().is_err());
+    assert!(f.runtime.shared.quiesce.running());
+    f.runtime
+        .resume_chat(run, crate::RunConfig::default())
+        .unwrap();
+    f.model.entered.notified().await;
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(f.runtime.quiesce_state(), failed);
+    assert!(f.runtime.shared.quiesce.running());
+    f.cleanup(run).await;
+}
