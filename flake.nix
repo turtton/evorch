@@ -18,9 +18,12 @@
     url = "github:nix-community/fenix";
     inputs.nixpkgs.follows = "nixpkgs";
   };
+  # No `follows`: it keeps its own nixpkgs / fenix / crane so that the cargo
+  # package is the derivation turtton/cargo pushes to attic.
+  inputs.turtton-cargo.url = "github:turtton/cargo/v0.102.0-9-turtton.2";
 
   outputs =
-    { self, nixpkgs, flake-utils, intent-system-flake, crane, fenix, ... }:
+    { self, nixpkgs, flake-utils, intent-system-flake, crane, fenix, ... }@inputs:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -385,67 +388,21 @@
               '.default_headers(headers).tcp_user_timeout(std::time::Duration::from_secs(300))'
           '';
         });
-        # huacnlee/cargo (https://huacnlee.github.io/cargo/): a Cargo fork that
-        # keeps intermediate artifacts under ~/.cargo/targets and shares
-        # dependency builds across checkouts. Trial only: the default dev shell
-        # resolves `cargo` to it, and `nix develop .#upstream-cargo` restores the
-        # fenix toolchain's cargo. rustc, rustfmt, clippy and rust-analyzer stay
-        # with fenix, and crane (packages / checks) keeps the upstream cargo.
+        # turtton/cargo (https://github.com/turtton/cargo, flake input
+        # `turtton-cargo`): a Cargo fork, originally huacnlee/cargo, that keeps
+        # intermediate artifacts under ~/.cargo/targets and shares dependency
+        # builds across checkouts. Trial only: the default dev shell resolves
+        # `cargo` to it, and `nix develop .#upstream-cargo` restores the fenix
+        # toolchain's cargo. rustc, rustfmt, clippy and rust-analyzer stay with
+        # fenix, and crane (packages / checks) keeps the upstream cargo.
         #
-        # The release asset is a tarball holding one `cargo` binary. Bump
-        # `cargoForkVersion` and the hashes together (the hashes are the
-        # release's SHA256SUMS in SRI form). A system without an asset gets no
-        # fork and its default dev shell keeps the upstream cargo.
-        cargoForkVersion = "0.102.0-9";
-        cargoForkAssets = {
-          x86_64-linux = {
-            target = "x86_64-unknown-linux-gnu";
-            hash = "sha256-3EVTXaSDD0FpSf33Oby2Ve95m9IgbngTdXJhR3+WuyA=";
-          };
-          aarch64-linux = {
-            target = "aarch64-unknown-linux-gnu";
-            hash = "sha256-1SEHDRFNA9SD9Ttow/uIReRXyRd2oWTOve55m4h/ZwM=";
-          };
-          aarch64-darwin = {
-            target = "aarch64-apple-darwin";
-            hash = "sha256-amNx8siYi47illhnFFoD8EgYgccCwF+0KaX2fR4JmLs=";
-          };
-        };
-        cargoFork =
-          let
-            asset = cargoForkAssets.${system} or null;
-          in
-          if asset == null then
-            null
-          else
-            pkgs.stdenv.mkDerivation {
-              pname = "cargo-fork";
-              version = cargoForkVersion;
-              src = pkgs.fetchurl {
-                url = "https://github.com/huacnlee/cargo/releases/download/v${cargoForkVersion}/cargo-${cargoForkVersion}-${asset.target}.tar.gz";
-                inherit (asset) hash;
-              };
-              sourceRoot = ".";
-              # The Linux binary links zlib and libgcc_s dynamically.
-              nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
-              buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-                pkgs.zlib
-                pkgs.stdenv.cc.cc.lib
-              ];
-              dontConfigure = true;
-              dontBuild = true;
-              dontStrip = true;
-              installPhase = ''
-                runHook preInstall
-                install -Dm755 cargo $out/bin/cargo
-                runHook postInstall
-              '';
-              meta = {
-                description = "huacnlee/cargo fork of Cargo (prebuilt release binary)";
-                homepage = "https://github.com/huacnlee/cargo";
-                mainProgram = "cargo";
-              };
-            };
+        # The input is pinned to a tag and does not follow this flake's
+        # nixpkgs / fenix / crane, so the package is the one turtton/cargo
+        # builds and pushes to attic. Bump the tag in `inputs` to update.
+        # turtton/cargo outputs packages for x86_64-linux only; a system
+        # without the package gets no fork and its default dev shell keeps the
+        # upstream cargo.
+        cargoFork = inputs.turtton-cargo.packages.${system}.cargo or null;
         # Dev shell with the fenix toolchain's own cargo; the fork shell is built from it.
         # `rustcWrapperDefault` is RUSTC_WRAPPER when the caller leaves it unset.
         mkCargoDevShell = rustcWrapperDefault: pkgs.mkShell ({
@@ -493,19 +450,17 @@
           # instead of downloading one.
         } // pkgs.lib.optionalAttrs isCefSystem { CEF_PATH = cefDist; });
         upstreamCargoDevShell = mkCargoDevShell "sccache";
-        # The fork goes first in PATH, ahead of the fenix toolchain's cargo. Its
-        # self-update would try to replace binaries outside the Nix store, so
-        # CARGO_FORK_AUTO_UPDATE=0 turns it off. It shares dependency builds
-        # across checkouts itself, so sccache is off by default here: an empty
-        # RUSTC_WRAPPER also overrides a `build.rustc-wrapper` in the user's
-        # Cargo config, and a non-empty value set by the caller is still kept.
+        # The fork goes first in PATH, ahead of the fenix toolchain's cargo. It
+        # shares dependency builds across checkouts itself, so sccache is off
+        # by default here: an empty RUSTC_WRAPPER also overrides a
+        # `build.rustc-wrapper` in the user's Cargo config, and a non-empty
+        # value set by the caller is still kept.
         devShell =
           if cargoFork == null then
             upstreamCargoDevShell
           else
             (mkCargoDevShell "").overrideAttrs (old: {
               nativeBuildInputs = [ cargoFork ] ++ old.nativeBuildInputs;
-              CARGO_FORK_AUTO_UPDATE = "0";
             });
       in
       {
