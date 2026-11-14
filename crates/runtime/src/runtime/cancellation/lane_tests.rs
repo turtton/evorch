@@ -396,6 +396,8 @@ async fn settled_unregistered_lane_keeps_its_permit_without_an_existing_stop_que
     let contention = f
         .interrupt_contended_admission(RunInterrupt::Stop, false)
         .await;
+    // Contention coordination is complete; recovery races real heartbeat writes.
+    drop(contention._clock);
     contention.lock.execute_batch("ROLLBACK").unwrap();
     f.runtime.drain_lane_stop_writes().await.unwrap();
     let next = OwnerHost::open(
