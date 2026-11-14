@@ -16,14 +16,13 @@ pub const LANE_NO_PROGRESS_LIMIT: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuestionCapacity {
+    /// The recipient already has the maximum number of unanswered questions.
     Requester,
-    Global,
 }
 impl QuestionCapacity {
     pub const fn limit(self) -> u32 {
         match self {
             Self::Requester => 32,
-            Self::Global => 1024,
         }
     }
 }

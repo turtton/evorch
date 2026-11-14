@@ -49,7 +49,6 @@ impl LaneDeliveryView {
         let blocked = self.capacity_blocked.as_ref()?;
         let scope = match blocked.capacity {
             QuestionCapacity::Requester => "this lane already has",
-            QuestionCapacity::Global => "the workbench already has",
         };
         Some(format!(
             "Question capacity reached: {scope} {} unanswered questions, so new ones are refused ({} attempt(s)). Answer some to continue; nothing is retried automatically.",

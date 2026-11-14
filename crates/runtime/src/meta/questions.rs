@@ -111,9 +111,31 @@ pub(super) fn user_answers(
         return error(e);
     }
     match runtime.user_answers(state.caller_run_id()) {
-        Ok(q) => serialize(&q),
+        Ok(q) => serialize(&listing_window(q)),
         Err(e) => error(e),
     }
+}
+
+/// Most recent answered questions listed beside every unanswered one. Older
+/// answers were already injected into the run (or, for a child's questions,
+/// given by the reader itself); runtime logic reads the complete history, only
+/// the model-facing listings of `user_answers` and `subagent_questions` are
+/// bounded.
+const ANSWERED_LISTING_LIMIT: usize = 32;
+
+fn listing_window(questions: Vec<event_bus::UserQuestion>) -> Vec<event_bus::UserQuestion> {
+    let answered = questions.iter().filter(|q| q.answer.is_some()).count();
+    let mut skip = answered.saturating_sub(ANSWERED_LISTING_LIMIT);
+    questions
+        .into_iter()
+        .filter(|question| {
+            if question.answer.is_some() && skip > 0 {
+                skip -= 1;
+                return false;
+            }
+            true
+        })
+        .collect()
 }
 
 pub(super) fn subagent_questions(
@@ -139,7 +161,7 @@ pub(super) fn subagent_questions(
                     .filter(|question| question.answer.is_none())
                     .map(|question| question.id.clone()),
             );
-            serialize(&questions)
+            serialize(&listing_window(questions))
         }
         Err(e) => error(e),
     }

@@ -144,7 +144,6 @@ pub enum LaneQuestionResponder {
 #[serde(rename_all = "snake_case")]
 pub enum LaneQuestionCapacity {
     Requester,
-    Global,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

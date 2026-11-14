@@ -406,46 +406,33 @@ async fn lane_capacity_is_typed_bounded_and_does_not_create_or_retry() {
         assert!(serde_json::to_vec(&diag).unwrap().len() < 512);
         assert_eq!(f.runtime.user_answers(lane.root_run_id).unwrap().len(), 32);
     }
-    // The same typed path handles the global 1024->1025 boundary. Synthetic
-    // offline requesters isolate global capacity from the lane's 32-row limit.
-    for i in 0..992 {
-        let run = format!("run-capacity-{}", i / 32);
-        f.db.handle()
-            .create_user_question(&UserQuestion {
-                responder: None,
-                routing_revision: 0,
-                management_revision: None,
-                id: format!("question-capacity-{i}"),
-                run_id: run.clone(),
-                root_run_id: run,
-                root_name: "offline capacity fixture".into(),
-                recipient_run_ids: vec![],
-                title: "capacity?".into(),
-                options: vec![],
-                blocking: false,
-                answer: None,
-                answer_origin: None,
-            })
-            .unwrap();
-    }
-    let second = f.lane(lead, "global-lane", LanePolicy::Attached).await;
-    let blocked = f
-        .runtime
-        .request_user_question_outcome(second.root_run_id, "global excess?".into(), vec![], false)
+    // Another lane is unaffected by this lane's full quota (no workbench-wide cap).
+    let second = f.lane(lead, "other-lane", LanePolicy::Attached).await;
+    assert!(matches!(
+        f.runtime
+            .request_user_question_outcome(second.root_run_id, "other?".into(), vec![], false)
+            .unwrap(),
+        LaneQuestionCreated::Created(_)
+    ));
+    // Answering one of the full lane's questions frees a slot for a new one.
+    let answered = f.runtime.user_answers(lane.root_run_id).unwrap()[0]
+        .id
+        .clone();
+    f.db.handle()
+        .answer_user_question(
+            &answered,
+            "done",
+            &event_bus::AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
         .unwrap();
     assert!(matches!(
-        blocked,
-        LaneQuestionCreated::CapacityBlocked(storage::lane_delivery::QuestionCapacityBlocked {
-            capacity: storage::lane_delivery::QuestionCapacity::Global,
-            ..
-        })
-    ));
-    assert!(
         f.runtime
-            .user_answers(second.root_run_id)
-            .unwrap()
-            .is_empty()
-    );
+            .request_user_question_outcome(lane.root_run_id, "after answer?".into(), vec![], false)
+            .unwrap(),
+        LaneQuestionCreated::Created(_)
+    ));
     f.stop(second.root_run_id).await;
     f.stop(lane.root_run_id).await;
     f.stop(lead).await;

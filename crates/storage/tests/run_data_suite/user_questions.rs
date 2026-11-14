@@ -127,36 +127,121 @@ fn first_answer_wins_and_same_answer_is_idempotent_across_reopen() {
 }
 
 #[test]
-fn question_limits_prevent_invisible_pending_questions() {
+fn pending_questions_have_no_workbench_wide_cap() {
     let (_dir, storage, database, _config) = fixture();
-    for id in 0..1024 {
+    for id in 0..1100 {
         storage
             .handle()
             .create_user_question(&question(id))
             .unwrap();
     }
+    assert_eq!(database.pending_user_questions().unwrap().len(), 1100);
+}
+
+#[test]
+fn answered_questions_free_requester_slots_beyond_the_cumulative_total() {
+    let (_dir, storage, database, _config) = fixture();
+    let host = AnswerOrigin::Host {
+        channel: Default::default(),
+    };
+    let ask = |id: u64| {
+        let mut q = question(id);
+        q.run_id = "run-1".into();
+        storage.handle().create_user_question(&q)
+    };
+    for id in 0..32 {
+        ask(id).unwrap();
+    }
     assert!(matches!(
-        storage.handle().create_user_question(&question(1024)),
+        ask(32),
         Err(StorageError::QuestionCapacity(
-            storage::lane_delivery::QuestionCapacity::Global
+            storage::lane_delivery::QuestionCapacity::Requester
         ))
     ));
-    assert_eq!(database.pending_user_questions().unwrap().len(), 1024);
+    // Far more than 32 questions are created over the run's lifetime as long as
+    // no more than 32 are unanswered at once.
+    for id in 0..100 {
+        storage
+            .handle()
+            .answer_user_question(&format!("question-{id}"), "A", &host)
+            .unwrap();
+        ask(32 + id).unwrap();
+        assert_eq!(database.pending_user_questions().unwrap().len(), 32);
+    }
+    assert!(matches!(
+        ask(1000),
+        Err(StorageError::QuestionCapacity(
+            storage::lane_delivery::QuestionCapacity::Requester
+        ))
+    ));
+}
+
+#[test]
+fn history_past_the_unanswered_capacity_stays_readable_and_inheritable() {
+    let (_dir, storage, database, _config) = fixture();
+    let host = AnswerOrigin::Host {
+        channel: Default::default(),
+    };
+    let ask = |id: u64| {
+        let mut q = question(id);
+        q.run_id = "run-1".into();
+        storage.handle().create_user_question(&q)
+    };
+    for id in 0..32 {
+        ask(id).unwrap();
+    }
     storage
         .handle()
-        .answer_user_question(
-            "question-0",
-            "A",
-            &AnswerOrigin::Host {
-                channel: Default::default(),
-            },
-        )
+        .answer_user_question("question-0", "A", &host)
         .unwrap();
+    ask(32).unwrap();
+    // 33 questions in the run's history, 32 of them unanswered.
+    let history = database.user_questions_for_run("run-1").unwrap();
+    assert_eq!(history.len(), 33);
+    assert_eq!(history.iter().filter(|q| q.answer.is_some()).count(), 1);
+
+    // The lifetime total keeps growing; every answer stays readable in order.
+    for id in 1..100 {
+        storage
+            .handle()
+            .answer_user_question(&format!("question-{id}"), "A", &host)
+            .unwrap();
+        ask(32 + id).unwrap();
+    }
+    let history = database.user_questions_for_run("run-1").unwrap();
+    assert_eq!(history.len(), 132);
+    assert_eq!(history.iter().filter(|q| q.answer.is_none()).count(), 32);
+    assert_eq!(history[0].id, "question-0");
+    assert_eq!(history[0].answer.as_deref(), Some("A"));
+    assert_eq!(history[131].id, "question-131");
+
+    // A continuation inherits the whole history, answered or not.
+    let ids = history.iter().map(|q| q.id.clone()).collect::<Vec<_>>();
     storage
         .handle()
-        .create_user_question(&question(1024))
+        .bind_user_questions("run-1", "run-2000", &ids)
         .unwrap();
-    assert_eq!(database.pending_user_questions().unwrap().len(), 1024);
+    let inherited = database.user_questions_for_run("run-2000").unwrap();
+    assert_eq!(inherited.len(), 132);
+    assert_eq!(inherited.iter().filter(|q| q.answer.is_none()).count(), 32);
+    // Its capacity is the same unanswered count: full until one is answered.
+    let mut own = question(3000);
+    own.run_id = "run-2000".into();
+    assert!(matches!(
+        storage.handle().create_user_question(&own),
+        Err(StorageError::QuestionCapacity(
+            storage::lane_delivery::QuestionCapacity::Requester
+        ))
+    ));
+    storage
+        .handle()
+        .answer_user_question("question-131", "A", &host)
+        .unwrap();
+    storage.handle().create_user_question(&own).unwrap();
+    assert_eq!(
+        database.user_questions_for_run("run-2000").unwrap().len(),
+        133
+    );
 }
 
 #[test]

@@ -25,20 +25,9 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
         ));
     }
     let count = requester_question_count(conn, &question.run_id)?;
-    if count >= 32 {
+    if count >= u64::from(crate::lane_delivery::QuestionCapacity::Requester.limit()) {
         return Err(StorageError::QuestionCapacity(
             crate::lane_delivery::QuestionCapacity::Requester,
-        ));
-    }
-    let pending: i64 = conn.query_row(
-        "SELECT count(*) FROM user_questions WHERE answered=0 \
-         AND ((run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=user_questions.id AND l.run_id != user_questions.run_id AND l.run_id NOT IN (SELECT run_id FROM run_tombstones)))",
-        [],
-        |row| row.get(0),
-    )?;
-    if pending >= 1024 {
-        return Err(StorageError::QuestionCapacity(
-            crate::lane_delivery::QuestionCapacity::Global,
         ));
     }
     let payload = serde_json::to_string(question).map_err(|e| invalid(&e.to_string()))?;
@@ -48,14 +37,20 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
     Ok(())
 }
 
-/// Creation and attention must use the same recipient set, including answered
-/// questions: answering does not free a per-recipient historical quota slot.
+/// Unanswered questions that count against one recipient's quota: those the run
+/// owns plus those it inherited through `user_question_links`. Answering frees a
+/// slot. Questions that are no longer visible (owner run or root tombstoned, with
+/// no live inherited recipient), the same set `get` and the pending listings use,
+/// are not counted. Creation and attention must use this same count.
 pub(super) fn requester_question_count(
     conn: &Connection,
     run_id: &str,
 ) -> Result<u64, StorageError> {
     Ok(conn.query_row(
-        "SELECT count(*) FROM user_questions q WHERE run_id=?1 OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id=?1)",
+        "SELECT count(*) FROM user_questions q WHERE q.answered=0 \
+         AND (q.run_id=?1 OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id=?1)) \
+         AND ((q.run_id NOT IN (SELECT run_id FROM run_tombstones) AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones)) \
+              OR EXISTS (SELECT 1 FROM user_question_links l2 WHERE l2.question_id=q.id AND l2.run_id != q.run_id AND l2.run_id NOT IN (SELECT run_id FROM run_tombstones)))",
         [run_id], |row| row.get(0),
     )?)
 }
@@ -210,18 +205,19 @@ fn answer_checked(
     Ok(())
 }
 
+/// Every question the run owns or inherited, answered or not, oldest first.
+///
+/// This is the run's answer history, not its quota: only unanswered questions
+/// count against the 32-question capacity (`requester_question_count`). A run
+/// restores and injects answers from this complete list, so it must never be
+/// truncated or fail once the lifetime total passes the capacity; omitting a
+/// delivered answer would make a restored run inject it again.
 pub fn for_run(conn: &Connection, run_id: &str) -> Result<Vec<UserQuestion>, StorageError> {
-    let questions = list(
+    list(
         conn,
-        "SELECT q.payload FROM user_questions q WHERE ?1 NOT IN (SELECT run_id FROM run_tombstones) AND ((q.run_id=?1 AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id != q.run_id AND l.run_id=?1)) ORDER BY q.rowid LIMIT 33",
+        "SELECT q.payload FROM user_questions q WHERE ?1 NOT IN (SELECT run_id FROM run_tombstones) AND ((q.run_id=?1 AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id != q.run_id AND l.run_id=?1)) ORDER BY q.rowid",
         run_id,
-    )?;
-    if questions.len() > 32 {
-        return Err(invalid(
-            "question recipient limit exceeded (32); refusing to omit questions",
-        ));
-    }
-    Ok(questions)
+    )
 }
 
 /// Explicit continuation inheritance; caller-chosen IDs must already belong to
@@ -232,12 +228,7 @@ pub fn bind(
     target: &str,
     ids: &[String],
 ) -> Result<(), StorageError> {
-    if source.is_empty()
-        || target.is_empty()
-        || source.len() > 64
-        || target.len() > 64
-        || ids.len() > 32
-    {
+    if source.is_empty() || target.is_empty() || source.len() > 64 || target.len() > 64 {
         return Err(invalid("invalid question inheritance"));
     }
     // Nothing may be inherited from, or handed to, a run a retention deleted.
@@ -254,22 +245,32 @@ pub fn bind(
             });
         }
     }
-    let source_questions = for_run(conn, source)?;
-    if ids
-        .iter()
-        .any(|id| !source_questions.iter().any(|question| &question.id == id))
-    {
-        return Err(invalid(
-            "question inheritance source does not own every question",
-        ));
-    }
-    let mut target_ids = for_run(conn, target)?
+    // Inheritance carries the whole answer history, so only the unanswered
+    // questions are bounded: the same quota creation and attention count.
+    let source_questions = for_run(conn, source)?
         .into_iter()
+        .map(|question| (question.id, question.answer.is_some()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut unanswered = for_run(conn, target)?
+        .into_iter()
+        .filter(|question| question.answer.is_none())
         .map(|question| question.id)
         .collect::<std::collections::HashSet<_>>();
-    target_ids.extend(ids.iter().cloned());
-    if target_ids.len() > 32 {
-        return Err(invalid("question recipient limit reached (32)"));
+    for id in ids {
+        match source_questions.get(id) {
+            None => {
+                return Err(invalid(
+                    "question inheritance source does not own every question",
+                ));
+            }
+            Some(false) => {
+                unanswered.insert(id.clone());
+            }
+            Some(true) => {}
+        }
+    }
+    if unanswered.len() > crate::lane_delivery::QuestionCapacity::Requester.limit() as usize {
+        return Err(invalid("question recipient limit reached (32 unanswered)"));
     }
     let transaction = conn.unchecked_transaction()?;
     for id in ids {
@@ -295,7 +296,7 @@ pub fn recipients(conn: &Connection, id: &str) -> Result<Vec<String>, StorageErr
 pub fn pending(conn: &Connection) -> Result<Vec<UserQuestion>, StorageError> {
     list(
         conn,
-        "SELECT payload FROM user_questions WHERE answered=0 AND ?1='' AND ((run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=user_questions.id AND l.run_id != user_questions.run_id AND l.run_id NOT IN (SELECT run_id FROM run_tombstones))) ORDER BY rowid DESC LIMIT 1024",
+        "SELECT payload FROM user_questions WHERE answered=0 AND ?1='' AND ((run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=user_questions.id AND l.run_id != user_questions.run_id AND l.run_id NOT IN (SELECT run_id FROM run_tombstones))) ORDER BY rowid DESC",
         "",
     )
 }

@@ -319,7 +319,7 @@ pub(super) fn submit_lesson_review(name: &str) -> ToolSpec {
 pub(super) fn ask_user(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Ask a focused scope question and return {question_id, status:pending, blocking, delivery} immediately. For a subagent this asks its Orchestrator parent. An attached lane root asks its lead only when durable delivery is bound; other root questions ask the user. Follow the returned delivery field. Answers clarify the task and never grant execution permissions. title is required (1-2048 UTF-8 bytes); options is optional (up to 3 nonempty choices, each up to 256 UTF-8 bytes). blocking defaults to true: finish is refused until required answers arrive and are observed in a subsequent model turn. Continue independent work while the question is pending; answers are injected automatically, so do not poll for progress. Unknown arguments, invalid sizes, unavailable storage, more than 32 questions per requester, or more than 1024 pending questions overall are rejected. Capacity returns status=question_capacity_blocked without creating a question; do not automatically retry.",
+        "Ask a focused scope question and return {question_id, status:pending, blocking, delivery} immediately. For a subagent this asks its Orchestrator parent. An attached lane root asks its lead only when durable delivery is bound; other root questions ask the user. Follow the returned delivery field. Answers clarify the task and never grant execution permissions. title is required (1-2048 UTF-8 bytes); options is optional (up to 3 nonempty choices, each up to 256 UTF-8 bytes). blocking defaults to true: finish is refused until required answers arrive and are observed in a subsequent model turn. Continue independent work while the question is pending; answers are injected automatically, so do not poll for progress. Unknown arguments, invalid sizes, unavailable storage, a requester that already has 32 unanswered questions is rejected (answering frees a slot). Capacity returns status=question_capacity_blocked without creating a question; do not automatically retry.",
         json!({"title":{"type":"string","minLength":1,"maxLength":2048},"options":{"type":"array","maxItems":3,"items":{"type":"string","minLength":1,"maxLength":256}},"blocking":{"type":"boolean","default":true}}),
         &["title"],
         true,
@@ -329,7 +329,7 @@ pub(super) fn ask_user(name: &str) -> ToolSpec {
 pub(super) fn user_answers(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Return up to 32 questions created by this run or explicitly inherited from its resumed conversation, with pending/answered state and original requester provenance. This read does not consume answers. Answers are also injected automatically into the run, so use this for recovery or inspection rather than repeated polling. An unconfigured store returns an empty list; unknown arguments or durable storage read failures return an error.",
+        "Return the questions created by this run or explicitly inherited from its resumed conversation, with pending/answered state and original requester provenance: every unanswered question and the 32 most recent answered ones, oldest first. This read does not consume answers. Answers are also injected automatically into the run, so use this for recovery or inspection rather than repeated polling. An unconfigured store returns an empty list; unknown arguments or durable storage read failures return an error.",
         json!({}),
         &[],
         true,
@@ -339,7 +339,7 @@ pub(super) fn user_answers(name: &str) -> ToolSpec {
 pub(super) fn subagent_questions(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Read questions from one direct child run, including pending state and original requester. Use after wait reports attention for that child. Listed questions count as reported, so a later wait does not return for them. Decide whether to answer from available context or ask the user on your own run. Only the direct Orchestrator parent may read these questions.",
+        "Read questions from one direct child run, including pending state and original requester: every unanswered question and the 32 most recent answered ones, oldest first. Use after wait reports attention for that child. Listed questions count as reported, so a later wait does not return for them. Decide whether to answer from available context or ask the user on your own run. Only the direct Orchestrator parent may read these questions.",
         json!({"run_id":run_id()}),
         &["run_id"],
         true,

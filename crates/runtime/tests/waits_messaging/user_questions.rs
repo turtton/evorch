@@ -576,6 +576,97 @@ async fn failed_question_inheritance_refuses_to_spawn_a_new_chat_run() {
 }
 
 #[tokio::test]
+async fn run_keeps_reading_injecting_and_continuing_past_the_unanswered_capacity() {
+    const ASKED: usize = 34;
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("long-run.sqlite3"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(4096));
+    let mut events = bus.subscribe();
+    let mut script = Vec::new();
+    for i in 0..ASKED {
+        script.push(Ok(tool_response(
+            &format!("ask-{i}"),
+            "ask_user",
+            serde_json::json!({"title": format!("Decision {i}")}),
+        )));
+        script.push(Ok(text_response("waiting", FinishReason::Stop)));
+    }
+    script.push(Ok(tool_response(
+        "read",
+        "user_answers",
+        serde_json::json!({}),
+    )));
+    script.push(Ok(text_response("all applied", FinishReason::Stop)));
+    script.push(Ok(text_response("continued", FinishReason::Stop)));
+    let model = Arc::new(ScriptedModel::new(script));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids()
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let run = runtime
+        .delegate_chat("thread", Role::Worker, "work".into(), RunConfig::default())
+        .unwrap();
+    // Each answer frees its slot, so the lifetime total passes the 32 unanswered
+    // limit while the run keeps reading and injecting every answer.
+    for i in 0..ASKED {
+        question_waiting(&mut events, run).await;
+        let pending: Vec<_> = runtime
+            .user_answers(run)
+            .unwrap()
+            .into_iter()
+            .filter(|question| question.answer.is_none())
+            .collect();
+        assert_eq!(pending.len(), 1, "question {i}");
+        runtime
+            .answer_user_question(&pending[0].id, &format!("answer {i}"))
+            .unwrap();
+    }
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(runtime.user_answers(run).unwrap().len(), ASKED);
+
+    let observed = model.observed().await;
+    let last = serde_json::to_string(observed.last().unwrap()).unwrap();
+    assert_eq!(last.matches("[user-answer id=").count(), ASKED);
+    // The model-facing listing is bounded to the 32 most recent answered questions.
+    let listed: Vec<event_bus::UserQuestion> = observed
+        .iter()
+        .flatten()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            providers::ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } if tool_call_id == "read" => content.iter().find_map(|part| match part {
+                providers::ToolResultContent::Text { text } => serde_json::from_str(text).ok(),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("user_answers result is in the history");
+    assert_eq!(listed.len(), 32);
+    assert_eq!(listed[0].title, "Decision 2");
+    assert_eq!(listed[31].title, format!("Decision {}", ASKED - 1));
+
+    // A continuation restores the whole history without reinjecting an answer.
+    let next = runtime
+        .delegate_chat(
+            "thread",
+            Role::Worker,
+            "continue again".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(runtime.wait(next).await.unwrap(), AgentRunPhase::Done);
+    let observed = model.observed().await;
+    let last = serde_json::to_string(observed.last().unwrap()).unwrap();
+    assert_eq!(last.matches("[user-answer id=").count(), ASKED);
+}
+
+#[tokio::test]
 async fn same_run_restore_does_not_reinject_an_answer_already_in_persisted_history() {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
@@ -975,4 +1066,119 @@ async fn only_direct_orchestrator_parent_can_read_or_answer_child_question() {
             .is_err()
     );
     assert_eq!(runtime.user_question(&question.id).unwrap(), Some(question));
+}
+
+struct ChildQuestionReaderModel {
+    start: tokio::sync::Notify,
+    read_done: tokio::sync::Notify,
+    parent_turns: std::sync::atomic::AtomicUsize,
+    parent_history: std::sync::Mutex<Vec<providers::Message>>,
+}
+
+#[async_trait::async_trait]
+impl runtime::AgentModel for ChildQuestionReaderModel {
+    async fn complete(
+        &self,
+        _: &runtime::AgentInvocationContext,
+        role: Role,
+        messages: &[providers::Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        if role == Role::Worker {
+            std::future::pending::<()>().await;
+        }
+        match self
+            .parent_turns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        {
+            0 => {
+                self.start.notified().await;
+                Ok(tool_response(
+                    "read",
+                    "subagent_questions",
+                    serde_json::json!({"run_id":"run-2"}),
+                ))
+            }
+            _ => {
+                *self.parent_history.lock().unwrap() = messages.to_vec();
+                self.read_done.notify_one();
+                // Finishing would wake the parent again for the open child question.
+                std::future::pending().await
+            }
+        }
+    }
+
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "child-question-reader-fixture".into()
+    }
+}
+
+#[tokio::test]
+async fn subagent_questions_lists_every_unanswered_and_a_bounded_answered_window() {
+    const ANSWERED: usize = 40;
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("questions.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(256));
+    let model = Arc::new(ChildQuestionReaderModel {
+        start: tokio::sync::Notify::new(),
+        read_done: tokio::sync::Notify::new(),
+        parent_turns: std::sync::atomic::AtomicUsize::new(0),
+        parent_history: std::sync::Mutex::new(Vec::new()),
+    });
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids()
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    assert_eq!(child, runtime::RunId::new(2));
+    // Each answer frees its slot, so the child's lifetime total passes the
+    // unanswered capacity while the full history stays stored.
+    for i in 0..ANSWERED {
+        let question = runtime
+            .request_user_question(child, format!("Answered {i}"), Vec::new(), true)
+            .unwrap();
+        runtime
+            .answer_user_question(&question.id, &format!("answer {i}"))
+            .unwrap();
+    }
+    let pending = runtime
+        .request_user_question(child, "Still open".into(), Vec::new(), true)
+        .unwrap();
+    assert_eq!(
+        runtime.subagent_questions(parent, child).unwrap().len(),
+        ANSWERED + 1
+    );
+
+    model.start.notify_one();
+    // The parent run stays open while its child does, so wait for the read itself.
+    model.read_done.notified().await;
+
+    let history = model.parent_history.lock().unwrap().clone();
+    let listed: Vec<event_bus::UserQuestion> = history
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            providers::ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } if tool_call_id == "read" => content.iter().find_map(|part| match part {
+                providers::ToolResultContent::Text { text } => serde_json::from_str(text).ok(),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("subagent_questions result is in the parent history");
+    assert_eq!(listed.len(), 33);
+    assert_eq!(listed[0].title, format!("Answered {}", ANSWERED - 32));
+    assert_eq!(listed[31].title, format!("Answered {}", ANSWERED - 1));
+    assert_eq!(listed[32].id, pending.id);
+    assert!(listed[32].answer.is_none());
 }

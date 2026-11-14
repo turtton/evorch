@@ -118,7 +118,6 @@ fn kind(kind: &domain::LaneAttentionKind) -> Result<wire::LaneAttentionKind, Wir
         D::QuestionCapacityBlocked { capacity, limit } => W::QuestionCapacityBlocked {
             capacity: match capacity {
                 domain::LaneQuestionCapacity::Requester => wire::LaneQuestionCapacity::Requester,
-                domain::LaneQuestionCapacity::Global => wire::LaneQuestionCapacity::Global,
             },
             limit: *limit,
         },
@@ -245,7 +244,7 @@ mod tests {
                 readiness: domain::LaneReadyState::AwaitingClose,
             },
             D::QuestionCapacityBlocked {
-                capacity: domain::LaneQuestionCapacity::Global,
+                capacity: domain::LaneQuestionCapacity::Requester,
                 limit: 40,
             },
             D::WakeSuppressed { guard_revision: 9 },
@@ -301,7 +300,7 @@ mod tests {
         assert!(matches!(
             kinds[5],
             W::QuestionCapacityBlocked {
-                capacity: wire::LaneQuestionCapacity::Global,
+                capacity: wire::LaneQuestionCapacity::Requester,
                 limit: 40
             }
         ));
