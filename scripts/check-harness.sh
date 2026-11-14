@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Deterministic harness regressions; no provider credentials or external model calls.
+# Use nextest's per-test processes and centralized hang watchdog, as CI does.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mode=${1:-focused}
@@ -19,24 +20,31 @@ run() {
 run format cargo fmt --all --check
 run cache-contracts scripts/check-cache-contracts.sh
 # The grouped targets run every test of their group; the filters keep the former per-file selection.
-run runtime cargo test -p runtime --test restore_state --test tools_shell --test delegation \
+run runtime cargo nextest run --no-tests fail -p runtime --test restore_state --test tools_shell --test delegation \
     --test waits_messaging --test escalation_ownership --test compaction_budget -- \
     restore_expansion:: restore_tool_intent:: shell_jobs_integration:: state_transitions:: \
     background:: messaging_loop:: wait_runs:: user_questions:: escalation_questions:: \
     escalation_handoff:: context_observability:: compaction_engine:: compaction_policy:: \
     compaction_continuation:: meta_ops::
-run runtime-standalone cargo test -p runtime --test compaction_triggers --lib
-run providers cargo test -p providers --lib
-run tools cargo test -p tools -p sandbox
-run storage cargo test -p storage --test run_data_suite --test platform_suite -- \
+run runtime-standalone cargo nextest run --no-tests fail -p runtime --test compaction_triggers --lib
+run providers cargo nextest run --no-tests fail -p providers --lib
+run tools cargo nextest run --no-tests fail -p tools -p sandbox
+# nextest does not run doctests; retain the coverage of unqualified cargo test.
+run tools-doc cargo test -p tools -p sandbox --doc
+run storage cargo nextest run --no-tests fail -p storage --test run_data_suite --test platform_suite -- \
     user_questions:: migration::
-run gui cargo test -p gui --test runtime_threads -- \
+run gui cargo nextest run --no-tests fail -p gui --test runtime_threads -- \
     user_questions_headless:: goal_restore_authority:: runtime_wiring::
-run gui-lib cargo test -p gui --lib
+run gui-lib cargo nextest run --no-tests fail -p gui --lib
 if [[ "$mode" == full ]]; then
-    run workspace cargo test --workspace --no-fail-fast
+    # Preserve --no-fail-fast across the normal-test/doctest boundary too.
+    workspace_failed=0
+    run workspace cargo nextest run --no-tests fail --workspace --no-fail-fast || workspace_failed=1
+    run workspace-doc cargo test --workspace --doc --no-fail-fast || workspace_failed=1
+    [[ "$workspace_failed" == 0 ]] || exit 1
     run lint cargo clippy --workspace --all-targets -- -D warnings
     run gui-requires-cef scripts/tests/test_gui_requires_cef.sh
-    run otel cargo test -p event-bus --features otel-exporter
+    run otel cargo nextest run --no-tests fail -p event-bus --features otel-exporter
+    run otel-doc cargo test -p event-bus --features otel-exporter --doc
 fi
 printf 'Passed. Logs are temporary files in %s; remove this directory when no longer needed.\n' "$out"
