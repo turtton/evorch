@@ -665,16 +665,23 @@ mod tests {
 
         private_dir(&parent).unwrap();
         assert!(!parent.join(IDENTITY_MARKER).exists());
+        // Even a directory that appears in the unmarked parent is out of B's reach.
+        private_dir(&parent.join("thread")).unwrap();
+        fs::write(parent.join("thread/early"), "keep").unwrap();
+        assert!(!b.owned_parent().unwrap());
         assert!(!b.discard("thread").unwrap());
         assert!(b.names().unwrap().is_empty());
-        assert!(
-            b.remove_bounded("thread", usize::MAX).unwrap().complete,
-            "an unmarked parent holds nothing to remove"
-        );
+        assert!(b.remove_bounded("thread", usize::MAX).unwrap().complete);
         b.purge_trash().unwrap();
+        assert_eq!(
+            fs::read_to_string(parent.join("thread/early")).unwrap(),
+            "keep"
+        );
 
         let dir = a.prepare("thread").unwrap();
+        assert!(a.owned_parent().unwrap());
         fs::write(dir.join("file"), "keep").unwrap();
+        assert!(b.owned_parent().is_err());
         assert!(b.discard("thread").is_err());
         assert!(b.prepare("thread").is_err());
         assert_eq!(fs::read_to_string(dir.join("file")).unwrap(), "keep");

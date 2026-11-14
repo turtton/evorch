@@ -532,16 +532,33 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&self.0);
             }
         }
-        let root = tempfile::tempdir().unwrap();
-        let scratch = ThreadScratch::for_ownership_root(root.path()).unwrap();
-        let _cleanup = Parent(scratch.parent().to_path_buf());
-        let dir = scratch
-            .prepare(&ScratchKey::Thread("thread-9gkyvvvf".into()))
-            .unwrap();
-        let temporary = tempfile::tempdir_in(&dir).unwrap();
-        let socket = temporary.path().join("evorch-0123456789abcdef.sock");
+        use std::os::unix::fs::MetadataExt;
+        const THREAD: &str = "thread-9gkyvvvf";
         // sun_path holds 108 bytes including the terminating NUL.
-        assert!(socket.as_os_str().len() < 108, "{}", socket.display());
+        const SUN_PATH_MAX: usize = 107;
+        let root = tempfile::tempdir().unwrap();
+        let uid = std::fs::metadata(root.path()).unwrap().uid();
+        let scratch = ThreadScratch::for_ownership_root(root.path()).unwrap();
+        // The guard only exists once prepare succeeded, so a failure (such as a scope
+        // collision with a live root) never removes a parent this test does not own.
+        let dir = scratch.prepare(&ScratchKey::Thread(THREAD.into())).unwrap();
+        let _cleanup = Parent(scratch.parent().to_path_buf());
+        let temporary = tempfile::tempdir_in(&dir).unwrap();
+        // Long enough that the previous layout could not hold it, short enough for this one.
+        let name = format!("evorch-{}.sock", "0123456789abcdef".repeat(2));
+        let socket = temporary.path().join(&name);
+        let previous = PathBuf::from(format!(
+            "/var/tmp/evorch-scratch-{uid}-{}/t-{THREAD}",
+            "0123456789abcdef"
+        ))
+        .join(temporary.path().file_name().unwrap())
+        .join(&name);
+        assert!(previous.as_os_str().len() > SUN_PATH_MAX);
+        assert!(
+            socket.as_os_str().len() <= SUN_PATH_MAX,
+            "{}",
+            socket.display()
+        );
         UnixListener::bind(&socket).unwrap();
     }
 
