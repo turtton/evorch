@@ -7,7 +7,7 @@ use runtime::ownership::{
 
 fn fixture() -> (test_socket_dir::SplitDir, OwnerPermit) {
     let directory = test_socket_dir::SplitDir::new();
-    let path = directory.sockets().join("owners.db");
+    let path = directory.path().join("owners.db");
     let owner = ThreadOwner::new(
         "thread".into(),
         Lease {

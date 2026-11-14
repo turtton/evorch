@@ -550,7 +550,7 @@ fn restored_orphan_snapshots_reconcile_only_nonterminal_phases() {
                 restorable,
             );
             storage.close();
-            let registry = dir.sockets().join("owners.db");
+            let registry = dir.path().join("owners.db");
             drop(runtime::ownership::Registry::open(&registry).unwrap());
             let mut state = fixture_state(dir.path(), false, false);
             state
@@ -873,7 +873,7 @@ fn unreadable_ownership_never_reconciles_restored_runs() {
             false,
         );
         storage.close();
-        let registry = dir.sockets().join("owners.db");
+        let registry = dir.path().join("owners.db");
         if corrupt {
             std::fs::write(&registry, "invalid database").unwrap();
         }

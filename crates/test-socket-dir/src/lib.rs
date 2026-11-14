@@ -333,7 +333,9 @@ mod tests {
                 .unwrap();
             PathBuf::from(line)
         };
-        let chosen = SocketDir::new();
+        // A short fixture base of its own, so a valid override of the process cannot make
+        // the child path too long.
+        let chosen = SocketDir::new_in(Path::new(DEFAULT_BASE_DIR));
         assert!(run(Some(chosen.path())).starts_with(chosen.path()));
         assert!(run(None).starts_with(DEFAULT_BASE_DIR));
     }

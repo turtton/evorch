@@ -73,9 +73,9 @@ fn heartbeat_and_claim_use_persisted_lease_settings() {
 #[test]
 fn ipc_delayed_heartbeat_uses_owner_settings() {
     use runtime::ownership::ipc::{Request, Response, request, serve_connection};
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = test_socket_dir::SplitDir::new();
     let path = directory.path().join("owners.db");
-    let socket = directory.path().join("owner.sock");
+    let socket = directory.sockets().join("owner.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).expect("listener");
     let mut owner = ThreadOwner::new(
         "thread".into(),
@@ -135,7 +135,7 @@ fn idle_quiesce_creates_legacy_placeholder_before_release() {
 #[test]
 fn idle_checkpoint_persists_metadata_without_history() {
     // Given: a thread with no active turn.
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let owner = ThreadOwner::new(
         "thread".into(),
@@ -199,7 +199,7 @@ fn stale_claim_clears_abandoned_child_runs() {
 #[test]
 fn released_permit_rejects_mutations_before_successor_claims() {
     // Given: a released owner whose generation has not changed yet.
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut owner = ThreadOwner::new(
         "thread".into(),
@@ -231,9 +231,9 @@ fn released_permit_rejects_mutations_before_successor_claims() {
 fn ipc_idle_quiesce_commits_placeholder_without_waiting_for_heartbeat() {
     use runtime::ownership::ipc::{Request, Response, request, serve_connection};
     // Given: an idle owner served over IPC, without a heartbeat worker.
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = test_socket_dir::SplitDir::new();
     let path = directory.path().join("owners.db");
-    let socket = directory.path().join("owner.sock");
+    let socket = directory.sockets().join("owner.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).expect("listener");
     let owner = ThreadOwner::new(
         "thread".into(),

@@ -26,8 +26,10 @@ fn child_owner_process() {
         return;
     };
     let path = std::path::PathBuf::from(path);
+    let sockets =
+        std::path::PathBuf::from(std::env::var_os("EVORCH_OWNERSHIP_TEST_SOCKETS").unwrap());
     let mut registry = Registry::open(&path.join("owners.db")).expect("registry");
-    let listener = UnixListener::bind(path.join("owner.sock")).expect("listen");
+    let listener = UnixListener::bind(sockets.join("owner.sock")).expect("listen");
     println!("READY");
     for _ in 0..2 {
         let (mut stream, _) = listener.accept().expect("accept");
@@ -38,7 +40,7 @@ fn child_owner_process() {
 #[test]
 fn two_process_attach_and_quiesce_preserve_generation() {
     use std::io::{BufRead, BufReader};
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = test_socket_dir::SplitDir::new();
     let mut registry = Registry::open(&directory.path().join("owners.db")).expect("registry");
     let lease = Lease {
         owner_id: "child".into(),
@@ -54,6 +56,7 @@ fn two_process_attach_and_quiesce_preserve_generation() {
         Command::new(std::env::current_exe().expect("test binary"))
             .args(["--exact", "child_owner_process", "--nocapture"])
             .env("EVORCH_OWNERSHIP_TEST_ROOT", directory.path())
+            .env("EVORCH_OWNERSHIP_TEST_SOCKETS", directory.sockets())
             .stdout(Stdio::piped())
             .spawn()
             .expect("child"),
@@ -75,7 +78,7 @@ fn two_process_attach_and_quiesce_preserve_generation() {
     ready_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("child ready");
-    let socket = directory.path().join("owner.sock");
+    let socket = directory.sockets().join("owner.sock");
     let attached = request(
         &socket,
         &Request::Attach {

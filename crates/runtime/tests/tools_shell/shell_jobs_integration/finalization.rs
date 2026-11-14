@@ -355,12 +355,11 @@ async fn running_job_allows_mutation_reads_and_all_continuations() {
 }
 
 #[cfg(unix)]
-fn assert_handoff_blocked(permit: &runtime::ownership::OwnerPermit) {
+fn assert_handoff_blocked(permit: &runtime::ownership::OwnerPermit, socket: &std::path::Path) {
     use runtime::ownership::Registry;
     use runtime::ownership::ipc::{Request, Response, request_with_timeout, serve_connection};
-    let socket = permit.registry_path.with_extension("sock");
-    let _ = std::fs::remove_file(&socket);
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let _ = std::fs::remove_file(socket);
+    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
     let path = permit.registry_path.clone();
     let server = std::thread::spawn(move || {
         let mut registry = Registry::open_existing(&path).unwrap();
@@ -372,12 +371,12 @@ fn assert_handoff_blocked(permit: &runtime::ownership::OwnerPermit) {
     // Ownership, not IPC speed: slow registry I/O must not close the client
     // before the server responds (which turns its reply into BrokenPipe).
     let ipc_timeout = Duration::from_secs(30);
-    assert!(matches!(request_with_timeout(&socket, &Request::Quiesce {
+    assert!(matches!(request_with_timeout(socket, &Request::Quiesce {
         thread_id: permit.thread_id.clone(), token: permit.lease.clone(),
     }, ipc_timeout).unwrap(), Response::Status(owner) if owner.active_turn && owner.active_runs.len() == 1));
     assert!(matches!(
         request_with_timeout(
-            &socket,
+            socket,
             &Request::Handoff {
                 thread_id: permit.thread_id.clone(),
                 token: permit.lease.clone(),
@@ -405,7 +404,7 @@ async fn unrecorded_shell_round_retains_active_before_and_after_finalization() {
         };
         let storage = Storage::open(config.clone()).unwrap();
         let permit = OwnerPermit {
-            registry_path: dir.sockets().join("owners.db"),
+            registry_path: dir.path().join("owners.db"),
             thread_id: "thread".into(),
             lease: Lease {
                 owner_id: "owner".into(),
@@ -460,12 +459,12 @@ async fn unrecorded_shell_round_retains_active_before_and_after_finalization() {
             "{mode}"
         );
         // Crucial: finalization has not persisted or released anything yet.
-        assert_handoff_blocked(&permit);
+        assert_handoff_blocked(&permit, &dir.sockets().join("owner.sock"));
         shell.gate.add_permits(1);
         assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error, "{mode}");
         assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
         assert!(!executor.has_running_shell_jobs(&run.to_string()));
-        assert_handoff_blocked(&permit);
+        assert_handoff_blocked(&permit, &dir.sockets().join("owner.sock"));
         assert!(
             calls.try_recv().is_err(),
             "no next model round after failed checkpoint"

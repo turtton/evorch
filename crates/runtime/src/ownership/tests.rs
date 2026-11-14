@@ -234,8 +234,8 @@ fn registry_commits_claim_and_rolls_back_competing_generation() {
 #[cfg(unix)]
 #[test]
 fn claim_refuses_reachable_owner_even_when_lease_is_stale() {
-    let directory = test_socket_dir::SocketDir::new();
-    let socket = directory.path().join("owner.sock");
+    let directory = test_socket_dir::SplitDir::new();
+    let socket = directory.sockets().join("owner.sock");
     let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("listener");
     let mut registry = Registry::open(&directory.path().join("owners.db")).expect("registry");
     let original = owner();

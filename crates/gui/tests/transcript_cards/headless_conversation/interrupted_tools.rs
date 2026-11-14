@@ -125,7 +125,7 @@ fn a_restored_orphan_run_interrupts_its_unfinished_call() {
     let storage = storage::Storage::open(config.clone()).unwrap();
     persist_unfinished_call(&storage, Record::Checkpointed);
     storage.close();
-    let registry = dir.sockets().join("owners.db");
+    let registry = dir.path().join("owners.db");
     drop(runtime::ownership::Registry::open(&registry).unwrap());
     let database = storage::Database::open(&config).unwrap();
 

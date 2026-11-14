@@ -5,9 +5,9 @@ use runtime::ownership::{Lease, Registry, ThreadOwner};
 
 #[test]
 fn ipc_handoff_requires_checkpoint_and_fences_previous_owner() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = test_socket_dir::SplitDir::new();
     let path = directory.path().join("owners.db");
-    let socket = directory.path().join("owner.sock");
+    let socket = directory.sockets().join("owner.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).expect("listener");
     let mut owner = ThreadOwner::new(
         "thread".into(),
