@@ -4,7 +4,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use workbench_protocol::namespaces::{
     ApprovalsCommand, ApprovalsEvent, ConversationCommand, ConversationEvent, ConversationQuery,
-    QuestionsCommand, QuestionsQuery, QuestionsReply,
+    ExecutionQuery, ExecutionReply, LanesQuery, LanesReply, QuestionsCommand, QuestionsQuery,
+    QuestionsReply,
+    execution::{RunDetailsQuery, RunScope},
+    lanes::ListLanes,
+    teams::TeamsQuery,
 };
 
 use event_bus::{EventBus, EventKind, ProviderEvent};
@@ -13,6 +17,7 @@ use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
+use workbench_host::areas::{Areas, execution::ExecutionArea, lanes::LanesArea, teams::TeamsArea};
 use workbench_host::{CommandHost, commands::CommandService, projects::StaticProjects};
 use workbench_protocol::{commands::*, envelope::*, events::*, handshake::*, ids::*, queries::*};
 use workbench_web::{WebServer, WebServerConfig};
@@ -30,6 +35,47 @@ fn send(thread: &str, submission: &str, text: &str) -> Command {
         fork_seed: None,
     }))
 }
+
+/// Read-only queries a screen sends to show runs, the team board and lanes. They are
+/// asked between two turns: the next provider request must still extend the first.
+fn display_queries() -> Vec<Query> {
+    let thread = ThreadId::new("thread").unwrap();
+    vec![
+        Query::Execution(ExecutionQuery::ListRunDetails(RunDetailsQuery {
+            thread: thread.clone(),
+            scope: RunScope::Roots,
+            page: Default::default(),
+        })),
+        Query::Execution(ExecutionQuery::GetThreadExecution(ThreadTarget {
+            thread: thread.clone(),
+        })),
+        Query::Teams(TeamsQuery::GetTeam(ThreadTarget {
+            thread: thread.clone(),
+        })),
+        Query::Teams(TeamsQuery::ListTeamTasks(ThreadQuery {
+            thread: thread.clone(),
+            page: Default::default(),
+        })),
+        Query::Lanes(LanesQuery::ListLanes(ListLanes {
+            lead_thread: thread.clone(),
+            policy: None,
+            detached: false,
+            page: Default::default(),
+        })),
+        Query::Teams(TeamsQuery::GetTeamTask(
+            workbench_protocol::namespaces::teams::TeamTaskRef {
+                thread,
+                task_id: "task-claimed".into(),
+            },
+        )),
+        Query::Lanes(LanesQuery::GetLane {
+            lane_id: workbench_protocol::lane_attention::LaneId::new(DISPLAY_LANE).unwrap(),
+        }),
+    ]
+}
+
+/// A lane stored in the ledger but never started, so reading it makes no provider request.
+const DISPLAY_LANE: &str = "lane-display";
 
 async fn turn(events: &mut event_bus::EventReceiver, run: runtime::RunId) {
     loop {
@@ -159,8 +205,16 @@ context_window_tokens = 1000000
         .with_ownership(owner.clone());
     let mut projects = StaticProjects::default();
     projects.insert(&ProjectId::new("project").unwrap(), dir.path().into());
+    let areas = Areas {
+        execution: ExecutionArea::with_runtime(runtime.clone()),
+        teams: TeamsArea::with_runtime(runtime.clone()),
+        lanes: LanesArea::with_runtime(runtime.clone()),
+        ..Areas::default()
+    };
     let host = Arc::new(Mutex::new(
-        CommandHost::new(service).with_projects(projects),
+        CommandHost::new(service)
+            .with_projects(projects)
+            .with_areas(areas),
     ));
     let instance = Instance::acquire(
         &evorch_core::instance::LaunchGuard::acquire(
@@ -215,6 +269,128 @@ context_window_tokens = 1000000
             page: Default::default(),
         },
     ));
+    // The thread's team board as a coordinator saved it (a claim included), so the team reads
+    // below return real tasks. Only a store write: no provider request is made.
+    bridge
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "thread".into(),
+            project_id: Some("project".into()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        }])
+        .unwrap();
+    let board = runtime::team::TeamBoard::durable(bridge.handle(), "project:thread".into());
+    for id in ["task-ready", "task-claimed"] {
+        board
+            .enqueue(runtime::team::TaskSpec {
+                id: id.into(),
+                paths: vec![format!("src/{id}.rs").into()],
+            })
+            .unwrap();
+    }
+    board.claim("task-claimed", "worker-1", 1).unwrap();
+    bridge
+        .handle()
+        .create_lane(storage::lanes::NewLane {
+            lane_id: DISPLAY_LANE.into(),
+            thread_id: "thread-lane-display".into(),
+            origin_thread_id: "thread".into(),
+            origin_run_id: run.to_string(),
+            creation_key: "open-display".into(),
+            brief: serde_json::from_value(serde_json::json!({
+                "objective": "display", "inputs": [], "deliverables": ["patch"],
+                "acceptance_criteria": ["review"], "constraints": [], "workspace": {},
+                "report_policy": "attached"
+            }))
+            .unwrap(),
+            start_seed: "{}".into(),
+            project_id: Some("project".into()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            title: None,
+            at_ns: 1,
+        })
+        .unwrap();
+    let display = display_queries();
+    let QueryReply::Execution(ExecutionReply::RunDetails(runs)) =
+        client.query(display[0].clone()).await.unwrap()
+    else {
+        panic!("run details reply")
+    };
+    assert_eq!(runs.items.len(), 1, "the thread's one root run is listed");
+    // The thread has one root run, a saved team board and a stored lane that has not started
+    // (a started lane would add provider requests of its own): every read must succeed with
+    // what exists, or the prefix check below would only prove that failing queries leave it
+    // alone.
+    let QueryReply::Execution(ExecutionReply::ThreadExecution(execution)) =
+        client.query(display[1].clone()).await.unwrap()
+    else {
+        panic!("thread execution reply")
+    };
+    assert_eq!(execution.root_run, Some(runs.items[0].summary.id.clone()));
+    let QueryReply::Teams(workbench_protocol::namespaces::teams::TeamsReply::Team(team)) =
+        client.query(display[2].clone()).await.unwrap()
+    else {
+        panic!("team reply")
+    };
+    assert_eq!((team.ready, team.claimed, team.complete), (1, 1, 0));
+    let QueryReply::Teams(workbench_protocol::namespaces::teams::TeamsReply::Tasks(tasks)) =
+        client.query(display[3].clone()).await.unwrap()
+    else {
+        panic!("team tasks reply")
+    };
+    assert_eq!(
+        tasks
+            .items
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect::<Vec<_>>(),
+        ["task-claimed", "task-ready"],
+        "the saved board's tasks are listed"
+    );
+    assert_eq!(tasks.items[0].owner.as_deref(), Some("worker-1"));
+    let QueryReply::Lanes(LanesReply::Lanes(lanes)) =
+        client.query(display[4].clone()).await.unwrap()
+    else {
+        panic!("lanes reply")
+    };
+    assert_eq!(
+        lanes
+            .items
+            .iter()
+            .map(|lane| lane.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        [DISPLAY_LANE],
+        "the stored lane is listed"
+    );
+    let QueryReply::Teams(workbench_protocol::namespaces::teams::TeamsReply::Task(task)) =
+        client.query(display[5].clone()).await.unwrap()
+    else {
+        panic!("team task reply")
+    };
+    assert_eq!(
+        (task.task_id.as_str(), task.owner.as_deref()),
+        ("task-claimed", Some("worker-1"))
+    );
+    let QueryReply::Lanes(LanesReply::Lane(lane_detail)) =
+        client.query(display[6].clone()).await.unwrap()
+    else {
+        panic!("lane detail reply")
+    };
+    assert_eq!(lane_detail.summary.lane_id.as_str(), DISPLAY_LANE);
+    let QueryReply::Execution(ExecutionReply::Run(run_detail)) = client
+        .query(Query::Execution(ExecutionQuery::GetRun(
+            workbench_protocol::namespaces::execution::RunRef {
+                thread: ThreadId::new("thread").unwrap(),
+                run: runs.items[0].summary.id.clone(),
+            },
+        )))
+        .await
+        .unwrap()
+    else {
+        panic!("run reply")
+    };
+    assert_eq!(*run_detail, runs.items[0]);
     let history = client.query(query.clone()).await.unwrap();
     let serialized = serde_json::to_string(&history).unwrap();
     assert!(serialized.contains("hello"));
@@ -249,6 +425,20 @@ context_window_tokens = 1000000
             .status()
             .is_success()
     );
+    for (n, query) in display.iter().enumerate() {
+        let response = http
+            .post(format!("{root}/api/v1/request"))
+            .header("Origin", &root)
+            .json(&RequestEnvelope {
+                request_id: RequestId::new(format!("web-display-{n}")).unwrap(),
+                session_id: SessionId::new("web-test").unwrap(),
+                body: RequestBody::Query(query.clone()),
+            })
+            .send()
+            .await
+            .unwrap();
+        let _: ReplyEnvelope = response.json().await.unwrap();
+    }
     let request = RequestEnvelope {
         request_id: RequestId::new("web-two").unwrap(),
         session_id: SessionId::new("web-test").unwrap(),

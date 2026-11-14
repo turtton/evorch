@@ -175,14 +175,7 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
                 cc.egui_ctx.clone(),
             ));
             Ok(Box::new(CoreClientApp {
-                shared,
-                actions: tx,
-                selected: None,
-                project: None,
-                answers: BTreeMap::new(),
-                attachment_path: String::new(),
-                composer_role: ComposerRole::Worker,
-                team: false,
+                screen: CoreClientScreen::new(shared, tx, None, None),
                 _runtime: runtime,
                 task,
             }))
@@ -191,7 +184,19 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// The height of the column in which the features are stacked.
+const FEATURES_MAX_HEIGHT: f32 = 420.0;
+
 pub struct CoreClientApp {
+    screen: CoreClientScreen,
+    _runtime: tokio::runtime::Runtime,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// What the window draws, apart from the runtime that serves the connection: the features, the
+/// selector and the conversation controls, over the shared projection. It is the whole page,
+/// so a test can draw exactly what the window draws.
+pub struct CoreClientScreen {
     shared: Arc<Mutex<Shared>>,
     actions: tokio::sync::mpsc::Sender<Action>,
     selected: Option<ThreadId>,
@@ -200,17 +205,45 @@ pub struct CoreClientApp {
     attachment_path: String,
     composer_role: ComposerRole,
     team: bool,
-    _runtime: tokio::runtime::Runtime,
-    task: tokio::task::JoinHandle<()>,
+}
+
+impl CoreClientScreen {
+    pub fn new(
+        shared: Arc<Mutex<Shared>>,
+        actions: tokio::sync::mpsc::Sender<Action>,
+        project: Option<ProjectId>,
+        selected: Option<ThreadId>,
+    ) -> Self {
+        Self {
+            shared,
+            actions,
+            selected,
+            project,
+            answers: BTreeMap::new(),
+            attachment_path: String::new(),
+            composer_role: ComposerRole::Worker,
+            team: false,
+        }
+    }
+
+    /// The page scrolls as a whole, so the conversation controls below a long feature column
+    /// stay reachable.
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .id_salt("core-client-page")
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.draw(ui));
+    }
 }
 
 impl Drop for CoreClientApp {
     fn drop(&mut self) {
+        let actions = self.screen.actions.clone();
         // Give the actor a bounded best-effort chance to discard known unused
         // attachments. This is resource cleanup, never an agent stop command.
         self._runtime.block_on(async {
             let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-                let _ = self.actions.send(Action::Shutdown).await;
+                let _ = actions.send(Action::Shutdown).await;
                 let _ = (&mut self.task).await;
             })
             .await;
@@ -306,6 +339,12 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
 
 impl eframe::App for CoreClientApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.screen.ui(ui);
+    }
+}
+
+impl CoreClientScreen {
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let mut shared = self
             .shared
             .lock()
@@ -335,7 +374,13 @@ impl eframe::App for CoreClientApp {
                 cache: &s.cache,
                 selection: &selection,
             };
-            s.features.render(ui, view)
+            // The column is given a bounded height: what is below it, the controls of the
+            // conversation, stays on the page.
+            ui.allocate_ui(
+                egui::vec2(ui.available_width(), FEATURES_MAX_HEIGHT),
+                |ui| s.features.render(ui, view),
+            )
+            .inner
         };
         apply_frame(
             &self.actions,

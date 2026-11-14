@@ -267,6 +267,8 @@ async fn area_tasks_are_stopped_and_drained_by_the_bootstrap_shutdown() {
     })
     .await
     .unwrap();
+    // The areas start event tasks of their own; the probe is one more.
+    let areas_running = boot.area_tasks.active();
     let (drained, completed) = tokio::sync::oneshot::channel();
     boot.area_tasks
         .spawn("probe", |mut stop| async move {
@@ -275,7 +277,7 @@ async fn area_tasks_are_stopped_and_drained_by_the_bootstrap_shutdown() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(boot.area_tasks.active(), 1);
+    assert_eq!(boot.area_tasks.active(), areas_running + 1);
     boot.shutdown().await.unwrap();
     // The task ran its drain before shutdown returned, and nothing new starts.
     completed.await.unwrap();

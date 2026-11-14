@@ -10,7 +10,9 @@ A lost command reply remains OutcomeUnknown. Reconnection uses the original rece
 
 The optional existing-thread import requires its canonical project already approved by the current host. The host rechecks tombstones and project identity/trust, and uses ADR0024 claim/restore only for a Released, demonstrably offline foreign owner. Live and uncertain owners are not acquired. The window never reads the owners registry, run DB or legacy sidebar itself.
 
-Unmigrated functionality is labelled Unsupported: project registration/trust changes, settings/model selection, lane/PR services, fork/rewind/delete/archive, files, terminals and browser. These must migrate through PR09–16 rather than direct DB access. The main embedded window and its existing tests remain separate.
+The execution, teams and lanes features (PR12) show, for the selected thread, its runs (roots, then the children of one run, with live/terminal/stopped/recovering and history-only told apart), goal, todo list and ledger, the team board and its tasks, and the lanes it leads (policy, detach, reattach, resume of held deliveries). They read everything from the core with typed queries; an event only triggers a new read, so a late event never moves the screen back.
+
+Unmigrated functionality is labelled Unsupported: project registration/trust changes, settings/model selection, PR services, fork/rewind/delete/archive, files, terminals and browser. These must migrate through PR09–16 rather than direct DB access. The main embedded window and its existing tests remain separate.
 
 ## Handoffs
 - PR08s: move conversation bootstrap/image operations into the planned protocol namespace. PR08 added only one top-level Command variant, Conversation, with nested operations.

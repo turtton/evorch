@@ -205,6 +205,18 @@ pub(crate) fn get(conn: &Connection, lane_id: &str) -> Result<Option<LaneRecord>
         .optional()?)
 }
 
+/// Every live lane that a lead manages now, as `(lane_id, lead_thread_id)` in lane ID order.
+pub(crate) fn managed_lane_leads(conn: &Connection) -> Result<Vec<(String, String)>, StorageError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT lane_id, lead_thread_id FROM lanes WHERE lead_thread_id IS NOT NULL AND {LIVE} \
+         ORDER BY lane_id"
+    ))?;
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 /// Internal live membership scan; unlike lane_list it creates no cursor snapshot.
 pub(crate) fn managed_lanes(
     conn: &Connection,
@@ -252,6 +264,46 @@ pub(crate) fn collection_view(
             })
         })
         .collect()
+}
+
+/// The lead of the lane's most recent reattach (NULL when it was never reattached), from the
+/// management receipts. Correlated with the `lanes` row of the enclosing query.
+const LAST_REATTACH_LEAD: &str = "SELECT json_extract(r.request_json, \
+        '$.action.payload.lead_thread_id') FROM lane_management_receipts r \
+     WHERE r.lane_id = lanes.lane_id \
+       AND json_extract(r.request_json, '$.action.type') = 'reattach' \
+     ORDER BY r.created_at_ns DESC, r.rowid DESC LIMIT 1";
+
+/// The leads that find `lane_id` again once it is detached: its origin thread and the lead of
+/// its latest reattach (see [`detached_lanes_for`]).
+pub(crate) fn lane_finders(conn: &Connection, lane_id: &str) -> Result<Vec<String>, StorageError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT origin_thread_id, ({LAST_REATTACH_LEAD}) FROM lanes WHERE lane_id = ?1"
+    ))?;
+    let row: Option<(String, Option<String>)> = statement
+        .query_row([lane_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()?;
+    Ok(row
+        .into_iter()
+        .flat_map(|(origin, last)| std::iter::once(origin).chain(last))
+        .collect())
+}
+
+/// Detached lanes `lead` can find again: opened from it, or last managed by it. The last
+/// lead is the target of the lane's most recent reattach receipt (a detach clears
+/// `lead_thread_id`, so the ledger row alone no longer names it).
+pub(crate) fn detached_lanes_for(
+    conn: &Connection,
+    lead: &str,
+) -> Result<Vec<LaneRecord>, StorageError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM lanes WHERE lead_thread_id IS NULL AND {LIVE} AND \
+         (origin_thread_id = ?1 OR ?1 = ({LAST_REATTACH_LEAD})) ORDER BY lane_id"
+    ))?;
+    statement
+        .query_map([lead], from_row)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 /// Identity lookup deliberately ignores current lead/policy: detached intents

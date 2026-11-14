@@ -1,1 +1,116 @@
-{}
+{
+  "query/teams/get_team": {
+    "payload": {
+      "payload": {
+        "thread": "thread-1"
+      },
+      "type": "get_team"
+    },
+    "type": "teams"
+  },
+  "query/teams/get_team_task": {
+    "payload": {
+      "payload": {
+        "task_id": "task-1",
+        "thread": "thread-1"
+      },
+      "type": "get_team_task"
+    },
+    "type": "teams"
+  },
+  "query/teams/list_team_tasks": {
+    "payload": {
+      "payload": {
+        "page": {
+          "limit": 50
+        },
+        "thread": "thread-1"
+      },
+      "type": "list_team_tasks"
+    },
+    "type": "teams"
+  },
+  "query_reply/teams/task": {
+    "payload": {
+      "payload": {
+        "claim_generation": "1",
+        "owner": "worker-1",
+        "owner_run": "run-2",
+        "paths": [
+          "src/lib.rs"
+        ],
+        "revision": "6",
+        "state": "claimed",
+        "task_id": "task-1"
+      },
+      "type": "task"
+    },
+    "type": "teams"
+  },
+  "query_reply/teams/tasks": {
+    "payload": {
+      "payload": {
+        "items": [
+          {
+            "claim_generation": "1",
+            "owner": "worker-1",
+            "owner_run": "run-2",
+            "paths": [
+              "src/lib.rs"
+            ],
+            "revision": "6",
+            "state": "claimed",
+            "task_id": "task-1"
+          }
+        ],
+        "snapshot_revision": "9"
+      },
+      "type": "tasks"
+    },
+    "type": "teams"
+  },
+  "query_reply/teams/team": {
+    "payload": {
+      "payload": {
+        "claimed": 1,
+        "complete": 0,
+        "members": [
+          {
+            "claimed_tasks": 1,
+            "owner": "worker-1",
+            "run": "run-2"
+          }
+        ],
+        "ready": 1,
+        "revision": "5",
+        "source": "persisted",
+        "thread": "thread-1"
+      },
+      "type": "team"
+    },
+    "type": "teams"
+  },
+  "ui_event/teams/team_changed": {
+    "payload": {
+      "payload": {
+        "team": {
+          "claimed": 1,
+          "complete": 0,
+          "members": [
+            {
+              "claimed_tasks": 1,
+              "owner": "worker-1",
+              "run": "run-2"
+            }
+          ],
+          "ready": 1,
+          "revision": "5",
+          "source": "persisted",
+          "thread": "thread-1"
+        }
+      },
+      "type": "team_changed"
+    },
+    "type": "teams"
+  }
+}

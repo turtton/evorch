@@ -1,6 +1,5 @@
-//! Teams namespace adapter (reserved). The namespace has no operations yet,
-//! so its command and query types are empty and these bodies are unreachable;
-//! the PR that implements it replaces them, without editing the shared router.
+//! Teams namespace adapter: the board is read by the teams area. The namespace
+//! has no command, so its command type is empty and that arm is unreachable.
 use workbench_protocol::commands::CommandReply;
 use workbench_protocol::envelope::Provenance;
 use workbench_protocol::errors::WorkbenchError;
@@ -20,9 +19,9 @@ impl CommandHost {
 
     pub(in crate::ingress) fn teams_query(
         &self,
-        _query: &Query,
-        query: &TeamsQuery,
+        query: &Query,
+        teams_query: &TeamsQuery,
     ) -> Result<QueryReply, WorkbenchError> {
-        match *query {}
+        self.areas.teams.query(query, teams_query)
     }
 }

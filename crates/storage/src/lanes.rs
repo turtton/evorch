@@ -290,6 +290,52 @@ impl crate::Database {
         crate::repo::lanes::get_by_thread(&self.conn, thread_id)
     }
 
+    /// Every live lane that a lead manages now, as `(lane_id, lead_thread_id)` in lane ID
+    /// order. A read-only scan, used to learn who each lane's lead is when nothing has
+    /// announced it yet (after a restart).
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn managed_lane_leads(&self) -> Result<Vec<(String, String)>, crate::StorageError> {
+        crate::repo::lanes::managed_lane_leads(&self.conn)
+    }
+
+    /// The lanes `lead_thread_id` currently manages, in lane ID order. A read
+    /// only membership scan: unlike `lane_list` it stores no cursor listing.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn managed_lanes(
+        &self,
+        lead_thread_id: &str,
+    ) -> Result<Vec<LaneRecord>, crate::StorageError> {
+        crate::repo::lanes::managed_lanes(&self.conn, lead_thread_id)
+    }
+
+    /// The detached lanes (no lead manages them now) that `lead_thread_id` can find again,
+    /// in lane ID order: those opened from it, and those it managed last (the lead of the
+    /// most recent reattach, taken from the management receipts). A lane moved from A to B
+    /// and detached there is found from B (and still from A, its origin). A read-only
+    /// scan, so a client can find a detached lane again.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn detached_lanes_for(
+        &self,
+        lead_thread_id: &str,
+    ) -> Result<Vec<LaneRecord>, crate::StorageError> {
+        crate::repo::lanes::detached_lanes_for(&self.conn, lead_thread_id)
+    }
+
+    /// The leads that can find `lane_id` again once it is detached (see
+    /// [`Self::detached_lanes_for`]); empty for an unknown lane.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn lane_finders(&self, lane_id: &str) -> Result<Vec<String>, crate::StorageError> {
+        crate::repo::lanes::lane_finders(&self.conn, lane_id)
+    }
+
     /// Reports of a lane after `after_seq`, oldest first, at most
     /// [`LANE_REPORTS_PAGE_MAX`].
     ///

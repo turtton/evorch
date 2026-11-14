@@ -1,1 +1,174 @@
-{}
+{
+  "query/execution/get_run": {
+    "payload": {
+      "payload": {
+        "run": "run-1",
+        "thread": "thread-1"
+      },
+      "type": "get_run"
+    },
+    "type": "execution"
+  },
+  "query/execution/get_thread_execution": {
+    "payload": {
+      "payload": {
+        "thread": "thread-1"
+      },
+      "type": "get_thread_execution"
+    },
+    "type": "execution"
+  },
+  "query/execution/list_run_details": {
+    "payload": {
+      "payload": {
+        "page": {
+          "limit": 50
+        },
+        "scope": {
+          "type": "roots"
+        },
+        "thread": "thread-1"
+      },
+      "type": "list_run_details"
+    },
+    "type": "execution"
+  },
+  "query_reply/execution/run": {
+    "payload": {
+      "payload": {
+        "child_count": 2,
+        "lifecycle": "active",
+        "model": "model-1",
+        "name": "orchestrator",
+        "revision": "7",
+        "source": "live",
+        "summary": {
+          "id": "run-1",
+          "phase": "running",
+          "revision": "1",
+          "role": "orchestrator",
+          "thread": "thread-1"
+        }
+      },
+      "type": "run"
+    },
+    "type": "execution"
+  },
+  "query_reply/execution/run_details": {
+    "payload": {
+      "payload": {
+        "items": [
+          {
+            "child_count": 2,
+            "lifecycle": "active",
+            "model": "model-1",
+            "name": "orchestrator",
+            "revision": "7",
+            "source": "live",
+            "summary": {
+              "id": "run-1",
+              "phase": "running",
+              "revision": "1",
+              "role": "orchestrator",
+              "thread": "thread-1"
+            }
+          }
+        ],
+        "snapshot_revision": "9"
+      },
+      "type": "run_details"
+    },
+    "type": "execution"
+  },
+  "query_reply/execution/thread_execution": {
+    "payload": {
+      "payload": {
+        "goal": {
+          "checks": [
+            {
+              "criterion": 0,
+              "evidence": "ci green",
+              "met": true
+            }
+          ],
+          "checks_paused": false,
+          "criteria": [
+            "tests pass"
+          ],
+          "epoch": "4",
+          "findings": [],
+          "goal": "goal-1",
+          "max_review_rounds": 3,
+          "objective": "ship it",
+          "phase": "reviewing",
+          "review_enabled": true,
+          "review_round": 1,
+          "root_run": "run-1",
+          "work_stopped": false
+        },
+        "ledger": {
+          "body": "notes",
+          "run": "run-1",
+          "seq": "3",
+          "truncated": false
+        },
+        "root_run": "run-1",
+        "thread": "thread-1",
+        "todo": {
+          "items": [
+            {
+              "content": "write tests",
+              "status": "in_progress"
+            }
+          ],
+          "list_id": "list-1",
+          "revision": "2"
+        }
+      },
+      "type": "thread_execution"
+    },
+    "type": "execution"
+  },
+  "ui_event/execution/thread_execution_changed": {
+    "payload": {
+      "payload": {
+        "goal": {
+          "checks": [
+            {
+              "criterion": 0,
+              "evidence": "ci green",
+              "met": true
+            }
+          ],
+          "checks_paused": false,
+          "criteria": [
+            "tests pass"
+          ],
+          "epoch": "4",
+          "findings": [],
+          "goal": "goal-1",
+          "max_review_rounds": 3,
+          "objective": "ship it",
+          "phase": "reviewing",
+          "review_enabled": true,
+          "review_round": 1,
+          "root_run": "run-1",
+          "work_stopped": false
+        },
+        "thread": "thread-1",
+        "todo": {
+          "items": [
+            {
+              "content": "write tests",
+              "status": "in_progress"
+            }
+          ],
+          "list_id": "list-1",
+          "revision": "2"
+        }
+      },
+      "type": "thread_execution_changed"
+    },
+    "type": "execution"
+  }
+}

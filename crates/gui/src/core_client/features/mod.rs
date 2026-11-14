@@ -61,6 +61,8 @@ pub mod mcp;
 pub mod teams;
 pub mod workspace;
 
+mod layout;
+
 use super::cache::Cache;
 use workbench_protocol::{
     commands::{Command, CommandReply},
@@ -468,19 +470,26 @@ fn render_all(
     view: FeatureView<'_>,
 ) -> FeatureFrame {
     let mut frame = FeatureFrame::default();
-    for feature in features
-        .iter_mut()
-        .filter(|f| is_available(f.as_ref(), view.connected, view.capabilities))
-    {
-        let mut ctx = FeatureContext {
-            feature: feature.id(),
-            view,
-            frame: &mut frame,
-        };
-        egui::CollapsingHeader::new(feature.title())
-            .default_open(true)
-            .show(ui, |ui| feature.render(ui, &mut ctx));
-    }
+    // The features are stacked in one scrolling column, as tall as the space given to it.
+    egui::ScrollArea::vertical()
+        .id_salt("features")
+        .auto_shrink([false, true])
+        .max_height(ui.available_height())
+        .show(ui, |ui| {
+            for feature in features
+                .iter_mut()
+                .filter(|f| is_available(f.as_ref(), view.connected, view.capabilities))
+            {
+                let mut ctx = FeatureContext {
+                    feature: feature.id(),
+                    view,
+                    frame: &mut frame,
+                };
+                egui::CollapsingHeader::new(feature.title())
+                    .default_open(true)
+                    .show(ui, |ui| feature.render(ui, &mut ctx));
+            }
+        });
     frame
 }
 

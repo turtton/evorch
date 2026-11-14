@@ -436,3 +436,295 @@ async fn the_core_bootstrap_delivers_a_lane_report_and_a_lead_answer_by_restorin
     );
     core.boot.shutdown().await.unwrap();
 }
+
+/// What a client that subscribed before an action is told about afterwards.
+struct Client(workbench_host::subscriptions::Subscription);
+
+impl Client {
+    /// Waits for the next event `wanted` accepts. The core announces what changed after it is
+    /// stored, so a read made once this returns already sees the change.
+    async fn until<T>(
+        &mut self,
+        wanted: impl Fn(&workbench_protocol::events::UiEvent) -> Option<T>,
+    ) -> T {
+        loop {
+            let envelope = self.0.recv().await.expect("the subscription stays open");
+            if let Some(found) = wanted(&envelope.event) {
+                return found;
+            }
+        }
+    }
+
+    async fn lane_changed(&mut self, lane_id: &str) {
+        self.until(|event| match event {
+            workbench_protocol::events::UiEvent::Lanes(
+                workbench_protocol::namespaces::LanesEvent::LaneChanged { lane, .. },
+            ) if lane.lane_id.as_str() == lane_id => Some(()),
+            _ => None,
+        })
+        .await;
+    }
+
+    async fn execution_changed(&mut self, thread: &str) {
+        self.until(|event| match event {
+            workbench_protocol::events::UiEvent::Execution(
+                workbench_protocol::namespaces::ExecutionEvent::ThreadExecutionChanged {
+                    thread: changed,
+                    ..
+                },
+            ) if changed.as_str() == thread => Some(()),
+            _ => None,
+        })
+        .await;
+    }
+}
+
+impl Core {
+    /// A client subscribed to one thread only.
+    fn client_of(&self, thread: &str) -> Client {
+        let host = self.boot.host.lock().unwrap();
+        Client(
+            host.projection()
+                .subscribe_with_snapshot(&workbench_protocol::events::Subscribe {
+                    scope: workbench_protocol::events::SubscriptionScope::Thread {
+                        thread: ThreadId::new(thread).unwrap(),
+                    },
+                    after: None,
+                })
+                .unwrap(),
+        )
+    }
+
+    fn client(&self) -> Client {
+        let host = self.boot.host.lock().unwrap();
+        Client(
+            host.projection()
+                .subscribe_with_snapshot(&workbench_protocol::events::Subscribe {
+                    scope: workbench_protocol::events::SubscriptionScope::All,
+                    after: None,
+                })
+                .unwrap(),
+        )
+    }
+
+    fn query(&self, id: &str, query: Query) -> QueryReply {
+        match self.request(id, RequestBody::Query(query)) {
+            ReplyPayload::Query(reply) => reply,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn lane_detail(&self, lane_id: &str) -> workbench_protocol::namespaces::lanes::LaneDetail {
+        let QueryReply::Lanes(workbench_protocol::namespaces::LanesReply::Lane(detail)) = self
+            .query(
+                "lane-detail",
+                Query::Lanes(workbench_protocol::namespaces::LanesQuery::GetLane {
+                    lane_id: workbench_protocol::lane_attention::LaneId::new(lane_id).unwrap(),
+                }),
+            )
+        else {
+            panic!("a lane detail was expected");
+        };
+        *detail
+    }
+
+    fn execution(
+        &self,
+        thread: &str,
+    ) -> workbench_protocol::namespaces::execution::ThreadExecution {
+        let QueryReply::Execution(workbench_protocol::namespaces::ExecutionReply::ThreadExecution(
+            execution,
+        )) = self.query(
+            "thread-execution",
+            Query::Execution(
+                workbench_protocol::namespaces::ExecutionQuery::GetThreadExecution(
+                    workbench_protocol::commands::ThreadTarget {
+                        thread: ThreadId::new(thread).unwrap(),
+                    },
+                ),
+            ),
+        )
+        else {
+            panic!("a thread execution was expected");
+        };
+        *execution
+    }
+
+    fn project(&self) -> ProjectId {
+        let QueryReply::Workspace(WorkspaceReply::Projects(projects)) = self.query(
+            "project-of",
+            Query::Workspace(WorkspaceQuery::ListProjects(Default::default())),
+        ) else {
+            panic!("expected the project list");
+        };
+        projects.items[0].id.clone()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_operator_stop_and_continue_reach_every_client_and_the_held_notice_is_delivered() {
+    let mut core = Core::open().await;
+    let lead = core.start_lead();
+    core.phase(&[lead], AgentRunPhase::Waiting).await;
+    let lane = core
+        .boot
+        .runtime
+        .open_lane(lead, "stop-lane", brief())
+        .unwrap();
+    core.phase(&[lane.root_run_id], AgentRunPhase::Waiting)
+        .await;
+    assert!(!core.lane_detail(&lane.lane_id).delivery.held);
+
+    // The operator stops the lead: both clients are told, and the ledger says it is held.
+    let mut clients = [core.client(), core.client()];
+    core.boot
+        .runtime
+        .stop(lead, runtime::StopScope::SelfOnly)
+        .unwrap();
+    core.phase(&[lead], AgentRunPhase::Stopped).await;
+    for client in &mut clients {
+        client.lane_changed(&lane.lane_id).await;
+    }
+    assert!(core.lane_detail(&lane.lane_id).delivery.held);
+
+    // A report made while the lead is stopped stays held and is not shown to it.
+    core.script(
+        lane.root_run_id,
+        tool(
+            "report",
+            "lane_report",
+            serde_json::json!({"status":"ready","summary":REPORT,"artifact_refs":["artifact:held"]}),
+        ),
+        "report while the lead is stopped",
+    );
+    core.phase(&[lane.root_run_id], AgentRunPhase::Waiting)
+        .await;
+    assert!(!core.saw(lead, REPORT));
+    assert!(core.lane_detail(&lane.lane_id).delivery.held);
+
+    // Continue: both clients are told again, and the held report reaches the lead.
+    let mut clients = [core.client(), core.client()];
+    let ReplyPayload::Command(_) = core.request(
+        "continue",
+        RequestBody::Command(Command::Conversation(ConversationCommand::ContinueChat(
+            workbench_protocol::commands::ContinueChat {
+                project: core.project(),
+                thread: ThreadId::new(LEAD).unwrap(),
+                composer_role: ComposerRole::Orchestrator,
+                model_preference: None,
+            },
+        ))),
+    ) else {
+        panic!("expected a command reply");
+    };
+    for client in &mut clients {
+        client.lane_changed(&lane.lane_id).await;
+    }
+    core.drive(LEAD).await;
+    assert!(core.saw(lead, REPORT), "the held report was delivered");
+    assert!(!core.lane_detail(&lane.lane_id).delivery.held);
+    core.boot.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_working_note_written_or_cleared_alone_reaches_every_client() {
+    let mut core = Core::open().await;
+    let lead = core.start_lead();
+    core.phase(&[lead], AgentRunPhase::Waiting).await;
+    assert!(core.execution(LEAD).ledger.is_none());
+
+    let mut clients = [core.client(), core.client()];
+    core.script(
+        lead,
+        tool(
+            "note-1",
+            "working_note_write",
+            serde_json::json!({"body":"first working note"}),
+        ),
+        "write the working note",
+    );
+    for client in &mut clients {
+        client.execution_changed(LEAD).await;
+    }
+    let written = core.execution(LEAD);
+    assert!(written.goal.is_none() && written.todo.is_none());
+    assert_eq!(
+        written.ledger.as_ref().map(|ledger| ledger.body.as_str()),
+        Some("first working note")
+    );
+
+    // Clearing is a note too: the view follows it although goal and todo never changed.
+    let mut clients = [core.client(), core.client()];
+    core.script(
+        lead,
+        tool(
+            "note-2",
+            "working_note_write",
+            serde_json::json!({"body":""}),
+        ),
+        "clear the working note",
+    );
+    for client in &mut clients {
+        client.execution_changed(LEAD).await;
+    }
+    let cleared = core.execution(LEAD).ledger.expect("the clear is an entry");
+    assert!(cleared.body.is_empty());
+    assert!(cleared.seq > written.ledger.unwrap().seq);
+    core.boot.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_detach_reaches_the_lead_that_detached_the_lane_and_the_lane_thread_when_scoped() {
+    let mut core = Core::open().await;
+    let lead = core.start_lead();
+    core.phase(&[lead], AgentRunPhase::Waiting).await;
+    let lane = core
+        .boot
+        .runtime
+        .open_lane(lead, "detach-lane", brief())
+        .unwrap();
+    core.phase(&[lane.root_run_id], AgentRunPhase::Waiting)
+        .await;
+    let revision = core.lane_detail(&lane.lane_id).summary.management_revision;
+
+    // Each client sees only its own thread: the lead's and the lane's.
+    let (mut of_lead, mut of_lane) = (core.client_of(LEAD), core.client_of(&lane.thread_id));
+    let ReplyPayload::Command(_) = core.request(
+        "detach",
+        RequestBody::Command(Command::Lanes(
+            workbench_protocol::namespaces::LanesCommand::ManageLane(
+                workbench_protocol::lane_management::ManageLane {
+                    request: workbench_protocol::lane_management::LaneManagementRequest {
+                        operation_id:
+                            workbench_protocol::lane_management::LaneManagementOperationId::new(
+                                "detach-1",
+                            )
+                            .unwrap(),
+                        lane_id: workbench_protocol::lane_attention::LaneId::new(&lane.lane_id)
+                            .unwrap(),
+                        expected_management_revision: revision,
+                        action: workbench_protocol::lane_management::LaneManagementAction::Detach,
+                    },
+                    expected_family_revision: None,
+                },
+            ),
+        )),
+    ) else {
+        panic!("expected a command reply");
+    };
+    // The lane has no lead now, yet the lead that managed it hears of the detach.
+    for client in [&mut of_lead, &mut of_lane] {
+        let detached = client
+            .until(|event| match event {
+                workbench_protocol::events::UiEvent::Lanes(
+                    workbench_protocol::namespaces::LanesEvent::LaneChanged {
+                        lane: changed, ..
+                    },
+                ) if changed.lane_id.as_str() == lane.lane_id => Some(changed.clone()),
+                _ => None,
+            })
+            .await;
+        assert!(detached.lead_thread_id.is_none());
+    }
+    core.boot.shutdown().await.unwrap();
+}
