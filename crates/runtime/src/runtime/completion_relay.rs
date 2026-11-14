@@ -75,7 +75,9 @@ impl AgentRuntime {
                 .enter(|| self.shared.dispatch_tails.register(true))
                 .ok()
         } else {
-            self.shared.dispatch_tails.register(true).ok()
+            // A live run may naturally finish while shutdown joins producers.
+            // This does not admit ordinary work, and closed remains a violation.
+            self.shared.dispatch_tails.register_required_terminal().ok()
         };
         #[cfg(test)]
         if let Ok(execution) = self.execution_snapshot(run_id) {

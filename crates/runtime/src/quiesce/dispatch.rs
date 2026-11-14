@@ -193,6 +193,13 @@ impl DispatchTails {
         self: &Arc<Self>,
         required: bool,
     ) -> Result<DispatchGuard, RuntimeError> {
+        self.register_with_purpose(required, false)
+    }
+    fn register_with_purpose(
+        self: &Arc<Self>,
+        required: bool,
+        terminal: bool,
+    ) -> Result<DispatchGuard, RuntimeError> {
         let parent = SYNC_PARENT
             .with(|p| p.borrow().last().cloned())
             .filter(|g| Arc::ptr_eq(&g.0.tails, self))
@@ -205,7 +212,12 @@ impl DispatchTails {
         if let Some(parent) = parent {
             return Ok(parent.fork());
         }
-        self.register_root(required, false)
+        self.register_root(required, terminal)
+    }
+    pub(crate) fn register_required_terminal(
+        self: &Arc<Self>,
+    ) -> Result<DispatchGuard, RuntimeError> {
+        self.register_with_purpose(true, true)
     }
     fn register_root(
         self: &Arc<Self>,

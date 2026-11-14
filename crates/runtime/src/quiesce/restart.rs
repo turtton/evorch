@@ -254,6 +254,9 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut inner = self.shared.quiesce.lock();
+        if inner.shutting_down {
+            return Ok(());
+        }
         self.shared.dispatch_tails.terminal_handoff()?;
         inner.generation = inner
             .generation
