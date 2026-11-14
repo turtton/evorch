@@ -120,17 +120,20 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
         let fence = source.fence_dispatch_restart().await.unwrap();
         source.drain_dispatch_tails(&fence).await.unwrap();
         let records = source
-            .capture_recovery_records(&BTreeMap::from([(
-                run,
-                RecoveryRecipe {
-                    settings_reference: CORE_RECOVERY_SETTINGS_REFERENCE.into(),
-                    policy: ResumePolicy::CoreOwned,
-                    goal_id: None,
-                    team: None,
-                    lane: None,
-                    descriptor: None,
-                },
-            )]))
+            .capture_recovery_records(
+                &fence,
+                &BTreeMap::from([(
+                    run,
+                    RecoveryRecipe {
+                        settings_reference: CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                        policy: ResumePolicy::CoreOwned,
+                        goal_id: None,
+                        team: None,
+                        lane: None,
+                        descriptor: None,
+                    },
+                )]),
+            )
             .unwrap();
         let manifests = source
             .save_recovery_graph("coordinator-test", &records)
@@ -494,7 +497,7 @@ async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
     source.wait_quiesced().await.unwrap();
     let fence = source.fence_dispatch_restart().await.unwrap();
     source.drain_dispatch_tails(&fence).await.unwrap();
-    let records = source.capture_recovery_records(&recipes).unwrap();
+    let records = source.capture_recovery_records(&fence, &recipes).unwrap();
     source
         .save_recovery_graph("mixed-claims", &records)
         .unwrap();
