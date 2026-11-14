@@ -43,13 +43,25 @@ impl LoopState {
                         .quiesce
                         .acknowledged(self.task.run_id, &self.task.publication.incarnation())
                 {
-                    match self.capture_safe_point(boundary) {
-                        Ok(()) => runtime.shared.quiesce.acknowledge(
-                            self.task.run_id,
-                            &self.task.publication.incarnation(),
-                            generation,
-                        ),
-                        Err(error) => runtime.shared.quiesce.fail(error),
+                    let incarnation = self.task.publication.incarnation();
+                    if let Some(kind) = self.restart_safety_blocker() {
+                        runtime
+                            .shared
+                            .quiesce
+                            .block(self.task.run_id, &incarnation, kind);
+                    } else {
+                        runtime
+                            .shared
+                            .quiesce
+                            .clear_blocker(self.task.run_id, &incarnation);
+                        match self.capture_safe_point(boundary) {
+                            Ok(()) => runtime.shared.quiesce.acknowledge(
+                                self.task.run_id,
+                                &self.task.publication.incarnation(),
+                                generation,
+                            ),
+                            Err(error) => runtime.shared.quiesce.fail(error),
+                        }
                     }
                 }
             }
@@ -58,6 +70,19 @@ impl LoopState {
                 changed = self.channels.cancel_rx.changed() => { if changed.is_err() { return false; } }
                 changed = changes.changed() => { if changed.is_err() { return false; } }
             }
+        }
+    }
+
+    fn restart_safety_blocker(&self) -> Option<RestartBlockerKind> {
+        let run = self.task.run_id.to_string();
+        if self.shared.executor.has_running_shell_jobs(&run) {
+            Some(RestartBlockerKind::ShellRunning)
+        } else if self.shared.executor.has_unobserved_shell_jobs(&run) {
+            Some(RestartBlockerKind::ShellResultUnobserved)
+        } else if self.run_js_unconfirmed_detail().is_some() {
+            Some(RestartBlockerKind::UnconfirmedRunJs)
+        } else {
+            None
         }
     }
 

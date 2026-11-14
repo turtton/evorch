@@ -172,14 +172,14 @@ impl LoopState {
         }
         match self.pending_waits(reply) {
             Ok(waits) => self.recovery_waits = waits,
-            Err(error) => {
-                runtime.shared.quiesce.fail(error);
-                // Still retain the incarnation and its live observation future.
-                while !self.channels.cancel_rx.borrow().is_interrupted() {
-                    if self.channels.cancel_rx.changed().await.is_err() {
-                        break;
-                    }
-                }
+            Err(_) => {
+                // Keep the original observation future live. An unfinished batch
+                // may resolve normally, but is not evidence for a restart ACK.
+                runtime.shared.quiesce.block(
+                    self.task.run_id,
+                    &self.task.publication.incarnation(),
+                    crate::quiesce::RestartBlockerKind::UnfinishedToolBatch,
+                );
                 return;
             }
         }

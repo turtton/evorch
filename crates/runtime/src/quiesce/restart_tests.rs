@@ -132,3 +132,55 @@ async fn sealed_shutdown_never_grants_a_turn_resume() {
     );
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn accepted_input_invalidates_the_current_ack_before_a_new_seal() {
+    let f = Fixture::new(0);
+    let run = f.start();
+    let attempt = f.runtime.begin_restart_quiesce().unwrap();
+    f.runtime.wait_quiesced().await.unwrap();
+    let incarnation = f.intent(run).incarnation;
+    assert!(f.runtime.shared.quiesce.acknowledged(run, &incarnation));
+    f.runtime
+        .queue_intent_input(
+            run,
+            DurableInput {
+                id: "during-park".into(),
+                text: "new input".into(),
+                images: vec![],
+                trusted_user: true,
+            },
+        )
+        .unwrap();
+    assert!(!f.runtime.shared.quiesce.acknowledged(run, &incarnation));
+    assert!(!f.runtime.complete_restart_safe_points().unwrap());
+    f.runtime.wait_quiesced().await.unwrap();
+    assert!(f.runtime.shared.quiesce.acknowledged(run, &incarnation));
+    f.runtime.cancel_restart_quiesce(&attempt).unwrap();
+    f.cleanup(run).await;
+}
+
+#[tokio::test]
+async fn stop_before_sealing_keeps_attempt_and_other_parked_execution() {
+    let f = Fixture::new(0);
+    let target = f.start();
+    f.model.entered.notified().await;
+    let other = f.start();
+    let attempt = f.runtime.begin_restart_quiesce().unwrap();
+    let mut changes = f.runtime.subscribe_restart_state();
+    while f.intent(other).checkpoint.is_none() {
+        changes.changed().await.unwrap();
+    }
+    f.runtime.stop(target, crate::StopScope::SelfOnly).unwrap();
+    f.runtime.wait(target).await.unwrap();
+    assert_eq!(
+        attempt.generation(),
+        f.runtime.begin_restart_quiesce().unwrap().generation()
+    );
+    f.runtime.wait_quiesced().await.unwrap();
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 1);
+    assert!(f.intent(other).checkpoint.is_some());
+    f.runtime.cancel_restart_quiesce(&attempt).unwrap();
+    f.model.entered.notified().await;
+    f.cleanup(other).await;
+}

@@ -178,6 +178,7 @@ impl AgentRuntime {
             inner.intents.insert(run, intent);
         }
         inner.acks.clear();
+        inner.blockers.clear();
         inner.resumed_through = generation;
         inner.cancelling = false;
         inner.sealing = false;

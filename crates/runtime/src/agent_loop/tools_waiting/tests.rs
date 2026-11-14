@@ -495,3 +495,36 @@ async fn reply_continuation(expired: bool) {
     assert!(state.resume_recovery_waits().await);
     assert_eq!(state.context.messages.len(), before_timeout + 1);
 }
+
+#[tokio::test]
+async fn unstarted_reply_wait_is_temporary_and_does_not_invent_a_deadline() {
+    let (_dir, _storage, runtime, mut state) =
+        crate::agent_loop::continuity_tests::stored_fixture_in("unstarted-reply.db", false).await;
+    let run = state.task.run_id;
+    state.task.publication = runtime.execution_snapshot(run).unwrap().publication();
+    state.context.push_assistant(Message {
+        role: MessageRole::Assistant,
+        content: vec![call(
+            "reply-not-started",
+            "wait_reply",
+            json!({"message_id":"not-started"}),
+        )],
+    });
+    let before = state.context.messages.clone();
+    let attempt = runtime.begin_restart_quiesce().unwrap();
+    state.quiesce_tools_waiting(None).await;
+    assert_eq!(
+        runtime.restart_blockers()[0].kind,
+        crate::quiesce::RestartBlockerKind::UnfinishedToolBatch
+    );
+    assert!(state.recovery_waits.is_empty());
+    assert_eq!(state.context.messages, before);
+    assert!(!matches!(
+        runtime.quiesce_state(),
+        crate::quiesce::QuiesceState::Failed { .. }
+    ));
+    assert!(futures_util::poll!(Box::pin(runtime.wait_quiesced()).as_mut()).is_pending());
+    runtime.cancel_restart_quiesce(&attempt).unwrap();
+    assert!(runtime.restart_blockers().is_empty());
+    runtime.cancel(run).unwrap();
+}

@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard};
 use tokio::sync::watch;
 
+mod blockers;
+pub use blockers::{RestartBlocker, RestartBlockerKind};
 mod deferred;
 #[cfg(test)]
 mod fixture;
@@ -57,6 +59,7 @@ struct Inner {
     // Prepared recovery has no running turn; its activation start gate is closed.
     unstarted: BTreeSet<RunId>,
     deferred_wakes: BTreeMap<RunId, String>,
+    blockers: BTreeMap<RunId, RestartBlocker>,
     intents: BTreeMap<RunId, ResumeIntent>,
     persisted: BTreeSet<RunId>,
 }
@@ -524,6 +527,7 @@ impl Coordinator {
                 .checked_add(1)
                 .ok_or("restart generation exhausted")?;
             inner.acks.clear();
+            inner.blockers.clear();
             inner.requested = true;
             inner.phase = QuiesceState::WaitingForSafePoints;
             self.changed();
