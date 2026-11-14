@@ -757,3 +757,89 @@ fn a_lane_that_moved_while_the_dialog_is_open_must_be_reloaded_before_confirming
         .get_by_label("この画面を読んだ後に lane が変わりました。Reload してから決めてください。");
     assert!(disabled(&screen, "lane を閉じる"));
 }
+
+fn open_close_dialog(
+    screen: &mut egui_kittest::Harness<
+        'static,
+        crate::core_client::features::execution::tests::Screen,
+    >,
+) -> u64 {
+    screen.get_by_label("人間の判断で閉じる…").click();
+    let read = asked(screen);
+    tag_of(&read, is_preview)
+}
+
+#[test]
+fn a_late_answer_to_a_close_that_was_sent_never_acts_on_a_later_confirmation() {
+    let mut screen = with_close_dialog("人間の判断で閉じる…", preview(3, 5, 2));
+    type_reason(&mut screen, "done");
+    screen.get_by_label("lane を閉じる").click();
+    let sent = asked(&mut screen);
+    let first = sent[0].tag;
+    // The person gives up waiting, and opens the confirmation of the same lane again.
+    screen.get_by_label("キャンセル").click();
+    let again = open_close_dialog(&mut screen);
+    answer(&mut screen, again, preview(4, 6, 2));
+
+    // The old close is refused late: the new confirmation shows none of it.
+    let mut refusal = FeatureError::new("stale_request");
+    refusal.code = Some(workbench_protocol::errors::ErrorCode::StaleRevision);
+    answer(&mut screen, first, FeatureReply::Command(Err(refusal)));
+    assert!(
+        screen
+            .query_by_label_contains("lane が変わっていたため記録していません")
+            .is_none()
+    );
+    type_reason(&mut screen, "second");
+    assert!(!disabled(&screen, "lane を閉じる"));
+
+    // Had it been recorded instead, the new confirmation is still the one on screen.
+    screen.get_by_label("lane を閉じる").click();
+    let resent = asked(&mut screen);
+    let second = resent
+        .iter()
+        .find(|a| matches!(a.request, FeatureRequest::Command(_)))
+        .expect("the new confirmation is sent");
+    assert_eq!(close_of(second).expected_request_revision, Revision(6));
+    answer(&mut screen, second.tag, closed("human_closed", false));
+    assert!(screen.query_by_label("lane を閉じる（未検証）").is_none());
+}
+
+#[test]
+fn a_late_close_answer_does_not_finish_the_confirmation_opened_after_it() {
+    let mut screen = with_close_dialog("人間の判断で閉じる…", preview(3, 5, 2));
+    type_reason(&mut screen, "done");
+    screen.get_by_label("lane を閉じる").click();
+    let first = asked(&mut screen)[0].tag;
+    screen.get_by_label("キャンセル").click();
+    let again = open_close_dialog(&mut screen);
+    answer(&mut screen, again, preview(4, 6, 2));
+    // The first close was recorded after all: its answer reports it, and the open
+    // confirmation stays for the person to decide.
+    answer(&mut screen, first, closed("human_closed", false));
+    screen.get_by_label("lane を閉じる（未検証）");
+}
+
+#[test]
+fn a_late_preview_of_an_earlier_opening_is_not_what_a_reopened_dialog_confirms() {
+    let mut screen = screen(Box::<LanesFeature>::default(), Some("lead"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        tag_of(&first, is_list),
+        lanes(vec![summary("l1", "attached", 3)]),
+    );
+    let old_read = open_close_dialog(&mut screen);
+    screen.get_by_label("キャンセル").click();
+    let new_read = open_close_dialog(&mut screen);
+    answer(&mut screen, old_read, preview(3, 5, 2));
+    // Still waiting for its own reading: nothing can be confirmed yet.
+    assert!(screen.query_by_label_contains("読み込んでいます").is_some());
+    answer(&mut screen, new_read, preview(4, 6, 2));
+    type_reason(&mut screen, "done");
+    screen.get_by_label("lane を閉じる").click();
+    let sent = asked(&mut screen);
+    let close = close_of(&sent[0]);
+    assert_eq!(close.expected_management_revision, Revision(4));
+    assert_eq!(close.expected_request_revision, Revision(6));
+}

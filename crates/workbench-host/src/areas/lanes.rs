@@ -48,14 +48,12 @@ use crate::queries::{Pager, error, revision, storage_error, text};
 pub struct LanesArea {
     runtime: Option<AgentRuntime>,
     pager: Pager,
-    source: Option<ProjectionSource>,
 }
 
 impl LanesArea {
     pub(super) fn new(handles: &AreaHandles) -> Result<Self, BootstrapError> {
         let source = handles.source("lanes")?;
-        let mut area = Self::with_runtime(handles.runtime.clone());
-        area.source = Some(source.clone());
+        let area = Self::with_runtime(handles.runtime.clone());
         let runtime = handles.runtime.clone();
         let mut events = handles.bus.subscribe();
         // Subscribed first, so a change during the read is still announced; the leads the
@@ -86,27 +84,6 @@ impl LanesArea {
         Self {
             runtime: Some(runtime),
             pager: Pager::default(),
-            source: None,
-        }
-    }
-
-    /// Tell subscribers that `lane_id` changed without a ledger event: a close is recorded in
-    /// the ledger but appends no event of its own. The summary is read from the ledger now, so
-    /// what is announced is what a client reading after this event sees. A lead does not
-    /// change by a close, so nobody beyond the lane's finders needs to hear of it.
-    pub fn announce(&self, lane_id: &str) {
-        let (Some(runtime), Some(source)) = (&self.runtime, &self.source) else {
-            return;
-        };
-        let id = lane_id.to_owned();
-        for (lane, also_for) in
-            read_summaries(runtime, |db| Ok(db.lane(&id)?.into_iter().collect()))
-        {
-            if let Err(error) =
-                source.publish(UiEvent::Lanes(LanesEvent::LaneChanged { lane, also_for }))
-            {
-                tracing::warn!(?error.code, "lanes event was not published");
-            }
         }
     }
 

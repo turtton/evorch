@@ -1074,6 +1074,96 @@ async fn a_lane_discarded_from_the_screen_is_recorded_as_discarded_and_its_run_k
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn another_clients_close_puts_a_badge_on_an_open_window_and_a_new_report_takes_it_off() {
+    use workbench_protocol::commands::CommandResult;
+    use workbench_protocol::lane_management::{CloseLane, HumanLaneCloseKind};
+    use workbench_protocol::namespaces::LanesCommand;
+
+    let world = start().await;
+    let lane = world
+        .boot
+        .runtime
+        .open_lane(world.lead, "e2e-badge", brief())
+        .unwrap();
+    waiting(&world.boot.runtime, lane.root_run_id).await;
+    // A window of its own (its own connection and subscription), left alone from here on:
+    // nothing below reloads it, so only the core's events can change what it shows.
+    let mut window = world.restarted_desktop().await;
+    window.select(LEAD);
+    window.until(|d| d.shows(OBJECTIVE)).await;
+    assert!(!window.shows_part("close 済み"));
+
+    let seen = world.web_close_preview("web-badge", &lane.lane_id).await;
+    let ReplyPayload::Command(reply) = request(
+        &world.backend,
+        "badge-close",
+        RequestBody::Command(Command::Lanes(LanesCommand::CloseLane(CloseLane {
+            lane_id: workbench_protocol::lane_attention::LaneId::new(&lane.lane_id).unwrap(),
+            kind: HumanLaneCloseKind::Discard,
+            ready_seq: None,
+            expected_management_revision: seen.management_revision,
+            expected_request_revision: seen.request_revision,
+            note: "from another client".into(),
+        }))),
+    ) else {
+        panic!("a command reply was expected");
+    };
+    assert!(matches!(
+        reply.result.map(|r| *r),
+        Some(CommandResult::Lanes(_))
+    ));
+    window.until(|d| d.shows("close 済み: 破棄")).await;
+
+    // The lane reports again, as its run does: the ledger lifts the close and the core
+    // announces the report.
+    let side = storage::Storage::open(storage::StorageConfig {
+        db_path: world
+            ._dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("evorch-events.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    let appended = side
+        .handle()
+        .append_lane_report_with_delivery(
+            lane.lane_id.clone(),
+            seen.management_revision.0,
+            event_bus::LaneReportInput {
+                status: event_bus::LaneStatus::Working,
+                summary: "going again".into(),
+                artifact_revision: None,
+                failure_episode: None,
+                artifact_refs: vec![],
+                needs_human: false,
+                question_refs: vec![],
+                reason_code: None,
+                producer: event_bus::lane::LaneReportProducer::LaneAgent,
+            },
+            1,
+        )
+        .unwrap();
+    world.boot.runtime.event_bus().emit(event_bus::Event::new(
+        appended
+            .lane
+            .report_appended_event(&appended.report, Some(lane.root_run_id.to_string())),
+    ));
+    window.until(|d| !d.shows_part("close 済み")).await;
+    assert!(
+        world
+            .web_close_preview("web-lifted", &lane.lane_id)
+            .await
+            .current_close
+            .is_none()
+    );
+    for run in [lane.root_run_id, world.lead] {
+        let _ = world.boot.runtime.cancel(run);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_click_on_a_team_task_opens_the_detail_the_core_and_the_web_client_report() {
     let world = start().await;
     // The team board is the lead thread's persisted one, written through the real board (a

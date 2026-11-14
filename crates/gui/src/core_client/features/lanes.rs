@@ -63,11 +63,14 @@ enum Pending {
     Command(&'static str),
     /// The read of the close preview the open dialog waits for (its `read_seq`).
     ClosePreview {
-        lane: LaneId,
+        generation: u64,
         seq: u64,
     },
-    /// A close or discard that was sent; at most one is in flight.
-    CloseCommand,
+    /// A close or discard that was sent, for the dialog of `generation`; at most one is in
+    /// flight.
+    CloseCommand {
+        generation: u64,
+    },
 }
 
 /// A reattach waits for the lane's management state (its family revision) and
@@ -100,6 +103,8 @@ pub struct LanesFeature {
     reattach: Option<Reattach>,
     /// The confirmation for closing or discarding a lane, while it is open.
     close: Option<close::CloseDialog>,
+    /// The generation the next dialog opens with.
+    close_generation: u64,
     status: String,
     list_stale: bool,
     detached_stale: bool,
@@ -195,11 +200,8 @@ impl LanesFeature {
             dialog.read_seq += 1;
             dialog.phase = close::ClosePhase::Loading;
             dialog.stale = false;
-            let (lane, seq) = (dialog.lane.clone(), dialog.read_seq);
-            let tag = self.tag(Pending::ClosePreview {
-                lane: lane.clone(),
-                seq,
-            });
+            let (lane, generation, seq) = (dialog.lane.clone(), dialog.generation, dialog.read_seq);
+            let tag = self.tag(Pending::ClosePreview { generation, seq });
             ctx.query(
                 tag,
                 Query::Lanes(LanesQuery::GetLaneClosePreview { lane_id: lane }),
@@ -208,14 +210,15 @@ impl LanesFeature {
         let sending = self
             .pending
             .values()
-            .any(|pending| matches!(pending, Pending::CloseCommand));
+            .any(|pending| matches!(pending, Pending::CloseCommand { .. }));
         let Some(dialog) = &mut self.close else {
             return;
         };
         match close::draw(ui.ctx(), dialog, sending) {
             Some(close::DialogAction::Confirm) => {
                 if let Some(order) = dialog.order(sending) {
-                    let tag = self.tag(Pending::CloseCommand);
+                    let generation = dialog.generation;
+                    let tag = self.tag(Pending::CloseCommand { generation });
                     ctx.command(tag, Command::Lanes(LanesCommand::CloseLane(order)));
                 }
             }
@@ -332,7 +335,9 @@ impl LanesFeature {
                 if lane.policy != LaneManagementPolicy::Detached {
                     for choice in [close::CloseChoice::Complete, close::CloseChoice::Discard] {
                         if ui.button(choice.button()).clicked() {
+                            self.close_generation += 1;
                             self.close = Some(close::CloseDialog::new(
+                                self.close_generation,
                                 lane.lane_id.clone(),
                                 choice,
                                 lane.objective_preview.clone(),
@@ -552,7 +557,7 @@ impl Feature for LanesFeature {
                 self.detail_stale = self.opened.is_some();
                 self.root_stale = true;
             }
-            (Pending::CloseCommand, FeatureReply::Command(Ok(reply))) => {
+            (Pending::CloseCommand { generation }, FeatureReply::Command(Ok(reply))) => {
                 let closed = match reply.result.as_deref() {
                     Some(CommandResult::Lanes(LanesResult::Closed(result))) => Some(result.clone()),
                     _ => None,
@@ -568,15 +573,27 @@ impl Feature for LanesFeature {
                     ),
                     None => "lane の close: 受け付けました".to_owned(),
                 };
-                self.close = None;
+                // Only the confirmation that sent it is finished by the answer.
+                if self
+                    .close
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.generation == generation)
+                {
+                    self.close = None;
+                }
                 self.refresh_after_command();
             }
-            (Pending::CloseCommand, FeatureReply::Command(Err(error))) => {
+            (Pending::CloseCommand { generation }, FeatureReply::Command(Err(error))) => {
+                let mine = self
+                    .close
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.generation == generation);
                 if error.outcome_unknown {
                     // Not a success: the same tag answers again with what the core resolved.
-                    self.pending.insert(tag, Pending::CloseCommand);
+                    self.pending
+                        .insert(tag, Pending::CloseCommand { generation });
                     self.status = failure("lane の close", &error);
-                    if let Some(dialog) = &mut self.close {
+                    if let Some(dialog) = self.close.as_mut().filter(|_| mine) {
                         dialog.notice = Some(
                             "結果が分かりません。成功とは見なさず、台帳を読み直しています。"
                                 .to_owned(),
@@ -584,7 +601,7 @@ impl Feature for LanesFeature {
                         dialog.phase = close::ClosePhase::Loading;
                         dialog.read_due = true;
                     }
-                } else if let Some(dialog) = &mut self.close {
+                } else if let Some(dialog) = self.close.as_mut().filter(|_| mine) {
                     let stale = error.code == Some(ErrorCode::StaleRevision)
                         || error.message.starts_with("stale");
                     dialog.stale |= stale;
@@ -602,20 +619,20 @@ impl Feature for LanesFeature {
                 self.refresh_after_command();
             }
             (
-                Pending::ClosePreview { lane, seq },
+                Pending::ClosePreview { generation, seq },
                 FeatureReply::Query(Ok(QueryReply::Lanes(LanesReply::LaneClosePreview(preview)))),
             ) => {
                 if let Some(dialog) = &mut self.close
-                    && dialog.lane == lane
+                    && dialog.generation == generation
                     && dialog.read_seq == seq
                 {
                     dialog.phase = close::ClosePhase::Loaded(preview);
                     dialog.stale = false;
                 }
             }
-            (Pending::ClosePreview { lane, seq }, FeatureReply::Query(Err(error))) => {
+            (Pending::ClosePreview { generation, seq }, FeatureReply::Query(Err(error))) => {
                 if let Some(dialog) = &mut self.close
-                    && dialog.lane == lane
+                    && dialog.generation == generation
                     && dialog.read_seq == seq
                 {
                     dialog.phase = close::ClosePhase::Unavailable(error.message);

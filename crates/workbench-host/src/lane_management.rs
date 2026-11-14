@@ -292,9 +292,6 @@ impl CommandHost {
         if let Err(error) = self.projection().refresh() {
             tracing::warn!(?error.code, "lane projection refresh failed");
         }
-        if result.outcome == event_bus::lane::LaneCloseOutcome::Closed {
-            self.areas.lanes.announce(&result.lane_id);
-        }
         Ok(result)
     }
     pub(crate) fn close_lane_command(

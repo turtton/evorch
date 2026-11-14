@@ -115,6 +115,10 @@ pub(super) enum ClosePhase {
 /// The open confirmation.
 #[derive(Debug, Clone)]
 pub(super) struct CloseDialog {
+    /// Which opening of a confirmation this is, counted by the feature and never reused: an
+    /// answer for an earlier one (a read or a close that was sent) must not act on this one,
+    /// not even for the same lane.
+    pub(super) generation: u64,
     pub(super) lane: LaneId,
     pub(super) choice: CloseChoice,
     /// The start of the lane's objective, as the row or detail that opened the dialog showed.
@@ -132,8 +136,9 @@ pub(super) struct CloseDialog {
 }
 
 impl CloseDialog {
-    pub(super) fn new(lane: LaneId, choice: CloseChoice, title: String) -> Self {
+    pub(super) fn new(generation: u64, lane: LaneId, choice: CloseChoice, title: String) -> Self {
         Self {
+            generation,
             lane,
             choice,
             title,

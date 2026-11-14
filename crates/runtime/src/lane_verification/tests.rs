@@ -413,6 +413,35 @@ async fn no_review_outcome_blocks_a_lead_close() {
     }
 }
 #[tokio::test]
+async fn a_new_close_tells_the_hosts_to_read_the_lane_again_and_one_that_stood_does_not() {
+    let f = Fixture::new(Mode::Approve).await;
+    let v = f.verify().await;
+    f.runtime
+        .wait(v.reviewer_run_id.parse().unwrap())
+        .await
+        .unwrap();
+    let mut seen = f.runtime.event_bus().subscribe();
+    let closes = |seen: &mut event_bus::EventReceiver| {
+        seen.drain_pending_snapshot()
+            .into_iter()
+            .filter(|event| {
+                matches!(&event.kind, EventKind::Diagnostic(d)
+                    if d.source == "lane_delivery"
+                        && d.code == "lane_closed"
+                        && d.thread_id.as_deref() == Some(f.lane.thread_id.as_str()))
+            })
+            .count()
+    };
+    assert_eq!(closes(&mut seen), 0);
+    let closed = f.close(&v).await.unwrap();
+    assert_eq!(closed.outcome, LaneCloseOutcome::Closed);
+    assert_eq!(closes(&mut seen), 1);
+    let again = f.close(&v).await.unwrap();
+    assert_eq!(again.outcome, LaneCloseOutcome::AlreadyClosed);
+    assert_eq!(closes(&mut seen), 0);
+    f.cleanup().await;
+}
+#[tokio::test]
 async fn a_changed_artifact_and_a_new_report_do_not_rewrite_evidence_and_a_stale_close_is_rejected()
 {
     let f = Fixture::new(Mode::Approve).await;
