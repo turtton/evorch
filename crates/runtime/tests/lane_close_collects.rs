@@ -123,8 +123,8 @@ fn report() -> event_bus::LaneReportInput {
     }
 }
 
-/// A managed lane of "progress-lead" whose latest report is a current Ready.
-fn seed_ready(store: &storage::Storage, lead: RunId, lane_id: &str) {
+/// A managed lane of "progress-lead" that has not reported yet.
+fn seed_lane(store: &storage::Storage, lead: RunId, lane_id: &str) {
     store
         .handle()
         .create_lane(storage::lanes::NewLane {
@@ -141,6 +141,11 @@ fn seed_ready(store: &storage::Storage, lead: RunId, lane_id: &str) {
             at_ns: 1,
         })
         .unwrap();
+}
+
+/// A managed lane of "progress-lead" whose latest report is a current Ready.
+fn seed_ready(store: &storage::Storage, lead: RunId, lane_id: &str) {
+    seed_lane(store, lead, lane_id);
     store
         .handle()
         .append_lane_report(lane_id, 1, report(), 2)
@@ -368,7 +373,7 @@ async fn closing_the_uncollected_ready_keeps_creation_from_reaching_the_suppress
 /// A human's close or discard ends the ledger entry too, and the ledger, not the lead's
 /// saved credits, decides: the lead's snapshot still lists the lane, yet a restored run
 /// in a new runtime is not suppressed.
-async fn human_end_survives_a_restore(discard: bool) {
+async fn human_end_survives_a_restore(discard: bool, ready: bool) {
     let dir = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
         db_path: dir.path().join("restore.db"),
@@ -385,7 +390,11 @@ async fn human_end_survives_a_restore(discard: bool) {
         )
         .unwrap();
     waiting(&mut f.events, lead).await;
-    seed_ready(&f.store, lead, "uncollected");
+    if ready {
+        seed_ready(&f.store, lead, "uncollected");
+    } else {
+        seed_lane(&f.store, lead, "uncollected");
+    }
     human_closes(&f, "uncollected", discard);
     f.runtime.stop(lead, runtime::StopScope::SelfOnly).unwrap();
     f.runtime.wait(lead).await.unwrap();
@@ -404,12 +413,17 @@ async fn human_end_survives_a_restore(discard: bool) {
 
 #[tokio::test]
 async fn a_human_close_leaves_the_cohort_across_a_restore() {
-    human_end_survives_a_restore(false).await;
+    human_end_survives_a_restore(false, true).await;
+}
+
+#[tokio::test]
+async fn a_human_close_of_a_lane_that_never_reported_leaves_the_cohort_across_a_restore() {
+    human_end_survives_a_restore(false, false).await;
 }
 
 #[tokio::test]
 async fn a_discard_leaves_the_cohort_across_a_restore() {
-    human_end_survives_a_restore(true).await;
+    human_end_survives_a_restore(true, true).await;
 }
 
 /// The same lane closes, leaves the cohort and reports anew: the cohort that forms again

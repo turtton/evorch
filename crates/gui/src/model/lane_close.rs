@@ -13,6 +13,15 @@ use storage::lane_control::LaneClosePreview;
 /// What closing means, shown in the confirmation and as the tooltip of its buttons.
 pub const MEANING: &str = "This only records the lane as ended in the ledger. It does not stop its run, delete its thread or worktree, or detach it. It is your decision, not a verification.";
 
+/// What closing leaves as it is, said next to the meaning so nobody reads a close as cleanup.
+pub const REMAINS: &str = "Its open questions stay open. If the lane reports again, the close is lifted and the lane reads as active.";
+
+/// Shown when the lane's thread has a run going: the close does not stop it.
+pub const RUNNING_WARNING: &str = "This lane is running now. Ending it here does not stop the run; stop it yourself if you want it to end.";
+
+/// Shown when a person closes a lane that has not reported Ready for its brief.
+pub const NO_READY_WARNING: &str = "This lane has not reported Ready for its current brief. You are ending it without a result to read.";
+
 /// Longest note the ledger accepts, in bytes.
 pub const NOTE_MAX_BYTES: usize = storage::lane_control::LANE_CLOSE_NOTE_MAX_BYTES;
 
@@ -26,6 +35,15 @@ pub enum CloseChoice {
 }
 
 impl CloseChoice {
+    /// The entry of a managed lane's sidebar menu.
+    #[must_use]
+    pub const fn menu_label(self) -> &'static str {
+        match self {
+            Self::Complete => "Close by human decision…",
+            Self::Discard => "Discard…",
+        }
+    }
+
     /// The button on the attention row.
     #[must_use]
     pub const fn button(self) -> &'static str {
@@ -188,6 +206,40 @@ pub fn moved_since_listed(
     None
 }
 
+/// How many unanswered questions the lane still holds, in a sentence; `None` when none.
+#[must_use]
+pub fn open_questions_line(count: u64) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some("1 question from this lane is still unanswered. It stays open.".to_owned()),
+        n => Some(format!(
+            "{n} questions from this lane are still unanswered. They stay open."
+        )),
+    }
+}
+
+/// What a lane's row in the sidebar shows once its close stands: a short word, and the same
+/// words the lane view uses on hover. It is a record of the ledger, never a state of any run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneCloseBadge {
+    pub text: &'static str,
+    pub hover: String,
+}
+
+impl LaneCloseBadge {
+    #[must_use]
+    pub fn of(close: &LaneCloseResult) -> Self {
+        Self {
+            text: match close.kind {
+                LaneCloseKind::LeadClosed => "closed",
+                LaneCloseKind::HumanClosed => "closed (unverified)",
+                LaneCloseKind::Discarded => "discarded",
+            },
+            hover: format!("{}\n{}", close_label(close), close_detail(close)),
+        }
+    }
+}
+
 /// The badge text of a lane's close, which never reads like a verified one.
 #[must_use]
 pub const fn close_label(close: &LaneCloseResult) -> &'static str {
@@ -239,6 +291,19 @@ mod tests {
             at_ns: 0,
             outcome: LaneCloseOutcome::Closed,
         }
+    }
+
+    #[test]
+    fn open_questions_are_counted_for_the_person_and_a_badge_never_reads_as_a_verified_close() {
+        assert_eq!(open_questions_line(0), None);
+        assert!(open_questions_line(1).unwrap().starts_with("1 question "));
+        assert!(open_questions_line(3).unwrap().starts_with("3 questions "));
+        let human = LaneCloseBadge::of(&close(LaneCloseKind::HumanClosed, None));
+        assert_eq!(human.text, "closed (unverified)");
+        assert_eq!(
+            LaneCloseBadge::of(&close(LaneCloseKind::Discarded, None)).text,
+            "discarded"
+        );
     }
 
     fn ready_with(

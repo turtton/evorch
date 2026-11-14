@@ -56,6 +56,11 @@ pub enum SidebarAction {
     TogglePin(ThreadId),
     ToggleArchive(ThreadId),
     ManageLane(storage::lane_management::LaneManagementRequest),
+    /// Open the confirmation for ending a managed lane by hand.
+    CloseLane {
+        thread: ThreadId,
+        choice: crate::model::lane_close::CloseChoice,
+    },
     ReattachLane(workspace_ui::lane_management::LaneDropIntent),
     /// Open the "Link PR…" dialog for a thread.
     LinkPullRequest(ThreadId),
@@ -67,6 +72,14 @@ pub enum SidebarAction {
 pub struct PullRequestsView<'a> {
     pub enabled: bool,
     pub badges: Option<&'a BTreeMap<ThreadId, crate::model::pull_requests::PullRequestBadge>>,
+}
+
+/// What the thread rows show about ended lanes: their badges, and whether this window can
+/// end a lane by hand (the menu entries are offered only then).
+#[derive(Clone, Copy, Default)]
+pub struct LaneCloseView<'a> {
+    pub can_close: bool,
+    pub badges: Option<&'a BTreeMap<ThreadId, crate::model::lane_close::LaneCloseBadge>>,
 }
 
 pub fn sidebar_pane(
@@ -132,6 +145,36 @@ pub fn sidebar_pane_with_pull_requests(
     view: &SidebarView,
     pull_requests: PullRequestsView<'_>,
 ) -> Option<SidebarAction> {
+    sidebar_pane_with_lane_close(
+        ui,
+        sidebar,
+        (phases, question_threads, approval_threads, unread_threads),
+        (externally_working_threads, retention),
+        view,
+        pull_requests,
+        LaneCloseView::default(),
+    )
+}
+
+/// [`sidebar_pane_with_pull_requests`] that also shows ended lanes and offers to end one.
+#[allow(clippy::too_many_arguments)]
+pub fn sidebar_pane_with_lane_close(
+    ui: &mut egui::Ui,
+    sidebar: &SidebarState,
+    (phases, question_threads, approval_threads, unread_threads): (
+        &BTreeMap<String, ThreadRunPhase>,
+        &BTreeSet<ThreadId>,
+        &BTreeSet<ThreadId>,
+        &BTreeSet<ThreadId>,
+    ),
+    (externally_working_threads, retention): (
+        &BTreeSet<ThreadId>,
+        &BTreeMap<ThreadId, storage::thread_retention::RetentionStatus>,
+    ),
+    view: &SidebarView,
+    pull_requests: PullRequestsView<'_>,
+    lane_close: LaneCloseView<'_>,
+) -> Option<SidebarAction> {
     let active_runs = threads::threads_with_active_runs(&sidebar.threads, phases);
     let indicators = threads::ThreadIndicators {
         phases,
@@ -142,6 +185,7 @@ pub fn sidebar_pane_with_pull_requests(
         active_runs: &active_runs,
         retention,
         pull_requests,
+        lane_close,
     };
     let pane_state = ui
         .ctx()

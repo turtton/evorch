@@ -8,7 +8,7 @@
 use egui::{Align, Layout};
 
 use crate::app::lane_close::{CloseDialog, ClosePhase};
-use crate::model::lane_close::{self, MEANING};
+use crate::model::lane_close::{self, CloseChoice, MEANING};
 use crate::theme::text::{h3, medium, muted};
 use crate::theme::tokens::*;
 use crate::theme::widgets::{ghost, primary_button, surface_frame};
@@ -25,6 +25,7 @@ pub enum CloseDialogAction {
 pub fn lane_close_dialog(
     ctx: &egui::Context,
     dialog: &mut CloseDialog,
+    running: bool,
 ) -> Option<CloseDialogAction> {
     let mut action = None;
     let modal = egui::Modal::new(egui::Id::new("lane-close-dialog"))
@@ -38,6 +39,10 @@ pub fn lane_close_dialog(
             ui.label(h3(dialog.choice.title()));
             ui.label(medium(&dialog.title));
             ui.add(egui::Label::new(muted(MEANING)).wrap());
+            ui.add(egui::Label::new(muted(lane_close::REMAINS)).wrap());
+            if running {
+                warning(ui, lane_close::RUNNING_WARNING);
+            }
             if let Some(blocker) = dialog.blocker() {
                 let color = if matches!(dialog.phase, ClosePhase::Loading) {
                     palette().TEXT_MUTED
@@ -47,6 +52,12 @@ pub fn lane_close_dialog(
                 ui.add(egui::Label::new(egui::RichText::new(blocker).color(color)).wrap());
             }
             if let ClosePhase::Loaded(preview) = &dialog.phase {
+                if preview.ready.is_none() && dialog.choice == CloseChoice::Complete {
+                    warning(ui, lane_close::NO_READY_WARNING);
+                }
+                if let Some(line) = lane_close::open_questions_line(preview.open_question_count) {
+                    warning(ui, &line);
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("lane-close-body")
                     .max_height(260.0)
@@ -141,4 +152,8 @@ pub fn lane_close_dialog(
         action = Some(CloseDialogAction::Cancel);
     }
     action
+}
+
+fn warning(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(egui::RichText::new(text).color(palette().WARNING_FG)).wrap());
 }

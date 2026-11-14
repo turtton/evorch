@@ -715,6 +715,54 @@ fn the_preview_gives_a_person_what_to_read_and_the_revisions_a_close_compares() 
 }
 
 #[test]
+fn the_preview_counts_unanswered_questions_and_a_close_leaves_them_open() {
+    let f = Fixture::new();
+    started(&f);
+    assert_eq!(
+        f.db()
+            .lane_close_preview("lane-1")
+            .unwrap()
+            .open_question_count,
+        0
+    );
+    let route = child_question(&f);
+    f.h()
+        .bind_user_questions(
+            "child",
+            "child-continuation",
+            std::slice::from_ref(&route.question_id),
+        )
+        .unwrap();
+    f.h().forward_lane_question(route.clone()).unwrap();
+    let open = |f: &Fixture| {
+        f.db()
+            .lane_close_preview("lane-1")
+            .unwrap()
+            .open_question_count
+    };
+    assert_eq!(open(&f), 1);
+
+    // Ending the lane by hand without any Ready records the close and nothing else: the
+    // question is still waiting for an answer, as the confirmation told the person.
+    let questions = f.count("user_questions");
+    f.h()
+        .close_lane(human_close(&f, LaneCloseKind::HumanClosed))
+        .unwrap();
+    assert_eq!(open(&f), 1);
+    assert_eq!(f.count("user_questions"), questions);
+    assert_eq!(
+        f.sql()
+            .query_row(
+                "SELECT COUNT(*) FROM user_questions WHERE id=?1 AND answered=0",
+                [&route.question_id],
+                |r| r.get::<_, u64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn a_blocked_lane_a_person_discarded_no_longer_asks_for_attention() {
     let f = Fixture::new();
     started(&f);

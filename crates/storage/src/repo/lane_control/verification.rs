@@ -583,7 +583,9 @@ pub(crate) fn close_preview(
         .as_ref()
         .map(|report| ready_readiness(conn, lane_id, report))
         .transpose()?;
+    let open_question_count = pending_question_count(conn, lane_id, lane.management_revision)?;
     Ok(LaneClosePreview {
+        open_question_count,
         context,
         pr_context: pr_context(conn, &lane.thread_id)?,
         current_close: current_close(conn, lane_id)?,

@@ -237,23 +237,23 @@ async fn a_screen_older_than_the_ledger_is_refused_by_the_revisions_and_records_
     assert!(!dialog.can_confirm(), "reload before deciding again");
     assert!(standing(&storage).is_none());
 
-    // Reading again shows a lane that is not the one the list drew: still not confirmable
-    // until the list is read again and the person chooses on the current item.
+    // Reload makes the newest snapshot the thing the person decides on. Nothing is resent by
+    // itself: the ledger is untouched until they confirm again.
     ui.reload_lane_close();
     settle(&mut ui);
     let dialog = ui.lane_close_dialog().unwrap();
-    assert!(dialog.blocker().unwrap().contains("reported again"));
-    ui.confirm_lane_close();
+    let ClosePhase::Loaded(preview) = &dialog.phase else {
+        panic!("the lane was read again: {:?}", dialog.phase);
+    };
+    assert_eq!(preview.ready.as_ref().unwrap().summary, "second ready");
+    assert!(dialog.blocker().is_none());
+    assert!(!dialog.stale);
     assert!(standing(&storage).is_none());
 
-    ui.cancel_lane_close();
-    ui.refresh_lane_attention();
-    settle(&mut ui);
-    let current = listed_ready(&ui);
-    choose(&mut ui, current, CloseChoice::Complete);
-    type_reason(&mut ui, "second one looks fine too");
     ui.confirm_lane_close();
-    assert_eq!(standing(&storage).unwrap().ready_seq, Some(2));
+    let stored = standing(&storage).expect("the second confirmation records");
+    assert_eq!(stored.ready_seq, Some(2));
+    assert_eq!(stored.note, "looks fine");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -345,4 +345,272 @@ async fn the_artifacts_a_ready_names_are_listed_collapsed_and_capped_as_referenc
     type_reason(window.state_mut(), "checked the pull requests by hand");
     window.run();
     assert_eq!(window.label_enabled("Close lane"), Some(true));
+}
+
+fn lane_thread() -> ThreadId {
+    ThreadId::new("lane-thread")
+}
+
+fn notices(ui: &WorkbenchState<DemoSource>) -> Vec<String> {
+    ui.transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            crate::model::transcript::TranscriptEntry::Notice { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn badge_text(ui: &WorkbenchState<DemoSource>) -> Option<&'static str> {
+    ui.lane_close_badges().get(&lane_thread()).map(|b| b.text)
+}
+
+fn open_from_sidebar(ui: &mut WorkbenchState<DemoSource>, choice: CloseChoice) {
+    ui.begin_lane_close_for_thread(&lane_thread(), choice);
+    settle(ui);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lane_chosen_in_the_sidebar_ends_without_attention_or_ready_and_cancel_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ui, storage, runtime) = closing_window(dir.path());
+    settle(&mut ui);
+    // No Ready and nothing on the attention list: the sidebar is the only way in.
+    assert!(ui.lane_attention().items().is_empty());
+
+    open_from_sidebar(&mut ui, CloseChoice::Complete);
+    let dialog = ui.lane_close_dialog().expect("the confirmation is open");
+    let ClosePhase::Loaded(preview) = &dialog.phase else {
+        panic!("the lane was read: {:?}", dialog.phase);
+    };
+    assert!(preview.ready.is_none());
+    assert_eq!(preview.open_question_count, 0);
+    assert!(dialog.blocker().is_none());
+    type_reason(&mut ui, "abandoning this brief");
+    ui.cancel_lane_close();
+    assert!(ui.lane_close_dialog().is_none());
+    assert!(standing(&storage).is_none());
+    assert_eq!(badge_text(&ui), None);
+
+    open_from_sidebar(&mut ui, CloseChoice::Complete);
+    assert_eq!(
+        ui.lane_close_dialog().unwrap().note,
+        "",
+        "a new screen starts empty"
+    );
+    type_reason(&mut ui, "abandoning this brief");
+    ui.confirm_lane_close();
+    let stored = standing(&storage).expect("the close stands");
+    assert_eq!(stored.kind, LaneCloseKind::HumanClosed);
+    assert_eq!(stored.ready_seq, None);
+    assert!(
+        notices(&ui)
+            .iter()
+            .any(|text| text.starts_with("Lane ended: completed by human decision"))
+    );
+
+    // Confirming again cannot record a second close or change the first.
+    ui.confirm_lane_close();
+    assert_eq!(standing(&storage).unwrap().close_id, stored.close_id);
+
+    // The badge is the ledger's record; the thread stays where it was, attached, and no run
+    // was stopped.
+    ui.request_delivery_reads("lane-thread");
+    settle(&mut ui);
+    assert_eq!(badge_text(&ui), Some("closed (unverified)"));
+    assert!(ui.sidebar.threads.iter().any(|t| t.id == lane_thread()));
+    assert_eq!(
+        storage.handle().lane("lane").unwrap().unwrap().policy,
+        storage::lanes::LanePolicy::Attached
+    );
+    assert!(runtime.list_agents().is_empty());
+
+    // New work from the lane lifts the close, and the badge goes with it.
+    report_ready(&storage, "more work", 9);
+    ui.request_delivery_reads("lane-thread");
+    settle(&mut ui);
+    assert!(standing(&storage).is_none());
+    assert_eq!(badge_text(&ui), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sidebar_close_refused_as_stale_is_reloaded_and_confirmed_again_by_the_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    report_ready(&storage, "first ready", 5);
+    settle(&mut ui);
+    open_from_sidebar(&mut ui, CloseChoice::Discard);
+    type_reason(&mut ui, "superseded");
+
+    report_ready(&storage, "second ready", 9);
+    ui.confirm_lane_close();
+    let dialog = ui.lane_close_dialog().expect("the dialog stays open");
+    assert!(dialog.stale);
+    assert!(standing(&storage).is_none());
+
+    // Reload shows the newest Ready and revisions; nothing is resent on its own.
+    ui.reload_lane_close();
+    settle(&mut ui);
+    let dialog = ui.lane_close_dialog().unwrap();
+    let ClosePhase::Loaded(preview) = &dialog.phase else {
+        panic!("{:?}", dialog.phase);
+    };
+    assert_eq!(preview.ready.as_ref().unwrap().summary, "second ready");
+    assert!(!dialog.stale);
+    assert!(standing(&storage).is_none());
+    ui.confirm_lane_close();
+    let stored = standing(&storage).unwrap();
+    assert_eq!(stored.kind, LaneCloseKind::Discarded);
+    assert_eq!(stored.ready_seq, Some(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_a_lane_someone_else_just_ended_shows_the_standing_record_and_adds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    open_from_sidebar(&mut ui, CloseChoice::Complete);
+    type_reason(&mut ui, "my reason");
+
+    // Another window ends it as a discard while this screen is still open.
+    let context = storage.handle().lane_close_context("lane".into()).unwrap();
+    let first = storage
+        .handle()
+        .close_lane(storage::lane_control::CloseLane {
+            closer: storage::lane_control::LaneCloser::Human {
+                surface: "web".into(),
+                client_id: Some("web-1".into()),
+            },
+            kind: LaneCloseKind::Discarded,
+            lane_id: "lane".into(),
+            ready_seq: None,
+            expected_management_revision: context.management_revision,
+            expected_request_revision: context.request_revision,
+            note: "first".into(),
+            verification_id: None,
+            at_ns: 20,
+        })
+        .unwrap();
+    ui.confirm_lane_close();
+
+    let stored = standing(&storage).unwrap();
+    assert_eq!(stored.close_id, first.close_id);
+    assert_eq!(stored.note, "first");
+    assert!(
+        notices(&ui).iter().any(|text| {
+            text == "The lane was already ended (discarded); nothing was recorded."
+        }),
+        "{:?}",
+        notices(&ui)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_detached_lane_cannot_be_ended_from_the_sidebar() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    ui.manage_lane(super::detach(1), None).unwrap();
+    settle(&mut ui);
+
+    ui.begin_lane_close_for_thread(&lane_thread(), CloseChoice::Discard);
+    assert!(ui.lane_close_dialog().is_none());
+    assert!(
+        notices(&ui)
+            .iter()
+            .any(|text| text == "Only a lane its lead manages can be ended here.")
+    );
+    assert!(standing(&storage).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_confirmation_warns_of_a_running_lane_and_a_close_without_ready_and_never_stops_anything()
+ {
+    use crate::model::lane_close::{NO_READY_WARNING, REMAINS, RUNNING_WARNING};
+    use workspace_ui::ThreadRunPhase;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let lane = ui
+        .sidebar
+        .threads
+        .iter_mut()
+        .find(|thread| thread.id == lane_thread())
+        .unwrap();
+    lane.run_ids.push("lane-run".into());
+    ui.phases.insert("lane-run".into(), ThreadRunPhase::Running);
+    let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
+    window.run();
+    open_from_sidebar(window.state_mut(), CloseChoice::Complete);
+    window.run();
+
+    for label in [RUNNING_WARNING, NO_READY_WARNING, REMAINS] {
+        assert!(window.has_label(label), "{label}");
+    }
+    type_reason(window.state_mut(), "ending it");
+    window.run();
+    window.click_label("Close lane");
+    window.run();
+    assert_eq!(standing(&storage).unwrap().kind, LaneCloseKind::HumanClosed);
+    // The run is still the one the sidebar showed: the close stopped nothing.
+    assert_eq!(
+        window.state().phases.get("lane-run"),
+        Some(&ThreadRunPhase::Running)
+    );
+
+    // A discard needs no Ready and says nothing about one.
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ui, _storage, _runtime) = closing_window(dir.path());
+    open_from_sidebar(&mut ui, CloseChoice::Discard);
+    let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
+    window.run();
+    assert!(!window.has_label(NO_READY_WARNING));
+    assert!(!window.has_label(RUNNING_WARNING));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sidebar_menu_leads_through_the_confirmation_stale_reload_and_the_badge() {
+    use super::runtime::context_action;
+    let dir = tempfile::tempdir().unwrap();
+    let (ui, storage, _runtime) = closing_window(dir.path());
+    let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
+    window.run();
+    report_ready(&storage, "first ready", 5);
+
+    // The row is not on the attention list yet; the menu is the way in.
+    context_action(&mut window, "↳ lane", "Close by human decision…");
+    settle(window.state_mut());
+    window.run();
+    assert!(window.has_label(crate::model::lane_close::MEANING));
+    assert!(window.has_label("first ready"));
+    assert_eq!(window.label_enabled("Close lane"), Some(false));
+
+    // Cancel leaves the ledger and the row as they were.
+    window.click_label("Cancel");
+    window.run();
+    assert!(window.state().lane_close_dialog().is_none());
+    assert!(standing(&storage).is_none());
+    assert!(!window.has_label("Lane close: closed (unverified)"));
+
+    context_action(&mut window, "↳ lane", "Close by human decision…");
+    settle(window.state_mut());
+    window.run();
+    type_reason(window.state_mut(), "reviewed");
+    window.run();
+    report_ready(&storage, "second ready", 9);
+    window.click_label("Close lane");
+    window.run();
+    assert!(window.state().lane_close_dialog().unwrap().stale);
+    assert!(standing(&storage).is_none());
+
+    window.click_label("Reload");
+    window.run();
+    settle(window.state_mut());
+    window.run();
+    assert!(window.has_label("second ready"));
+    assert!(standing(&storage).is_none(), "reload never resends");
+    window.click_label("Close lane");
+    window.run();
+    assert_eq!(standing(&storage).unwrap().ready_seq, Some(2));
+    settle(window.state_mut());
+    window.run();
+    assert!(window.has_label("Lane close: closed (unverified)"));
 }

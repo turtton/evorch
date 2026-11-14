@@ -397,6 +397,59 @@ fn lane_result(
     }
 }
 
+#[tokio::test]
+async fn a_reason_over_the_limit_and_a_detached_lane_are_refused_without_a_record() {
+    let mut f = Fixture::new().await;
+    let lane_id = f.lane.lane_id.clone();
+    let seen = f
+        .storage
+        .handle()
+        .lane_close_context(lane_id.clone())
+        .unwrap();
+    let close = |note: String, management_revision: u64| {
+        Command::Lanes(LanesCommand::CloseLane(CloseLane {
+            lane_id: workbench_protocol::lane_attention::LaneId::new(&lane_id).unwrap(),
+            kind: HumanLaneCloseKind::Complete,
+            ready_seq: None,
+            expected_management_revision: Revision(management_revision),
+            expected_request_revision: Revision(seen.request_revision),
+            note,
+        }))
+    };
+    let standing = |f: &Fixture| {
+        f.storage
+            .handle()
+            .current_lane_close(lane_id.clone())
+            .unwrap()
+    };
+
+    // One byte over the ledger's limit is refused before anything is recorded.
+    let too_long = "x".repeat(storage::lane_control::LANE_CLOSE_NOTE_MAX_BYTES + 1);
+    let refused = f
+        .host
+        .handle_command(close(too_long, seen.management_revision), common::web())
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::LimitExceeded);
+    assert!(standing(&f).is_none());
+
+    // A detached lane is not managed by its lead, so nobody can end it from here.
+    let detach = f.command(
+        "detach",
+        seen.management_revision,
+        LaneManagementAction::Detach,
+    );
+    f.host.handle_command(detach, common::web()).unwrap();
+    assert_eq!(f.state().policy, LaneManagementPolicy::Detached);
+    let detached = f.state().management_revision.0;
+    assert!(
+        f.host
+            .handle_command(close("reason".into(), detached), common::web())
+            .is_err()
+    );
+    assert!(standing(&f).is_none());
+    f.stop().await;
+}
+
 /// The lane close result a command answered with.
 fn close_result(
     reply: workbench_protocol::commands::CommandReply,
