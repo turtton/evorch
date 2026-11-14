@@ -161,8 +161,9 @@ async fn stop_dispatch_producers(
     if let Some(service) = runtime.pull_requests() {
         service.shutdown();
     }
-    // Only the lane producer may stop yet. Learning observers must remain
+    // Only recovery producers may stop yet. Learning observers must remain
     // subscribed until no recovery/admission can register another root.
+    remember(&mut failure, services.join_named("graph-recovery").await);
     remember(&mut failure, services.join_named("lane-recovery").await);
     remember(&mut failure, runtime.drain_lane_admissions().await);
     // A recovery scan already in progress may have acquired another lease.

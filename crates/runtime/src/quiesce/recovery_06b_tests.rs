@@ -1,6 +1,8 @@
 use super::{fixture::Fixture, *};
 use crate::{AgentRuntime, Role, RunConfig, StopScope};
 use event_bus::EventBus;
+#[path = "recovery_06c_tests.rs"]
+mod prepared_adoption;
 use std::{collections::BTreeMap, sync::Arc, sync::atomic::Ordering};
 
 async fn saved(f: &Fixture) -> RunId {
@@ -10,7 +12,7 @@ async fn saved(f: &Fixture) -> RunId {
     let fence = f.runtime.fence_dispatch_restart().await.unwrap();
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
     let recipe = RecoveryRecipe {
-        settings_reference: "current-profile".into(),
+        settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
         policy: ResumePolicy::CoreOwned,
         goal_id: None,
         team: None,
@@ -26,7 +28,7 @@ async fn saved(f: &Fixture) -> RunId {
         .unwrap();
     run
 }
-fn new_process(f: &Fixture) -> AgentRuntime {
+pub(super) fn new_process(f: &Fixture) -> AgentRuntime {
     let bus = Arc::new(EventBus::new(256));
     AgentRuntime::new(
         bus.clone(),
@@ -35,7 +37,7 @@ fn new_process(f: &Fixture) -> AgentRuntime {
     )
     .with_run_store(RunStore::open(&f.config, f._storage.handle()).unwrap())
 }
-fn prepare(f: &Fixture, runtime: &AgentRuntime) -> crate::PausedRecoveryComponent {
+pub(super) fn prepare(f: &Fixture, runtime: &AgentRuntime) -> crate::PausedRecoveryComponent {
     let root = f._dir.path().join("ownership");
     let leases =
         storage::shared_with_wait(&f.config.db_path, &root, std::time::Duration::ZERO).unwrap();
@@ -47,6 +49,20 @@ fn prepare(f: &Fixture, runtime: &AgentRuntime) -> crate::PausedRecoveryComponen
     runtime
         .prepare_component(&plan.components[0], startup, &root)
         .unwrap()
+}
+
+fn adopt_for_stop(
+    f: &Fixture,
+    runtime: &AgentRuntime,
+    paused: crate::PausedRecoveryComponent,
+) -> (crate::ownership::OwnerHost, crate::PausedRecoveryComponent) {
+    let run = paused.claim().members[0].run_id.parse().unwrap();
+    let (owner, authority) = prepared_adoption::authority(f, run);
+    let (proof, startup, root) = prepared_adoption::evidence(f, &paused.claim().claim_id);
+    let adopted = runtime
+        .adopt_prepared_claim(proof, startup, &root, &authority)
+        .unwrap();
+    (owner, adopted)
 }
 
 #[tokio::test]
@@ -105,7 +121,7 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
         .unwrap();
     let other = f.start();
     let recipe = RecoveryRecipe {
-        settings_reference: "current-profile".into(),
+        settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
         policy: ResumePolicy::CoreOwned,
         goal_id: None,
         team: None,
@@ -256,6 +272,7 @@ async fn prepare_and_drop_leave_exact_snapshot_and_pending_claim_without_executi
         .unwrap()
         .unwrap();
     let paused = prepare(&f, &runtime);
+    let (_owner, paused) = adopt_for_stop(&f, &runtime, paused);
     assert!(runtime.has_paused_recovery());
     assert!(runtime.list_agents().is_empty());
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
@@ -306,6 +323,7 @@ async fn paused_stop_cancel_and_subtree_cancel_fence_the_old_incarnation() {
         let runtime = new_process(&f);
         let db = storage::Database::open(&f.config).unwrap();
         let paused = prepare(&f, &runtime);
+        let (_owner, paused) = adopt_for_stop(&f, &runtime, paused);
         let old = paused.claim().members[0].old_incarnation.clone();
         let revision = paused.claim().members[0].reserved_revision;
         let reason = if mode == 0 {
@@ -560,7 +578,7 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
         .capture_recovery_records(&BTreeMap::from([(
             root,
             RecoveryRecipe {
-                settings_reference: "current".into(),
+                settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
                 policy: ResumePolicy::CoreOwned,
                 goal_id: None,
                 team: None,
@@ -846,7 +864,7 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
         .capture_recovery_records(&BTreeMap::from([(
             run,
             RecoveryRecipe {
-                settings_reference: "current".into(),
+                settings_reference: crate::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
                 policy: ResumePolicy::CoreOwned,
                 goal_id: None,
                 team: None,

@@ -2,6 +2,10 @@
 //! Payloads are runtime-owned. No method here starts work or grants authority.
 mod activation;
 pub use activation::*;
+mod prepared;
+pub use prepared::{RecoveryReleaseOutcome, ValidatedPreparedClaim};
+mod inspection;
+pub use inspection::{RecoveryClaimSnapshot, RecoveryIntentObservation};
 
 use crate::{Database, RunContextReceipt, StorageError};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -81,13 +85,24 @@ pub(crate) enum Write {
     Commit(String),
     Claim(RecoveryClaimRequest),
     Validate(String),
+    InspectPrepared(String),
     Activate(RecoveryActivationRequest),
-    Release { claim_id: String, reason: String },
+    Release {
+        claim_id: String,
+        reason: String,
+    },
+    StopQuarantined {
+        claim_id: String,
+        expected: Vec<(crate::resume_intent::ResumeIntentRecord, u64)>,
+        stopped: Vec<crate::resume_intent::ResumeIntentRecord>,
+    },
 }
 #[derive(Debug)]
 pub(crate) enum Written {
     Saved,
     Claimed(RecoveryClaim),
+    Validated(Box<prepared::PreparedClaimEvidence>),
+    Released(RecoveryReleaseOutcome),
 }
 
 fn invalid(reason: &str) -> StorageError {
@@ -273,7 +288,18 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
             Write::Claim(request) => Written::Claimed(prepare_claim(&tx, &request)?),
             Write::Activate(request) => Written::Claimed(activation::activate(&tx, &request)?),
             Write::Release { claim_id, reason } => {
-                Written::Claimed(activation::release(&tx, &claim_id, &reason)?)
+                Written::Released(prepared::release(&tx, &claim_id, &reason)?)
+            }
+            Write::InspectPrepared(id) => {
+                Written::Validated(Box::new(prepared::inspect(&tx, &id)?))
+            }
+            Write::StopQuarantined {
+                claim_id,
+                expected,
+                stopped,
+            } => {
+                inspection::stop_quarantined(&tx, &claim_id, &expected, &stopped)?;
+                Written::Saved
             }
             Write::Validate(id) => {
                 validate_claim(&tx, &id)?;
@@ -422,6 +448,13 @@ fn prepare_claim(
     if !record.committed || record.superseded {
         return Err(invalid("manifest is not committed"));
     }
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM recovery_claims WHERE manifest_id=?1)",
+        [&request.manifest_id],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Err(invalid("recovery manifest already claimed"));
+    }
     let candidates: Vec<_> = record.members.iter().filter(|m| m.resume).collect();
     if candidates.is_empty() || candidates.len() != request.incarnations.len() {
         return Err(invalid("invalid recovery claim membership"));
@@ -490,15 +523,7 @@ fn claim(conn: &Connection, id: &str) -> Result<RecoveryClaim, StorageError> {
     })
 }
 fn validate_claim(conn: &Connection, id: &str) -> Result<(), StorageError> {
-    let claim = claim(conn, id)?;
-    if claim.state != RecoveryClaimState::Prepared {
-        return Err(invalid("recovery claim is not prepared"));
-    }
-    let record =
-        load(conn, &claim.manifest_id).map_err(|_| invalid("corrupt recovery manifest"))?;
-    if !record.committed || record.superseded {
-        return Err(invalid("recovery manifest superseded"));
-    }
+    let (claim, record) = prepared::membership(conn, id)?;
     for m in &record.members {
         let revision = if m.resume {
             claim

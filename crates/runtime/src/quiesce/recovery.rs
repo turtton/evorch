@@ -1,6 +1,9 @@
 //! Authority-free, versioned graph evidence. Provider inputs remain in resume_intents.
 use crate::{RunId, restore::RunRestoreDescriptor};
 use serde::{Deserialize, Serialize};
+/// Stable selector for CURRENT core configuration; never a stored capability.
+/// PR07 capture must use this exact versioned selector.
+pub const CORE_RECOVERY_SETTINGS_REFERENCE: &str = "evorch/core/current/v1";
 pub use storage::recovery::{
     RecoveryClaim, RecoveryClaimState, RecoveryEdge, RecoveryManifestRecord as RecoveryManifest,
 };

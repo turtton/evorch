@@ -64,3 +64,7 @@ mock-openai = { path = "../mock-openai" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }
+
+[features]
+# Per-runtime, explicit IPC probes for cross-process crash tests only.
+recovery-test-support = []

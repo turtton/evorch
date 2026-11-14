@@ -10,6 +10,7 @@
 //! - GUI retains a 60s storage bridge tick; core retains its 5s tick.
 //! - Project declarations are read-only: saved state cannot manufacture trust.
 pub mod components;
+pub mod core_startup;
 pub mod evaluation;
 mod host_services;
 pub mod lane_pr;
@@ -114,6 +115,7 @@ pub struct BootstrappedHost {
     pub config: config::Config,
     pub services: services::BackgroundServices,
     pub mcp: runtime::mcp::McpHostServices,
+    pub recovery_diagnostics: Option<Arc<dyn core_startup::CoreStartupDiagnostics>>,
     area_tasks: AreaTasks,
     pub usage_pricing: recorder::pricing::SharedUsagePricing,
     pub evaluator: Arc<evaluation::EvaluatorHost>,
@@ -131,6 +133,7 @@ pub struct BootstrappedHost {
 pub struct CompositionInventory {
     pub tools: Vec<tools::executor::ToolSpec>,
     pub storage: storage::StorageConfig,
+    pub storage_writer: storage::StorageHandle,
     pub model: runtime::compose::ModelIdentity,
 }
 
@@ -141,6 +144,7 @@ impl BootstrappedHost {
             None,
             None,
             lane_pr::PullRequestAdapters::default(),
+            None,
             None,
         )
         .await
@@ -160,6 +164,7 @@ impl BootstrappedHost {
             None,
             lane_pr::PullRequestAdapters::default(),
             None,
+            None,
         )
         .await
     }
@@ -176,6 +181,7 @@ impl BootstrappedHost {
             Some(mcp),
             lane_pr::PullRequestAdapters::default(),
             None,
+            None,
         )
         .await
     }
@@ -186,7 +192,7 @@ impl BootstrappedHost {
         seams: TestSeams,
         adapters: lane_pr::PullRequestAdapters,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, Some(seams), None, adapters, None).await
+        Self::open_composed(options, Some(seams), None, adapters, None, None).await
     }
 
     /// Observe resources before recovery so failed-startup tests can audit cleanup.
@@ -203,6 +209,41 @@ impl BootstrappedHost {
             None,
             adapters,
             Some(Box::new(observe)),
+            None,
+        )
+        .await
+    }
+
+    /// Core-only recovery runs after shared lease acquisition/reload and RunStore
+    /// high-watermarks, but before learning or lane recovery can admit work.
+    pub async fn open_for_core(
+        options: BootstrapOptions,
+        recovery: &dyn core_startup::CoreStartupHook,
+    ) -> Result<Self, BootstrapError> {
+        Self::open_composed(
+            options,
+            None,
+            None,
+            lane_pr::PullRequestAdapters::default(),
+            None,
+            Some(recovery),
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn open_for_core_with_test_seams(
+        options: BootstrapOptions,
+        seams: TestSeams,
+        recovery: &dyn core_startup::CoreStartupHook,
+    ) -> Result<Self, BootstrapError> {
+        Self::open_composed(
+            options,
+            Some(seams),
+            None,
+            lane_pr::PullRequestAdapters::default(),
+            None,
+            Some(recovery),
         )
         .await
     }
@@ -213,6 +254,7 @@ impl BootstrappedHost {
         mcp: Option<runtime::mcp::McpHostServices>,
         adapters: lane_pr::PullRequestAdapters,
         observe: Option<RuntimeObserver>,
+        recovery: Option<&dyn core_startup::CoreStartupHook>,
     ) -> Result<Self, BootstrapError> {
         let config = config::Config::load_strict(&config::LoadOptions {
             user_config_dir: Some(options.config_dir.clone()),
@@ -239,7 +281,14 @@ impl BootstrappedHost {
         let storage =
             storage::Storage::open_with_lease(storage_config.clone(), leases.db_lease()?)?;
         let handle = storage.handle();
+        // This reload must stay AFTER acquire_leases (including any exclusive
+        // maintenance/downgrade), regardless of which PR adds that phase first.
         let tombstones = storage::Database::open(&storage_config)?.tombstones()?;
+        let startup = recovery
+            .map(|_| {
+                leases.recovery_startup_complete(&storage_config.db_path, &options.ownership_root)
+            })
+            .transpose()?;
         let pricing = Arc::new(RwLock::new(UsagePricing::new(
             config.providers.clone(),
             None,
@@ -415,6 +464,7 @@ impl BootstrappedHost {
         for (root, access) in projects.access {
             access.apply(&runtime, root);
         }
+        let recovery_projects = projects.directory.clone();
         let command_host = CommandHost::new(service)
             .with_projects(projects.directory)
             .with_legacy_import(
@@ -449,11 +499,12 @@ impl BootstrappedHost {
         let composition = CompositionInventory {
             tools: executor.tool_specs(),
             storage: storage_config.clone(),
+            storage_writer: handle.clone(),
             model: routed_identity.unwrap_or(composed.model_identity),
         };
         let reclaim = runtime::thread_retention::ReclaimExecutor::spawn(
             runtime::thread_retention::ExecutorConfig::new(
-                handle,
+                handle.clone(),
                 storage_config.clone(),
                 Some(artifacts),
             ),
@@ -468,6 +519,7 @@ impl BootstrappedHost {
             services: services::BackgroundServices::default(),
             area_tasks,
             mcp,
+            recovery_diagnostics: None,
             usage_pricing: pricing,
             #[cfg(any(test, feature = "test-support"))]
             composition,
@@ -476,6 +528,36 @@ impl BootstrappedHost {
             executor,
             _leases: leases,
         };
+        if let (Some(recovery), Some(startup)) = (recovery, startup) {
+            let work_changed = bootstrap
+                .host
+                .lock()
+                .unwrap()
+                .service()
+                .background_work_notify();
+            let result = recovery
+                .start(
+                    core_startup::CoreStartupInputs {
+                        options: options.clone(),
+                        runtime: bootstrap.runtime.clone(),
+                        owner: bootstrap.owner.clone(),
+                        storage: storage_config.clone(),
+                        writer: handle,
+                        projects: recovery_projects,
+                        startup,
+                        work_changed,
+                    },
+                    &mut bootstrap.services,
+                )
+                .await;
+            match result {
+                Ok(diagnostics) => bootstrap.recovery_diagnostics = Some(diagnostics),
+                Err(error) => {
+                    let _ = bootstrap.shutdown().await;
+                    return Err(error);
+                }
+            }
+        }
         host_services::start(
             &mut bootstrap.services,
             &options,
@@ -532,6 +614,9 @@ impl BootstrappedHost {
         // chat's Waiting state, count that idle conversation as no work. Until
         // then retain all Waiting runs conservatively to avoid losing them.
         self.evaluations.is_busy()
+            // A live external owner's lease may outlast idle grace. Keep the
+            // managed retry alive even before it can publish any local RunEntry.
+            || self.recovery_diagnostics.as_ref().is_some_and(|d| d.has_pending_work())
             || self.runtime.has_paused_recovery()
             || self.runtime.pending_lane_stop_writes() != 0
             || !self.runtime.pending_lane_admissions().is_empty()

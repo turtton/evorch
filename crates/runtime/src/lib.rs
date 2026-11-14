@@ -107,7 +107,9 @@ pub use restore::ChatForkSeed;
 pub use agents::Role;
 pub use mailbox::{MAILBOX_CAPACITY, RunMailbox};
 pub use meta::{HOST_SEARCH_MAX_LIMIT, HostSearchIndex, HostThreadHit, HostThreadSearch};
-pub use model::{AgentInvocationContext, AgentModel, ModelPreference, RoutePinRecord};
+pub use model::{
+    AgentInvocationContext, AgentModel, ModelPreference, RecoveryModelSnapshot, RoutePinRecord,
+};
 pub use network::{NetworkAccessDecision, build_sandbox, judge_web_network_access};
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
 /// GPT-family delegate tool descriptions append this instruction for spawned subagents.
@@ -125,7 +127,8 @@ pub use run_store::RunStore;
 pub use runtime::{
     AgentRuntime, AnswerOutcome, AnswerQuestionError, ChatResumeObservation,
     CurrentRecoveryAuthority, FollowUpStatus, FollowUpWithdrawalError, PausedRecoveryComponent,
-    ProjectModelResolver, ProjectSlugResolver, RunWait, SandboxFactory, WeakAgentRuntime,
+    ProjectModelResolver, ProjectSlugResolver, RecoveryClaimHandle, RecoveryCleanupHandle,
+    RecoveryCleanupState, RecoveryModels, RunWait, SandboxFactory, WeakAgentRuntime,
     WorkspaceMounts, production_executor, production_executor_with_config,
     production_executor_with_host_tools,
 };
@@ -138,3 +141,6 @@ pub use skill_source::{SkillCatalogSource, SourceSnapshot};
 pub use state::{InterruptKind, RunInterrupt, RunState, StopScope, is_valid_transition};
 
 mod continuity;
+
+#[cfg(feature = "recovery-test-support")]
+pub use runtime::RecoveryActivationBoundary;

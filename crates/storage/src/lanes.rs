@@ -312,4 +312,17 @@ impl crate::Database {
     pub fn unstarted_lanes(&self, limit: usize) -> Result<Vec<LaneRecord>, crate::StorageError> {
         crate::repo::lanes::unstarted(&self.conn, limit)
     }
+
+    /// The same scan and bounds as [`Self::unstarted_lanes`], excluding graph-owned
+    /// root/seed run identities BEFORE LIMIT. Also use this for retry existence checks.
+    ///
+    /// # Errors
+    /// Returns an error on unreadable seeds or SQLite failures (never starts them).
+    pub fn unstarted_lanes_excluding(
+        &self,
+        limit: usize,
+        excluded_runs: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<LaneRecord>, crate::StorageError> {
+        crate::repo::lanes::unstarted_excluding(&self.conn, limit, excluded_runs)
+    }
 }

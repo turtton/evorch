@@ -116,6 +116,7 @@ fn fixture_with_model(
         inherited_mcp_snapshot: None,
         task: RunTask {
             startup_failure: None,
+            recovery_model: None,
             publication: crate::runtime::ExecutionControl::new(false).publication(),
             ancestry: Default::default(),
             turn: providers::RequestTurnContext::unattributed(false),
