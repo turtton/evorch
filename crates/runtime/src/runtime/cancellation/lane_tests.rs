@@ -396,6 +396,8 @@ async fn settled_unregistered_lane_keeps_its_permit_without_an_existing_stop_que
     let contention = f
         .interrupt_contended_admission(RunInterrupt::Stop, false)
         .await;
+    // Contention coordination is complete; recovery races real heartbeat writes.
+    drop(contention._clock);
     contention.lock.execute_batch("ROLLBACK").unwrap();
     f.runtime.drain_lane_stop_writes().await.unwrap();
     let next = OwnerHost::open(
@@ -511,7 +513,21 @@ async fn lane_stop_service_shutdown_has_a_bounded_drain_and_retains_failed_write
             .start_blocked_reason
             .is_none()
     );
+    // The bounded shutdown is complete. Recovery may contend with the owner's
+    // real heartbeat thread, so it must not exhaust a virtual retry budget
+    // before that writer gets to release SQLite.
+    drop(contention._clock);
     contention.lock.execute_batch("ROLLBACK").unwrap();
     f.runtime.drain_lane_stop_writes().await.unwrap();
     assert_eq!(f.runtime.pending_lane_stop_writes(), 0);
+    assert_eq!(
+        f.storage
+            .handle()
+            .lane("lane")
+            .unwrap()
+            .unwrap()
+            .start_blocked_reason
+            .as_deref(),
+        Some(storage::lanes::LANE_START_OPERATOR_STOP)
+    );
 }
