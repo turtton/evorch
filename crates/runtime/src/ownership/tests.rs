@@ -163,7 +163,7 @@ fn claim_fences_previous_generation() {
 
 #[test]
 fn permit_commits_metadata_before_clearing_active_turn() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut registry = Registry::open(&path).expect("registry");
     let mut original = owner();
@@ -194,7 +194,7 @@ fn permit_commits_metadata_before_clearing_active_turn() {
 
 #[test]
 fn registry_attach_never_starts_an_absent_thread() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let registry = Registry::open(&directory.path().join("owners.db")).expect("registry");
     assert!(matches!(
         registry.attach("absent"),
@@ -204,7 +204,7 @@ fn registry_attach_never_starts_an_absent_thread() {
 
 #[test]
 fn registry_commits_claim_and_rolls_back_competing_generation() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut registry = Registry::open(&path).expect("registry");
     let original = owner();
@@ -292,7 +292,7 @@ fn saturated_owner_endpoint_protects_runs_without_waiting_for_accept() {
 
 #[test]
 fn missing_registry_probes_and_permits_never_create_a_database() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let owner = owner();
     let permit = OwnerPermit {
@@ -314,7 +314,7 @@ fn missing_registry_probes_and_permits_never_create_a_database() {
 
 #[test]
 fn existing_registry_opens_do_not_initialize_schema() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let connection = rusqlite::Connection::open(&path).expect("empty database");
 
@@ -338,7 +338,7 @@ fn existing_registry_opens_do_not_initialize_schema() {
 
 #[test]
 fn reused_readonly_registry_observes_external_generation_changes() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut writer = Registry::open(&path).expect("registry");
     let original = owner();
@@ -358,7 +358,7 @@ fn reused_readonly_registry_observes_external_generation_changes() {
 
 #[test]
 fn readonly_mutation_guard_holds_the_generation_snapshot_until_dropped() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut registry = Registry::open(&path).expect("registry");
     let original = owner();
@@ -397,7 +397,7 @@ fn readonly_mutation_guard_holds_the_generation_snapshot_until_dropped() {
 
 #[test]
 fn nonblocking_mutation_guard_distinguishes_contention_from_fencing() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let original = owner();
     let mut registry = Registry::open(&path).unwrap();
@@ -456,7 +456,7 @@ async fn compound_event_fences_release_readers_before_waiting_and_revalidate_eve
 
     for entry in ["emit", "recv", "drain", "validator"] {
         for revoke in [false, true] {
-            let directory = test_socket_dir::SocketDir::new();
+            let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("owners.db");
             let mut registry = Registry::open(&path).unwrap();
             let mut source = owner();
@@ -796,7 +796,7 @@ fn delayed_turn_and_child_start_renew_the_current_generation() {
 #[test]
 fn expired_permit_recovers_active_work_before_the_heartbeat_worker() {
     for run_id in [None, Some("parent")] {
-        let directory = test_socket_dir::SocketDir::new();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("owners.db");
         let mut original = owner();
         let token = original.lease.clone();
@@ -843,7 +843,7 @@ fn expired_permit_recovers_active_work_before_the_heartbeat_worker() {
 
 #[test]
 fn expired_permit_rechecks_a_claim_committed_after_its_read() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut original = owner();
     let token = original.lease.clone();
@@ -886,7 +886,7 @@ fn expired_permit_rechecks_a_claim_committed_after_its_read() {
 
 #[test]
 fn expired_permit_cannot_revive_a_run_checkpointed_after_its_read() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut original = owner();
     let token = original.lease.clone();
@@ -921,7 +921,7 @@ fn expired_permit_cannot_revive_a_run_checkpointed_after_its_read() {
 
 #[test]
 fn quiescing_runs_can_recover_and_drain_without_reviving_released_owners() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut original = owner();
     let token = original.lease.clone();
@@ -1180,7 +1180,7 @@ fn data_version(connection: &rusqlite::Connection) -> i64 {
 
 #[test]
 fn one_heartbeat_tick_writes_every_due_thread_in_a_single_transaction() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("owners.db");
     let mut registry = Registry::open(&path).unwrap();
     let now = 100_000;
@@ -1261,7 +1261,7 @@ fn one_heartbeat_tick_writes_every_due_thread_in_a_single_transaction() {
 // lease expiry), and removal deletes rows and checkpoints of the named threads only.
 #[test]
 fn retention_classifies_owner_rows_and_removes_only_named_threads() {
-    let directory = test_socket_dir::SocketDir::new();
+    let directory = tempfile::tempdir().unwrap();
     let mut registry = Registry::open(&directory.path().join("owners.db")).expect("registry");
     let row = |thread: &str| {
         ThreadOwner::new(

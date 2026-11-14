@@ -97,16 +97,7 @@ impl SocketDir {
         // The mode follows the umask otherwise.
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
             .map_err(create_error)?;
-        let length = path_len(dir.path());
-        if length + SUFFIX_BUDGET >= SUN_PATH_LIMIT {
-            return Err(format!(
-                "socket directory {} is {length} bytes; with {SUFFIX_BUDGET} bytes reserved for \
-                 socket file names it must stay below the sun_path limit of {SUN_PATH_LIMIT} \
-                 bytes. Set {BASE_DIR_ENV} to a shorter directory (default {DEFAULT_BASE_DIR}); \
-                 $TMPDIR is not used because it is long in sandboxes and on macOS",
-                dir.path().display(),
-            ));
-        }
+        check_directory_length(dir.path())?;
         Ok(Self { dir })
     }
 
@@ -191,6 +182,22 @@ impl Default for SocketDir {
     }
 }
 
+/// Fails when a socket file name of [`SUFFIX_BUDGET`] bytes below `directory` would reach
+/// [`SUN_PATH_LIMIT`].
+fn check_directory_length(directory: &Path) -> Result<(), String> {
+    let length = path_len(directory);
+    if length + SUFFIX_BUDGET >= SUN_PATH_LIMIT {
+        return Err(format!(
+            "socket directory {} is {length} bytes; with {SUFFIX_BUDGET} bytes reserved for \
+             socket file names it must stay below the sun_path limit of {SUN_PATH_LIMIT} \
+             bytes. Set {BASE_DIR_ENV} to a shorter directory (default {DEFAULT_BASE_DIR}); \
+             $TMPDIR is not used because it is long in sandboxes and on macOS",
+            directory.display(),
+        ));
+    }
+    Ok(())
+}
+
 fn path_len(path: &Path) -> usize {
     use std::os::unix::ffi::OsStrExt;
     path.as_os_str().as_bytes().len()
@@ -239,6 +246,96 @@ mod tests {
         assert_ne!(data, sockets);
         drop(dir);
         assert!(!sockets.exists() && !data.exists());
+    }
+
+    #[test]
+    fn directories_created_at_the_same_time_never_share_a_name() {
+        const THREADS: usize = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    SocketDir::new()
+                })
+            })
+            .collect();
+        let dirs: Vec<SocketDir> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let names: std::collections::HashSet<_> =
+            dirs.iter().map(|dir| dir.path().to_path_buf()).collect();
+        assert_eq!(names.len(), THREADS);
+    }
+
+    #[test]
+    fn drop_removes_a_symlink_but_never_what_it_points_to() {
+        let outside = tempfile::tempdir().unwrap();
+        let keep = outside.path().join("keep.txt");
+        std::fs::write(&keep, "outside").unwrap();
+        let dir = SocketDir::new();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(&keep, dir.path().join("file-link")).unwrap();
+        let path = dir.path().to_path_buf();
+        drop(dir);
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_to_string(&keep).unwrap(), "outside");
+    }
+
+    #[test]
+    fn the_length_check_is_exclusive_at_the_reserved_budget() {
+        let of_len = |length: usize| PathBuf::from(format!("/{}", "d".repeat(length - 1)));
+        let largest_ok = SUN_PATH_LIMIT - SUFFIX_BUDGET - 1;
+        assert!(check_directory_length(&of_len(largest_ok)).is_ok());
+        let message = check_directory_length(&of_len(largest_ok + 1)).unwrap_err();
+        assert!(
+            message.contains(&format!("is {} bytes", largest_ok + 1)),
+            "{message}"
+        );
+        assert!(message.contains(BASE_DIR_ENV), "{message}");
+    }
+
+    /// Child half of [`the_base_directory_follows_the_environment_in_a_child_process`]; it
+    /// reports where [`SocketDir::new`] put its directory under the environment it was given.
+    #[test]
+    #[ignore = "subprocess entry point; run by the parent test"]
+    fn child_reports_its_socket_directory() {
+        println!("SOCKET_DIR={}", SocketDir::new().path().display());
+    }
+
+    #[test]
+    fn the_base_directory_follows_the_environment_in_a_child_process() {
+        let run = |base: Option<&Path>| -> PathBuf {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "tests::child_reports_its_socket_directory",
+                "--ignored",
+                "--nocapture",
+            ]);
+            match base {
+                Some(base) => command.env(BASE_DIR_ENV, base),
+                None => command.env_remove(BASE_DIR_ENV),
+            };
+            // The default base must not come from these.
+            command
+                .env("XDG_RUNTIME_DIR", "/nonexistent")
+                .env("TMPDIR", "/nonexistent");
+            let output = command.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            assert!(
+                output.status.success(),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let line = stdout
+                .lines()
+                .find_map(|l| l.strip_prefix("SOCKET_DIR="))
+                .unwrap();
+            PathBuf::from(line)
+        };
+        let chosen = SocketDir::new();
+        assert!(run(Some(chosen.path())).starts_with(chosen.path()));
+        assert!(run(None).starts_with(DEFAULT_BASE_DIR));
     }
 
     #[test]
