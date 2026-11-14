@@ -109,7 +109,7 @@ mod tests {
                 ("KEEP".into(), "yes".into()),
             ],
         };
-        let wrapped = unsandboxed_with_tmpdir(PathBuf::from("/var/tmp/evorch-scratch-1-x/t-a"))
+        let wrapped = unsandboxed_with_tmpdir(PathBuf::from("/var/tmp/evo-1-x/t-a"))
             .wrap(spec)
             .expect("wrap");
         assert!(wrapped.inherit_env);
@@ -117,10 +117,7 @@ mod tests {
             wrapped.env,
             vec![
                 ("KEEP".to_owned(), "yes".to_owned()),
-                (
-                    "TMPDIR".to_owned(),
-                    "/var/tmp/evorch-scratch-1-x/t-a".to_owned()
-                ),
+                ("TMPDIR".to_owned(), "/var/tmp/evo-1-x/t-a".to_owned()),
             ]
         );
     }

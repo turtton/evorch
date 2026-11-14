@@ -324,10 +324,10 @@ mod tests {
                 .any(|args| args == ["--bind", "/workspace", "/workspace"])
         );
         assert!(argv.windows(3).any(|args| args[0] == "--bind"
-            && args[1].starts_with("/var/tmp/evorch-scratch-")
+            && args[1].starts_with("/var/tmp/evo-")
             && args[2] == "/tmp"));
         assert!(argv.windows(3).any(|args| args[0] == "--bind"
-            && args[1].starts_with("/var/tmp/evorch-scratch-")
+            && args[1].starts_with("/var/tmp/evo-")
             && args[2] == args[1]));
         assert!(!argv.iter().any(|arg| arg == "--tmpfs"));
         assert!(argv.contains(&"--unshare-net".to_owned()));

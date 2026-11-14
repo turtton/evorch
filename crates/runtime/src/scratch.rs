@@ -69,12 +69,17 @@ impl ScratchKey {
     fn name(&self) -> String {
         match self {
             Self::Thread(thread) => thread_dir_name(thread),
-            Self::Run(run) => format!("r-{run}"),
+            Self::Run(run) => format!("{RUN_DIR_PREFIX}{run}"),
         }
     }
 }
 
-/// `t-<id>` for plain ids; `t.<digest>` (no plain id contains `.`) for the rest.
+/// Unbound runs live under `r.<run>`. The `.` keeps them apart from thread
+/// directories, whose plain ids never contain one.
+const RUN_DIR_PREFIX: &str = "r.";
+
+/// The id itself for plain ids; `t.<digest>` for the rest. A plain id has only
+/// `[A-Za-z0-9_-]`, so it can never equal a `t.<digest>` or `r.<run>` name.
 fn thread_dir_name(thread: &str) -> String {
     if !thread.is_empty()
         && thread.len() <= 96
@@ -82,14 +87,14 @@ fn thread_dir_name(thread: &str) -> String {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        format!("t-{thread}")
+        thread.to_owned()
     } else {
         format!("t.{}", &hex_digest(thread.as_bytes())[..32])
     }
 }
 
-fn is_thread_dir(name: &str) -> bool {
-    name.starts_with("t-") || name.starts_with("t.")
+fn is_run_dir(name: &str) -> bool {
+    name.starts_with(RUN_DIR_PREFIX)
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -144,8 +149,10 @@ struct State {
 }
 
 impl ThreadScratch {
-    /// Directories under `/var/tmp/evorch-scratch-<uid>-<digest of ownership root>`,
-    /// shared by every process using that ownership root.
+    /// Directories under `/var/tmp/evo-<uid>-<first 8 digits of the ownership root's
+    /// digest>`, shared by every process using that ownership root. The parent also
+    /// records the full digest, so a root whose short prefix collides is refused
+    /// instead of sharing (and sweeping) the other root's directories.
     ///
     /// # Errors
     /// Propagates [`ScratchRoot::fixed`] failures.
@@ -154,7 +161,7 @@ impl ThreadScratch {
             .canonicalize()
             .unwrap_or_else(|_| ownership_root.to_path_buf());
         let digest = hex_digest(canonical.as_os_str().as_bytes());
-        Ok(Self::new(ScratchRoot::fixed(&digest[..16])?))
+        Ok(Self::new(ScratchRoot::fixed(&digest[..8], &digest)?))
     }
 
     /// A private parent removed when this value drops, for runtimes without ownership.
@@ -290,10 +297,10 @@ impl ThreadScratch {
             }
         };
         for name in names {
-            let unused = if is_thread_dir(&name) {
-                !live.contains(&name)
+            let unused = if is_run_dir(&name) {
+                !other_process_may_be_live
             } else {
-                name.starts_with("r-") && !other_process_may_be_live
+                !live.contains(&name)
             };
             if unused {
                 self.discard(&name);
@@ -454,7 +461,7 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let scratch = ThreadScratch::at(base.path().join("scratch"));
         let thread = scratch.thread_dir("thread-1");
-        assert_eq!(thread, base.path().join("scratch/t-thread-1"));
+        assert_eq!(thread, base.path().join("scratch/thread-1"));
         assert_eq!(
             ThreadScratch::at(base.path().join("scratch")).thread_dir("thread-1"),
             thread
@@ -462,7 +469,21 @@ mod tests {
         assert_ne!(scratch.thread_dir("thread-2"), thread);
         assert_eq!(
             scratch.dir(&ScratchKey::Run(RunId::new(7))),
-            base.path().join("scratch/r-run-7")
+            base.path().join("scratch/r.run-7")
+        );
+        // Plain ids are used as they are, so an id shaped like a run or digest name
+        // must still land on a name no other key can produce.
+        let names = ["run-7", "r-run-7", "t-thread-1", "r.run-7", "t.abc"]
+            .map(|id| scratch.thread_dir(id).file_name().unwrap().to_owned());
+        assert_eq!(names[..3], ["run-7", "r-run-7", "t-thread-1"]);
+        for name in &names[3..] {
+            assert!(name.to_str().unwrap().starts_with("t."), "{name:?}");
+        }
+        let run_name = scratch.dir(&ScratchKey::Run(RunId::new(7)));
+        assert!(
+            names
+                .iter()
+                .all(|name| run_name.file_name() != Some(name.as_os_str()))
         );
         for hostile in ["../escape", "a/b", "", &"x".repeat(200)] {
             let dir = scratch.thread_dir(hostile);
@@ -492,8 +513,53 @@ mod tests {
             meta.uid()
         });
         let name = a.parent().file_name().unwrap().to_str().unwrap().to_owned();
-        assert!(name.starts_with(&format!("evorch-scratch-{}-", uid.unwrap())));
+        let scope = name
+            .strip_prefix(&format!("evo-{}-", uid.unwrap()))
+            .unwrap();
+        assert!(scope.len() == 8 && scope.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert!(!a.parent().exists(), "the parent is created lazily");
+    }
+
+    // Given: a real thread's scratch under a fixed parent / When: a socket is bound in a
+    // temporary directory below it, as tools do under $TMPDIR / Then: the path fits
+    // sun_path and the bind succeeds
+    #[test]
+    fn a_socket_in_a_temporary_directory_below_the_scratch_binds() {
+        use std::os::unix::net::UnixListener;
+        struct Parent(PathBuf);
+        impl Drop for Parent {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        use std::os::unix::fs::MetadataExt;
+        const THREAD: &str = "thread-9gkyvvvf";
+        // sun_path holds 108 bytes including the terminating NUL.
+        const SUN_PATH_MAX: usize = 107;
+        let root = tempfile::tempdir().unwrap();
+        let uid = std::fs::metadata(root.path()).unwrap().uid();
+        let scratch = ThreadScratch::for_ownership_root(root.path()).unwrap();
+        // The guard only exists once prepare succeeded, so a failure (such as a scope
+        // collision with a live root) never removes a parent this test does not own.
+        let dir = scratch.prepare(&ScratchKey::Thread(THREAD.into())).unwrap();
+        let _cleanup = Parent(scratch.parent().to_path_buf());
+        let temporary = tempfile::tempdir_in(&dir).unwrap();
+        // Long enough that the previous layout could not hold it, short enough for this one.
+        let name = format!("evorch-{}.sock", "0123456789abcdef".repeat(2));
+        let socket = temporary.path().join(&name);
+        let previous = PathBuf::from(format!(
+            "/var/tmp/evorch-scratch-{uid}-{}/t-{THREAD}",
+            "0123456789abcdef"
+        ))
+        .join(temporary.path().file_name().unwrap())
+        .join(&name);
+        assert!(previous.as_os_str().len() > SUN_PATH_MAX);
+        assert!(
+            socket.as_os_str().len() <= SUN_PATH_MAX,
+            "{}",
+            socket.display()
+        );
+        UnixListener::bind(&socket).unwrap();
     }
 
     // Given: a prepared thread directory with a file / When: the owner resets and then
@@ -689,7 +755,7 @@ mod tests {
     // system block, restored runs without the current note get it appended once
     #[test]
     fn restored_runs_without_the_note_get_it_appended_once() {
-        let dir = PathBuf::from("/var/tmp/evorch-scratch-1-x/t-thread");
+        let dir = PathBuf::from("/var/tmp/evo-1-x/thread");
         let attach = |context: &mut AgentContext, dir: &Path, restored, emptied| {
             let mut binding = RunScratch::new(dir.to_path_buf(), emptied);
             binding.attach(context, restored);

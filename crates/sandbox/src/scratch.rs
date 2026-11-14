@@ -17,6 +17,9 @@ use std::sync::{OnceLock, mpsc};
 use std::time::Duration;
 
 const TRASH_PREFIX: &str = ".trash-";
+/// Records which ownership root a fixed parent belongs to. Dot-prefixed, so
+/// [`ScratchRoot::dir`] never names it and sweeps never treat it as a directory.
+const IDENTITY_MARKER: &str = ".owner";
 
 /// What [`ScratchRoot::remove_bounded`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,14 +80,21 @@ impl std::error::Error for BoundedError {
 pub struct ScratchRoot {
     parent: PathBuf,
     ephemeral: bool,
+    /// The full identity a fixed parent's marker must hold. The parent name carries
+    /// only a short prefix of it, so two identities can share a parent.
+    identity: Option<String>,
 }
 
 impl ScratchRoot {
-    /// `/var/tmp/evorch-scratch-<uid>-<scope>`. Nothing is created before [`Self::prepare`].
+    /// `/var/tmp/evo-<uid>-<scope>`. Nothing is created before [`Self::prepare`].
+    ///
+    /// `scope` is a short, path-safe prefix of `identity`. The first `prepare` writes
+    /// `identity` into the parent; every later use fails closed when the parent holds a
+    /// different one, so two identities whose scopes collide never share a parent.
     ///
     /// # Errors
     /// Rejects a `scope` that is not a short ASCII alphanumeric name.
-    pub fn fixed(scope: &str) -> io::Result<Self> {
+    pub fn fixed(scope: &str, identity: &str) -> io::Result<Self> {
         if scope.is_empty()
             || scope.len() > 64
             || !scope.bytes().all(|byte| byte.is_ascii_alphanumeric())
@@ -94,10 +104,15 @@ impl ScratchRoot {
                 "scratch scope must be 1-64 ASCII alphanumeric characters",
             ));
         }
-        Ok(Self::at(PathBuf::from(format!(
-            "/var/tmp/evorch-scratch-{}-{scope}",
-            euid()
-        ))))
+        Ok(
+            Self::at(PathBuf::from(format!("/var/tmp/evo-{}-{scope}", euid())))
+                .identified(identity),
+        )
+    }
+
+    fn identified(mut self, identity: &str) -> Self {
+        self.identity = Some(identity.to_owned());
+        self
     }
 
     /// A caller-chosen parent, such as a test's temporary directory.
@@ -105,6 +120,7 @@ impl ScratchRoot {
         Self {
             parent,
             ephemeral: false,
+            identity: None,
         }
     }
 
@@ -114,12 +130,13 @@ impl ScratchRoot {
     /// Propagates directory creation failures.
     pub fn ephemeral() -> io::Result<Self> {
         let directory = tempfile::Builder::new()
-            .prefix(&format!("evorch-scratch-{}-", euid()))
+            .prefix(&format!("evo-{}-", euid()))
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in("/var/tmp")?;
         Ok(Self {
             parent: directory.keep(),
             ephemeral: true,
+            identity: None,
         })
     }
 
@@ -154,6 +171,7 @@ impl ScratchRoot {
     pub fn prepare(&self, name: &str) -> io::Result<PathBuf> {
         let dir = self.dir(name)?;
         private_dir(&self.parent)?;
+        self.check_identity(true)?;
         private_dir(&dir)?;
         ensure_layout(&dir)?;
         Ok(dir)
@@ -318,12 +336,66 @@ impl ScratchRoot {
 
     fn owned_parent(&self) -> io::Result<bool> {
         match fs::symlink_metadata(&self.parent) {
-            Ok(meta) if is_private(&meta) => Ok(true),
+            Ok(meta) if is_private(&meta) => self.check_identity(false),
             Ok(_) => Err(not_private()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }
     }
+}
+
+impl ScratchRoot {
+    /// Whether the parent is this root's, failing when it is another identity's.
+    /// `create` claims a parent without a marker (atomically, so concurrent first users
+    /// agree); otherwise such a parent is not this root's yet and reads as absent. A
+    /// directory only appears under a parent after its marker, so an unmarked parent
+    /// holds nothing, and a colliding root can never delete what its owner is about to
+    /// create. The parent is private to this user, so only this user's processes write
+    /// the marker.
+    fn check_identity(&self, create: bool) -> io::Result<bool> {
+        let Some(identity) = &self.identity else {
+            return Ok(true);
+        };
+        let marker = self.parent.join(IDENTITY_MARKER);
+        let matches = |found: &str| -> io::Result<bool> {
+            if found == identity {
+                Ok(true)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{} belongs to another ownership root (scratch scope collision)",
+                        self.parent.display()
+                    ),
+                ))
+            }
+        };
+        match read_marker(&marker) {
+            Ok(found) => return matches(&found),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && create => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(with_path(error, &marker)),
+        }
+        let mut staged = tempfile::NamedTempFile::new_in(&self.parent)?;
+        io::Write::write_all(&mut staged, identity.as_bytes())?;
+        match staged.persist_noclobber(&marker) {
+            Ok(_) => Ok(true),
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                matches(&read_marker(&marker).map_err(|error| with_path(error, &marker))?)
+            }
+            Err(error) => Err(with_path(error.error, &marker)),
+        }
+    }
+}
+
+fn read_marker(path: &Path) -> io::Result<String> {
+    use rustix::fs::{Mode, OFlags, open};
+    let fd = open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    io::read_to_string(io::Read::take(fs::File::from(fd), 4096))
 }
 
 impl Drop for ScratchRoot {
@@ -342,7 +414,7 @@ pub(super) struct Scratch {
 impl Scratch {
     pub(super) fn new() -> io::Result<Self> {
         let directory = tempfile::Builder::new()
-            .prefix("evorch-scratch-")
+            .prefix("evo-")
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in("/var/tmp")?;
         ensure_layout(directory.path())?;
@@ -507,14 +579,17 @@ mod tests {
     // Given: a fixed scope / When: deriving the parent / Then: it is per-user, per-scope and lazy
     #[test]
     fn fixed_parent_is_derived_from_uid_and_scope_without_creating_it() {
-        let root = ScratchRoot::fixed("abc123").unwrap();
+        let root = ScratchRoot::fixed("abc123", "abc123full").unwrap();
         assert_eq!(
             root.parent(),
-            Path::new(&format!("/var/tmp/evorch-scratch-{}-abc123", euid()))
+            Path::new(&format!("/var/tmp/evo-{}-abc123", euid()))
         );
-        assert_ne!(root.parent(), ScratchRoot::fixed("other").unwrap().parent());
+        assert_ne!(
+            root.parent(),
+            ScratchRoot::fixed("other", "otherfull").unwrap().parent()
+        );
         for scope in ["", "../x", "a/b", "dot.ted"] {
-            assert!(ScratchRoot::fixed(scope).is_err(), "{scope}");
+            assert!(ScratchRoot::fixed(scope, "id").is_err(), "{scope}");
         }
         for name in ["", ".hidden", "a/b", "..", "white space"] {
             assert!(root.dir(name).is_err(), "{name}");
@@ -542,6 +617,75 @@ mod tests {
         let again = root.prepare("t-thread").unwrap();
         assert_eq!(again, dir);
         assert!(!again.join("file").exists());
+    }
+
+    // Given: two identities whose scopes (and so parents) collide / When: the second uses
+    // the parent / Then: it fails closed and never touches the first one's directories;
+    // the same identity keeps sharing, and the marker is not a directory name
+    #[test]
+    fn parent_shared_by_colliding_identities_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let parent = base.path().join("scratch");
+        let root = |identity: &str| ScratchRoot::at(parent.clone()).identified(identity);
+        let (first, same, other) = (root("first"), root("first"), root("other"));
+        assert!(first.names().unwrap().is_empty(), "no parent yet is fine");
+        let dir = first.prepare("thread").unwrap();
+        fs::write(dir.join("file"), "keep").unwrap();
+        assert_eq!(same.prepare("thread").unwrap(), dir);
+        assert_eq!(same.names().unwrap(), vec!["thread".to_owned()]);
+
+        assert!(other.prepare("thread").is_err());
+        assert!(other.prepare("elsewhere").is_err());
+        assert!(other.names().is_err());
+        assert!(other.discard("thread").is_err());
+        assert!(other.remove_bounded("thread", usize::MAX).is_err());
+        assert!(other.purge_trash().is_err());
+        assert_eq!(fs::read_to_string(dir.join("file")).unwrap(), "keep");
+        assert!(!parent.join("elsewhere").exists());
+
+        let marker = parent.join(IDENTITY_MARKER);
+        fs::remove_file(&marker).unwrap();
+        std::os::unix::fs::symlink(base.path(), &marker).unwrap();
+        assert!(
+            first.prepare("thread").is_err(),
+            "a linked marker is refused"
+        );
+    }
+
+    // Given: root A created the parent but has not published its marker yet / When: a
+    // colliding root B cleans up, then A finishes preparing / Then: B changes nothing
+    // while the parent is unmarked, and is refused once A owns it, so A's directory
+    // survives every interleaving
+    #[test]
+    fn cleanup_by_a_colliding_root_cannot_precede_the_owners_marker() {
+        let base = tempfile::tempdir().unwrap();
+        let parent = base.path().join("scratch");
+        let root = |identity: &str| ScratchRoot::at(parent.clone()).identified(identity);
+        let (a, b) = (root("a"), root("b"));
+
+        private_dir(&parent).unwrap();
+        assert!(!parent.join(IDENTITY_MARKER).exists());
+        // Even a directory that appears in the unmarked parent is out of B's reach.
+        private_dir(&parent.join("thread")).unwrap();
+        fs::write(parent.join("thread/early"), "keep").unwrap();
+        assert!(!b.owned_parent().unwrap());
+        assert!(!b.discard("thread").unwrap());
+        assert!(b.names().unwrap().is_empty());
+        assert!(b.remove_bounded("thread", usize::MAX).unwrap().complete);
+        b.purge_trash().unwrap();
+        assert_eq!(
+            fs::read_to_string(parent.join("thread/early")).unwrap(),
+            "keep"
+        );
+
+        let dir = a.prepare("thread").unwrap();
+        assert!(a.owned_parent().unwrap());
+        fs::write(dir.join("file"), "keep").unwrap();
+        assert!(b.owned_parent().is_err());
+        assert!(b.discard("thread").is_err());
+        assert!(b.prepare("thread").is_err());
+        assert_eq!(fs::read_to_string(dir.join("file")).unwrap(), "keep");
+        assert!(a.discard("thread").unwrap());
     }
 
     // Given: a parent that is group-readable / When: preparing / Then: it fails closed

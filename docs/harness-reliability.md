@@ -426,9 +426,15 @@ startup scan or bulk deletion on the UI thread. Expired files are optional
 history aids, never a requirement for conversation restoration.
 
 Shell temporary files live in one scratch directory per thread (ADR 0033):
-`/var/tmp/evorch-scratch-<uid>-<digest of the ownership root>/<thread>/`. The
-key is the thread bound by `bind_thread_root`, or the root run ID for a root
-run with no thread, so a thread's root run and all its child runs share the
+`/var/tmp/evo-<uid>-<first 8 hex digits of the ownership root's digest>/<thread>/`
+(kept short so a socket under `$TMPDIR` fits `sun_path`). A thread ID made of
+`[A-Za-z0-9_-]` is the directory name as it is; any other ID becomes
+`t.<digest>`, and a run with no thread uses `r.<run>`, so no two keys share a
+name. The parent holds a `.owner` file with the full digest; a root whose short
+prefix collides with another root's is refused instead of sharing (and sweeping)
+that root's directories. Directories under the old `evorch-scratch-*` names are
+not migrated or removed. The key is the thread bound by `bind_thread_root`,
+or the root run ID for a root run with no thread, so a thread's root run and all its child runs share the
 directory and its path survives restores and root rebinding. The parent is
 created lazily with mode 0700 and must be owned by the current user; a
 mismatched owner, mode or a symlink fails the run's sandbox setup.
