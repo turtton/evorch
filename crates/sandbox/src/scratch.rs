@@ -336,7 +336,7 @@ impl ScratchRoot {
 
     fn owned_parent(&self) -> io::Result<bool> {
         match fs::symlink_metadata(&self.parent) {
-            Ok(meta) if is_private(&meta) => self.check_identity(false).map(|()| true),
+            Ok(meta) if is_private(&meta) => self.check_identity(false),
             Ok(_) => Err(not_private()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
@@ -345,17 +345,21 @@ impl ScratchRoot {
 }
 
 impl ScratchRoot {
-    /// Fail unless the parent belongs to this root's identity. A parent without a
-    /// marker passes; `create` claims it (atomically, so concurrent first users agree).
-    /// The parent is private to this user, so only this user's processes write the marker.
-    fn check_identity(&self, create: bool) -> io::Result<()> {
+    /// Whether the parent is this root's, failing when it is another identity's.
+    /// `create` claims a parent without a marker (atomically, so concurrent first users
+    /// agree); otherwise such a parent is not this root's yet and reads as absent. A
+    /// directory only appears under a parent after its marker, so an unmarked parent
+    /// holds nothing, and a colliding root can never delete what its owner is about to
+    /// create. The parent is private to this user, so only this user's processes write
+    /// the marker.
+    fn check_identity(&self, create: bool) -> io::Result<bool> {
         let Some(identity) = &self.identity else {
-            return Ok(());
+            return Ok(true);
         };
         let marker = self.parent.join(IDENTITY_MARKER);
-        let matches = |found: &str| -> io::Result<()> {
+        let matches = |found: &str| -> io::Result<bool> {
             if found == identity {
-                Ok(())
+                Ok(true)
             } else {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -369,13 +373,13 @@ impl ScratchRoot {
         match read_marker(&marker) {
             Ok(found) => return matches(&found),
             Err(error) if error.kind() == io::ErrorKind::NotFound && create => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(with_path(error, &marker)),
         }
         let mut staged = tempfile::NamedTempFile::new_in(&self.parent)?;
         io::Write::write_all(&mut staged, identity.as_bytes())?;
         match staged.persist_noclobber(&marker) {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(true),
             Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
                 matches(&read_marker(&marker).map_err(|error| with_path(error, &marker))?)
             }
@@ -646,6 +650,35 @@ mod tests {
             first.prepare("thread").is_err(),
             "a linked marker is refused"
         );
+    }
+
+    // Given: root A created the parent but has not published its marker yet / When: a
+    // colliding root B cleans up, then A finishes preparing / Then: B changes nothing
+    // while the parent is unmarked, and is refused once A owns it, so A's directory
+    // survives every interleaving
+    #[test]
+    fn cleanup_by_a_colliding_root_cannot_precede_the_owners_marker() {
+        let base = tempfile::tempdir().unwrap();
+        let parent = base.path().join("scratch");
+        let root = |identity: &str| ScratchRoot::at(parent.clone()).identified(identity);
+        let (a, b) = (root("a"), root("b"));
+
+        private_dir(&parent).unwrap();
+        assert!(!parent.join(IDENTITY_MARKER).exists());
+        assert!(!b.discard("thread").unwrap());
+        assert!(b.names().unwrap().is_empty());
+        assert!(
+            b.remove_bounded("thread", usize::MAX).unwrap().complete,
+            "an unmarked parent holds nothing to remove"
+        );
+        b.purge_trash().unwrap();
+
+        let dir = a.prepare("thread").unwrap();
+        fs::write(dir.join("file"), "keep").unwrap();
+        assert!(b.discard("thread").is_err());
+        assert!(b.prepare("thread").is_err());
+        assert_eq!(fs::read_to_string(dir.join("file")).unwrap(), "keep");
+        assert!(a.discard("thread").unwrap());
     }
 
     // Given: a parent that is group-readable / When: preparing / Then: it fails closed

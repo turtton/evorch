@@ -520,6 +520,31 @@ mod tests {
         assert!(!a.parent().exists(), "the parent is created lazily");
     }
 
+    // Given: a real thread's scratch under a fixed parent / When: a socket is bound in a
+    // temporary directory below it, as tools do under $TMPDIR / Then: the path fits
+    // sun_path and the bind succeeds
+    #[test]
+    fn a_socket_in_a_temporary_directory_below_the_scratch_binds() {
+        use std::os::unix::net::UnixListener;
+        struct Parent(PathBuf);
+        impl Drop for Parent {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let scratch = ThreadScratch::for_ownership_root(root.path()).unwrap();
+        let _cleanup = Parent(scratch.parent().to_path_buf());
+        let dir = scratch
+            .prepare(&ScratchKey::Thread("thread-9gkyvvvf".into()))
+            .unwrap();
+        let temporary = tempfile::tempdir_in(&dir).unwrap();
+        let socket = temporary.path().join("evorch-0123456789abcdef.sock");
+        // sun_path holds 108 bytes including the terminating NUL.
+        assert!(socket.as_os_str().len() < 108, "{}", socket.display());
+        UnixListener::bind(&socket).unwrap();
+    }
+
     // Given: a prepared thread directory with a file / When: the owner resets and then
     // releases it / Then: reset empties it, release deletes it, and the parent is 0700
     #[test]
