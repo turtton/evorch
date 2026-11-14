@@ -567,6 +567,27 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
     tx.commit()?;
     Ok(result)
 }
+/// Questions raised by the lane's own runs (its root and every run under it) that nobody has
+/// answered. Unlike the attention list this does not wait for a question to be forwarded to
+/// the lead: a person ending the lane needs to know about every one of them. A question whose
+/// run was deleted is not counted, which is the ledger's only form of cancellation. Each
+/// question is one row, so it is counted once however it is routed.
+fn open_question_count(conn: &Connection, lane: &LaneRecord) -> Result<u64, StorageError> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM user_questions q WHERE q.answered=0 \
+         AND (q.root_run_id=?2 \
+              OR q.run_id IN (SELECT run_id FROM thread_runs WHERE thread_id=?1) \
+              OR q.root_run_id IN (SELECT root_run_id FROM thread_runs WHERE thread_id=?1)) \
+         AND q.run_id NOT IN (SELECT run_id FROM run_tombstones) \
+         AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones)",
+        rusqlite::params![
+            lane.thread_id,
+            lane.root_run_id.as_deref().unwrap_or_default()
+        ],
+        |row| row.get(0),
+    )?)
+}
+
 /// Everything a person reads before ending a lane, from one snapshot of the ledger, with the
 /// revisions a close then compares. Read only: it observes no artifact, Git or GitHub state.
 pub(crate) fn close_preview(
@@ -583,7 +604,7 @@ pub(crate) fn close_preview(
         .as_ref()
         .map(|report| ready_readiness(conn, lane_id, report))
         .transpose()?;
-    let open_question_count = pending_question_count(conn, lane_id, lane.management_revision)?;
+    let open_question_count = open_question_count(conn, &lane)?;
     Ok(LaneClosePreview {
         open_question_count,
         context,

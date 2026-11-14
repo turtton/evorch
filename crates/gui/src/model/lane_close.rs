@@ -22,6 +22,27 @@ pub const RUNNING_WARNING: &str = "This lane is running now. Ending it here does
 /// Shown when a person closes a lane that has not reported Ready for its brief.
 pub const NO_READY_WARNING: &str = "This lane has not reported Ready for its current brief. You are ending it without a result to read.";
 
+/// Shown when the latest Ready was reported for an earlier brief: it is only for reference.
+pub const OLDER_BRIEF_WARNING: &str = "The latest Ready was reported for an earlier brief. The brief was revised after it, so it is shown for reference only and is not a result for the current brief.";
+
+/// Whether the Ready a preview shows answers the lane's current brief. `None` when there is
+/// no Ready for the current management at all.
+#[must_use]
+pub fn ready_answers_current_brief(preview: &LaneClosePreview) -> Option<bool> {
+    preview.ready.as_ref()?;
+    Some(preview.context.ready_brief_revision == Some(preview.context.brief_revision))
+}
+
+/// The warning a person ending a lane as done reads about its Ready, if any.
+#[must_use]
+pub fn ready_warning(preview: &LaneClosePreview) -> Option<&'static str> {
+    match ready_answers_current_brief(preview) {
+        None => Some(NO_READY_WARNING),
+        Some(false) => Some(OLDER_BRIEF_WARNING),
+        Some(true) => None,
+    }
+}
+
 /// Longest note the ledger accepts, in bytes.
 pub const NOTE_MAX_BYTES: usize = storage::lane_control::LANE_CLOSE_NOTE_MAX_BYTES;
 

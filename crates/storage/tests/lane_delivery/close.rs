@@ -715,17 +715,24 @@ fn the_preview_gives_a_person_what_to_read_and_the_revisions_a_close_compares() 
 }
 
 #[test]
-fn the_preview_counts_unanswered_questions_and_a_close_leaves_them_open() {
+fn the_preview_counts_every_unanswered_question_of_the_lane_whether_or_not_it_was_forwarded() {
     let f = Fixture::new();
     started(&f);
-    assert_eq!(
+    let open = |f: &Fixture| {
         f.db()
             .lane_close_preview("lane-1")
             .unwrap()
-            .open_question_count,
-        0
-    );
+            .open_question_count
+    };
+    assert_eq!(open(&f), 0);
+
+    // A child run asked and nothing was forwarded to the lead yet: there is no route, but the
+    // person ending the lane still has to hear about it.
     let route = child_question(&f);
+    assert_eq!(f.count("lane_question_routes"), 0);
+    assert_eq!(open(&f), 1);
+
+    // Forwarding adds a route for the same question and never a second count.
     f.h()
         .bind_user_questions(
             "child",
@@ -734,12 +741,7 @@ fn the_preview_counts_unanswered_questions_and_a_close_leaves_them_open() {
         )
         .unwrap();
     f.h().forward_lane_question(route.clone()).unwrap();
-    let open = |f: &Fixture| {
-        f.db()
-            .lane_close_preview("lane-1")
-            .unwrap()
-            .open_question_count
-    };
+    assert_eq!(f.count("lane_question_routes"), 1);
     assert_eq!(open(&f), 1);
 
     // Ending the lane by hand without any Ready records the close and nothing else: the
@@ -750,16 +752,51 @@ fn the_preview_counts_unanswered_questions_and_a_close_leaves_them_open() {
         .unwrap();
     assert_eq!(open(&f), 1);
     assert_eq!(f.count("user_questions"), questions);
-    assert_eq!(
-        f.sql()
-            .query_row(
-                "SELECT COUNT(*) FROM user_questions WHERE id=?1 AND answered=0",
-                [&route.question_id],
-                |r| r.get::<_, u64>(0),
-            )
-            .unwrap(),
-        1
-    );
+}
+
+#[test]
+fn answered_questions_and_those_of_a_deleted_run_are_not_counted_and_other_lanes_are_not_mixed_in()
+{
+    let f = Fixture::new();
+    started(&f);
+    let open = |f: &Fixture| {
+        f.db()
+            .lane_close_preview("lane-1")
+            .unwrap()
+            .open_question_count
+    };
+    let first = child_question(&f);
+    // A second question from another child run of the same lane root.
+    let mut record = snapshot().record;
+    record.run_id = "child-2".into();
+    record.parent_run_id = Some("run-1".into());
+    f.h().upsert_run_context(&record).unwrap();
+    let mut second = question(1, 1);
+    second.run_id = "child-2".into();
+    second.root_run_id = "run-1".into();
+    f.h().create_user_question(&second).unwrap();
+    // A question of an unrelated root belongs to no lane here.
+    f.h().create_user_question(&question(9, 0)).unwrap();
+    assert_eq!(open(&f), 2);
+
+    // An answer closes one; the run that was deleted takes the other with it.
+    f.h()
+        .answer_user_question(
+            &first.question_id,
+            "go on",
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
+        .unwrap();
+    assert_eq!(open(&f), 1);
+    f.sql()
+        .execute(
+            "INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES ('child-2','thread-1','thread-1')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(open(&f), 0);
 }
 
 #[test]

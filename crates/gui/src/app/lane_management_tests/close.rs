@@ -614,3 +614,53 @@ async fn the_sidebar_menu_leads_through_the_confirmation_stale_reload_and_the_ba
     window.run();
     assert!(window.has_label("Lane close: closed (unverified)"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ready_for_an_earlier_brief_is_marked_for_reference_and_still_does_not_block_a_human_close()
+ {
+    use crate::model::lane_close::{NO_READY_WARNING, OLDER_BRIEF_WARNING};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    report_ready(&storage, "old result", 5);
+    let mut brief = storage.handle().lane("lane").unwrap().unwrap().brief;
+    brief.objective = "a revised objective".into();
+    storage
+        .handle()
+        .revise_lane_brief("lane", 1, brief, 7)
+        .unwrap();
+    settle(&mut ui);
+    open_from_sidebar(&mut ui, CloseChoice::Complete);
+    let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
+    window.run();
+
+    assert!(window.has_label(OLDER_BRIEF_WARNING));
+    assert!(!window.has_label(NO_READY_WARNING));
+    assert!(window.has_label("Latest Ready (#1), for an earlier brief"));
+    assert!(window.has_label("old result"));
+
+    // A person may still end it: the Ready is only shown for reference.
+    type_reason(window.state_mut(), "the new brief is moot");
+    window.run();
+    window.click_label("Close lane");
+    window.run();
+    let stored = standing(&storage).expect("the close stands");
+    assert_eq!(stored.kind, LaneCloseKind::HumanClosed);
+    assert_eq!(stored.ready_seq, Some(1));
+
+    // A Ready for the current brief reads without that warning.
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ui, storage, _runtime) = closing_window(dir.path());
+    let mut brief = storage.handle().lane("lane").unwrap().unwrap().brief;
+    brief.objective = "a revised objective".into();
+    storage
+        .handle()
+        .revise_lane_brief("lane", 1, brief, 7)
+        .unwrap();
+    report_ready(&storage, "new result", 9);
+    settle(&mut ui);
+    open_from_sidebar(&mut ui, CloseChoice::Complete);
+    let mut window = HeadlessWorkbench::new(ui, [1280.0, 900.0]);
+    window.run();
+    assert!(!window.has_label(OLDER_BRIEF_WARNING));
+    assert!(window.has_label("Latest Ready (#1)"));
+}

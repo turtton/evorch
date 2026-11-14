@@ -52,8 +52,10 @@ pub fn lane_close_dialog(
                 ui.add(egui::Label::new(egui::RichText::new(blocker).color(color)).wrap());
             }
             if let ClosePhase::Loaded(preview) = &dialog.phase {
-                if preview.ready.is_none() && dialog.choice == CloseChoice::Complete {
-                    warning(ui, lane_close::NO_READY_WARNING);
+                if dialog.choice == CloseChoice::Complete
+                    && let Some(text) = lane_close::ready_warning(preview)
+                {
+                    warning(ui, text);
                 }
                 if let Some(line) = lane_close::open_questions_line(preview.open_question_count) {
                     warning(ui, &line);
@@ -71,7 +73,16 @@ pub fn lane_close_dialog(
                         ui.separator();
                         match &preview.ready {
                             Some(ready) => {
-                                ui.label(medium(format!("Latest Ready (#{})", ready.report_seq)));
+                                let for_reference =
+                                    lane_close::ready_answers_current_brief(preview) == Some(false);
+                                ui.label(medium(if for_reference {
+                                    format!(
+                                        "Latest Ready (#{}), for an earlier brief",
+                                        ready.report_seq
+                                    )
+                                } else {
+                                    format!("Latest Ready (#{})", ready.report_seq)
+                                }));
                                 ui.add(egui::Label::new(&ready.summary).wrap());
                                 ui.label(muted(lane_close::evidence_line(ready)));
                                 let artifacts = lane_close::artifact_lines(ready);

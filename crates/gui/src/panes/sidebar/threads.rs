@@ -431,6 +431,13 @@ fn render_tree(
                     };
                     branch_kind_icon(ui, slot, response, kind);
                 }
+                let lane_view = LaneRowView {
+                    can_close: indicators.lane_close.can_close,
+                    badge: indicators
+                        .lane_close
+                        .badges
+                        .and_then(|badges| badges.get(&thread.id)),
+                };
                 if archived {
                     let retention = indicators.retention.get(&thread.id);
                     archived_row(
@@ -438,7 +445,7 @@ fn render_tree(
                         thread,
                         display_root,
                         hidden.count,
-                        retention,
+                        (retention, lane_view),
                         sidebar,
                         action,
                     );
@@ -465,13 +472,7 @@ fn render_tree(
                                     .copied(),
                                 link_pr: indicators.pull_requests.enabled,
                             },
-                            LaneRowView {
-                                can_close: indicators.lane_close.can_close,
-                                badge: indicators
-                                    .lane_close
-                                    .badges
-                                    .and_then(|badges| badges.get(&thread.id)),
-                            },
+                            lane_view,
                         ),
                         family_running,
                         sidebar,
@@ -803,7 +804,7 @@ fn archived_row(
     thread: &ThreadRecord,
     display_root: bool,
     hidden_count: usize,
-    retention: Option<&RetentionStatus>,
+    (retention, lane_view): (Option<&RetentionStatus>, LaneRowView<'_>),
     sidebar: &SidebarState,
     action: &mut Option<SidebarAction>,
 ) {
@@ -813,12 +814,15 @@ fn archived_row(
             *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
         }
         hidden_count_badge(ui, hidden_count);
+        if let Some(badge) = lane_view.badge {
+            lane_close_badge(ui, badge);
+        }
         let note = retention.and_then(retention_hover_text);
         thread_title(
             ui,
             thread,
             !display_root,
-            (note.as_deref(), None, false, false),
+            (note.as_deref(), None, false, lane_view.can_close),
             sidebar,
             action,
         );
@@ -1517,6 +1521,80 @@ mod tests {
                 harness.state(),
                 &Some(SidebarAction::TogglePin(thread.id.clone()))
             );
+        }
+    }
+
+    #[test]
+    fn an_archived_managed_lane_offers_the_close_menu_and_shows_its_badge_a_detached_one_does_not()
+    {
+        use crate::model::lane_close::{CloseChoice, LaneCloseBadge};
+        let badge = LaneCloseBadge {
+            text: "closed (unverified)",
+            hover: "ended by hand".into(),
+        };
+        for (policy, can_close, offered) in [
+            (workspace_ui::LanePolicy::Attached, true, true),
+            (workspace_ui::LanePolicy::Summary, true, true),
+            (workspace_ui::LanePolicy::Attached, false, false),
+            (workspace_ui::LanePolicy::Detached, true, false),
+        ] {
+            let mut thread =
+                ThreadRecord::new(ThreadId::new("lane-thread"), ProjectId::new("demo"), "Lane");
+            thread.lane = Some(workspace_ui::LaneLink {
+                lane_id: "lane".into(),
+                origin_thread_id: ThreadId::new("thread"),
+                lead_thread_id: Some(ThreadId::new("thread")),
+                policy,
+                management_revision: 1,
+                detached_since_management_revision: None,
+            });
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(320.0, 200.0))
+                .build_ui_state(
+                    |ui, action| {
+                        crate::theme::install(ui.ctx());
+                        super::archived_row(
+                            ui,
+                            &thread,
+                            true,
+                            0,
+                            (
+                                None,
+                                LaneRowView {
+                                    can_close,
+                                    badge: Some(&badge),
+                                },
+                            ),
+                            &workspace_ui::SidebarState::default(),
+                            action,
+                        );
+                    },
+                    None,
+                );
+            harness.run();
+            assert!(
+                harness
+                    .query_by_label("Lane close: closed (unverified)")
+                    .is_some(),
+                "the badge of an archived lane is drawn"
+            );
+            harness.get_by_label("Lane").click_secondary();
+            harness.run();
+            let entry = harness.query_by_label(CloseChoice::Complete.menu_label());
+            assert_eq!(entry.is_some(), offered, "{policy:?} can_close={can_close}");
+            if offered {
+                harness
+                    .get_by_label(CloseChoice::Discard.menu_label())
+                    .click();
+                harness.run();
+                assert_eq!(
+                    harness.state(),
+                    &Some(SidebarAction::CloseLane {
+                        thread: thread.id.clone(),
+                        choice: CloseChoice::Discard,
+                    })
+                );
+            }
         }
     }
 
