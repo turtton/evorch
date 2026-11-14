@@ -103,9 +103,17 @@ pub struct CloseDialog {
     pub notice: Option<String>,
     /// A confirmation was refused as stale: reload before deciding again.
     pub stale: bool,
-    listed_management_revision: u64,
-    listed_ready_seq: Option<u64>,
+    /// What the screen is held to: the revisions the list item named, or `None` when the
+    /// next read is what the person is shown (a lane chosen from the sidebar, or after
+    /// Reload). The ledger still compares the revisions of the read that was displayed.
+    listed: Option<Listed>,
     seq: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Listed {
+    management_revision: u64,
+    ready_seq: Option<u64>,
 }
 
 impl CloseDialog {
@@ -126,11 +134,13 @@ impl CloseDialog {
                         lane_close::close_label(close)
                     ));
                 }
-                lane_close::moved_since_listed(
-                    preview,
-                    self.listed_management_revision,
-                    self.listed_ready_seq,
-                )
+                self.listed.and_then(|listed| {
+                    lane_close::moved_since_listed(
+                        preview,
+                        listed.management_revision,
+                        listed.ready_seq,
+                    )
+                })
             }
         }
     }
@@ -206,6 +216,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.lane_close.reader.is_some() && self.lane_close.host.is_some()
     }
 
+    /// The badge of every lane thread whose close stands, from what the ledger last said.
+    pub(super) fn lane_close_badges(
+        &self,
+    ) -> std::collections::BTreeMap<workspace_ui::ThreadId, lane_close::LaneCloseBadge> {
+        self.sidebar
+            .threads
+            .iter()
+            .filter(|thread| thread.lane.is_some())
+            .filter_map(|thread| {
+                let close = self.lane_detail(&thread.id)?.close.as_ref()?;
+                Some((thread.id.clone(), lane_close::LaneCloseBadge::of(close)))
+            })
+            .collect()
+    }
+
     /// The open confirmation, if any.
     #[must_use]
     pub const fn lane_close_dialog(&self) -> Option<&CloseDialog> {
@@ -240,10 +265,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             LaneAttentionKind::ReadyUnclosed { ready_seq, .. } => Some(ready_seq.0),
             _ => None,
         };
-        if choice == CloseChoice::Complete && listed_ready_seq.is_none() {
-            self.push_notice("Only a lane that reported Ready can be closed; it can be discarded.");
-            return;
-        }
         let thread = self.sidebar.threads.iter().find(|thread| {
             thread
                 .lane
@@ -263,8 +284,52 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             note: String::new(),
             notice: None,
             stale: false,
-            listed_management_revision: item.management_revision.get(),
-            listed_ready_seq,
+            listed: Some(Listed {
+                management_revision: item.management_revision.get(),
+                ready_seq: listed_ready_seq,
+            }),
+            seq: 0,
+        });
+        self.start_close_read();
+    }
+
+    /// Opens the confirmation for a managed lane chosen from the sidebar. The lane needs no
+    /// attention item and no Ready: the next read is what the person is shown and decides on.
+    pub(super) fn begin_lane_close_for_thread(
+        &mut self,
+        thread: &workspace_ui::ThreadId,
+        choice: CloseChoice,
+    ) {
+        if !self.can_close_lanes() {
+            self.push_notice("Ending a lane is not available in this window.");
+            return;
+        }
+        let Some((lane_id, title)) = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|candidate| candidate.id == *thread)
+            .and_then(|candidate| {
+                candidate
+                    .lane
+                    .as_ref()
+                    .filter(|lane| lane.policy.is_managed())
+                    .map(|lane| (lane.lane_id.clone(), candidate.title.clone()))
+            })
+        else {
+            self.push_notice("Only a lane its lead manages can be ended here.");
+            return;
+        };
+        self.lane_close.dialog = Some(CloseDialog {
+            choice,
+            lane_id,
+            lane_thread: Some(thread.to_string()),
+            title,
+            phase: ClosePhase::Loading,
+            note: String::new(),
+            notice: None,
+            stale: false,
+            listed: None,
             seq: 0,
         });
         self.start_close_read();
@@ -276,6 +341,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             dialog.phase = ClosePhase::Loading;
             dialog.notice = None;
             dialog.stale = false;
+            // A refused confirmation means the screen was older than the ledger. The new
+            // read replaces what the person is held to; nothing is sent until they confirm
+            // it again.
+            dialog.listed = None;
         }
         self.start_close_read();
     }
@@ -314,7 +383,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 continue;
             }
             dialog.phase = match loaded.result {
-                Ok(preview) => ClosePhase::Loaded(Box::new(preview)),
+                Ok(preview) => {
+                    // The person is shown this read, so it is what they decide on.
+                    dialog.listed.get_or_insert(Listed {
+                        management_revision: preview.context.management_revision,
+                        ready_seq: preview.context.latest_ready_seq,
+                    });
+                    ClosePhase::Loaded(Box::new(preview))
+                }
                 Err(reason) => ClosePhase::Unavailable(reason),
             };
         }
@@ -336,7 +412,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         let order = LaneCloseOrder {
             lane_id: dialog.lane_id.clone(),
-            ready_seq: dialog.listed_ready_seq,
+            ready_seq: preview.context.latest_ready_seq,
             expected_management_revision: preview.context.management_revision,
             expected_request_revision: preview.context.request_revision,
             discard: dialog.choice.discards(),
@@ -369,12 +445,28 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
+    /// Whether the lane of the open confirmation has a run going in its thread. The close
+    /// never stops it; the screen only says so.
+    fn lane_close_running(&self) -> bool {
+        let Some(dialog) = &self.lane_close.dialog else {
+            return false;
+        };
+        self.sidebar.threads.iter().any(|thread| {
+            dialog.lane_thread.as_deref() == Some(thread.id.to_string().as_str())
+                && matches!(
+                    thread.state(&self.phases),
+                    workspace_ui::ThreadState::Running
+                )
+        })
+    }
+
     /// Draws the confirmation and runs its answer.
     pub(super) fn render_lane_close_dialog(&mut self, ctx: &egui::Context) {
+        let running = self.lane_close_running();
         let Some(dialog) = &mut self.lane_close.dialog else {
             return;
         };
-        match crate::panes::lane_close::lane_close_dialog(ctx, dialog) {
+        match crate::panes::lane_close::lane_close_dialog(ctx, dialog, running) {
             Some(crate::panes::lane_close::CloseDialogAction::Confirm) => {
                 self.confirm_lane_close();
             }

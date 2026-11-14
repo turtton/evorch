@@ -21,7 +21,7 @@ use crate::panes::{
     file_viewer::{FileLink, file_viewer_pane, take_file_links},
     notifications::{NotificationsAction, notifications_pane},
     requests::RequestAction,
-    sidebar::{PullRequestsView, SidebarAction, sidebar_pane_with_pull_requests},
+    sidebar::{LaneCloseView, PullRequestsView, SidebarAction, sidebar_pane_with_lane_close},
     tasks::{TasksAction, tasks_pane},
     terminal::terminal_pane,
 };
@@ -48,6 +48,8 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) notifications_action: &'a mut Option<NotificationsAction>,
     pub(super) lane_attention: &'a crate::model::lane_attention::AttentionBoard,
     pub(super) can_close_lanes: bool,
+    pub(super) lane_close_badges:
+        &'a BTreeMap<workspace_ui::ThreadId, crate::model::lane_close::LaneCloseBadge>,
     pub(super) lane_attention_action: &'a mut Option<crate::model::lane_attention::AttentionAction>,
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
     pub(super) usage: &'a mut crate::panes::usage::UsagePane,
@@ -339,7 +341,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     })
                     .map(|thread| thread.id.clone())
                     .collect();
-                if let Some(action) = sidebar_pane_with_pull_requests(
+                if let Some(action) = sidebar_pane_with_lane_close(
                     ui,
                     self.sidebar,
                     (
@@ -353,6 +355,10 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     PullRequestsView {
                         enabled: self.pull_requests.enabled,
                         badges: Some(self.pull_request_badges),
+                    },
+                    LaneCloseView {
+                        can_close: self.can_close_lanes,
+                        badges: Some(self.lane_close_badges),
                     },
                 ) {
                     *self.sidebar_action = Some(action);

@@ -81,6 +81,10 @@ pub struct LaneClosePreview {
     pub pr_context: LaneClosePrContext,
     /// The close that stands now, if any.
     pub current_close: Option<LaneCloseResult>,
+    /// Questions raised by the lane's own runs that nobody has answered, whether or not they
+    /// were forwarded to the lead yet. A close leaves them as they are; this only tells the
+    /// person they exist.
+    pub open_question_count: u64,
 }
 /// Longest note a close accepts, in bytes.
 pub const LANE_CLOSE_NOTE_MAX_BYTES: usize = 2048;

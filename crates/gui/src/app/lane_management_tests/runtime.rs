@@ -84,7 +84,7 @@ fn move_to(ui: &mut Window, pos: Pos2) {
     ui.input_mut().events.push(Event::PointerMoved(pos));
     ui.step();
 }
-fn context_action(ui: &mut Window, label: &str, action: &str) {
+pub(super) fn context_action(ui: &mut Window, label: &str, action: &str) {
     let pos = ui.label_rects(label)[0].center();
     move_to(ui, pos);
     button(ui, pos, PointerButton::Secondary, true);

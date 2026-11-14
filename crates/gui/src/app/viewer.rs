@@ -126,6 +126,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let pull_request_badges = self.pull_request_badges();
         let lane_delivery_bound = self.sink.lane_delivery_bound();
         let can_close_lanes = self.can_close_lanes();
+        let lane_close_badges = self.lane_close_badges();
         let mut self_improvement_action = None;
         let mut diagnostics_request = false;
         let mut context_request = false;
@@ -173,6 +174,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 notifications_action: &mut notifications_action,
                 lane_attention: &self.attention.board,
                 can_close_lanes,
+                lane_close_badges: &lane_close_badges,
                 lane_attention_action: &mut lane_attention_action,
                 attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
@@ -388,6 +390,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::TogglePin(thread_id) => self.toggle_pin(thread_id),
                 SidebarAction::ToggleArchive(thread_id) => self.toggle_archive(thread_id),
                 SidebarAction::ManageLane(request) => self.manage_lane(request, None),
+                SidebarAction::CloseLane { thread, choice } => {
+                    self.begin_lane_close_for_thread(&thread, choice);
+                    Ok(())
+                }
                 SidebarAction::ReattachLane(intent) => self.reattach_lane_drop(intent),
                 SidebarAction::LinkPullRequest(thread_id) => {
                     self.open_link_dialog(thread_id.to_string());

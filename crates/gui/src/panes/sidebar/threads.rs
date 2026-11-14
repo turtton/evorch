@@ -146,6 +146,8 @@ pub(super) struct ThreadIndicators<'a> {
     pub retention: &'a BTreeMap<workspace_ui::ThreadId, RetentionStatus>,
     /// The pull request badges, and whether "Link PR…" is offered.
     pub pull_requests: super::PullRequestsView<'a>,
+    /// The badges of ended lanes, and whether the lane menu offers to end one.
+    pub lane_close: super::LaneCloseView<'a>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -270,6 +272,13 @@ struct RowMarks {
     pull_request: Option<crate::model::pull_requests::PullRequestBadge>,
     /// Offer "Link PR…" in the title's menu.
     link_pr: bool,
+}
+
+/// What the title's menu and badges need about the row's lane, beyond [`RowMarks`].
+#[derive(Clone, Copy, Default)]
+struct LaneRowView<'a> {
+    can_close: bool,
+    badge: Option<&'a crate::model::lane_close::LaneCloseBadge>,
 }
 
 /// What a collapsed row hides, so collapsing a family never hides work that
@@ -422,6 +431,13 @@ fn render_tree(
                     };
                     branch_kind_icon(ui, slot, response, kind);
                 }
+                let lane_view = LaneRowView {
+                    can_close: indicators.lane_close.can_close,
+                    badge: indicators
+                        .lane_close
+                        .badges
+                        .and_then(|badges| badges.get(&thread.id)),
+                };
                 if archived {
                     let retention = indicators.retention.get(&thread.id);
                     archived_row(
@@ -429,7 +445,7 @@ fn render_tree(
                         thread,
                         display_root,
                         hidden.count,
-                        retention,
+                        (retention, lane_view),
                         sidebar,
                         action,
                     );
@@ -444,17 +460,20 @@ fn render_tree(
                         ui,
                         (thread, display_root),
                         state,
-                        RowMarks {
-                            attention: own,
-                            hidden,
-                            title_color: row_colors.map(|(fg, _)| fg),
-                            pull_request: indicators
-                                .pull_requests
-                                .badges
-                                .and_then(|badges| badges.get(&thread.id))
-                                .copied(),
-                            link_pr: indicators.pull_requests.enabled,
-                        },
+                        (
+                            RowMarks {
+                                attention: own,
+                                hidden,
+                                title_color: row_colors.map(|(fg, _)| fg),
+                                pull_request: indicators
+                                    .pull_requests
+                                    .badges
+                                    .and_then(|badges| badges.get(&thread.id))
+                                    .copied(),
+                                link_pr: indicators.pull_requests.enabled,
+                            },
+                            lane_view,
+                        ),
                         family_running,
                         sidebar,
                         action,
@@ -672,7 +691,7 @@ fn active_row(
     ui: &mut Ui,
     (thread, display_root): (&ThreadRecord, bool),
     state: ThreadState,
-    marks: RowMarks,
+    (marks, lane_view): (RowMarks, LaneRowView<'_>),
     family_running: bool,
     sidebar: &SidebarState,
     action: &mut Option<SidebarAction>,
@@ -766,11 +785,14 @@ fn active_row(
         if let Some(badge) = pull_request {
             pull_request_badge(ui, badge);
         }
+        if let Some(badge) = lane_view.badge {
+            lane_close_badge(ui, badge);
+        }
         thread_title(
             ui,
             thread,
             !display_root,
-            (note, title_color, link_pr),
+            (note, title_color, link_pr, lane_view.can_close),
             sidebar,
             action,
         );
@@ -782,7 +804,7 @@ fn archived_row(
     thread: &ThreadRecord,
     display_root: bool,
     hidden_count: usize,
-    retention: Option<&RetentionStatus>,
+    (retention, lane_view): (Option<&RetentionStatus>, LaneRowView<'_>),
     sidebar: &SidebarState,
     action: &mut Option<SidebarAction>,
 ) {
@@ -792,12 +814,15 @@ fn archived_row(
             *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
         }
         hidden_count_badge(ui, hidden_count);
+        if let Some(badge) = lane_view.badge {
+            lane_close_badge(ui, badge);
+        }
         let note = retention.and_then(retention_hover_text);
         thread_title(
             ui,
             thread,
             !display_root,
-            (note.as_deref(), None, false),
+            (note.as_deref(), None, false, lane_view.can_close),
             sidebar,
             action,
         );
@@ -820,6 +845,22 @@ fn pull_request_badge(ui: &mut Ui, badge: crate::model::pull_requests::PullReque
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
     response.on_hover_text(label);
+}
+
+/// A pill saying the lane's close stands. It is the ledger's record, drawn next to the run's
+/// own state and never in place of it.
+fn lane_close_badge(ui: &mut Ui, badge: &crate::model::lane_close::LaneCloseBadge) {
+    let label = format!("Lane close: {}", badge.text);
+    let response = ui.add(
+        egui::Label::new(
+            egui::RichText::new(badge.text)
+                .size(FONT_SMALL)
+                .color(palette().TEXT_MUTED),
+        )
+        .sense(Sense::hover()),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+    response.on_hover_text(&badge.hover);
 }
 
 /// A pill counting a collapsed row's descendants; nothing when none are hidden.
@@ -922,7 +963,7 @@ fn thread_title(
     ui: &mut Ui,
     thread: &ThreadRecord,
     child: bool,
-    (note, color, link_pr): (Option<&str>, Option<egui::Color32>, bool),
+    (note, color, link_pr, can_close): (Option<&str>, Option<egui::Color32>, bool, bool),
     sidebar: &SidebarState,
     action: &mut Option<SidebarAction>,
 ) {
@@ -990,6 +1031,23 @@ fn thread_title(
                 }
             }
             ui.separator();
+            if can_close {
+                use crate::model::lane_close::CloseChoice;
+                for choice in [CloseChoice::Complete, CloseChoice::Discard] {
+                    if ui
+                        .button(choice.menu_label())
+                        .on_hover_text(crate::model::lane_close::MEANING)
+                        .clicked()
+                    {
+                        *action = Some(SidebarAction::CloseLane {
+                            thread: thread.id.clone(),
+                            choice,
+                        });
+                        ui.close();
+                    }
+                }
+                ui.separator();
+            }
         }
         if ui.button("Copy thread ID").clicked() {
             ui.ctx().copy_text(thread.id.to_string());
@@ -1194,9 +1252,9 @@ mod tests {
     };
 
     use super::{
-        Attention, BranchKind, Hidden, RowAttention, RowMarks, ThreadIndicators, TreeRails,
-        active_row, attention_note, branch_kind, family_gap_before, family_has_running_runs,
-        hidden_descendants, limit_families, nested_threads, thread_family,
+        Attention, BranchKind, Hidden, LaneRowView, RowAttention, RowMarks, ThreadIndicators,
+        TreeRails, active_row, attention_note, branch_kind, family_gap_before,
+        family_has_running_runs, hidden_descendants, limit_families, nested_threads, thread_family,
     };
     use crate::panes::sidebar::SidebarAction;
 
@@ -1223,6 +1281,7 @@ mod tests {
             active_runs: &HashSet::new(),
             retention: &BTreeMap::new(),
             pull_requests: Default::default(),
+            lane_close: Default::default(),
         };
         // a hides a1, a1x and a2, but neither itself nor b's subtree.
         assert_eq!(
@@ -1438,7 +1497,7 @@ mod tests {
                                 ui,
                                 (&thread, true),
                                 ThreadState::Running,
-                                RowMarks::default(),
+                                (RowMarks::default(), LaneRowView::default()),
                                 true,
                                 &workspace_ui::SidebarState::default(),
                                 action,
@@ -1462,6 +1521,80 @@ mod tests {
                 harness.state(),
                 &Some(SidebarAction::TogglePin(thread.id.clone()))
             );
+        }
+    }
+
+    #[test]
+    fn an_archived_managed_lane_offers_the_close_menu_and_shows_its_badge_a_detached_one_does_not()
+    {
+        use crate::model::lane_close::{CloseChoice, LaneCloseBadge};
+        let badge = LaneCloseBadge {
+            text: "closed (unverified)",
+            hover: "ended by hand".into(),
+        };
+        for (policy, can_close, offered) in [
+            (workspace_ui::LanePolicy::Attached, true, true),
+            (workspace_ui::LanePolicy::Summary, true, true),
+            (workspace_ui::LanePolicy::Attached, false, false),
+            (workspace_ui::LanePolicy::Detached, true, false),
+        ] {
+            let mut thread =
+                ThreadRecord::new(ThreadId::new("lane-thread"), ProjectId::new("demo"), "Lane");
+            thread.lane = Some(workspace_ui::LaneLink {
+                lane_id: "lane".into(),
+                origin_thread_id: ThreadId::new("thread"),
+                lead_thread_id: Some(ThreadId::new("thread")),
+                policy,
+                management_revision: 1,
+                detached_since_management_revision: None,
+            });
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(320.0, 200.0))
+                .build_ui_state(
+                    |ui, action| {
+                        crate::theme::install(ui.ctx());
+                        super::archived_row(
+                            ui,
+                            &thread,
+                            true,
+                            0,
+                            (
+                                None,
+                                LaneRowView {
+                                    can_close,
+                                    badge: Some(&badge),
+                                },
+                            ),
+                            &workspace_ui::SidebarState::default(),
+                            action,
+                        );
+                    },
+                    None,
+                );
+            harness.run();
+            assert!(
+                harness
+                    .query_by_label("Lane close: closed (unverified)")
+                    .is_some(),
+                "the badge of an archived lane is drawn"
+            );
+            harness.get_by_label("Lane").click_secondary();
+            harness.run();
+            let entry = harness.query_by_label(CloseChoice::Complete.menu_label());
+            assert_eq!(entry.is_some(), offered, "{policy:?} can_close={can_close}");
+            if offered {
+                harness
+                    .get_by_label(CloseChoice::Discard.menu_label())
+                    .click();
+                harness.run();
+                assert_eq!(
+                    harness.state(),
+                    &Some(SidebarAction::CloseLane {
+                        thread: thread.id.clone(),
+                        choice: CloseChoice::Discard,
+                    })
+                );
+            }
         }
     }
 
@@ -1715,6 +1848,7 @@ mod tests {
                         active_runs: &active,
                         retention: &BTreeMap::new(),
                         pull_requests: Default::default(),
+                        lane_close: Default::default(),
                     };
                     super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
                 },
@@ -1772,6 +1906,7 @@ mod tests {
                         active_runs: &active,
                         retention: &BTreeMap::new(),
                         pull_requests: Default::default(),
+                        lane_close: Default::default(),
                     };
                     super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
                 },
@@ -1903,6 +2038,7 @@ mod tests {
                         active_runs: &active,
                         retention: &retention,
                         pull_requests: Default::default(),
+                        lane_close: Default::default(),
                     };
                     for (archived, id) in [(true, "old"), (false, "live")] {
                         let section: Vec<&ThreadRecord> = sidebar
@@ -2125,6 +2261,7 @@ mod tests {
             active_runs: &active,
             retention: &BTreeMap::new(),
             pull_requests: Default::default(),
+            lane_close: Default::default(),
         };
 
         // Then: the collapsed root carries it, the child itself is not hidden
@@ -2187,6 +2324,7 @@ mod tests {
                         active_runs: &active,
                         retention: &BTreeMap::new(),
                         pull_requests: Default::default(),
+                        lane_close: Default::default(),
                     };
                     super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
                 },
@@ -2334,6 +2472,7 @@ mod tests {
                     active_runs: &active,
                     retention: &BTreeMap::new(),
                     pull_requests: Default::default(),
+                    lane_close: Default::default(),
                 };
                 let mut action = None;
                 super::render_tree(
