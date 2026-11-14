@@ -135,6 +135,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("UnexpectedModelSwitch", Ignored),
         ("lane_stall_changed", Ignored),
         ("lane_nudge_accepted", Ignored),
+        ("lane_closed", Ignored),
         ("future-code", Ignored),
     ];
     // A new shared code needs its own pinned decision here, not the unknown fallback.

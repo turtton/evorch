@@ -427,7 +427,7 @@ async fn a_new_close_tells_the_hosts_to_read_the_lane_again_and_one_that_stood_d
             .filter(|event| {
                 matches!(&event.kind, EventKind::Diagnostic(d)
                     if d.source == "lane_delivery"
-                        && d.code == "lane_closed"
+                        && d.code == event_bus::event::diagnostic_codes::LANE_CLOSED
                         && d.thread_id.as_deref() == Some(f.lane.thread_id.as_str()))
             })
             .count()

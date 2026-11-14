@@ -192,7 +192,7 @@ impl AgentRuntime {
             self.lane_state_changed(
                 &lane.thread_id,
                 event_bus::DiagnosticSeverity::Info,
-                "lane_closed",
+                event_bus::event::diagnostic_codes::LANE_CLOSED,
                 &result.close_id,
             );
         }

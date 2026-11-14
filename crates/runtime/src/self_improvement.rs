@@ -189,7 +189,7 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         // eval: a requested evaluation ended; its failures are the replays', not the harness's.
         EVALUATION_FINISHED => Ignored,
         // Lane ledger re-query hints are routine state notifications, not faults.
-        LANE_STALL_CHANGED | LANE_NUDGE_ACCEPTED => Ignored,
+        LANE_STALL_CHANGED | LANE_NUDGE_ACCEPTED | LANE_CLOSED => Ignored,
         // budget_tracker: the lead kept opening lanes without collecting terminal
         // reports and the harness refused further creation; the guidance or
         // threshold may be at fault, so it is a harness improvement candidate.
