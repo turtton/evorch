@@ -213,6 +213,9 @@ impl PendingLearning {
         let Some(runtime) = AgentRuntime::from_weak(&weak) else {
             return Ok(());
         };
+        let Some(producer) = runtime.producer_gate().enter().await else {
+            return Ok(());
+        };
         // A restored/fenced host must not become another learner of this source.
         if !runtime.owns_background_run(run) {
             return Ok(());
@@ -256,6 +259,7 @@ impl PendingLearning {
                 return Ok(());
             }
         }
+        drop(producer);
         let queue = LearningQueue::new(
             runtime,
             (self.settings.writer.clone(), self.settings.storage.clone()),

@@ -54,6 +54,7 @@ pub mod network;
 pub mod ownership;
 pub mod panic_capture;
 pub mod policy;
+pub mod producer;
 pub mod prompt;
 pub mod pull_requests;
 pub mod quiesce;
@@ -143,4 +144,4 @@ pub use state::{InterruptKind, RunInterrupt, RunState, StopScope, is_valid_trans
 mod continuity;
 
 #[cfg(feature = "recovery-test-support")]
-pub use runtime::RecoveryActivationBoundary;
+pub use runtime::{RecoveryActivationBoundary, TerminalTailLease};

@@ -100,11 +100,12 @@ pub fn start(
     let draining = runtime.clone();
     let intake_db = storage.db_path.clone();
     let drain_db = intake_db.clone();
+    let producers = runtime.producer_gate();
     services.start("self-improvement", |stop| async move {
         // The hook outlives producers and the final writer acknowledgement.
         let _hook = hook;
         runtime::self_improvement::ImprovementCollector::new(settings)
-            .run_until(
+            .run_until_gated(
                 receiver,
                 async move {
                     let _ = stop.await;
@@ -168,6 +169,7 @@ pub fn start(
                     // duplicate delivery of the same event across owners.
                     true
                 },
+                producers,
             )
             .await?;
         Ok(())

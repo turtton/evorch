@@ -21,6 +21,7 @@ impl Drop for State {
 pub struct EvaluationService {
     pub(super) state: Arc<Mutex<State>>,
     pub(super) stop: watch::Sender<bool>,
+    pub producers: runtime::producer::ProducerGate,
     drained: watch::Sender<bool>,
     shutdown_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -30,6 +31,7 @@ impl Default for EvaluationService {
         Self {
             state: Arc::default(),
             stop: watch::channel(false).0,
+            producers: runtime::producer::ProducerGate::default(),
             drained: watch::channel(false).0,
             shutdown_lock: Arc::default(),
         }
@@ -58,6 +60,7 @@ impl EvaluationService {
     }
 
     pub fn request_stop(&self) {
+        self.producers.close();
         self.state.lock().unwrap().closed = true;
         self.stop.send_replace(true);
     }

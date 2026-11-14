@@ -85,6 +85,7 @@ struct State {
 
 struct Inner {
     runtime: tokio::runtime::Handle,
+    producers: runtime::producer::ProducerGate,
     stop: watch::Sender<bool>,
     state: Mutex<State>,
     /// Tasks started with [`AreaTasks::spawn_counted`] that have not ended.
@@ -120,6 +121,7 @@ impl AreaTasks {
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
         Self(Arc::new(Inner {
             runtime,
+            producers: Default::default(),
             stop: watch::channel(false).0,
             state: Mutex::default(),
             counted: Arc::new(AtomicUsize::new(0)),
@@ -141,7 +143,12 @@ impl AreaTasks {
         self.spawn_inner(name, task, true)
     }
 
-    /// Whether a task started with [`Self::spawn_counted`] is still running.
+    /// Admission of new counted operations; passive area watchers remain running.
+    pub fn producer_gate(&self) -> runtime::producer::ProducerGate {
+        self.0.producers.clone()
+    }
+
+    /// Whether accepted counted work is still pending or running.
     pub fn busy(&self) -> bool {
         self.0.counted.load(Ordering::SeqCst) != 0
     }
@@ -186,6 +193,19 @@ impl AreaTasks {
             return Err(SpawnError::Full);
         }
         let future = task(StopSignal(self.0.stop.subscribe()));
+        let producers = self.0.producers.clone();
+        let mut stop = StopSignal(self.0.stop.subscribe());
+        let future = async move {
+            let _permit = if counted {
+                tokio::select! { biased; _ = stop.stopped() => return Ok(()), permit = producers.enter() => {
+                    let Some(permit) = permit else { return Ok(()); };
+                    Some(permit)
+                }}
+            } else {
+                None
+            };
+            future.await
+        };
         // The task is owned by its supervisor (and aborted with it), so the
         // registry's own handle is the only one there is to stop.
         let inner = AbortOnDrop(self.0.runtime.spawn(future));
@@ -228,6 +248,7 @@ impl AreaTasks {
     /// Call it before draining what the tasks depend on, so they stop
     /// producing work first; [`Self::shutdown`] then joins them.
     pub fn request_stop(&self) {
+        self.0.producers.close();
         self.0.state().closed = true;
         self.0.stop.send_replace(true);
     }
@@ -254,6 +275,45 @@ impl AreaTasks {
 mod tests {
     use super::*;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn paused_counted_work_starts_once_after_resume_but_never_after_shutdown() {
+        let tasks = tasks();
+        let gate = tasks.producer_gate();
+        let pause = gate.pause();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let count = starts.clone();
+        let (started, observed) = oneshot::channel();
+        tasks
+            .spawn_counted("pending", move |_| async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                started.send(()).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            tasks.busy(),
+            "accepted pending work remains owned by the host"
+        );
+        assert!(gate.resume(pause));
+        observed.await.unwrap();
+        tasks.shutdown().await.unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(!gate.resume(pause));
+
+        let stopped = AreaTasks::new(tokio::runtime::Handle::current());
+        stopped.producer_gate().pause();
+        let count = starts.clone();
+        stopped
+            .spawn_counted("never-start", move |_| async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        stopped.shutdown().await.unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(!stopped.busy());
+    }
 
     fn tasks() -> AreaTasks {
         AreaTasks::new(tokio::runtime::Handle::current())

@@ -75,6 +75,8 @@ impl ThreadBindings {
 
 /// Executes [`HostCommand`]s against one runtime.
 pub struct CommandService {
+    restart_gate: crate::bootstrap::restart::HostRestartGate,
+    restart_stop: Option<Arc<dyn crate::bootstrap::restart::RestartStopHandler>>,
     event_bus: Option<Arc<EventBus>>,
     team_writer: Option<storage::StorageHandle>,
     memory_config: Option<storage::StorageConfig>,
@@ -95,6 +97,8 @@ impl CommandService {
     /// A service over `runtime`, spawning its async work on `handle`.
     pub fn new(runtime: AgentRuntime, handle: tokio::runtime::Handle) -> Self {
         Self {
+            restart_gate: Default::default(),
+            restart_stop: None,
             event_bus: None,
             team_writer: None,
             memory_config: None,
@@ -165,6 +169,30 @@ impl CommandService {
         self.team_writer = Some(writer);
     }
 
+    pub fn restart_gate(&self) -> crate::bootstrap::restart::HostRestartGate {
+        self.restart_gate.clone()
+    }
+    pub fn restart_stop_handler(
+        &self,
+    ) -> Option<Arc<dyn crate::bootstrap::restart::RestartStopHandler>> {
+        self.restart_stop.clone()
+    }
+    pub fn set_restart_stop_handler(
+        &mut self,
+        handler: Arc<dyn crate::bootstrap::restart::RestartStopHandler>,
+    ) {
+        self.restart_stop = Some(handler);
+    }
+    pub(crate) fn stop_for_host(
+        &self,
+        run: RunId,
+        scope: runtime::StopScope,
+    ) -> Result<(), runtime::RuntimeError> {
+        match &self.restart_stop {
+            Some(handler) => handler.stop(run, scope),
+            None => self.runtime.stop(run, scope),
+        }
+    }
     pub fn runtime(&self) -> &AgentRuntime {
         &self.runtime
     }

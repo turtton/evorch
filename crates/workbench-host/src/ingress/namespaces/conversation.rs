@@ -222,7 +222,7 @@ impl CommandHost {
             ConversationCommand::CreateExecution(chat) => {
                 // Validate attachments before creating even an owner row.
                 self.chat_input(&chat)?;
-                self.reserve_new_chat_thread(&chat)?;
+                self.reserve_chat_after_gate(&chat)?;
                 return self.send_chat(&chat, provenance);
             }
             ConversationCommand::CreateGoal(goal) => {

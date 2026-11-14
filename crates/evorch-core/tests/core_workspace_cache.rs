@@ -92,6 +92,15 @@ impl Core<'_> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn trust_and_sidebar_changes_keep_the_sent_prefix_on_the_production_wire() {
+    wire_workflow(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_prepare_cancel_keeps_the_sent_prefix_on_the_production_wire() {
+    wire_workflow(true).await;
+}
+
+async fn wire_workflow(restart: bool) {
     for subscription in [false, true] {
         let project = cache::Project::new();
         let provider = cache::Provider::new(subscription).await;
@@ -206,6 +215,47 @@ async fn trust_and_sidebar_changes_keep_the_sent_prefix_on_the_production_wire()
         );
         cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
 
+        if restart {
+            let driver = evorch_core::lifecycle::LifecycleDriver::new(&core);
+            let coordinator = driver.restart;
+            let id = coordinator.request().unwrap();
+            assert_eq!(id, coordinator.request().unwrap());
+            let proof = coordinator.wait_sealed(id).await.unwrap();
+            assert!(coordinator.busy());
+            assert!(core.busy());
+            assert_eq!(provider.requests().len(), 1);
+            let refused = SendChat {
+                project: ProjectId::new("p").unwrap(),
+                thread: ThreadId::new("t1").unwrap(),
+                submission_id: SubmissionId::new("00000000-0000-4000-8000-000000000010").unwrap(),
+                composer_role: ComposerRole::Worker,
+                text: "must never be replayed".into(),
+                skills: vec![],
+                images: vec![],
+                model_preference: None,
+                fork_seed: None,
+            };
+            assert!(
+                core.host
+                    .lock()
+                    .unwrap()
+                    .handle_command(
+                        Command::Conversation(
+                            workbench_protocol::namespaces::ConversationCommand::SendChat(refused)
+                        ),
+                        local_desktop()
+                    )
+                    .is_err()
+            );
+            coordinator.cancel(id).unwrap();
+            assert!(proof.validate(&core.runtime).is_err());
+            assert!(
+                core.runtime
+                    .list_agents()
+                    .iter()
+                    .any(|agent| agent.run_id == run)
+            );
+        }
         // Everything the workspace area can change, while the run is open.
         let extra = tempfile::tempdir().unwrap();
         let reference = tempfile::tempdir().unwrap();

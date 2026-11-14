@@ -187,6 +187,9 @@ impl AgentRuntime {
     /// One owned scan, driven by the delivery worker's startup/Skip timer.
     /// The host clock is injectable and also timestamps the existing lease ledger.
     pub(crate) fn monitor_lanes(&self) -> Result<(), LaneError> {
+        let Some(_producer) = self.producer_gate().try_enter() else {
+            return Ok(());
+        };
         let host = self.lane_monitor_host();
         let Some(host) = host else {
             return Ok(());

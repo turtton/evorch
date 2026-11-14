@@ -581,3 +581,32 @@ async fn self_improvement_draft_failure_preserves_successful_learning() {
     assert_eq!(candidates.len(), 1);
     assert!(candidates[0].draft_path.is_none());
 }
+
+#[tokio::test]
+async fn pending_learning_starts_once_after_resume_and_never_after_shutdown() {
+    let fixture = Fixture::new(ReviewMode::Approve);
+    let gate = fixture.runtime.producer_gate();
+    let pause = gate.pause();
+    let source = fixture.start().await;
+    assert_eq!(fixture.runtime.list_agents().len(), 1);
+    let mut waiting = Box::pin(fixture.runtime.wait_learning(source));
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(waiting.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    drop(waiting);
+    assert!(gate.resume(pause));
+    assert_eq!(fixture.learning(source).await, Ok(()));
+    assert_eq!(fixture.runtime.list_agents().len(), 3);
+    assert_eq!(fixture.entries().len(), 1);
+    assert!(!gate.resume(pause));
+    let fixture = Fixture::new(ReviewMode::Approve);
+    let gate = fixture.runtime.producer_gate();
+    let pause = gate.pause();
+    let source = fixture.start().await;
+    gate.close();
+    assert_eq!(fixture.learning(source).await, Ok(()));
+    assert!(!gate.resume(pause));
+    assert_eq!(fixture.runtime.list_agents().len(), 1);
+}

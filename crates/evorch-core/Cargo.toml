@@ -46,4 +46,4 @@ workspace-state = { path = "../workspace-state" }
 reqwest = { workspace = true }
 workbench-client = { path = "../workbench-client" }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["test-util", "process"] }
+tokio = { workspace = true, features = ["test-util", "process", "io-std"] }

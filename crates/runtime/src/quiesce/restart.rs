@@ -76,6 +76,43 @@ impl AgentRuntime {
         })
     }
 
+    pub(crate) fn validate_restart_attempt(
+        &self,
+        attempt: &RestartAttempt,
+    ) -> Result<(), RuntimeError> {
+        let inner = self.shared.quiesce.lock();
+        if !Arc::ptr_eq(&attempt.owner, &self.shared.dispatch_tails)
+            || attempt.generation != inner.generation
+            || !inner.requested
+            || inner.cancelling
+            || inner.shutting_down
+        {
+            return Err(runtime::error("stale restart attempt"));
+        }
+        if let QuiesceState::Failed { reason } = &inner.phase {
+            return Err(runtime::error(reason));
+        }
+        Ok(())
+    }
+    /// Close the host input boundary before waiting for accepted host permits.
+    /// This is the same marker the first dispatch-drain poll sets, not a drain.
+    pub fn begin_restart_sealing(&self, attempt: &RestartAttempt) -> Result<(), RuntimeError> {
+        let mut inner = self.shared.quiesce.lock();
+        if !Arc::ptr_eq(&attempt.owner, &self.shared.dispatch_tails)
+            || attempt.generation != inner.generation
+            || !inner.requested
+            || inner.cancelling
+            || inner.shutting_down
+        {
+            return Err(runtime::error("stale restart sealer"));
+        }
+        if let QuiesceState::Failed { reason } = &inner.phase {
+            return Err(runtime::error(reason));
+        }
+        inner.sealing = true;
+        self.shared.quiesce.changed();
+        Ok(())
+    }
     pub fn subscribe_restart_state(&self) -> watch::Receiver<u64> {
         self.shared.quiesce.subscribe()
     }

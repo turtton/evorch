@@ -43,12 +43,15 @@ impl AgentRuntime {
             started = true;
             let receiver = self.shared.bus.subscribe();
             let weak = Arc::downgrade(&self.shared);
+            let producers = self.producer_gate();
             ObserverTask(tokio::spawn(async move {
                 let settings = weak
                     .upgrade()
                     .and_then(|shared| shared.self_improvement.get().cloned());
                 if let Some(settings) = settings {
-                    ImprovementCollector::new(settings).run(receiver).await;
+                    let _ = ImprovementCollector::new(settings)
+                        .run_until_gated(receiver, std::future::pending(), |_| true, producers)
+                        .await;
                 }
             }))
         });

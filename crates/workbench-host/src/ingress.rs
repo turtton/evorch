@@ -15,6 +15,7 @@
 //! way to run a command and none of the steps can be skipped.
 
 mod namespaces;
+mod restart;
 
 use workbench_protocol::commands::{
     Command, CommandDisposition, CommandReply, ComposerRole as WireRole, Delegation,
@@ -75,6 +76,15 @@ impl CommandHost {
     /// Reserve an absent thread for a new chat, after resolving its project.
     /// This never claims or hands off an existing owner row, even a released one.
     pub fn reserve_new_chat_thread(&self, send: &SendChat) -> Result<(), WorkbenchError> {
+        let _permit = self
+            .service
+            .restart_gate()
+            .enter(self.chat_access(send.thread.as_str()))
+            .map_err(|_| restart::busy())?;
+        self.reserve_chat_after_gate(send)
+    }
+
+    fn reserve_chat_after_gate(&self, send: &SendChat) -> Result<(), WorkbenchError> {
         self.reserve_new_thread(
             &send.project,
             &send.thread,
@@ -217,6 +227,7 @@ impl CommandHost {
     ) -> Result<CommandReply, WorkbenchError> {
         provenance.validate()?;
         command.validate()?;
+        let _permit = self.restart_command_permit(&command)?;
         self.dispatch_command(command, &provenance)
     }
 
@@ -554,6 +565,10 @@ impl CommandHost {
         permit: Option<runtime::ownership::OwnerPermit>,
         provenance: &Provenance,
     ) -> Vec<HostEvent> {
+        let _restart = match self.restart_local_permit(&command) {
+            Ok(permit) => permit,
+            Err(refusal) => return vec![refusal],
+        };
         match self.execute(command, permit, provenance) {
             Executed::Duplicate { thread_id, run_id } => vec![HostEvent::ChatAccepted {
                 thread_id,
@@ -757,6 +772,8 @@ impl CommandHost {
         send: &SendChat,
         provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
+        // Reserve only after the common host gate accepted this command.
+        self.reserve_chat_after_gate(send)?;
         let command = HostCommand::SendChat(self.chat_input(send)?);
         let permit = self.service.authorize(&command).map_err(refusal_error)?;
         match self.execute(command, permit, provenance) {

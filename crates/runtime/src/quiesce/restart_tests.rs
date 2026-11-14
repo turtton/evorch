@@ -227,3 +227,63 @@ async fn cancelled_restart_waiter_cannot_acquire_the_next_attempts_fence() {
     f.runtime.cancel_restart_quiesce(&b).unwrap();
     f.cleanup(run).await;
 }
+
+#[tokio::test]
+async fn bound_attempt_rejects_replacement_before_first_poll_and_during_wait() {
+    for poll_first in [false, true] {
+        let f = Fixture::new(0);
+        let run = f.start();
+        f.model.entered.notified().await;
+        let first = f.runtime.begin_restart_quiesce().unwrap();
+        let mut old = Box::pin(f.runtime.fence_dispatch_restart_attempt(&first));
+        if poll_first {
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(old.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+        }
+        f.runtime.cancel_restart_quiesce(&first).unwrap();
+        let second = f.runtime.begin_restart_quiesce().unwrap();
+        assert!(old.await.is_err());
+        f.model.release.add_permits(1);
+        let fence = f
+            .runtime
+            .fence_dispatch_restart_attempt(&second)
+            .await
+            .unwrap();
+        f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+        f.runtime.cancel_restart_quiesce(&second).unwrap();
+        f.cleanup(run).await;
+    }
+}
+#[tokio::test]
+async fn sealing_marker_binds_owner_and_stop_before_drain_invalidates_fence() {
+    let f = Fixture::new(0);
+    let other = Fixture::new(0);
+    let foreign = other.runtime.begin_restart_quiesce().unwrap();
+    assert!(f.runtime.begin_restart_sealing(&foreign).is_err());
+    let run = f.start();
+    let attempt = f.runtime.begin_restart_quiesce().unwrap();
+    let fence = f
+        .runtime
+        .fence_dispatch_restart_attempt(&attempt)
+        .await
+        .unwrap();
+    f.runtime.begin_restart_sealing(&attempt).unwrap();
+    f.runtime.begin_restart_sealing(&attempt).unwrap();
+    // Host permit gate is closed, but runtime tail drain has not been polled.
+    f.runtime.stop(run, crate::StopScope::SelfOnly).unwrap();
+    f.runtime.wait(run).await.unwrap();
+    assert!(f.runtime.drain_dispatch_tails(&fence).await.is_err());
+    assert!(f.runtime.begin_restart_sealing(&attempt).is_err());
+    let next = f.runtime.begin_restart_quiesce().unwrap();
+    let fence = f
+        .runtime
+        .fence_dispatch_restart_attempt(&next)
+        .await
+        .unwrap();
+    f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+    f.runtime.cancel_restart_quiesce(&next).unwrap();
+    other.runtime.cancel_restart_quiesce(&foreign).unwrap();
+}

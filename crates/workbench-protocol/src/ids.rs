@@ -126,3 +126,8 @@ wire_id!(
     /// peer can name what it requires without this crate knowing it.
     CapabilityName
 );
+
+wire_id!(
+    /// A process-local restart preparation attempt (not durable commit evidence).
+    RestartId
+);

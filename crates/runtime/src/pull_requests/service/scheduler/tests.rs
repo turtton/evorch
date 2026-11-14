@@ -80,3 +80,27 @@ async fn explicit_refresh_survives_an_in_flight_success() {
 async fn explicit_refresh_survives_an_in_flight_failure() {
     refresh_during_a_fetch(true).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn repeated_producer_notifications_resume_one_pending_fetch_without_self_retriggering() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    let producers = process.service.producer_gate();
+    let mut pause = producers.pause();
+    process.link_directly("t1", 1);
+    let answer = process.source.push_gate(&key(1));
+    // Coalesced pause/resume notifications may arrive before the scheduler first polls.
+    for _ in 0..8 {
+        assert!(producers.resume(pause));
+        pause = producers.pause();
+    }
+    assert!(process.source.calls().is_empty());
+    assert!(producers.resume(pause));
+    process.service.inner().wake.notify_one();
+    answer.arrived().await;
+    assert_eq!(process.source.calls().len(), 1);
+    answer.release_ok(open_passing(1));
+    process.quiet_events().await;
+    assert_eq!(process.source.calls().len(), 1);
+    process.service.shutdown_and_drain().await.unwrap();
+}
