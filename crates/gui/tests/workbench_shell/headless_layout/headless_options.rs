@@ -45,6 +45,9 @@ fn late_thread_is_reachable_when_scrolled_into_view() {
                 format!("Overflow thread {index:02}"),
             )
             .expect("overflow thread");
+        // Tie activity so title order puts thread 39 last, even when creation
+        // spans multiple wall-clock seconds.
+        sidebar.threads.last_mut().expect("created").created_at = 0;
         // Pinned threads bypass the per-project "See more" page.
         sidebar
             .set_pinned(&ThreadId::new(format!("overflow-{index:02}")), true)
