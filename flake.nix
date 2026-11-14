@@ -20,7 +20,7 @@
   };
   # No `follows`: it keeps its own nixpkgs / fenix / crane so that the cargo
   # package is the derivation turtton/cargo pushes to attic.
-  inputs.turtton-cargo.url = "github:turtton/cargo/v0.102.0-9-turtton.1";
+  inputs.turtton-cargo.url = "github:turtton/cargo/v0.102.0-9-turtton.2";
 
   outputs =
     { self, nixpkgs, flake-utils, intent-system-flake, crane, fenix, ... }@inputs:

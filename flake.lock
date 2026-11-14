@@ -243,16 +243,16 @@
         "nixpkgs": "nixpkgs_3"
       },
       "locked": {
-        "lastModified": 1794628095,
-        "narHash": "sha256-Ry9PjLnHYyXlX/NTTRSS/dQ+5PdGJ5HWmupPgXJ6dv8=",
+        "lastModified": 1794640888,
+        "narHash": "sha256-184Gv98OKbSLTKjxNEYjYxORCCfqfEyriKDxOl64aOE=",
         "owner": "turtton",
         "repo": "cargo",
-        "rev": "3dcd2826fe044d0338e28174ba8f4d3047bb0d64",
+        "rev": "386189eb9f818af02d3d400a7fa13c58744739a4",
         "type": "github"
       },
       "original": {
         "owner": "turtton",
-        "ref": "v0.102.0-9-turtton.1",
+        "ref": "v0.102.0-9-turtton.2",
         "repo": "cargo",
         "type": "github"
       }
