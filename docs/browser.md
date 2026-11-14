@@ -305,7 +305,7 @@ writes a verbose CEF log.
   `LD_LIBRARY_PATH=<dir>`. Without `CEF_PATH`, cef-dll-sys downloads CEF itself
   on the first build, and `libcef.so` must still be on `LD_LIBRARY_PATH`.
 - cef-dll-sys copies the CEF runtime beside the build artifacts only where cargo
-  puts intermediate files under `target/`. The huacnlee/cargo fork keeps them
+  puts intermediate files under `target/`. The turtton/cargo fork keeps them
   under `~/.cargo/targets`, so `target/debug` does not hold `libcef.so`. Do
   not rely on that copy: CEF reads its resources (paks, ICU data, locales) from
   the directory of the `libcef.so` it loaded, so `LD_LIBRARY_PATH` must name the

@@ -443,14 +443,13 @@ Automatic sharing mounts Cargo registry/git caches and installed tool binaries
 read-only and excludes host Cargo credentials/config; explicit allowed
 HOME-directory mirrors are an exception. Allowing all of `~/.cargo` exposes
 config/credentials too, so allow only the existing `~/.cargo/targets` when the
-goal is sharing the huacnlee/cargo fork's build pool across thread scratches
+goal is sharing the turtton/cargo fork's build pool across thread scratches
 (Worker and Reviewer read-write, other roles read-only).
 
 Which Cargo runs depends on the evorch process's `PATH`, not a dev shell opened
-elsewhere. The sandbox does not inherit `RUSTC_WRAPPER`,
-`CARGO_FORK_AUTO_UPDATE` or sccache settings: use
-`CARGO_FORK_AUTO_UPDATE=0 RUSTC_WRAPPER= cargo ...` explicitly when needed.
-sccache configuration, server/socket and cache access are not implicitly shared.
+elsewhere. The sandbox does not inherit `RUSTC_WRAPPER` or sccache settings:
+use `RUSTC_WRAPPER= cargo ...` explicitly when needed. sccache
+configuration, server/socket and cache access are not implicitly shared.
 Network isolation remains controlled by the existing policy. A sandbox built
 without a scratch directory (benchmarks, and executors shared by runs of a
 runtime without a sandbox root) falls back to a private directory of its own

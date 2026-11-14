@@ -64,11 +64,12 @@ mismatch. Revisit this policy before cutting a v1 release.
 
 ## Development environment
 
-- The default Nix dev shell resolves `cargo` to the huacnlee/cargo fork (a
-  trial, pinned in `flake.nix`, with `CARGO_FORK_AUTO_UPDATE=0`). rustc,
-  rustfmt, clippy and rust-analyzer still come from the fenix toolchain. CI
-  and the crane builds keep the upstream cargo. `nix develop .#upstream-cargo`
-  gives the previous setup: fenix's cargo, a `target/` per checkout, sccache.
+- On `x86_64-linux`, the default Nix dev shell resolves `cargo` to the
+  turtton/cargo fork from the tag-pinned `turtton-cargo` flake input. Other
+  systems use upstream cargo. rustc, rustfmt, clippy and rust-analyzer still
+  come from the fenix toolchain. CI and the crane builds keep the upstream
+  cargo. `nix develop .#upstream-cargo` gives the previous setup: fenix's
+  cargo, a `target/` per checkout, sccache.
 - The Cargo selected inside a sandbox depends on the evorch process's
   `PATH`; entering a dev shell in another terminal does not select the fork
   for an already-running evorch. To share the fork's build pool across thread
@@ -81,10 +82,9 @@ mismatch. Revisit this policy before cutting a v1 release.
   siblings and external paths never mirror. Explicit permissions still apply
   when automatic cache sharing is disabled. Allow only targets for build
   sharing: allowing all of `~/.cargo` also exposes config and credentials.
-- The sandbox does not inherit `RUSTC_WRAPPER`, `CARGO_FORK_AUTO_UPDATE` or
-  sccache settings. When needed, run
-  `CARGO_FORK_AUTO_UPDATE=0 RUSTC_WRAPPER= cargo ...` explicitly; sccache
-  configuration and server access are not implicitly shared either.
+- The sandbox does not inherit `RUSTC_WRAPPER` or sccache settings. When
+  needed, run `RUSTC_WRAPPER= cargo ...` explicitly; sccache configuration and
+  server access are not implicitly shared either.
 - `gui` enables CEF by default, so cargo builds of it need the CEF distribution.
   The default Nix dev shell sets `CEF_PATH` and `LD_LIBRARY_PATH` for it, but a
   sandbox does not inherit them: pass both explicitly (docs/browser.md,

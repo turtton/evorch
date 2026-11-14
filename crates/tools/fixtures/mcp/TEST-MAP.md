@@ -149,6 +149,6 @@ T0: cargo check --workspace --all-targets --locked; cargo check --locked -p tool
 G registers mcp_cache_e2e in scripts/contract-test-filters.sh. Use input-derived
 mock cache + independent assert_append_only/wire-prefix assertions, not fixed
 cached-token counts. Final gates are the exact commands in plan §9. All cargo
-commands set CARGO_FORK_AUTO_UPDATE=0 and RUSTC_WRAPPER=; never CARGO_TARGET_DIR.
+commands set RUSTC_WRAPPER=; never CARGO_TARGET_DIR.
 No test sleeps, completion timeouts or wall-clock pass/fail conditions. Paused
 Tokio time is for protocol deadlines/grace only; use named events/child wait.
