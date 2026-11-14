@@ -28,7 +28,8 @@ const WARMUPS: usize = 5;
 const PAGE_LIMIT: usize = 20;
 const LATENCY_REFERENCE_US: u64 = 300_000;
 const DEADLINE: Duration = Duration::from_secs(120);
-const BACKUP: &str = "/var/tmp/evorch-scratch-1000-1b531f2bc252cbe8/t-thread-199/w6-measure-20261025T215631/store-copy.db";
+const BACKUP: &str =
+    "/var/tmp/evo-1000-1b531f2b/thread-199/w6-measure-20261025T215631/store-copy.db";
 
 fn require(ok: bool, code: &'static str) -> Result<()> {
     if ok { Ok(()) } else { Err(code.into()) }
