@@ -38,8 +38,6 @@ impl OwnerHost {
         settings: config::OwnershipConfig,
         bus: Arc<EventBus>,
     ) -> Result<Self, RegistryError> {
-        std::fs::create_dir_all(root)?;
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(std::io::Error::other)?;
         let owner_id = random
@@ -47,6 +45,11 @@ impl OwnerHost {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let socket = root.join(format!("{owner_id}.sock"));
+        // Checked before any side effect: an overlong root must leave no
+        // directory behind, and bind(2) alone reports a bare InvalidInput.
+        check_socket_path(root, &socket)?;
+        std::fs::create_dir_all(root)?;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
         let listener = UnixListener::bind(&socket)?;
         listener.set_nonblocking(true)?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
@@ -268,6 +271,43 @@ impl OwnerHost {
     fn db(&self) -> PathBuf {
         self.root.join("owners.db")
     }
+}
+
+/// Bytes an AF_UNIX path must stay below (`sizeof(sockaddr_un.sun_path)`,
+/// terminating NUL included): 104 on macOS and the BSDs, 108 elsewhere.
+pub(super) const SOCKET_PATH_LIMIT: usize = if cfg!(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+)) {
+    104
+} else {
+    108
+};
+
+/// Rejects an ownership socket path that `bind(2)` would refuse, naming the
+/// root so the operator knows what to shorten.
+pub(super) fn check_socket_path(root: &Path, socket: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let length = socket.as_os_str().as_bytes().len();
+    if length < SOCKET_PATH_LIMIT {
+        return Ok(());
+    }
+    let root_length = root.as_os_str().as_bytes().len();
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "ownership socket path {} is {length} bytes, but a Unix socket path must be shorter \
+             than {SOCKET_PATH_LIMIT} bytes; the ownership root {} is {root_length} bytes and \
+             the socket name adds {} more. Use a shorter ownership root",
+            socket.display(),
+            root.display(),
+            length - root_length,
+        ),
+    ))
 }
 
 pub(super) fn socket_path(root: &Path, id: &str) -> Result<PathBuf, RegistryError> {

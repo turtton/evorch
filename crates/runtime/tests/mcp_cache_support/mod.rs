@@ -186,7 +186,7 @@ pub struct Project {
 }
 impl Project {
     pub fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_socket_dir::tempdir();
         std::fs::create_dir(directory.path().join(".evorch")).unwrap();
         let approvals =
             Arc::new(ApprovalLedger::at_user_config_dir(directory.path().join("user")).unwrap());

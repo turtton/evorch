@@ -5,8 +5,8 @@ use runtime::ownership::{
     SnapshotNoneReason as Reason, SnapshotReference as Reference, ThreadOwner,
 };
 
-fn fixture() -> (tempfile::TempDir, OwnerPermit) {
-    let directory = tempfile::tempdir().unwrap();
+fn fixture() -> (test_socket_dir::SocketDir, OwnerPermit) {
+    let directory = test_socket_dir::SocketDir::new();
     let path = directory.path().join("owners.db");
     let owner = ThreadOwner::new(
         "thread".into(),

@@ -174,7 +174,7 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(mode: Mode) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         std::fs::write(dir.path().join("artifact.txt"), b"verified contents").unwrap();
         let config = storage::StorageConfig {
             db_path: dir.path().join("lanes.db"),

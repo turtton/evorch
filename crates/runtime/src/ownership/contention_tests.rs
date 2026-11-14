@@ -21,7 +21,7 @@ struct Fixture {
 
 /// An owner whose lease never expires, with `RUN` in an open turn.
 fn fixture() -> Fixture {
-    let directory = tempfile::tempdir().expect("directory");
+    let directory = test_socket_dir::tempdir();
     let path = directory.path().join("owners.db");
     let mut owner = ThreadOwner::new(
         "thread-1".into(),
@@ -264,7 +264,7 @@ fn a_contended_claim_is_recorded_as_a_claim() {
     let before = owner_of(&fixture.path);
     let records = Records::default();
     let lock = exclusive_lock(&fixture.path);
-    let directory = tempfile::tempdir().expect("socket directory");
+    let directory = test_socket_dir::SocketDir::new();
     let result = tracing::dispatcher::with_default(&records.dispatch(), || {
         ipc::claim(
             &mut Registry::open_existing(&fixture.path).unwrap(),

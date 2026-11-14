@@ -157,7 +157,7 @@ pub struct LostOwnership {
 }
 
 pub fn lost_ownership(thread: &str) -> LostOwnership {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let bus = Arc::new(EventBus::new(64));
     let owner =
         runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone()).unwrap();

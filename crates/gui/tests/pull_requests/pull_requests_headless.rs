@@ -44,7 +44,7 @@ struct World {
 
 impl World {
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_socket_dir::tempdir();
         let owners = ShortPrivateDirectory::new();
         let config = storage::StorageConfig {
             db_path: directory.path().join("pull-requests.db"),

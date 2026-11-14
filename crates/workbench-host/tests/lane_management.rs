@@ -25,7 +25,7 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("host.db"),
             ..Default::default()

@@ -124,7 +124,7 @@ async fn claimed_admission_keeps_accepted_until_snapshot_delivery() {
 
 #[tokio::test]
 async fn restart_recovers_accepted_without_chataccepted_run_binding() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let path = dir.path().join("sidebar.json");
     let config = storage::StorageConfig {
         db_path: dir.path().join("events.db"),

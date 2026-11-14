@@ -147,7 +147,7 @@ fn mixed_phases_block_archive_despite_stopped_or_error_display_state() {
             // Exercise both a mixed root and a mixed descendant hidden by a
             // non-running root. Child runs inherit the same conversation owner.
             for descendant in [false, true] {
-                let temp = tempfile::tempdir().unwrap();
+                let temp = test_socket_dir::tempdir();
                 let mut state = fixture_state(temp.path(), false, false);
                 let target = ThreadId::new("target");
                 let owner = if descendant {
@@ -535,7 +535,7 @@ fn restored_orphan_snapshots_reconcile_only_nonterminal_phases() {
         (AgentRunPhase::Waiting, Some("Stopped"), P::Stopped, true),
     ] {
         for restorable in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = test_socket_dir::tempdir();
             let config = storage::StorageConfig {
                 db_path: dir.path().join("events.db"),
                 ..Default::default()
@@ -569,7 +569,7 @@ fn restored_orphan_snapshots_reconcile_only_nonterminal_phases() {
 #[test]
 fn restored_live_owner_and_legacy_turn_protect_archive() {
     for legacy in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
@@ -614,7 +614,7 @@ fn restored_live_owner_and_legacy_turn_protect_archive() {
 #[test]
 fn restored_owner_between_tool_rounds_blocks_archive_until_release_or_exit() {
     for release in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
@@ -682,7 +682,7 @@ fn restored_owner_between_tool_rounds_blocks_archive_until_release_or_exit() {
 
 #[test]
 fn restored_checkpoint_probes_expired_owner_before_reconciling() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let config = storage::StorageConfig {
         db_path: dir.path().join("events.db"),
         ..Default::default()
@@ -742,7 +742,7 @@ fn restored_checkpoint_probes_expired_owner_before_reconciling() {
 #[test]
 fn restored_checkpoint_preserves_phase_when_owner_liveness_is_unknown() {
     for invalid_id in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
@@ -797,7 +797,7 @@ fn restored_checkpoint_preserves_phase_when_owner_liveness_is_unknown() {
 
 #[test]
 fn restored_orphan_with_live_descendant_cannot_archive_family() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let mut state = fixture_state(dir.path(), false, false);
     let child = state.fork_thread(ThreadId::new("target")).unwrap();
     let config = storage::StorageConfig {
@@ -858,7 +858,7 @@ fn restored_orphan_with_live_descendant_cannot_archive_family() {
 #[test]
 fn unreadable_ownership_never_reconciles_restored_runs() {
     for corrupt in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
@@ -898,7 +898,7 @@ fn unreadable_ownership_never_reconciles_restored_runs() {
 fn claiming_a_thread_stops_its_orphaned_runs() {
     use workspace_ui::ThreadRunPhase as P;
     for own_claim in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()

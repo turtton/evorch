@@ -89,10 +89,7 @@ async fn open(root: &Path) -> BootstrappedHost {
 
 /// A sidebar that lists project `p` at `repo`, with the threads named.
 async fn world(threads: &[&str]) -> World {
-    let dir = tempfile::Builder::new()
-        .prefix("ws-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join("repo")).unwrap();
     std::fs::create_dir_all(root.join("config")).unwrap();

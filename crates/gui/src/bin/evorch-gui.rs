@@ -2418,7 +2418,7 @@ mod storage_shutdown_tests {
 
     #[test]
     fn startup_resource_guard_keeps_the_host_alive_until_fenced_writes_drain() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_socket_dir::tempdir();
         let config = StorageConfig {
             db_path: directory.path().join("events.db"),
             ..Default::default()

@@ -32,11 +32,7 @@ impl runtime::SandboxFactory for Direct {
     }
 }
 async fn open(root: &std::path::Path) -> (tempfile::TempDir, BootstrappedHost) {
-    let owners = tempfile::Builder::new()
-        .prefix("6")
-        .rand_bytes(3)
-        .tempdir()
-        .unwrap();
+    let owners = test_socket_dir::tempdir();
     let boot = BootstrappedHost::open_with_test_seams(
         BootstrapOptions {
             config_dir: root.into(),
@@ -66,7 +62,7 @@ fn start(boot: &BootstrappedHost) -> runtime::RunId {
 
 #[tokio::test]
 async fn failed_drain_still_flushes_bridge_without_releasing_owner() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let (_owners, mut boot) = open(dir.path()).await;
     let _permit = boot.owner.start("owned").unwrap();
     let bus = boot.runtime.event_bus().clone();
@@ -108,7 +104,7 @@ async fn failed_drain_still_flushes_bridge_without_releasing_owner() {
 
 #[tokio::test]
 async fn original_restart_safe_point_still_allows_explicit_operator_shutdown() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let (_owners, mut boot) = open(dir.path()).await;
     let _permit = boot.owner.start("owned").unwrap();
     let run = start(&boot);
@@ -126,7 +122,7 @@ async fn original_restart_safe_point_still_allows_explicit_operator_shutdown() {
 }
 #[tokio::test]
 async fn capture_without_explicit_restart_fence_cannot_commit_or_close_dispatch() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let (_owners, mut boot) = open(dir.path()).await;
     let run = start(&boot);
     assert!(
@@ -165,7 +161,7 @@ async fn capture_without_explicit_restart_fence_cannot_commit_or_close_dispatch(
 }
 #[tokio::test]
 async fn explicit_current_config_and_core_policy_capture_a_candidate_but_never_activate() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let (_owners, boot) = open(dir.path()).await;
     let run = start(&boot);
     boot.quiesce_for_restart().await.unwrap();
@@ -203,7 +199,7 @@ async fn explicit_current_config_and_core_policy_capture_a_candidate_but_never_a
 
 #[tokio::test]
 async fn stale_restart_fence_cannot_capture_after_reopen_and_reseal() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let (_owners, boot) = open(dir.path()).await;
     let attempt = boot.runtime.begin_restart_quiesce().unwrap();
     boot.quiesce_for_restart().await.unwrap();

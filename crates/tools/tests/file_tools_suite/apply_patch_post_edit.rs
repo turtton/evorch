@@ -688,7 +688,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let binary = dir.path().join("fixture checker");
         let fixture = std::env::var("CARGO_BIN_EXE_comment-checker-test-fixture")
             .expect("CARGO_BIN_EXE_comment-checker-test-fixture")

@@ -117,7 +117,7 @@ fn tool_status(state: &WorkbenchState<EmptySource>) -> Option<ToolStatus> {
 #[test]
 fn a_restored_orphan_run_interrupts_its_unfinished_call() {
     // Given: a recorded run that exited mid-call, with no live owner.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let config = storage::StorageConfig {
         db_path: dir.path().join("events.db"),
         ..Default::default()
@@ -213,7 +213,7 @@ fn an_orphan_call_is_interrupted_even_when_its_phase_cannot_be_restored() {
         for unrelated_owner in [false, true] {
             // Given: an orphan call whose run lacks a snapshot or a phase event,
             // and possibly a live process that owns only another thread.
-            let dir = tempfile::tempdir().unwrap();
+            let dir = test_socket_dir::tempdir();
             let database = recorded(dir.path(), record);
             let registry = dir.path().join("owners.db");
             drop(runtime::ownership::Registry::open(&registry).unwrap());
@@ -249,7 +249,7 @@ fn a_call_in_a_thread_that_a_live_process_owns_keeps_running() {
     for record in [Record::Checkpointed, Record::NoSnapshot, Record::NoPhase] {
         for between_rounds in [false, true] {
             // Given: an unfinished call in a thread that a live process owns.
-            let dir = tempfile::tempdir().unwrap();
+            let dir = test_socket_dir::tempdir();
             let database = recorded(dir.path(), record);
             let (_host, permit) = live_owner(dir.path(), "target", RUN);
             if between_rounds {
@@ -279,7 +279,7 @@ fn a_call_left_active_by_an_owner_that_exited_mid_call_is_interrupted() {
         for owner_thread in ["target", "unrelated"] {
             // Given: an owner that began a turn of the run and exited mid-call
             // without a checkpoint, so its record still lists the run as active.
-            let dir = tempfile::tempdir().unwrap();
+            let dir = test_socket_dir::tempdir();
             let database = recorded(dir.path(), record);
             let (host, permit) = live_owner(dir.path(), owner_thread, RUN);
             drop(host);
@@ -383,7 +383,7 @@ fn a_call_keeps_running_while_ownership_cannot_prove_its_owner_dead() {
             Unproven::LiveOtherThread,
         ] {
             // Given: an unfinished call whose owner may still be executing it.
-            let dir = tempfile::tempdir().unwrap();
+            let dir = test_socket_dir::tempdir();
             let database = recorded(dir.path(), record);
             let (registry, _owner) = unproven_ownership(dir.path(), case);
 

@@ -101,12 +101,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        // Kept relative: both executors bind an owner socket below this root.
-        let dir = tempfile::Builder::new()
-            .prefix(".bg-")
-            .tempdir_in(".")
-            .unwrap();
-        let root = std::path::PathBuf::from(dir.path().file_name().unwrap());
+        // Both executors bind an owner socket below this root.
+        let dir = test_socket_dir::tempdir();
+        let root = dir.path().to_path_buf();
         std::fs::write(
             root.join("config.toml"),
             "[pull_requests]\nenabled = true\n",

@@ -720,10 +720,7 @@ impl Process {
     }
 }
 fn fixture(mock: &StreamingMockOpenAi) -> tempfile::TempDir {
-    let dir = tempfile::Builder::new()
-        .prefix("06c-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::tempdir();
     std::fs::write(dir.path().join("child-input.txt"), "durable child input").unwrap();
     std::fs::write(
         dir.path().join("config.toml"),

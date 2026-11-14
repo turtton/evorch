@@ -265,10 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_tracks_connection_lifetimes_and_web_without_browser_clients() {
-        let dir = tempfile::Builder::new()
-            .prefix("p7-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let dir = test_socket_dir::tempdir();
         let root = dir.path().canonicalize().unwrap();
         let mut boot = BootstrappedHost::open(BootstrapOptions {
             config_dir: root.clone(),

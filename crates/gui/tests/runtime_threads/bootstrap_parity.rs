@@ -17,7 +17,7 @@ impl eval::evaluator::EvaluatorHost for EvaluationHost {
 
 #[tokio::test]
 async fn configured_core_and_gui_share_tools_models_providers_and_storage() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path().canonicalize().unwrap();
     let user_dir = root.join("user");
     std::fs::create_dir(&user_dir).unwrap();
@@ -287,7 +287,7 @@ max_bytes = 2097152
 
 #[tokio::test]
 async fn unconfigured_core_is_read_only_while_gui_demo_keeps_standard_tools() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path().canonicalize().unwrap();
     let mut core = BootstrappedHost::open(BootstrapOptions {
         config_dir: root.clone(),

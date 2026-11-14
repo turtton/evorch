@@ -111,10 +111,7 @@ struct Core {
 impl Core {
     async fn open() -> Self {
         // Owner hosts bind a unix socket below the ownership root, so the path stays short.
-        let dir = tempfile::Builder::new()
-            .prefix("p7-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let dir = test_socket_dir::tempdir();
         let root = dir.path().canonicalize().unwrap();
         let model = Arc::new(Model::default());
         let boot = BootstrappedHost::open_with_test_seams(

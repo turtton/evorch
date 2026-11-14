@@ -1498,6 +1498,7 @@ dependencies = [
  "serde_json",
  "storage",
  "tempfile",
+ "test-socket-dir",
  "tokio",
  "tools",
  "workbench-host",
@@ -1576,6 +1577,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde_json",
  "tempfile",
+ "test-socket-dir",
  "thiserror 2.0.18",
  "tokio",
  "uuid",
@@ -2483,6 +2485,7 @@ dependencies = [
  "serde_json",
  "storage",
  "tempfile",
+ "test-socket-dir",
  "test-support",
  "tokio",
  "tools",
@@ -3072,6 +3075,7 @@ dependencies = [
  "sha2 0.10.9",
  "storage",
  "tempfile",
+ "test-socket-dir",
  "test-support",
  "thiserror 2.0.18",
  "tokio",
@@ -5584,6 +5588,7 @@ dependencies = [
  "serde_json",
  "storage",
  "tempfile",
+ "test-socket-dir",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -5887,6 +5892,7 @@ dependencies = [
  "socket2",
  "storage",
  "tempfile",
+ "test-socket-dir",
  "test-support",
  "thiserror 2.0.18",
  "tokio",
@@ -6862,6 +6868,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-socket-dir"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "test-support"
 version = "0.1.0"
 dependencies = [
@@ -7160,6 +7173,7 @@ dependencies = [
  "sha2 0.10.9",
  "similar",
  "tempfile",
+ "test-socket-dir",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -8418,6 +8432,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "test-socket-dir",
  "thiserror 2.0.18",
  "tokio",
  "workbench-protocol",
@@ -8447,6 +8462,7 @@ dependencies = [
  "sha2 0.10.9",
  "storage",
  "tempfile",
+ "test-socket-dir",
  "thiserror 2.0.18",
  "tokio",
  "tools",

@@ -398,7 +398,7 @@ async fn unrecorded_shell_round_retains_active_before_and_after_finalization() {
     test_support::isolated_state_dir();
     use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
     for mode in ["absent", "failed"] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()

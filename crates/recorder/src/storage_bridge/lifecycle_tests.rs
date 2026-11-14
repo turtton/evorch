@@ -12,7 +12,7 @@ fn shutdown_only_bridge(handle: StorageHandle) -> StorageBridge {
 }
 
 fn fixture() -> (tempfile::TempDir, Storage, Database) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let config = StorageConfig {
         db_path: dir.path().join("shutdown.db"),
         ..StorageConfig::default()

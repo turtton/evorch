@@ -179,7 +179,7 @@ fn owner_ids_truncate_by_character_and_remain_inspectable_on_hover() {
     }
 }
 
-fn host(dir: &tempfile::TempDir) -> Arc<OwnerHost> {
+fn host(dir: &test_socket_dir::SocketDir) -> Arc<OwnerHost> {
     Arc::new(
         OwnerHost::open(
             dir.path(),
@@ -201,7 +201,7 @@ fn state(host: Arc<OwnerHost>) -> WorkbenchState<DemoSource> {
 
 #[test]
 fn cached_write_display_never_authorizes_after_live_ownership_is_lost() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let first = host(&dir);
     let second = host(&dir);
     let permit = first.start("thread").unwrap();
@@ -223,7 +223,7 @@ fn cached_write_display_never_authorizes_after_live_ownership_is_lost() {
 
 #[test]
 fn action_failure_is_local_and_independent_of_probe_recovery() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let host = host(&dir);
     host.start("thread").unwrap();
     let now = Instant::now();
@@ -262,7 +262,7 @@ fn action_failure_is_local_and_independent_of_probe_recovery() {
 
 #[test]
 fn failed_attach_does_not_switch_to_read_only_and_success_clears_action_error() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let host = host(&dir);
     let now = Instant::now();
     let mut state = state(host.clone());
@@ -291,7 +291,7 @@ fn failed_attach_does_not_switch_to_read_only_and_success_clears_action_error() 
 
 #[test]
 fn shutdown_failure_is_in_the_close_dialog_not_the_header() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let host = host(&dir);
     let permit = host.start("thread").unwrap();
     permit.begin_turn().unwrap();
@@ -323,7 +323,8 @@ fn shutdown_failure_is_in_the_close_dialog_not_the_header() {
 #[test]
 fn repeated_quiesce_ticks_do_not_write_unchanged_sidebar_while_draining() {
     let directory = tempfile::tempdir().unwrap();
-    let host = host(&directory);
+    let sockets = test_socket_dir::SocketDir::new();
+    let host = host(&sockets);
     let permit = host.start("thread").unwrap();
     permit.begin_turn().unwrap();
     let mut state = crate::app::delivery_tests::state(&directory.path().join("sidebar.json"))
@@ -363,7 +364,7 @@ fn header_repaint_delay(state: &mut WorkbenchState<DemoSource>, now: Instant) ->
 
 #[test]
 fn next_repaint_is_requested_for_the_contention_grace_deadline() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let mut state = state(host(&dir));
     // `now` is only a logical origin; the header never reads the clock here.
     let now = Instant::now();
@@ -383,7 +384,7 @@ fn next_repaint_is_requested_for_the_contention_grace_deadline() {
 
 #[test]
 fn no_repaint_is_requested_without_a_host_or_a_selected_thread() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let mut no_host =
         WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default()).unwrap();
     assert_eq!(

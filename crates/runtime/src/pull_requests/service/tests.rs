@@ -292,7 +292,7 @@ pub(super) struct Process {
 impl World {
     pub(super) fn new() -> Self {
         Self {
-            dir: tempfile::tempdir().unwrap(),
+            dir: test_socket_dir::tempdir(),
             clock: Arc::new(ManualClock(AtomicI64::new(10_000_000_000))),
         }
     }

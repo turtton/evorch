@@ -116,10 +116,7 @@ async fn sse_event(response: &mut reqwest::Response, buffer: &mut Vec<u8>) -> Ev
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unix_and_web_preserve_model_prefix_and_mask_committed_output() {
-    let dir = tempfile::Builder::new()
-        .prefix("p7-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::tempdir();
     let secret = format!("sk-proj-{}", "A".repeat(64));
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(
         vec![

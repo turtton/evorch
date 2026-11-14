@@ -158,7 +158,7 @@ fn delivered_notification_targets_one_settled_id_immediately() {
 
 #[test]
 fn ownership_claim_in_event_batch_reuses_lookup_and_confirmed_settlement() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let mut state = state(&dir.path().join("sidebar.json"));
     state.history[0].status = DeliveryStatus::Queued;
     let receipts = Arc::new(Mutex::new(vec![review::receipt(

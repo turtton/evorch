@@ -19,6 +19,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["time", "rt", "net", "io-util", "macros"] }
 
 [dev-dependencies]
+test-socket-dir = { path = "../test-socket-dir" }
 rustix = { version = "1", features = ["event"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "process", "test-util"] }

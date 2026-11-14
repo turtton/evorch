@@ -221,7 +221,7 @@ mod tests {
     // inside the creation path, so the unlink does not take it away
     #[tokio::test(start_paused = true)]
     async fn an_escalation_pins_the_parent_link_before_the_parent_can_change_it() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: directory.path().join("hook.db"),
             ..Default::default()

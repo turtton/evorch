@@ -114,10 +114,7 @@ impl Core {
     async fn open_with_backend(backend: Option<runtime::mcp::McpCredentialBackend>) -> Self {
         // Owner IPC and the test control socket both need short sockaddr_un paths.
         traces::capture();
-        let dir = tempfile::Builder::new()
-            .prefix("03c-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let dir = test_socket_dir::tempdir();
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir(root.join(".evorch")).unwrap();
         std::fs::write(

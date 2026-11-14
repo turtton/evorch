@@ -16,7 +16,7 @@ struct Fixture {
 }
 
 fn fixture(days: u32, threads: &[&str]) -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path().join("project");
     let owners = dir.path().join("owners");
     std::fs::create_dir_all(&root).unwrap();

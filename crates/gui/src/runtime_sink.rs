@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn offline_question_rejects_caller_fenced_after_command_authorization() {
         let (rt, mut sink, runtime, _) = build_sink();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = StorageConfig {
             db_path: dir.path().join("questions.db"),
             ..Default::default()
@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn inherited_question_requires_registered_recipient_and_current_thread_ownership() {
         let (rt, mut sink, runtime, _) = build_sink();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = StorageConfig {
             db_path: dir.path().join("questions.db"),
             ..Default::default()
@@ -1556,7 +1556,7 @@ mod tests {
                 [LoopEvent::ChatNotice { .. }]
             ));
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SocketDir::new();
         let bus = Arc::new(EventBus::new(64));
         let owner =
             runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone())
@@ -1636,7 +1636,7 @@ mod tests {
             vec![],
         )));
         let goal = runtime.thread_goal("thread-1").unwrap();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SocketDir::new();
         let bus = Arc::new(EventBus::new(64));
         let previous =
             runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone())

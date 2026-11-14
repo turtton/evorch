@@ -21,7 +21,7 @@ impl CommandSink for Receipts {
 
 #[test]
 fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::tempdir();
     let path = directory.path().join("sidebar.json");
     let config = StorageConfig {
         db_path: directory.path().join("events.db"),
@@ -148,7 +148,7 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
 fn dropping_the_running_app_stops_the_executor_before_the_locks_are_released() {
     // Given: a running app with a reclaim executor holding the reclaim lease, and
     // shared start-up locks in its storage resources.
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::tempdir();
     let config = StorageConfig {
         db_path: directory.path().join("events.db"),
         ..Default::default()
@@ -225,7 +225,7 @@ fn dropping_the_running_app_stops_the_executor_before_the_locks_are_released() {
 fn the_start_up_wiring_makes_both_the_runtime_and_the_host_refuse_deleted_threads() {
     // Given: a runtime and an ownership host as the start-up composes them, and the
     // tombstones it read after the locks became shared.
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::SocketDir::new();
     let bus = Arc::new(EventBus::new(32));
     let runtime = AgentRuntime::new(
         bus.clone(),

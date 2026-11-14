@@ -38,7 +38,7 @@ fn the_guard_refuses_exactly_the_deleted_identities() {
 // Then: each is refused with `ThreadDeleted` and leaves no owner row; other threads work.
 #[test]
 fn an_owner_host_refuses_start_claim_and_attach_for_a_deleted_thread() {
-    let root = tempfile::tempdir().unwrap();
+    let root = test_socket_dir::SocketDir::new();
     let bus = Arc::new(event_bus::EventBus::new(32));
     let host = OwnerHost::open(root.path(), config::OwnershipConfig::default(), bus).unwrap();
     // A row that exists from before the deletion: claim must not even look at it.

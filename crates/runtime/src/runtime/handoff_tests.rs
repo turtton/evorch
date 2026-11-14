@@ -95,7 +95,7 @@ async fn missing_handoff_receipt_keeps_the_source_goal_and_execution() {
 
 #[tokio::test]
 async fn committed_target_starts_with_its_prepared_permit_after_source_releases() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let config = storage::StorageConfig {
         db_path: dir.path().join("released-source.db"),
         ..Default::default()

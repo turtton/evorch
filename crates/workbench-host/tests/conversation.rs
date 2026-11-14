@@ -152,8 +152,8 @@ fn save_access(path: &Path, root: &Path, trust: &str) {
 #[test]
 fn released_offline_legacy_thread_claims_canonically_and_restores_on_continue() {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let owners = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
+    let owners = test_socket_dir::SocketDir::new();
     let (_, store) = runtime_with_store(dir.path());
     let question = offline_question(&rt, dir.path(), &store);
     store

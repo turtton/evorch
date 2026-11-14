@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 
 # A test-only composition root keeps rendering out of the core and Web adapter.
 [dev-dependencies]
+test-socket-dir = { path = "../test-socket-dir" }
 gui = { path = "../gui", default-features = false }
 evorch-core = { path = "../evorch-core" }
 core-instance = { path = "../core-instance" }

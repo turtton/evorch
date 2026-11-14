@@ -103,10 +103,7 @@ struct Rig {
 }
 impl Rig {
     fn new() -> Self {
-        let root = tempfile::Builder::new()
-            .prefix("p10-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let root = test_socket_dir::tempdir();
         let config = root.path().join("cfg");
         private(&config);
         let runtime = root.path().join("run");

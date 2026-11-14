@@ -495,7 +495,7 @@ pub struct ReviewStorage {
 
 impl ReviewStorage {
     pub fn new() -> Self {
-        let directory = tempfile::tempdir().expect("review storage directory");
+        let directory = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: directory.path().join("review.db"),
             ..Default::default()

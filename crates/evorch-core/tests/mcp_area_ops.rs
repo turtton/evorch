@@ -124,10 +124,7 @@ fn session() -> SessionId {
 impl Area {
     async fn open() -> Self {
         traces::capture();
-        let dir = tempfile::Builder::new()
-            .prefix("m11-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let dir = test_socket_dir::tempdir();
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir(root.join(".evorch")).unwrap();
         std::fs::write(

@@ -70,10 +70,7 @@ async fn error_code(stream: &mut UnixStream, request: Value) -> ErrorCode {
 
 #[tokio::test]
 async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_offered() {
-    let dir = tempfile::Builder::new()
-        .prefix("p8-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::tempdir();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(
         dir.path().join("config.toml"),

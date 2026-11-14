@@ -150,7 +150,7 @@ impl Harness {
         model: Arc<ScriptedModel>,
         executor: impl FnOnce(Arc<EventBus>) -> tools::ToolExecutor,
     ) -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_socket_dir::tempdir();
         let storage = storage::Storage::open(storage::StorageConfig {
             db_path: directory.path().join("evorch.db"),
             ..Default::default()

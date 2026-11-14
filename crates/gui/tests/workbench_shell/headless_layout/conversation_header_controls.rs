@@ -51,7 +51,7 @@ fn diagnostics_info_button_sits_before_thread_title_and_opens_dialog() {
 
 #[test]
 fn owner_controls_stay_above_conversation_while_settings_and_usage_stay_in_footer() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let host = Arc::new(
         OwnerHost::open(
             dir.path(),

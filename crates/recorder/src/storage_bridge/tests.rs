@@ -4,7 +4,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use storage::{Database, Storage, StorageConfig};
 
 fn fixture() -> (tempfile::TempDir, Storage, Database) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let config = StorageConfig {
         db_path: dir.path().join("events.db"),
         ..StorageConfig::default()

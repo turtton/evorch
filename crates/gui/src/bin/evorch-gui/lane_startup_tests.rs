@@ -77,17 +77,13 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        // Explicitly relative socket paths avoid SUN_LEN without global chdir/env.
-        let dir = tempfile::Builder::new()
-            .prefix(".lane-startup-")
-            .tempdir_in(".")
-            .unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = StorageConfig {
             db_path: dir.path().join("lanes.db"),
             ..Default::default()
         };
         let storage = Storage::open(config.clone()).unwrap();
-        let root = PathBuf::from(dir.path().file_name().unwrap()).join("owners");
+        let root = dir.path().join("owners");
         Self {
             _dir: dir,
             config,

@@ -74,7 +74,7 @@ impl AgentModel for QuestionHandoffModel {
 
 #[test]
 fn inherited_question_is_visible_after_restart_and_answered_in_destination_before_finish() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let config = storage::StorageConfig {
         db_path: dir.path().join("questions.db"),
         ..Default::default()

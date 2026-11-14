@@ -121,7 +121,7 @@ fn text(s: &str) -> ScriptedResponse {
 }
 impl World {
     async fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(
             vec![text("initial answer")],
             vec![MODEL.into()],

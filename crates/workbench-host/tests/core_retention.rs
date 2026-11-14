@@ -140,7 +140,7 @@ fn write_sidebar(path: &Path, repo: &Path, pin_a: bool) {
 }
 
 fn world(state: Recovery, pin_a: bool) -> World {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let repo = dir.path().join("project");
     let owners = dir.path().join("owners");
     std::fs::create_dir_all(&repo).unwrap();

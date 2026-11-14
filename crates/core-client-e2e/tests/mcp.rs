@@ -126,10 +126,7 @@ fn shows(window: &Window, text: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the_core() {
-    let dir = tempfile::Builder::new()
-        .prefix("e2e-mcp-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path().canonicalize().unwrap();
     std::fs::create_dir(root.join(".evorch")).unwrap();
     std::fs::write(

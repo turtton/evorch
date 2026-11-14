@@ -33,8 +33,9 @@ struct Layout {
 }
 
 fn layout() -> Layout {
-    let dirs = (0..5)
-        .map(|_| tempfile::tempdir().unwrap())
+    // The project directory holds a socket in some tests, so it is a short directory.
+    let dirs = std::iter::once(test_socket_dir::tempdir())
+        .chain((1..5).map(|_| tempfile::tempdir().unwrap()))
         .collect::<Vec<_>>();
     let path = |index: usize| dirs[index].path().canonicalize().unwrap();
     let layout = Layout {

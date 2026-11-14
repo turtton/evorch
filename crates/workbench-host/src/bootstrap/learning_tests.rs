@@ -216,7 +216,7 @@ fn candidates(root: &std::path::Path) -> Vec<storage::improvement::ImprovementCa
 
 #[tokio::test]
 async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path();
     write_config(root);
     let spool = root.join("self-improvement/drafts/crash-spool");
@@ -288,7 +288,7 @@ async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
 
 #[tokio::test]
 async fn gui_factory_and_core_partition_thread_and_global_work_on_one_database() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path();
     write_config(root);
     let model = Arc::new(Model::default());
@@ -341,7 +341,7 @@ async fn gui_factory_and_core_partition_thread_and_global_work_on_one_database()
 
 #[tokio::test]
 async fn partial_startup_failure_releases_services_and_database_collector_lease() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path();
     write_config(root);
     // Evaluation is already registered when the improvement factory hits this error.
@@ -364,7 +364,7 @@ async fn partial_startup_failure_releases_services_and_database_collector_lease(
 
 #[tokio::test]
 async fn disabled_learning_evidence_path_is_inert_and_repeated_shutdown_drains() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let mut boot = BootstrappedHost::open(options(dir.path())).await.unwrap();
     assert!(!dir.path().join("self-improvement").exists());
     boot.shutdown().await.unwrap();
@@ -375,7 +375,7 @@ async fn disabled_learning_evidence_path_is_inert_and_repeated_shutdown_drains()
 #[tokio::test]
 async fn evaluation_host_reload_uses_strict_saved_configuration() {
     use eval::evaluator::EvaluatorHost;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     write_config(dir.path());
     let mut boot = BootstrappedHost::open(options(dir.path())).await.unwrap();
     boot.evaluator.reload_config().unwrap();
@@ -386,7 +386,7 @@ async fn evaluation_host_reload_uses_strict_saved_configuration() {
 
 #[tokio::test]
 async fn shutdown_drains_an_inflight_lesson_review_before_collector_and_lease_release() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     write_config(dir.path());
     let model = Arc::new(Model::default());
     model.hold_review.store(true, Ordering::SeqCst);
@@ -482,7 +482,7 @@ fn learning_factory(
 
 #[tokio::test]
 async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path();
     write_config(root);
     let mut config = config::Config::default();
@@ -524,7 +524,7 @@ async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
 
 #[tokio::test]
 async fn review_m1_non_elected_bus_diagnostics_are_collected_without_broadcasting() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path();
     write_config(root);
     let model = Arc::new(Model::default());
@@ -553,7 +553,7 @@ async fn review_m1_non_elected_bus_diagnostics_are_collected_without_broadcastin
 
 #[tokio::test]
 async fn review_m2_remaining_host_collects_events_and_spool_after_first_host_exits() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path();
     write_config(root);
     let model = Arc::new(Model::default());
@@ -580,7 +580,7 @@ async fn review_m2_remaining_host_collects_events_and_spool_after_first_host_exi
 
 #[tokio::test]
 async fn review_m3_evaluation_work_prevents_idle_exit_until_it_is_drained() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let mut core = BootstrappedHost::open(options(dir.path())).await.unwrap();
     assert!(!core.busy());
     let sh = std::env::split_paths(&std::env::var_os("PATH").unwrap())
@@ -656,7 +656,7 @@ impl AgentModel for LateLaneAdmission {
 #[tokio::test]
 async fn review_m6_late_lane_admission_terminal_diagnostic_survives_shutdown() {
     use super::services::ServicePhase;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let root = dir.path();
     write_config(root);
     {

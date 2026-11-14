@@ -80,7 +80,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_socket_dir::tempdir();
         let storage_config = storage::StorageConfig {
             db_path: directory.path().join("chat.sqlite3"),
             ..storage::StorageConfig::default()

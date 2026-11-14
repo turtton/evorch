@@ -86,10 +86,7 @@ impl Harness {
     fn new(steps: &[Value]) -> Self {
         // Keep the Unix socket path below the OS's sockaddr_un limit even when
         // the runner's TMPDIR is a long scratch path.
-        let dir = tempfile::Builder::new()
-            .prefix("mcp-d-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let dir = test_socket_dir::tempdir();
         let root = dir.path().canonicalize().unwrap();
         std::fs::write(
             root.join("peer.jsonl"),

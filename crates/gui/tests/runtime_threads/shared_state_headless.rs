@@ -39,7 +39,7 @@ struct Shared {
 
 impl Shared {
     fn new() -> Self {
-        let dir = TempDir::new().expect("temp dir");
+        let dir = test_socket_dir::tempdir();
         let config = StorageConfig {
             db_path: dir.path().join("events.db"),
             ..StorageConfig::default()

@@ -158,7 +158,7 @@ impl Fixture {
         Self::with_approval(count, admission, false)
     }
     pub(super) fn with_approval(count: usize, admission: bool, approval: bool) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("runs.db"),
             ..Default::default()

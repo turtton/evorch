@@ -124,7 +124,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("lanes.db"),
             ..Default::default()

@@ -172,7 +172,7 @@ fn switching_threads_or_deselecting_resets_snapshot_and_failure() {
 
 #[test]
 fn blocked_probe_keeps_refresh_nonblocking_and_coalesces_thread_changes() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let host = Arc::new(
         OwnerHost::open(
             dir.path(),
@@ -273,7 +273,7 @@ fn settle(ctx: &egui::Context) {
 
 #[test]
 fn only_a_changed_or_urgent_probe_result_requests_a_repaint() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let host = Arc::new(
         OwnerHost::open(
             dir.path(),
@@ -373,7 +373,7 @@ fn an_unchanged_result_is_not_stale_when_the_next_probe_pass_collects_it() {
     assert!(status.stale(now + STALE_AFTER));
 }
 
-fn test_host(dir: &tempfile::TempDir) -> Arc<OwnerHost> {
+fn test_host(dir: &test_socket_dir::SocketDir) -> Arc<OwnerHost> {
     Arc::new(
         OwnerHost::open(
             dir.path(),
@@ -409,7 +409,7 @@ fn status_with_worker() -> (OwnershipStatus, mpsc::Receiver<()>) {
 
 #[test]
 fn an_unchanged_result_is_collected_by_the_next_pass_without_waking_the_ui() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let host = test_host(&dir);
     let ctx = egui::Context::default();
     let (mut status, results_queued) = status_with_worker();
@@ -447,7 +447,7 @@ fn an_unchanged_result_is_collected_by_the_next_pass_without_waking_the_ui() {
 
 #[test]
 fn a_result_for_a_superseded_readonly_state_is_dropped_and_the_latest_one_shown() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let host = test_host(&dir);
     let ctx = egui::Context::default();
     let (mut status, results_queued) = status_with_worker();

@@ -122,7 +122,7 @@ fn policy(ui: &Window) -> workspace_ui::LanePolicy {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pointer_menu_and_drop_commit_through_runtime_and_ack_latest_epoch() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let (ui, storage, runtime) = actual_host(dir.path());
     let mut ui = Window::new(ui, [1280.0, 900.0]);
     ui.run();
@@ -178,7 +178,7 @@ async fn pointer_drop_displays_each_rejection_without_changing_the_ledger() {
         LaneDropError::Archived,
         LaneDropError::DifferentProject,
     ] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let (mut state, storage, runtime) = actual_host(dir.path());
         state.manage_lane(detach(1), None).unwrap();
         match reason {
@@ -239,7 +239,7 @@ async fn pointer_drop_displays_each_rejection_without_changing_the_ledger() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_replay_projects_current_lane_and_keeps_same_epoch_edits() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let (mut ui, storage, runtime) = actual_host(dir.path());
     let request = LaneManagementRequest {
         operation_id: "policy-before-detach".into(),

@@ -19,10 +19,7 @@ use std::{
 };
 
 fn dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("p7-")
-        .tempdir_in("/tmp")
-        .unwrap()
+    test_socket_dir::tempdir()
 }
 
 #[test]

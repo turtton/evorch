@@ -146,7 +146,7 @@ fn graph_evidence(
 }
 
 async fn assert_recovery_cache(human_after_c3: bool) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::tempdir();
     let config = storage::StorageConfig {
         db_path: dir.path().join("recovery-cache.db"),
         ..Default::default()

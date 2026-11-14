@@ -60,7 +60,7 @@ struct Setup {
 }
 
 fn setup(enabled: bool) -> Setup {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::tempdir();
     let storage = storage::Storage::open(storage::StorageConfig {
         db_path: directory.path().join("service.db"),
         ..Default::default()

@@ -224,7 +224,7 @@ mod tests {
     }
     #[tokio::test]
     async fn recipes_cannot_create_a_binding_or_a_current_owner() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("current.db"),
             ..Default::default()

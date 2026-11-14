@@ -61,14 +61,10 @@ fn brief(objective: &str) -> event_bus::LaneBrief {
 
 impl Fixture {
     async fn new(lane_count: usize) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         // The owner's Unix socket lives below this directory: keep it under SUN_LEN whatever
         // TMPDIR is.
-        let owners = tempfile::Builder::new()
-            .prefix("6")
-            .rand_bytes(3)
-            .tempdir_in("/tmp")
-            .unwrap();
+        let owners = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("host.db"),
             ..Default::default()

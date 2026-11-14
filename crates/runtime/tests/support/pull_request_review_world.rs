@@ -212,7 +212,7 @@ pub fn world_with(
     bus: Arc<EventBus>,
     settings: PullRequestsConfig,
 ) -> World {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::tempdir();
     let storage_config = storage::StorageConfig {
         db_path: directory.path().join("review-cache.db"),
         ..Default::default()

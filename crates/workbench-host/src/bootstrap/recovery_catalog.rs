@@ -154,7 +154,7 @@ mod tests {
     }
     #[tokio::test]
     async fn publication_uses_the_canonical_project_context_without_admission() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let directory = dir.path().join("catalog");
         std::fs::create_dir(&directory).unwrap();
         std::fs::write(directory.join("models-dev.json"), serde_json::json!({"fetched_at":0,
@@ -238,7 +238,7 @@ mod tests {
     }
     #[tokio::test]
     async fn health_mode_does_not_discover_or_contact_a_catalog() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let mut services = BackgroundServices::default();
         let options = BootstrapOptions {
             config_dir: dir.path().to_path_buf(),

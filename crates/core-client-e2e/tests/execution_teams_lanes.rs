@@ -285,10 +285,7 @@ async fn running(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
 
 async fn start() -> World {
     // The sockets live below the directory, so the path stays short.
-    let dir = tempfile::Builder::new()
-        .prefix("p12-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::tempdir();
     let root_dir = dir.path().canonicalize().unwrap();
     std::fs::write(
         root_dir.join("sidebar.json"),

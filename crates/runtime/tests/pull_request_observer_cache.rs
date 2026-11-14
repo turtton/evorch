@@ -156,7 +156,7 @@ struct Fixture {
 }
 
 fn fixture(model: Arc<dyn AgentModel>, observed: bool) -> Fixture {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::tempdir();
     let storage = storage::Storage::open(storage::StorageConfig {
         db_path: directory.path().join("observer.db"),
         ..Default::default()

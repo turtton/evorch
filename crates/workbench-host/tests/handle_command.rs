@@ -192,7 +192,7 @@ fn losing_thread_ownership_refuses_the_command_before_it_reaches_the_runtime() {
         web(),
     )
     .unwrap();
-    let owners = tempfile::tempdir().unwrap();
+    let owners = test_socket_dir::SocketDir::new();
     let bus = Arc::new(EventBus::new(64));
     let owner = runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus.clone())
         .unwrap();

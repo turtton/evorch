@@ -159,10 +159,7 @@ async fn rejects_input_reflection(
 
 #[tokio::test]
 async fn foreground_web_health_handshake_rejection_and_sigterm_release_the_lock() {
-    let dir = tempfile::Builder::new()
-        .prefix("p7-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::tempdir();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(
         dir.path().join("config.toml"),
@@ -295,10 +292,7 @@ fn cold_spawned_real_core_adopts_launch_and_publishes_handshake_epoch() {
             let _ = self.0.wait();
         }
     }
-    let dir = tempfile::Builder::new()
-        .prefix("p10-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::tempdir();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(
         dir.path().join("config.toml"),

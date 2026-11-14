@@ -204,10 +204,7 @@ async fn proxy(
 #[tokio::test(flavor = "multi_thread")]
 async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive_desktop() {
     use base64::Engine;
-    let dir = tempfile::Builder::new()
-        .prefix("p08-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::tempdir();
     let bus = Arc::new(event_bus::EventBus::new(1024));
     let (requests, mut provider) = tokio::sync::mpsc::unbounded_channel();
     let config = storage::StorageConfig {

@@ -75,7 +75,7 @@ impl Fixture {
     }
 
     fn with_model(model: Arc<dyn AgentModel>) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("goal.sqlite3"),
             ..storage::StorageConfig::default()

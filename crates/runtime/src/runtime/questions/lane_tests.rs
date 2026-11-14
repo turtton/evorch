@@ -44,7 +44,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::tempdir();
         let config = storage::StorageConfig {
             db_path: dir.path().join("questions.db"),
             ..Default::default()
@@ -462,13 +462,8 @@ async fn lane_answer_rejects_fenced_ownership_and_rebound_root() {
             )
             .unwrap(),
     );
-    // Relative private directory keeps the Unix socket path below SUN_LEN even
-    // when the runner's TMPDIR is long. No global cwd/environment mutation.
-    let dir = tempfile::Builder::new()
-        .prefix(".b-owner-")
-        .tempdir_in(".")
-        .unwrap();
-    let owner_path = std::path::Path::new(".").join(dir.path().file_name().unwrap());
+    let dir = test_socket_dir::tempdir();
+    let owner_path = dir.path().to_path_buf();
     let first = crate::ownership::OwnerHost::open(
         &owner_path,
         config::OwnershipConfig::default(),
