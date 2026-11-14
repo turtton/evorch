@@ -49,6 +49,7 @@ impl AgentRuntime {
         // Keep the intent active until actual shell cleanup, never just until
         // a panic/timeout has ended the Rust future.
         if let Ok(execution) = self.execution_snapshot(run_id) {
+            self.prepare_terminal_dispatch(run_id);
             self.end_intent(
                 run_id,
                 &execution.publication().incarnation(),

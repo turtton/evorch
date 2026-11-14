@@ -160,10 +160,21 @@ impl LoopState {
             Some(crate::InterruptKind::Cancel) => StopReason::Cancelled,
             None => StopReason::Terminal,
         };
+        #[cfg(test)]
+        if let Ok(execution) = runtime.execution_snapshot(self.task.run_id) {
+            runtime.execution_hook(crate::runtime::HookPoint::TerminalRetiring, &execution);
+        }
+        // The active intent and its terminal tail must overlap. No sealer may
+        // observe neither after finalization has closed the mailbox.
+        runtime.prepare_terminal_dispatch(self.task.run_id);
         runtime.end_intent(
             self.task.run_id,
             &self.task.publication.incarnation(),
             reason,
         );
+        #[cfg(test)]
+        if let Ok(execution) = runtime.execution_snapshot(self.task.run_id) {
+            runtime.execution_hook(crate::runtime::HookPoint::TerminalIntentRetired, &execution);
+        }
     }
 }

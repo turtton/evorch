@@ -57,27 +57,22 @@ impl AgentRuntime {
         ))
     }
 
+    /// Bridge intent retirement to relay publication, including natural exit.
+    pub(crate) fn prepare_terminal_dispatch(&self, run_id: RunId) {
+        if let Ok(execution) = self.execution_snapshot(run_id) {
+            execution.prepare_terminal_dispatch(&self.shared.dispatch_tails);
+        }
+    }
+
     pub(crate) fn publish_terminal(
         &self,
         run_id: RunId,
         event: LifecycleEvent,
     ) -> Option<crate::quiesce::dispatch::DispatchGuard> {
         // Registered BEFORE phase publication: runtime.wait may return inside relay.
-        let stop_guard = self.execution_snapshot(run_id).ok().and_then(|execution| {
-            execution
-                .terminal_dispatch
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-        });
-        let dispatch = if let Some(guard) = stop_guard {
-            guard
-                .enter(|| self.shared.dispatch_tails.register(true))
-                .ok()
-        } else {
-            // A live run may naturally finish while shutdown joins producers.
-            // This does not admit ordinary work, and closed remains a violation.
-            self.shared.dispatch_tails.register_required_terminal().ok()
+        let dispatch = match self.execution_snapshot(run_id) {
+            Ok(execution) => execution.take_terminal_dispatch(&self.shared.dispatch_tails),
+            Err(_) => self.shared.dispatch_tails.register_required_terminal().ok(),
         };
         #[cfg(test)]
         if let Ok(execution) = self.execution_snapshot(run_id) {

@@ -2220,6 +2220,7 @@ impl AgentRuntime {
                         {
                             runtime.host_input_diagnostic(task.run_id, &error.to_string());
                         }
+                        runtime.prepare_terminal_dispatch(task.run_id);
                         runtime.end_intent(
                             task.run_id,
                             &task.publication.incarnation(),
@@ -3120,7 +3121,7 @@ impl AgentRuntime {
             {
                 admission.cancelled = true;
                 if runs.get(&target).is_some_and(|entry| {
-                    is_live(entry) && Arc::ptr_eq(&entry.execution, &admission.execution)
+                    !entry.completion_relayed && Arc::ptr_eq(&entry.execution, &admission.execution)
                 }) {
                     admission
                         .execution
@@ -3139,7 +3140,7 @@ impl AgentRuntime {
                     admission.finish_queued(target);
                 }
             } else if let Some(entry) = runs.get(&target) {
-                if is_live(entry) {
+                if !entry.completion_relayed {
                     entry
                         .execution
                         .track_terminal_dispatch(self.shared.dispatch_tails.register(true)?);
