@@ -13,20 +13,26 @@ use std::sync::Arc;
 use event_bus::RecvError;
 use event_bus::lane::{
     LaneAttentionAction as StoredAction, LaneAttentionFilter, LaneAttentionKind as StoredKind,
-    LanePolicy, LaneReadyState as StoredReady, LaneStatus,
+    LaneCloseKind as StoredCloseKind, LaneOperationError, LanePolicy,
+    LaneReadyState as StoredReady, LaneStatus,
 };
-use event_bus::{EventKind, LedgerEvent};
+use event_bus::{AgentRunPhase, EventKind, LedgerEvent};
 use runtime::AgentRuntime;
 use storage::lanes::LaneRecord;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::events::UiEvent;
 use workbench_protocol::ids::{RunId, ThreadId};
 use workbench_protocol::lane_attention::{LaneAttentionAction, LaneId, LaneReadyState};
-use workbench_protocol::lane_management::{LaneManagementPolicy, ManagedLanePolicy};
+use workbench_protocol::lane_management::{
+    LaneCloseRecordKind, LaneManagementPolicy, ManagedLanePolicy,
+};
 use workbench_protocol::namespaces::lanes::{
-    LaneAttentionBrief, LaneAttentionTag, LaneDeliveriesResumed, LaneDeliveryView, LaneDetail,
-    LaneReadyView, LaneReportStatus, LaneReportView, LaneStartState, LaneSummary, ListLanes,
-    MAX_LANE_DETAIL_ATTENTION, MAX_LANE_EVENT_THREADS, ResumeLaneDeliveries,
+    LaneArtifactRevisionKind, LaneArtifactRevisionView, LaneAttentionBrief, LaneAttentionTag,
+    LaneClosePreview, LaneClosePreviewReady, LaneCurrentClose, LaneDeliveriesResumed,
+    LaneDeliveryView, LaneDetail, LaneReadyView, LaneReportStatus, LaneReportView, LaneStartState,
+    LaneSummary, ListLanes, MAX_CLOSE_PREVIEW_ARTIFACT_REFS, MAX_CLOSE_PREVIEW_CRITERIA,
+    MAX_CLOSE_PREVIEW_ITEM_BYTES, MAX_CLOSE_PREVIEW_OBJECTIVE_BYTES, MAX_LANE_DETAIL_ATTENTION,
+    MAX_LANE_EVENT_THREADS, ResumeLaneDeliveries,
 };
 use workbench_protocol::namespaces::{LanesEvent, LanesQuery, LanesReply};
 use workbench_protocol::queries::{Query, QueryReply};
@@ -42,12 +48,14 @@ use crate::queries::{Pager, error, revision, storage_error, text};
 pub struct LanesArea {
     runtime: Option<AgentRuntime>,
     pager: Pager,
+    source: Option<ProjectionSource>,
 }
 
 impl LanesArea {
     pub(super) fn new(handles: &AreaHandles) -> Result<Self, BootstrapError> {
-        let area = Self::with_runtime(handles.runtime.clone());
         let source = handles.source("lanes")?;
+        let mut area = Self::with_runtime(handles.runtime.clone());
+        area.source = Some(source.clone());
         let runtime = handles.runtime.clone();
         let mut events = handles.bus.subscribe();
         // Subscribed first, so a change during the read is still announced; the leads the
@@ -78,6 +86,27 @@ impl LanesArea {
         Self {
             runtime: Some(runtime),
             pager: Pager::default(),
+            source: None,
+        }
+    }
+
+    /// Tell subscribers that `lane_id` changed without a ledger event: a close is recorded in
+    /// the ledger but appends no event of its own. The summary is read from the ledger now, so
+    /// what is announced is what a client reading after this event sees. A lead does not
+    /// change by a close, so nobody beyond the lane's finders needs to hear of it.
+    pub fn announce(&self, lane_id: &str) {
+        let (Some(runtime), Some(source)) = (&self.runtime, &self.source) else {
+            return;
+        };
+        let id = lane_id.to_owned();
+        for (lane, also_for) in
+            read_summaries(runtime, |db| Ok(db.lane(&id)?.into_iter().collect()))
+        {
+            if let Err(error) =
+                source.publish(UiEvent::Lanes(LanesEvent::LaneChanged { lane, also_for }))
+            {
+                tracing::warn!(?error.code, "lanes event was not published");
+            }
         }
     }
 
@@ -102,6 +131,9 @@ impl LanesArea {
             LanesQuery::ListLanes(list) => LanesReply::Lanes(self.list(runtime, query, list)?),
             LanesQuery::GetLane { lane_id } => {
                 LanesReply::Lane(Box::new(lane_detail(runtime, lane_id)?))
+            }
+            LanesQuery::GetLaneClosePreview { lane_id } => {
+                LanesReply::LaneClosePreview(Box::new(close_preview(runtime, lane_id)?))
             }
         };
         Ok(QueryReply::Lanes(reply))
@@ -138,7 +170,8 @@ impl LanesArea {
                 let mut out = Vec::with_capacity(records.len());
                 for record in &records {
                     let report = latest_report(db, record)?;
-                    if let Some(summary) = summary_of(record, report.as_ref()) {
+                    let close = current_close(db, record);
+                    if let Some(summary) = summary_of(record, report.as_ref(), close) {
                         out.push(summary);
                     }
                 }
@@ -261,12 +294,15 @@ fn read_summaries(
             let mut out = Vec::new();
             for record in lanes(db)? {
                 let report = latest_report(db, &record)?;
+                let close = current_close(db, &record);
                 let also_for = db
                     .lane_finders(&record.lane_id)?
                     .iter()
                     .filter_map(|thread| ThreadId::new(thread).ok())
                     .collect();
-                out.extend(summary_of(&record, report.as_ref()).map(|summary| (summary, also_for)));
+                out.extend(
+                    summary_of(&record, report.as_ref(), close).map(|summary| (summary, also_for)),
+                );
             }
             Ok(out)
         })
@@ -310,9 +346,36 @@ fn millis(ns: i64) -> UnixMillis {
     UnixMillis((ns.max(0) / 1_000_000) as u64)
 }
 
+/// The close that stands for `lane`, as the ledger records it. Only a managed lane has one. A
+/// close that cannot be read shows as absent here; the close preview and the close itself
+/// answer with the ledger's own refusal.
+fn current_close(db: &storage::Database, lane: &LaneRecord) -> Option<LaneCurrentClose> {
+    if !lane.policy.is_managed() {
+        return None;
+    }
+    db.current_lane_close(&lane.lane_id)
+        .ok()
+        .flatten()
+        .as_ref()
+        .and_then(close_mark)
+}
+
+fn close_mark(close: &event_bus::lane::LaneCloseResult) -> Option<LaneCurrentClose> {
+    Some(LaneCurrentClose {
+        close_id: close.close_id.clone(),
+        kind: match close.kind {
+            StoredCloseKind::LeadClosed => LaneCloseRecordKind::LeadClosed,
+            StoredCloseKind::HumanClosed => LaneCloseRecordKind::HumanClosed,
+            StoredCloseKind::Discarded => LaneCloseRecordKind::Discarded,
+        },
+        ready_seq: close.ready_seq.map(Sequence),
+    })
+}
+
 fn summary_of(
     lane: &LaneRecord,
     report: Option<&event_bus::lane::LaneReport>,
+    close: Option<LaneCurrentClose>,
 ) -> Option<LaneSummary> {
     let start = if lane.is_started() {
         LaneStartState::Started
@@ -342,6 +405,7 @@ fn summary_of(
         start,
         last_activity_at: millis(lane.last_activity_at_ns),
         latest_report_status: report.map(|report| report_status(report.status)),
+        current_close: close,
         revision: Revision(0),
     };
     summary.revision = revision(&summary);
@@ -392,6 +456,7 @@ fn lane_detail(runtime: &AgentRuntime, lane_id: &LaneId) -> Result<LaneDetail, W
                 return Ok(None);
             };
             let report = latest_report(db, &lane)?;
+            let close = current_close(db, &lane);
             let items = match &lane.lead_thread_id {
                 Some(lead) => {
                     db.lane_attention(
@@ -415,14 +480,14 @@ fn lane_detail(runtime: &AgentRuntime, lane_id: &LaneId) -> Result<LaneDetail, W
                     .is_some_and(|destination| destination.stopped),
                 None => false,
             };
-            Ok(Some((lane, report, items, destination_stopped)))
+            Ok(Some((lane, report, close, items, destination_stopped)))
         })
         .map_err(storage_error)?
         .ok_or_else(|| error(ErrorCode::StorageUnavailable, "storage is unavailable"))?;
-    let Some((lane, report, items, destination_stopped)) = read else {
+    let Some((lane, report, close, items, destination_stopped)) = read else {
         return Err(error(ErrorCode::NotFound, "unknown lane"));
     };
-    let summary = summary_of(&lane, report.as_ref())
+    let summary = summary_of(&lane, report.as_ref(), close)
         .ok_or_else(|| error(ErrorCode::Internal, "the lane has an invalid identity"))?;
     let readiness_of = items.iter().find_map(|item| match &item.kind {
         StoredKind::ReadyUnclosed {
@@ -472,6 +537,103 @@ fn lane_detail(runtime: &AgentRuntime, lane_id: &LaneId) -> Result<LaneDetail, W
             })
             .collect(),
         summary,
+    })
+}
+
+/// Whether a run of the lane's thread is working now. A run idle between turns (waiting for
+/// its next input) or finished is not; a lane that idles must not read as busy. A close does
+/// not stop a working run either.
+fn thread_has_working_run(
+    runtime: &AgentRuntime,
+    db: &storage::Database,
+    thread_id: &str,
+) -> Result<bool, storage::StorageError> {
+    for agent in runtime.list_agents() {
+        if !matches!(agent.phase, AgentRunPhase::Pending | AgentRunPhase::Running) {
+            continue;
+        }
+        let thread = match db.thread_of_run(&agent.run_id.to_string())? {
+            Some(row) => Some(row.thread_id),
+            None => storage::threads::parse_chat_run_name(&agent.name)
+                .map(|(_, thread)| thread.to_owned()),
+        };
+        if thread.as_deref() == Some(thread_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn artifact_revision_view(
+    revision: &event_bus::lane::ArtifactRevision,
+) -> LaneArtifactRevisionView {
+    use event_bus::lane::ArtifactRevision;
+    let (kind, value) = match revision {
+        ArtifactRevision::CommitSha(value) => (LaneArtifactRevisionKind::CommitSha, value),
+        ArtifactRevision::Sha256(value) => (LaneArtifactRevisionKind::Sha256, value),
+    };
+    LaneArtifactRevisionView {
+        kind,
+        value: text(value, MAX_CLOSE_PREVIEW_ITEM_BYTES),
+    }
+}
+
+/// What a person reads before ending `lane_id`, from one snapshot of the ledger. The storage
+/// preview is the source; this only bounds it for the wire and adds whether a run is live.
+fn close_preview(
+    runtime: &AgentRuntime,
+    lane_id: &LaneId,
+) -> Result<LaneClosePreview, WorkbenchError> {
+    let read = runtime
+        .with_storage_reader(|db| {
+            if db.lane(lane_id.as_str())?.is_none() {
+                return Ok(Err(error(ErrorCode::NotFound, "unknown lane")));
+            }
+            let preview = match db.lane_close_preview(lane_id.as_str()) {
+                Ok(preview) => preview,
+                Err(storage::StorageError::LaneOperation(LaneOperationError::NotAttached)) => {
+                    return Ok(Err(refusal("not_attached")));
+                }
+                Err(other) => return Err(other),
+            };
+            let running = thread_has_working_run(runtime, db, &preview.lane.thread_id)?;
+            Ok(Ok((preview, running)))
+        })
+        .map_err(storage_error)?
+        .ok_or_else(|| error(ErrorCode::StorageUnavailable, "storage is unavailable"))?;
+    let (preview, running) = read?;
+    let lane = &preview.lane;
+    let invalid = || error(ErrorCode::Internal, "the lane has an invalid identity");
+    Ok(LaneClosePreview {
+        lane_id: LaneId::new(&lane.lane_id).map_err(|_| invalid())?,
+        thread_id: ThreadId::new(&lane.thread_id).map_err(|_| invalid())?,
+        objective: text(&lane.brief.objective, MAX_CLOSE_PREVIEW_OBJECTIVE_BYTES),
+        acceptance_criteria: lane
+            .brief
+            .acceptance_criteria
+            .iter()
+            .take(MAX_CLOSE_PREVIEW_CRITERIA)
+            .map(|criterion| text(criterion, MAX_CLOSE_PREVIEW_ITEM_BYTES))
+            .collect(),
+        brief_revision: Revision(preview.context.brief_revision),
+        management_revision: Revision(preview.context.management_revision),
+        request_revision: Revision(preview.context.request_revision),
+        ready: preview.ready.as_ref().map(|ready| LaneClosePreviewReady {
+            report_seq: Sequence(ready.report_seq),
+            brief_revision: Revision(ready.brief_revision),
+            summary: text(&ready.summary, 1024),
+            artifact_revision: ready.artifact_revision.as_ref().map(artifact_revision_view),
+            artifact_refs: ready
+                .artifact_refs
+                .iter()
+                .take(MAX_CLOSE_PREVIEW_ARTIFACT_REFS)
+                .map(|reference| text(reference, MAX_CLOSE_PREVIEW_ITEM_BYTES))
+                .collect(),
+            artifact_ref_count: u32::try_from(ready.artifact_refs.len()).unwrap_or(u32::MAX),
+        }),
+        open_question_count: u32::try_from(preview.open_question_count).unwrap_or(u32::MAX),
+        running,
+        current_close: preview.current_close.as_ref().and_then(close_mark),
     })
 }
 

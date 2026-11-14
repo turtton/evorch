@@ -511,3 +511,53 @@ fn an_event_names_its_namespace_and_only_projection_notices_end_a_subscription()
         );
     }
 }
+
+#[test]
+fn a_close_preview_is_bounded_like_every_other_reply() {
+    use workbench_protocol::namespaces::lanes::{
+        LaneClosePreview, MAX_CLOSE_PREVIEW_ARTIFACT_REFS, MAX_CLOSE_PREVIEW_CRITERIA,
+        MAX_CLOSE_PREVIEW_ITEM_BYTES, MAX_CLOSE_PREVIEW_OBJECTIVE_BYTES,
+    };
+    let preview = |edit: &dyn Fn(&mut Value)| {
+        let mut value = json!({
+            "lane_id": "lane-1", "thread_id": "thread-2", "objective": "o",
+            "acceptance_criteria": ["it builds"], "brief_revision": "2",
+            "management_revision": "3", "request_revision": "5",
+            "ready": {"report_seq": "4", "brief_revision": "2", "summary": "done",
+                "artifact_refs": ["a"], "artifact_ref_count": 1},
+            "open_question_count": 0, "running": false
+        });
+        edit(&mut value);
+        serde_json::from_value::<LaneClosePreview>(value).unwrap()
+    };
+    assert!(preview(&|_| {}).validate().is_ok());
+    let long = |len: usize| "x".repeat(len);
+    assert!(
+        preview(&|v| {
+            v["objective"] = json!(long(MAX_CLOSE_PREVIEW_OBJECTIVE_BYTES + 1));
+        })
+        .validate()
+        .is_err()
+    );
+    assert!(
+        preview(&|v| {
+            v["acceptance_criteria"] = json!(vec!["c"; MAX_CLOSE_PREVIEW_CRITERIA + 1]);
+        })
+        .validate()
+        .is_err()
+    );
+    assert!(
+        preview(&|v| {
+            v["ready"]["artifact_refs"] = json!(vec!["r"; MAX_CLOSE_PREVIEW_ARTIFACT_REFS + 1]);
+        })
+        .validate()
+        .is_err()
+    );
+    assert!(
+        preview(&|v| {
+            v["ready"]["artifact_refs"] = json!([long(MAX_CLOSE_PREVIEW_ITEM_BYTES + 1)]);
+        })
+        .validate()
+        .is_err()
+    );
+}
