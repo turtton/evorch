@@ -205,3 +205,25 @@ async fn storage_health_failed_before_request_does_not_gate_manual_chat_resume()
     assert!(f.runtime.shared.quiesce.running());
     f.cleanup(run).await;
 }
+
+#[tokio::test]
+async fn cancelled_restart_waiter_cannot_acquire_the_next_attempts_fence() {
+    let f = Fixture::new(0);
+    let run = f.start();
+    f.model.entered.notified().await;
+    let a = f.runtime.begin_restart_quiesce().unwrap();
+    let old = f.runtime.fence_dispatch_restart();
+    tokio::pin!(old);
+    assert!(futures_util::poll!(&mut old).is_pending());
+    f.runtime.cancel_restart_quiesce(&a).unwrap();
+    let b = f.runtime.begin_restart_quiesce().unwrap();
+    assert_ne!(a.generation(), b.generation());
+    // Deliberately do not poll A again until B has checkpointed.
+    f.model.release.add_permits(1);
+    let current = f.runtime.fence_dispatch_restart().await.unwrap();
+    assert!(old.await.is_err());
+    f.runtime.validate_restart_dispatch_fence(&current).unwrap();
+    f.runtime.drain_dispatch_tails(&current).await.unwrap();
+    f.runtime.cancel_restart_quiesce(&b).unwrap();
+    f.cleanup(run).await;
+}

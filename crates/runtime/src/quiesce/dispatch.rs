@@ -437,12 +437,24 @@ impl AgentRuntime {
     }
     /// Obtain attempt- and epoch-bound evidence after checkpointing.
     pub async fn fence_dispatch_restart(&self) -> Result<DispatchDrainFence, RuntimeError> {
-        self.quiesce().await?;
+        let attempt = self.begin_restart_quiesce()?;
+        self.wait_quiesced_generation(attempt.generation()).await?;
+        // Cancellation, terminal handoff and epoch replacement all hold this
+        // boundary. Never grant a later attempt's authority to an old waiter.
+        let inner = self.shared.quiesce.lock();
+        if inner.generation != attempt.generation()
+            || !inner.requested
+            || inner.cancelling
+            || inner.shutting_down
+            || inner.phase != crate::quiesce::QuiesceState::Checkpointed
+        {
+            return Err(error("stale restart waiter"));
+        }
         Ok(DispatchDrainFence {
             tails: self.shared.dispatch_tails.clone(),
             kind: FenceKind::Restart,
             epoch: self.shared.dispatch_tails.epoch(),
-            attempt: self.shared.quiesce.lock().generation,
+            attempt: inner.generation,
         })
     }
     /// Drain dispatch tails, independently of runtime.wait. Callers must first

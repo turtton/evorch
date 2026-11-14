@@ -17,8 +17,25 @@ impl AgentRuntime {
     }
     /// Only success permits the host to exit; no elapsed-time escape hatch.
     pub async fn wait_quiesced(&self) -> Result<(), RuntimeError> {
+        let generation = self.shared.quiesce.lock().generation;
+        self.wait_quiesced_generation(generation).await
+    }
+    pub(crate) async fn wait_quiesced_generation(
+        &self,
+        generation: u64,
+    ) -> Result<(), RuntimeError> {
         let mut version = self.shared.quiesce.subscribe();
         loop {
+            {
+                let inner = self.shared.quiesce.lock();
+                if inner.generation != generation
+                    || !inner.requested
+                    || inner.cancelling
+                    || inner.shutting_down
+                {
+                    return Err(error("stale restart waiter"));
+                }
+            }
             let complete = self.complete_restart_safe_points()?;
             if complete {
                 return Ok(());
@@ -27,8 +44,8 @@ impl AgentRuntime {
         }
     }
     pub async fn quiesce(&self) -> Result<(), RuntimeError> {
-        self.begin_restart_quiesce()?;
-        self.wait_quiesced().await
+        let attempt = self.begin_restart_quiesce()?;
+        self.wait_quiesced_generation(attempt.generation()).await
     }
     /// Read-only evidence. PR 06 must validate current authority and the
     /// incarnation/receipt before admission; these rows are not permits.
