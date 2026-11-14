@@ -13,6 +13,7 @@ impl LoopState {
             return true;
         }
         let mut changes = runtime.shared.quiesce.subscribe();
+        let mut shell_changes = self.shared.executor.subscribe_shell_job_changes();
         let parked_generation = runtime.shared.quiesce.lock().generation;
         loop {
             if let Some(kind) = self.interrupted() {
@@ -69,6 +70,12 @@ impl LoopState {
                 biased;
                 changed = self.channels.cancel_rx.changed() => { if changed.is_err() { return false; } }
                 changed = changes.changed() => { if changed.is_err() { return false; } }
+                changed = async {
+                    match shell_changes.as_mut() {
+                        Some(changes) => changes.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => { if changed.is_err() { shell_changes = None; } }
             }
         }
     }

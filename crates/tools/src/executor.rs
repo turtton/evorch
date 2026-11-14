@@ -526,6 +526,30 @@ impl ToolExecutor {
         }
     }
 
+    pub fn shell_job_snapshots(&self, run_id: &str) -> Vec<crate::ShellJobSnapshot> {
+        self.tools
+            .get("shell")
+            .map_or_else(Vec::new, |shell| shell.tool.shell_job_snapshots(run_id))
+    }
+    pub fn subscribe_shell_job_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.tools
+            .get("shell")
+            .and_then(|shell| shell.tool.subscribe_shell_job_changes())
+    }
+    pub async fn wait_shell_job_terminal(
+        &self,
+        identity: &crate::ShellJobIdentity,
+    ) -> Result<crate::ShellJobSnapshot, ToolError> {
+        self.tools
+            .get("shell")
+            .ok_or_else(|| ToolError::UnknownTool {
+                name: "shell".into(),
+            })?
+            .tool
+            .wait_shell_job_terminal(identity)
+            .await
+    }
+
     pub fn has_running_shell_jobs(&self, run_id: &str) -> bool {
         self.tools
             .get("shell")

@@ -909,3 +909,75 @@ async fn a_cut_off_child_is_observed_once_its_program_result_was_delivered_not_b
     shell.observe_child_shell_jobs("owner", "other", &[1]);
     assert!(!shell.has_unobserved_shell_jobs("owner"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn typed_wait_is_signal_free_and_leaves_the_terminal_result_unobserved() {
+    use std::io::Write;
+    let directory = tempfile::tempdir().unwrap();
+    let fifo = directory.path().join("release");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let shell = shell();
+    let mut changes = shell.subscribe_shell_job_changes().unwrap();
+    let before = *changes.borrow_and_update();
+    let start = invoke(&shell, "owner", json!({"command":format!("IFS= read -r line < '{}'; printf 'normal:%s' \"$line\"", fifo.display()),"yield_ms":0})).await;
+    assert!(*changes.borrow_and_update() > before);
+    let snapshot = shell.shell_job_snapshots("owner").pop().unwrap();
+    assert_eq!(snapshot.state, crate::ShellJobState::Running);
+    assert!(shell.shell_job_snapshots("foreign").is_empty());
+    let foreign = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
+    assert!(
+        foreign
+            .wait_shell_job_terminal(&snapshot.identity)
+            .await
+            .is_err()
+    );
+    {
+        let mut abandoned = Box::pin(shell.wait_shell_job_terminal(&snapshot.identity));
+        assert!(futures_util::poll!(abandoned.as_mut()).is_pending());
+    }
+    assert_eq!(
+        shell.shell_job_snapshots("owner")[0].state,
+        crate::ShellJobState::Running
+    );
+    let release = tokio::task::spawn_blocking(move || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(fifo)
+            .unwrap()
+            .write_all(b"released\n")
+            .unwrap();
+    });
+    let terminal = shell
+        .wait_shell_job_terminal(&snapshot.identity)
+        .await
+        .unwrap();
+    release.await.unwrap();
+    assert_eq!(terminal.state, crate::ShellJobState::Terminal);
+    assert_eq!(terminal.exit_code, Some(0));
+    assert!(!terminal.observed);
+    assert!(shell.has_unobserved_shell_jobs("owner"));
+    let terminal_revision = *changes.borrow_and_update();
+    let result = invoke(
+        &shell,
+        "owner",
+        json!({"action":"poll","job_id":id(&start)}),
+    )
+    .await;
+    assert!(result.content.contains("normal:released"));
+    assert!(shell.shell_job_snapshots("owner")[0].observed);
+    assert!(*changes.borrow_and_update() > terminal_revision);
+    shell.release_shell_jobs("owner").unwrap();
+    assert!(
+        shell
+            .wait_shell_job_terminal(&snapshot.identity)
+            .await
+            .is_err()
+    );
+}

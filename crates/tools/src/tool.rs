@@ -166,6 +166,23 @@ pub trait Tool: Send + Sync + std::any::Any {
         self.execute_with_context(ctx, args).await
     }
 
+    /// Read-only, process-local identities; no command or output payload.
+    fn shell_job_snapshots(&self, _run_id: &str) -> Vec<crate::ShellJobSnapshot> {
+        Vec::new()
+    }
+    fn subscribe_shell_job_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
+    /// Wait for actual teardown, without signalling or acknowledging results.
+    async fn wait_shell_job_terminal(
+        &self,
+        _identity: &crate::ShellJobIdentity,
+    ) -> Result<crate::ShellJobSnapshot, ToolError> {
+        Err(ToolError::InvalidArgs {
+            detail: "shell observation is unavailable".into(),
+        })
+    }
+
     /// Cancel processes still owned by a terminal/cancelled run. No replay occurs.
     fn cancel_shell_jobs(&self, _run_id: &str) {}
 

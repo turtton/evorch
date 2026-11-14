@@ -33,6 +33,7 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
             last_seen: None,
         }),
         changed,
+        registry_changes: watch::channel(0).0,
         cancel,
         input,
         escalated: None,

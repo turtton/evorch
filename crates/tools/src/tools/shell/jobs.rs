@@ -16,6 +16,7 @@ use crate::{Progress, ToolError, ToolExecutionContext, ToolResult};
 
 #[cfg(test)]
 mod handle_tests;
+mod observation;
 mod output;
 mod process;
 #[cfg(all(test, target_os = "linux"))]
@@ -83,14 +84,26 @@ pub(super) struct EscalatedInput {
     pub access: ShellAccess,
 }
 
-#[derive(Default)]
 pub(super) struct JobRegistry {
+    changes: watch::Sender<u64>,
     // Writers hold jobs across updates to both indexes. Lock order is jobs →
     // by_handle → allocator → job state; handle-only readers never lock jobs.
     jobs: Mutex<HashMap<String, Arc<Job>>>,
     allocator: crate::shell_handles::HandleAllocator,
     by_handle: Mutex<HashMap<String, Arc<Job>>>,
     events: RwLock<Option<Arc<EventBus>>>,
+}
+
+impl Default for JobRegistry {
+    fn default() -> Self {
+        Self {
+            jobs: Mutex::default(),
+            allocator: Default::default(),
+            by_handle: Mutex::default(),
+            events: RwLock::default(),
+            changes: watch::channel(0).0,
+        }
+    }
 }
 
 impl Drop for JobRegistry {
@@ -125,6 +138,7 @@ struct Job {
     timeout_ms: Option<u64>,
     state: Mutex<State>,
     changed: watch::Sender<u64>,
+    registry_changes: watch::Sender<u64>,
     cancel: watch::Sender<bool>,
     input: mpsc::Sender<Input>,
     escalated: Option<EscalatedInput>,
@@ -252,6 +266,7 @@ impl JobRegistry {
                     last_seen: None,
                 }),
                 changed,
+                registry_changes: self.changes.clone(),
                 cancel,
                 input,
                 escalated,
@@ -260,6 +275,8 @@ impl JobRegistry {
             by_handle.insert(job.handle.clone(), Arc::clone(&job));
             job
         };
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
         let timeout = timeout_ms.map(Duration::from_millis);
         let worker = Arc::clone(&job);
         // The registry owns cancellation; the task owns the process and reaping.
@@ -328,6 +345,7 @@ impl JobRegistry {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if synchronous && state.completion.is_some() {
                 state.observed = true;
+                job.observation_changed();
                 state
                     .final_result
                     .take()
@@ -558,8 +576,9 @@ impl JobRegistry {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.completion.is_some() {
+            if state.completion.is_some() && !state.observed {
                 state.observed = true;
+                job.observation_changed();
             }
         }
     }
@@ -663,6 +682,8 @@ impl JobRegistry {
                 true
             }
         });
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
         Ok(())
     }
 
@@ -919,6 +940,7 @@ impl Job {
             state.final_result = Some(Ok(result));
         }
         state.completion = Some(completion);
+        self.observation_changed();
         state.process = None;
         state.sandbox = None;
         drop(state);
@@ -1053,8 +1075,9 @@ impl Job {
     ) -> (ToolResult, bool) {
         // A kill/drain alone is not an observed outcome. Only a terminal tool
         // response acknowledges the potentially partial filesystem effects.
-        if state.completion.is_some() {
+        if state.completion.is_some() && !state.observed {
             state.observed = true;
+            self.observation_changed();
         }
         let output = &state.output;
         let available_from = output.offset;
