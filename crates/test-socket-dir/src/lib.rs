@@ -10,6 +10,7 @@
 //!
 //! Keep databases, logs and other data in the regular `$TMPDIR`; only the
 //! directory that holds sockets (for example an ownership root) belongs here.
+//! [`SplitDir`] bundles both for a fixture that passes one directory around.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -137,15 +138,50 @@ impl SocketDir {
     }
 }
 
-/// Shorthand for `SocketDir::new().into_tempdir()`: a drop-in for
-/// `tempfile::tempdir().unwrap()` in a fixture whose directory holds sockets
-/// (or an ownership root) next to its other files.
+/// A fixture directory split in two: [`SplitDir::path`] is a regular
+/// `tempfile` directory below `$TMPDIR` for databases, logs and state, and
+/// [`SplitDir::sockets`] is a short [`SocketDir`] for sockets and ownership
+/// roots. Both are removed on drop.
 ///
-/// # Panics
-/// Panics on the errors of [`SocketDir::new`].
-#[track_caller]
-pub fn tempdir() -> tempfile::TempDir {
-    SocketDir::new().into_tempdir()
+/// Use it where a fixture hands one directory around but a socket must still
+/// fit in `sun_path`: data stays out of `/tmp` (often a tmpfs), only the socket
+/// directory lives there.
+#[derive(Debug)]
+pub struct SplitDir {
+    data: tempfile::TempDir,
+    sockets: SocketDir,
+}
+
+impl SplitDir {
+    /// Creates both directories.
+    ///
+    /// # Panics
+    /// Panics when either cannot be created or the socket directory is too
+    /// long; see [`SocketDir::new`].
+    #[track_caller]
+    pub fn new() -> Self {
+        Self {
+            data: tempfile::tempdir().expect("create the data directory below $TMPDIR"),
+            sockets: SocketDir::new(),
+        }
+    }
+
+    /// The data directory below `$TMPDIR`.
+    pub fn path(&self) -> &Path {
+        self.data.path()
+    }
+
+    /// The short directory for sockets and ownership roots.
+    pub fn sockets(&self) -> &Path {
+        self.sockets.path()
+    }
+}
+
+impl Default for SplitDir {
+    #[track_caller]
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Default for SocketDir {
@@ -189,6 +225,20 @@ mod tests {
         assert!(message.contains(BASE_DIR_ENV), "{message}");
         assert!(message.contains(&SUN_PATH_LIMIT.to_string()), "{message}");
         assert_eq!(std::fs::read_dir(&long).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn split_dir_keeps_data_in_tmpdir_and_sockets_in_the_short_base() {
+        let dir = SplitDir::new();
+        let sockets = dir.sockets().to_path_buf();
+        let data = dir.path().to_path_buf();
+        assert!(sockets.starts_with(
+            std::env::var_os(BASE_DIR_ENV).unwrap_or_else(|| DEFAULT_BASE_DIR.into())
+        ));
+        assert!(data.starts_with(std::env::temp_dir()));
+        assert_ne!(data, sockets);
+        drop(dir);
+        assert!(!sockets.exists() && !data.exists());
     }
 
     #[test]

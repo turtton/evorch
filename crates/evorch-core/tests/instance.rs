@@ -18,8 +18,8 @@ use std::{
     sync::{Arc, Barrier},
 };
 
-fn dir() -> tempfile::TempDir {
-    test_socket_dir::tempdir()
+fn dir() -> test_socket_dir::SocketDir {
+    test_socket_dir::SocketDir::new()
 }
 
 #[test]

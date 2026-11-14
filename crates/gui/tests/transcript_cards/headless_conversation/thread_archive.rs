@@ -147,7 +147,7 @@ fn mixed_phases_block_archive_despite_stopped_or_error_display_state() {
             // Exercise both a mixed root and a mixed descendant hidden by a
             // non-running root. Child runs inherit the same conversation owner.
             for descendant in [false, true] {
-                let temp = test_socket_dir::tempdir();
+                let temp = test_socket_dir::SplitDir::new();
                 let mut state = fixture_state(temp.path(), false, false);
                 let target = ThreadId::new("target");
                 let owner = if descendant {
@@ -535,7 +535,7 @@ fn restored_orphan_snapshots_reconcile_only_nonterminal_phases() {
         (AgentRunPhase::Waiting, Some("Stopped"), P::Stopped, true),
     ] {
         for restorable in [false, true] {
-            let dir = test_socket_dir::tempdir();
+            let dir = test_socket_dir::SplitDir::new();
             let config = storage::StorageConfig {
                 db_path: dir.path().join("events.db"),
                 ..Default::default()
@@ -550,7 +550,7 @@ fn restored_orphan_snapshots_reconcile_only_nonterminal_phases() {
                 restorable,
             );
             storage.close();
-            let registry = dir.path().join("owners.db");
+            let registry = dir.sockets().join("owners.db");
             drop(runtime::ownership::Registry::open(&registry).unwrap());
             let mut state = fixture_state(dir.path(), false, false);
             state
@@ -569,7 +569,7 @@ fn restored_orphan_snapshots_reconcile_only_nonterminal_phases() {
 #[test]
 fn restored_live_owner_and_legacy_turn_protect_archive() {
     for legacy in [false, true] {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
@@ -585,7 +585,7 @@ fn restored_live_owner_and_legacy_turn_protect_archive() {
         );
         storage.close();
         let host = runtime::ownership::OwnerHost::open(
-            dir.path(),
+            dir.sockets(),
             Default::default(),
             std::sync::Arc::new(event_bus::EventBus::new(32)),
         )
@@ -614,7 +614,7 @@ fn restored_live_owner_and_legacy_turn_protect_archive() {
 #[test]
 fn restored_owner_between_tool_rounds_blocks_archive_until_release_or_exit() {
     for release in [false, true] {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
@@ -630,7 +630,7 @@ fn restored_owner_between_tool_rounds_blocks_archive_until_release_or_exit() {
         );
         storage.close();
         let host = runtime::ownership::OwnerHost::open(
-            dir.path(),
+            dir.sockets(),
             Default::default(),
             std::sync::Arc::new(event_bus::EventBus::new(32)),
         )
@@ -682,7 +682,7 @@ fn restored_owner_between_tool_rounds_blocks_archive_until_release_or_exit() {
 
 #[test]
 fn restored_checkpoint_probes_expired_owner_before_reconciling() {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let config = storage::StorageConfig {
         db_path: dir.path().join("events.db"),
         ..Default::default()
@@ -697,7 +697,7 @@ fn restored_checkpoint_probes_expired_owner_before_reconciling() {
         true,
     );
     storage.close();
-    let registry_path = dir.path().join("owners.db");
+    let registry_path = dir.sockets().join("owners.db");
     let owner = runtime::ownership::ThreadOwner::new(
         "target".into(),
         runtime::ownership::Lease {
@@ -710,7 +710,7 @@ fn restored_checkpoint_probes_expired_owner_before_reconciling() {
         .unwrap()
         .start(&owner)
         .unwrap();
-    let socket = dir.path().join(format!("{}.sock", owner.lease.owner_id));
+    let socket = dir.sockets().join(format!("{}.sock", owner.lease.owner_id));
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let db = storage::Database::open(&config).unwrap();
     let mut state = fixture_state(dir.path(), false, false);
@@ -742,7 +742,7 @@ fn restored_checkpoint_probes_expired_owner_before_reconciling() {
 #[test]
 fn restored_checkpoint_preserves_phase_when_owner_liveness_is_unknown() {
     for invalid_id in [false, true] {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
@@ -757,7 +757,7 @@ fn restored_checkpoint_preserves_phase_when_owner_liveness_is_unknown() {
             true,
         );
         storage.close();
-        let registry_path = dir.path().join("owners.db");
+        let registry_path = dir.sockets().join("owners.db");
         let owner = runtime::ownership::ThreadOwner::new(
             "target".into(),
             runtime::ownership::Lease {
@@ -776,7 +776,7 @@ fn restored_checkpoint_preserves_phase_when_owner_liveness_is_unknown() {
             .unwrap();
         if !invalid_id {
             // ELOOP is an unknown endpoint failure, not proof of owner death.
-            let socket = dir.path().join(format!("{}.sock", owner.lease.owner_id));
+            let socket = dir.sockets().join(format!("{}.sock", owner.lease.owner_id));
             std::os::unix::fs::symlink(&socket, &socket).unwrap();
         }
         let mut state = fixture_state(dir.path(), false, false);
@@ -797,7 +797,7 @@ fn restored_checkpoint_preserves_phase_when_owner_liveness_is_unknown() {
 
 #[test]
 fn restored_orphan_with_live_descendant_cannot_archive_family() {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let mut state = fixture_state(dir.path(), false, false);
     let child = state.fork_thread(ThreadId::new("target")).unwrap();
     let config = storage::StorageConfig {
@@ -823,7 +823,7 @@ fn restored_orphan_with_live_descendant_cannot_archive_family() {
     );
     storage.close();
     let host = runtime::ownership::OwnerHost::open(
-        dir.path(),
+        dir.sockets(),
         Default::default(),
         std::sync::Arc::new(event_bus::EventBus::new(32)),
     )
@@ -858,7 +858,7 @@ fn restored_orphan_with_live_descendant_cannot_archive_family() {
 #[test]
 fn unreadable_ownership_never_reconciles_restored_runs() {
     for corrupt in [false, true] {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
@@ -873,7 +873,7 @@ fn unreadable_ownership_never_reconciles_restored_runs() {
             false,
         );
         storage.close();
-        let registry = dir.path().join("owners.db");
+        let registry = dir.sockets().join("owners.db");
         if corrupt {
             std::fs::write(&registry, "invalid database").unwrap();
         }
@@ -898,7 +898,7 @@ fn unreadable_ownership_never_reconciles_restored_runs() {
 fn claiming_a_thread_stops_its_orphaned_runs() {
     use workspace_ui::ThreadRunPhase as P;
     for own_claim in [true, false] {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
@@ -930,7 +930,7 @@ fn claiming_a_thread_stops_its_orphaned_runs() {
         }
         storage.close();
         let previous = runtime::ownership::OwnerHost::open(
-            dir.path(),
+            dir.sockets(),
             Default::default(),
             std::sync::Arc::new(event_bus::EventBus::new(32)),
         )
@@ -938,7 +938,7 @@ fn claiming_a_thread_stops_its_orphaned_runs() {
         let permit = previous.start("target").unwrap();
         let this_window = std::sync::Arc::new(
             runtime::ownership::OwnerHost::open(
-                dir.path(),
+                dir.sockets(),
                 Default::default(),
                 std::sync::Arc::new(event_bus::EventBus::new(32)),
             )

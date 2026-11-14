@@ -74,7 +74,7 @@ impl AgentModel for QuestionHandoffModel {
 
 #[test]
 fn inherited_question_is_visible_after_restart_and_answered_in_destination_before_finish() {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let config = storage::StorageConfig {
         db_path: dir.path().join("questions.db"),
         ..Default::default()
@@ -88,12 +88,8 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
     let bus = Arc::new(EventBus::new(512));
     let mut receiver = bus.subscribe();
     let owner = Arc::new(
-        runtime::ownership::OwnerHost::open(
-            &dir.path().join("owners"),
-            Default::default(),
-            bus.clone(),
-        )
-        .unwrap(),
+        runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
+            .unwrap(),
     );
     let model = Arc::new(QuestionHandoffModel::default());
     let runtime = AgentRuntime::new(

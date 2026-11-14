@@ -27,7 +27,7 @@ enum Recovery {
 }
 
 struct World {
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
     plan: RetentionPlan,
 }
 
@@ -140,9 +140,9 @@ fn write_sidebar(path: &Path, repo: &Path, pin_a: bool) {
 }
 
 fn world(state: Recovery, pin_a: bool) -> World {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let repo = dir.path().join("project");
-    let owners = dir.path().join("owners");
+    let owners = dir.sockets().to_path_buf();
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::create_dir_all(&owners).unwrap();
     let config = StorageConfig {

@@ -114,7 +114,8 @@ fn benchmark_snapshot_preserves_crlf_bytes_and_unix_modes_despite_git_defaults()
 #[cfg(unix)]
 #[test]
 fn benchmark_snapshot_rejects_special_files_and_attributes_before_index_or_workspace_changes() {
-    let temp = test_socket_dir::tempdir();
+    // The trial tree holds a socket, so the whole fixture directory has to be short.
+    let temp = test_socket_dir::SocketDir::new();
     let root = temp.path().join("trial");
     fs::create_dir_all(root.join("nested")).unwrap();
     fs::write(root.join("file"), "original").unwrap();

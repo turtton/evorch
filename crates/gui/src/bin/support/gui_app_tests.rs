@@ -21,7 +21,7 @@ impl CommandSink for Receipts {
 
 #[test]
 fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
-    let directory = test_socket_dir::tempdir();
+    let directory = test_socket_dir::SplitDir::new();
     let path = directory.path().join("sidebar.json");
     let config = StorageConfig {
         db_path: directory.path().join("events.db"),
@@ -74,7 +74,7 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
         .unwrap();
     let ownership = Arc::new(
         runtime::ownership::OwnerHost::open(
-            &directory.path().join("owner"),
+            &directory.sockets().join("owner"),
             Default::default(),
             bus.clone(),
         )
@@ -148,12 +148,12 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
 fn dropping_the_running_app_stops_the_executor_before_the_locks_are_released() {
     // Given: a running app with a reclaim executor holding the reclaim lease, and
     // shared start-up locks in its storage resources.
-    let directory = test_socket_dir::tempdir();
+    let directory = test_socket_dir::SplitDir::new();
     let config = StorageConfig {
         db_path: directory.path().join("events.db"),
         ..Default::default()
     };
-    let root = directory.path().join("owners");
+    let root = directory.sockets().to_path_buf();
     let leases = storage::shared_with_wait(&config.db_path, &root, Duration::from_secs(1)).unwrap();
     let storage = Storage::open_with_lease(config.clone(), leases.db_lease().unwrap()).unwrap();
     let bus = Arc::new(EventBus::new(32));
@@ -232,12 +232,8 @@ fn the_start_up_wiring_makes_both_the_runtime_and_the_host_refuse_deleted_thread
         Arc::new(tools::ToolExecutor::new(bus.clone())),
         Arc::new(DemoScriptModel::new(bus.clone())),
     );
-    let host = runtime::ownership::OwnerHost::open(
-        &directory.path().join("owners"),
-        Default::default(),
-        bus,
-    )
-    .unwrap();
+    let host =
+        runtime::ownership::OwnerHost::open(directory.path(), Default::default(), bus).unwrap();
     let tombstones = storage::thread_retention::TombstoneSet {
         threads: ["gone".to_owned()].into(),
         runs: ["gone-run".to_owned()].into(),

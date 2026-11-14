@@ -146,7 +146,7 @@ fn graph_evidence(
 }
 
 async fn assert_recovery_cache(human_after_c3: bool) {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let config = storage::StorageConfig {
         db_path: dir.path().join("recovery-cache.db"),
         ..Default::default()
@@ -270,7 +270,7 @@ async fn assert_recovery_cache(human_after_c3: bool) {
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
     let owner = crate::ownership::OwnerHost::open(
-        &dir.path().join("owner"),
+        &dir.sockets().join("owner"),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )

@@ -16,7 +16,7 @@ impl NudgeFixture {
         f.request_marker = Some("delivery first lane".into());
         let owner = Arc::new(
             runtime::ownership::OwnerHost::open(
-                f.h._directory.path(),
+                f.h._directory.sockets(),
                 Default::default(),
                 Arc::new(event_bus::EventBus::new(128)),
             )

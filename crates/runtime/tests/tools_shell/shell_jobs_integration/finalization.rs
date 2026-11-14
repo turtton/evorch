@@ -398,14 +398,14 @@ async fn unrecorded_shell_round_retains_active_before_and_after_finalization() {
     test_support::isolated_state_dir();
     use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
     for mode in ["absent", "failed"] {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = StorageConfig {
             db_path: dir.path().join("events.db"),
             ..Default::default()
         };
         let storage = Storage::open(config.clone()).unwrap();
         let permit = OwnerPermit {
-            registry_path: dir.path().join("owners.db"),
+            registry_path: dir.sockets().join("owners.db"),
             thread_id: "thread".into(),
             lease: Lease {
                 owner_id: "owner".into(),

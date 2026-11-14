@@ -37,7 +37,7 @@ pub(super) struct World {
 
 impl World {
     pub fn new() -> Self {
-        let dir = test_socket_dir::tempdir();
+        let dir = tempfile::tempdir().unwrap();
         let world = Self {
             db_path: dir.path().join("events.db"),
             root: dir.path().join("ownership"),
@@ -52,7 +52,7 @@ impl World {
 
     /// Another database and sidebar sharing this world's ownership root.
     pub fn sibling_sharing_root(&self, name: &str) -> Self {
-        let dir = test_socket_dir::tempdir();
+        let dir = tempfile::tempdir().unwrap();
         let world = Self {
             db_path: dir.path().join(format!("{name}.db")),
             root: self.root.clone(),

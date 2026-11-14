@@ -362,7 +362,7 @@ async fn ownership_lost_during_summary_cannot_commit_the_prepared_checkpoint() {
     let mut events = fixture.runtime.shared.bus.subscribe();
     let before = snapshot(&fixture, run);
     let host = crate::ownership::OwnerHost::open(
-        fixture._dir.path(),
+        fixture._dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(128)),
     )

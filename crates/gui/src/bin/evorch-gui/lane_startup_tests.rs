@@ -70,20 +70,20 @@ async fn waiting(events: &mut EventReceiver, id: RunId) {
 }
 
 struct Fixture {
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
     config: StorageConfig,
     storage: Storage,
     root: PathBuf,
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = StorageConfig {
             db_path: dir.path().join("lanes.db"),
             ..Default::default()
         };
         let storage = Storage::open(config.clone()).unwrap();
-        let root = dir.path().join("owners");
+        let root = dir.sockets().to_path_buf();
         Self {
             _dir: dir,
             config,

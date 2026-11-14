@@ -116,7 +116,7 @@ async fn sse_event(response: &mut reqwest::Response, buffer: &mut Vec<u8>) -> Ev
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unix_and_web_preserve_model_prefix_and_mask_committed_output() {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let secret = format!("sk-proj-{}", "A".repeat(64));
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(
         vec![
@@ -189,12 +189,8 @@ context_window_tokens = 1000000
     .runtime
     .with_run_store(runtime::RunStore::open(&storage_config, bridge.handle()).unwrap());
     let owner = Arc::new(
-        runtime::ownership::OwnerHost::open(
-            &dir.path().join("owners"),
-            Default::default(),
-            bus.clone(),
-        )
-        .unwrap(),
+        runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
+            .unwrap(),
     );
     let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current())
         .with_event_bus(bus.clone())
@@ -218,7 +214,7 @@ context_window_tokens = 1000000
             &evorch_core::instance::ConfigIdentity::new(&dir.path().join("config")).unwrap(),
         )
         .unwrap(),
-        dir.path(),
+        dir.sockets(),
     )
     .unwrap();
     let listener = instance.bind().unwrap();
@@ -689,8 +685,7 @@ context_window_tokens = 1000000
 
     // An existing GUI owner cannot be adopted by this core ingress.
     let other =
-        runtime::ownership::OwnerHost::open(&dir.path().join("owners"), Default::default(), bus)
-            .unwrap();
+        runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus).unwrap();
     let _permit = other.start("foreign").unwrap();
     let denied = client
         .command(send("foreign", "foreign-sub", "must not run"))

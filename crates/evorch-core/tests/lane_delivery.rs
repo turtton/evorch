@@ -105,20 +105,20 @@ struct Core {
     events: EventReceiver,
     /// Questions the bus announced, in order.
     questions: Vec<event_bus::UserQuestion>,
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
 }
 
 impl Core {
     async fn open() -> Self {
         // Owner hosts bind a unix socket below the ownership root, so the path stays short.
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let root = dir.path().canonicalize().unwrap();
         let model = Arc::new(Model::default());
         let boot = BootstrappedHost::open_with_test_seams(
             BootstrapOptions {
                 config_dir: root.clone(),
                 project_root: root.clone(),
-                ownership_root: root.join("owners"),
+                ownership_root: dir.sockets().to_path_buf(),
             },
             TestSeams {
                 model: model.clone(),

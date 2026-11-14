@@ -29,17 +29,18 @@ use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 use runtime::ownership::OwnerHost;
 use storage::{Database, Storage, StorageConfig};
 use tempfile::TempDir;
+use test_socket_dir::SplitDir;
 use workspace_ui::{ThreadId, ThreadRunPhase, ThreadState, UiSettings};
 
 struct Shared {
-    dir: TempDir,
+    dir: SplitDir,
     project: TempDir,
     config: StorageConfig,
 }
 
 impl Shared {
     fn new() -> Self {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = StorageConfig {
             db_path: dir.path().join("events.db"),
             ..StorageConfig::default()
@@ -85,12 +86,8 @@ fn open_window_customized(
     let storage = Storage::open(shared.config.clone()).expect("storage must open");
     let bus = Arc::new(EventBus::new(64));
     let host = Arc::new(
-        OwnerHost::open(
-            &shared.dir.path().join("threads"),
-            Default::default(),
-            Arc::clone(&bus),
-        )
-        .expect("owner host must open"),
+        OwnerHost::open(shared.dir.sockets(), Default::default(), Arc::clone(&bus))
+            .expect("owner host must open"),
     );
     let mut state = customize(
         WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())

@@ -265,12 +265,12 @@ mod tests {
 
     #[tokio::test]
     async fn status_tracks_connection_lifetimes_and_web_without_browser_clients() {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let root = dir.path().canonicalize().unwrap();
         let mut boot = BootstrappedHost::open(BootstrapOptions {
             config_dir: root.clone(),
             project_root: root.clone(),
-            ownership_root: root.join("owners"),
+            ownership_root: dir.sockets().to_path_buf(),
         })
         .await
         .unwrap();

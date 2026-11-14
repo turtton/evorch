@@ -158,7 +158,7 @@ fn delivered_notification_targets_one_settled_id_immediately() {
 
 #[test]
 fn ownership_claim_in_event_batch_reuses_lookup_and_confirmed_settlement() {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let mut state = state(&dir.path().join("sidebar.json"));
     state.history[0].status = DeliveryStatus::Queued;
     let receipts = Arc::new(Mutex::new(vec![review::receipt(
@@ -167,7 +167,7 @@ fn ownership_claim_in_event_batch_reuses_lookup_and_confirmed_settlement() {
     let calls = install_counter(&mut state, receipts);
     let host = Arc::new(
         runtime::ownership::OwnerHost::open(
-            &dir.path().join("owner"),
+            &dir.sockets().join("owner"),
             Default::default(),
             Arc::new(event_bus::EventBus::new(16)),
         )

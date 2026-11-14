@@ -504,7 +504,7 @@ fn retention_deletes_a_lead_with_its_managed_lanes_and_never_with_a_detached_one
     use storage::threads::ThreadUpsert;
 
     // Given: a stored lead, an attached lane and a detached lane, as the runtime writes them
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let config = storage::StorageConfig {
         db_path: dir.path().join("events.db"),
         ..Default::default()

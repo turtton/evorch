@@ -5,9 +5,9 @@ use runtime::ownership::{
     SnapshotNoneReason as Reason, SnapshotReference as Reference, ThreadOwner,
 };
 
-fn fixture() -> (test_socket_dir::SocketDir, OwnerPermit) {
-    let directory = test_socket_dir::SocketDir::new();
-    let path = directory.path().join("owners.db");
+fn fixture() -> (test_socket_dir::SplitDir, OwnerPermit) {
+    let directory = test_socket_dir::SplitDir::new();
+    let path = directory.sockets().join("owners.db");
     let owner = ThreadOwner::new(
         "thread".into(),
         Lease {
@@ -348,7 +348,7 @@ fn quiesce_during_snapshot_preparation_waits_for_reference_commit_before_handoff
         .recv_timeout(std::time::Duration::from_secs(5))
         .unwrap();
 
-    let socket = directory.path().join("owner.sock");
+    let socket = directory.sockets().join("owner.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let registry_path = old.registry_path.clone();
     let server = std::thread::spawn(move || {

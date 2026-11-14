@@ -29,7 +29,7 @@ use crate::pull_request_world::{
 };
 
 struct World {
-    directory: tempfile::TempDir,
+    directory: test_socket_dir::SplitDir,
     owners: ShortPrivateDirectory,
     config: storage::StorageConfig,
     storage: storage::Storage,
@@ -44,7 +44,7 @@ struct World {
 
 impl World {
     fn new() -> Self {
-        let directory = test_socket_dir::tempdir();
+        let directory = test_socket_dir::SplitDir::new();
         let owners = ShortPrivateDirectory::new();
         let config = storage::StorageConfig {
             db_path: directory.path().join("pull-requests.db"),

@@ -224,7 +224,7 @@ mod tests {
     }
     #[tokio::test]
     async fn recipes_cannot_create_a_binding_or_a_current_owner() {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("current.db"),
             ..Default::default()
@@ -237,8 +237,9 @@ mod tests {
             Arc::new(tools::ToolExecutor::new(bus.clone())),
             Arc::new(runtime::compose::UnconfiguredModel),
         );
-        let owner =
-            Arc::new(OwnerHost::open(&dir.path().join("owner"), Default::default(), bus).unwrap());
+        let owner = Arc::new(
+            OwnerHost::open(&dir.sockets().join("owner"), Default::default(), bus).unwrap(),
+        );
         let bindings = BindingTable::default();
         let provider = CurrentAuthorityProvider {
             runtime: &runtime,

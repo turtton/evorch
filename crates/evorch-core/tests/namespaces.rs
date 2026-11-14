@@ -70,7 +70,7 @@ async fn error_code(stream: &mut UnixStream, request: Value) -> ErrorCode {
 
 #[tokio::test]
 async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_offered() {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(
         dir.path().join("config.toml"),
@@ -85,8 +85,8 @@ async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_off
             "--foreground",
             "--web",
         ])
-        .env("XDG_STATE_HOME", dir.path().join("state"))
-        .env("XDG_RUNTIME_DIR", dir.path())
+        .env("XDG_STATE_HOME", dir.sockets().join("state"))
+        .env("XDG_RUNTIME_DIR", dir.sockets())
         .current_dir(dir.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

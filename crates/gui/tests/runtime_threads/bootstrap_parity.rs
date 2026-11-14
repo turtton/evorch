@@ -17,7 +17,7 @@ impl eval::evaluator::EvaluatorHost for EvaluationHost {
 
 #[tokio::test]
 async fn configured_core_and_gui_share_tools_models_providers_and_storage() {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let user_dir = root.join("user");
     std::fs::create_dir(&user_dir).unwrap();
@@ -82,7 +82,7 @@ max_bytes = 2097152
     let mut core = BootstrappedHost::open(BootstrapOptions {
         config_dir: user_dir.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     })
     .await
     .unwrap();
@@ -263,7 +263,7 @@ max_bytes = 2097152
     let mut approved_core = BootstrappedHost::open(BootstrapOptions {
         config_dir: user_dir,
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     })
     .await
     .unwrap();
@@ -287,12 +287,12 @@ max_bytes = 2097152
 
 #[tokio::test]
 async fn unconfigured_core_is_read_only_while_gui_demo_keeps_standard_tools() {
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let mut core = BootstrappedHost::open(BootstrapOptions {
         config_dir: root.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     })
     .await
     .unwrap();

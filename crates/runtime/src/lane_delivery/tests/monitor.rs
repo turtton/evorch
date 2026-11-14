@@ -41,7 +41,7 @@ fn owned(
 ) -> (Arc<crate::ownership::OwnerHost>, Arc<OwnedHost>) {
     let owner = Arc::new(
         crate::ownership::OwnerHost::open(
-            f._dir.path(),
+            f._dir.sockets(),
             Default::default(),
             f.runtime.shared.bus.clone(),
         )
@@ -315,6 +315,7 @@ async fn silent_done_wakes_once_despite_three_different_working_reports_and_rest
 async fn nonowner_process_cannot_observe_or_fabricate_stall() {
     const CHILD_DB: &str = "EVORCH_2B_NONOWNER_DB";
     const CHILD_THREAD: &str = "EVORCH_2B_NONOWNER_THREAD";
+    const CHILD_SOCKETS: &str = "EVORCH_2B_NONOWNER_SOCKETS";
     if let Some(db) = std::env::var_os(CHILD_DB) {
         let config = storage::StorageConfig {
             db_path: db.into(),
@@ -326,7 +327,7 @@ async fn nonowner_process_cannot_observe_or_fabricate_stall() {
         let root = lane.root_run_id.as_deref().unwrap().parse().unwrap();
         let bus = Arc::new(EventBus::new(128));
         let owner = crate::ownership::OwnerHost::open(
-            config.db_path.parent().unwrap(),
+            std::path::Path::new(&std::env::var_os(CHILD_SOCKETS).unwrap()),
             Default::default(),
             bus.clone(),
         )
@@ -370,7 +371,7 @@ async fn nonowner_process_cannot_observe_or_fabricate_stall() {
     let lane = f.lane(lead, "foreign").await;
     let (owner, host) = owned(&f, &lane);
     let second = crate::ownership::OwnerHost::open(
-        f._dir.path(),
+        f._dir.sockets(),
         Default::default(),
         f.runtime.shared.bus.clone(),
     )
@@ -409,6 +410,7 @@ async fn nonowner_process_cannot_observe_or_fabricate_stall() {
         ])
         .env(CHILD_DB, &f.config.db_path)
         .env(CHILD_THREAD, &lane.thread_id)
+        .env(CHILD_SOCKETS, f._dir.sockets())
         .output()
         .await
         .unwrap();

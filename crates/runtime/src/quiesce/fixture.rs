@@ -136,7 +136,7 @@ impl Tool for GateRead {
     }
 }
 pub(super) struct Fixture {
-    pub(super) _dir: tempfile::TempDir,
+    pub(super) _dir: test_socket_dir::SplitDir,
     pub(super) config: storage::StorageConfig,
     pub(super) _storage: storage::Storage,
     pub(super) runtime: AgentRuntime,
@@ -158,7 +158,7 @@ impl Fixture {
         Self::with_approval(count, admission, false)
     }
     pub(super) fn with_approval(count: usize, admission: bool, approval: bool) -> Self {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("runs.db"),
             ..Default::default()

@@ -297,6 +297,7 @@ impl workbench_host::bootstrap::core_startup::CoreStartupHook for ProbeHook {
 
 async fn open(
     root: &Path,
+    sockets: &Path,
     mode: &str,
 ) -> (
     BootstrappedHost,
@@ -305,7 +306,7 @@ async fn open(
 ) {
     let options = BootstrapOptions {
         config_dir: root.into(),
-        ownership_root: root.join("owners"),
+        ownership_root: sockets.to_path_buf(),
         project_root: root.into(),
     };
     let load_options = config::LoadOptions {
@@ -365,8 +366,9 @@ fn recipe() -> RecoveryRecipe {
 #[ignore = "subprocess entry point; invoked with explicit private fixture arguments"]
 async fn startup_subprocess_worker() {
     let root = PathBuf::from(std::env::var_os("EVORCH_STARTUP_ROOT").unwrap());
+    let sockets = PathBuf::from(std::env::var_os("EVORCH_STARTUP_SOCKETS").unwrap());
     let mode = std::env::var("EVORCH_STARTUP_MODE").unwrap();
-    let (mut host, mut provider_events, waiting_model) = open(&root, &mode).await;
+    let (mut host, mut provider_events, waiting_model) = open(&root, &sockets, &mode).await;
     if mode.starts_with("capture") {
         let permit = host.owner.start("thread").unwrap();
         let run = host
@@ -475,7 +477,7 @@ async fn startup_subprocess_worker() {
             }).unwrap();
             std::fs::write(root.join("orphan-run"), orphan.to_string()).unwrap();
             let owner = runtime::ownership::OwnerHost::open(
-                &root.join("owners"),
+                &sockets,
                 Default::default(),
                 Arc::new(event_bus::EventBus::new(64)),
             )
@@ -667,10 +669,10 @@ struct Process {
     lines: Lines<BufReader<tokio::process::ChildStdout>>,
 }
 impl Process {
-    fn spawn(root: &Path, mode: &str) -> Self {
-        Self::spawn_with_proxy(root, mode, None)
+    fn spawn(dir: &test_socket_dir::SplitDir, mode: &str) -> Self {
+        Self::spawn_with_proxy(dir, mode, None)
     }
-    fn spawn_with_proxy(root: &Path, mode: &str, proxy: Option<&str>) -> Self {
+    fn spawn_with_proxy(dir: &test_socket_dir::SplitDir, mode: &str, proxy: Option<&str>) -> Self {
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
         if let Some(proxy) = proxy {
             // Child-local proxy rejects models.dev CONNECT, never contacting the
@@ -688,7 +690,8 @@ impl Process {
                 "startup_subprocess_worker",
                 "--nocapture",
             ])
-            .env("EVORCH_STARTUP_ROOT", root)
+            .env("EVORCH_STARTUP_ROOT", dir.path())
+            .env("EVORCH_STARTUP_SOCKETS", dir.sockets())
             .env("EVORCH_STARTUP_MODE", mode)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -719,8 +722,8 @@ impl Process {
         assert!(!self.child.wait().await.unwrap().success());
     }
 }
-fn fixture(mock: &StreamingMockOpenAi) -> tempfile::TempDir {
-    let dir = test_socket_dir::tempdir();
+fn fixture(mock: &StreamingMockOpenAi) -> test_socket_dir::SplitDir {
+    let dir = test_socket_dir::SplitDir::new();
     std::fs::write(dir.path().join("child-input.txt"), "durable child input").unwrap();
     std::fs::write(
         dir.path().join("config.toml"),
@@ -758,10 +761,10 @@ async fn startup_process_cache_preserves_wire_prefix_after_capture_and_kill() {
         ScriptedResponse::text_stream("after", "mock-model", ["Restored in another process"]),
     ]);
     let dir = fixture(&mock);
-    let mut first = Process::spawn(dir.path(), "capture");
+    let mut first = Process::spawn(&dir, "capture");
     let captured = first.checkpoint("captured").await;
     first.kill().await;
-    let mut second = Process::spawn(dir.path(), "restore");
+    let mut second = Process::spawn(&dir, "restore");
     let bootstrapped = second.checkpoint("bootstrapped").await;
     assert_ne!(captured["pid"], bootstrapped["pid"]);
     assert_eq!(
@@ -811,10 +814,10 @@ async fn crash_boundary(mode: &str, boundary: &str, activated: bool) {
         ScriptedResponse::text_stream("after", "mock-model", ["Restored"]),
     ]);
     let dir = fixture(&mock);
-    let mut source = Process::spawn(dir.path(), "capture");
+    let mut source = Process::spawn(&dir, "capture");
     source.checkpoint("captured").await;
     source.kill().await;
-    let mut crashing = Process::spawn(dir.path(), mode);
+    let mut crashing = Process::spawn(&dir, mode);
     let checkpoint = crashing.checkpoint("crash_boundary").await;
     assert_eq!(checkpoint["boundary"], boundary);
     let config = storage::StorageConfig {
@@ -843,7 +846,7 @@ async fn crash_boundary(mode: &str, boundary: &str, activated: bool) {
         "no provider work before publication"
     );
     crashing.kill().await;
-    let mut recovered = Process::spawn(dir.path(), if activated { "observe" } else { "restore" });
+    let mut recovered = Process::spawn(&dir, if activated { "observe" } else { "restore" });
     let ready = recovered.checkpoint("bootstrapped").await;
     assert_ne!(ready["pid"], checkpoint["pid"]);
     if activated {
@@ -887,10 +890,10 @@ async fn startup_unexecuted_release_and_corrupt_claim_quarantine_never_replay() 
                 ["Waiting"],
             )]);
         let dir = fixture(&mock);
-        let mut source = Process::spawn(dir.path(), "capture");
+        let mut source = Process::spawn(&dir, "capture");
         source.checkpoint("captured").await;
         source.kill().await;
-        let mut prepared = Process::spawn(dir.path(), "prepared");
+        let mut prepared = Process::spawn(&dir, "prepared");
         prepared.checkpoint("crash_boundary").await;
         prepared.kill().await;
         let sql = rusqlite::Connection::open(dir.path().join("evorch-events.db")).unwrap();
@@ -920,7 +923,7 @@ async fn startup_unexecuted_release_and_corrupt_claim_quarantine_never_replay() 
             // captured component. Do not hand-author a snapshot or a claim.
             sql.execute("UPDATE recovery_members SET record_json=json_set(record_json,'$.recipe.settings_reference','evorch/core/unsupported')", []).unwrap();
         }
-        let mut observer = Process::spawn(dir.path(), "observe");
+        let mut observer = Process::spawn(&dir, "observe");
         let ready = observer.checkpoint("bootstrapped").await;
         let diagnostic = &ready["report"]["components"][0];
         assert_eq!(
@@ -953,7 +956,7 @@ async fn startup_wait_and_delegate_wait_restore_the_captured_tool_continuation()
     for kind in ["wait", "delegate"] {
         let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![]);
         let dir = fixture(&mock);
-        let mut source = Process::spawn(dir.path(), &format!("capture_{kind}"));
+        let mut source = Process::spawn(&dir, &format!("capture_{kind}"));
         source.checkpoint("captured").await;
         let db = storage::Database::open(&storage::StorageConfig {
             db_path: dir.path().join("evorch-events.db"),
@@ -976,7 +979,7 @@ async fn startup_wait_and_delegate_wait_restore_the_captured_tool_continuation()
                 .any(|r| r.waits.iter().any(|w| w.continuation.tool_name == kind))
         );
         source.kill().await;
-        let mut recovered = Process::spawn(dir.path(), &format!("restore_{kind}"));
+        let mut recovered = Process::spawn(&dir, &format!("restore_{kind}"));
         let ready = recovered.checkpoint("bootstrapped").await;
         assert!(matches!(
             ready["report"]["components"][0]["state"].as_str(),
@@ -993,10 +996,10 @@ async fn startup_question_is_durable_across_capture_kill_and_new_process_answer(
         ScriptedResponse::text_stream("after", "mock-model", ["Answered"]),
     ]);
     let dir = fixture(&mock);
-    let mut source = Process::spawn(dir.path(), "capture_question");
+    let mut source = Process::spawn(&dir, "capture_question");
     source.checkpoint("captured").await;
     source.kill().await;
-    let mut recovered = Process::spawn(dir.path(), "restore_question");
+    let mut recovered = Process::spawn(&dir, "restore_question");
     recovered.checkpoint("bootstrapped").await;
     let restored = recovered.checkpoint("restored").await;
     assert!(recovered.child.wait().await.unwrap().success());
@@ -1016,9 +1019,9 @@ async fn startup_orphan_unowned_seed_waits_for_external_owner_then_starts_once()
         ScriptedResponse::text_stream("lane", "mock-model", ["Recovered lane"]),
     ]);
     let dir = fixture(&mock);
-    let mut source = Process::spawn(dir.path(), "capture_lane");
+    let mut source = Process::spawn(&dir, "capture_lane");
     source.checkpoint("captured").await;
-    let mut recovered = Process::spawn(dir.path(), "restore_lane");
+    let mut recovered = Process::spawn(&dir, "restore_lane");
     recovered.checkpoint("bootstrapped").await;
     recovered.checkpoint("owner_blocked").await;
     assert_eq!(
@@ -1059,7 +1062,7 @@ async fn startup_orphan_unowned_seed_waits_for_external_owner_then_starts_once()
             .count(),
         2
     );
-    let mut observer = Process::spawn(dir.path(), "observe");
+    let mut observer = Process::spawn(&dir, "observe");
     observer.checkpoint("bootstrapped").await;
     assert!(observer.child.wait().await.unwrap().success());
     assert_eq!(
@@ -1078,11 +1081,11 @@ async fn catalog_outage(fetch_fails: bool) {
         ScriptedResponse::text_stream("lane", "mock-model", ["Unrelated lane recovered"]),
     ]);
     let dir = fixture(&mock);
-    let mut source = Process::spawn(dir.path(), "capture_catalog_lane");
+    let mut source = Process::spawn(&dir, "capture_catalog_lane");
     source.checkpoint("captured").await;
     source.kill().await;
     if !fetch_fails {
-        let mut prepared = Process::spawn(dir.path(), "prepared");
+        let mut prepared = Process::spawn(&dir, "prepared");
         prepared.checkpoint("crash_boundary").await;
         prepared.kill().await;
     }
@@ -1107,8 +1110,7 @@ async fn catalog_outage(fetch_fails: bool) {
         .respond_with(wiremock::ResponseTemplate::new(503))
         .mount(&proxy)
         .await;
-    let mut recovered =
-        Process::spawn_with_proxy(dir.path(), "catalog_failure", Some(&proxy.uri()));
+    let mut recovered = Process::spawn_with_proxy(&dir, "catalog_failure", Some(&proxy.uri()));
     recovered.checkpoint("bootstrapped").await;
     recovered.checkpoint("unrelated_lane_restored").await;
     assert!(recovered.child.wait().await.unwrap().success());
@@ -1158,7 +1160,7 @@ async fn startup_catalog_outage_without_graphs_does_not_prevent_core_boot() {
         .respond_with(wiremock::ResponseTemplate::new(503))
         .mount(&proxy)
         .await;
-    let mut empty = Process::spawn_with_proxy(dir.path(), "empty", Some(&proxy.uri()));
+    let mut empty = Process::spawn_with_proxy(&dir, "empty", Some(&proxy.uri()));
     empty.checkpoint("empty_bootstrapped").await;
     assert!(empty.child.wait().await.unwrap().success());
     assert!(mock.recorded_requests().is_empty());
@@ -1171,10 +1173,10 @@ async fn startup_same_process_ack_loss_cleans_only_for_explicit_manual_continue(
         ScriptedResponse::text_stream("manual", "mock-model", ["Human Continue"]),
     ]);
     let dir = fixture(&mock);
-    let mut source = Process::spawn(dir.path(), "capture");
+    let mut source = Process::spawn(&dir, "capture");
     source.checkpoint("captured").await;
     source.kill().await;
-    let mut recovered = Process::spawn(dir.path(), "lost_ack");
+    let mut recovered = Process::spawn(&dir, "lost_ack");
     recovered.checkpoint("bootstrapped").await;
     assert_eq!(
         mock.recorded_requests()

@@ -40,11 +40,11 @@ struct Fixture {
     model: Arc<Idle>,
     db: storage::Storage,
     events: event_bus::EventReceiver,
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("questions.db"),
             ..Default::default()
@@ -462,7 +462,7 @@ async fn lane_answer_rejects_fenced_ownership_and_rebound_root() {
             )
             .unwrap(),
     );
-    let dir = test_socket_dir::tempdir();
+    let dir = test_socket_dir::SocketDir::new();
     let owner_path = dir.path().to_path_buf();
     let first = crate::ownership::OwnerHost::open(
         &owner_path,

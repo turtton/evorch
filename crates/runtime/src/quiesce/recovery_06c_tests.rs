@@ -11,7 +11,7 @@ pub(super) fn authority(
     run: RunId,
 ) -> (crate::ownership::OwnerHost, CurrentRecoveryAuthority) {
     let owner = crate::ownership::OwnerHost::open(
-        &f._dir.path().join("adopt-owner"),
+        f._dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )
@@ -302,7 +302,7 @@ async fn old_cleanup_and_shutdown_never_mutate_a_successor_after_owner_handoff()
     let id = lose_ack(&f, &runtime, authority);
     let handle = cleanup_handle(&f, &runtime, &id);
     let next_owner = crate::ownership::OwnerHost::open(
-        &f._dir.path().join("adopt-owner"),
+        f._dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )

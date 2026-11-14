@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn offline_question_rejects_caller_fenced_after_command_authorization() {
         let (rt, mut sink, runtime, _) = build_sink();
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = StorageConfig {
             db_path: dir.path().join("questions.db"),
             ..Default::default()
@@ -746,12 +746,12 @@ mod tests {
         assert!(!runtime.has_active_question_recipient(&question.id).unwrap());
         let bus = Arc::new(EventBus::new(64));
         let first =
-            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone())
+            runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
                 .unwrap();
         first.start("thread-1").unwrap();
         let authorized = first.owned_permit("thread-1").unwrap();
         let successor =
-            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
+            runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus).unwrap();
         // Ownership changes between submit's initial check and durable answer write.
         first.handoff(&authorized, &successor).unwrap();
         let events = sink.submit_authorized(
@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn inherited_question_requires_registered_recipient_and_current_thread_ownership() {
         let (rt, mut sink, runtime, _) = build_sink();
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let config = StorageConfig {
             db_path: dir.path().join("questions.db"),
             ..Default::default()
@@ -844,13 +844,13 @@ mod tests {
         ));
         let bus = Arc::new(EventBus::new(64));
         let first =
-            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone())
+            runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
                 .unwrap();
         first.start("recipient").unwrap();
         first.start("unrelated").unwrap();
         let stale = first.owned_permit("recipient").unwrap();
         let successor =
-            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
+            runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus).unwrap();
         first.handoff(&stale, &successor).unwrap();
         for permit in [stale, first.owned_permit("unrelated").unwrap()] {
             assert!(matches!(

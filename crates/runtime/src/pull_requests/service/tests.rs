@@ -25,7 +25,7 @@ use storage::pull_requests::{
     PullRequestKey, PullRequestState, ReviewDecision,
 };
 use storage::{Storage, StorageConfig, StorageHandle};
-use tempfile::TempDir;
+use test_socket_dir::SplitDir;
 
 use super::*;
 use crate::ownership::OwnerHost;
@@ -272,7 +272,7 @@ impl OwnershipView for HookedOwnership {
 
 /// A database and an ownership registry that several "processes" share.
 pub(super) struct World {
-    pub(super) dir: TempDir,
+    pub(super) dir: SplitDir,
     pub(super) clock: Arc<ManualClock>,
 }
 
@@ -292,7 +292,7 @@ pub(super) struct Process {
 impl World {
     pub(super) fn new() -> Self {
         Self {
-            dir: test_socket_dir::tempdir(),
+            dir: test_socket_dir::SplitDir::new(),
             clock: Arc::new(ManualClock(AtomicI64::new(10_000_000_000))),
         }
     }
@@ -326,7 +326,7 @@ impl World {
         let bus = Arc::new(EventBus::new(4096));
         let host = Arc::new(
             OwnerHost::open(
-                &self.dir.path().join("owners"),
+                self.dir.sockets(),
                 config::OwnershipConfig::default(),
                 Arc::clone(&bus),
             )

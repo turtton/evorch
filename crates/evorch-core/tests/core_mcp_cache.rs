@@ -79,7 +79,7 @@ async fn compose(subscription: bool) -> Composed {
         BootstrapOptions {
             config_dir: project.root().join("user"),
             project_root: project.root().to_path_buf(),
-            ownership_root: project.root().join("owners"),
+            ownership_root: project.sockets().to_path_buf(),
         },
         TestSeams {
             model,

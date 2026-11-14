@@ -11,8 +11,8 @@ fn shutdown_only_bridge(handle: StorageHandle) -> StorageBridge {
     bridge
 }
 
-fn fixture() -> (tempfile::TempDir, Storage, Database) {
-    let dir = test_socket_dir::tempdir();
+fn fixture() -> (test_socket_dir::SplitDir, Storage, Database) {
+    let dir = test_socket_dir::SplitDir::new();
     let config = StorageConfig {
         db_path: dir.path().join("shutdown.db"),
         ..StorageConfig::default()
@@ -138,12 +138,8 @@ fn explicit_shutdown_is_idempotent_and_leaves_the_writer_available_until_drop() 
 fn real_owner_quiesce_preserves_a_queued_delta_until_owned_storage_shutdown() {
     let (dir, storage, db) = fixture();
     let bus = Arc::new(EventBus::new(64));
-    let host = runtime::ownership::OwnerHost::open(
-        &dir.path().join("owners"),
-        Default::default(),
-        bus.clone(),
-    )
-    .unwrap();
+    let host = runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
+        .unwrap();
     let permit = host.start("thread").unwrap();
     let fence = permit.clone();
     bus.register_mutation_guard(

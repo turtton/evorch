@@ -105,7 +105,7 @@ struct Core {
     model: Arc<Model>,
     events: EventReceiver,
     listener: UnixListener,
-    dir: tempfile::TempDir,
+    dir: test_socket_dir::SplitDir,
 }
 impl Core {
     async fn open() -> Self {
@@ -114,7 +114,7 @@ impl Core {
     async fn open_with_backend(backend: Option<runtime::mcp::McpCredentialBackend>) -> Self {
         // Owner IPC and the test control socket both need short sockaddr_un paths.
         traces::capture();
-        let dir = test_socket_dir::tempdir();
+        let dir = test_socket_dir::SplitDir::new();
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir(root.join(".evorch")).unwrap();
         std::fs::write(
@@ -127,12 +127,12 @@ impl Core {
             .to_string(),
         )
         .unwrap();
-        let listener = UnixListener::bind(root.join("control")).unwrap();
+        let listener = UnixListener::bind(dir.sockets().join("control")).unwrap();
         let command = PathBuf::from(std::env::var("CARGO_BIN_EXE_core-mcp-test-peer").unwrap())
             .canonicalize()
             .unwrap();
         std::fs::write(root.join(".evorch/mcp.toml"), format!(
-            "version=1\n[servers.fixture]\ntype=\"stdio\"\ncommand={command:?}\nargs=[{:?}]\nroles=[\"worker\"]\n[servers.fixture.env]\nTOKEN={{keychain=\"token\"}}\n", root.join("control")
+            "version=1\n[servers.fixture]\ntype=\"stdio\"\ncommand={command:?}\nargs=[{:?}]\nroles=[\"worker\"]\n[servers.fixture.env]\nTOKEN={{keychain=\"token\"}}\n", dir.sockets().join("control")
         )).unwrap();
         let store = Arc::new(sandbox::FileCredentialStore::open(root.join("secrets")).unwrap());
         store
@@ -169,7 +169,7 @@ impl Core {
             .unwrap();
         let model = Arc::new(Model::default());
         let boot = BootstrappedHost::open_with_mcp_test_seams(
-            options(&root),
+            options(&dir),
             TestSeams {
                 model: model.clone(),
                 sandbox: Arc::new(Unisolated),
@@ -293,11 +293,11 @@ fn scope(root: &Path) -> ApprovalScope {
         server_id: "fixture".into(),
     }
 }
-fn options(root: &Path) -> BootstrapOptions {
+fn options(dir: &test_socket_dir::SplitDir) -> BootstrapOptions {
     BootstrapOptions {
-        config_dir: root.into(),
-        project_root: root.into(),
-        ownership_root: root.join("owners"),
+        config_dir: dir.path().into(),
+        project_root: dir.path().into(),
+        ownership_root: dir.sockets().to_path_buf(),
     }
 }
 fn send(
@@ -528,7 +528,7 @@ async fn reconnect_is_for_a_later_explicit_call_and_does_not_replay_unknown_outc
 
 async fn legacy_host(core: &Core, legacy_model: Arc<Model>) -> BootstrappedHost {
     BootstrappedHost::open_with_mcp_test_seams(
-        options(core.dir.path()),
+        options(&core.dir),
         TestSeams {
             model: legacy_model,
             sandbox: Arc::new(Unisolated),

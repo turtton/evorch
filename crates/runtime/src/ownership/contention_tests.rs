@@ -14,14 +14,14 @@ const RUN: &str = "run-1";
 const BODY_MARKER: &str = "BODY-MARKER-must-not-be-logged";
 
 struct Fixture {
-    _directory: tempfile::TempDir,
+    _directory: test_socket_dir::SplitDir,
     path: PathBuf,
     permit: OwnerPermit,
 }
 
 /// An owner whose lease never expires, with `RUN` in an open turn.
 fn fixture() -> Fixture {
-    let directory = test_socket_dir::tempdir();
+    let directory = test_socket_dir::SplitDir::new();
     let path = directory.path().join("owners.db");
     let mut owner = ThreadOwner::new(
         "thread-1".into(),

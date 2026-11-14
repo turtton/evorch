@@ -688,7 +688,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let dir = test_socket_dir::tempdir();
+        // The checker fixture dials `checker.*.sock` relative to its working directory, which
+        // is this directory, so the whole fixture directory has to be short.
+        let dir = test_socket_dir::SocketDir::new().into_tempdir();
         let binary = dir.path().join("fixture checker");
         let fixture = std::env::var("CARGO_BIN_EXE_comment-checker-test-fixture")
             .expect("CARGO_BIN_EXE_comment-checker-test-fixture")

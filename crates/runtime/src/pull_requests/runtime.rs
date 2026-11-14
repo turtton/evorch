@@ -221,7 +221,7 @@ mod tests {
     // inside the creation path, so the unlink does not take it away
     #[tokio::test(start_paused = true)]
     async fn an_escalation_pins_the_parent_link_before_the_parent_can_change_it() {
-        let directory = test_socket_dir::tempdir();
+        let directory = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: directory.path().join("hook.db"),
             ..Default::default()
@@ -236,7 +236,7 @@ mod tests {
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
         let host = Arc::new(
             OwnerHost::open(
-                &directory.path().join("owners"),
+                directory.sockets(),
                 config::OwnershipConfig::default(),
                 Arc::clone(&runtime.shared.bus),
             )

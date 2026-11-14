@@ -176,7 +176,7 @@ fn error(kind: McpErrorKind) -> McpError {
     }
 }
 pub struct Project {
-    pub directory: tempfile::TempDir,
+    pub directory: test_socket_dir::SplitDir,
     pub approvals: Arc<ApprovalLedger>,
     pub secrets: Arc<FileCredentialStore>,
     pub peer: Arc<Peer>,
@@ -186,7 +186,7 @@ pub struct Project {
 }
 impl Project {
     pub fn new() -> Self {
-        let directory = test_socket_dir::tempdir();
+        let directory = test_socket_dir::SplitDir::new();
         std::fs::create_dir(directory.path().join(".evorch")).unwrap();
         let approvals =
             Arc::new(ApprovalLedger::at_user_config_dir(directory.path().join("user")).unwrap());
@@ -223,6 +223,12 @@ impl Project {
     }
     pub fn root(&self) -> &Path {
         self.directory.path()
+    }
+
+    /// Short directory for the ownership root; the sockets must fit in `sun_path`.
+    #[allow(dead_code)]
+    pub fn sockets(&self) -> &Path {
+        self.directory.sockets()
     }
     pub fn scope(&self) -> ApprovalScope {
         ApprovalScope {
