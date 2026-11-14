@@ -973,6 +973,9 @@ impl LoopState {
                     {
                         self.ledger_tool_completed("delegate", &id, &dispatch.result);
                         self.record_tool_outcome("delegate", &dispatch.result, None);
+                        // A live wait may have projected recovery state while parked.
+                        // Retire only this completed call, not other restored waits.
+                        self.recovery_waits.retain(|wait| wait.tool_call_id != id);
                         self.context.push_tool_result(id, dispatch.result);
                         self.publish_message_count();
                     }
@@ -1205,6 +1208,9 @@ impl LoopState {
                         {
                             stalled = Some((id.clone(), name.clone(), input, error_class));
                         }
+                        // A live wait may have projected recovery state while parked.
+                        // Retire only this completed call, not other restored waits.
+                        self.recovery_waits.retain(|wait| wait.tool_call_id != id);
                         self.context.push_tool_result(id, dispatch.result);
                         self.publish_message_count();
                         match dispatch.terminal {

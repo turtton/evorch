@@ -4,6 +4,7 @@ mod delegation;
 mod queued;
 #[cfg(unix)]
 mod shell;
+mod waiting;
 
 #[tokio::test]
 async fn two_restart_cancellations_keep_wire_prefix_and_parked_input_once() {
