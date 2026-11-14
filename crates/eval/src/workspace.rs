@@ -1,9 +1,12 @@
 //! Rebuild a thread's start state in a runner-owned clone (ADR 0036 §3, §4).
 //!
-//! The clone is a plain local clone: alternates would point into the user's
-//! repository, which the shell sandbox does not mount. Its `origin` is a bare
-//! repository inside the clone's git directory, so pull and push work inside
-//! the sandbox without network. The user's repository is only read.
+//! The clone is initialised empty and receives only the recorded commit and its
+//! ancestors, so nothing the user committed afterwards (later branches, tags,
+//! unreachable objects) leaks into the replay. Objects are transferred, never
+//! shared: alternates would point into the user's repository, which the shell
+//! sandbox does not mount. Its `origin` is a bare repository inside the clone's
+//! git directory holding the same history, so pull and push work inside the
+//! sandbox without network. The user's repository is only read.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -17,6 +20,8 @@ use crate::git::{self, GitError};
 /// Bare repository standing in for the original remotes, relative to the clone's git directory.
 const ORIGIN_DIR: &str = "evorch-origin.git";
 const START_REF: &str = "refs/evorch/eval-start";
+/// Initial branch name of a repository that has no recorded branch to hold.
+const FALLBACK_BRANCH: &str = "main";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareError {
@@ -73,7 +78,7 @@ pub struct WorkspaceResult {
     pub pushed_refs: Vec<RefChange>,
 }
 
-/// Clone `source` into `target` and rebuild the recorded working tree there.
+/// Rebuild in `target` the history up to the recorded commit, read from `source`, and rebuild the recorded working tree there.
 ///
 /// # Errors
 /// Any step that fails leaves the run unusable; a partial state is never returned.
@@ -88,28 +93,37 @@ pub fn prepare(
         .ok_or_else(|| std::io::Error::other("workspace has no parent directory"))?;
     std::fs::create_dir_all(parent)?;
     let source = path_str(source)?;
-    let target_str = path_str(target)?;
-    git::run(
-        parent,
-        &[
-            "clone",
-            "--quiet",
-            "--local",
-            "--no-checkout",
-            source,
-            target_str,
-        ],
-    )?;
-    let toplevel = target.canonicalize()?;
     let head = snapshot.head_commit.as_str();
+    // Checked in the source so that a missing commit is reported as such rather than as a
+    // fetch failure.
     if git::run(
-        &toplevel,
+        Path::new(source),
         &["cat-file", "-e", &format!("{head}^{{commit}}")],
     )
     .is_err()
     {
         return Err(PrepareError::MissingCommit(head.to_owned()));
     }
+    let branch = snapshot
+        .head_ref
+        .as_deref()
+        .and_then(|name| name.strip_prefix("refs/heads/"));
+    let initial_branch = format!("--initial-branch={}", branch.unwrap_or(FALLBACK_BRANCH));
+    // The fetched objects must hash the same way as the source's.
+    let object_format = format!(
+        "--object-format={}",
+        git::text(Path::new(source), &["rev-parse", "--show-object-format"])?
+    );
+
+    // The clone is built from nothing, not cloned: a clone would carry the source's later
+    // branches, tags and objects (hardlinked for a local path) into a replay that must not
+    // know about them.
+    std::fs::create_dir(target)?;
+    let toplevel = target.canonicalize()?;
+    git::run(
+        &toplevel,
+        &["init", "--quiet", &initial_branch, &object_format],
+    )?;
     for (key, value) in [
         ("commit.gpgsign", "false"),
         ("tag.gpgsign", "false"),
@@ -118,33 +132,59 @@ pub fn prepare(
     ] {
         git::run(&toplevel, &["config", "--local", key, value])?;
     }
-
-    let origin = toplevel.join(".git").join(ORIGIN_DIR);
+    // Only the recorded commit and its ancestors are transferred, through the pack protocol
+    // (never hardlinks or alternates). No tags are followed and FETCH_HEAD is not written,
+    // so no ref or log names a later commit.
     git::run(
         &toplevel,
         &[
-            "clone",
+            "fetch",
             "--quiet",
-            "--bare",
-            "--local",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--no-recurse-submodules",
             source,
-            path_str(&origin)?,
+            head,
         ],
     )?;
-    let branch = snapshot
-        .head_ref
-        .as_deref()
-        .and_then(|name| name.strip_prefix("refs/heads/"));
-    if let Some(name) = &snapshot.head_ref
-        && branch.is_some()
-    {
-        git::run(&origin, &["update-ref", name, head])?;
+
+    // The stand-in for the original remotes holds the same history and nothing else; it is
+    // filled from the clone by push, which again transfers only what the ref reaches.
+    let origin = toplevel.join(".git").join(ORIGIN_DIR);
+    let origin_str = path_str(&origin)?;
+    git::run(
+        &toplevel,
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            &initial_branch,
+            &object_format,
+            origin_str,
+        ],
+    )?;
+    if let Some(branch) = branch {
+        git::run(
+            &toplevel,
+            &[
+                "push",
+                "--quiet",
+                origin_str,
+                &format!("{head}:refs/heads/{branch}"),
+            ],
+        )?;
     }
-    for remote in git::text(&toplevel, &["remote"])?.lines() {
-        git::run(&toplevel, &["remote", "remove", remote])?;
-    }
-    git::run(&toplevel, &["remote", "add", "origin", path_str(&origin)?])?;
-    git::run(&toplevel, &["fetch", "--quiet", "origin"])?;
+    git::run(&toplevel, &["remote", "add", "origin", origin_str])?;
+    git::run(
+        &toplevel,
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+        ],
+    )?;
 
     match branch {
         Some(branch) => {
@@ -165,15 +205,6 @@ pub fn prepare(
         None => {
             git::run(&toplevel, &["checkout", "--quiet", "-f", "--detach", head])?;
         }
-    }
-    for local in git::text(
-        &toplevel,
-        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
-    )?
-    .lines()
-    .filter(|local| Some(*local) != branch)
-    {
-        git::run(&toplevel, &["branch", "--quiet", "-D", local])?;
     }
 
     if !snapshot.diff.is_empty() {

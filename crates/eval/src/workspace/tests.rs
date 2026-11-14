@@ -63,10 +63,22 @@ pub(crate) struct Source {
 
 impl Source {
     pub(crate) fn new() -> Self {
+        Self::with_object_format("sha1")
+    }
+
+    pub(crate) fn with_object_format(format: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("source");
         std::fs::create_dir(&root).unwrap();
-        git(&root, &["init", "--quiet", "--initial-branch=main"]);
+        git(
+            &root,
+            &[
+                "init",
+                "--quiet",
+                "--initial-branch=main",
+                &format!("--object-format={format}"),
+            ],
+        );
         std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
         std::fs::write(root.join("removed.txt"), "bye\n").unwrap();
         std::fs::write(root.join("image.bin"), [0_u8, 1, 2, 255]).unwrap();
@@ -271,7 +283,6 @@ fn recorded_branch_is_checked_out_at_the_head_with_its_origin_upstream() {
     // Given: a start on `main`, after which the source's `main` moved on.
     let source = Source::new();
     let snapshot = source.snapshot("app/");
-    let other = git(&source.root(), &["rev-parse", "other"]);
     std::fs::write(source.root().join("later.txt"), "later\n").unwrap();
     git(&source.root(), &["add", "later.txt"]);
     git(&source.root(), &["commit", "--quiet", "-m", "later"]);
@@ -295,7 +306,10 @@ fn recorded_branch_is_checked_out_at_the_head_with_its_origin_upstream() {
         git(&origin, &["rev-parse", "refs/heads/main"]),
         snapshot.head_commit
     );
-    assert_eq!(git(&origin, &["rev-parse", "refs/heads/other"]), other);
+    assert_eq!(
+        git(&origin, &["for-each-ref", "--format=%(refname)"]),
+        "refs/heads/main"
+    );
     assert_eq!(
         git(root, &["for-each-ref", "--format=%(refname)", "refs/heads"]),
         "refs/heads/main"
@@ -305,6 +319,154 @@ fn recorded_branch_is_checked_out_at_the_head_with_its_origin_upstream() {
     assert_eq!(workspace.project_dir, root.join("app/"));
     assert_eq!(git(root, &["config", "--get", "commit.gpgsign"]), "false");
     assert_eq!(git(root, &["config", "--get", "user.name"]), "evorch-test");
+}
+
+/// Every commit object a repository holds, reachable or not.
+fn all_commits(dir: &Path) -> Vec<String> {
+    let mut commits: Vec<_> = git(
+        dir,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objecttype) %(objectname)",
+        ],
+    )
+    .lines()
+    .filter_map(|line| line.strip_prefix("commit "))
+    .map(str::to_owned)
+    .collect();
+    commits.sort();
+    commits
+}
+
+/// Whether the hex id appears in any file below `dir` (refs, logs, FETCH_HEAD, packed-refs).
+fn mentions(dir: &Path, id: &str) -> bool {
+    std::fs::read_dir(dir).unwrap().any(|entry| {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            mentions(&path, id)
+        } else {
+            String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains(id)
+        }
+    })
+}
+
+fn assert_only_recorded_history(
+    repository: &Path,
+    git_dir: &Path,
+    recorded: Option<&str>,
+    later: &[&str],
+) {
+    let history = recorded.map_or_else(String::new, |head| git(repository, &["rev-list", head]));
+    let mut expected: Vec<_> = history.lines().map(str::to_owned).collect();
+    expected.sort();
+    assert_eq!(all_commits(repository), expected, "{repository:?}");
+    for object in later {
+        assert!(
+            git_command(repository)
+                .args(["cat-file", "-e", object])
+                .status()
+                .unwrap()
+                .code()
+                != Some(0),
+            "{object} is present in {repository:?}"
+        );
+        assert!(
+            !mentions(git_dir, object),
+            "{object} is named in {git_dir:?}"
+        );
+    }
+    for line in git(
+        repository,
+        &[
+            "for-each-ref",
+            "--format=%(objecttype) %(refname) %(objectname)",
+        ],
+    )
+    .lines()
+    {
+        let mut fields = line.split(' ');
+        let (kind, name, id) = (
+            fields.next(),
+            fields.next().unwrap(),
+            fields.next().unwrap(),
+        );
+        // `refs/evorch/eval-start` names the rebuilt working tree, which has no history.
+        if kind != Some("commit") {
+            continue;
+        }
+        let head = recorded.expect("a repository without history has no commit ref");
+        assert!(
+            git_command(repository)
+                .args(["merge-base", "--is-ancestor", id, head])
+                .status()
+                .unwrap()
+                .success(),
+            "{name} reaches beyond the recorded commit"
+        );
+    }
+}
+
+#[test]
+fn replay_repositories_hold_nothing_after_the_recorded_commit() {
+    // Given: a start recorded on `main`, after which the source gained a commit on `main`,
+    // a branch and a tag at later commits, a dangling commit, and a dangling blob.
+    for detached in [false, true] {
+        let source = Source::new();
+        if detached {
+            git(&source.root(), &["checkout", "--quiet", "--detach"]);
+        }
+        let snapshot = source.snapshot("");
+        let root = source.root();
+        std::fs::write(root.join("later.txt"), "later\n").unwrap();
+        git(&root, &["add", "later.txt"]);
+        git(&root, &["commit", "--quiet", "-m", "later"]);
+        let later = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["branch", "follow-up"]);
+        git(&root, &["tag", "v-later"]);
+        let tree = git(&root, &["write-tree"]);
+        let dangling = git(
+            &root,
+            &["commit-tree", &tree, "-p", &later, "-m", "dangling"],
+        );
+        let blob = git_command(&root)
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(b"secret later blob\n")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        let blob = String::from_utf8(blob.stdout).unwrap().trim().to_owned();
+        let later_ids = [later.as_str(), dangling.as_str(), blob.as_str()];
+
+        // When: the workspace is prepared.
+        let workspace = source.prepare(&snapshot).unwrap();
+
+        // Then: the clone and its origin reach only the recorded commit's history, hold no
+        // later object, and no ref, log or FETCH_HEAD names one.
+        let root = &workspace.toplevel;
+        let recorded = Some(snapshot.head_commit.as_str());
+        assert_only_recorded_history(root, &root.join(".git"), recorded, &later_ids);
+        assert_only_recorded_history(
+            &workspace.origin,
+            &workspace.origin,
+            // A detached start has no branch to publish, so its origin holds nothing.
+            recorded.filter(|_| !detached),
+            &later_ids,
+        );
+        assert_eq!(git(root, &["tag"]), "");
+        assert!(!root.join(".git/FETCH_HEAD").exists());
+        assert!(!root.join(".git/objects/info/alternates").exists());
+        assert!(!workspace.origin.join("objects/info/alternates").exists());
+    }
 }
 
 #[test]
@@ -375,6 +537,60 @@ fn pushes_to_origin_work_offline_and_are_reported_without_touching_the_source() 
     assert!(!diff.contains("tracked.txt"), "{diff}");
     assert_ne!(result.final_tree, workspace.start_tree);
     assert_eq!(source.fingerprint(), before);
+}
+
+#[test]
+fn pushes_from_a_detached_start_reach_the_empty_origin_and_are_reported() {
+    // Given: a start recorded with HEAD detached, whose origin holds no ref.
+    let source = Source::new();
+    git(&source.root(), &["checkout", "--quiet", "--detach"]);
+    let workspace = source.prepare(&source.snapshot("")).unwrap();
+    let root = &workspace.toplevel;
+    assert_eq!(git(&workspace.origin, &["for-each-ref"]), "");
+
+    // When: the agent commits on the detached HEAD and publishes it as a new branch.
+    std::fs::write(root.join("agent.txt"), "new\n").unwrap();
+    git(root, &["add", "--all"]);
+    git(root, &["commit", "--quiet", "-m", "agent work"]);
+    git(
+        root,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/topic"],
+    );
+    let pushed = git(root, &["rev-parse", "HEAD"]);
+    let result = workspace.finish().unwrap();
+
+    // Then: the new branch is the only reported ref change.
+    assert_eq!(
+        result.pushed_refs,
+        [RefChange {
+            name: "refs/heads/topic".into(),
+            before: None,
+            after: Some(pushed),
+        }]
+    );
+}
+
+#[test]
+fn sha256_source_is_replayed_in_sha256_repositories() {
+    // Given: a source repository that hashes with SHA-256.
+    let source = Source::with_object_format("sha256");
+    let snapshot = source.snapshot("");
+    assert_eq!(snapshot.head_commit.len(), 64);
+
+    // When: the workspace is prepared.
+    let workspace = source.prepare(&snapshot).unwrap();
+
+    // Then: both repositories use SHA-256 and the head is checked out.
+    for repository in [&workspace.toplevel, &workspace.origin] {
+        assert_eq!(
+            git(repository, &["rev-parse", "--show-object-format"]),
+            "sha256"
+        );
+    }
+    assert_eq!(
+        git(&workspace.toplevel, &["rev-parse", "HEAD"]),
+        snapshot.head_commit
+    );
 }
 
 #[test]
