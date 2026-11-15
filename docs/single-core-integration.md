@@ -27,6 +27,60 @@ PR 10 must show this: a restart requested during a login wait seals without
 waiting for the login, and the login ends in a settled state. The full contract
 is the module documentation of `workbench_protocol::operation`.
 
+## PR 10: settings and auth
+
+The `settings` and `auth` namespaces are implemented in the core
+(`areas/settings.rs`, `areas/auth.rs`), the adapters, the desktop features and
+the Web API at once. Operations (`save_document`, `save_provider`,
+`delete_provider`, `reload_models`, `save_api_key`, `start_login`, ...) are
+accepted at once and settle through `settings_operation_completed` /
+`auth_operation_completed`.
+
+| Contract | Where it is held | Where it is tested |
+|---|---|---|
+| R1: a login wait holds no restart permit; a planned restart or shutdown ends it as `Cancelled(Restart \| Shutdown)`; the result is written only after entering the gate again | `areas/auth.rs`, `areas/auth/login.rs` | `workbench-host/tests/auth_login.rs` (a restart requested during the wait seals without the login, and the login ends settled) |
+| `core.restart.targets` cannot be added, removed, repointed or omitted by a settings save, whole or partial, judged inside the revision lock | `areas/settings/store.rs` on `config::reject_restart_target_changes` | `workbench-host/tests/settings_save.rs`; through the real desktop screen and the real Web HTTP API in `core-client-e2e/tests/settings_restart_targets.rs` |
+| A save never rewrites a sent provider prefix; a reload replaces the model of the projects and the next request still extends what was sent | `bootstrap` reload hook (`SwitchableModel::replace`) | `evorch-core/tests/core_settings_cache.rs` (the replacement is observed at a second endpoint) |
+
+### Threat model: remote control
+
+With `[web] enabled` and Tailscale Serve (`docs/config/evorch-core.md`), whoever
+passes Tailscale's authentication and ACL can issue every command of the
+protocol, with the provenance of a human on the Web surface. Settings and auth
+are the commands where that matters most, so:
+
+- **Restart targets are not a setting a client can change.** A restart target is
+  an executable the core starts on a planned restart. If a Web client could
+  rewrite it, one settings save would be the start of an arbitrary program, so
+  the core refuses every save that changes `core.restart.targets` (permission
+  denied; the file is untouched), from the desktop and from the Web alike. The
+  targets are changed only by editing the config file on the machine that runs
+  the core. The check compares the targets of the file as it is (the whole text
+  of a document save, the file after a partial save) and of the effective
+  configuration (all layers), so a key moved to another layer or spelled in a
+  form the parser reads differently does not pass; an omission counts as a
+  removal. It runs under the same lock as the revision comparison and the write.
+- **A save is checked as the core would load it.** `save_document` accepts only
+  text the core's own strict loader accepts; the revision is compared in the
+  same critical section as the write, so two clients saving one revision end as
+  one success and one `stale_revision`.
+- **Secrets are write-only.** An API key travels once inside `save_api_key` and
+  goes straight to the credential store. It is not in any operation, event,
+  receipt, log line or repeat-detection digest, and no query returns it; the
+  snapshot says only whether a credential is present (and, for a login, when it
+  expires). `SecretValue` redacts itself in `Debug`.
+- **Logins.** The authorize URL is built by the core. A Codex or Claude login
+  listens on a loopback port of the machine that runs the core, so a person on a
+  phone finishes it by pasting the redirect address (or code) into the client;
+  the pasted text is checked against the `state` the login started with and is
+  accepted once, whichever of the listener and the paste arrives first. Neither
+  the callback nor the pasted text is logged or stored. Only the owner of the
+  Web session's network position can finish a login, so a login started over the
+  Web is as trusted as Tailscale's boundary and no more.
+- **Not a boundary:** `allowed_hosts` / `allowed_origins` stop a browser page
+  from another origin; they do not tell two Tailscale users apart. Do not expose
+  the Web port through a public reverse proxy.
+
 ## Who edits what after S0
 
 See `scripts/feature-scopes.txt` (the machine-readable form) and

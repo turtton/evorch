@@ -1,1 +1,209 @@
-{}
+{
+  "command/settings/delete_provider": {
+    "payload": {
+      "payload": {
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "name": "work",
+        "operation_id": "op-delete"
+      },
+      "type": "delete_provider"
+    },
+    "type": "settings"
+  },
+  "command/settings/refresh_settings": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-refresh"
+      },
+      "type": "refresh_settings"
+    },
+    "type": "settings"
+  },
+  "command/settings/reload_models": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-reload"
+      },
+      "type": "reload_models"
+    },
+    "type": "settings"
+  },
+  "command/settings/save_document": {
+    "payload": {
+      "payload": {
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "operation_id": "op-save",
+        "text": "version = 3\n"
+      },
+      "type": "save_document"
+    },
+    "type": "settings"
+  },
+  "command/settings/save_provider": {
+    "payload": {
+      "payload": {
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "operation_id": "op-provider-oa",
+        "original_name": "old",
+        "provider": {
+          "base_url": "https://api.example.test/v1",
+          "credential": {
+            "type": "env",
+            "var": "WORK_API_KEY"
+          },
+          "default_model": "model-a",
+          "excluded_models": [],
+          "kind": "openai_compatible",
+          "models": [
+            {
+              "enabled": true,
+              "id": "model-a"
+            },
+            {
+              "enabled": false,
+              "id": "model-b"
+            }
+          ],
+          "name": "work",
+          "type": "openai_compatible"
+        }
+      },
+      "type": "save_provider"
+    },
+    "type": "settings"
+  },
+  "query/settings/get_settings_operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_settings_operation"
+    },
+    "type": "settings"
+  },
+  "query/settings/get_settings_snapshot": {
+    "payload": {
+      "payload": {},
+      "type": "get_settings_snapshot"
+    },
+    "type": "settings"
+  },
+  "query/settings/list_settings_operations": {
+    "payload": {
+      "payload": {},
+      "type": "list_settings_operations"
+    },
+    "type": "settings"
+  },
+  "query_reply/settings/operation": {
+    "payload": {
+      "payload": {
+        "kind": "reload_models",
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "4",
+          "state": {
+            "type": "pending"
+          }
+        }
+      },
+      "type": "operation"
+    },
+    "type": "settings"
+  },
+  "query_reply/settings/operations": {
+    "payload": {
+      "payload": {
+        "operations": [
+          {
+            "kind": "save_document",
+            "message": "core.restart.targets: restart targets may only be changed locally",
+            "operation": {
+              "operation_id": "op-1",
+              "revision": "4",
+              "state": {
+                "code": "invalid_request",
+                "type": "failed"
+              }
+            }
+          },
+          {
+            "kind": "refresh",
+            "operation": {
+              "operation_id": "op-1",
+              "revision": "4",
+              "state": {
+                "reason": "shutdown",
+                "type": "cancelled"
+              }
+            }
+          }
+        ]
+      },
+      "type": "operations"
+    },
+    "type": "settings"
+  },
+  "query_reply/settings/settings": {
+    "payload": {
+      "payload": {
+        "applied_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "document": "version = 3\n[core]\nidle_grace_secs = 30\n",
+        "providers": [
+          {
+            "base_url": "https://api.example.test/v1",
+            "credential": {
+              "account": "work",
+              "service": "evorch",
+              "type": "keyring"
+            },
+            "default_model": "model-a",
+            "excluded_models": [
+              "model-z"
+            ],
+            "kind": "openai_compatible",
+            "models": [
+              {
+                "enabled": true,
+                "id": "model-a"
+              }
+            ],
+            "name": "work"
+          }
+        ],
+        "revision": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "type": "settings"
+    },
+    "type": "settings"
+  },
+  "ui_event/settings/settings_operation_completed": {
+    "payload": {
+      "payload": {
+        "operation": {
+          "kind": "save_document",
+          "operation": {
+            "operation_id": "op-1",
+            "revision": "4",
+            "state": {
+              "type": "ready"
+            }
+          },
+          "revision": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      },
+      "type": "settings_operation_completed"
+    },
+    "type": "settings"
+  },
+  "ui_event/settings/settings_snapshot_changed": {
+    "payload": {
+      "payload": {
+        "applied_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "revision": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "type": "settings_snapshot_changed"
+    },
+    "type": "settings"
+  }
+}
