@@ -65,6 +65,8 @@ scripts/check-workbench-boundaries.sh
 scripts/central-files.txt
 scripts/feature-scopes.txt
 scripts/check-central-files.sh
+scripts/ci-scope-gate.sh
+scripts/tests/test_check_central_files.sh
 scripts/core-client-refs-baseline.txt
 scripts/check-core-client-refs.sh
 

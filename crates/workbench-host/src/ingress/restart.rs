@@ -105,8 +105,10 @@ pub(super) fn command_access(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use workbench_protocol::commands::{ComposerRole, SendChat, ThreadTarget};
-    use workbench_protocol::ids::{ProjectId, SubmissionId, ThreadId};
+    use workbench_protocol::commands::{
+        ComposerRole, SendChat, StopRun, ThreadTarget, WithdrawFollowUp,
+    };
+    use workbench_protocol::ids::{ProjectId, RunId, SubmissionId, ThreadId};
 
     fn name(access: CommandAccess) -> &'static str {
         match access {
@@ -149,6 +151,27 @@ mod tests {
         assert_eq!(
             name(command_access(
                 &Command::Conversation(ConversationCommand::DeliverFollowUpsNextTurn(thread())),
+                not_chat
+            )),
+            "existing"
+        );
+        assert_eq!(
+            name(command_access(
+                &Command::Execution(ExecutionCommand::StopRun(StopRun {
+                    thread: ThreadId::new("t").unwrap(),
+                    run: RunId::new("r").unwrap(),
+                })),
+                not_chat
+            )),
+            "stop"
+        );
+        assert_eq!(
+            name(command_access(
+                &Command::Conversation(ConversationCommand::WithdrawFollowUp(WithdrawFollowUp {
+                    thread: ThreadId::new("t").unwrap(),
+                    run: RunId::new("r").unwrap(),
+                    submission_id: SubmissionId::new("s").unwrap(),
+                })),
                 not_chat
             )),
             "existing"

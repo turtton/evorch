@@ -4,10 +4,13 @@
 //! HTTP, and the subscription protocol too) with the shared input-derived cache
 //! fixture, and the prefix assertions read the recorded requests.
 //!
-//! This file holds the baseline the integration PR S0 registers: the model
-//! recomposition (`reload_models`, the hook a settings save ends with) between
-//! two turns of one run. PR 10 adds the scenario that goes through the settings
-//! commands themselves; this baseline does not stand in for it.
+//! This file holds the baseline the integration PR S0 registers: a two-turn run
+//! on the production wire with the production reload hook (`reload_models`, the
+//! hook a settings save ends with) called between the turns. The test seam
+//! supplies a fixed model, so the hook replaces nothing here: this is the
+//! two-turn prefix baseline, not a proof that a recomposed model keeps it. PR 10
+//! adds the scenario that goes through the settings commands and observes the
+//! replacement.
 use std::sync::Arc;
 
 use event_bus::AgentRunPhase;
@@ -36,7 +39,7 @@ impl runtime::SandboxFactory for Unisolated {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn model_reload_between_turns_keeps_the_sent_prefix_on_the_production_wire() {
+async fn two_turns_around_the_reload_hook_keep_the_sent_prefix_on_the_production_wire() {
     for subscription in [false, true] {
         let project = cache::Project::new();
         let provider = cache::Provider::new(subscription).await;

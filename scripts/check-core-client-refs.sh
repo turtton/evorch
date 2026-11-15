@@ -19,11 +19,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# A path that starts at one of these crates (`browser` is left out: it is also the
-# name of a feature module); `tokio::runtime::` and the like do
-# not (a `:` or an identifier character before the name).
+# A reference to one of these crates, in any form Rust accepts (`browser` is left
+# out: it is also the name of a feature module):
+#   storage::X            a path from the crate (not tokio::runtime::, whose name
+#                         follows a `:` or an identifier character)
+#   ::storage::X          an absolute path
+#   use storage;  use storage as s;  use storage, ...;  use {storage, x};
+#   extern crate storage;
 internal='(storage|runtime|sandbox|tools|providers|routing|config|eval|event_bus|recorder|agents|catalog|browser_cef|model|secret_guard|workbench_host)'
-pattern="(^|[^:[:alnum:]_])${internal}::"
+path_ref="(^|[^[:alnum:]_:])(::)?${internal}::"
+absolute_ref="(^|[^[:alnum:]_>])::${internal}([^[:alnum:]_]|$)"
+use_ref="(^|[^[:alnum:]_])(use|extern[[:space:]]+crate)[[:space:]]+(::)?(\{([^}]*[^[:alnum:]_])?)?${internal}([[:space:]]*(;|,|\}|[[:space:]]as[[:space:]])|[[:space:]]+as[[:space:]])"
+pattern="(${path_ref})|(${absolute_ref})|(${use_ref})"
 
 declare -A allowed
 while read -r file count; do

@@ -13,7 +13,7 @@ Feature PRs of the migration never edit the shared registration. An
 | Host | `Areas` has a placeholder service per namespace (`areas/<area>.rs`). `AreaHandles` also carries `credentials`, `reload_models`, `evaluations`, `evaluator` and `database`. Every command adapter takes the acceptance `HostCommandPermit`. Restart classification of an area's commands lives in `<area>_command_access` in its adapter. |
 | GUI | `core_client/features` has a placeholder feature per namespace; none is available, none draws or sends. |
 | CLI | `main.rs` only starts logging and calls `evorch::cli::dispatch`; each command has a module in `cli/` (`run`, `eval`, `reindex`, `backfill`, `maintenance`, `inspect`, `benchmark`). The online `backfill-events` has its own parser (`evorch::backfill`). Arguments and exit codes are unchanged. |
-| CI | `scripts/contract-test-filters.sh` registers the cache target `core_settings_cache` (a later feature PR registers its own new cache target in the same change that adds the file; nextest rejects a name that matches no binary). `scripts/central-files.txt` and `scripts/feature-scopes.txt` plus `scripts/check-central-files.sh` check that a feature PR touches no central file. `scripts/check-core-client-refs.sh` keeps `core_client` from naming internal crates beyond its baseline. |
+| CI | `scripts/contract-test-filters.sh` registers the cache target `core_settings_cache`. The filter is a central file: a new cache target is registered by the integration PR that precedes its feature PR (nextest rejects a name that matches no binary, so that PR also adds a placeholder file for it). `scripts/central-files.txt`, `scripts/feature-scopes.txt`, `scripts/check-central-files.sh` and `scripts/ci-scope-gate.sh` keep a feature PR out of the central files, and the `scope-gate` job of `ci` runs that check on every PR. `scripts/check-core-client-refs.sh` keeps `core_client` from naming internal crates beyond its baseline, in every form Rust accepts (`storage::`, `::storage::`, `use storage as s`, `extern crate`). |
 
 ## Operations and the restart permit
 
@@ -36,12 +36,41 @@ adapter `ingress/namespaces/<area>.rs`, the service `areas/<area>.rs`, the GUI
 feature `features/<area>.rs`, and the area's samples and golden file. The
 cache scenarios it adds go into the target S0 registered.
 
-Run `scripts/check-central-files.sh --scope <pr>` before opening a feature PR.
+## The scope gate
+
+The `scope-gate` job of `ci` (a need of the aggregate `ci` job) runs
+`scripts/ci-scope-gate.sh` on every pull request, with the full history so that
+the merge base with the target branch exists. The scope is the head branch name:
+
+- `<type>/pr<N>[-slug]` (`feat/pr10-settings`, `feat/pr17e-offline`) is a feature
+  PR. Every changed file must be outside `scripts/central-files.txt` and inside
+  that scope in `scripts/feature-scopes.txt`.
+- `<type>/s<N>[-slug]` and `<type>/integration[-slug]` are integration PRs. They may
+  change central files; the check only lists them.
+- Any other branch is not part of the migration and is not checked. The gate
+  is therefore opt-in by naming, and the Orchestrator names every migration
+  branch. The name is fixed when the PR is opened, so editing the PR description
+  does not rerun CI.
+
+A diff that cannot be computed (an unknown base) fails the gate; it never counts
+as "no changes". To run it locally: `scripts/check-central-files.sh --scope pr10
+--base origin/main`.
+
 A change to a central file goes through the Orchestrator into the next
 integration PR.
 
+PR 16a-1 (#610) is the one exception the Orchestrator approved: it adds two
+lines to `scripts/ci-test-groups.json` (a central file) for its renderer crates,
+which are not in the `pr16a1` scope either. Its branch `feat/renderer-helper`
+carries no `pr<N>` scope, so the gate does not check it. A rename to
+`pr16a1-...` would make the gate refuse it, which is intended: the renderer
+crates enter through the small integration PR that R2 asks for once the
+measurement is accepted.
+
 ## Reserved migration numbers
 
-Storage migrations are numbered from one shared ledger: v62 (07b-1, #602) and
-v63 (07b-2, #603). S0 adds none. The next free number is v64; S0 only reserves
-it for the next integration or feature PR that proves it needs one.
+Storage migrations are numbered from one shared ledger kept by the
+Orchestrator: v62 (07b-1, #602) and v63 (07b-2, #603) are merged; v64 is taken
+by 07b-2b (learning attempts). S0 adds none and reserves none. A PR that needs a
+migration asks the ledger for the next free number (v65 at the time of writing),
+and at most one numbered migration PR waits to merge at a time.

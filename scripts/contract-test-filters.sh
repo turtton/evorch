@@ -4,10 +4,10 @@
 # cache_preservation_e2e includes approval_cache::approved_tool_preserves_next_provider_prefix
 # (Chat Completions, Responses and Codex; approval is not a cache boundary).
 # core_settings_cache is the baseline the integration PR S0 registered; PR 10 adds
-# scenarios to it. nextest rejects a binary name that matches nothing, so a
-# later feature PR registers its new cache binary (PR 15: core_pr_cache) in the
-# same change that adds the file. (No comments inside the filter itself:
-# nextest does not parse them.)
+# scenarios to it. nextest rejects a binary name that matches nothing, so the
+# integration PR that precedes a feature PR registers its new cache binary (for
+# PR 15: core_pr_cache) together with a placeholder test file. (No comments
+# inside the filter itself: nextest does not parse them.)
 # shellcheck disable=SC2034 # Consumed by scripts that source this file.
 CACHE_CONTRACT_FILTER='
   package(=mock-openai)

@@ -57,7 +57,8 @@ scope_patterns() {
   while IFS= read -r line; do
     [[ "${line%% *}" == "$name" ]] || continue
     found=1
-    for item in ${line#* }; do
+    read -ra items <<< "${line#* }"
+    for item in "${items[@]}"; do
       if [[ "$item" == area:* ]]; then
         area=${item#area:}
         echo "crates/workbench-protocol/src/namespaces/$area.rs"
@@ -124,9 +125,19 @@ if [[ "$check_data" == 1 ]]; then
 fi
 
 if [[ -n "$files_from" ]]; then
+  [[ -r "$files_from" ]] || { echo "cannot read $files_from" >&2; exit 2; }
   mapfile -t changed < "$files_from"
 else
-  mapfile -t changed < <(git diff --name-only "$base"...HEAD)
+  # A failed diff (an unknown base, a shallow clone without it) is an error, not
+  # an empty change set: a process substitution would hide its exit status.
+  git rev-parse --verify --quiet "$base^{commit}" > /dev/null \
+    || { echo "base $base is not a commit here (fetch it, or pass --base)" >&2; exit 2; }
+  diff_names=$(git diff --name-only "$base"...HEAD) \
+    || { echo "git diff $base...HEAD failed" >&2; exit 2; }
+  changed=()
+  while IFS= read -r file; do
+    [[ -z "$file" ]] || changed+=("$file")
+  done <<< "$diff_names"
 fi
 
 if [[ "$scope" == integration ]]; then
