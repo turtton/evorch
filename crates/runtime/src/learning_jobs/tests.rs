@@ -1220,16 +1220,22 @@ async fn learning_unresolved_terminal_keeps_retrying_past_the_backoff_cap() {
     assert!(!f.has_evidence("capped"));
 }
 
-// Cancelling a two-job suspension while the database rolls back the requeue and the settling
-// write: the first job's cleanup stays owned and unresolved, no new attempt can take the task, and the second job stays reserved.
-// Once the database recovers the runtime settles the first job and the cancel moves on to
-// requeue the second one, with no explicit reconcile.
+// Landed and rolled-back requeues both retain ownership until recovery unblocks later jobs.
 #[tokio::test(start_paused = true)]
 async fn learning_cancel_requeues_later_jobs_once_an_older_entrys_readback_recovers() {
+    cancel_recovers_and_requeues_later_jobs(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_cancel_requeues_later_jobs_once_a_rolled_back_requeue_recovers() {
+    cancel_recovers_and_requeues_later_jobs(true).await;
+}
+
+async fn cancel_recovers_and_requeues_later_jobs(rollback: bool) {
     let f = Fixture::new();
     let owner = origin(LearningOriginKind::Core, "cancel-owner", Some("cfg"));
     let runtime = f.runtime(owner.clone());
-    let queue = f.queue(owner);
+    let queue = f.queue(owner.clone());
     let mut entries = Vec::new();
     for task in ["first", "second"] {
         queue
@@ -1258,13 +1264,33 @@ async fn learning_cancel_requeues_later_jobs_once_an_older_entrys_readback_recov
     }
     suspension.wait().await.unwrap();
     let broken = rusqlite::Connection::open(&f.config.db_path).unwrap();
-    broken
-        .execute_batch(
-            "CREATE TRIGGER inject_cancel_rollback BEFORE UPDATE ON learning_jobs
+    if rollback {
+        broken
+            .execute_batch(
+                "CREATE TRIGGER inject_cancel_rollback BEFORE UPDATE ON learning_jobs
              WHEN NEW.state IN ('Pending','Abandoned')
              BEGIN SELECT RAISE(ABORT, 'injected rollback'); END;",
-        )
-        .unwrap();
+            )
+            .unwrap();
+    } else {
+        // Commit with a lost acknowledgement, then make receipt readback unavailable.
+        let interrupted = queue.job("first").unwrap().unwrap();
+        queue
+            .change(
+                &interrupted.key(),
+                LearningAttemptChange::Requeue {
+                    suspension_id: interrupted.suspension_id.clone().unwrap(),
+                    to: owner,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        broken
+            .execute_batch(
+                "ALTER TABLE learning_attempt_receipts RENAME TO learning_attempt_receipts_off;",
+            )
+            .unwrap();
+    }
 
     runtime
         .cancel_learning_suspension(pause, suspension)
@@ -1284,7 +1310,11 @@ async fn learning_cancel_requeues_later_jobs_once_an_older_entrys_readback_recov
     );
 
     broken
-        .execute_batch("DROP TRIGGER inject_cancel_rollback;")
+        .execute_batch(if rollback {
+            "DROP TRIGGER inject_cancel_rollback;"
+        } else {
+            "ALTER TABLE learning_attempt_receipts_off RENAME TO learning_attempt_receipts;"
+        })
         .unwrap();
     while f.state("second") == LearningJobState::Interrupted {
         changes.changed().await.unwrap();
@@ -1293,35 +1323,110 @@ async fn learning_cancel_requeues_later_jobs_once_an_older_entrys_readback_recov
     assert_ne!(f.state("first"), LearningJobState::Interrupted);
     assert_ne!(f.state("second"), LearningJobState::Abandoned);
     returned_cleanly(&entries[0]).await;
+    if !rollback {
+        assert_eq!(f.state("first"), LearningJobState::Pending);
+    }
 }
 
-// A dispatch that merely registers must not make an old Publish cleanup look finished: the old
-// entry keeps its slot, the job stays Started with its evidence, and only the committed
-// terminal write releases it.
+// A stale Pending snapshot must not supersede a Publish whose rollback/readback was unknown.
+// After DB recovery, only the old entry may settle its Started job and delete private staging.
 #[tokio::test(start_paused = true)]
 async fn learning_a_refused_registration_does_not_settle_an_unresolved_publish_cleanup() {
     let f = Fixture::new();
-    let (runtime, entry, injected) = returned_with_rejected_terminal(&f, "held").await;
-
-    for _ in 0..2 {
-        assert!(
-            runtime
-                .shared
-                .learning_executions
-                .register("held", runtime.shared.learning_jobs_changed.clone())
-                .is_none()
-        );
+    let worker = f.bare_runtime();
+    let source = worker.delegate_background(Role::Worker, "work".into(), RunConfig::default());
+    assert_eq!(worker.wait(source).await.unwrap(), AgentRunPhase::Done);
+    let owner = origin(LearningOriginKind::Core, "publish-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    let mut request = admit_request("held", &source.to_string());
+    request.evidence_json = worker
+        .freeze_run_learning(source)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    queue.admit(request).unwrap();
+    let stale = AdoptedJob {
+        job: queue.job("held").unwrap().unwrap(),
+        evidence: queue.evidence("held").unwrap().unwrap(),
+    };
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register("held", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    {
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(entry.start(&queue, &permit).unwrap());
     }
+    assert!(
+        entry
+            .change(
+                &queue,
+                LearningAttemptChange::BindRun {
+                    run: source.to_string(),
+                    review: false,
+                }
+            )
+            .unwrap()
+    );
+    assert!(
+        entry
+            .change(&queue, LearningAttemptChange::ExtractionReady(vec![]))
+            .unwrap()
+    );
+    let injected = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    injected
+        .execute_batch(
+            "CREATE TRIGGER inject_publish_rollback BEFORE UPDATE ON learning_jobs
+         WHEN NEW.state='Finished' BEGIN SELECT RAISE(ABORT, 'injected rollback'); END;
+         ALTER TABLE learning_attempt_receipts RENAME TO learning_attempt_receipts_off;",
+        )
+        .unwrap();
+    assert!(
+        entry
+            .change(&queue, LearningAttemptChange::Publish)
+            .is_err()
+    );
+    runtime.learning_returned(&entry).await;
     assert!(matches!(*entry.returned_receipt().borrow(), Some(Err(_))));
     assert_eq!(f.state("held"), LearningJobState::Started);
     assert!(f.has_evidence("held"));
-
     injected
-        .execute_batch("DROP TRIGGER inject_terminal_rollback;")
+        .execute_batch(
+            "ALTER TABLE learning_attempt_receipts_off RENAME TO learning_attempt_receipts;
+         DROP TRIGGER inject_publish_rollback;",
+        )
         .unwrap();
-    returned_cleanly(&entry).await;
-    assert_eq!(f.state("held"), LearningJobState::Failed);
+
+    let dispatch = runtime.resume_adopted_learning(stale);
+    runtime.learning_returned(&entry).await;
+    assert!(
+        f.state("held").is_terminal(),
+        "the old Publish must not be forgotten by a registration"
+    );
+    assert!(
+        dispatch.is_err(),
+        "unsettled cleanup must refuse a stale dispatch"
+    );
+    let pause = runtime.pause_learning();
+    runtime
+        .suspend_learning(&pause)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert!(queue.started_by_me().unwrap().is_empty());
     assert!(!f.has_evidence("held"));
+    let staging: u32 = injected
+        .query_row(
+            "SELECT count(*) FROM learning_job_staging WHERE task_id='held'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(staging, 0);
+    assert!(runtime.list_agents().is_empty());
 }
 
 // An entry with no attempt (its intake was never confirmed) may end only the Pending job it
