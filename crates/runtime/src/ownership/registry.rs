@@ -453,6 +453,113 @@ impl Registry {
         Ok(serde_json::from_str(&json.ok_or(RegistryError::Absent)?)?)
     }
 
+    /// Atomically install and read back holds for ALL unreleased threads of this
+    /// owner, including idle threads omitted by capture. The caller fences new
+    /// admissions before calling. No restart/storage DB transaction is assumed.
+    pub fn hold_owned(
+        &mut self,
+        owner_id: &str,
+        transaction_id: &str,
+        capture_id: &str,
+        expected: &super::ExpectedActiveRuns,
+    ) -> Result<Vec<super::PlannedHold>, RegistryError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let states = {
+            let mut statement =
+                transaction.prepare("SELECT state FROM thread_owners ORDER BY thread_id")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut owners = Vec::new();
+        for state in states {
+            let owner: ThreadOwner = serde_json::from_str(&state)?;
+            if owner.lease.owner_id == owner_id && owner.state != super::OwnerState::Released {
+                owners.push(owner);
+            }
+        }
+        if expected
+            .keys()
+            .any(|thread| !owners.iter().any(|owner| &owner.thread_id == thread))
+        {
+            return Err(OwnershipError::PlannedOwnerBlocked.into());
+        }
+        let empty = std::collections::BTreeSet::new();
+        let mut holds = Vec::new();
+        for mut owner in owners {
+            let runs = match expected.get(&owner.thread_id) {
+                Some(captured) => {
+                    if captured.generation != owner.lease.generation {
+                        return Err(OwnershipError::PlannedOwnerBlocked.into());
+                    }
+                    &captured.active_runs
+                }
+                None => &empty,
+            };
+            owner.install_hold(transaction_id, capture_id, runs)?;
+            transaction.execute(
+                "UPDATE thread_owners SET state = ?2 WHERE thread_id = ?1",
+                params![owner.thread_id, serde_json::to_string(&owner)?],
+            )?;
+            holds.push(*owner.handoff_hold.expect("installed hold"));
+        }
+        transaction.commit()?;
+        Ok(holds)
+    }
+
+    /// Remove just this hold by thread/owner/generation/tx CAS. Safe to retry
+    /// after ACK loss and usable from every FailedClosed path. Never releases.
+    pub fn clear_planned_hold(
+        &mut self,
+        hold: &super::PlannedHold,
+    ) -> Result<ThreadOwner, RegistryError> {
+        self.update(&hold.thread_id, |owner| owner.clear_hold(hold))
+    }
+
+    /// Serialize destructive scratch work with hold installation. A changed
+    /// generation or any protective hold skips cleanup, never deletes new data.
+    pub(super) fn clean_scratch(
+        &mut self,
+        thread: &str,
+        expected: &super::Lease,
+        clean: impl FnOnce(),
+    ) -> Result<(), RegistryError> {
+        self.update(thread, |owner| {
+            owner.validate(expected)?;
+            if !owner.protects_scratch() {
+                clean();
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Hold a write transaction while building the live set and sweeping, so
+    /// a concurrent install/claim cannot invalidate the decision mid-deletion.
+    pub(super) fn scratch_sweep(
+        &mut self,
+        sweep: impl FnOnce(Vec<ThreadOwner>),
+    ) -> Result<(), RegistryError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let owners = {
+            let mut statement = transaction.prepare("SELECT state FROM thread_owners")?;
+            let states = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            states
+                .into_iter()
+                .map(|state| serde_json::from_str(&state))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        sweep(owners);
+        // Read-only body: dropping rolls back the reservation.
+        Ok(())
+    }
+
     pub fn start(&mut self, owner: &ThreadOwner) -> Result<(), RegistryError> {
         let site = self.site(DbOperation::Start, &owner.thread_id, Instant::now(), None);
         let changed = self
