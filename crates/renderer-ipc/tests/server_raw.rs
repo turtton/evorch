@@ -129,7 +129,6 @@ fn a_body_larger_than_the_limit_is_a_protocol_violation_without_reading_it() {
     raw_hello(&peer);
     // Announces a 4 GiB body and sends none of it.
     peer.control.write_all(&raw_header(1, 2, u32::MAX)).unwrap();
-    peer.control.write_all(b"{}").unwrap();
     assert!(matches!(
         helper.join().unwrap(),
         ExitReason::ProtocolViolation(_)
