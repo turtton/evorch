@@ -16,6 +16,14 @@ pub enum OwnershipError {
     GenerationExhausted,
     #[error("previous owner still responds or liveness could not be established")]
     OwnerResponsive,
+    #[error("thread has a planned restart hold")]
+    PlannedHeld,
+    #[error("planned hold, adoption evidence or active run set does not match")]
+    PlannedMismatch,
+    #[error(
+        "ownership generation changed; wait for owner (06c OwnerBlocked); scratch preservation cannot be guaranteed / 所有世代が変更されたためscratch保持は保証できない"
+    )]
+    PlannedOwnerBlocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +36,11 @@ pub struct ThreadOwner {
     pub active_runs: std::collections::BTreeSet<String>,
     #[serde(default)]
     pub settings: config::OwnershipConfig,
+    #[serde(default)]
+    pub handoff_hold: Option<Box<super::PlannedHold>>,
+    /// Readback receipt for an ACK-lost limited claim; never adoption authority.
+    #[serde(default)]
+    pub planned_claim: Option<Box<super::PlannedHold>>,
 }
 
 impl ThreadOwner {
@@ -39,6 +52,8 @@ impl ThreadOwner {
             active_turn: false,
             active_runs: std::collections::BTreeSet::new(),
             settings: config::OwnershipConfig::default(),
+            handoff_hold: None,
+            planned_claim: None,
         }
     }
 
@@ -51,7 +66,7 @@ impl ThreadOwner {
 
     pub fn begin_turn(&mut self, token: &Lease, now_ms: u64) -> Result<(), OwnershipError> {
         self.validate(token)?;
-        if self.state != OwnerState::Running {
+        if self.state != OwnerState::Running || self.has_planned_hold() {
             return Err(OwnershipError::Quiescing);
         }
         if self.active_turn {
@@ -97,7 +112,7 @@ impl ThreadOwner {
         now_ms: u64,
     ) -> Result<(), OwnershipError> {
         self.validate(token)?;
-        if self.state != OwnerState::Running {
+        if self.state != OwnerState::Running || self.has_planned_hold() {
             return Err(OwnershipError::Quiescing);
         }
         if self.active_runs.contains(run) || (self.active_turn && self.active_runs.is_empty()) {
@@ -122,6 +137,9 @@ impl ThreadOwner {
 
     pub fn release(&mut self, token: &Lease) -> Result<(), OwnershipError> {
         self.validate(token)?;
+        if self.has_planned_hold() {
+            return Err(OwnershipError::PlannedHeld);
+        }
         if self.active_turn {
             return Err(OwnershipError::Active);
         }
@@ -141,9 +159,11 @@ impl ThreadOwner {
         grace_ms: u64,
     ) -> Result<(), OwnershipError> {
         self.validate(expected)?;
-        if self.state != OwnerState::Released
-            && self.lease.observe(now_ms, grace_ms) != OwnerState::Stale
-        {
+        let stale = self.lease.observe(now_ms, grace_ms) == OwnerState::Stale;
+        if self.has_planned_hold() && !stale {
+            return Err(OwnershipError::PlannedHeld);
+        }
+        if self.state != OwnerState::Released && !stale {
             return Err(OwnershipError::NotClaimable);
         }
         let generation = self
@@ -151,6 +171,13 @@ impl ThreadOwner {
             .generation
             .checked_add(1)
             .ok_or(OwnershipError::GenerationExhausted)?;
+        if self.has_planned_hold()
+            && let Some(hold) = &mut self.handoff_hold
+        {
+            hold.orphaned = true;
+            tracing::warn!(thread_id = %self.thread_id, transaction_id = %hold.transaction_id,
+                    "stale planned hold orphaned by cold claim; preserve scratch and quarantine capture");
+        }
         self.lease = Lease {
             owner_id: owner_id.into(),
             generation,
@@ -158,6 +185,7 @@ impl ThreadOwner {
         };
         self.active_turn = false;
         self.active_runs.clear();
+        self.planned_claim = None;
         self.state = OwnerState::Running;
         Ok(())
     }
@@ -204,7 +232,11 @@ impl ThreadOwner {
         heartbeat_ms: u64,
         release_quiescing: bool,
     ) -> HeartbeatTick {
-        if self.state == OwnerState::Quiescing && !self.active_turn && release_quiescing {
+        if self.state == OwnerState::Quiescing
+            && !self.active_turn
+            && release_quiescing
+            && !self.has_planned_hold()
+        {
             return HeartbeatTick::Release;
         }
         let remaining = self.lease.expires_at.saturating_sub(now_ms);
