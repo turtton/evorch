@@ -44,8 +44,9 @@ pub const LEARNING_DRAIN_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 1..=3600;
 impl Default for CoreRestartConfig {
     fn default() -> Self {
         Self {
-            // 暫定値: 実測に基づくものではない。抽出から review の保存までの
-            // 所要時間の実測 (p95 x 1.25、30 秒単位で切り上げ) で置き換える。
+            // 暫定値: 実測に基づくものではない。実測は 12 件 (p50 235s / p95 915s) で、
+            // 採用基準の 30 件に満たないため置き換えていない。30 件に達したら
+            // p95 x 1.25 を 30 秒単位で切り上げた値で置き換える。docs/config/evorch-core.md を参照。
             learning_drain_timeout_secs: 120,
         }
     }

@@ -80,7 +80,15 @@ sidebar の draft・archive 状態は書き換えない。モデルのない設�
 `core.restart.learning_drain_timeout_secs`（1〜3600 秒、user 設定のみ。project 設定では上書きできない）は、
 再起動の準備が、開始済みの learning（抽出と review を含む）の完了を待つ上限を決める。
 上限は要求の受理時に確定する。超過しても learning は止めず、再起動の要求だけを取り消す。
-既定値 120 秒は**暫定値で、実測に基づくものではない**。実測値が揃い次第、置き換える。
+既定値 120 秒は**暫定値で、実測に基づくものではない**。実測は標本数の基準を満たさなかったため、値を置き換えていない。
+
+実測の記録:
+- 出所: 利用者の events DB (`evorch-events.db`) を読み取り専用で集計した。`run_contexts` の抽出 run (`lesson`) と review run (`learning-evidence-review`)、`events.wall_clock_ns` の最初と最後のイベントの差を使う。集計は `crates/storage/examples/learning_pipeline_measure.rs` で、件数と統計量だけを出す。
+- 標本: 両方の run が `Done` で終わり、イベントがあり、抽出と review の対応が一意に示せるものだけ。12 件 (extract+review)。
+  計測不能は、抽出のイベントなし 1、review のイベントなし 1、対応が曖昧 2、`Done` でない run 0、review のない抽出 0。
+- 統計量: p50 = 235.4 秒、p95 = 914.7 秒、max = 914.7 秒。
+- 採用基準: 標本 30 件以上を満たしたうえで、p95 × 1.25 を 30 秒単位で切り上げ、上限 3600 秒を超えない。12 件では満たさないため、推奨値は出していない。
+- 注意: 12 件のうち大半が 120 秒を超える。標本が少なく採用基準は満たさないが、既定値 120 秒では多くの再起動準備が TimedOut になる可能性が高い。標本が 30 件に達した時点で再測定して置き換える。
 
 learning のジョブは durable queue（`learning_jobs`）に積まれる。admission で dedup claim、
 Pending のジョブ、不変の evidence を 1 つのトランザクションで作る。状態は
