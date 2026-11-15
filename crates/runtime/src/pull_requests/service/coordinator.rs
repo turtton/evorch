@@ -528,6 +528,8 @@ impl Inner {
         });
     }
     async fn prepare_notice(self: &Arc<Self>, target: &Target, notice: &PrNotice) -> Result<()> {
+        let mut stopping = self.shutdown.subscribe();
+        let _producer = tokio::select! { biased; _ = stopping.wait_for(|stop| *stop) => return Ok(()), permit = self.producers.enter() => { let Some(permit) = permit else { return Ok(()); }; permit } };
         self.check_permit(&target.thread_id, &target.permit).await?;
         let inner = Arc::clone(self);
         let (t, n) = (target.clone(), notice.clone());

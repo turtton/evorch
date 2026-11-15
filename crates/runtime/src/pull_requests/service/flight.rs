@@ -157,6 +157,8 @@ impl Inner {
     /// Fetches `key`, stores what came back and tells the threads. The answer is used only
     /// while some party it is for still owns its thread.
     async fn fetch_and_commit(&self, key: &PullRequestKey, flight: &Flight) -> FlightOutcome {
+        let mut stopping = self.shutdown.subscribe();
+        let _producer = tokio::select! { biased; _ = stopping.wait_for(|stop| *stop) => return FlightOutcome::Discarded, permit = self.producers.enter() => { let Some(permit) = permit else { return FlightOutcome::Discarded; }; permit } };
         let storage = self.storage.clone();
         let begin_key = key.clone();
         let seq = match self
@@ -714,6 +716,8 @@ impl Inner {
     ) -> Result<InheritanceResolution, PullRequestError> {
         match flight.wait().await {
             FlightOutcome::Committed { seq, .. } => {
+                let mut stopping = self.shutdown.subscribe();
+                let _producer = tokio::select! { biased; _ = stopping.wait_for(|stop| *stop) => return Err(PullRequestError::ProducerStopped), permit = self.producers.enter() => { let Some(permit) = permit else { return Err(PullRequestError::ProducerStopped); }; permit } };
                 // The answer is shared, so it says nothing about the child's own authority:
                 // the decision is written under the child's lease.
                 let (storage, bus, thread, at_ns) = (

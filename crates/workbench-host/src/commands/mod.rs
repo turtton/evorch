@@ -75,6 +75,8 @@ impl ThreadBindings {
 
 /// Executes [`HostCommand`]s against one runtime.
 pub struct CommandService {
+    restart_gate: crate::bootstrap::restart::HostRestartGate,
+    restart_stop: Option<Arc<dyn crate::bootstrap::restart::RestartStopHandler>>,
     event_bus: Option<Arc<EventBus>>,
     team_writer: Option<storage::StorageHandle>,
     memory_config: Option<storage::StorageConfig>,
@@ -95,6 +97,8 @@ impl CommandService {
     /// A service over `runtime`, spawning its async work on `handle`.
     pub fn new(runtime: AgentRuntime, handle: tokio::runtime::Handle) -> Self {
         Self {
+            restart_gate: Default::default(),
+            restart_stop: None,
             event_bus: None,
             team_writer: None,
             memory_config: None,
@@ -165,6 +169,30 @@ impl CommandService {
         self.team_writer = Some(writer);
     }
 
+    pub fn restart_gate(&self) -> crate::bootstrap::restart::HostRestartGate {
+        self.restart_gate.clone()
+    }
+    pub fn restart_stop_handler(
+        &self,
+    ) -> Option<Arc<dyn crate::bootstrap::restart::RestartStopHandler>> {
+        self.restart_stop.clone()
+    }
+    pub fn set_restart_stop_handler(
+        &mut self,
+        handler: Arc<dyn crate::bootstrap::restart::RestartStopHandler>,
+    ) {
+        self.restart_stop = Some(handler);
+    }
+    pub(crate) fn stop_for_host(
+        &self,
+        run: RunId,
+        scope: runtime::StopScope,
+    ) -> Result<(), runtime::RuntimeError> {
+        match &self.restart_stop {
+            Some(handler) => handler.stop(run, scope),
+            None => self.runtime.stop(run, scope),
+        }
+    }
     pub fn runtime(&self) -> &AgentRuntime {
         &self.runtime
     }
@@ -463,7 +491,16 @@ impl CommandService {
         command: HostCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
     ) -> Vec<HostEvent> {
-        let events = self.dispatch_authorized(command, permit);
+        self.submit_authorized_tracked(command, permit, None)
+    }
+
+    pub(crate) fn submit_authorized_tracked(
+        &mut self,
+        command: HostCommand,
+        permit: Option<runtime::ownership::OwnerPermit>,
+        restart: Option<crate::bootstrap::restart::HostCommandPermit>,
+    ) -> Vec<HostEvent> {
+        let events = self.dispatch_authorized(command, permit, restart);
         self.publish_lane_bindings();
         events
     }
@@ -472,6 +509,7 @@ impl CommandService {
         &mut self,
         command: HostCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
+        restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Vec<HostEvent> {
         if let Some(thread) = Self::compaction_excluded_thread(&command)
             && self.compaction_jobs.contains_key(thread)
@@ -505,7 +543,7 @@ impl CommandService {
                 }
                 Vec::new()
             }
-            HostCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit),
+            HostCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit, restart),
             HostCommand::ResumeLaneDeliveries { thread_id } => {
                 self.resume_lane_deliveries(thread_id, permit)
             }

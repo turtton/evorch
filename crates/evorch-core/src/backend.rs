@@ -6,7 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use workbench_host::{CommandHost, projection::Projection};
-use workbench_protocol::namespaces::{ConversationCommand, LifecycleQuery, LifecycleReply};
+use workbench_protocol::namespaces::{LifecycleQuery, LifecycleReply};
 use workbench_protocol::{
     envelope::*, errors::*, events::*, handshake::*, ids::*, wire::InstanceEpoch,
 };
@@ -160,12 +160,6 @@ impl HostBackend {
                 RequestBody::Command(command) => {
                     // Reserving a NEW thread is not a claim. Existing owner rows,
                     // including released rows, remain fenced; no automatic takeover.
-                    if let workbench_protocol::commands::Command::Conversation(
-                        ConversationCommand::SendChat(send),
-                    ) = &command
-                    {
-                        host.reserve_new_chat_thread(send)?;
-                    }
                     host.handle_request(&request.session_id, &id, command, provenance)
                         .map(ReplyPayload::Command)
                 }

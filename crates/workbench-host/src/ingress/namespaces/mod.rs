@@ -47,9 +47,10 @@ impl CommandHost {
         &mut self,
         command: Command,
         provenance: &Provenance,
+        restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         match command {
-            Command::Conversation(c) => self.conversation_command(c, provenance),
+            Command::Conversation(c) => self.conversation_command(c, provenance, restart),
             Command::Workspace(c) => self.workspace_command(c, provenance),
             Command::Execution(c) => self.execution_command(c, provenance),
             Command::Questions(c) => self.questions_command(c, provenance),
@@ -59,7 +60,7 @@ impl CommandHost {
             Command::Projection(c) => self.projection_command(c, provenance),
             Command::Settings(c) => self.settings_command(c, provenance),
             Command::Auth(c) => self.auth_command(c, provenance),
-            Command::Mcp(c) => self.mcp_command(c, provenance),
+            Command::Mcp(c) => self.mcp_command(c, provenance, restart),
             Command::Teams(c) => self.teams_command(c, provenance),
             Command::Diagnostics(c) => self.diagnostics_command(c, provenance),
             Command::Memory(c) => self.memory_command(c, provenance),

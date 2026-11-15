@@ -15,11 +15,15 @@ impl CommandHost {
         &mut self,
         command: McpCommand,
         _provenance: &Provenance,
+        restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         let root = project_of(&command)
             .map(|project| self.project_root(project))
             .transpose()?;
-        let submitted = self.areas.mcp.submit(command, root)?;
+        let submitted = self
+            .areas
+            .mcp
+            .submit_tracked(command, root, Some(restart))?;
         let mut reply =
             CommandReply::with_result(CommandResult::Mcp(McpResult::Operation(submitted.view)));
         if submitted.already_applied {

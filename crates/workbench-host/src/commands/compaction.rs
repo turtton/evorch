@@ -12,6 +12,7 @@ impl CommandService {
         &mut self,
         thread_id: String,
         permit: Option<runtime::ownership::OwnerPermit>,
+        restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Vec<HostEvent> {
         let result: Result<String, String> = (|| {
             let run = *self
@@ -53,6 +54,8 @@ impl CommandService {
             let thread = thread_id.clone();
             let completion = self.background_work.clone();
             let task = self.handle.spawn(async move {
+                // Include provider work and the final persisted snapshot in host drain.
+                let _accepted = restart;
                 let event = match runtime.compact_saved_chat(run, authority).await {
                     Ok(()) => HostEvent::applied_notice(
                         thread,

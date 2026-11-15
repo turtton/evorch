@@ -31,7 +31,15 @@ async fn cancelling_park_invalidates_checkpoint_before_same_execution_resumes() 
     );
     f.runtime.wait_quiesced().await.unwrap();
     assert!(f.intent(run).checkpoint.is_some());
+    assert_eq!(
+        f.runtime.restart_attempt_state(&attempt),
+        RestartAttemptState::Active
+    );
     f.runtime.cancel_restart_quiesce(&attempt).unwrap();
+    assert_eq!(
+        f.runtime.restart_attempt_state(&attempt),
+        RestartAttemptState::Cancelled
+    );
     assert!(f.intent(run).checkpoint.is_none());
     assert!(f.intent(run).snapshot.is_some());
     assert!(std::sync::Arc::ptr_eq(
@@ -53,6 +61,10 @@ async fn failed_checkpoint_invalidation_keeps_park_and_failure_sticky() {
     *f.runtime.shared.quiesce.fault.lock().unwrap() = Some(StorageStep::Save);
     assert!(f.runtime.cancel_restart_quiesce(&attempt).is_err());
     assert!(!f.runtime.shared.quiesce.running());
+    assert_eq!(
+        f.runtime.restart_attempt_state(&attempt),
+        RestartAttemptState::Failed
+    );
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
     assert!(f.runtime.begin_restart_quiesce().is_err());
     assert!(f.runtime.cancel_restart_quiesce(&attempt).is_err());
@@ -226,4 +238,93 @@ async fn cancelled_restart_waiter_cannot_acquire_the_next_attempts_fence() {
     f.runtime.drain_dispatch_tails(&current).await.unwrap();
     f.runtime.cancel_restart_quiesce(&b).unwrap();
     f.cleanup(run).await;
+}
+
+#[tokio::test]
+async fn bound_attempt_rejects_replacement_before_first_poll_and_during_wait() {
+    for poll_first in [false, true] {
+        let f = Fixture::new(0);
+        let run = f.start();
+        f.model.entered.notified().await;
+        let first = f.runtime.begin_restart_quiesce().unwrap();
+        let mut old = Box::pin(f.runtime.fence_dispatch_restart_attempt(&first));
+        if poll_first {
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(old.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+        }
+        f.runtime.cancel_restart_quiesce(&first).unwrap();
+        let second = f.runtime.begin_restart_quiesce().unwrap();
+        assert!(old.await.is_err());
+        f.model.release.add_permits(1);
+        let fence = f
+            .runtime
+            .fence_dispatch_restart_attempt(&second)
+            .await
+            .unwrap();
+        f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+        f.runtime.cancel_restart_quiesce(&second).unwrap();
+        f.cleanup(run).await;
+    }
+}
+#[tokio::test]
+async fn sealing_marker_binds_owner_and_stop_before_drain_invalidates_fence() {
+    let f = Fixture::new(0);
+    let other = Fixture::new(0);
+    let foreign = other.runtime.begin_restart_quiesce().unwrap();
+    assert!(f.runtime.begin_restart_sealing(&foreign).is_err());
+    let run = f.start();
+    let attempt = f.runtime.begin_restart_quiesce().unwrap();
+    let fence = f
+        .runtime
+        .fence_dispatch_restart_attempt(&attempt)
+        .await
+        .unwrap();
+    f.runtime.begin_restart_sealing(&attempt).unwrap();
+    let changes = f.runtime.subscribe_restart_state();
+    f.runtime.begin_restart_sealing(&attempt).unwrap();
+    assert!(!changes.has_changed().unwrap());
+    // Host permit gate is closed, but runtime tail drain has not been polled.
+    f.runtime.stop(run, crate::StopScope::SelfOnly).unwrap();
+    f.runtime.wait(run).await.unwrap();
+    assert!(f.runtime.drain_dispatch_tails(&fence).await.is_err());
+    assert!(f.runtime.begin_restart_sealing(&attempt).is_err());
+    let next = f.runtime.begin_restart_quiesce().unwrap();
+    let fence = f
+        .runtime
+        .fence_dispatch_restart_attempt(&next)
+        .await
+        .unwrap();
+    f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+    f.runtime.cancel_restart_quiesce(&next).unwrap();
+    other.runtime.cancel_restart_quiesce(&foreign).unwrap();
+}
+
+#[tokio::test]
+async fn host_failure_is_attempt_bound_and_preserves_the_first_diagnosis() {
+    let f = Fixture::new(0);
+    let a = f.runtime.begin_restart_quiesce().unwrap();
+    f.runtime.cancel_restart_quiesce(&a).unwrap();
+    let b = f.runtime.begin_restart_quiesce().unwrap();
+    assert!(f.runtime.fail_restart_attempt(&a, "old failure").is_err());
+    assert!(!matches!(
+        f.runtime.quiesce_state(),
+        QuiesceState::Failed { .. }
+    ));
+    f.runtime.begin_restart_sealing(&b).unwrap();
+    f.runtime
+        .fail_restart_attempt(&b, "host drain failed")
+        .unwrap();
+    f.runtime
+        .fail_restart_attempt(&b, "replacement diagnosis")
+        .unwrap();
+    assert_eq!(
+        f.runtime.quiesce_state(),
+        QuiesceState::Failed {
+            reason: "host drain failed".into()
+        }
+    );
+    assert!(f.runtime.cancel_restart_quiesce(&b).is_err());
 }

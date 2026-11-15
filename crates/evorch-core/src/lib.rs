@@ -2,6 +2,7 @@
 pub mod backend;
 pub mod instance;
 pub mod lifecycle;
+pub mod restart;
 // Only the core bootstrap installs graph recovery; embedded hosts remain legacy.
 pub mod recovery_service;
 pub mod recovery_startup;

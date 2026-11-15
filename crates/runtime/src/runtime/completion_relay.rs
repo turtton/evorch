@@ -78,6 +78,15 @@ impl AgentRuntime {
         if let Ok(execution) = self.execution_snapshot(run_id) {
             self.execution_hook(cancellation::HookPoint::TerminalRegistered, &execution);
         }
+        #[cfg(feature = "recovery-test-support")]
+        if let (Some(probe), Some(guard)) = (self.shared.terminal_probe.get(), &dispatch) {
+            probe(
+                run_id,
+                restart_test_support::TerminalTailLease {
+                    _guard: guard.clone(),
+                },
+            );
+        }
         let publish = || {
             self.publish_terminal_relay(run_id, event);
             self.resume_deferred_chat(run_id);

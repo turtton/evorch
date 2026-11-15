@@ -1,11 +1,10 @@
 use evorch_core::{
     backend::HostBackend,
     instance::{ConfigIdentity, Instance, InstanceError, LaunchGuard},
-    lifecycle::IdleGrace,
+    lifecycle::{LifecycleDriver, OperatorSignals},
     recovery_service::CoreGraphRecovery,
-    unix,
 };
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc};
 use workbench_host::bootstrap::{BootstrapError, BootstrapOptions, BootstrappedHost};
 use workbench_web::{WebServer, WebServerConfig};
 
@@ -86,8 +85,8 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
         host.host.clone(),
         instance.identity.clone(),
     ));
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let signals = OperatorSignals::new()?;
+    let mut lifecycle = LifecycleDriver::new(&host);
     let web_config = WebServerConfig {
         enabled: web || host.config.web.enabled,
         bind: ([127, 0, 0, 1], host.config.web.port).into(),
@@ -130,54 +129,13 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
         "{}",
         serde_json::json!({"status":"ready", "socket":instance.socket, "core":instance.identity, "web":server.as_ref().map(|s| s.local_addr().to_string())})
     );
-    let (shutdown, _) = tokio::sync::watch::channel(false);
-    let mut clients = tokio::task::JoinSet::new();
-    let mut events = host.runtime.event_bus().subscribe();
-    let background = host.host.lock().unwrap().service().background_work_notify();
-    let area_work = host.area_work_notify();
-    let mut idle = IdleGrace::new(Duration::from_secs(host.config.core.idle_grace_secs));
-    let outcome = loop {
-        host.host.lock().unwrap().service_mut().poll();
-        let deadline = idle.update(web_enabled, clients.len(), host.busy());
-        let expired = async {
-            match deadline {
-                Some(d) => tokio::time::sleep_until(d).await,
-                None => std::future::pending().await,
-            }
-        };
-        tokio::select! {
-            _ = terminate.recv() => break Ok(()),
-            _ = interrupt.recv() => break Ok(()),
-            _ = background.notified() => (),
-            _ = area_work.notified() => (),
-            _ = expired => {
-                if !host.busy() { break Ok(()); }
-            },
-            event = events.recv() => {
-                if let Ok(event) = event {
-                    host.host.lock().unwrap().service_mut().observe_lifecycle(&event);
-                }
-            },
-            _ = clients.join_next(), if !clients.is_empty() => (),
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    if clients.len() < 64 {
-                        clients.spawn(unix::connection(stream, backend.clone(), shutdown.subscribe()));
-                    }
-                },
-                Err(e) => break Err(e),
-            },
-        }
-    };
-    // No ingress can start new work from here; close transports before drain.
-    drop(listener);
-    backend.close();
-    let _ = shutdown.send(true);
+    let outcome = lifecycle
+        .run(&host, backend.clone(), listener, web_enabled, signals)
+        .await;
     let web_result = match server {
         Some(s) => s.shutdown().await,
         None => Ok(()),
     };
-    while clients.join_next().await.is_some() {}
     host.shutdown().await?;
     drop(backend);
     drop(host); // storage leases before the lifetime lock

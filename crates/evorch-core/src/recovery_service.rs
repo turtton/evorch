@@ -112,6 +112,7 @@ impl CoreStartupHook for CoreGraphRecovery {
                     tokio::select! { biased;
                         _ = &mut stop => break,
                         _ = tick.tick() => {
+                            let Some(_producer) = inputs.runtime.producer_gate().try_enter() else { continue; };
                             let scan = match coordinator.scan() {
                                 Ok(scan) => scan,
                                 Err(reason) => {

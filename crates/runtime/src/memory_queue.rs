@@ -102,6 +102,9 @@ impl LearningQueue {
         source_run_id: RunId,
         snapshot: Option<std::sync::Arc<crate::learning::SourceSnapshot>>,
     ) -> Result<Vec<Lesson>, LearningError> {
+        let Some(producer) = self.runtime.producer_gate().enter().await else {
+            return Ok(Vec::new());
+        };
         let extractor = self.runtime.reserve_run_id();
         if let Some(snapshot) = snapshot {
             self.runtime
@@ -124,6 +127,7 @@ impl LearningQueue {
                 ..RunConfig::default()
             },
         );
+        drop(producer);
         let outcome = self
             .complete_extraction(task, source_run_id, extractor)
             .await;
@@ -152,6 +156,9 @@ impl LearningQueue {
             .map(|candidate| lesson(task, candidate))
             .collect();
         self.writer.append_lessons(&lessons)?;
+        let Some(producer) = self.runtime.producer_gate().enter().await else {
+            return Ok(Vec::new());
+        };
         let reviewer = self.runtime.delegate_background(
             Role::Reviewer,
             format!(
@@ -169,6 +176,7 @@ impl LearningQueue {
                 ..RunConfig::default()
             },
         );
+        drop(producer);
         let result = self.complete_review(reviewer, &candidates, &lessons).await;
         self.runtime.clear_learning_run(reviewer);
         result

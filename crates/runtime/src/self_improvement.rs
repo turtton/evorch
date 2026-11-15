@@ -389,23 +389,51 @@ impl ImprovementCollector {
     /// acknowledge all queued writer commands. Subscribe before spawning this future.
     pub async fn run_until(
         self,
-        mut receiver: EventReceiver,
+        receiver: EventReceiver,
         stopped: impl std::future::Future<Output = ()>,
         accepts: impl Fn(&event_bus::Event) -> bool,
     ) -> Result<(), storage::StorageError> {
+        self.run_until_gated(
+            receiver,
+            stopped,
+            accepts,
+            crate::producer::ProducerGate::default(),
+        )
+        .await
+    }
+
+    pub async fn run_until_gated(
+        self,
+        mut receiver: EventReceiver,
+        stopped: impl std::future::Future<Output = ()>,
+        accepts: impl Fn(&event_bus::Event) -> bool,
+        gate: crate::producer::ProducerGate,
+    ) -> Result<(), storage::StorageError> {
         tokio::pin!(stopped);
+        let mut pending = std::collections::VecDeque::new();
         let mut lagging = false;
         loop {
             let received = tokio::select! {
                 biased;
                 () = &mut stopped => break,
+                permit = gate.enter(), if !pending.is_empty() => {
+                    if let Some(_permit) = permit {
+                        if let Some(event) = pending.pop_front()
+                            && accepts(&event) { self.observe(event); }
+                    } else { (&mut stopped).await; break; }
+                    continue;
+                }
                 received = receiver.recv() => received,
             };
             match received {
                 Ok(event) => {
                     lagging = false;
-                    if accepts(&event) {
-                        self.observe(event);
+                    if let Some(_permit) = gate.try_enter() {
+                        if accepts(&event) {
+                            self.observe(event);
+                        }
+                    } else {
+                        pending.push_back(event);
                     }
                 }
                 Err(RecvError::Lagged(skipped)) => {
@@ -421,7 +449,7 @@ impl ImprovementCollector {
         if lagged > 0 {
             self.handle_lag(lagged);
         }
-        for event in events {
+        for event in pending.into_iter().chain(events) {
             if accepts(&event) {
                 self.observe(event);
             }

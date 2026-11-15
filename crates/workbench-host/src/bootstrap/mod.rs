@@ -22,6 +22,7 @@ mod project_models;
 pub mod recovery;
 #[cfg(test)]
 mod recovery_06a_tests;
+pub mod restart;
 pub mod retention;
 pub mod services;
 #[cfg(test)]
@@ -603,6 +604,18 @@ impl BootstrappedHost {
         Ok(bootstrap)
     }
 
+    pub fn restart_producers(&self) -> Vec<runtime::producer::ProducerGate> {
+        let mut gates = vec![
+            self.runtime.producer_gate(),
+            self.evaluations.producers.clone(),
+            self.area_tasks.producer_gate(),
+        ];
+        if let Some(pr) = self.runtime.pull_requests() {
+            gates.push(pr.producer_gate());
+        }
+        gates
+    }
+
     /// Woken when an area operation that counts as work ends, so the idle
     /// decision is taken again (ADR 0045 §2, §3).
     pub fn area_work_notify(&self) -> Arc<tokio::sync::Notify> {
@@ -613,7 +626,8 @@ impl BootstrappedHost {
         // TODO(P9): once safe-point restart/auto-resume can restore an ordinary
         // chat's Waiting state, count that idle conversation as no work. Until
         // then retain all Waiting runs conservatively to avoid losing them.
-        self.evaluations.is_busy()
+        self.host.lock().unwrap().service().restart_gate().busy()
+            || self.evaluations.is_busy()
             // A live external owner's lease may outlast idle grace. Keep the
             // managed retry alive even before it can publish any local RunEntry.
             || self.recovery_diagnostics.as_ref().is_some_and(|d| d.has_pending_work())
@@ -631,10 +645,10 @@ impl BootstrappedHost {
             })
     }
 
-    /// Planned restart preparation (ADR 0045 §8), separate from operator stop.
-    /// Success parks runs and leaves services, ownership and the bridge alive;
-    /// the restart transaction in PR 07 owns handoff/exit. Never call shutdown
-    /// as a fallback when this fails or is still waiting for a provider/tool.
+    /// Runtime-only safe-point observation, separate from operator stop.
+    /// This legacy observer does not close host ingress/producers and cannot
+    /// issue a SealedRestart. Core callers must use RestartCoordinator for the
+    /// authoritative host-level fence. Never use shutdown as a fallback.
     pub async fn quiesce_for_restart(&self) -> Result<(), BootstrapError> {
         self.runtime.quiesce().await.map_err(Into::into)
     }
@@ -644,6 +658,15 @@ impl BootstrappedHost {
         let mut failure = None;
         // Area tasks stop producing before the runtime drains; they are joined
         // below, with the other host-owned tasks.
+        for producer in self.restart_producers() {
+            producer.close();
+        }
+        self.host
+            .lock()
+            .unwrap()
+            .service()
+            .restart_gate()
+            .transition(u64::MAX, restart::HostRestartPhase::ShuttingDown);
         self.area_tasks.request_stop();
         let tasks = self
             .host

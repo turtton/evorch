@@ -438,6 +438,15 @@ impl AgentRuntime {
     /// Obtain attempt- and epoch-bound evidence after checkpointing.
     pub async fn fence_dispatch_restart(&self) -> Result<DispatchDrainFence, RuntimeError> {
         let attempt = self.begin_restart_quiesce()?;
+        self.fence_dispatch_restart_attempt(&attempt).await
+    }
+
+    /// Bind the worker before its first poll; never begin or join another attempt.
+    pub async fn fence_dispatch_restart_attempt(
+        &self,
+        attempt: &super::RestartAttempt,
+    ) -> Result<DispatchDrainFence, RuntimeError> {
+        self.validate_restart_attempt(attempt)?;
         self.wait_quiesced_generation(attempt.generation()).await?;
         // Cancellation, terminal handoff and epoch replacement all hold this
         // boundary. Never grant a later attempt's authority to an old waiter.
