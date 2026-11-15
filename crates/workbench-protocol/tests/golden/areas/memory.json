@@ -1,1 +1,173 @@
-{}
+{
+  "query/memory/get_memory": {
+    "payload": {
+      "payload": {
+        "id": "lesson-1",
+        "operation_id": "op-2",
+        "project": "project-1"
+      },
+      "type": "get_memory"
+    },
+    "type": "memory"
+  },
+  "query/memory/get_memory_operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_memory_operation"
+    },
+    "type": "memory"
+  },
+  "query/memory/list_memory": {
+    "payload": {
+      "payload": {
+        "favorite": true,
+        "operation_id": "op-1",
+        "page": {
+          "limit": 50
+        },
+        "project": "project-1",
+        "status": "promoted",
+        "text": "retry budget"
+      },
+      "type": "list_memory"
+    },
+    "type": "memory"
+  },
+  "query_reply/memory/detail": {
+    "payload": {
+      "payload": {
+        "data": {
+          "content": {
+            "text": "Prefer the retry budget.",
+            "total_bytes": 24,
+            "truncated": false
+          },
+          "evidence": {
+            "text": "run-1",
+            "total_bytes": 5,
+            "truncated": false
+          },
+          "scope": "user",
+          "state": {
+            "actions": [
+              {
+                "action": "set_favorite",
+                "state": {
+                  "type": "allowed"
+                }
+              },
+              {
+                "action": "reject",
+                "state": {
+                  "type": "allowed"
+                }
+              },
+              {
+                "action": "clear_favorite",
+                "state": {
+                  "reason": "not_applicable_in_state",
+                  "type": "denied"
+                }
+              }
+            ],
+            "favorite": false,
+            "id": "lesson-1",
+            "revision": "3",
+            "status": "candidate"
+          },
+          "task_id": "task-1"
+        },
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "detail"
+    },
+    "type": "memory"
+  },
+  "query_reply/memory/list": {
+    "payload": {
+      "payload": {
+        "data": {
+          "items": [
+            {
+              "preview": "Prefer the retry budget",
+              "scope": "project",
+              "state": {
+                "actions": [
+                  {
+                    "action": "set_favorite",
+                    "state": {
+                      "type": "allowed"
+                    }
+                  },
+                  {
+                    "action": "reject",
+                    "state": {
+                      "type": "allowed"
+                    }
+                  },
+                  {
+                    "action": "clear_favorite",
+                    "state": {
+                      "reason": "not_applicable_in_state",
+                      "type": "denied"
+                    }
+                  }
+                ],
+                "favorite": false,
+                "id": "lesson-1",
+                "revision": "3",
+                "status": "candidate"
+              }
+            }
+          ],
+          "snapshot_revision": "9"
+        },
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "list"
+    },
+    "type": "memory"
+  },
+  "query_reply/memory/operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "revision": "2",
+        "state": {
+          "type": "pending"
+        }
+      },
+      "type": "operation"
+    },
+    "type": "memory"
+  },
+  "ui_event/memory/memory_operation_changed": {
+    "payload": {
+      "payload": {
+        "view": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "memory_operation_changed"
+    },
+    "type": "memory"
+  }
+}

@@ -1,1 +1,193 @@
-{}
+{
+  "query/evaluation/get_evaluation": {
+    "payload": {
+      "payload": {
+        "group": "20260101-000000",
+        "operation_id": "op-2"
+      },
+      "type": "get_evaluation"
+    },
+    "type": "evaluation"
+  },
+  "query/evaluation/get_evaluation_operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_evaluation_operation"
+    },
+    "type": "evaluation"
+  },
+  "query/evaluation/get_evaluation_report": {
+    "payload": {
+      "payload": {
+        "group": "20260101-000000",
+        "member": "member-0",
+        "operation_id": "op-3"
+      },
+      "type": "get_evaluation_report"
+    },
+    "type": "evaluation"
+  },
+  "query/evaluation/list_evaluations": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "page": {
+          "limit": 50
+        }
+      },
+      "type": "list_evaluations"
+    },
+    "type": "evaluation"
+  },
+  "query_reply/evaluation/group": {
+    "payload": {
+      "payload": {
+        "data": {
+          "group": "20260101-000000",
+          "members": [
+            {
+              "index": 0,
+              "member": "member-0",
+              "phase": "running_trials",
+              "problems": 0,
+              "replay": {
+                "group": "20260101-000000",
+                "kind": "replay",
+                "member": "member-0",
+                "presence": "present"
+              },
+              "report": {
+                "group": "20260101-000000",
+                "kind": "report",
+                "member": "member-0",
+                "presence": "missing"
+              },
+              "thread_id": "thread-1",
+              "trials": {
+                "failed": 0,
+                "finished": 2,
+                "interrupted": 0,
+                "planned": 4,
+                "queued": 1,
+                "running": 1,
+                "unavailable": 0,
+                "unverified": 0
+              }
+            }
+          ],
+          "members_omitted": 0,
+          "members_total": 1,
+          "phase": "running",
+          "revision": "7",
+          "started_at": "2026-01-01T00:00:00Z"
+        },
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "group"
+    },
+    "type": "evaluation"
+  },
+  "query_reply/evaluation/list": {
+    "payload": {
+      "payload": {
+        "data": {
+          "groups": {
+            "items": [
+              {
+                "group": "20260101-000000",
+                "members_total": 1,
+                "phase": "finished",
+                "presence": "present",
+                "revision": "5",
+                "started_at": "2026-01-01T00:00:00Z"
+              },
+              {
+                "group": "20251231-000000",
+                "presence": "problem",
+                "problem": "malformed",
+                "revision": "6"
+              }
+            ],
+            "snapshot_revision": "9"
+          },
+          "omitted": 0,
+          "scan_truncated": false
+        },
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "list"
+    },
+    "type": "evaluation"
+  },
+  "query_reply/evaluation/operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "revision": "2",
+        "state": {
+          "reason": "shutdown",
+          "type": "cancelled"
+        }
+      },
+      "type": "operation"
+    },
+    "type": "evaluation"
+  },
+  "query_reply/evaluation/report": {
+    "payload": {
+      "payload": {
+        "data": {
+          "artifact": {
+            "group": "20260101-000000",
+            "kind": "report",
+            "member": "member-0",
+            "presence": "present"
+          },
+          "text": {
+            "text": "# Report",
+            "total_bytes": 8,
+            "truncated": false
+          }
+        },
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "report"
+    },
+    "type": "evaluation"
+  },
+  "ui_event/evaluation/evaluation_operation_changed": {
+    "payload": {
+      "payload": {
+        "view": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "evaluation_operation_changed"
+    },
+    "type": "evaluation"
+  }
+}

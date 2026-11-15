@@ -1,1 +1,186 @@
-{}
+{
+  "query/improvement/get_improvement": {
+    "payload": {
+      "payload": {
+        "candidate": "cand-1",
+        "operation_id": "op-2",
+        "project": "project-1"
+      },
+      "type": "get_improvement"
+    },
+    "type": "improvement"
+  },
+  "query/improvement/get_improvement_operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_improvement_operation"
+    },
+    "type": "improvement"
+  },
+  "query/improvement/list_improvement": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "page": {
+          "limit": 50
+        },
+        "project": "project-1",
+        "status": "new"
+      },
+      "type": "list_improvement"
+    },
+    "type": "improvement"
+  },
+  "query_reply/improvement/detail": {
+    "payload": {
+      "payload": {
+        "data": {
+          "created_ms": 1699999000000,
+          "draft_file": "cand-1.md",
+          "evidence": {
+            "text": "{\"busy\":true}",
+            "total_bytes": 13,
+            "truncated": false
+          },
+          "recent_runs": [
+            "run-1",
+            "run-2"
+          ],
+          "reopened_count": 0,
+          "run": "run-1",
+          "summary": {
+            "code": "storage.busy",
+            "last_seen_ms": 1700000000000,
+            "occurrences": 3,
+            "severity": "warning",
+            "source": "diagnostic",
+            "state": {
+              "actions": [
+                {
+                  "action": "mark_reviewed",
+                  "state": {
+                    "type": "allowed"
+                  }
+                },
+                {
+                  "action": "dismiss",
+                  "state": {
+                    "type": "allowed"
+                  }
+                },
+                {
+                  "action": "triage",
+                  "state": {
+                    "reason": "read_only",
+                    "type": "denied"
+                  }
+                }
+              ],
+              "id": "cand-1",
+              "revision": "4",
+              "status": "new"
+            },
+            "title": "Reduce writer contention"
+          }
+        },
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "detail"
+    },
+    "type": "improvement"
+  },
+  "query_reply/improvement/list": {
+    "payload": {
+      "payload": {
+        "data": {
+          "candidates": {
+            "items": [
+              {
+                "code": "storage.busy",
+                "last_seen_ms": 1700000000000,
+                "occurrences": 3,
+                "severity": "warning",
+                "source": "diagnostic",
+                "state": {
+                  "actions": [
+                    {
+                      "action": "mark_reviewed",
+                      "state": {
+                        "type": "allowed"
+                      }
+                    },
+                    {
+                      "action": "dismiss",
+                      "state": {
+                        "type": "allowed"
+                      }
+                    },
+                    {
+                      "action": "triage",
+                      "state": {
+                        "reason": "read_only",
+                        "type": "denied"
+                      }
+                    }
+                  ],
+                  "id": "cand-1",
+                  "revision": "4",
+                  "status": "new"
+                },
+                "title": "Reduce writer contention"
+              }
+            ],
+            "snapshot_revision": "9"
+          },
+          "enabled": true
+        },
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "list"
+    },
+    "type": "improvement"
+  },
+  "query_reply/improvement/operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "revision": "2",
+        "state": {
+          "code": "storage_unavailable",
+          "type": "failed"
+        }
+      },
+      "type": "operation"
+    },
+    "type": "improvement"
+  },
+  "ui_event/improvement/improvement_operation_changed": {
+    "payload": {
+      "payload": {
+        "view": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "improvement_operation_changed"
+    },
+    "type": "improvement"
+  }
+}
