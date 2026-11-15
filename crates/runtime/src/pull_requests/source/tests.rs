@@ -964,6 +964,7 @@ mod processes {
     // Given: a runner without a ledger and one with a ledger / When: each runs a
     // program that reports its process group / Then: only the owned child leads a
     // group of its own, so the unowned one keeps the old leader-only behaviour
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn only_a_ledger_owned_child_leads_its_own_process_group() {
         fn group_of(stat: &str) -> String {

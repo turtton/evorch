@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use super::{Inner, SpawnLedger, locked};
@@ -13,6 +13,35 @@ use super::{Inner, SpawnLedger, locked};
 /// Names one registered worker. Never reused within a ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorkerId(u64);
+
+/// A worker thread could not be joined, because no thread could be started
+/// to join it. The worker stays registered, so nothing is taken for ended; call
+/// [`SpawnLedger::join_workers`] again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("no joiner could be started for {unjoined} worker thread(s); they stay registered")]
+pub struct JoinFailed {
+    pub unjoined: usize,
+}
+
+/// Hooks for tests that need to fix an order or inject a failure.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct Seams {
+    /// How many of the next joiner threads fail to start.
+    pub fail_joiner_starts: std::sync::atomic::AtomicUsize,
+    /// Held by `spawn_thread` before it publishes the thread's handle.
+    pub hold_publish: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Run once by `join_workers`, after it has started its joins and before it
+    /// looks at what is left.
+    pub join_window: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for Seams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Seams").finish_non_exhaustive()
+    }
+}
 
 /// A running worker, as [`SpawnLedger::workers`] lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,9 +188,18 @@ where
         });
     match spawned {
         Ok(handle) => {
-            if let Some(record) = locked(&inner.workers).live.get_mut(&id) {
+            #[cfg(test)]
+            if let Some(hold) = locked(&inner.seams.hold_publish).take() {
+                let _ = hold.recv();
+            }
+            // Publishing the handle is a change a waiting join must see: the
+            // thread may have ended already, and nothing else will wake it.
+            let mut table = locked(&inner.workers);
+            if let Some(record) = table.live.get_mut(&id) {
                 record.thread = Some(handle);
             }
+            table.epoch += 1;
+            inner.workers_activity.send_replace(table.activity());
             Ok(())
         }
         Err(error) => {
@@ -222,47 +260,87 @@ impl SpawnLedger {
     /// Cancel-safe: the joining of threads and the removal of their records is
     /// done by the ledger, not by this future, so a join that is dropped can
     /// simply be called again.
-    pub async fn join_workers(&self) {
+    ///
+    /// # Errors
+    /// [`JoinFailed`] when a joiner thread could not be started. The worker
+    /// stays registered (it is not reported as ended); calling again retries.
+    pub async fn join_workers(&self) -> Result<(), JoinFailed> {
         loop {
-            self.start_thread_joins();
+            // Subscribe before looking at anything: every change after this
+            // point, such as a thread's handle being published or a worker
+            // ending, is then seen by `changed`.
             let mut activity = self.inner.workers_activity.subscribe();
+            let unjoined = self.start_thread_joins();
+            #[cfg(test)]
+            if let Some(window) = locked(&self.inner.seams.join_window).take() {
+                window();
+            }
+            if unjoined > 0 {
+                return Err(JoinFailed { unjoined });
+            }
             if locked(&self.inner.workers).live.is_empty() {
-                return;
+                return Ok(());
             }
             if activity.changed().await.is_err() {
-                return;
+                return Ok(());
             }
         }
     }
 
     /// Hand each unjoined thread to a joiner thread of the ledger, which
-    /// removes the record once the thread is gone.
-    fn start_thread_joins(&self) {
+    /// removes the record once the thread is gone. Returns how many could not
+    /// be handed over: their handle goes back to the record, which stays.
+    fn start_thread_joins(&self) -> usize {
         let threads: Vec<_> = locked(&self.inner.workers)
             .live
             .iter_mut()
             .filter_map(|(id, record)| record.thread.take().map(|handle| (*id, handle)))
             .collect();
+        let mut unjoined = 0;
         for (id, handle) in threads {
+            // The handle waits in a slot until the joiner runs, so a failed
+            // start can take it back instead of losing the thread.
+            let slot = Arc::new(Mutex::new(Some(handle)));
+            let joiner_slot = Arc::clone(&slot);
             let inner = self.inner.clone();
-            let spawned = std::thread::Builder::new()
-                .name("worker-joiner".to_owned())
-                .spawn(move || {
+            let started = self.start_joiner(move || {
+                if let Some(handle) = locked(&joiner_slot).take() {
                     let _ = handle.join();
-                    let mut table = locked(&inner.workers);
-                    table.live.remove(&id);
-                    table.epoch += 1;
-                    inner.workers_activity.send_replace(table.activity());
-                });
-            if spawned.is_err() {
-                // The handle went with the closure: the thread is detached
-                // and its record can only be dropped, not proven joined.
-                let mut table = locked(&self.inner.workers);
+                }
+                let mut table = locked(&inner.workers);
                 table.live.remove(&id);
                 table.epoch += 1;
-                self.inner.workers_activity.send_replace(table.activity());
+                inner.workers_activity.send_replace(table.activity());
+            });
+            if started.is_err() {
+                unjoined += 1;
+                let handle = locked(&slot).take();
+                if let Some(record) = locked(&self.inner.workers).live.get_mut(&id) {
+                    record.thread = handle;
+                }
             }
         }
+        unjoined
+    }
+
+    fn start_joiner(&self, join: impl FnOnce() + Send + 'static) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            let failing = &self.inner.seams.fail_joiner_starts;
+            if failing
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+        }
+        std::thread::Builder::new()
+            .name("worker-joiner".to_owned())
+            .spawn(join)
+            .map(drop)
     }
 
     /// Run cleanup of something the core already owns on a thread the ledger

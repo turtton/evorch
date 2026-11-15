@@ -353,7 +353,7 @@ async fn joining_workers_proves_the_task_and_the_thread_ended() {
     ledger.close_fence();
     assert_eq!(ledger.abort_workers(), 1);
     release_thread.send(()).unwrap();
-    ledger.join_workers().await;
+    ledger.join_workers().await.unwrap();
 
     assert!(ledger.workers().is_empty());
     assert_eq!(Arc::strong_count(&witness), 1);
@@ -385,7 +385,7 @@ async fn workers_that_panic_or_finish_leave_the_ledger() {
     }
     done.send(()).unwrap();
 
-    ledger.join_workers().await;
+    ledger.join_workers().await.unwrap();
 
     let stats = ledger.worker_stats();
     assert_eq!((stats.spawned, stats.finished), (2, 2));
@@ -440,12 +440,80 @@ async fn a_cancelled_join_can_be_repeated() {
     // The worker is blocked, so the join is pending; the ready branch cancels it.
     tokio::select! {
         biased;
-        () = ledger.join_workers() => panic!("the worker is still blocked"),
+        _ = ledger.join_workers() => panic!("the worker is still blocked"),
         () = std::future::ready(()) => {}
     }
     assert_eq!(ledger.workers().len(), 1);
     release.send(()).unwrap();
-    ledger.join_workers().await;
+    ledger.join_workers().await.unwrap();
+
+    assert!(ledger.workers().is_empty());
+    assert_eq!(ledger.worker_stats().finished, 1);
+}
+
+// Given: a blocking worker whose joiner thread cannot be started / When: the
+// workers are joined / Then: the join reports the failure instead of success, the
+// unfinished worker stays registered, and a later join finishes it
+#[tokio::test]
+async fn a_joiner_that_cannot_start_leaves_the_worker_registered() {
+    let ledger = SpawnLedger::new();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    {
+        let admission = ledger.admit().unwrap();
+        admission
+            .spawn_worker_thread("blocking-worker", move || {
+                let _ = released.recv();
+            })
+            .unwrap();
+    }
+    ledger
+        .inner
+        .seams
+        .fail_joiner_starts
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+
+    let failed = ledger.join_workers().await;
+
+    assert_eq!(failed, Err(JoinFailed { unjoined: 1 }));
+    assert_eq!(ledger.workers().len(), 1);
+    assert_eq!(ledger.worker_stats().finished, 0);
+    release.send(()).unwrap();
+    ledger.join_workers().await.unwrap();
+    assert!(ledger.workers().is_empty());
+    assert_eq!(ledger.worker_stats().finished, 1);
+}
+
+// Given: a worker thread that has ended but whose handle is not yet published /
+// When: the handle is published after the join has started its joins and before
+// it looks at what is left / Then: the join is woken by the publication and
+// completes, instead of waiting for a change that was already missed
+#[tokio::test]
+async fn a_handle_published_during_a_join_wakes_it() {
+    let ledger = SpawnLedger::new();
+    let (publish, hold) = std::sync::mpsc::channel::<()>();
+    *locked(&ledger.inner.seams.hold_publish) = Some(hold);
+    let spawner = {
+        let ledger = ledger.clone();
+        std::thread::spawn(move || {
+            let admission = ledger.admit().unwrap();
+            admission
+                .spawn_worker_thread("quick-worker", || {})
+                .unwrap();
+        })
+    };
+    // The worker has ended, so its own notification is behind us; its handle is
+    // held back, and only publishing it can wake the join.
+    ledger
+        .watch_workers()
+        .wait_for(|_| ledger.worker_stats().finished == 1)
+        .await
+        .unwrap();
+    *locked(&ledger.inner.seams.join_window) = Some(Box::new(move || {
+        publish.send(()).unwrap();
+        spawner.join().unwrap();
+    }));
+
+    ledger.join_workers().await.unwrap();
 
     assert!(ledger.workers().is_empty());
     assert_eq!(ledger.worker_stats().finished, 1);

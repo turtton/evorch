@@ -968,7 +968,7 @@ async fn ledger_stops_and_reaps_a_stdio_server_its_descendant_and_supervisor() {
     ledger.close_fence();
     assert_eq!(ledger.stop_all_children(), 1);
     ledger.reap_all_children().await.unwrap();
-    ledger.join_workers().await;
+    ledger.join_workers().await.unwrap();
 
     let mut byte = [0];
     assert_eq!(descendant.read(&mut byte).await.unwrap(), 0);
@@ -994,7 +994,7 @@ async fn aborting_the_supervisor_still_confirms_reader_drainer_and_cleanup() {
 
     ledger.close_fence();
     assert_eq!(ledger.abort_workers(), 3);
-    ledger.join_workers().await;
+    ledger.join_workers().await.unwrap();
     ledger.reap_all_children().await.unwrap();
 
     assert!(ledger.workers().is_empty());
@@ -1023,7 +1023,7 @@ async fn closed_fence_refuses_stdio_connect_and_restart() {
     let mut byte = [0];
     assert_eq!(descendant.read(&mut byte).await.unwrap(), 0);
     assert_eq!(peer.read(&mut byte).await.unwrap(), 0);
-    ledger.join_workers().await;
+    ledger.join_workers().await.unwrap();
     assert!(ledger.children().is_empty());
     assert_eq!(ledger.child_stats().registered, 1);
 

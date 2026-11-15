@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 pub use children::{
     ChildActivity, ChildEntry, ChildId, ChildInfo, ChildKind, ChildStats, UnconfirmedReap,
 };
-pub use workers::{WorkerActivity, WorkerId, WorkerInfo, WorkerStats};
+pub use workers::{JoinFailed, WorkerActivity, WorkerId, WorkerInfo, WorkerStats};
 
 use crate::process::{GroupChild, ProcessGroup};
 
@@ -98,6 +98,10 @@ struct Inner {
     children_activity: tokio::sync::watch::Sender<ChildActivity>,
     workers: Mutex<workers::Table>,
     workers_activity: tokio::sync::watch::Sender<WorkerActivity>,
+    /// Test seams: fail the next joiner-thread starts, hold a worker thread's
+    /// handle back from its record, and run code inside a join's window.
+    #[cfg(test)]
+    seams: workers::Seams,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -131,6 +135,8 @@ impl SpawnLedger {
                 children_activity,
                 workers: Mutex::new(workers::Table::default()),
                 workers_activity,
+                #[cfg(test)]
+                seams: workers::Seams::default(),
             }),
         }
     }
