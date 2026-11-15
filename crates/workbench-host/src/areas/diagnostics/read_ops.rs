@@ -291,14 +291,23 @@ pub fn bounded(text: &str) -> workbench_protocol::namespaces::diagnostics::Bound
 }
 
 /// How much of a file to read for a body that is shown with [`bounded_head`]: a little
-/// less than the reply limit, so that the marker which replaces an unfinished credential
-/// at the end of the head still fits and is never itself cut.
+/// less than the reply limit, so that the cut marker is normally still inside it.
+/// (If masking makes the text longer than it was, [`cut_masked`] cuts it at the
+/// limit, which can cut the marker, but never shows more.)
 pub const HEAD_BYTES: u64 = workbench_protocol::namespaces::diagnostics::MAX_TEXT_BYTES as u64 - 64;
+
+/// What follows the kept part of a head that was cut.
+const CUT_MARKER: &str = " [truncated]";
 
 /// [`bounded`] for text that is only the *head* of a longer one (a file read up to a
 /// byte limit). A secret that straddles the end of the head would not match whole,
-/// and its first half would reach the wire, so a head that was cut is masked as text
-/// still being written: an unfinished credential at its end is masked too.
+/// and the detector cannot be relied on to recognise a fragment (it looks at a word's
+/// opening, which depends on the character before it). So the unfinished word at the
+/// end of a head that was cut is dropped altogether: a credential holds no
+/// whitespace, so no part of one that the cut falls inside is left. The drop reaches
+/// back to the last whitespace, but never further than the longest credential the
+/// redactor must mask (plus some room); if there is none in that range, all of the
+/// range goes. Then what is kept is masked in the usual way, and [`CUT_MARKER`] ends it.
 pub fn bounded_head(
     head: &str,
     cut: bool,
@@ -307,8 +316,20 @@ pub fn bounded_head(
     if !cut {
         return bounded(head);
     }
-    let redactor = REDACTOR.get_or_init(secret_guard::SecretRedactor::from_env);
-    cut_masked(redactor.redact_streaming(head).text)
+    let window = REDACTOR
+        .get_or_init(secret_guard::SecretRedactor::from_env)
+        .max_credential_len()
+        + 256;
+    let mut from = head.len().saturating_sub(window);
+    while !head.is_char_boundary(from) {
+        from += 1;
+    }
+    let keep = head[from..]
+        .rfind(char::is_whitespace)
+        .map_or(from, |at| from + at);
+    let mut text = crate::queries::masked(&head[..keep]);
+    text.push_str(CUT_MARKER);
+    cut_masked(text)
 }
 
 fn cut_masked(masked: String) -> workbench_protocol::namespaces::diagnostics::BoundedText {
@@ -372,6 +393,64 @@ pub fn runtime_slug(runtime: runtime::AgentRuntime) -> SlugOf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SECRET_REST: &str = "Zq8Wm3Nv7Xc2Rb5Ty9Uh4Jk6Lp1Sd0FgAaBbCcDd";
+
+    /// The head of a file `limit` bytes long whose credential the cut falls inside, with
+    /// `before` right in front of the credential (nothing, or a character the detector
+    /// might read the opening of the word through).
+    fn head_with_credential(
+        limit: usize,
+        before: &str,
+        prefix: &str,
+        keep: usize,
+        spaced: bool,
+    ) -> String {
+        let credential = format!("{prefix}{SECRET_REST}");
+        let shown = &credential[..keep - before.len()];
+        let lead = limit - keep - usize::from(spaced);
+        format!(
+            "{}{}{before}{shown}",
+            "x".repeat(lead),
+            if spaced { " " } else { "" }
+        )
+    }
+
+    #[test]
+    fn a_credential_the_cut_falls_inside_leaves_no_fragment_whatever_precedes_it() {
+        for prefix in ["sk-", "ghp_", "AKIA", "eyJ", "xoxb-", "github_pat_"] {
+            for before in ["", ".", "-", "_", "a", "7", "=", ":"] {
+                for spaced in [true, false] {
+                    for keep in [prefix.len() + before.len(), 15, 22, 33] {
+                        let head = head_with_credential(4096, before, prefix, keep, spaced);
+                        assert_eq!(head.len(), 4096);
+                        let out = bounded_head(&head, true);
+                        let label = format!("{prefix:?} {before:?} spaced={spaced} keep={keep}");
+                        assert!(!out.text.contains("Zq8W"), "{label}");
+                        assert!(!out.text.contains(prefix), "{label}");
+                        assert!(out.text.ends_with(CUT_MARKER), "{label}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_head_without_whitespace_loses_the_whole_range_the_credential_could_start_in() {
+        let head = "y".repeat(4096);
+        let out = bounded_head(&head, true);
+        assert_eq!(out.text, CUT_MARKER, "nothing of an unbroken run is kept");
+    }
+
+    #[test]
+    fn a_whole_head_and_the_text_before_the_last_word_are_kept() {
+        assert_eq!(bounded_head("a short file", false).text, "a short file");
+        let out = bounded_head("first line\nsecond line and a word", true);
+        assert_eq!(
+            out.text,
+            format!("first line\nsecond line and a{CUT_MARKER}")
+        );
+    }
     use std::sync::{
         Condvar,
         atomic::{AtomicUsize, Ordering},

@@ -52,8 +52,11 @@ namespace.
 
 Every body is bounded (`BoundedText`, 64 KiB) and masked for secrets. A body that is only the
 head of a longer file (an evaluation report, a candidate overlay) is read a little
-short of the limit and masked as text still being written, so a credential the cut
-falls inside is masked whole and never leaves a fragment (`bounded_head`). A list is a
+short of the limit, and the unfinished word at its end is dropped (back to the last
+whitespace, at most the longest credential plus some room, all of that range if there
+is no whitespace) before the rest is masked and a cut marker is added: a credential
+holds no whitespace, so no fragment of one the cut falls inside is left, whatever the
+detector would have made of it (`bounded_head`). A list is a
 `Page` cut by the host's `Pager`; a cursor is bound to its operation and snapshot.
 
 ## Client
@@ -79,5 +82,9 @@ are untouched.
 - The evaluation launch monitor is not wired, so the process state of a member the
   core launched itself reads from its files and may stay `Unverified`.
 - Learning candidates (07b-2b, #613) are not shown; this PR adds no storage API.
+- `secret_guard::SecretRedactor::redact_streaming` misses the opening of a word that
+  follows `.`, `-` or `_`, so it cannot be relied on for a cut fragment. This PR does
+  not use it (see `bounded_head`); the redactor itself is outside its scope and is a
+  follow-up.
 - The cache end-to-end scenarios are not extended: these reads send nothing to a
   provider and change no prompt prefix.

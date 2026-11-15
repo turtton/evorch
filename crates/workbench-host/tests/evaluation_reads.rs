@@ -275,12 +275,23 @@ fn an_unknown_group_fails_as_not_found_and_an_unwired_area_is_unsupported() {
     );
 }
 
-/// Text that is `limit` bytes up to `keep` bytes into the credential, and then the
-/// rest of the credential: the read stops inside it.
-fn straddling(limit: usize, keep: usize, prefix: &str, rest: &str) -> String {
-    // A space before it: the credential is then a token of its own.
-    let lead = limit - keep - 1;
-    format!("{} {prefix}{rest}\nmore\n", "x".repeat(lead))
+/// A file `limit` bytes into which a credential runs `keep` bytes: the read stops
+/// inside it. `before` stands right in front of the credential, with a space before
+/// that when `spaced`.
+fn straddling(limit: usize, before: &str, prefix: &str, keep: usize, spaced: bool) -> String {
+    let rest = "Zq8Wm3Nv7Xc2Rb5Ty9Uh4Jk6Lp1Sd0FgAaBbCcDd";
+    let credential = format!("{prefix}{rest}more text after the credential\n");
+    let lead = limit - keep - usize::from(spaced);
+    // Words with spaces between them, or one unbroken run when there is no space to find.
+    let lead = if spaced {
+        "x ".repeat(lead / 2) + &"x".repeat(lead % 2)
+    } else {
+        "x".repeat(lead)
+    };
+    format!(
+        "{lead}{}{before}{credential}",
+        if spaced { " " } else { "" }
+    )
 }
 
 #[test]
@@ -288,45 +299,56 @@ fn a_credential_cut_by_the_size_limit_leaves_no_fragment_in_a_report_or_a_candid
     let w = evaluation_world();
     seed(&w);
     let root = w.dir.path().join("eval");
-    let secret_rest = "Zq8Wm3Nv7Xc2Rb5Ty9Uh4Jk6Lp1Sd0FgAaBbCcDd";
-
-    // Given: a report whose credential starts 15 bytes before the cut (64 KiB less the room kept for a marker), so the
-    // shown part holds only the opening and the shape rule finds no whole key.
-    std::fs::write(
-        root.join("member-a/report.md"),
-        straddling(65_536 - 64, 15, "sk-", secret_rest),
-    )
-    .unwrap();
-    // Given: a candidate overlay whose credential starts 12 bytes before the 4 KiB cut.
-    std::fs::write(
-        root.join(".groups").join(GOOD).join("candidate.toml"),
-        straddling(4 * 1024, 12, "ghp_", secret_rest),
-    )
-    .unwrap();
-
-    // When: both are read.
-    let report_text = w
-        .read(|| report(&w, "cut-report", "member-a"))
-        .data
-        .unwrap()
-        .text
+    let candidate = root.join(".groups").join(GOOD).join("candidate.toml");
+    let report_limit = 65_536 - 64;
+    let candidate_limit = 4 * 1024;
+    // The detector reads a word's opening through the character before it, so the
+    // fragment must be gone whatever that character is, and with no space at all.
+    for (round, (before, prefix, keep, spaced)) in [
+        ("", "sk-", 15, true),
+        (".", "sk-", 15, true),
+        ("-", "ghp_", 22, true),
+        ("_", "ghp_", 33, true),
+        ("a", "sk-", 22, true),
+        ("", "sk-", 15, false),
+        (".", "ghp_", 33, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Given: a report and an overlay whose credential the size limit cuts.
+        std::fs::write(
+            root.join("member-a/report.md"),
+            straddling(report_limit, before, prefix, keep, spaced),
+        )
         .unwrap();
-    let candidate_text = w
-        .read(|| group(&w, "cut-group", GOOD))
-        .data
-        .unwrap()
-        .candidate
+        std::fs::write(
+            &candidate,
+            straddling(candidate_limit, before, prefix, keep, spaced),
+        )
         .unwrap();
 
-    // Then: no fragment of the credential is shown, and both say they were cut.
-    for text in [&report_text, &candidate_text] {
-        assert!(text.truncated);
-        assert!(text.text.contains("[REDACTED:partial-credential]"));
-        assert!(
-            !text.text.contains("Zq8W"),
-            "{}",
-            &text.text[text.text.len() - 60..]
-        );
-        assert!(!text.text.contains("sk-") && !text.text.contains("ghp_"));
+        // When: both are read.
+        let report_text = w
+            .read(|| report(&w, &format!("cut-report-{round}"), "member-a"))
+            .data
+            .unwrap()
+            .text
+            .unwrap();
+        let candidate_text = w
+            .read(|| group(&w, &format!("cut-group-{round}"), GOOD))
+            .data
+            .unwrap()
+            .candidate
+            .unwrap();
+
+        // Then: no fragment of the credential is shown, and both say they were cut.
+        for text in [&report_text, &candidate_text] {
+            let label = format!("{before:?} {prefix:?} {keep} {spaced}");
+            assert!(text.truncated, "{label}");
+            assert!(!text.text.contains("Zq8W"), "{label}");
+            assert!(!text.text.contains(prefix), "{label}");
+            assert!(!text.text.contains("more text"), "{label}");
+        }
     }
 }
