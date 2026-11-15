@@ -222,7 +222,16 @@ impl Fixture {
         )
     }
     pub(super) async fn cleanup(&self, run: RunId) {
-        self.runtime.cancel(run).unwrap();
+        match self.runtime.cancel(run) {
+            Err(RuntimeError::RestartBusy) => {
+                self.runtime
+                    .fence_dispatch_shutdown(|| async { Ok::<_, String>(()) })
+                    .await
+                    .unwrap();
+                self.runtime.cancel(run).unwrap();
+            }
+            result => result.unwrap(),
+        }
         if let Err(error) = self.runtime.wait(run).await {
             assert!(matches!(error, RuntimeError::RunTerminated { .. }));
             assert!(!self.intent(run).active);

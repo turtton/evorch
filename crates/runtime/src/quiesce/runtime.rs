@@ -177,6 +177,10 @@ impl AgentRuntime {
         incarnation: &str,
         reason: StopReason,
     ) -> bool {
+        // Invalidation is independent of the terminal intent write (which may
+        // fail). This is a no-op before capture; after capture exec is forbidden
+        // in memory before attempting either durable write.
+        self.invalidate_active_restart_capture("terminal acceptance during capture");
         let queued = self.shared.quiesce.queued(run, incarnation);
         if let Err(error) =
             self.shared
@@ -221,6 +225,7 @@ impl AgentRuntime {
         queued
     }
     pub(crate) fn end_intent(&self, run: RunId, incarnation: &str, reason: StopReason) {
+        self.invalidate_active_restart_capture("internal terminal or owner loss during capture");
         if let Err(error) =
             self.shared
                 .quiesce

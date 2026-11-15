@@ -147,3 +147,54 @@ async fn lsp_redacts_secret_code_before_live_delivery() {
         serde_json::json!(["[redacted]"])
     );
 }
+
+// Given: an LSP tool registered in the core's ledger and a server that never
+// answers / When: the fence closes and the ledger stops and reaps what it owns /
+// Then: the server was listed as a sandbox session, the call ends with an error
+// and the ledger holds nothing
+#[tokio::test]
+async fn ledger_registers_stops_and_reaps_an_lsp_server() {
+    let (dir, tool, _) = fixture("hang");
+    let ledger = sandbox::SpawnLedger::new();
+    let tool = tool.with_ledger(ledger.clone());
+    let mut activity = ledger.watch_children();
+    let path = dir.path().join("sample file.rs");
+    let call = tokio::spawn(async move { tool.execute(serde_json::json!({"path":path})).await });
+    activity
+        .wait_for(|activity| activity.live == 1)
+        .await
+        .unwrap();
+    let listed = ledger.children();
+    assert_eq!(listed[0].kind, sandbox::ChildKind::SandboxSession);
+    // The server may be stopped before it writes its own pid file.
+    let leader = listed[0].leader.expect("an unreaped leader");
+
+    ledger.close_fence();
+    assert_eq!(ledger.stop_all_children(), 1);
+    let result = call.await.unwrap().unwrap();
+    ledger.reap_all_children().await.unwrap();
+
+    assert!(result.is_error, "{}", result.content);
+    assert!(ledger.children().is_empty());
+    assert_eq!(ledger.child_stats().reaped, 1);
+    assert!(!std::path::Path::new(&format!("/proc/{leader}")).exists());
+}
+
+// Given: a closed spawn fence / When: the tool is asked for diagnostics / Then:
+// no server starts and the refusal reaches the agent as an error
+#[tokio::test]
+async fn closed_fence_refuses_to_start_an_lsp_server() {
+    let (dir, tool, _) = fixture("hang");
+    let ledger = sandbox::SpawnLedger::new();
+    ledger.close_fence();
+    let tool = tool.with_ledger(ledger.clone());
+
+    let result = tool
+        .execute(serde_json::json!({"path":dir.path().join("sample file.rs")}))
+        .await
+        .unwrap();
+
+    assert!(result.is_error, "{}", result.content);
+    assert!(!dir.path().join("pid").exists(), "a server was started");
+    assert_eq!(ledger.child_stats().registered, 0);
+}

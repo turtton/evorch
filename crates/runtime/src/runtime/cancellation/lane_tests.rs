@@ -49,6 +49,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_required_ownership(true)
+    }
+
+    fn with_required_ownership(requires_ownership: bool) -> Self {
         let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("lanes.db"),
@@ -81,7 +85,7 @@ impl Fixture {
                     report_policy: LanePolicy::Attached,
                 },
                 start_seed: serde_json::json!({
-                    "run_id": run, "project_root": null, "requires_ownership": true,
+                    "run_id": run, "project_root": null, "requires_ownership": requires_ownership,
                 })
                 .to_string(),
                 project_id: None,
@@ -427,9 +431,12 @@ async fn settled_unregistered_lane_keeps_its_permit_without_an_existing_stop_que
 #[tokio::test(start_paused = true)]
 async fn lane_stop_writeback_retries_storage_recovery_and_stop_interrupts_its_backoff() {
     for recover in [true, false] {
-        let f = Fixture::new();
+        // Isolate storage backoff from ownership: the nonblocking Stop guard can
+        // legitimately return LaneCancellationPending during a heartbeat write.
+        // The surrounding tests cover contention and fencing for owned lanes.
+        let f = Fixture::with_required_ownership(false);
         f.model.hold_admission.store(true, Ordering::SeqCst);
-        f.runtime.recover_unstarted_lanes(Some(&f.owner)).unwrap();
+        f.runtime.recover_unstarted_lanes(None).unwrap();
         f.model.admission_entered.notified().await;
         let lock = rusqlite::Connection::open(f.dir.path().join("lanes.db")).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();

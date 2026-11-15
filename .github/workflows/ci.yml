@@ -125,6 +125,10 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Clippy (core handoff fixtures)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: cargo clippy -p core-instance -p core-launcher --all-targets --features core-instance/recovery-test-support,core-launcher/handoff-test-support --locked -- -D warnings
       - name: Clippy (event-bus with otel-exporter)
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -293,6 +297,15 @@ jobs:
         run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" io "$EVORCH_TEST_INVENTORY_DIR"
       # nextest owns parallelism and the per-test hang watchdog. Every default
       # non-ignored test belongs to exactly one of the three suites.
+      # Opt-in process harness: Linux only, not part of the default inventory.
+      # The targeted second run fails if the fixture tests disappear entirely.
+      - name: Core exec handoff and recovery proof fixtures
+        if: matrix.group == 'support'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          cargo nextest run -p core-instance --features recovery-test-support --locked --no-tests fail
+          cargo nextest run -p core-launcher --test handoff --features handoff-test-support,core-instance/recovery-test-support --locked --no-tests fail
       - name: Remaining tests
         env:
           CARGO_TARGET_DIR: target/ci-shared

@@ -18,7 +18,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "process", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "process", "rt", "sync", "time"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 

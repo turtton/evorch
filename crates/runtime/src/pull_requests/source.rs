@@ -36,6 +36,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use sandbox::SpawnLedger;
+use sandbox::ledger::ChildKind;
+use sandbox::process::apply_launch_policy;
 use serde::Deserialize;
 use storage::pull_requests::{
     CheckConclusion, CheckKind, CheckStatus, DisplayTitle, PULL_REQUEST_BRANCH_MAX_CHARS,
@@ -153,8 +156,60 @@ pub trait ProcessRunner: Send + Sync {
 
 /// Runs real processes with `tokio`. The child has no stdin, and is killed when the future
 /// is dropped (a cancelled or timed-out fetch) or once its stdout passes the limit.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TokioProcessRunner;
+///
+/// Without a ledger that is all: the leader is killed on drop, as it always was. With a
+/// [`SpawnLedger`] the child is registered as a [`ChildKind::PullRequestSource`], runs under
+/// evorch's launch policy as a process group of its own, and the ledger's planned cleanup stops
+/// it with its descendants; the final spawn fence refuses a new one.
+#[derive(Debug, Clone, Default)]
+pub struct TokioProcessRunner {
+    ledger: Option<SpawnLedger>,
+}
+
+impl TokioProcessRunner {
+    /// A runner whose children the core owns through `ledger`.
+    #[must_use]
+    pub const fn with_ledger(ledger: SpawnLedger) -> Self {
+        Self {
+            ledger: Some(ledger),
+        }
+    }
+}
+
+fn spawn_error(error: &std::io::Error) -> ProcessError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        ProcessError::NotFound
+    } else {
+        ProcessError::Spawn(error.kind().to_string())
+    }
+}
+
+/// Reads both pipes to their limits. `kill` runs when stdout passes its limit.
+async fn read_pipes(
+    stdout: &mut tokio::process::ChildStdout,
+    stderr: &mut tokio::process::ChildStderr,
+    spec: &ProcessSpec,
+    mut kill: impl FnMut(),
+) -> Result<(Vec<u8>, bool, Vec<u8>, bool), ProcessError> {
+    let (out, err) = tokio::join!(
+        async {
+            let read = read_capped(stdout, spec.stdout_limit).await;
+            if matches!(read, Ok((_, true))) {
+                kill();
+            }
+            read
+        },
+        async {
+            let read = read_capped(stderr, spec.stderr_limit).await;
+            // What is over the limit is read and dropped, so the child never blocks.
+            let _ = tokio::io::copy(stderr, &mut tokio::io::sink()).await;
+            read
+        }
+    );
+    let (stdout, stdout_truncated) = out.map_err(|error| ProcessError::Io(error.to_string()))?;
+    let (stderr, stderr_truncated) = err.map_err(|error| ProcessError::Io(error.to_string()))?;
+    Ok((stdout, stdout_truncated, stderr, stderr_truncated))
+}
 
 #[async_trait]
 impl ProcessRunner for TokioProcessRunner {
@@ -172,40 +227,45 @@ impl ProcessRunner for TokioProcessRunner {
         for (name, value) in &spec.env_set {
             command.env(name, value);
         }
-        let mut child = command.spawn().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ProcessError::NotFound
-            } else {
-                ProcessError::Spawn(error.kind().to_string())
-            }
-        })?;
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let (out, err) = tokio::join!(
-            async {
-                let read = read_capped(&mut stdout, spec.stdout_limit).await;
-                if matches!(read, Ok((_, true))) {
+        let (exit_code, pipes) = match &self.ledger {
+            None => {
+                let mut child = command.spawn().map_err(|error| spawn_error(&error))?;
+                let mut stdout = child.stdout.take().expect("piped stdout");
+                let mut stderr = child.stderr.take().expect("piped stderr");
+                let pipes = read_pipes(&mut stdout, &mut stderr, &spec, || {
                     let _ = child.start_kill();
-                }
-                read
-            },
-            async {
-                let read = read_capped(&mut stderr, spec.stderr_limit).await;
-                // What is over the limit is read and dropped, so the child never blocks.
-                let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-                read
+                })
+                .await?;
+                let status = child
+                    .wait()
+                    .await
+                    .map_err(|error| ProcessError::Io(error.to_string()))?;
+                (status.code(), pipes)
             }
-        );
-        let (stdout, stdout_truncated) =
-            out.map_err(|error| ProcessError::Io(error.to_string()))?;
-        let (stderr, stderr_truncated) =
-            err.map_err(|error| ProcessError::Io(error.to_string()))?;
-        let status = child
-            .wait()
-            .await
-            .map_err(|error| ProcessError::Io(error.to_string()))?;
+            Some(ledger) => {
+                apply_launch_policy(command.as_std_mut());
+                let mut child = {
+                    // The admission holds the spawn fence open: use it without an await.
+                    let admission = ledger
+                        .admit()
+                        .map_err(|error| ProcessError::Spawn(error.to_string()))?;
+                    admission
+                        .spawn_group(ChildKind::PullRequestSource, None, &mut command)
+                        .map_err(|error| spawn_error(&error))?
+                };
+                let mut stdout = child.take_stdout().expect("piped stdout");
+                let mut stderr = child.take_stderr().expect("piped stderr");
+                let pipes = read_pipes(&mut stdout, &mut stderr, &spec, || child.kill()).await?;
+                let status = child
+                    .wait()
+                    .await
+                    .map_err(|error| ProcessError::Io(error.to_string()))?;
+                (status.code(), pipes)
+            }
+        };
+        let (stdout, stdout_truncated, stderr, stderr_truncated) = pipes;
         Ok(ProcessOutput {
-            exit_code: status.code(),
+            exit_code,
             stdout,
             stdout_truncated,
             stderr,
@@ -256,7 +316,7 @@ impl GhSource {
     /// `gh` from `PATH`, run as a real process.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_runner(Arc::new(TokioProcessRunner))
+        Self::with_runner(Arc::new(TokioProcessRunner::default()))
     }
 
     /// `gh` from `PATH`, run by `runner` (a fake in tests).

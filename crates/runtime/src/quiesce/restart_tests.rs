@@ -1,5 +1,6 @@
 use super::fixture::Fixture;
 use super::*;
+use crate::RuntimeError;
 use crate::runtime::HookPoint;
 use std::sync::atomic::Ordering;
 
@@ -72,7 +73,7 @@ async fn failed_checkpoint_invalidation_keeps_park_and_failure_sticky() {
 }
 
 #[tokio::test]
-async fn stop_after_capture_invalidates_capture_without_resuming_other_parked_turns() {
+async fn capturing_rejects_stop_without_receipt_but_failed_closed_allows_terminal_only() {
     let f = Fixture::new(0);
     let target = f.start();
     let other = f.start();
@@ -80,6 +81,17 @@ async fn stop_after_capture_invalidates_capture_without_resuming_other_parked_tu
     let fence = f.runtime.fence_dispatch_restart().await.unwrap();
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
     f.runtime.begin_recovery_capture(&fence).unwrap();
+    let before = f.intent(target);
+    assert!(matches!(
+        f.runtime.stop(target, crate::StopScope::SelfOnly),
+        Err(RuntimeError::RestartBusy)
+    ));
+    assert_eq!(f.intent(target), before);
+    assert!(f.runtime.shared.dispatch_tails.capture_valid());
+    f.runtime
+        .shared
+        .quiesce
+        .fail("independent post-capture failure");
     f.runtime.stop(target, crate::StopScope::SelfOnly).unwrap();
     f.runtime.wait(target).await.unwrap();
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);

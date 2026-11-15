@@ -407,13 +407,7 @@ impl RestartCoordinator {
 impl RestartStopHandler for RestartCoordinator {
     fn stop(&self, run: RunId, scope: StopScope) -> Result<(), RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
-        if matches!(state.phase, RestartPhase::Sealing | RestartPhase::Sealed) {
-            state.sealed = None;
-            self.0
-                .gate
-                .transition(state.generation, HostRestartPhase::Cancelling);
-            self.publish(&mut state, RestartPhase::Cancelling);
-        }
+        // Do not publish Cancelling before runtime terminal admission accepts.
         // Runtime prepares dispatch, delivers Stop, then durably resumes others.
         let result = self.0.runtime.stop(run, scope);
         if let Some(attempt) = state.attempt.clone() {

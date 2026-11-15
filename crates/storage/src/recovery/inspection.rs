@@ -59,7 +59,9 @@ impl Database {
              WHERE (g.committed=1 AND g.superseded=0) \
                 OR g.manifest_id IN (SELECT value FROM json_each(?1)) \
              UNION SELECT m.run_id FROM recovery_claim_members m JOIN recovery_claims c USING(claim_id) \
-             WHERE c.state!='released' ORDER BY 1",
+             WHERE c.state!='released'
+             UNION SELECT run_id FROM restart_expected_members
+             UNION SELECT root_run_id FROM restart_expected_members ORDER BY 1",
         )?;
         let ids = q
             .query_map([quarantined], |row| row.get::<_, String>(0))?

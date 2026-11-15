@@ -39,9 +39,10 @@ thiserror = { workspace = true }
 
 [features]
 # Test-only entry points for the in-process adapter's tests.
-test-support = []
+test-support = ["runtime/recovery-test-support"]
 
 [dev-dependencies]
+runtime = { path = "../runtime", features = ["recovery-test-support"] }
 test-socket-dir = { path = "../test-socket-dir" }
 storage = { path = "../storage", features = ["test-support"] }
 async-trait = { workspace = true }

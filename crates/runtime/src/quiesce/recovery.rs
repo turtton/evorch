@@ -164,6 +164,7 @@ pub enum RecoveryReason {
     MissingEdge,
     UnknownSchema,
     NoCommittedManifest,
+    PlannedAdoptionRequired,
     PendingClaim,
     IntentRevisionConflict,
     MissingSnapshot,

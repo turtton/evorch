@@ -124,8 +124,10 @@ fn process(
     model: Arc<WaitModel>,
 ) -> AgentRuntime {
     let bus = Arc::new(EventBus::new(256));
-    AgentRuntime::new(bus.clone(), Arc::new(tools::ToolExecutor::new(bus)), model)
-        .with_run_store(RunStore::open(config, storage.handle()).unwrap())
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(tools::ToolExecutor::new(bus)), model)
+        .with_run_store(RunStore::open(config, storage.handle()).unwrap());
+    runtime.install_planned_recovery_fixture().unwrap();
+    runtime
 }
 
 fn graph_evidence(

@@ -21,6 +21,8 @@ event-bus = { path = "../event-bus" }
 [features]
 # Read instrumentation for downstream regression tests; absent from product builds.
 test-support = []
+# Legacy manifest binding is a logical recovery fixture only.
+recovery-test-support = []
 # `Database::open_unchecked`: opens an old-format database without the conversion gate.
 # Only the tests of the historical migrations enable it (through the dev-dependency on
 # this crate below); no product crate does.

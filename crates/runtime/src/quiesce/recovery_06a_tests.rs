@@ -751,6 +751,7 @@ async fn stopped_child_with_interrupted_tool_does_not_block_its_report_recipient
         f.model.clone(),
     )
     .with_run_store(crate::RunStore::open(&f.config, f._storage.handle()).unwrap());
+    restored.install_planned_recovery_fixture().unwrap();
     let root = f._dir.path().join("ownership");
     let leases =
         storage::shared_with_wait(&f.config.db_path, &root, std::time::Duration::ZERO).unwrap();

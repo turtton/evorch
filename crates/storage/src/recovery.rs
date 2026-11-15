@@ -1,6 +1,7 @@
 //! Component-scoped graph receipts and durable, revision-fenced claims (PR 06a).
 //! Payloads are runtime-owned. No method here starts work or grants authority.
 mod activation;
+pub mod restart;
 pub use activation::*;
 mod prepared;
 pub use prepared::{RecoveryReleaseOutcome, ValidatedPreparedClaim};
@@ -81,6 +82,24 @@ pub struct RecoveryClaimRequest {
 }
 #[derive(Debug)]
 pub(crate) enum Write {
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    RestartWriteFault {
+        after_commit: bool,
+    },
+    RestartColdQuarantine {
+        id: String,
+        expected_revision: u64,
+    },
+    RestartInvalidation {
+        id: String,
+        expected_revision: u64,
+        reason: String,
+    },
+    Restart {
+        id: String,
+        expected_revision: Option<u64>,
+        mutation: restart::RestartMutation,
+    },
     Prepare(RecoveryManifestRecord),
     Commit(String),
     Claim(RecoveryClaimRequest),
@@ -99,6 +118,7 @@ pub(crate) enum Write {
 }
 #[derive(Debug)]
 pub(crate) enum Written {
+    Restart(Box<restart::RestartTransaction>),
     Saved,
     Claimed(RecoveryClaim),
     Validated(Box<prepared::PreparedClaimEvidence>),
@@ -269,14 +289,66 @@ fn load(conn: &Connection, id: &str) -> Result<RecoveryManifestRecord, RecoveryP
     })
 }
 
-/// Every graph write is FULL-durable and atomic. A failed write cannot leave a
-/// successful-looking commit/claim, or consume a checkpoint as a side effect.
+#[cfg(any(test, feature = "recovery-test-support"))]
+thread_local! {static RESTART_WRITE_FAULT: std::cell::Cell<Option<bool>> = const {std::cell::Cell::new(None)};}
+#[cfg(any(test, feature = "recovery-test-support"))]
+fn restart_write_fault(after_commit: bool) -> Result<(), StorageError> {
+    if RESTART_WRITE_FAULT.with(|f| {
+        if f.get() == Some(after_commit) {
+            f.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(invalid("injected restart write acknowledgement failure"));
+    }
+    Ok(())
+}
+/// Every graph write is FULL-durable and atomic; no partial claim or consumption.
 pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, StorageError> {
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    let restart_command = matches!(
+        &command,
+        Write::Restart { .. }
+            | Write::RestartInvalidation { .. }
+            | Write::RestartColdQuarantine { .. }
+    );
     let previous: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
     conn.pragma_update(None, "synchronous", "FULL")?;
     let result = (|| {
         let tx = conn.unchecked_transaction()?;
         let result = match command {
+            #[cfg(any(test, feature = "recovery-test-support"))]
+            Write::RestartWriteFault { after_commit } => {
+                RESTART_WRITE_FAULT.with(|f| f.set(Some(after_commit)));
+                Written::Saved
+            }
+            Write::RestartColdQuarantine {
+                id,
+                expected_revision,
+            } => {
+                restart::quarantine_cold(&tx, &id, expected_revision)?;
+                Written::Saved
+            }
+            Write::RestartInvalidation {
+                id,
+                expected_revision,
+                reason,
+            } => {
+                restart::invalidate(&tx, &id, expected_revision, &reason)?;
+                Written::Saved
+            }
+            Write::Restart {
+                id,
+                expected_revision,
+                mutation,
+            } => Written::Restart(Box::new(restart::mutate(
+                &tx,
+                &id,
+                expected_revision,
+                mutation,
+            )?)),
             Write::Prepare(record) => {
                 prepare(&tx, &record)?;
                 Written::Saved
@@ -306,7 +378,15 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
                 Written::Saved
             }
         };
+        #[cfg(any(test, feature = "recovery-test-support"))]
+        if restart_command {
+            restart_write_fault(false)?;
+        }
         tx.commit()?;
+        #[cfg(any(test, feature = "recovery-test-support"))]
+        if restart_command {
+            restart_write_fault(true)?;
+        }
         Ok(result)
     })();
     // Never turn a committed transaction into a retryable error.

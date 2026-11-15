@@ -1,6 +1,57 @@
 use super::{Command, StorageHandle};
 use crate::{StorageError, recovery::*};
 impl StorageHandle {
+    /// Per-writer deterministic fault for the next restart mutation only.
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub fn inject_restart_write_fault(&self, after_commit: bool) -> Result<(), StorageError> {
+        self.recovery_write(Write::RestartWriteFault { after_commit })
+            .map(|_| ())
+    }
+
+    /// Quarantine unreadable restart evidence without decoding a partial graph.
+    pub fn quarantine_cold_restart(
+        &self,
+        id: String,
+        expected_revision: u64,
+    ) -> Result<(), StorageError> {
+        self.recovery_write(Write::RestartColdQuarantine {
+            id,
+            expected_revision,
+        })
+        .map(|_| ())
+    }
+    /// Independent of manifest/member decoding and terminal intent persistence.
+    pub fn invalidate_restart(
+        &self,
+        id: String,
+        expected_revision: u64,
+        reason: String,
+    ) -> Result<(), StorageError> {
+        self.recovery_write(Write::RestartInvalidation {
+            id,
+            expected_revision,
+            reason,
+        })
+        .map(|_| ())
+    }
+
+    /// FULL-durable revision CAS. On an uncertain acknowledgement read back the
+    /// same restart ID; never issue another capture or reopen optimistically.
+    pub fn mutate_restart(
+        &self,
+        id: String,
+        expected_revision: Option<u64>,
+        mutation: restart::RestartMutation,
+    ) -> Result<restart::RestartTransaction, StorageError> {
+        match self.recovery_write(Write::Restart {
+            id,
+            expected_revision,
+            mutation,
+        })? {
+            Written::Restart(tx) => Ok(*tx),
+            _ => unreachable!("restart reply"),
+        }
+    }
     /// Validate process-local shared startup evidence without reserving a claim.
     pub fn validate_recovery_startup(
         &self,
