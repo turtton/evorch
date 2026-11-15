@@ -2214,9 +2214,7 @@ impl AgentRuntime {
                         return None;
                     }
                 }
-                let Some(shared) = weak.upgrade() else {
-                    return None;
-                };
+                let shared = weak.upgrade()?;
                 let runtime = AgentRuntime { shared };
                 let model = task
                     .recovery_model

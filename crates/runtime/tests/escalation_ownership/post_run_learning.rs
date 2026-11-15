@@ -28,6 +28,8 @@ enum ReviewMode {
 
 const FAVORITE_PREFIX: &str = "Keep the bounded completion check";
 
+type ExtractionRequest = (RunId, Vec<Message>, Vec<ToolSpec>);
+
 struct Model {
     mode: ReviewMode,
     config: StorageConfig,
@@ -35,7 +37,7 @@ struct Model {
     root_started: Notify,
     root_release: Notify,
     hold_learning: AtomicBool,
-    first_extractions: Mutex<Vec<(RunId, Vec<Message>, Vec<ToolSpec>)>>,
+    first_extractions: Mutex<Vec<ExtractionRequest>>,
     reviewer_started: Notify,
     reviewer_calls: AtomicUsize,
 }
