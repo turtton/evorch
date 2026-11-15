@@ -180,3 +180,45 @@ fn a_request_too_large_for_the_channel_is_refused_locally_and_the_connection_sur
     assert_eq!(client.closed(), None);
     drop(peer);
 }
+
+#[test]
+fn shutdown_returns_when_the_helper_acknowledges_and_then_keeps_the_channels_open() {
+    let (client, peer) = connect_to_raw_helper();
+    let stopping = std::thread::spawn(move || {
+        let reason = client.shutdown(std::time::Duration::from_millis(500));
+        (reason, client.closed())
+    });
+    let (request, _) = read_request_frame(&peer.control);
+    assert!(matches!(request.request, Request::Shutdown));
+    raw_response(
+        &peer.control,
+        GENERATION,
+        request.id.0,
+        Outcome::Ok { reply: Reply::Done },
+        &[],
+    );
+    // The helper now holds both channels and sends nothing more. `shutdown`
+    // must still return, by closing the connection itself. (On a machine so
+    // slow that the answer misses the deadline it ends as LocalClose instead;
+    // both are final and neither is a hang.)
+    let (reason, closed) = stopping.join().unwrap();
+    assert!(
+        matches!(
+            reason,
+            CloseReason::ShutdownTimedOut | CloseReason::LocalClose
+        ),
+        "{reason:?}"
+    );
+    assert_eq!(closed, Some(reason));
+    // The client cut the control channel: the helper reads the end of it.
+    let ended = read_message(
+        &peer.control,
+        renderer_ipc::codec::CONTROL_LIMITS,
+        Vec::new(),
+        NEVER,
+    );
+    assert!(matches!(
+        ended,
+        Err(renderer_ipc::codec::CodecError::Closed)
+    ));
+}

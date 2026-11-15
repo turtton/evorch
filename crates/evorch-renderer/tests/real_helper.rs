@@ -3,6 +3,11 @@
 //! CEF distribution, `evorch-cef-helper` built next to the renderer, and
 //! unprivileged user namespaces for CEF's sandbox (CI runs them with
 //! `--run-ignored all`).
+//!
+//! Linux only: the harness reaps the helper's process group with a child
+//! subreaper and checks it through `/proc`.
+
+#![cfg(target_os = "linux")]
 
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;

@@ -311,3 +311,62 @@ fn a_shutdown_while_a_frame_awaits_its_acknowledgement_is_still_a_clean_stop() {
     fake.shutdown_seen.recv().unwrap();
     assert_eq!(helper.join().unwrap(), ExitReason::ShutdownRequested);
 }
+
+#[test]
+fn a_frame_half_written_when_the_stop_comes_is_still_sent_whole() {
+    let (peer, fake, helper) = serve_raw(ServeConfig::default());
+    raw_hello(&peer);
+    let (open, body) = index_only();
+    raw_request(
+        &peer.control,
+        GENERATION,
+        2,
+        Request::OpenArtifact(open),
+        &body,
+    );
+    read_response_frame(&peer.control);
+    raw_request(
+        &peer.control,
+        GENERATION,
+        3,
+        Request::SetStreaming {
+            tab: TabId(1),
+            enabled: true,
+        },
+        &[],
+    );
+    read_response_frame(&peer.control);
+    // 1280x720 BGRA is far more than a socket buffer holds, and this peer does
+    // not read the frame channel yet: the sender is stuck inside the body.
+    raw_request(
+        &peer.control,
+        GENERATION,
+        4,
+        Request::Cdp {
+            tab: TabId(1),
+            method: "Runtime.evaluate".into(),
+            params: json!({"op": "large_frame", "width": 1280, "height": 720, "fill": 7}),
+            timeout_ms: 1000,
+        },
+        &[],
+    );
+    read_response_frame(&peer.control);
+    raw_request(&peer.control, GENERATION, 5, Request::Shutdown, &[]);
+    let (answer, _) = read_response_frame(&peer.control);
+    assert!(matches!(answer.outcome, Outcome::Ok { reply: Reply::Done }));
+    fake.shutdown_seen.recv().unwrap();
+    // Everything on the frame channel is whole messages up to the close.
+    let mut whole = 0;
+    loop {
+        match read_message(&peer.frames, FRAME_LIMITS, Vec::new(), NEVER) {
+            Ok(frame) => {
+                assert_eq!(frame.kind, Kind::Frame);
+                assert_eq!(frame.body.len(), 1280 * 720 * 4);
+                whole += 1;
+            }
+            Err(renderer_ipc::codec::CodecError::Closed) => break,
+            Err(other) => panic!("a frame was cut: {other} after {whole} whole"),
+        }
+    }
+    assert_eq!(helper.join().unwrap(), ExitReason::ShutdownRequested);
+}

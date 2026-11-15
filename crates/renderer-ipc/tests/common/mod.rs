@@ -114,6 +114,14 @@ impl Backend for Fake {
                 self.release.lock().unwrap().recv().unwrap();
                 Ok(json!({"gated": true}))
             }
+            "large_frame" => {
+                let width = params["width"].as_u64().unwrap() as u32;
+                let height = params["height"].as_u64().unwrap() as u32;
+                let fill = params["fill"].as_u64().unwrap() as u8;
+                let pixels = vec![fill; width as usize * height as usize * 4];
+                let published = self.ctx.frames.publish(tab, width, height, &pixels);
+                Ok(json!({"published": published}))
+            }
             "frame" => {
                 let fill = params["fill"].as_u64().unwrap() as u8;
                 let published = self.ctx.frames.publish(tab, 2, 2, &[fill; 16]);

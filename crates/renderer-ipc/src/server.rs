@@ -387,7 +387,12 @@ fn run<B: Backend>(
         shared.respond(id, Ok((Reply::Done, Vec::new())));
     }
     shared.queue.close();
-    let _ = shared.frames_abort.shutdown(Shutdown::Both);
+    // Only the read half: it wakes a sender that waits for an acknowledgement,
+    // while a frame that is half written is still sent whole. Cutting the write
+    // side here left the core with a truncated frame, which it could not tell
+    // from damage. A core that stopped reading holds this up for at most the
+    // write timeout.
+    let _ = shared.frames_abort.shutdown(Shutdown::Read);
     let _ = sender.join();
     (Some(backend), reason)
 }

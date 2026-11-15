@@ -321,9 +321,12 @@ pub struct Ack {
 /// Whole domains are deliberately not allowed: `DOM` alone holds
 /// `setFileInputFiles` and `getFileInfo`, which would let a caller read host
 /// files the artifact never contained, and `Input` holds `dispatchDragEvent`
-/// with file paths. Only reading the page (DOM, accessibility, layout, styles,
-/// script evaluation) and operating it with input events are listed. Anything
-/// that navigates, replaces the document, touches files, downloads, the
+/// with file paths. What is listed inspects the loaded page (DOM, accessibility,
+/// layout, styles, screenshots), runs script in it and drives it with input
+/// events. Script evaluation (`Runtime.*`) can also change the page, its DOM
+/// included; that stays inside the artifact, whose own scripts could do the
+/// same, and is why this list is not a read-only guarantee. Anything that
+/// navigates, replaces the document, touches host files, downloads, the
 /// network, storage, targets, emulation or the browser itself is absent, and so
 /// is anything a future DevTools version adds.
 pub const CDP_ALLOWED_METHODS: &[&str] = &[

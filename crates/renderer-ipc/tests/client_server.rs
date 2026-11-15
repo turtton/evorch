@@ -315,3 +315,26 @@ fn dropping_the_client_makes_the_helper_stop_by_itself() {
     let calls = connected.fake.calls.lock().unwrap().clone();
     assert_eq!(calls.last().map(String::as_str), Some("shutdown"));
 }
+
+#[test]
+fn a_stop_during_large_frames_ends_as_an_acknowledged_shutdown_every_time() {
+    // The frame is far larger than a socket buffer, so the stop regularly
+    // meets the sender inside the body.
+    for _ in 0..20 {
+        let c = connect_fake();
+        open_tab(&c.client);
+        c.client.set_streaming(TabId(1), true).unwrap();
+        let published = c
+            .client
+            .cdp(
+                TabId(1),
+                "Runtime.evaluate",
+                json!({"op": "large_frame", "width": 1280, "height": 720, "fill": 9}),
+                1000,
+            )
+            .unwrap();
+        assert_eq!(published["published"], true);
+        assert_eq!(c.client.shutdown(NEVER), CloseReason::ShutdownAcknowledged);
+        assert_eq!(c.helper.join().unwrap(), ExitReason::ShutdownRequested);
+    }
+}

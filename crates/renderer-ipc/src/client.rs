@@ -252,16 +252,18 @@ impl Inner {
             let spare = lock(&self.state).spare.take().unwrap_or_default();
             let message = match read_message(stream, FRAME_LIMITS, spare, self.config.io_timeout) {
                 Ok(message) => message,
-                // The helper closes this channel just before the control
-                // channel; the connection ends when the control channel does,
-                // so the reason (acknowledged shutdown or crash) is not lost
-                // to this race.
-                Err(CodecError::Closed) => return,
+                // The helper closes this channel around the time it closes the
+                // control channel (an ordered stop, a crash, a kill); the
+                // connection ends when the control channel does, so the reason
+                // (acknowledged shutdown or crash) is not lost to this race. A
+                // close inside a frame is the same event, only mistimed. Damage
+                // that is not a close still ends the connection here.
+                Err(CodecError::Closed | CodecError::Truncated) => return,
                 Err(error) => return self.peer_ended(error),
             };
             match self.on_frame(stream, message) {
                 Ok(()) => {}
-                Err(CodecError::Closed) => return,
+                Err(CodecError::Closed | CodecError::Truncated) => return,
                 Err(error) => return self.peer_ended(error),
             }
         }
@@ -758,6 +760,29 @@ mod tests {
             CloseReason::ShutdownTimedOut
         );
         assert_eq!(client.closed(), Some(CloseReason::ShutdownTimedOut));
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn a_frame_cut_short_by_a_close_leaves_the_decision_to_the_control_channel() {
+        use std::io::Write;
+        let (client, peer) = client_with_a_silent_peer();
+        // A frame header announcing a body that never fully arrives, then the
+        // close an ordered stop or a crash brings: the same event as a clean
+        // close between frames, only mistimed.
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let mut header = b"ERIP".to_vec();
+        header.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        header.extend_from_slice(&[Kind::Frame as u8, 0]);
+        header.extend_from_slice(&2u32.to_le_bytes());
+        header.extend_from_slice(&64u32.to_le_bytes());
+        writer.write_all(&header).unwrap();
+        writer.write_all(b"{}").unwrap();
+        writer.write_all(&[0; 10]).unwrap();
+        drop(writer);
+        client.inner.frame_loop(&reader);
+        assert_eq!(client.closed(), None, "only the control channel decides");
+        client.inner.close(CloseReason::PeerClosed);
         peer.join().unwrap();
     }
 
