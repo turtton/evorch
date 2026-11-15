@@ -13,9 +13,18 @@
 //!   crate of that name inside that scope only: `mod storage {} use storage::X;`
 //!   is local, and a child module's `storage` does not hide the crate outside it.
 //!   A leading `::` always means the crate.
+//! * A generic parameter hides a crate of the same name in its item (`fn f<storage: Tr>`).
 //! * The tokens of a macro invocation or definition are scanned for paths that
-//!   start at a crate. A macro metavariable (`$storage::x`) and `$crate::` are not
-//!   crate names, and what a macro expands to is out of scope.
+//!   start at a crate, without expanding the macro. The scan is conservative: a
+//!   token sequence that looks like a path from a crate counts even when the macro
+//!   uses it as something else. A macro metavariable (`$storage::x`), `$crate::` and
+//!   the arguments of text macros (`stringify!`, `concat!`, `include_str!`, ...) are
+//!   not crate names, and what a macro expands to is out of scope.
+//! * Only the files that are given are read. A module in a file that is not a `.rs`
+//!   file (`#[path = "x.txt"] mod m;`, `include!`) is not followed. The command line
+//!   reads every `.rs` file under the root, so a module file of the tree is covered.
+//! * The check finds references written by mistake. It does not try to catch a
+//!   reference that is hidden on purpose.
 //!
 //! One reference is counted for each root crate a `use` declaration names, and one
 //! for each other path (two or more segments) that starts at an internal crate.
@@ -25,7 +34,11 @@ use std::collections::{BTreeSet, HashMap};
 use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use syn::ext::IdentExt;
 use syn::visit::{self, Visit};
-use syn::{Block, File, Item, ItemExternCrate, ItemMod, ItemUse, MetaList, Path, Stmt, UseTree};
+use syn::{
+    Block, File, GenericParam, Generics, ImplItemFn, ImplItemType, Item, ItemEnum, ItemExternCrate,
+    ItemFn, ItemImpl, ItemMod, ItemStruct, ItemTrait, ItemType, ItemUnion, ItemUse, MetaList, Path,
+    Stmt, TraitItemFn, TraitItemType, UseTree,
+};
 
 /// The crates the core-client desktop must not name. `browser` is left out: it is
 /// also the name of a feature module there.
@@ -79,7 +92,65 @@ enum Binding {
     Crate(String),
 }
 
-type Scope = HashMap<String, Binding>;
+/// The names one module, block or generic parameter list defines.
+#[derive(Default)]
+struct Scope {
+    /// Items, extern crates and generic parameters.
+    defs: HashMap<String, Binding>,
+    /// Names a `use` declaration imports, with the address of that declaration:
+    /// the roots of a `use` are not resolved through the names it introduces
+    /// itself (`use tools::tools;`, `use storage::Database as storage;`).
+    imports: Vec<(usize, String, Binding)>,
+}
+
+impl Scope {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn define(&mut self, name: String, binding: Binding) {
+        self.defs.insert(name, binding);
+    }
+
+    fn import(&mut self, owner: usize, name: String, binding: Binding) {
+        self.imports.push((owner, name, binding));
+    }
+
+    fn get(&self, name: &str, exclude: Option<usize>) -> Option<&Binding> {
+        self.defs.get(name).or_else(|| {
+            self.imports
+                .iter()
+                .rev()
+                .find(|(owner, bound, _)| bound == name && Some(*owner) != exclude)
+                .map(|(_, _, binding)| binding)
+        })
+    }
+}
+
+fn address(item: &ItemUse) -> usize {
+    std::ptr::from_ref(item).addr()
+}
+
+/// Keywords that start a path in the token stream of a macro: what follows them
+/// is not the continuation of a path. `crate`, `self`, `super` and `Self` are
+/// path segments and are not listed.
+const KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern", "fn",
+    "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+    "return", "static", "struct", "trait", "type", "unsafe", "use", "where", "while", "yield",
+];
+
+/// Macros whose arguments are text, not paths.
+const TEXT_MACROS: &[&str] = &[
+    "stringify",
+    "concat",
+    "include_str",
+    "include_bytes",
+    "include",
+    "env",
+    "option_env",
+    "compile_error",
+];
 
 struct Checker<'a> {
     internal: &'a BTreeSet<String>,
@@ -159,20 +230,27 @@ fn leaves(item: &ItemUse) -> Vec<Leaf> {
 impl Checker<'_> {
     /// The internal crate a path starting with `name` names, if any.
     fn resolve(&self, name: &str, absolute: bool) -> Option<String> {
-        self.resolve_in(&Scope::new(), name, absolute)
+        self.resolve_in(None, name, absolute, None)
     }
 
-    /// Like `resolve`, with `inner` as a scope that is still being built and is
-    /// consulted before the stack.
-    fn resolve_in(&self, inner: &Scope, name: &str, absolute: bool) -> Option<String> {
+    /// `inner` is a scope that is still being built and is consulted before the
+    /// stack. The names the `use` declaration at `exclude` introduces are not
+    /// consulted: its own roots are resolved without them.
+    fn resolve_in(
+        &self,
+        inner: Option<&Scope>,
+        name: &str,
+        absolute: bool,
+        exclude: Option<usize>,
+    ) -> Option<String> {
         if absolute {
             return self.internal.contains(name).then(|| name.to_owned());
         }
         if matches!(name, "crate" | "self" | "super" | "Self") {
             return None;
         }
-        for scope in std::iter::once(inner).chain(self.stack.iter().rev()) {
-            match scope.get(name) {
+        for scope in inner.into_iter().chain(self.stack.iter().rev()) {
+            match scope.get(name, exclude) {
                 Some(Binding::Local) => return None,
                 Some(Binding::Crate(root)) => return Some(root.clone()),
                 None => {}
@@ -192,27 +270,13 @@ impl Checker<'_> {
         let mut scope = Scope::new();
         for item in &items {
             match item {
-                Item::Mod(m) => {
-                    scope.insert(name_of(&m.ident), Binding::Local);
-                }
-                Item::Struct(i) => {
-                    scope.insert(name_of(&i.ident), Binding::Local);
-                }
-                Item::Enum(i) => {
-                    scope.insert(name_of(&i.ident), Binding::Local);
-                }
-                Item::Union(i) => {
-                    scope.insert(name_of(&i.ident), Binding::Local);
-                }
-                Item::Trait(i) => {
-                    scope.insert(name_of(&i.ident), Binding::Local);
-                }
-                Item::TraitAlias(i) => {
-                    scope.insert(name_of(&i.ident), Binding::Local);
-                }
-                Item::Type(i) => {
-                    scope.insert(name_of(&i.ident), Binding::Local);
-                }
+                Item::Mod(m) => scope.define(name_of(&m.ident), Binding::Local),
+                Item::Struct(i) => scope.define(name_of(&i.ident), Binding::Local),
+                Item::Enum(i) => scope.define(name_of(&i.ident), Binding::Local),
+                Item::Union(i) => scope.define(name_of(&i.ident), Binding::Local),
+                Item::Trait(i) => scope.define(name_of(&i.ident), Binding::Local),
+                Item::TraitAlias(i) => scope.define(name_of(&i.ident), Binding::Local),
+                Item::Type(i) => scope.define(name_of(&i.ident), Binding::Local),
                 Item::ExternCrate(c) => {
                     let name = name_of(&c.ident);
                     let bound = c.rename.as_ref().map_or(name.clone(), |(_, r)| name_of(r));
@@ -221,7 +285,7 @@ impl Checker<'_> {
                     } else {
                         Binding::Local
                     };
-                    scope.insert(bound, binding);
+                    scope.define(bound, binding);
                 }
                 _ => {}
             }
@@ -236,19 +300,36 @@ impl Checker<'_> {
                     continue;
                 }
                 let absolute = item_use.leading_colon.is_some();
+                let owner = address(item_use);
                 let root = leaf
                     .path
                     .first()
-                    .and_then(|first| self.resolve_in(&scope, first, absolute));
+                    .and_then(|first| self.resolve_in(Some(&scope), first, absolute, Some(owner)));
                 let binding = match root {
                     // `use runtime as rt;` imports the crate itself.
                     Some(root) if leaf.path.len() == 1 => Binding::Crate(root),
                     _ => Binding::Local,
                 };
-                scope.insert(bound.clone(), binding);
+                scope.import(owner, bound.clone(), binding);
             }
         }
         scope
+    }
+
+    /// Visits with the type and const parameters of `generics` in scope: a
+    /// parameter named like a crate hides it.
+    fn with_generics(&mut self, generics: &Generics, visit: impl FnOnce(&mut Self)) {
+        let mut scope = Scope::new();
+        for param in &generics.params {
+            match param {
+                GenericParam::Type(p) => scope.define(name_of(&p.ident), Binding::Local),
+                GenericParam::Const(p) => scope.define(name_of(&p.ident), Binding::Local),
+                GenericParam::Lifetime(_) => {}
+            }
+        }
+        self.stack.push(scope);
+        visit(self);
+        self.stack.pop();
     }
 
     /// Paths written in the tokens of a macro invocation or definition.
@@ -265,11 +346,20 @@ impl Checker<'_> {
             matches!(trees.get(i), Some(TokenTree::Punct(p)) if p.as_char() == ':' && p.spacing() == Spacing::Joint)
                 && punct(i + 1, ':')
         };
+        let mut skip: Option<usize> = None;
         for (i, tree) in trees.iter().enumerate() {
             match tree {
+                TokenTree::Group(_) if skip == Some(i) => {}
                 TokenTree::Group(group) => {
                     let inner: Vec<TokenTree> = group.stream().into_iter().collect();
                     self.scan_trees(&inner);
+                }
+                TokenTree::Ident(ident)
+                    if TEXT_MACROS.contains(&ident.to_string().as_str())
+                        && punct(i + 1, '!')
+                        && matches!(trees.get(i + 2), Some(TokenTree::Group(_))) =>
+                {
+                    skip = Some(i + 2);
                 }
                 TokenTree::Ident(ident) if double_colon(i + 1) => {
                     let name = ident.unraw().to_string();
@@ -282,13 +372,20 @@ impl Checker<'_> {
                             i >= 4 && punct(i - 3, '>') && (punct(i - 4, '-') || punct(i - 4, '='));
                         let continues = !arrow
                             && match before {
-                                Some(TokenTree::Ident(_)) => true,
+                                Some(TokenTree::Ident(id)) => {
+                                    !KEYWORDS.contains(&id.to_string().as_str())
+                                }
                                 Some(TokenTree::Punct(p)) => p.as_char() == '>',
                                 Some(TokenTree::Group(g)) => {
-                                    matches!(
-                                        g.delimiter(),
-                                        Delimiter::Parenthesis | Delimiter::Bracket
-                                    )
+                                    // `pub(crate) ::name` starts a path.
+                                    let after_pub = i.checked_sub(4).is_some_and(|j| {
+                                        matches!(trees.get(j), Some(TokenTree::Ident(id)) if id == "pub")
+                                    });
+                                    !after_pub
+                                        && matches!(
+                                            g.delimiter(),
+                                            Delimiter::Parenthesis | Delimiter::Bracket
+                                        )
                                 }
                                 _ => false,
                             };
@@ -346,7 +443,7 @@ impl<'ast> Visit<'ast> for Checker<'_> {
         let mut roots = BTreeSet::new();
         for leaf in leaves(item) {
             if let Some(first) = leaf.path.first()
-                && let Some(root) = self.resolve(first, absolute)
+                && let Some(root) = self.resolve_in(None, first, absolute, Some(address(item)))
             {
                 roots.insert(root);
             }
@@ -377,7 +474,66 @@ impl<'ast> Visit<'ast> for Checker<'_> {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         self.visit_path(&mac.path);
-        self.scan(mac.tokens.clone());
+        let text = mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| TEXT_MACROS.contains(&name_of(&segment.ident).as_str()));
+        if !text {
+            self.scan(mac.tokens.clone());
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast ItemFn) {
+        self.with_generics(&item.sig.generics, |this| visit::visit_item_fn(this, item));
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast ImplItemFn) {
+        self.with_generics(&item.sig.generics, |this| {
+            visit::visit_impl_item_fn(this, item)
+        });
+    }
+
+    fn visit_trait_item_fn(&mut self, item: &'ast TraitItemFn) {
+        self.with_generics(&item.sig.generics, |this| {
+            visit::visit_trait_item_fn(this, item)
+        });
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
+        self.with_generics(&item.generics, |this| visit::visit_item_struct(this, item));
+    }
+
+    fn visit_item_enum(&mut self, item: &'ast ItemEnum) {
+        self.with_generics(&item.generics, |this| visit::visit_item_enum(this, item));
+    }
+
+    fn visit_item_union(&mut self, item: &'ast ItemUnion) {
+        self.with_generics(&item.generics, |this| visit::visit_item_union(this, item));
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
+        self.with_generics(&item.generics, |this| visit::visit_item_trait(this, item));
+    }
+
+    fn visit_item_type(&mut self, item: &'ast ItemType) {
+        self.with_generics(&item.generics, |this| visit::visit_item_type(this, item));
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
+        self.with_generics(&item.generics, |this| visit::visit_item_impl(this, item));
+    }
+
+    fn visit_impl_item_type(&mut self, item: &'ast ImplItemType) {
+        self.with_generics(&item.generics, |this| {
+            visit::visit_impl_item_type(this, item)
+        });
+    }
+
+    fn visit_trait_item_type(&mut self, item: &'ast TraitItemType) {
+        self.with_generics(&item.generics, |this| {
+            visit::visit_trait_item_type(this, item)
+        });
     }
 
     fn visit_meta_list(&mut self, list: &'ast MetaList) {

@@ -72,6 +72,35 @@ fn every_spelling_of_a_crate_name_is_a_reference() {
             "a crate named in a derive list",
             "#[derive(Debug, storage::Marker)] struct S;",
         ),
+        (
+            "an alias named like the crate it imports",
+            "use storage::Database as storage;",
+        ),
+        ("a module of the crate named like it", "use tools::tools;"),
+        (
+            "a second leaf after an alias of the same name",
+            "use {storage::A as storage, storage::B};",
+        ),
+        (
+            "an absolute use in a macro definition",
+            "macro_rules! m { () => { use ::storage::Database as Db; } }",
+        ),
+        (
+            "an absolute path after return in a macro definition",
+            "macro_rules! m { () => { return ::storage::Database } }",
+        ),
+        (
+            "an absolute path after return in a call",
+            "fn f() { m!(return ::storage::Database); }",
+        ),
+        (
+            "an absolute path after pub(crate) in a macro",
+            "macro_rules! m { () => { pub(crate) ::storage::X } }",
+        ),
+        (
+            "a path after a text macro in the same call",
+            "fn f() { m!(stringify!(a), storage::Database); }",
+        ),
     ];
     for (what, source) in cases {
         assert!(count(source) > 0, "{what} must count: {source}");
@@ -155,6 +184,30 @@ fn what_only_looks_like_a_crate_name_is_not_a_reference() {
             "a path that continues",
             "fn f() { tokio::runtime::Handle::current(); }",
         ),
+        (
+            "stringify",
+            "fn f() { let _ = stringify!(storage::Database); }",
+        ),
+        (
+            "stringify inside another macro",
+            "fn f() { println!(\"{}\", stringify!(::storage::Database)); }",
+        ),
+        (
+            "concat",
+            "const A: &str = concat!(\"x\", stringify!(runtime::X));",
+        ),
+        (
+            "a generic parameter named like a crate",
+            "fn f<storage: Tr>(_: storage::Assoc) {}",
+        ),
+        (
+            "a const generic named like a crate",
+            "struct S<const config: usize>([u8; config::N]);",
+        ),
+        (
+            "a generic parameter of an impl",
+            "impl<runtime: Tr> S<runtime> { fn f(_: runtime::X) {} }",
+        ),
     ];
     for (what, source) in cases {
         assert_eq!(count(source), 0, "{what} must not count: {source}");
@@ -208,4 +261,42 @@ fn a_name_the_scope_defines_hides_the_crate_there_only() {
 fn an_unreadable_file_is_an_error_not_a_clean_file() {
     let internal: BTreeSet<String> = INTERNAL_CRATES.iter().map(|s| (*s).to_owned()).collect();
     assert!(references("fn f( {", &internal).is_err());
+}
+
+#[test]
+fn a_generic_parameter_hides_the_crate_in_its_item_only() {
+    assert_eq!(
+        count("fn f<storage: Tr>(_: storage::Assoc) {}\nfn g(_: storage::Database) {}"),
+        1
+    );
+}
+
+#[test]
+fn an_import_does_not_hide_its_own_source() {
+    assert_eq!(count("use tools::tools;"), 1);
+    assert_eq!(count("use storage::Database as storage;"), 1);
+    assert_eq!(count("use {storage::A as storage, storage::B};"), 1);
+    // Another declaration's import of that name still shadows the crate.
+    assert_eq!(count("use std as storage;\nuse storage::fmt;"), 0);
+}
+
+#[test]
+fn a_keyword_starts_the_path_after_it() {
+    assert_eq!(
+        count("macro_rules! m { () => { use ::storage::Database as Db; } }"),
+        1
+    );
+    assert_eq!(
+        count("macro_rules! m { () => { return ::storage::Database } }"),
+        1
+    );
+    // A path segment before `::` still continues the path.
+    assert_eq!(
+        count("macro_rules! m { () => { crate::x::storage::y() } }"),
+        0
+    );
+    assert_eq!(
+        count("macro_rules! m { () => { std::mem::swap(a, b); self::storage::y() } }"),
+        0
+    );
 }
