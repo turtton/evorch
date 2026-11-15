@@ -240,18 +240,29 @@ mod linux {
             let pid = pid.trim().parse::<i32>().unwrap();
             child.kill().unwrap();
             child.wait().unwrap();
+            // The supervisor is a child of the killed host, which has a
+            // waiter thread blocked in waitpid on it. While the host dies that
+            // thread may still reap the supervisor's exit before the kernel
+            // reparents it to this subreaper, so either side can be the reaper.
+            // Both mean "stopped and reaped"; ECHILD must then leave no process
+            // behind, a zombie or live supervisor would still answer kill(0).
             let mut status = 0;
             loop {
                 let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
                 if rc == pid {
+                    assert!(libc::WIFEXITED(status));
                     break;
                 }
-                assert_eq!(
-                    io::Error::last_os_error().kind(),
-                    io::ErrorKind::Interrupted
-                );
+                match io::Error::last_os_error().raw_os_error() {
+                    Some(libc::EINTR) => {}
+                    Some(libc::ECHILD) => {
+                        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+                        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+                        break;
+                    }
+                    other => panic!("waitpid({pid}) failed: {other:?}"),
+                }
             }
-            assert!(libc::WIFEXITED(status));
             say("parent-death-cleaned");
             return;
         }
