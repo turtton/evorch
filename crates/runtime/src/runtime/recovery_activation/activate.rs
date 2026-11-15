@@ -47,6 +47,7 @@ impl AgentRuntime {
         models: RecoveryModels,
     ) -> Result<Vec<RunId>, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
+        self.require_planned_manifest(&paused.claim.manifest_id)?;
         if !Weak::ptr_eq(&paused.runtime, &Arc::downgrade(&self.shared)) {
             return Err(error("foreign paused recovery component"));
         }

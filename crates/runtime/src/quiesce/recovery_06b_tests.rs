@@ -31,14 +31,18 @@ async fn saved(f: &Fixture) -> RunId {
         .unwrap();
     run
 }
+// Logical fixture: this handle retains the SAME adopted successor epoch.
+// Physical cold launches never install the proof and are covered separately.
 pub(super) fn new_process(f: &Fixture) -> AgentRuntime {
     let bus = Arc::new(EventBus::new(256));
-    AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         bus.clone(),
         Arc::new(tools::ToolExecutor::new(bus)),
         f.model.clone(),
     )
-    .with_run_store(RunStore::open(&f.config, f._storage.handle()).unwrap())
+    .with_run_store(RunStore::open(&f.config, f._storage.handle()).unwrap());
+    runtime.install_planned_recovery_fixture().unwrap();
+    runtime
 }
 pub(super) fn prepare(f: &Fixture, runtime: &AgentRuntime) -> crate::PausedRecoveryComponent {
     let root = f._dir.path().join("ownership");

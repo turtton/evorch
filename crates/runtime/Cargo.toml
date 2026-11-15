@@ -8,6 +8,7 @@ publish = false
 name = "runtime"
 
 [dependencies]
+core-instance = { path = "../core-instance" }
 agents = { path = "../agents" }
 apply-patch = { path = "../apply-patch" }
 async-trait = { workspace = true }
@@ -49,10 +50,11 @@ rustix = { version = "1", features = ["fs"] }
 socket2 = "0.6"
 
 [dev-dependencies]
+core-instance = { path = "../core-instance", features = ["recovery-test-support"] }
 test-socket-dir = { path = "../test-socket-dir" }
 recorder = { path = "../recorder" }
 # The conversion tests take a database the runtime wrote back to version 39 and convert it.
-storage = { path = "../storage", features = ["unchecked-open"] }
+storage = { path = "../storage", features = ["unchecked-open", "recovery-test-support"] }
 # S8 copies only the approved backup, using SQLite's online backup API.
 rusqlite = { workspace = true, features = ["backup"] }
 test-support = { path = "../test-support" }
@@ -68,4 +70,4 @@ tracing-subscriber = { workspace = true }
 
 [features]
 # Per-runtime, explicit IPC probes for cross-process crash tests only.
-recovery-test-support = []
+recovery-test-support = ["core-instance/recovery-test-support", "storage/recovery-test-support"]

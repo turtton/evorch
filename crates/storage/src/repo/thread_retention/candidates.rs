@@ -194,6 +194,10 @@ pub(super) fn family_blocked(
     if management_projection_pending(conn)? {
         return Ok(Some(BlockReason::Exploring));
     }
+    let restart: bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM retention_staging s JOIN restart_expected_members m ON m.run_id=s.id JOIN restart_transactions t USING(restart_id) WHERE s.family_key=?1 AND s.kind='run' AND t.phase!='completed')",[family_key],|r|r.get(0))?;
+    if restart {
+        return Ok(Some(BlockReason::Owner("restart evidence retained".into())));
+    }
     let prepared: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM retention_staging s \
          JOIN recovery_claim_members m ON m.run_id=s.id \

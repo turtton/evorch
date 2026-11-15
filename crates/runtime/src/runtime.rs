@@ -19,7 +19,10 @@ mod completion_relay;
 mod held_messages;
 mod host_prompt;
 mod recovery_activation;
+#[cfg(any(test, feature = "recovery-test-support"))]
+mod recovery_fixture;
 mod recovery_graph;
+mod restart_transaction;
 pub(crate) use host_prompt::HostPrompt;
 #[cfg(feature = "recovery-test-support")]
 pub use recovery_activation::RecoveryActivationBoundary;
@@ -27,6 +30,7 @@ pub use recovery_activation::{
     CurrentRecoveryAuthority, PausedRecoveryComponent, RecoveryClaimHandle, RecoveryCleanupHandle,
     RecoveryCleanupState, RecoveryModels,
 };
+pub use restart_transaction::{RestartAdoptionError, RestartCaptureSession};
 mod nested_orchestrator;
 mod output;
 mod project;
@@ -209,6 +213,8 @@ pub(crate) struct Shared {
     /// Read-only directories per thread id (ADR 0037), read when a run builds its sandbox.
     pub(crate) thread_read_dirs: Mutex<HashMap<String, Vec<PathBuf>>>,
     next_message_id: AtomicU64,
+    active_restart_capture: OnceLock<String>,
+    planned_adoption: OnceLock<core_instance::InheritedHandoffProof>,
     recovery_message_ids_safe: AtomicBool,
     #[cfg(feature = "recovery-test-support")]
     recovery_probe: OnceLock<recovery_activation::RecoveryActivationProbe>,
@@ -863,6 +869,8 @@ impl AgentRuntime {
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
+                active_restart_capture: OnceLock::new(),
+                planned_adoption: OnceLock::new(),
                 recovery_message_ids_safe: AtomicBool::new(true),
                 #[cfg(feature = "recovery-test-support")]
                 recovery_probe: OnceLock::new(),
@@ -1246,6 +1254,8 @@ impl AgentRuntime {
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
+                active_restart_capture: OnceLock::new(),
+                planned_adoption: OnceLock::new(),
                 recovery_message_ids_safe: AtomicBool::new(true),
                 #[cfg(feature = "recovery-test-support")]
                 recovery_probe: OnceLock::new(),

@@ -6,7 +6,12 @@
 
 #![allow(unused_imports)]
 
+use ::runtime;
 #[path = "../../shared-test-support/mod.rs"]
 mod shared;
 
 pub use shared::*;
+#[allow(dead_code)]
+#[path = "../../shared-test-support/restart_fixture.rs"]
+mod restart_fixture;
+pub use restart_fixture::{fixture_restart_metadata, inherited_fixture_proof};

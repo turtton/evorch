@@ -10,6 +10,7 @@ pub use blockers::{RestartBlocker, RestartBlockerKind};
 mod deferred;
 #[cfg(test)]
 mod fixture;
+mod host_restart;
 #[cfg(test)]
 mod recovery_06a_tests;
 #[cfg(test)]
@@ -17,6 +18,9 @@ mod recovery_06b_tests;
 #[cfg(test)]
 mod recovery_cache_tests;
 mod restart;
+pub use host_restart::{
+    CommandAccess, HostCommandPermit, HostRestartGate, HostRestartPhase, SealedRestart,
+};
 pub(crate) mod runtime;
 mod safe_point;
 pub use restart::{RestartAttempt, RestartAttemptState, ResumeReceipt};
@@ -26,6 +30,8 @@ mod accepted_resume_tests;
 mod queued_tests;
 #[cfg(test)]
 mod restart_tests;
+#[cfg(test)]
+mod restart_transaction_tests;
 #[cfg(test)]
 mod tests;
 
@@ -51,6 +57,7 @@ struct Inner {
     phase: QuiesceState,
     // Storage health is sticky, but only an explicit request gates normal turns.
     requested: bool,
+    planned: bool,
     generation: u64,
     resumed_through: u64,
     cancellation_finished_through: u64,
@@ -511,6 +518,9 @@ impl Coordinator {
     }
 
     pub(crate) fn begin(&self) -> Result<u64, String> {
+        self.begin_mode(false)
+    }
+    pub(crate) fn begin_mode(&self, planned: bool) -> Result<u64, String> {
         // Manual restoration is synchronous. Finish or reject it before the
         // attempt can close admission, rather than retaining it as queued work.
         let _manual = self
@@ -532,6 +542,7 @@ impl Coordinator {
             inner.acks.clear();
             inner.blockers.clear();
             inner.requested = true;
+            inner.planned = planned;
             inner.phase = QuiesceState::WaitingForSafePoints;
             self.changed();
         }

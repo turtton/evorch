@@ -199,6 +199,9 @@ pub(crate) fn spawn_delegate(
     runtime: &AgentRuntime,
     input: serde_json::Value,
 ) -> Result<crate::RunId, DispatchResult> {
+    let _external = runtime
+        .external_admission_guard()
+        .map_err(|e| error(e.to_string()))?;
     if input.get("role").is_some() || input.get("category").is_some() {
         return Err(error(misplaced_target_error(&input)));
     }

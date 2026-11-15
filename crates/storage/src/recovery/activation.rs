@@ -197,6 +197,12 @@ pub(super) fn activate(
     if changed != 1 {
         return Err(invalid("activation claim CAS conflict"));
     }
+    super::restart::claim_disposition(
+        conn,
+        &claim,
+        super::restart::RestartDisposition::Activated,
+        None,
+    )?;
     let changed = conn.execute("UPDATE recovery_manifests SET superseded=1 WHERE manifest_id=?1 AND committed=1 AND superseded=0", [&claim.manifest_id])?;
     if changed != 1 {
         return Err(invalid("activation manifest CAS conflict"));
@@ -218,5 +224,12 @@ pub(super) fn release(
     if changed != 1 {
         return Err(invalid("recovery claim is not prepared"));
     }
-    super::claim(conn, id)
+    let claim = super::claim(conn, id)?;
+    super::restart::claim_disposition(
+        conn,
+        &claim,
+        super::restart::RestartDisposition::Released,
+        Some(reason),
+    )?;
+    Ok(claim)
 }

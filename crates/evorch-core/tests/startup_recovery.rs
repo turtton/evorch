@@ -252,6 +252,9 @@ impl workbench_host::bootstrap::core_startup::CoreStartupHook for ProbeHook {
         services: &'a mut workbench_host::bootstrap::services::BackgroundServices,
     ) -> workbench_host::bootstrap::core_startup::CoreStartupFuture<'a> {
         use runtime::RecoveryActivationBoundary as Boundary;
+        if !self.0.starts_with("cold") && self.0 != "observe" {
+            inputs.runtime.install_planned_recovery_fixture().unwrap();
+        }
         let target = match self.0.as_str() {
             "prepared" => Some(Boundary::Prepared),
             "before_ack" => Some(Boundary::BeforeFullAck),
@@ -585,7 +588,7 @@ async fn startup_subprocess_worker() {
             assert_eq!(db.recovery_claims().unwrap()[0], claim);
             return;
         }
-        if mode == "observe" {
+        if mode == "observe" || mode.starts_with("cold") {
             host.shutdown().await.unwrap();
             return;
         }
@@ -755,7 +758,7 @@ context_window_tokens = 1000000
     dir
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_process_cache_preserves_wire_prefix_after_capture_and_kill() {
+async fn startup_process_cache_preserves_wire_prefix_after_planned_adoption() {
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
         ScriptedResponse::text_stream("before", "mock-model", ["Waiting for the user"]),
         ScriptedResponse::text_stream("after", "mock-model", ["Restored in another process"]),
@@ -775,6 +778,40 @@ async fn startup_process_cache_preserves_wire_prefix_after_capture_and_kill() {
     assert_eq!(restored["run"], captured["run"]);
     assert!(restored["cache_read_tokens"].as_u64().unwrap() > 0);
     assert!(second.child.wait().await.unwrap().success());
+    // Ready is separate from activation; 4b will publish it after endpoint readiness.
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("evorch-events.db"),
+        ..Default::default()
+    };
+    let transaction = storage::Database::open(&config)
+        .unwrap()
+        .restart_transactions()
+        .unwrap()
+        .remove(0);
+    let writer = storage::Storage::open(config).unwrap();
+    let completed = writer
+        .handle()
+        .mutate_restart(
+            transaction.metadata.restart_id,
+            Some(transaction.revision),
+            storage::recovery::restart::RestartMutation::Ready { at_ms: 123 },
+        )
+        .unwrap();
+    assert_eq!(
+        completed.phase,
+        storage::recovery::restart::RestartPhase::Completed
+    );
+    drop(writer);
+    let mut cold = Process::spawn(&dir, "cold_observe");
+    let observed = cold.checkpoint("bootstrapped").await;
+    assert!(
+        observed["report"]["components"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "Completed is not a repeated cold-start alert"
+    );
+    assert!(cold.child.wait().await.unwrap().success());
     let requests = mock
         .recorded_requests()
         .into_iter()
@@ -797,11 +834,11 @@ async fn startup_process_cache_preserves_wire_prefix_after_capture_and_kill() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_prepared_process_crash_adopts_the_same_reserved_claim() {
+async fn startup_prepared_process_crash_quarantines_the_reserved_claim() {
     crash_boundary("prepared", "Prepared", false).await;
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_before_activation_ack_crash_retries_only_the_prepared_claim() {
+async fn startup_before_activation_ack_crash_quarantines_without_retry() {
     crash_boundary("before_ack", "BeforeFullAck", false).await;
 }
 #[tokio::test(flavor = "multi_thread")]
@@ -846,7 +883,7 @@ async fn crash_boundary(mode: &str, boundary: &str, activated: bool) {
         "no provider work before publication"
     );
     crashing.kill().await;
-    let mut recovered = Process::spawn(&dir, if activated { "observe" } else { "restore" });
+    let mut recovered = Process::spawn(&dir, "cold_observe");
     let ready = recovered.checkpoint("bootstrapped").await;
     assert_ne!(ready["pid"], checkpoint["pid"]);
     if activated {
@@ -856,9 +893,11 @@ async fn crash_boundary(mode: &str, boundary: &str, activated: bool) {
             "already_activated"
         );
     } else {
-        // An expired external lease has no event source in this process. The
-        // production owner retry performs the wait; our test awaits its work.
-        recovered.checkpoint("restored").await;
+        assert_eq!(ready["report"]["components"][0]["state"], "quarantined");
+        assert_eq!(
+            ready["report"]["components"][0]["reason"],
+            "needs_attention"
+        );
     }
     assert!(recovered.child.wait().await.unwrap().success());
     let after = storage::Database::open(&config)
@@ -876,13 +915,13 @@ async fn crash_boundary(mode: &str, boundary: &str, activated: bool) {
             .iter()
             .filter(|r| r.path == "/v1/chat/completions")
             .count(),
-        if activated { 1 } else { 2 }
+        1
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_unexecuted_release_and_corrupt_claim_quarantine_never_replay() {
-    for corrupt in [false, true] {
+async fn startup_cold_unexecuted_and_corrupt_claims_quarantine_without_release_or_replay() {
+    for corruption in ["settings", "claim", "restart"] {
         let mock =
             StreamingMockOpenAi::spawn_with_prompt_cache(vec![ScriptedResponse::text_stream(
                 "before",
@@ -912,12 +951,15 @@ async fn startup_unexecuted_release_and_corrupt_claim_quarantine_never_replay() 
             .unwrap()
         };
         let before = intent();
-        if corrupt {
+        if corruption == "claim" {
             sql.execute(
                 "UPDATE recovery_claim_members SET old_incarnation=x'ff'",
                 [],
             )
             .unwrap();
+        } else if corruption == "restart" {
+            sql.execute("UPDATE restart_expected_members SET member_json='{'", [])
+                .unwrap();
         } else {
             // Emulate an unsupported settings selector in an otherwise readable
             // captured component. Do not hand-author a snapshot or a claim.
@@ -926,11 +968,8 @@ async fn startup_unexecuted_release_and_corrupt_claim_quarantine_never_replay() 
         let mut observer = Process::spawn(&dir, "observe");
         let ready = observer.checkpoint("bootstrapped").await;
         let diagnostic = &ready["report"]["components"][0];
-        assert_eq!(
-            diagnostic["state"],
-            if corrupt { "quarantined" } else { "released" }
-        );
-        assert_eq!(diagnostic["manual_continue"], !corrupt);
+        assert_eq!(diagnostic["state"], "quarantined");
+        assert_eq!(diagnostic["manual_continue"], false);
         assert!(observer.child.wait().await.unwrap().success());
         assert_eq!(
             intent(),
@@ -940,7 +979,7 @@ async fn startup_unexecuted_release_and_corrupt_claim_quarantine_never_replay() 
         let state: String = sql
             .query_row("SELECT state FROM recovery_claims", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(state, if corrupt { "prepared" } else { "released" });
+        assert_eq!(state, "prepared", "cold boot cannot release the old claim");
         assert_eq!(
             mock.recorded_requests()
                 .iter()
@@ -1201,5 +1240,46 @@ async fn startup_same_process_ack_loss_cleans_only_for_explicit_manual_continue(
             .filter(|r| r.path == "/v1/chat/completions")
             .count(),
         2
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_cold_captured_graph_never_adopts_or_calls_the_provider() {
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![ScriptedResponse::text_stream(
+        "before",
+        "mock-model",
+        ["Waiting"],
+    )]);
+    let dir = fixture(&mock);
+    let mut source = Process::spawn(&dir, "capture");
+    source.checkpoint("captured").await;
+    source.kill().await;
+    let mut cold = Process::spawn(&dir, "cold_observe");
+    let ready = cold.checkpoint("bootstrapped").await;
+    assert!(
+        ready["report"]["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["state"] == "quarantined")
+    );
+    assert!(cold.child.wait().await.unwrap().success());
+    assert_eq!(
+        mock.recorded_requests()
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .count(),
+        1
+    );
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("evorch-events.db"),
+        ..Default::default()
+    };
+    assert!(
+        storage::Database::open(&config)
+            .unwrap()
+            .recovery_claims()
+            .unwrap()
+            .is_empty()
     );
 }

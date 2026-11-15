@@ -63,6 +63,9 @@ impl CoreStartupHook for CoreGraphRecovery {
         services: &'a mut BackgroundServices,
     ) -> CoreStartupFuture<'a> {
         Box::pin(async move {
+            if !inputs.runtime.has_planned_restart_handoff() {
+                inputs.runtime.quarantine_cold_restarts()?;
+            }
             let config = config::Config::load_strict(&config::LoadOptions {
                 user_config_dir: Some(inputs.options.config_dir.clone()),
                 project_dir: Some(inputs.options.project_root.clone()),

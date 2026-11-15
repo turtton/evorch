@@ -34,6 +34,22 @@ use Treatment::{
 /// `(table, treatment, why)`. FTS shadow tables and `sqlite_*` are excluded by the test.
 pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     (
+        "restart_transactions",
+        Keep,
+        "durable restart and permanent invalidation evidence",
+    ),
+    (
+        "restart_expected_members",
+        Keep,
+        "partial capture and lane fallback exclusion tombstones",
+    ),
+    ("restart_components", Keep, "durable component dispositions"),
+    (
+        "restart_owner_progress",
+        Keep,
+        "cross-database owner cleanup readback progress",
+    ),
+    (
         "threads",
         ConfirmDelete,
         "removed when the family is confirmed; includes the archive/pin mirror columns \
