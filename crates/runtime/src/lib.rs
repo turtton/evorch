@@ -125,7 +125,6 @@ pub use run::{
     RunPurpose, WorkspaceInspection,
 };
 pub use run_store::RunStore;
-pub use runtime::RestartCaptureSession;
 pub use runtime::{
     AgentRuntime, AnswerOutcome, AnswerQuestionError, ChatResumeObservation,
     CurrentRecoveryAuthority, FollowUpStatus, FollowUpWithdrawalError, PausedRecoveryComponent,
@@ -134,6 +133,7 @@ pub use runtime::{
     WorkspaceMounts, production_executor, production_executor_with_config,
     production_executor_with_host_tools,
 };
+pub use runtime::{RestartAdoptionError, RestartCaptureSession};
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,
     SkillResourceError, SkillScope, SkillValidationError, default_skill_dirs, discover_skills,

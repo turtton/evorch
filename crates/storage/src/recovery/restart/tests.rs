@@ -181,6 +181,7 @@ fn restart_component_owner_and_terminal_cas_are_atomic() {
         },
     );
     let t = step(&db, t, adopt());
+    assert!(db.has_pending_adopted_restart().unwrap());
     let t = step(&db, t, RestartMutation::Ready { at_ms: 7 });
     assert_eq!(t.phase, RestartPhase::Adopted);
     assert!(
@@ -203,6 +204,7 @@ fn restart_component_owner_and_terminal_cas_are_atomic() {
     });
     assert_eq!(t.phase, RestartPhase::Completed);
     assert_eq!(t.retry_pending(), 0);
+    assert!(!db.has_pending_adopted_restart().unwrap());
 }
 #[test]
 fn restart_partial_capture_never_commits_and_exclusions_survive_manifest_loss() {

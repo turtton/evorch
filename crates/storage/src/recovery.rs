@@ -82,6 +82,10 @@ pub struct RecoveryClaimRequest {
 }
 #[derive(Debug)]
 pub(crate) enum Write {
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    RestartWriteFault {
+        after_commit: bool,
+    },
     RestartColdQuarantine {
         id: String,
         expected_revision: u64,
@@ -285,9 +289,9 @@ fn load(conn: &Connection, id: &str) -> Result<RecoveryManifestRecord, RecoveryP
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "recovery-test-support"))]
 thread_local! {static RESTART_WRITE_FAULT: std::cell::Cell<Option<bool>> = const {std::cell::Cell::new(None)};}
-#[cfg(test)]
+#[cfg(any(test, feature = "recovery-test-support"))]
 fn restart_write_fault(after_commit: bool) -> Result<(), StorageError> {
     if RESTART_WRITE_FAULT.with(|f| {
         if f.get() == Some(after_commit) {
@@ -303,7 +307,7 @@ fn restart_write_fault(after_commit: bool) -> Result<(), StorageError> {
 }
 /// Every graph write is FULL-durable and atomic; no partial claim or consumption.
 pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, StorageError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "recovery-test-support"))]
     let restart_command = matches!(
         &command,
         Write::Restart { .. }
@@ -315,6 +319,11 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
     let result = (|| {
         let tx = conn.unchecked_transaction()?;
         let result = match command {
+            #[cfg(any(test, feature = "recovery-test-support"))]
+            Write::RestartWriteFault { after_commit } => {
+                RESTART_WRITE_FAULT.with(|f| f.set(Some(after_commit)));
+                Written::Saved
+            }
             Write::RestartColdQuarantine {
                 id,
                 expected_revision,
@@ -369,12 +378,12 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
                 Written::Saved
             }
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "recovery-test-support"))]
         if restart_command {
             restart_write_fault(false)?;
         }
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "recovery-test-support"))]
         if restart_command {
             restart_write_fault(true)?;
         }

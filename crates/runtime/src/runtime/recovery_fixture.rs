@@ -18,7 +18,9 @@ impl AgentRuntime {
             .with_database(|db| fixture::inherited_fixture_proof(db, &store.handle))
             .map_err(crate::quiesce::runtime::error)?;
         match proof {
-            Some(proof) => self.adopt_restart_handoff(proof),
+            Some(proof) => self
+                .adopt_restart_handoff(proof)
+                .map_err(|failure| failure.error),
             None => Ok(()),
         }
     }

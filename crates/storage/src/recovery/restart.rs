@@ -208,6 +208,13 @@ impl Database {
         Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?)
     }
+    /// Admission depends only on live relational state, never terminal payloads.
+    pub fn has_pending_adopted_restart(&self) -> Result<bool, StorageError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM restart_transactions t JOIN restart_components c USING(restart_id) WHERE t.phase='adopted' AND c.disposition='retry_pending')",
+            [], |r| r.get(0),
+        )?)
+    }
     pub fn restart_transactions(&self) -> Result<Vec<RestartTransaction>, StorageError> {
         let mut q = self
             .conn

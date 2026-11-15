@@ -30,7 +30,7 @@ pub use recovery_activation::{
     CurrentRecoveryAuthority, PausedRecoveryComponent, RecoveryClaimHandle, RecoveryCleanupHandle,
     RecoveryCleanupState, RecoveryModels,
 };
-pub use restart_transaction::RestartCaptureSession;
+pub use restart_transaction::{RestartAdoptionError, RestartCaptureSession};
 mod nested_orchestrator;
 mod output;
 mod project;

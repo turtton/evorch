@@ -10,6 +10,7 @@ pub use blockers::{RestartBlocker, RestartBlockerKind};
 mod deferred;
 #[cfg(test)]
 mod fixture;
+mod host_restart;
 #[cfg(test)]
 mod recovery_06a_tests;
 #[cfg(test)]
@@ -17,6 +18,9 @@ mod recovery_06b_tests;
 #[cfg(test)]
 mod recovery_cache_tests;
 mod restart;
+pub use host_restart::{
+    CommandAccess, HostCommandPermit, HostRestartGate, HostRestartPhase, SealedRestart,
+};
 pub(crate) mod runtime;
 mod safe_point;
 pub use restart::{RestartAttempt, RestartAttemptState, ResumeReceipt};

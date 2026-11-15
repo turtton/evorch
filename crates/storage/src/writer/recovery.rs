@@ -1,6 +1,13 @@
 use super::{Command, StorageHandle};
 use crate::{StorageError, recovery::*};
 impl StorageHandle {
+    /// Per-writer deterministic fault for the next restart mutation only.
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub fn inject_restart_write_fault(&self, after_commit: bool) -> Result<(), StorageError> {
+        self.recovery_write(Write::RestartWriteFault { after_commit })
+            .map(|_| ())
+    }
+
     /// Quarantine unreadable restart evidence without decoding a partial graph.
     pub fn quarantine_cold_restart(
         &self,

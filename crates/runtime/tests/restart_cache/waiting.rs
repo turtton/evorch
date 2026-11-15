@@ -131,7 +131,9 @@ async fn tools_waiting_cancel_then_completion_keeps_wire_prefix_and_next_capture
         h.runtime.begin_planned_restart_quiesce(&recipes).unwrap();
         h.runtime.wait_quiesced().await.unwrap();
         let fence = h.runtime.fence_dispatch_restart().await.unwrap();
-        h.runtime.drain_dispatch_tails(&fence).await.unwrap();
+        let gate = runtime::quiesce::HostRestartGate::default();
+        assert!(gate.transition(1, runtime::quiesce::HostRestartPhase::Sealing));
+        let sealed = gate.sealed(&h.runtime, 1, fence).await.unwrap();
         let tx = storage
             .handle()
             .mutate_restart(
@@ -142,10 +144,7 @@ async fn tools_waiting_cancel_then_completion_keeps_wire_prefix_and_next_capture
                 )),
             )
             .unwrap();
-        let mut session = h
-            .runtime
-            .begin_restart_capture_session(fence, &tx, recipes)
-            .unwrap();
+        let mut session = sealed.begin_capture(&h.runtime, &tx, recipes).unwrap();
         h.runtime
             .persist_restart_capture_expected(&mut session)
             .unwrap();

@@ -126,7 +126,9 @@ async fn recover(changed_settings: bool) {
     old.begin_planned_restart_quiesce(&recipes).unwrap();
     old.wait_quiesced().await.unwrap();
     let fence = old.fence_dispatch_restart().await.unwrap();
-    old.drain_dispatch_tails(&fence).await.unwrap();
+    let gate = runtime::quiesce::HostRestartGate::default();
+    assert!(gate.transition(1, runtime::quiesce::HostRestartPhase::Sealing));
+    let sealed = gate.sealed(&old, 1, fence).await.unwrap();
     let tx = storage
         .handle()
         .mutate_restart(
@@ -135,9 +137,7 @@ async fn recover(changed_settings: bool) {
             RestartMutation::Create(Box::new(support::fixture_restart_metadata("routed-wire"))),
         )
         .unwrap();
-    let mut session = old
-        .begin_restart_capture_session(fence, &tx, recipes)
-        .unwrap();
+    let mut session = sealed.begin_capture(&old, &tx, recipes).unwrap();
     old.persist_restart_capture_expected(&mut session).unwrap();
     let committed = old.commit_restart_capture(&mut session).unwrap();
     storage

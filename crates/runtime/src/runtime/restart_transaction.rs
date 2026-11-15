@@ -17,6 +17,18 @@ pub struct RestartCaptureSession {
     pub(super) revision: u64,
     expected_persisted: bool,
 }
+/// Failed adoption retains the physical proof, including on readback failure.
+#[derive(Debug)]
+pub struct RestartAdoptionError {
+    pub error: RuntimeError,
+    pub proof: core_instance::InheritedHandoffProof,
+}
+impl std::fmt::Display for RestartAdoptionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+impl std::error::Error for RestartAdoptionError {}
 impl AgentRuntime {
     pub(crate) fn external_admission_guard(
         &self,
@@ -109,11 +121,41 @@ impl AgentRuntime {
                 })
                 .transpose()
                 .map_err(error)?;
-            if intent.checkpoint.is_none()
-                && intent.snapshot.is_none()
-                && intent.initial_input.is_none()
+            let mut has_receipt = false;
+            for reference in intent
+                .checkpoint
+                .as_ref()
+                .map(|c| &c.snapshot)
+                .into_iter()
+                .chain(intent.snapshot.as_ref())
             {
-                return Err(error("Unsupported: missing safe snapshot"));
+                if matches!(
+                    reference,
+                    crate::checkpoint::SnapshotReference::RunContext { .. }
+                ) {
+                    has_receipt = true;
+                    if !reference.available(snapshot.as_ref()) {
+                        return Err(error("Unsupported: missing or changed referenced snapshot"));
+                    }
+                }
+            }
+            if !has_receipt {
+                let durable_queued = matches!(intent.wait, ResumeWait::AdmissionQueued)
+                    && intent.initial_input.is_some()
+                    && store
+                        .with_database(|db| db.resume_intent(&intent.run_id.to_string()))
+                        .map_err(error)?
+                        .and_then(|row| ResumeIntent::decode(row).ok())
+                        .is_some_and(|saved| {
+                            saved.incarnation == intent.incarnation
+                                && saved.active
+                                && saved.stop_reason.is_none()
+                                && matches!(saved.wait, ResumeWait::AdmissionQueued)
+                                && saved.initial_input == intent.initial_input
+                        });
+                if !durable_queued {
+                    return Err(error("Unsupported: missing safe snapshot"));
+                }
             }
             if intent.run_id == root
                 && descriptor
@@ -140,10 +182,8 @@ impl AgentRuntime {
         self.preflight_restart_capture(recipes)?;
         if let Some(store) = self.shared.run_store.get()
             && store
-                .with_database(|db| db.restart_transactions())
+                .with_database(|db| db.has_pending_adopted_restart())
                 .map_err(error)?
-                .iter()
-                .any(|t| t.phase == RestartPhase::Adopted && t.retry_pending() != 0)
         {
             return Err(error(
                 "previous adopted restart has RetryPending components",
@@ -151,9 +191,34 @@ impl AgentRuntime {
         }
         self.begin_restart_quiesce_mode(true)
     }
-    /// Synchronous memory boundary, no database I/O. Caller has already performed
-    /// preflight and drained accepted terminal tails. DB writes occur afterwards.
+    /// Production capture consumes the capability minted by the host drain gate.
+    /// A raw dispatch fence cannot manufacture host admission evidence:
+    /// ```compile_fail
+    /// fn bypass(runtime: &runtime::AgentRuntime, fence: runtime::quiesce::DispatchDrainFence,
+    ///     tx: &storage::recovery::restart::RestartTransaction) {
+    ///     runtime.begin_restart_capture_session(fence, tx, Default::default());
+    /// }
+    /// ```
     pub fn begin_restart_capture_session(
+        &self,
+        sealed: SealedRestart,
+        tx: &RestartTransaction,
+        recipes: BTreeMap<RunId, RecoveryRecipe>,
+    ) -> Result<RestartCaptureSession, RuntimeError> {
+        self.begin_restart_capture_from_fence(sealed.into_fence(self)?, tx, recipes)
+    }
+    /// Logical fixture only: production callers must consume SealedRestart.
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub fn begin_restart_capture_session_fixture(
+        &self,
+        fence: DispatchDrainFence,
+        tx: &RestartTransaction,
+        recipes: BTreeMap<RunId, RecoveryRecipe>,
+    ) -> Result<RestartCaptureSession, RuntimeError> {
+        self.begin_restart_capture_from_fence(fence, tx, recipes)
+    }
+    /// Synchronous memory boundary, no database I/O.
+    fn begin_restart_capture_from_fence(
         &self,
         fence: DispatchDrainFence,
         tx: &RestartTransaction,
@@ -374,50 +439,87 @@ impl AgentRuntime {
         Ok(())
     }
     /// The only recovery eligibility installation takes opaque physical evidence.
-    /// Stored JSON, booleans and command-line arguments cannot call this API.
+    /// An uncertain write is resolved by same-ID readback; any unresolved error
+    /// returns ownership of the proof so the caller can retry without minting one.
     pub fn adopt_restart_handoff(
         &self,
         proof: core_instance::InheritedHandoffProof,
+    ) -> Result<(), Box<RestartAdoptionError>> {
+        if let Err(error) = self.validate_restart_adoption(&proof) {
+            return Err(Box::new(RestartAdoptionError { error, proof }));
+        }
+        self.shared.planned_adoption.set(proof).map_err(|proof| {
+            Box::new(RestartAdoptionError {
+                error: error("handoff proof already installed"),
+                proof,
+            })
+        })
+    }
+    fn validate_restart_adoption(
+        &self,
+        proof: &core_instance::InheritedHandoffProof,
     ) -> Result<(), RuntimeError> {
         let store = self
             .shared
             .run_store
             .get()
             .ok_or_else(|| error("no run store"))?;
-        let tx = store
-            .with_database(|db| db.restart_transaction(proof.restart_id()))
-            .map_err(error)?
-            .ok_or_else(|| error("missing handoff transaction"))?;
-        if tx.metadata.config_identity != proof.config_identity()
-            || tx.metadata.successor_epoch != proof.successor_epoch()
-            || tx.metadata.successor_build != proof.successor_build()
-            || tx.ticket_nonce_hash.as_deref() != Some(proof.nonce_hash())
-        {
+        let read = || {
+            store
+                .with_database(|db| db.restart_transaction(proof.restart_id()))
+                .map_err(error)?
+                .ok_or_else(|| error("missing handoff transaction"))
+        };
+        let matches_proof = |tx: &RestartTransaction| {
+            tx.metadata.restart_id == proof.restart_id()
+                && tx.metadata.config_identity == proof.config_identity()
+                && tx.metadata.successor_epoch == proof.successor_epoch()
+                && tx.metadata.successor_build == proof.successor_build()
+                && tx.ticket_nonce_hash.as_deref() == Some(proof.nonce_hash())
+        };
+        let before = read()?;
+        if !matches_proof(&before) {
             return Err(error("handoff proof mismatch"));
         }
-        if tx.phase == RestartPhase::Armed {
-            store
-                .handle
-                .mutate_restart(
-                    proof.restart_id().into(),
-                    Some(tx.revision),
-                    RestartMutation::Adopt {
-                        nonce_hash: proof.nonce_hash().into(),
-                        successor_epoch: proof.successor_epoch(),
-                        config_identity: proof.config_identity().into(),
-                        successor_build: proof.successor_build().into(),
-                    },
-                )
-                .map_err(error)?;
-        } else if tx.phase != RestartPhase::Adopted
+        let tx = if before.phase == RestartPhase::Armed {
+            let write = store.handle.mutate_restart(
+                proof.restart_id().into(),
+                Some(before.revision),
+                RestartMutation::Adopt {
+                    nonce_hash: proof.nonce_hash().into(),
+                    successor_epoch: proof.successor_epoch(),
+                    config_identity: proof.config_identity().into(),
+                    successor_build: proof.successor_build().into(),
+                },
+            );
+            // Never infer failure or success from an ambiguous ACK. The opaque
+            // proof remains owned by this call while canonical state is read.
+            let after = read()?;
+            if after.revision <= before.revision
+                || after.metadata != before.metadata
+                || after.expected_digest != before.expected_digest
+                || after.manifest_digest != before.manifest_digest
+            {
+                return Err(write
+                    .err()
+                    .map(error)
+                    .unwrap_or_else(|| error("adoption readback mismatch")));
+            }
+            after
+        } else {
+            before
+        };
+        if !matches_proof(&tx)
+            || tx.phase != RestartPhase::Adopted
             || tx.adopted_epoch != Some(proof.successor_epoch())
         {
             return Err(error("handoff is not adoptable"));
         }
-        self.shared
-            .planned_adoption
-            .set(proof)
-            .map_err(|_| error("handoff proof already installed"))
+        // Adopt validates the capture atomically in storage. An already-adopted
+        // successor installs only physical eligibility here: per-component graph
+        // validation still belongs to require_planned_manifest/activation, so one
+        // damaged component cannot prevent component-level diagnosis.
+        Ok(())
     }
     pub fn require_planned_manifest(&self, manifest: &str) -> Result<(), RuntimeError> {
         let proof = self
