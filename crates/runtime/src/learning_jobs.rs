@@ -383,7 +383,9 @@ impl LearningJobQueue {
                 Ok(None) | Err(_) => {
                     // Without verified evidence the job cannot run; ending it keeps
                     // the claim and the quota spent, like any other ended job.
-                    self.abandon(&job.task_id, "evidence unavailable")?;
+                    if let Some(current) = database.learning_job(&job.task_id)? {
+                        self.abandon_observed(&current.key())?;
+                    }
                 }
             }
         }

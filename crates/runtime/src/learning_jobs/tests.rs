@@ -1220,16 +1220,16 @@ async fn learning_unresolved_terminal_keeps_retrying_past_the_backoff_cap() {
     assert!(!f.has_evidence("capped"));
 }
 
-// Cancelling a two-job suspension: the first job's requeue already landed (its ack was lost)
-// and a newer attempt of that task holds the registration, while reading its receipt back
-// fails. The cleanup is retried by the runtime, so once the database recovers the cancel
-// moves on and requeues the second job without any explicit reconcile.
+// Cancelling a two-job suspension while the database rolls back the requeue and the settling
+// write: the first job's cleanup stays owned and unresolved, no new attempt can take the task, and the second job stays reserved.
+// Once the database recovers the runtime settles the first job and the cancel moves on to
+// requeue the second one, with no explicit reconcile.
 #[tokio::test(start_paused = true)]
 async fn learning_cancel_requeues_later_jobs_once_an_older_entrys_readback_recovers() {
     let f = Fixture::new();
     let owner = origin(LearningOriginKind::Core, "cancel-owner", Some("cfg"));
     let runtime = f.runtime(owner.clone());
-    let queue = f.queue(owner.clone());
+    let queue = f.queue(owner);
     let mut entries = Vec::new();
     for task in ["first", "second"] {
         queue
@@ -1257,29 +1257,12 @@ async fn learning_cancel_requeues_later_jobs_once_an_older_entrys_readback_recov
         runtime.learning_returned(entry).await;
     }
     suspension.wait().await.unwrap();
-
-    // The requeue of the first job landed but was never acknowledged to its owner.
-    let landed = queue.job("first").unwrap().unwrap();
-    queue
-        .change(
-            &landed.key(),
-            LearningAttemptChange::Requeue {
-                suspension_id: landed.suspension_id.clone().unwrap(),
-                to: owner,
-            },
-        )
-        .unwrap()
-        .unwrap();
-    // A newer attempt of that task holds the registration.
-    let newer = runtime
-        .shared
-        .learning_executions
-        .register("first", runtime.shared.learning_jobs_changed.clone())
-        .unwrap();
     let broken = rusqlite::Connection::open(&f.config.db_path).unwrap();
     broken
         .execute_batch(
-            "ALTER TABLE learning_attempt_receipts RENAME TO learning_attempt_receipts_off;",
+            "CREATE TRIGGER inject_cancel_rollback BEFORE UPDATE ON learning_jobs
+             WHEN NEW.state IN ('Pending','Abandoned')
+             BEGIN SELECT RAISE(ABORT, 'injected rollback'); END;",
         )
         .unwrap();
 
@@ -1291,20 +1274,94 @@ async fn learning_cancel_requeues_later_jobs_once_an_older_entrys_readback_recov
         stuck.changed().await.unwrap();
     }
     assert_eq!(f.state("second"), LearningJobState::Interrupted);
+    assert!(
+        runtime
+            .shared
+            .learning_executions
+            .register("first", runtime.shared.learning_jobs_changed.clone())
+            .is_none(),
+        "an unresolved cleanup keeps its task"
+    );
 
     broken
-        .execute_batch(
-            "ALTER TABLE learning_attempt_receipts_off RENAME TO learning_attempt_receipts;",
-        )
+        .execute_batch("DROP TRIGGER inject_cancel_rollback;")
         .unwrap();
     while f.state("second") == LearningJobState::Interrupted {
         changes.changed().await.unwrap();
     }
 
+    assert_ne!(f.state("first"), LearningJobState::Interrupted);
     assert_ne!(f.state("second"), LearningJobState::Abandoned);
     returned_cleanly(&entries[0]).await;
-    assert_ne!(f.state("first"), LearningJobState::Abandoned);
-    assert!(newer.returned_receipt().borrow().is_none());
+}
+
+// A dispatch that merely registers must not make an old Publish cleanup look finished: the old
+// entry keeps its slot, the job stays Started with its evidence, and only the committed
+// terminal write releases it.
+#[tokio::test(start_paused = true)]
+async fn learning_a_refused_registration_does_not_settle_an_unresolved_publish_cleanup() {
+    let f = Fixture::new();
+    let (runtime, entry, injected) = returned_with_rejected_terminal(&f, "held").await;
+
+    for _ in 0..2 {
+        assert!(
+            runtime
+                .shared
+                .learning_executions
+                .register("held", runtime.shared.learning_jobs_changed.clone())
+                .is_none()
+        );
+    }
+    assert!(matches!(*entry.returned_receipt().borrow(), Some(Err(_))));
+    assert_eq!(f.state("held"), LearningJobState::Started);
+    assert!(f.has_evidence("held"));
+
+    injected
+        .execute_batch("DROP TRIGGER inject_terminal_rollback;")
+        .unwrap();
+    returned_cleanly(&entry).await;
+    assert_eq!(f.state("held"), LearningJobState::Failed);
+    assert!(!f.has_evidence("held"));
+}
+
+// An entry with no attempt (its intake was never confirmed) may end only the Pending job it
+// observed. A job that a newer attempt already started is never written over.
+#[tokio::test(start_paused = true)]
+async fn learning_unconfirmed_intake_cleanup_never_ends_a_job_it_did_not_observe_pending() {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "intake-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    for task in ["running", "pending"] {
+        queue
+            .admit(admit_request(task, &format!("{task}-root")))
+            .unwrap();
+    }
+    let started = queue.job("running").unwrap().unwrap();
+    queue
+        .change(&started.key(), LearningAttemptChange::Start)
+        .unwrap()
+        .unwrap();
+    for task in ["running", "pending"] {
+        let entry = runtime
+            .shared
+            .learning_executions
+            .register(task, runtime.shared.learning_jobs_changed.clone())
+            .unwrap();
+        entry.intake_unconfirmed();
+        runtime.learning_returned(&entry).await;
+        returned_cleanly(&entry).await;
+    }
+
+    assert_eq!(f.state("running"), LearningJobState::Started);
+    assert!(f.has_evidence("running"));
+    let ended = queue.job("pending").unwrap().unwrap();
+    assert_eq!(ended.state, LearningJobState::Abandoned);
+    assert_eq!(
+        ended.reason.as_deref(),
+        Some(LearningEndReason::UnconfirmedWrite.as_str())
+    );
+    assert!(!f.has_evidence("pending"));
 }
 
 /// Runs `hook` with the instance of the first judged origin when the second origin is judged,

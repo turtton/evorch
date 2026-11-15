@@ -27,9 +27,10 @@ const LEARNING_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(6
 pub(crate) struct LearningExecutions {
     scheduler: AtomicBool,
     retrying: AtomicBool,
-    /// Every entry that is not settled yet, by identity, in registration order. A task can
-    /// have a running newer attempt and older entries whose cleanup is still unresolved.
-    entries: Mutex<Vec<Arc<LearningExecution>>>,
+    /// One slot per task. An entry keeps its slot until its durable writes are settled and
+    /// its job is not reserved (Interrupted) for recovery, so a task never has an old
+    /// cleanup and a new attempt at the same time.
+    entries: Mutex<HashMap<String, Arc<LearningExecution>>>,
     internal: Mutex<HashMap<RunId, watch::Sender<bool>>>,
     detached: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -60,14 +61,21 @@ pub(crate) struct LearningExecution {
     pub(crate) task_id: String,
     state: Mutex<ExecutionState>,
     cancelled: AtomicBool,
-    /// A newer attempt for the same task is registered: this entry only finishes its own
-    /// cleanup and no longer represents the task.
-    superseded: AtomicBool,
     returned: watch::Sender<Option<Result<(), String>>>,
     changed: watch::Sender<u64>,
 }
 
 impl LearningExecution {
+    /// The job is Interrupted and awaits its cancel or recovery write.
+    fn reserved(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .key
+            .as_ref()
+            .is_some_and(|key| key.state == LearningJobState::Interrupted)
+    }
+
     #[cfg(test)]
     pub(crate) fn returned_receipt(&self) -> Receipt {
         self.returned.subscribe()
@@ -81,26 +89,17 @@ impl LearningExecutions {
         changed: watch::Sender<u64>,
     ) -> Option<Arc<LearningExecution>> {
         let mut entries = self.entries.lock().unwrap();
-        // Only a running attempt blocks a new one; an earlier attempt that returned may still
-        // be settling its own durable write.
-        if entries
-            .iter()
-            .any(|e| e.task_id == task_id && e.returned.borrow().is_none())
-        {
+        if entries.contains_key(task_id) {
             return None;
-        }
-        for older in entries.iter().filter(|e| e.task_id == task_id) {
-            older.superseded.store(true, Ordering::Release);
         }
         let entry = Arc::new(LearningExecution {
             task_id: task_id.into(),
             state: Mutex::default(),
             cancelled: AtomicBool::new(false),
-            superseded: AtomicBool::new(false),
             returned: watch::channel(None).0,
             changed,
         });
-        entries.push(entry.clone());
+        entries.insert(task_id.into(), entry.clone());
         Some(entry)
     }
 
@@ -114,50 +113,49 @@ impl LearningExecutions {
             .map_or(Ok(()), Err);
         entry.returned.send_replace(Some(result.clone()));
         // Unknown durable outcomes remain visible; they must block the next seal.
-        // Only this exact entry is released; a late callback never touches another attempt.
-        if result.is_ok() {
-            self.entries
-                .lock()
-                .unwrap()
-                .retain(|e| !std::ptr::eq(Arc::as_ptr(e), entry));
+        // The slot is kept while the write outcome is unknown and while the job is Interrupted:
+        // that job is reserved for its cancel/recovery, which releases the slot itself.
+        if result.is_ok() && !entry.reserved() {
+            self.release(entry);
         }
     }
 
-    /// Every entry that returned but still holds an unresolved durable write, including
-    /// those a newer attempt has superseded. This is the retry set.
+    /// Frees the slot of exactly this entry; another attempt's slot is never touched.
+    pub(super) fn release(&self, entry: &LearningExecution) {
+        let mut entries = self.entries.lock().unwrap();
+        if entries
+            .get(&entry.task_id)
+            .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), entry))
+        {
+            entries.remove(&entry.task_id);
+        }
+    }
+
+    /// Entries that returned with an unresolved durable write: the retry set.
     fn unresolved(&self) -> Vec<Arc<LearningExecution>> {
         self.entries
             .lock()
             .unwrap()
-            .iter()
+            .values()
             .filter(|entry| matches!(*entry.returned.borrow(), Some(Err(_))))
             .cloned()
             .collect()
     }
 
-    /// The entries that stand for their task: what a suspend must wait for. A superseded
-    /// entry is not part of it; its newer attempt is.
+    /// What a suspend waits for: running entries and unresolved ones, in task order so that
+    /// cancel and recovery run in a deterministic order. A settled entry that only holds its
+    /// Interrupted job for recovery is not part of it.
     fn cohort(&self) -> Vec<Arc<LearningExecution>> {
-        self.entries
+        let mut cohort: Vec<_> = self
+            .entries
             .lock()
             .unwrap()
-            .iter()
-            .filter(|entry| !entry.superseded.load(Ordering::Acquire))
+            .values()
+            .filter(|entry| !matches!(*entry.returned.borrow(), Some(Ok(()))))
             .cloned()
-            .collect()
-    }
-
-    /// Puts a settled entry back because its cleanup is unresolved again. It never
-    /// replaces another attempt: an older entry just joins the retry set as superseded.
-    fn readmit(&self, entry: &Arc<LearningExecution>) {
-        let mut entries = self.entries.lock().unwrap();
-        if entries.iter().any(|e| Arc::ptr_eq(e, entry)) {
-            return;
-        }
-        if entries.iter().any(|e| e.task_id == entry.task_id) {
-            entry.superseded.store(true, Ordering::Release);
-        }
-        entries.push(entry.clone());
+            .collect();
+        cohort.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        cohort
     }
 
     pub(crate) fn own(&self, task: tokio::task::JoinHandle<()>) {
@@ -449,7 +447,6 @@ impl AgentRuntime {
                                 state.unsafe_result = Some("learning requeue unconfirmed".into());
                                 state.uncertain = Some((key, change));
                             }
-                            runtime.shared.learning_executions.readmit(entry);
                             runtime.learning_returned(entry).await;
                             let mut tail = entry.returned.subscribe();
                             loop {
@@ -463,6 +460,7 @@ impl AgentRuntime {
                         }
                     }
                 }
+                runtime.shared.learning_executions.release(entry);
             }
             runtime
                 .shared
