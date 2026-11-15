@@ -96,191 +96,196 @@ pub(super) fn write(
     command: LearningAttemptWrite,
     at_ns: i64,
 ) -> Result<bool, StorageError> {
+    in_transaction(conn, |tx| apply_in_transaction(tx, command, at_ns))
+}
+
+/// Same fenced operation and receipt, inside the caller's existing writer transaction.
+pub(crate) fn apply_in_transaction(
+    tx: &Connection,
+    command: LearningAttemptWrite,
+    at_ns: i64,
+) -> Result<bool, StorageError> {
     let receipt = command_hash(&command.key, &command.change);
-    in_transaction(conn, |tx| {
-        let job = tx
-            .query_row(
-                &format!("SELECT {JOB_COLUMNS} FROM learning_jobs WHERE task_id=?1"),
-                [&command.key.task_id],
-                job_row,
-            )
-            .optional()?
-            .transpose()?;
-        let Some(job) = job else { return Ok(false) };
-        if job.key() != command.key || job.state.is_terminal() {
-            return Ok(false);
+    let job = tx
+        .query_row(
+            &format!("SELECT {JOB_COLUMNS} FROM learning_jobs WHERE task_id=?1"),
+            [&command.key.task_id],
+            job_row,
+        )
+        .optional()?
+        .transpose()?;
+    let Some(job) = job else { return Ok(false) };
+    if job.key() != command.key || job.state.is_terminal() {
+        return Ok(false);
+    }
+    let id = &job.task_id;
+    use LearningAttemptChange as C;
+    use LearningJobState as S;
+    match command.change {
+        C::Start if job.state == S::Pending => {
+            if job.attempt >= job.max_attempts {
+                terminal(tx, &job, LearningEndReason::AttemptLimit, false, at_ns)?;
+            } else {
+                tx.execute(
+                    "UPDATE learning_jobs SET state='Started', attempt=attempt+1,
+                     generation=generation+1, started_at_ns=?2, suspension_id=NULL,
+                     extraction_run=NULL, review_run=NULL, revision=revision+1 WHERE task_id=?1",
+                    params![id, at_ns],
+                )?;
+            }
         }
-        let id = &job.task_id;
-        use LearningAttemptChange as C;
-        use LearningJobState as S;
-        match command.change {
-            C::Start if job.state == S::Pending => {
-                if job.attempt >= job.max_attempts {
-                    terminal(tx, &job, LearningEndReason::AttemptLimit, false, at_ns)?;
+        C::BindRun { run, review } if job.state == S::Started => {
+            let field = if review {
+                "review_run"
+            } else {
+                "extraction_run"
+            };
+            if run.is_empty()
+                || run.len() > 256
+                || if review {
+                    job.review_run.is_some()
                 } else {
-                    tx.execute(
-                        "UPDATE learning_jobs SET state='Started', attempt=attempt+1,
-                         generation=generation+1, started_at_ns=?2, suspension_id=NULL,
-                         extraction_run=NULL, review_run=NULL, revision=revision+1 WHERE task_id=?1",
-                        params![id, at_ns],
-                    )?;
+                    job.extraction_run.is_some()
                 }
+            {
+                return Ok(false);
             }
-            C::BindRun { run, review } if job.state == S::Started => {
-                let field = if review {
-                    "review_run"
-                } else {
-                    "extraction_run"
-                };
-                if run.is_empty()
-                    || run.len() > 256
-                    || if review {
-                        job.review_run.is_some()
-                    } else {
-                        job.extraction_run.is_some()
-                    }
+            tx.execute(
+                &format!(
+                    "UPDATE learning_jobs SET {field}=?2, revision=revision+1 WHERE task_id=?1"
+                ),
+                params![id, run],
+            )?;
+        }
+        C::ExtractionReady(lessons) if job.state == S::Started => {
+            if lessons.len() > 8 || job.extraction_run.is_none() {
+                return Ok(false);
+            }
+            for (slot, lesson) in lessons.iter().enumerate() {
+                // Public identity is independent of either internal RunId.
+                if lesson.id != format!("{}:{}:{}", job.project, id, slot + 1)
+                    || lesson.task_id != *id
+                    || lesson.project != job.project
                 {
-                    return Ok(false);
-                }
-                tx.execute(
-                    &format!(
-                        "UPDATE learning_jobs SET {field}=?2, revision=revision+1 WHERE task_id=?1"
-                    ),
-                    params![id, run],
-                )?;
-            }
-            C::ExtractionReady(lessons) if job.state == S::Started => {
-                if lessons.len() > 8 || job.extraction_run.is_none() {
-                    return Ok(false);
-                }
-                for (slot, lesson) in lessons.iter().enumerate() {
-                    // Public identity is independent of either internal RunId.
-                    if lesson.id != format!("{}:{}:{}", job.project, id, slot + 1)
-                        || lesson.task_id != *id
-                        || lesson.project != job.project
-                    {
-                        return Err(corrupt("invalid learning publication identity".into()));
-                    }
-                }
-                if tx.execute(
-                    "INSERT INTO learning_job_staging(task_id,lessons_json) VALUES(?1,?2)
-                     ON CONFLICT(task_id) DO NOTHING",
-                    params![id, serde_json::to_string(&lessons).map_err(json_error)?],
-                )? == 0
-                {
-                    return Ok(false);
-                }
-                bump(tx, id)?;
-            }
-            C::ReviewReady(reviews) if job.state == S::Started => {
-                let Some((lessons, previous)) = staging(tx, id)? else {
-                    return Ok(false);
-                };
-                if previous.is_some()
-                    || job.review_run.is_none()
-                    || reviews.len() != lessons.len()
-                    || reviews.iter().any(|r| {
-                        !matches!(
-                            r.status,
-                            MemoryStatus::Candidate
-                                | MemoryStatus::Promoted
-                                | MemoryStatus::Rejected
-                        ) || r.rationale.len() > 1_000
-                    })
-                {
-                    return Ok(false);
-                }
-                tx.execute(
-                    "UPDATE learning_job_staging SET reviews_json=?2 WHERE task_id=?1",
-                    params![id, serde_json::to_string(&reviews).map_err(json_error)?],
-                )?;
-                bump(tx, id)?;
-            }
-            C::Publish if job.state == S::Started => {
-                let Some((lessons, reviews)) = staging(tx, id)? else {
-                    return Ok(false);
-                };
-                // A genuinely empty extraction is complete without a reviewer.
-                if !lessons.is_empty() && reviews.is_none() {
-                    return Ok(false);
-                }
-                let reviews = reviews.unwrap_or_default();
-                // Guard/validation failures roll back the entire batch, including promotes.
-                // The caller then uses Fail, which falls back to no-publication cleanup.
-                publish_batch(tx, &lessons, Some(&reviews))?;
-                finish(
-                    tx,
-                    &job,
-                    "Finished",
-                    "Reviewed",
-                    None,
-                    Some(&reviews),
-                    at_ns,
-                )?;
-            }
-            C::Fail(reason) if job.state == S::Started => {
-                terminal(tx, &job, reason, true, at_ns)?;
-            }
-            C::Interrupt { suspension_id } if job.state == S::Started => {
-                if suspension_id.is_empty() || suspension_id.len() > 256 {
-                    return Ok(false);
-                }
-                tx.execute(
-                    "UPDATE learning_jobs SET state='Interrupted', generation=generation+1,
-                     suspension_id=?2, revision=revision+1 WHERE task_id=?1",
-                    params![id, suspension_id],
-                )?;
-                tx.execute("DELETE FROM learning_job_staging WHERE task_id=?1", [id])?;
-            }
-            C::Requeue { suspension_id, to } if job.state == S::Interrupted => {
-                if job.suspension_id.as_deref() != Some(&suspension_id)
-                    || job.origin.kind != LearningOriginKind::Core
-                    || to.kind != LearningOriginKind::Core
-                    || to.config_identity.is_none()
-                    || job.origin.config_identity != to.config_identity
-                {
-                    return Ok(false);
-                }
-                if job.attempt >= job.max_attempts {
-                    terminal(tx, &job, LearningEndReason::AttemptLimit, false, at_ns)?;
-                } else {
-                    tx.execute(
-                        "UPDATE learning_jobs SET state='Pending', origin_instance=?2,
-                         origin_pid=?3, origin_start_ticks=?4, origin_boot_id=?5, origin_pid_ns=?6,
-                         suspension_id=NULL, revision=revision+1 WHERE task_id=?1",
-                        params![
-                            id,
-                            to.instance,
-                            to.pid,
-                            to.start_ticks,
-                            to.boot_id,
-                            to.pid_ns
-                        ],
-                    )?;
+                    return Err(corrupt("invalid learning publication identity".into()));
                 }
             }
-            C::Abandon(reason) => terminal(
+            if tx.execute(
+                "INSERT INTO learning_job_staging(task_id,lessons_json) VALUES(?1,?2)
+                 ON CONFLICT(task_id) DO NOTHING",
+                params![id, serde_json::to_string(&lessons).map_err(json_error)?],
+            )? == 0
+            {
+                return Ok(false);
+            }
+            bump(tx, id)?;
+        }
+        C::ReviewReady(reviews) if job.state == S::Started => {
+            let Some((lessons, previous)) = staging(tx, id)? else {
+                return Ok(false);
+            };
+            if previous.is_some()
+                || job.review_run.is_none()
+                || reviews.len() != lessons.len()
+                || reviews.iter().any(|r| {
+                    !matches!(
+                        r.status,
+                        MemoryStatus::Candidate | MemoryStatus::Promoted | MemoryStatus::Rejected
+                    ) || r.rationale.len() > 1_000
+                })
+            {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE learning_job_staging SET reviews_json=?2 WHERE task_id=?1",
+                params![id, serde_json::to_string(&reviews).map_err(json_error)?],
+            )?;
+            bump(tx, id)?;
+        }
+        C::Publish if job.state == S::Started => {
+            let Some((lessons, reviews)) = staging(tx, id)? else {
+                return Ok(false);
+            };
+            // A genuinely empty extraction is complete without a reviewer.
+            if !lessons.is_empty() && reviews.is_none() {
+                return Ok(false);
+            }
+            let reviews = reviews.unwrap_or_default();
+            // Guard/validation failures roll back the entire batch, including promotes.
+            // The caller then uses Fail, which falls back to no-publication cleanup.
+            publish_batch(tx, &lessons, Some(&reviews))?;
+            finish(
                 tx,
                 &job,
-                reason,
-                job.state == S::Started && reason == LearningEndReason::OriginDied,
+                "Finished",
+                "Reviewed",
+                None,
+                Some(&reviews),
                 at_ns,
-            )?,
-            _ => return Ok(false),
+            )?;
         }
-        let next = tx
-            .query_row(
-                &format!("SELECT {JOB_COLUMNS} FROM learning_jobs WHERE task_id=?1"),
-                [id],
-                job_row,
-            )??
-            .key();
-        tx.execute(
-            "INSERT INTO learning_attempt_receipts(task_id,revision,command_hash,result_key_json) VALUES(?1,?2,?3,?4)",
-            params![id, command.key.revision, receipt, serde_json::to_string(&next).map_err(json_error)?],
-        )?;
-        Ok(true)
-    })
+        C::Fail(reason) if job.state == S::Started => {
+            terminal(tx, &job, reason, true, at_ns)?;
+        }
+        C::Interrupt { suspension_id } if job.state == S::Started => {
+            if suspension_id.is_empty() || suspension_id.len() > 256 {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE learning_jobs SET state='Interrupted', generation=generation+1,
+                 suspension_id=?2, revision=revision+1 WHERE task_id=?1",
+                params![id, suspension_id],
+            )?;
+            tx.execute("DELETE FROM learning_job_staging WHERE task_id=?1", [id])?;
+        }
+        C::Requeue { suspension_id, to } if job.state == S::Interrupted => {
+            if job.suspension_id.as_deref() != Some(&suspension_id)
+                || job.origin.kind != LearningOriginKind::Core
+                || to.kind != LearningOriginKind::Core
+                || to.config_identity.is_none()
+                || job.origin.config_identity != to.config_identity
+            {
+                return Ok(false);
+            }
+            if job.attempt >= job.max_attempts {
+                terminal(tx, &job, LearningEndReason::AttemptLimit, false, at_ns)?;
+            } else {
+                tx.execute(
+                    "UPDATE learning_jobs SET state='Pending', origin_instance=?2,
+                     origin_pid=?3, origin_start_ticks=?4, origin_boot_id=?5, origin_pid_ns=?6,
+                     suspension_id=NULL, revision=revision+1 WHERE task_id=?1",
+                    params![
+                        id,
+                        to.instance,
+                        to.pid,
+                        to.start_ticks,
+                        to.boot_id,
+                        to.pid_ns
+                    ],
+                )?;
+            }
+        }
+        C::Abandon(reason) => terminal(
+            tx,
+            &job,
+            reason,
+            job.state == S::Started && reason == LearningEndReason::OriginDied,
+            at_ns,
+        )?,
+        _ => return Ok(false),
+    }
+    let next = tx
+        .query_row(
+            &format!("SELECT {JOB_COLUMNS} FROM learning_jobs WHERE task_id=?1"),
+            [id],
+            job_row,
+        )??
+        .key();
+    tx.execute(
+        "INSERT INTO learning_attempt_receipts(task_id,revision,command_hash,result_key_json) VALUES(?1,?2,?3,?4)",
+        params![id, command.key.revision, receipt, serde_json::to_string(&next).map_err(json_error)?],
+    )?;
+    Ok(true)
 }
 
 fn bump(tx: &Connection, id: &str) -> Result<(), StorageError> {

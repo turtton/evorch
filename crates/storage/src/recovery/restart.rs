@@ -2,6 +2,9 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+pub mod handoff;
+pub mod tools;
+
 pub const MAX_BUILTIN_TOOL_NAMES: usize = 4096;
 pub const MAX_BUILTIN_TOOL_NAME_BYTES: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +122,22 @@ pub enum RestartMutation {
     BindComponent {
         manifest_id: String,
     },
+    LearningInventory(handoff::LearningInventory),
+    ResumeLearning {
+        task_id: String,
+        to: crate::learning_jobs::LearningOrigin,
+    },
+    CaptureTools {
+        run_id: String,
+        incarnation: String,
+        snapshot: tools::ToolSnapshot,
+    },
+    Tools(Box<tools::RestartToolsEvidence>),
+    ConsumeTools {
+        run_id: String,
+        incarnation: String,
+    },
+    BootProgress(handoff::RestartBootProgress),
     Commit,
     Arm {
         nonce_hash: String,
@@ -388,6 +407,25 @@ pub(super) fn mutate(
     }
     match mutation {
         RestartMutation::Create(_) => unreachable!(),
+        RestartMutation::LearningInventory(inventory) => {
+            handoff::save_inventory(conn, &tx, inventory)?
+        }
+        RestartMutation::ResumeLearning { task_id, to } => {
+            handoff::resume(conn, &tx, &task_id, &to)?
+        }
+        RestartMutation::CaptureTools {
+            run_id,
+            incarnation,
+            snapshot,
+        } => tools::capture(conn, &tx, &run_id, &incarnation, &snapshot)?,
+        RestartMutation::Tools(evidence) => tools::save(conn, &tx, &evidence)?,
+        RestartMutation::ConsumeTools {
+            run_id,
+            incarnation,
+        } => tools::consume(conn, &tx, &run_id, &incarnation)?,
+        RestartMutation::BootProgress(progress) => {
+            handoff::save_boot_progress(conn, &tx, &progress)?
+        }
         RestartMutation::BeginCapture(mut members) => {
             phase(tx.phase, RestartPhase::Preparing)?;
             members.sort_by(|a, b| a.run_id.cmp(&b.run_id));
@@ -640,6 +678,7 @@ pub(super) fn mutate(
             fail(conn, id, &reason)?;
         }
         RestartMutation::QuarantineCold => {
+            handoff::quarantine_learning(conn, id)?;
             if tx.phase == RestartPhase::Completed {
                 return Ok(tx);
             }
@@ -790,6 +829,7 @@ pub(super) fn quarantine_cold(
     id: &str,
     revision: u64,
 ) -> Result<(), StorageError> {
+    handoff::quarantine_learning(conn, id)?;
     let changed=conn.execute("UPDATE restart_transactions SET phase=CASE WHEN phase='preparing' THEN 'aborted' ELSE 'invalidated' END,revision=revision+1,failure_reason='cold boot has no inherited proof' WHERE restart_id=?1 AND revision=?2 AND phase != 'completed'",params![id,revision])?;
     if changed != 1 {
         return Err(invalid("restart cold quarantine revision conflict"));

@@ -1,6 +1,7 @@
 //! Synchronous failpoints distinguish rollback from lost acknowledgements.
 use super::*;
 use serde_json::json;
+mod handoff;
 fn metadata(id: &str) -> RestartMetadata {
     RestartMetadata {
         restart_id: id.into(),

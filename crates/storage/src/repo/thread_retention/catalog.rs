@@ -45,6 +45,21 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ),
     ("restart_components", Keep, "durable component dispositions"),
     (
+        "restart_learning_inventory",
+        Keep,
+        "restart learning ownership evidence",
+    ),
+    (
+        "restart_learning_members",
+        Keep,
+        "learning recovery disposition receipts",
+    ),
+    (
+        "restart_run_tools",
+        Keep,
+        "one-request tool boundary evidence",
+    ),
+    (
         "restart_owner_progress",
         Keep,
         "cross-database owner cleanup readback progress",
