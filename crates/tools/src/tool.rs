@@ -276,6 +276,10 @@ pub trait Tool: Send + Sync + std::any::Any {
     /// result, such as live shell job output. Other tools ignore it.
     fn set_event_bus(&self, _bus: std::sync::Arc<event_bus::EventBus>) {}
 
+    /// Register every child this tool starts in the core's ledger, and refuse to
+    /// start any once its spawn fence is closed. Tools that start no process ignore it.
+    fn set_spawn_ledger(&self, _ledger: sandbox::SpawnLedger) {}
+
     /// Replace the variables a shell adds to every command it starts. Other tools ignore it.
     fn set_shell_environment(&self, _env: Vec<(String, String)>) {}
 

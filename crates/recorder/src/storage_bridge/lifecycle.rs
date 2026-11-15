@@ -97,15 +97,28 @@ impl OwnedStorageBridge {
     /// even with live producers. Later arrivals are not persisted by this bridge.
     /// Returns after durable writes complete; may wait for storage I/O. Idempotent.
     pub fn shutdown(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(thread) = self.thread.take()
-            && thread.join().is_err()
-        {
+        if self.try_shutdown().is_err() {
             self.monitor
                 .warn("storage bridge thread failed during shutdown");
         }
+    }
+
+    /// [`shutdown`](Self::shutdown) that says whether the bridge thread ended
+    /// cleanly. A restart must not go on after an `Err`: the bridge may have
+    /// left accepted events unwritten.
+    ///
+    /// # Errors
+    /// The bridge thread panicked.
+    pub fn try_shutdown(&mut self) -> io::Result<()> {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
+        thread
+            .join()
+            .map_err(|_| io::Error::other("the storage bridge thread panicked during shutdown"))
     }
 }
 

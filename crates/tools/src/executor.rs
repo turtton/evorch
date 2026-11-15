@@ -162,6 +162,7 @@ pub struct ToolExecutor {
     gate: Option<Arc<ApprovalGate>>,
     default_cwd: RwLock<Option<std::path::PathBuf>>,
     post_edit_hook: Option<Arc<dyn PostEditHook>>,
+    spawn_ledger: Option<sandbox::SpawnLedger>,
     workspace_boundary: RwLock<Option<std::path::PathBuf>>,
     file_boundary: RwLock<Option<sandbox::SandboxBoundary>>,
     file_escalation: RwLock<Option<Arc<dyn crate::tools::shell_escalation::ShellEscalationGate>>>,
@@ -183,6 +184,7 @@ impl ToolExecutor {
             gate: None,
             default_cwd: RwLock::new(None),
             post_edit_hook: None,
+            spawn_ledger: None,
             workspace_boundary: RwLock::new(None),
             file_boundary: RwLock::new(None),
             file_escalation: RwLock::new(None),
@@ -218,6 +220,9 @@ impl ToolExecutor {
             tool.set_default_cwd(cwd);
         }
         tool.set_event_bus(Arc::clone(&self.event_bus));
+        if let Some(ledger) = &self.spawn_ledger {
+            tool.set_spawn_ledger(ledger.clone());
+        }
         self.tools.insert(
             tool.name().to_owned(),
             RegisteredTool {
@@ -247,6 +252,7 @@ impl ToolExecutor {
                     .clone(),
             ),
             post_edit_hook: self.post_edit_hook.clone(),
+            spawn_ledger: self.spawn_ledger.clone(),
             workspace_boundary: RwLock::new(
                 self.workspace_boundary
                     .read()
@@ -318,7 +324,7 @@ impl ToolExecutor {
             edit,
             write,
             apply_patch,
-            Arc::new(Grep),
+            Arc::new(Grep::default()),
             Arc::new(shell),
             Arc::new(GitDiff::new(sandbox)),
             Arc::new(RunJs::new()),
@@ -338,8 +344,27 @@ impl ToolExecutor {
     /// Attach a shared hook to registered standard Write/Edit/ApplyPatch tools. None
     /// restores their hook-free behavior without changing tool schemas or permissions.
     pub fn with_post_edit_hook(mut self, hook: Option<Arc<dyn PostEditHook>>) -> Self {
+        if let (Some(hook), Some(ledger)) = (&hook, &self.spawn_ledger) {
+            hook.set_spawn_ledger(ledger.clone());
+        }
         self.post_edit_hook = hook;
         self.refresh_post_edit_tools();
+        self
+    }
+
+    /// Register every process the tools of this executor start, and the
+    /// supervisors that watch them, in the core's ledger; none starts once its
+    /// spawn fence is closed. Applies to the tools and post-edit hook already
+    /// installed and to those installed later, and to forks of this executor.
+    #[must_use]
+    pub fn with_spawn_ledger(mut self, ledger: sandbox::SpawnLedger) -> Self {
+        for registered in self.tools.values() {
+            registered.tool.set_spawn_ledger(ledger.clone());
+        }
+        if let Some(hook) = &self.post_edit_hook {
+            hook.set_spawn_ledger(ledger.clone());
+        }
+        self.spawn_ledger = Some(ledger);
         self
     }
 

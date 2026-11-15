@@ -166,7 +166,7 @@ mod tests {
         vec![
             ("write".to_owned(), crate::tools::Write.schema()),
             ("read".to_owned(), crate::tools::Read.schema()),
-            ("grep".to_owned(), crate::tools::Grep.schema()),
+            ("grep".to_owned(), crate::tools::Grep::default().schema()),
             ("edit".to_owned(), crate::tools::Edit.schema()),
             (
                 "git_diff".to_owned(),

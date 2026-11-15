@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event};
+use sandbox::process::GroupChild;
 use serde_json::{Value, json};
 
 use super::{Shared, read_json};
@@ -89,7 +90,12 @@ fn group_id(now: SystemTime) -> Result<String, String> {
     Ok(format!("{stamp}-{suffix}"))
 }
 
-fn spawn(cli: &Path, args: &[OsString], member: &Member) -> std::io::Result<tokio::process::Child> {
+fn spawn(
+    cli: &Path,
+    args: &[OsString],
+    member: &Member,
+    ledger: Option<&sandbox::SpawnLedger>,
+) -> std::io::Result<GroupChild> {
     let mut command = tokio::process::Command::new(cli);
     command
         .args(args)
@@ -101,7 +107,9 @@ fn spawn(cli: &Path, args: &[OsString], member: &Member) -> std::io::Result<toki
     sandbox::process::apply_launch_policy(command.as_std_mut());
     end_with_parent(&mut command);
     command.kill_on_drop(true);
-    command.spawn()
+    sandbox::SpawnLedger::admit_optional(ledger)
+        .map_err(std::io::Error::from)?
+        .spawn_group(sandbox::ChildKind::Eval, Some("evaluation"), &mut command)
 }
 
 /// Ask the kernel to stop the evaluation when this process ends, crashes
@@ -142,8 +150,14 @@ fn launch_with(
     run_id: &str,
     overlay: &str,
     launches: Vec<Launch>,
-    mut spawn_child: impl FnMut(&Path, &[OsString], &Member) -> std::io::Result<tokio::process::Child>,
+    mut spawn_child: impl FnMut(
+        &Path,
+        &[OsString],
+        &Member,
+        Option<&sandbox::SpawnLedger>,
+    ) -> std::io::Result<GroupChild>,
 ) -> Result<GroupRecord, String> {
+    let ledger = shared.lifecycle.spawn_ledger();
     let mut admission = shared.lifecycle.state.lock().unwrap();
     if admission.closed {
         return Err("evaluation host is stopping".into());
@@ -204,7 +218,7 @@ fn launch_with(
             context.user_config_dir.clone().into(),
         ]
         .into();
-        match spawn_child(&cli, &args, &member) {
+        match spawn_child(&cli, &args, &member, ledger.as_ref()) {
             Ok(child) => {
                 member.pid = child.id();
                 children.push((members.len(), child));
@@ -260,7 +274,7 @@ async fn watch(
     mut stopped: tokio::sync::watch::Receiver<bool>,
     record: Arc<Mutex<GroupRecord>>,
     index: usize,
-    mut child: tokio::process::Child,
+    mut child: GroupChild,
 ) {
     let stop = async {
         loop {
@@ -274,10 +288,7 @@ async fn watch(
     };
     let status = tokio::select! {
         biased;
-        () = stop => {
-            let _ = child.start_kill();
-            child.wait().await
-        }
+        () = stop => child.kill_and_wait().await,
         status = child.wait() => status,
     };
     let exit = match status {
@@ -542,7 +553,7 @@ mod launch_tests {
         );
 
         // When: the evaluation process reports its pid, session and that descriptor.
-        let mut child = spawn(&sh, &["-c".into(), probe.into()], &member).unwrap();
+        let mut child = spawn(&sh, &["-c".into(), probe.into()], &member, None).unwrap();
         assert!(child.wait().await.unwrap().success());
 
         // Then: it leads a session of its own and the descriptor did not reach it.
@@ -554,6 +565,57 @@ mod launch_tests {
         assert!(pid.parse::<u32>().is_ok(), "{stdout}");
         assert_eq!(session, pid, "{stdout}");
         assert_eq!(descriptor, "descriptor-closed", "{stdout}");
+    }
+
+    fn member_in(dir: &Path) -> Member {
+        Member {
+            thread_id: "thread-owned".into(),
+            purpose: Purpose::Target,
+            repeat: 1,
+            dir: dir.join("evaluation"),
+            pid: None,
+            stdout: dir.join("stdout.log"),
+            stderr: dir.join("stderr.log"),
+            exit: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_evaluation_is_registered_in_the_ledger_and_refused_once_its_fence_closes() {
+        // Given: a ledger and an evaluation that ends by itself.
+        let dir = tempfile::tempdir().unwrap();
+        let member = member_in(dir.path());
+        let ledger = sandbox::SpawnLedger::new();
+
+        // When: it is launched, then run to its end.
+        let mut child = spawn(
+            Path::new("sh"),
+            &["-c".into(), "true".into()],
+            &member,
+            Some(&ledger),
+        )
+        .unwrap();
+        let children = ledger.children();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].kind, sandbox::ChildKind::Eval);
+        assert!(child.wait().await.unwrap().success());
+        ledger.reap_all_children().await.unwrap();
+
+        // Then: its reap is confirmed, and a closed fence starts no more.
+        let stats = ledger.child_stats();
+        assert_eq!(
+            (stats.registered, stats.reaped, stats.unconfirmed),
+            (1, 1, 0)
+        );
+        ledger.close_fence();
+        let refused = spawn(
+            Path::new("sh"),
+            &["-c".into(), "true".into()],
+            &member,
+            Some(&ledger),
+        );
+        assert!(refused.is_err());
+        assert_eq!(ledger.child_stats().registered, 1);
     }
 }
 
@@ -612,15 +674,21 @@ mod lifecycle_tests {
                 .collect()
         };
         let mut count = 0;
-        let group = launch_with(&shared, "run-1", "overlay", launches(), |cli, _, member| {
-            count += 1;
-            if count == 2 {
-                return Err(std::io::Error::other("injected spawn failure"));
-            }
-            // The shell blocks itself, not by sleeping; shutdown can kill it even
-            // before exec. Child wait is the completion signal, not elapsed time.
-            spawn(cli, &["-c".into(), "kill -STOP $$".into()], member)
-        })
+        let group = launch_with(
+            &shared,
+            "run-1",
+            "overlay",
+            launches(),
+            |cli, _, member, ledger| {
+                count += 1;
+                if count == 2 {
+                    return Err(std::io::Error::other("injected spawn failure"));
+                }
+                // The shell blocks itself, not by sleeping; shutdown can kill it even
+                // before exec. Child wait is the completion signal, not elapsed time.
+                spawn(cli, &["-c".into(), "kill -STOP $$".into()], member, ledger)
+            },
+        )
         .unwrap();
         assert!(
             lifecycle.is_busy(),

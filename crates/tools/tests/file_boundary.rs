@@ -496,7 +496,7 @@ fn file_tool_access_description_counts_allowed_directories_inside_the_boundary()
     // Given: the standard file tools.
     let tools: [Box<dyn Tool>; 4] = [
         Box::new(Read),
-        Box::new(Grep),
+        Box::new(Grep::default()),
         Box::new(Write::default()),
         Box::new(Edit::default()),
     ];

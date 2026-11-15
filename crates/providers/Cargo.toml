@@ -21,6 +21,7 @@ getrandom = { workspace = true }
 httpdate = "1"
 image = { workspace = true }
 reqwest = { workspace = true }
+sandbox = { path = "../sandbox" }
 secret-guard = { path = "../secret-guard" }
 serde = { workspace = true }
 serde_json = { workspace = true }

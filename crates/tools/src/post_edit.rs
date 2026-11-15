@@ -5,15 +5,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
-    Arc,
+    Arc, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 
 use async_trait::async_trait;
 use config::CommentCheckerConfig;
-use sandbox::process::GroupChild;
-use sandbox::{CommandSpec, Sandbox};
+use sandbox::{ChildKind, CommandSpec, Sandbox, SpawnLedger};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{oneshot, watch};
@@ -76,6 +75,10 @@ pub enum UnavailableReason {
 pub trait PostEditHook: Send + Sync {
     async fn check(&self, input: &PostEditInput) -> PostEditOutcome;
 
+    /// Register the checker processes and their supervisors in the core's
+    /// ledger. Hooks that start nothing ignore it.
+    fn set_spawn_ledger(&self, _ledger: SpawnLedger) {}
+
     /// Wait for cancellation cleanup before releasing the run's workspace.
     async fn drain(&self) {}
 
@@ -94,6 +97,7 @@ pub struct CommentChecker {
     prompt: String,
     unavailable_notified: AtomicBool,
     supervisors: watch::Sender<usize>,
+    ledger: RwLock<Option<SpawnLedger>>,
 }
 
 impl CommentChecker {
@@ -134,6 +138,7 @@ impl CommentChecker {
                 .unwrap_or_else(|| DEFAULT_PROMPT.to_owned()),
             unavailable_notified: AtomicBool::new(false),
             supervisors: watch::channel(0).0,
+            ledger: RwLock::new(None),
         })
     }
 }
@@ -339,6 +344,7 @@ async fn capture_stderr(mut reader: impl AsyncRead + Unpin) -> io::Result<String
 
 async fn supervise(
     mut command: tokio::process::Command,
+    ledger: Option<SpawnLedger>,
     payload: Vec<u8>,
     deadline: tokio::time::Instant,
     mut cancel: oneshot::Receiver<()>,
@@ -353,7 +359,16 @@ async fn supervise(
             "checker deadline elapsed before launch",
         );
     }
-    let mut child = match GroupChild::spawn(&mut command) {
+    let spawned = SpawnLedger::admit_optional(ledger.as_ref())
+        .map_err(io::Error::from)
+        .and_then(|admission| {
+            admission.spawn_group(
+                ChildKind::SandboxSession,
+                Some("comment-checker"),
+                &mut command,
+            )
+        });
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return unavailable(UnavailableReason::SpawnFailed, error),
     };
@@ -437,22 +452,39 @@ impl PostEditHook for CommentChecker {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        let ledger = self
+            .ledger
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let deadline = tokio::time::Instant::now() + self.timeout;
         let (cancel, cancelled) = oneshot::channel();
         let mut cancellation = CancelOnDrop(Some(cancel));
         let (send, receive) = oneshot::channel();
         self.supervisors.send_modify(|active| *active += 1);
         let finished = SupervisorFinished(self.supervisors.clone());
-        tokio::spawn(async move {
+        let owner = ledger.clone();
+        let supervisor = async move {
             let _finished = finished;
-            let outcome = supervise(command, payload, deadline, cancelled).await;
+            let outcome = supervise(command, owner, payload, deadline, cancelled).await;
             let _ = send.send(outcome);
-        });
+        };
+        match SpawnLedger::admit_optional(ledger.as_ref()) {
+            Ok(admission) => admission.spawn_worker("comment-checker", supervisor),
+            Err(error) => return unavailable(UnavailableReason::SpawnFailed, error),
+        }
         let result = receive
             .await
             .unwrap_or_else(|_| unavailable(UnavailableReason::Io, "checker supervisor stopped"));
         cancellation.0.take();
         result
+    }
+
+    fn set_spawn_ledger(&self, ledger: SpawnLedger) {
+        *self
+            .ledger
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ledger);
     }
 
     async fn drain(&self) {

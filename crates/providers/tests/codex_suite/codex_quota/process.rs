@@ -119,3 +119,58 @@ async fn cancelled_request_reaps_child_while_runtime_remains_active() {
     .await
     .expect("cancelled child reaped");
 }
+
+fn flooding_config(ledger: &sandbox::SpawnLedger) -> QuotaConfig {
+    QuotaConfig {
+        app_server_program: "sh".into(),
+        app_server_args: vec!["-c".into(),
+            "i=0; while [ $i -lt 129 ]; do printf '%s\\n' '{\"id\":999,\"result\":{}}'; i=$((i+1)); done; IFS= read -r r; IFS= read -r r".into()],
+        ledger: Some(ledger.clone()),
+        ..QuotaConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn the_app_server_and_its_supervisor_are_owned_by_the_ledger() {
+    // Given: a quota config registered in a ledger and a server that ends the exchange.
+    let ledger = sandbox::SpawnLedger::new();
+    let mut client = CodexQuotaClient::new(
+        flooding_config(&ledger),
+        Arc::new(InMemoryTokenStore::new()),
+    )
+    .unwrap();
+
+    // When: the quota is fetched.
+    let error = client.fetch_quota().await.unwrap_err();
+
+    // Then: the ledger registered the child and the supervisor, and both ended cleanly.
+    assert!(matches!(error, QuotaError::Sources { .. }), "{error}");
+    ledger.join_workers().await.unwrap();
+    ledger.reap_all_children().await.unwrap();
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (1, 1, 0)
+    );
+    assert!(ledger.worker_stats().spawned >= 1);
+}
+
+#[tokio::test]
+async fn a_closed_fence_starts_no_app_server() {
+    // Given: a fenced ledger.
+    let ledger = sandbox::SpawnLedger::new();
+    ledger.close_fence();
+    let mut client = CodexQuotaClient::new(
+        flooding_config(&ledger),
+        Arc::new(InMemoryTokenStore::new()),
+    )
+    .unwrap();
+
+    // When: the quota is fetched.
+    let error = client.fetch_quota().await.unwrap_err();
+
+    // Then: no child and no supervisor started.
+    assert!(matches!(error, QuotaError::Sources { .. }), "{error}");
+    assert_eq!(ledger.child_stats().registered, 0);
+    assert_eq!(ledger.worker_stats().spawned, 0);
+}

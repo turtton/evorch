@@ -5,9 +5,11 @@
 
 use std::io::ErrorKind;
 use std::process::Stdio;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use regex::Regex;
+use sandbox::{ChildKind, SpawnLedger};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
@@ -16,8 +18,33 @@ use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
 /// 正規表現でファイル内容を検索するツール。
-#[derive(Debug, Clone, Copy)]
-pub struct Grep;
+#[derive(Debug, Clone, Default)]
+pub struct Grep {
+    ledger: Arc<RwLock<Option<SpawnLedger>>>,
+}
+
+impl Grep {
+    /// Registers every `rg` this tool starts in the core's ledger.
+    #[must_use]
+    pub fn with_spawn_ledger(self, ledger: SpawnLedger) -> Self {
+        self.set_ledger(ledger);
+        self
+    }
+
+    fn set_ledger(&self, ledger: SpawnLedger) {
+        *self
+            .ledger
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ledger);
+    }
+
+    fn ledger(&self) -> Option<SpawnLedger> {
+        self.ledger
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
 
 const MAX_LINES: usize = 200;
 const MAX_BYTES: usize = 8192;
@@ -47,6 +74,10 @@ impl Tool for Grep {
 
     fn permissions(&self) -> Permissions {
         Permissions::read_only()
+    }
+
+    fn set_spawn_ledger(&self, ledger: SpawnLedger) {
+        self.set_ledger(ledger);
     }
 
     fn execution_mode(&self) -> ToolExecutionMode {
@@ -79,19 +110,23 @@ impl Tool for Grep {
             if metadata.is_file() {
                 return search_file(path, &regex).await.map(ToolResult::success);
             }
-            let mut child =
-                grep_command(pattern, path)
-                    .spawn()
-                    .map_err(|error| ToolError::SpawnFailed {
-                        command: "rg (install ripgrep and make it available on PATH)".to_string(),
-                        detail: error.to_string(),
-                    })?;
-            let stdout = child.stdout.take().ok_or_else(|| ToolError::Io {
+            let ledger = self.ledger();
+            let mut command = grep_command(pattern, path);
+            let mut child = SpawnLedger::admit_optional(ledger.as_ref())
+                .map_err(std::io::Error::from)
+                .and_then(|admission| {
+                    admission.spawn_group(ChildKind::Other, Some("grep"), &mut command)
+                })
+                .map_err(|error| ToolError::SpawnFailed {
+                    command: "rg (install ripgrep and make it available on PATH)".to_string(),
+                    detail: error.to_string(),
+                })?;
+            let stdout = child.take_stdout().ok_or_else(|| ToolError::Io {
                 detail: "rg stdout is unavailable".to_string(),
             })?;
             let (output, capped) = collect_output(stdout).await.map_err(io_error)?;
             if capped {
-                child.kill().await.map_err(io_error)?;
+                child.kill_and_wait().await.map_err(io_error)?;
                 return Ok(ToolResult::success(output));
             }
             let status = child.wait().await.map_err(io_error)?;

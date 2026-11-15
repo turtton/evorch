@@ -419,23 +419,34 @@ impl ReclaimExecutor {
 
     /// Stop and join. The reclaim lease is released with the thread.
     pub fn shutdown(mut self) {
-        self.join();
+        let _ = self.join();
     }
 
-    fn join(&mut self) {
+    /// [`shutdown`](Self::shutdown) that says whether the thread ended cleanly
+    /// (and so released its lease). A restart must not go on after an `Err`.
+    ///
+    /// # Errors
+    /// The reclaim thread panicked.
+    pub fn try_shutdown(mut self) -> std::io::Result<()> {
+        self.join()
+    }
+
+    fn join(&mut self) -> std::io::Result<()> {
         // A closed channel means the thread already ended.
         let _ = self.stop.send(());
-        if let Some(thread) = self.thread.take()
-            && thread.join().is_err()
-        {
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
+        thread.join().map_err(|_| {
             tracing::error!("the thread retention reclaim thread panicked");
-        }
+            std::io::Error::other("the thread retention reclaim thread panicked")
+        })
     }
 }
 
 impl Drop for ReclaimExecutor {
     fn drop(&mut self) {
-        self.join();
+        let _ = self.join();
     }
 }
 

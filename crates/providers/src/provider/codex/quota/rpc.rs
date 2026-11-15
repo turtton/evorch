@@ -1,4 +1,5 @@
 use super::{CodexQuota, QuotaConfig, QuotaError, wire::RpcLimits};
+use sandbox::{ChildKind, SpawnLedger};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::process::Stdio;
@@ -109,13 +110,18 @@ impl Connection {
 
 pub(super) async fn fetch(config: &QuotaConfig) -> Result<CodexQuota, QuotaError> {
     let config = config.clone();
+    let ledger = config.ledger.clone();
     let (mut sender, receiver) = tokio::sync::oneshot::channel();
     // The supervisor owns the child even when the caller drops its receiver.
     // Unlike an aborted task, it can await kill/reaping on cancellation.
-    tokio::spawn(async move {
+    let supervisor = async move {
         let result = supervise(&config, &mut sender).await;
         let _ = sender.send(result);
-    });
+    };
+    match SpawnLedger::admit_optional(ledger.as_ref()) {
+        Ok(admission) => admission.spawn_worker("codex-quota-rpc", supervisor),
+        Err(_) => return Err(QuotaError::Process(std::io::ErrorKind::PermissionDenied)),
+    }
     receiver
         .await
         .map_err(|_| QuotaError::Protocol("RPC supervisor stopped"))?
@@ -125,24 +131,28 @@ async fn supervise(
     config: &QuotaConfig,
     sender: &mut tokio::sync::oneshot::Sender<Result<CodexQuota, QuotaError>>,
 ) -> Result<CodexQuota, QuotaError> {
-    let mut child = Command::new(&config.app_server_program)
+    let mut command = Command::new(&config.app_server_program);
+    command
         .args(&config.app_server_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    sandbox::process::apply_launch_policy(command.as_std_mut());
+    let mut child = SpawnLedger::admit_optional(config.ledger.as_ref())
+        .map_err(std::io::Error::from)
+        .and_then(|admission| {
+            admission.spawn_group(ChildKind::Other, Some("codex-quota"), &mut command)
+        })
         .map_err(io)?;
     let exchange = async {
         let mut connection = Connection {
             input: child
-                .stdin
-                .take()
+                .take_stdin()
                 .ok_or(QuotaError::Protocol("missing child stdin"))?,
             output: BufReader::new(
                 child
-                    .stdout
-                    .take()
+                    .take_stdout()
                     .ok_or(QuotaError::Protocol("missing child stdout"))?,
             ),
         };
@@ -153,6 +163,6 @@ async fn supervise(
         result = tokio::time::timeout(config.timeout, exchange) =>
             result.unwrap_or(Err(QuotaError::Timeout)),
     };
-    child.kill().await.map_err(io)?;
+    child.kill_and_wait().await.map_err(io)?;
     result
 }

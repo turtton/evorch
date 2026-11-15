@@ -29,6 +29,7 @@ use std::time::Duration;
 use crate::bwrap::{locate_bwrap, probe};
 use crate::error::SandboxError;
 use crate::exec::{CommandSpec, Sandbox, WrappedCommand};
+use crate::ledger::SpawnLedger;
 use crate::session::StdioSession;
 
 /// Longest the library listing may take.
@@ -83,6 +84,21 @@ impl MinimalSandbox {
         forward_env: &[&str],
         cancel: &AtomicBool,
     ) -> Result<Self, SandboxError> {
+        Self::detect_owned(executable, forward_env, cancel, None)
+    }
+
+    /// Like [`Self::detect_cancellable`], with the library listing registered
+    /// in `ledger`, so a core stop sees it: once the ledger's spawn fence is
+    /// closed no listing starts and the preparation fails.
+    ///
+    /// # Errors
+    /// As [`Self::detect_cancellable`], or the fence is closed.
+    pub fn detect_owned(
+        executable: &Path,
+        forward_env: &[&str],
+        cancel: &AtomicBool,
+        ledger: Option<&SpawnLedger>,
+    ) -> Result<Self, SandboxError> {
         let unavailable = |detail: String| SandboxError::BwrapUnavailable { detail };
         let executable = executable
             .canonicalize()
@@ -108,9 +124,8 @@ impl MinimalSandbox {
             })
             .collect();
         let listed = match &loader {
-            Some(loader) => {
-                list_libraries(&bwrap, loader, &executable, &env, cancel).map_err(unavailable)?
-            }
+            Some(loader) => list_libraries(&bwrap, loader, &executable, &env, cancel, ledger)
+                .map_err(unavailable)?,
             None => Vec::new(),
         };
         if cancel.load(Ordering::SeqCst) {
@@ -201,6 +216,7 @@ fn list_libraries(
     executable: &Path,
     env: &[(String, String)],
     cancel: &AtomicBool,
+    ledger: Option<&SpawnLedger>,
 ) -> Result<Vec<PathBuf>, String> {
     let wrapped = WrappedCommand {
         program: bwrap.to_string_lossy().into_owned(),
@@ -209,8 +225,14 @@ fn list_libraries(
         inherit_env: false,
         env: env.to_vec(),
     };
-    let listing = run_bounded(wrapped, DISCOVERY_TIMEOUT, DISCOVERY_OUTPUT_BYTES, cancel)
-        .map_err(|error| format!("listing the libraries of {}: {error}", executable.display()))?;
+    let listing = run_bounded_owned(
+        wrapped,
+        DISCOVERY_TIMEOUT,
+        DISCOVERY_OUTPUT_BYTES,
+        cancel,
+        ledger,
+    )
+    .map_err(|error| format!("listing the libraries of {}: {error}", executable.display()))?;
     let files: Vec<PathBuf> = listing.lines().filter_map(listed_path).collect();
     if files.is_empty() {
         return Err(format!(
@@ -355,11 +377,23 @@ fn refused(loader: &Path, reason: &str) -> String {
 /// when it exceeds `timeout` or writes more than `cap` bytes, and returns what it
 /// wrote to stdout. A command that ends successfully and stays within both limits
 /// is the only success.
+#[cfg(test)]
 fn run_bounded(
     command: WrappedCommand,
     timeout: Duration,
     cap: usize,
     cancel: &AtomicBool,
+) -> Result<String, String> {
+    run_bounded_owned(command, timeout, cap, cancel, None)
+}
+
+/// [`run_bounded`] whose process is registered in `ledger`, when there is one.
+fn run_bounded_owned(
+    command: WrappedCommand,
+    timeout: Duration,
+    cap: usize,
+    cancel: &AtomicBool,
+    ledger: Option<&SpawnLedger>,
 ) -> Result<String, String> {
     struct Prepared(WrappedCommand);
     impl Sandbox for Prepared {
@@ -367,7 +401,8 @@ fn run_bounded(
             Ok(self.0.clone())
         }
     }
-    let mut session = StdioSession::spawn(
+    let mut session = StdioSession::spawn_owned(
+        ledger,
         &Prepared(command),
         CommandSpec {
             program: String::new(),
@@ -639,6 +674,38 @@ mod tests {
             .parse()
             .unwrap();
         assert!(gone(pid), "listing process {pid} survived");
+    }
+
+    #[test]
+    fn a_listing_is_registered_in_the_ledger_and_refused_once_its_fence_closes() {
+        let ledger = SpawnLedger::new();
+        let cancel = AtomicBool::new(false);
+
+        let output = run_bounded_owned(
+            sh("echo ok"),
+            Duration::from_secs(60),
+            1024,
+            &cancel,
+            Some(&ledger),
+        )
+        .unwrap();
+        ledger.close_fence();
+        let refused = run_bounded_owned(
+            sh("echo no"),
+            Duration::from_secs(60),
+            1024,
+            &cancel,
+            Some(&ledger),
+        );
+
+        assert_eq!(output.trim(), "ok");
+        let stats = ledger.child_stats();
+        assert_eq!(
+            (stats.registered, stats.reaped, stats.unconfirmed),
+            (1, 1, 0)
+        );
+        assert!(refused.is_err(), "no listing starts under a closed fence");
+        assert_eq!(ledger.child_stats().registered, 1);
     }
 
     #[test]

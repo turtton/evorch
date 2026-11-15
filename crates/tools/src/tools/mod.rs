@@ -46,13 +46,14 @@ mod tests {
     fn all_standard_tool_schemas_compile() {
         let shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
         let git_diff = GitDiff::new(Arc::new(DirectSandbox::new_unchecked()));
+        let grep = Grep::default();
         let apply_patch = ApplyPatch::new();
         let schemas = [
             (Read.name(), Read.schema()),
             (Edit.name(), Edit.schema()),
             (Write.name(), Write.schema()),
             (apply_patch.name(), apply_patch.schema()),
-            (Grep.name(), Grep.schema()),
+            (grep.name(), grep.schema()),
             (
                 shell.name(),
                 Shell::new(Arc::new(DirectSandbox::new_unchecked())).schema(),
@@ -91,11 +92,12 @@ mod tests {
     // Then: each accepts isolated / unsandboxed with a justification, and nothing else
     #[test]
     fn file_tool_schemas_accept_sandbox_access_and_justification() {
+        let grep = Grep::default();
         let schemas = [
             (Read.name(), Read.schema()),
             (Edit.name(), Edit.schema()),
             (Write.name(), Write.schema()),
-            (Grep.name(), Grep.schema()),
+            (grep.name(), grep.schema()),
         ];
         for (name, schema) in schemas {
             let access = &schema["properties"]["sandbox_access"];

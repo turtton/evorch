@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use sandbox::{ChildKind, SpawnLedger, StdioSession};
+
 mod benchmark;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub enum SnapshotError {
 pub struct SnapshotStore {
     root: PathBuf,
     git_dir: PathBuf,
+    ledger: Option<SpawnLedger>,
 }
 
 impl SnapshotStore {
@@ -62,6 +65,7 @@ impl SnapshotStore {
         let store = Self {
             root,
             git_dir: directory.join("repository"),
+            ledger: None,
         };
         if store.git_dir.is_symlink() {
             return Err(SnapshotError::InvalidStore);
@@ -70,6 +74,14 @@ impl SnapshotStore {
             store.git(&["init", "--quiet"])?;
         }
         Ok(store)
+    }
+
+    /// Registers every git process of this store in the core's ledger. Set it
+    /// before the first snapshot is taken.
+    #[must_use]
+    pub fn with_spawn_ledger(mut self, ledger: SpawnLedger) -> Self {
+        self.ledger = Some(ledger);
+        self
     }
 
     pub fn diff(&self, before: &SnapshotId, after: &SnapshotId) -> Result<String, SnapshotError> {
@@ -139,18 +151,17 @@ impl SnapshotStore {
             ]);
         }
         command.args(arguments);
-        let output = if let Some(input) = input {
-            use std::io::Write;
-            let mut child = command
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?;
-            child.stdin.take().expect("piped stdin").write_all(input)?;
-            child.wait_with_output()?
-        } else {
-            command.output()?
-        };
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = StdioSession::spawn_command_owned(
+            self.ledger.as_ref(),
+            ChildKind::Other,
+            Some("snapshot-git"),
+            command,
+        )?
+        .output(input)?;
         if output.status.success() {
             Ok(output)
         } else {

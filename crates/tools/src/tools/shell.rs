@@ -284,6 +284,14 @@ impl Tool for Shell {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cwd);
     }
 
+    fn set_spawn_ledger(&self, ledger: sandbox::SpawnLedger) {
+        *self
+            .jobs
+            .ledger
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ledger);
+    }
+
     fn set_event_bus(&self, bus: Arc<event_bus::EventBus>) {
         self.jobs.set_event_bus(bus);
     }

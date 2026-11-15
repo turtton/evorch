@@ -179,3 +179,41 @@ fn store_rejects_metadata_inside_workspace() {
     // Then: reject recursive/self-capturing stores.
     assert!(result.is_err());
 }
+
+#[test]
+fn every_git_of_a_store_is_registered_in_the_ledger_and_reaped() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("trial");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("file"), "content").unwrap();
+    let ledger = SpawnLedger::new();
+    let mut store = SnapshotStore::open(&root, &temp.path().join("snapshots"))
+        .unwrap()
+        .with_spawn_ledger(ledger.clone());
+
+    store.capture_all().unwrap();
+
+    let stats = ledger.child_stats();
+    assert!(stats.registered > 0, "{stats:?}");
+    assert_eq!(
+        (stats.reaped, stats.unconfirmed),
+        (stats.registered, 0),
+        "{stats:?}"
+    );
+}
+
+#[test]
+fn a_closed_fence_starts_no_snapshot_git() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("trial");
+    fs::create_dir(&root).unwrap();
+    let ledger = SpawnLedger::new();
+    let mut store = SnapshotStore::open(&root, &temp.path().join("snapshots"))
+        .unwrap()
+        .with_spawn_ledger(ledger.clone());
+    let before = ledger.child_stats().registered;
+    ledger.close_fence();
+
+    assert!(store.capture_all().is_err());
+    assert_eq!(ledger.child_stats().registered, before);
+}

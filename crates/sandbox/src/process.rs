@@ -345,6 +345,11 @@ impl GroupChild {
         self.child.as_mut().and_then(|child| child.stderr.take())
     }
 
+    /// The leader's pid, until it has been reaped.
+    pub fn id(&self) -> Option<u32> {
+        self.child.as_ref().and_then(tokio::process::Child::id)
+    }
+
     /// The child's process group, for stopping it from elsewhere.
     pub const fn group(&self) -> &ProcessGroup {
         &self.group
