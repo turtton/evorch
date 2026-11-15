@@ -20,6 +20,7 @@ use workbench_protocol::{
         RejectReason,
     },
     ids::{CapabilityName, ClientId},
+    namespaces::{NAMESPACES, NamespaceStatus},
 };
 
 async fn exchange(stream: &mut UnixStream, value: &impl serde::Serialize) -> Value {
@@ -149,32 +150,58 @@ async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_off
         ErrorCode::UnsupportedCapability
     );
 
-    // Reserved namespaces and the flat version 1 shape are unsupported, not accepted.
-    for payload in [
-        json!({"type": "settings", "payload": {"type": NO_SUCH_OPERATION, "payload": {}}}),
-        json!({"type": "maintenance", "payload": {"type": NO_SUCH_OPERATION}}),
-        json!({"type": "get_core_status"}),
-    ] {
+    // Namespace status follows its operation declarations, so implementing a
+    // namespace removes it from this reserved-only refusal check automatically.
+    for namespace in NAMESPACES
+        .iter()
+        .filter(|namespace| namespace.status == NamespaceStatus::Reserved)
+    {
+        let payload = json!({
+            "type": namespace.name,
+            "payload": {"type": NO_SUCH_OPERATION, "payload": {}},
+        });
         assert_eq!(
             error_code(&mut stream, request("query", payload.clone())).await,
             ErrorCode::UnsupportedCapability,
-            "{payload}"
+            "{}",
+            payload
         );
     }
+    // Flat version 1 clients must not be implicitly upgraded by accepting
+    // their old request shape.
+    let payload = json!({"type": "get_core_status"});
+    assert_eq!(
+        error_code(&mut stream, request("query", payload.clone())).await,
+        ErrorCode::UnsupportedCapability,
+        "{payload}"
+    );
+
     let http = reqwest::Client::new();
-    let response = http
-        .post(format!("{root}/api/v1/request"))
-        .header("Origin", &root)
-        .json(&request(
-            "command",
-            json!({"type": "auth", "payload": {"type": NO_SUCH_OPERATION, "payload": {}}}),
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert!(response.status().is_client_error());
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["payload"]["code"], "unsupported_capability");
+    for namespace in NAMESPACES
+        .iter()
+        .filter(|namespace| namespace.status == NamespaceStatus::Reserved)
+    {
+        let response = http
+            .post(format!("{root}/api/v1/request"))
+            .header("Origin", &root)
+            .json(&request(
+                "query",
+                json!({
+                    "type": namespace.name,
+                    "payload": {"type": NO_SUCH_OPERATION, "payload": {}},
+                }),
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error(), "{}", namespace.name);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(
+            body["payload"]["code"], "unsupported_capability",
+            "{}",
+            namespace.name
+        );
+    }
 
     rustix::process::kill_process(
         rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap(),

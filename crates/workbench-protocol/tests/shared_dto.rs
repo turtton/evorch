@@ -126,8 +126,11 @@ fn evaluation_artifacts_tell_missing_from_a_problem() {
 
 #[test]
 fn the_shared_vocabulary_does_not_make_a_reserved_namespace_implemented() {
-    for name in ["memory", "improvement", "evaluation"] {
-        let info = NAMESPACES.iter().find(|n| n.name == name).unwrap();
-        assert_eq!(info.status, NamespaceStatus::Reserved, "{name}");
+    for info in NAMESPACES {
+        let has_operations =
+            !info.commands.is_empty() || !info.queries.is_empty() || !info.events.is_empty();
+        if !has_operations {
+            assert_eq!(info.status, NamespaceStatus::Reserved, "{}", info.name);
+        }
     }
 }
