@@ -100,8 +100,16 @@ impl LearningExecutions {
             .map_or(Ok(()), Err);
         entry.returned.send_replace(Some(result.clone()));
         // Unknown durable outcomes remain visible; they must block the next seal.
+        // A late callback for an older attempt must not drop the registration of a newer
+        // one that reuses the task id, so only this exact entry is removed.
         if result.is_ok() {
-            self.active.lock().unwrap().remove(&entry.task_id);
+            let mut active = self.active.lock().unwrap();
+            if active
+                .get(&entry.task_id)
+                .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), entry))
+            {
+                active.remove(&entry.task_id);
+            }
         }
     }
 
@@ -254,7 +262,10 @@ impl AgentRuntime {
                 for entry in pending {
                     runtime.reconcile_returned(&entry).await;
                 }
-                if delay >= LEARNING_RETRY_CAP && !stalled {
+                if delay >= LEARNING_RETRY_CAP
+                    && !stalled
+                    && !runtime.shared.learning_executions.unresolved().is_empty()
+                {
                     stalled = true;
                     tracing::error!(
                         interval_secs = LEARNING_RETRY_CAP.as_secs(),
@@ -416,7 +427,8 @@ impl AgentRuntime {
                                 .active
                                 .lock()
                                 .unwrap()
-                                .insert(entry.task_id.clone(), entry.clone());
+                                .entry(entry.task_id.clone())
+                                .or_insert_with(|| entry.clone());
                             runtime.learning_returned(entry).await;
                             let mut tail = entry.returned.subscribe();
                             loop {

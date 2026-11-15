@@ -35,3 +35,26 @@ async fn learning_cohort_deadline_does_not_drop_owned_cleanup_or_restart_per_ent
     suspension.wait().await.unwrap();
     assert!(registry.active.lock().unwrap().is_empty());
 }
+
+// Cleanup callbacks can arrive twice (the return-time reconcile, the automatic retry and an
+// explicit suspend reconcile all report the same entry). A late one for attempt 1 must not
+// release the registration of attempt 2 that reuses the task id, or the next suspend would
+// seal over a job that is still Started.
+#[test]
+fn a_late_callback_for_an_older_attempt_never_drops_the_newer_registration() {
+    let registry = LearningExecutions::default();
+    let changes = watch::channel(0).0;
+    let first = registry.register("task", changes.clone()).unwrap();
+    registry.returned(&first);
+    assert!(registry.active.lock().unwrap().is_empty());
+    let second = registry.register("task", changes).unwrap();
+
+    registry.returned(&first);
+
+    let cohort: Vec<_> = registry.active.lock().unwrap().values().cloned().collect();
+    assert_eq!(cohort.len(), 1);
+    assert!(Arc::ptr_eq(&cohort[0], &second));
+    assert!(second.returned.borrow().is_none());
+    registry.returned(&second);
+    assert!(registry.active.lock().unwrap().is_empty());
+}
