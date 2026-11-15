@@ -32,7 +32,7 @@ use super::{
     WireVerdict,
 };
 
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 
 /// User-request references kept in the record itself; any further ones follow in
 /// continuation events of this many each, so none is dropped.
@@ -189,6 +189,9 @@ pub struct VerdictRecord {
     pub risk_level: Option<RiskLevel>,
     pub authorization_level: Option<AuthorizationLevel>,
     pub procedure_step: ProcedureStep,
+    pub authorization_basis: Option<super::AuthorizationBasis>,
+    pub authorization_refs: Option<Vec<usize>>,
+    pub scope_match: Option<super::ScopeMatch>,
     pub decision: Decision,
 }
 
@@ -529,7 +532,10 @@ impl Audit {
                     approve: wire.approve,
                     risk_level: wire.risk_level,
                     authorization_level: wire.authorization_level,
-                    procedure_step: wire.procedure_step,
+                    procedure_step: wire.procedure_step.unwrap_or_default(),
+                    authorization_basis: wire.authorization_basis,
+                    authorization_refs: wire.authorization_refs.clone(),
+                    scope_match: wire.scope_match,
                     decision: match verdict {
                         ReviewVerdict::Approve => Decision::Approve,
                         ReviewVerdict::Deny { .. } => Decision::Deny,

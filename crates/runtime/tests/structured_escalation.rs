@@ -1,5 +1,8 @@
 //! Offline review contracts through runtime routing and the real provider HTTP adapters.
 
+#[path = "structured_escalation/authorization_cache.rs"]
+mod authorization_cache;
+
 #[path = "structured_escalation/support.rs"]
 mod support;
 
@@ -21,7 +24,13 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const MODEL: &str = "gpt-4o";
 const REVIEW_MODEL: &str = "gpt-4o-review";
-const APPROVE: &str = r#"{"approve":true,"reason":"safe inspection"}"#;
+const APPROVE: &str = r#"{"approve":true,"reason":"safe inspection","risk_level":"low","authorization_level":"high","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[],"scope_match":"full"}"#;
+
+fn missing_user_context() -> ReviewVerdict {
+    ReviewVerdict::Deny {
+        reason: "shell action lacks a real user request in this run's lineage".into(),
+    }
+}
 const DENY: &str = r#"{"approve":false,"reason":"unsafe effects"}"#;
 
 async fn server(codex: bool) -> MockServer {
@@ -70,6 +79,10 @@ async fn requests(server: &MockServer) -> Vec<Value> {
 }
 
 fn assert_schema(format: &Value) {
+    assert_review_schema(format, true);
+}
+
+fn assert_review_schema(format: &Value, shell: bool) {
     assert_eq!(format["type"], "json_schema");
     let schema = if format.get("json_schema").is_some() {
         &format["json_schema"]
@@ -85,7 +98,11 @@ fn assert_schema(format: &Value) {
     let required = schema["schema"]["required"]
         .as_array()
         .expect("required fields");
-    assert_eq!(required.len(), 5);
+    assert_eq!(required.len(), if shell { 8 } else { 5 });
+    for field in ["authorization_basis", "authorization_refs", "scope_match"] {
+        assert_eq!(required.contains(&json!(field)), shell);
+        assert_eq!(schema["schema"]["properties"].get(field).is_some(), shell);
+    }
     assert!(required.contains(&json!("procedure_step")));
     assert!(
         required.contains(&json!("risk_level")) && required.contains(&json!("authorization_level"))
@@ -96,7 +113,7 @@ fn assert_schema(format: &Value) {
 #[tokio::test]
 async fn compatible_schema_and_reasoning_reach_the_real_review_path() {
     for (text, expected) in [
-        (APPROVE, ReviewVerdict::Approve),
+        (APPROVE, missing_user_context()),
         (
             DENY,
             ReviewVerdict::Deny {
@@ -143,7 +160,7 @@ async fn shell_review_uses_reviewer_tool_execution_model_and_generation() {
         QuickModelReviewer::new(harness.model)
             .review("run-review", "pwd", "inspect directory")
             .await,
-        Ok(ReviewVerdict::Approve)
+        Ok(missing_user_context())
     );
     let captured = requests(&server).await;
     assert_eq!(captured.len(), 1);
@@ -186,7 +203,7 @@ async fn unsupported_format_falls_back_once_with_identical_input_and_settings() 
             QuickModelReviewer::new(harness.model)
                 .review("run-review", "pwd", "inspect directory")
                 .await,
-            Ok(ReviewVerdict::Approve)
+            Ok(missing_user_context())
         );
         let requests = requests(&server).await;
         assert_eq!(requests.len(), 2);
@@ -220,7 +237,7 @@ async fn mount_review_candidates(server: &MockServer, fallback: ResponseTemplate
 }
 
 #[tokio::test]
-async fn http_400_falls_back_to_next_candidate_and_approves() {
+async fn http_400_falls_back_to_next_candidate_but_cannot_invent_user_context() {
     let server = server(false).await;
     mount_review_candidates(&server, completion(APPROVE)).await;
     let harness = harness_fallback(&server.uri(), Duration::from_secs(2));
@@ -228,7 +245,7 @@ async fn http_400_falls_back_to_next_candidate_and_approves() {
         QuickModelReviewer::new(harness.model)
             .review("run-review", "pwd", "inspect directory")
             .await,
-        Ok(ReviewVerdict::Approve)
+        Ok(missing_user_context())
     );
     let requests = requests(&server).await;
     assert_eq!(requests.len(), 2);
@@ -251,7 +268,7 @@ async fn http_400_falls_back_to_next_candidate_and_approves() {
         let payload: Value = serde_json::from_str(content).unwrap();
         assert_eq!(
             payload,
-            json!({"command":"pwd","justification":"inspect directory","access":"host_unsandboxed"})
+            json!({"command":"pwd","justification":"inspect directory","access":"host_unsandboxed", "cwd":null, "workspace_root":null})
         );
         assert_eq!(request["temperature"], 0.25);
         assert_eq!(request["max_tokens"], 321);
@@ -336,7 +353,7 @@ async fn structured_unsupported_400_keeps_same_provider_downgrade_precedence() {
         QuickModelReviewer::new(harness.model)
             .review("run-review", "pwd", "inspect directory")
             .await,
-        Ok(ReviewVerdict::Approve)
+        Ok(missing_user_context())
     );
     let captured = server.received_requests().await.expect("recorded requests");
     let posts: Vec<_> = captured
@@ -499,7 +516,7 @@ async fn codex_sse_review_uses_text_format_and_falls_back_without_changing_affin
             QuickModelReviewer::new(harness.model)
                 .review("run-review", "pwd", "inspect directory")
                 .await,
-            Ok(ReviewVerdict::Approve)
+            Ok(missing_user_context())
         );
         let requests = requests(&server).await;
         assert_schema(&requests[0]["text"]["format"]);
@@ -531,7 +548,7 @@ async fn codex_sse_file_review_accepts_encrypted_reasoning() {
     let server = server(true).await;
     Mock::given(method("POST"))
         .respond_with(codex_completion(
-            r#"{"approve":true,"reason":"safe read","risk_level":"low","authorization_level":"high"}"#,
+            r#"{"approve":true,"reason":"safe read","risk_level":"low","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#,
         ))
         .expect(1)
         .mount(&server)
@@ -558,7 +575,7 @@ async fn codex_sse_file_review_accepts_encrypted_reasoning() {
         )
         .await;
     assert!(matches!(decision, EscalationDecision::Approve));
-    assert_schema(&requests(&server).await[0]["text"]["format"]);
+    assert_review_schema(&requests(&server).await[0]["text"]["format"], false);
 }
 
 #[tokio::test]
@@ -572,7 +589,7 @@ async fn codex_sse_web_review_accepts_encrypted_reasoning() {
     let server = server(true).await;
     Mock::given(method("POST"))
         .respond_with(codex_completion(
-            r#"{"approve":true,"reason":"requested page","risk_level":"low","authorization_level":"high"}"#,
+            r#"{"approve":true,"reason":"requested page","risk_level":"low","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#,
         ))
         .expect(1)
         .mount(&server)
@@ -636,7 +653,7 @@ async fn codex_sse_web_review_accepts_encrypted_reasoning() {
         event.kind,
         EventKind::Tool(ToolEvent::ApprovalRequested { .. })
     )));
-    assert_schema(&requests(&server).await[0]["text"]["format"]);
+    assert_review_schema(&requests(&server).await[0]["text"]["format"], false);
 }
 
 fn message(role: MessageRole, text: &str) -> Message {
@@ -683,7 +700,7 @@ async fn independent_review_preserves_the_normal_turn_prefix_and_cached_input() 
         QuickModelReviewer::new(harness.model.clone())
             .review("normal-run", "pwd", "inspect directory")
             .await,
-        Ok(ReviewVerdict::Approve)
+        Ok(missing_user_context())
     );
     history.push(first.message);
     history.push(message(MessageRole::User, "Continue inspection."));
@@ -722,7 +739,7 @@ async fn independent_review_preserves_the_normal_turn_prefix_and_cached_input() 
 // HTTP negotiation and unchanged wire input remain covered above.
 
 const CLEANUP_STEPS: &str = "After the merge, remove the task worktree.\n";
-const CRITICAL_VERIFIED: &str = r#"{"approve":true,"reason":"cleanup the procedure defines","risk_level":"critical","authorization_level":"high","procedure_step":"verified"}"#;
+const CRITICAL_VERIFIED: &str = r#"{"approve":true,"reason":"cleanup the procedure defines","risk_level":"critical","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high","procedure_step":"verified"}"#;
 
 /// One agent run that reads a skill, then has a shell command reviewed with it
 /// in context. Returns the chat requests the agent itself sent, in order, and

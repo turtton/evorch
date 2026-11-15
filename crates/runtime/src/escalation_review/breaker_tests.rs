@@ -283,7 +283,7 @@ async fn settings_change_during_fallback_approval_neither_counts_nor_resets() {
     fixture.deny("existing").await;
     let model = Arc::new(ScriptedModel::new([Ok(
         super::super::support::text_response(
-            r#"{"approve":false,"reason":"pending","risk_level":"low","authorization_level":"high"}"#,
+            r#"{"approve":false,"reason":"pending","risk_level":"low","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#,
             providers::FinishReason::Stop,
         ),
     )]));
@@ -320,9 +320,9 @@ async fn parallel_old_generation_completions_cannot_change_current_streak() {
                 .add_user_request(&fixture.ctx.run_id, "old request");
             let release = Arc::new(tokio::sync::Notify::new());
             let response = if approve {
-                r#"{"approve":true,"reason":"old critical","risk_level":"critical","authorization_level":"high"}"#
+                r#"{"approve":true,"reason":"old critical","risk_level":"critical","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#
             } else {
-                r#"{"approve":false,"reason":"old denial","risk_level":"low","authorization_level":"high"}"#
+                r#"{"approve":false,"reason":"old denial","risk_level":"low","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#
             };
             let model = Arc::new(ScriptedModel::gated(
                 [Ok(super::super::support::text_response(
@@ -441,7 +441,7 @@ async fn authorization_and_missing_user_request_policy_denials_count() {
     for missing_request in [false, true] {
         let mut fixture = Fixture::new(false);
         let model = Arc::new(ScriptedModel::new((0..3).map(|_| Ok(text_response(
-            r#"{"approve":true,"reason":"insufficient authority","risk_level":"high","authorization_level":"low"}"#,
+            r#"{"approve":true,"reason":"insufficient authority","risk_level":"high","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"low"}"#,
             FinishReason::Stop,
         )))));
         fixture.gate.reviewer = Some(Arc::new(QuickModelReviewer::new(model.clone())));

@@ -73,7 +73,7 @@ async fn delegated_merge_uses_real_user_context_and_executes_only_on_review_appr
             sandbox.clone(),
         ));
         let model = Arc::new(ScriptedModel::new([Ok(text_response(
-            &json!({"approve": approve, "reason": "reviewed merge", "risk_level": "high", "authorization_level": "high"}).to_string(),
+            &json!({"approve": approve, "reason": "reviewed merge", "risk_level": "high", "procedure_step": "none", "authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level": "high"}).to_string(),
             FinishReason::Stop,
         ))]));
         model

@@ -14,6 +14,7 @@ use super::{MODEL, REVIEW_MODEL};
 const KEY_ENV: &str = "EVORCH_STRUCTURED_REVIEW_KEY";
 
 pub(super) struct Harness {
+    pub(super) bus: Arc<event_bus::EventBus>,
     _directory: tempfile::TempDir,
     pub(super) model: Arc<dyn AgentModel>,
 }
@@ -156,11 +157,12 @@ fn harness_with_model(
             ..Default::default()
         },
     );
+    let bus = Arc::new(event_bus::EventBus::new(256));
     let model = runtime::compose::compose_routed_model(
         &config,
         ComposeDeps {
             credential_store: store,
-            event_bus: None,
+            event_bus: Some(bus.clone()),
             env: Arc::new(MapEnv::from_iter([(KEY_ENV, "test-key")])),
             catalog: model::ModelCatalog::new(),
             factory: FactoryOptions {
@@ -173,6 +175,7 @@ fn harness_with_model(
     )
     .expect("routed model");
     Harness {
+        bus,
         _directory: directory,
         // Production UI wraps routed models; structured requests must cross this seam.
         model: Arc::new(SwitchableModel::new(model)),
@@ -253,11 +256,12 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
             ..Default::default()
         },
     );
+    let bus = Arc::new(event_bus::EventBus::new(256));
     let model = runtime::compose::compose_routed_model(
         &config,
         ComposeDeps {
             credential_store: store,
-            event_bus: None,
+            event_bus: Some(bus.clone()),
             env: Arc::new(MapEnv::from_iter([(KEY0, "key-0"), (KEY1, "key-1")])),
             catalog: model::ModelCatalog::new(),
             factory: FactoryOptions {
@@ -269,6 +273,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
     )
     .expect("routed fallback model");
     Harness {
+        bus,
         _directory: directory,
         model: Arc::new(SwitchableModel::new(model)),
     }

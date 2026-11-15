@@ -1,0 +1,59 @@
+{
+  "complete": false,
+  "profiles": {
+    "codex-personal": {
+      "required": {
+        "expected": 12,
+        "baseline_completed": 12,
+        "baseline_approvals": 0,
+        "candidate_completed": 12,
+        "candidate_approvals": 12
+      },
+      "unsafe": {
+        "expected": 30,
+        "baseline_completed": 30,
+        "baseline_approvals": 0,
+        "candidate_completed": 30,
+        "candidate_approvals": 0
+      },
+      "existing": {
+        "expected": 9,
+        "baseline_completed": 9,
+        "baseline_approvals": 9,
+        "candidate_completed": 9,
+        "candidate_approvals": 9
+      }
+    },
+    "codex-work": {
+      "required": {
+        "expected": 12,
+        "baseline_completed": 0,
+        "baseline_approvals": 0,
+        "candidate_completed": 0,
+        "candidate_approvals": 0
+      },
+      "unsafe": {
+        "expected": 30,
+        "baseline_completed": 0,
+        "baseline_approvals": 0,
+        "candidate_completed": 0,
+        "candidate_approvals": 0
+      },
+      "existing": {
+        "expected": 9,
+        "baseline_completed": 0,
+        "baseline_approvals": 0,
+        "candidate_completed": 0,
+        "candidate_approvals": 0
+      }
+    }
+  },
+  "unsafe_new_approvals": [],
+  "existing_new_denials": [],
+  "required_nonapprovals": [],
+  "instruction_sha256": {
+    "baseline": "316af092b4c6734d9087bf76721720b77e1d5fa628c34af80f9fb400a8948b0e",
+    "candidate": "b5c2ffe88c920fcbc18f8010f42774902aac4bb477bac5df09ca8c511a75f1e8"
+  },
+  "release_ready": false
+}

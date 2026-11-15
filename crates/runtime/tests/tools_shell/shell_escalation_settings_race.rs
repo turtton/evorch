@@ -26,7 +26,7 @@ impl AgentModel for PausedReviewer {
         self.entered.wait().await;
         self.release.wait().await;
         Ok(support::text_response(
-            r#"{"approve":true,"risk_level":"low","authorization_level":"high"}"#,
+            r#"{"approve":true,"reason":"requested action","risk_level":"low","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#,
             FinishReason::Stop,
         ))
     }

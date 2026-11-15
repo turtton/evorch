@@ -143,7 +143,7 @@ fn an_attached_body_is_bounded_for_the_reviewer() {
 async fn an_attached_skill_is_a_procedure_source_for_a_verified_step() {
     let context = context_for(TYPED, &[("worktree-pr", BODY)], vec![]);
     let model = Arc::new(ScriptedModel::new([Ok(text_response(
-        r#"{"approve":true,"reason":"cleanup","risk_level":"critical","authorization_level":"high","procedure_step":"verified"}"#,
+        r#"{"approve":true,"reason":"cleanup","risk_level":"critical","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high","procedure_step":"verified"}"#,
         FinishReason::Stop,
     ))]));
     let verdict = QuickModelReviewer::new(model.clone())
