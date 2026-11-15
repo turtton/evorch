@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 use workbench_protocol::{
     handshake::{ActivityCounts, CoreState, CoreStatus},
     ids::RunId,
-    namespaces::{ExecutionEvent, LifecycleEvent, LifecycleQuery, LifecycleReply},
+    namespaces::{
+        ExecutionEvent, LifecycleEvent, LifecycleQuery, LifecycleReply, NAMESPACES, NamespaceStatus,
+    },
     queries::QueryReply,
     views::{RunPhase, RunRole, RunSummary},
     wire::Revision,
@@ -140,38 +142,87 @@ fn view<'a>(
     }
 }
 
+fn namespace_status(id: FeatureId) -> NamespaceStatus {
+    NAMESPACES
+        .iter()
+        .find(|namespace| namespace.name == id.namespace())
+        .unwrap_or_else(|| panic!("{id:?} names no protocol namespace"))
+        .status
+}
+
+fn feature_ids_with_namespace_status(
+    features: &Features,
+    status: NamespaceStatus,
+) -> Vec<FeatureId> {
+    features
+        .features
+        .iter()
+        .map(|feature| feature.id())
+        .filter(|id| namespace_status(*id) == status)
+        .collect()
+}
+
 #[test]
-fn only_the_implemented_workspace_is_offered_and_the_other_placeholders_stay_silent() {
+fn implemented_features_are_offered_and_reserved_placeholders_stay_silent() {
     let mut features = Features::default();
     let (cache, selection) = (Cache::default(), Selection::default());
-    // Only implemented areas are offered, in slot order: the workspace, MCP
-    // and the execution, teams and lanes screens. Without a selected project
-    // they ask for nothing.
+    let declared_implemented: Vec<_> = features
+        .features
+        .iter()
+        .filter(|feature| match feature.availability() {
+            Availability::Placeholder => false,
+            Availability::Implemented { required } => required
+                .iter()
+                .all(|capability| Capability::IMPLEMENTED.contains(capability)),
+        })
+        .map(|feature| feature.id())
+        .collect();
+    assert!(
+        !declared_implemented.is_empty(),
+        "the registry should declare at least one implemented feature"
+    );
     assert_eq!(
         features.available(true, &Capability::IMPLEMENTED),
-        [
-            FeatureId::Workspace,
-            FeatureId::Mcp,
-            FeatureId::Execution,
-            FeatureId::Teams,
-            FeatureId::Lanes
-        ]
+        declared_implemented
     );
     assert!(
         features
             .available(false, &Capability::IMPLEMENTED)
             .is_empty()
     );
+    let reserved = feature_ids_with_namespace_status(&features, NamespaceStatus::Reserved);
+    assert!(
+        !reserved.is_empty(),
+        "the registry should include a reserved namespace placeholder"
+    );
+    let offered = features.available(true, &Capability::IMPLEMENTED);
+    assert!(
+        reserved.iter().all(|id| !offered.contains(id)),
+        "reserved namespace placeholders are not offered"
+    );
+    // Simulate the initial connected snapshot; the workspace refresh is a
+    // query, giving the query-only assertion a non-empty action to inspect.
+    features.begin_session(&[], vec![]);
     run_ui(|ui| {
         let v = view(true, &Capability::IMPLEMENTED, &cache, &selection);
         let frame = features.render(ui, v);
         assert!(
-            frame
-                .actions
-                .iter()
-                .all(|a| a.feature == FeatureId::Workspace),
-            "a placeholder never sends anything"
+            !frame.actions.is_empty(),
+            "at least one implemented feature should issue a query"
         );
+        for action in &frame.actions {
+            assert_eq!(
+                namespace_status(action.feature),
+                NamespaceStatus::Implemented,
+                "reserved placeholder {:?} sent an action",
+                action.feature
+            );
+            assert!(
+                matches!(action.request, FeatureRequest::Query(_)),
+                "implemented feature {:?} must not cause command side effects",
+                action.feature
+            );
+        }
         assert!(frame.navigation.is_empty());
         let outcome = features.render_selector(ui, v);
         assert!(outcome.replaced, "the workspace feature draws the selector");
@@ -183,7 +234,17 @@ fn only_the_implemented_workspace_is_offered_and_the_other_placeholders_stay_sil
 fn an_implemented_feature_renders_only_while_connected_with_its_capabilities() {
     let log = log();
     let mut features = Features::default();
-    for id in [FeatureId::Execution, FeatureId::Teams, FeatureId::Lanes] {
+    let other_features: Vec<_> = features
+        .features
+        .iter()
+        .map(|feature| feature.id())
+        .filter(|id| *id != FeatureId::Mcp)
+        .collect();
+    assert!(
+        !other_features.is_empty(),
+        "the registry should contain features other than MCP"
+    );
+    for id in other_features {
         features.install(Recorder::new(id, Availability::Placeholder, &log));
     }
     features.install(Recorder::new(FeatureId::Mcp, NEEDS_QUERIES, &log));
@@ -355,28 +416,14 @@ fn only_placeholders_that_say_so_are_listed_as_unsupported() {
 /// and the feature's own tests take over.
 #[test]
 fn a_slot_of_a_reserved_namespace_is_not_offered() {
-    use workbench_protocol::namespaces::{NAMESPACES, NamespaceStatus};
-    let slots = [
-        FeatureId::Settings,
-        FeatureId::Auth,
-        FeatureId::Diagnostics,
-        FeatureId::Memory,
-        FeatureId::Improvement,
-        FeatureId::Evaluation,
-        FeatureId::PullRequests,
-        FeatureId::Maintenance,
-        FeatureId::Artifacts,
-        FeatureId::Browser,
-    ];
     let features = Features::default();
     let offered = features.available(true, &Capability::IMPLEMENTED);
-    for id in slots {
-        let namespace = NAMESPACES
-            .iter()
-            .find(|n| n.name == id.namespace())
-            .unwrap_or_else(|| panic!("{id:?} names no protocol namespace"));
-        if namespace.status == NamespaceStatus::Reserved {
-            assert!(!offered.contains(&id), "{id:?} is offered while reserved");
-        }
+    let reserved = feature_ids_with_namespace_status(&features, NamespaceStatus::Reserved);
+    assert!(
+        !reserved.is_empty(),
+        "the registry should include a reserved namespace placeholder"
+    );
+    for id in reserved {
+        assert!(!offered.contains(&id), "{id:?} is offered while reserved");
     }
 }
