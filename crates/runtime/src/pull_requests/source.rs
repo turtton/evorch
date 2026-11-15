@@ -36,6 +36,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use sandbox::SpawnLedger;
+use sandbox::ledger::ChildKind;
+use sandbox::process::apply_launch_policy;
 use serde::Deserialize;
 use storage::pull_requests::{
     CheckConclusion, CheckKind, CheckStatus, DisplayTitle, PULL_REQUEST_BRANCH_MAX_CHARS,
@@ -151,10 +154,26 @@ pub trait ProcessRunner: Send + Sync {
     async fn run(&self, spec: ProcessSpec) -> Result<ProcessOutput, ProcessError>;
 }
 
-/// Runs real processes with `tokio`. The child has no stdin, and is killed when the future
-/// is dropped (a cancelled or timed-out fetch) or once its stdout passes the limit.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TokioProcessRunner;
+/// Runs real processes with `tokio`. The child has no stdin, runs under evorch's launch policy
+/// as a process group of its own, and is stopped with its descendants when the future is
+/// dropped (a cancelled or timed-out fetch) or once its stdout passes the limit.
+///
+/// With a [`SpawnLedger`] the child is registered as a
+/// [`ChildKind::PullRequestSource`] and the ledger's final spawn fence refuses a new one.
+#[derive(Debug, Clone, Default)]
+pub struct TokioProcessRunner {
+    ledger: Option<SpawnLedger>,
+}
+
+impl TokioProcessRunner {
+    /// A runner whose children the core owns through `ledger`.
+    #[must_use]
+    pub const fn with_ledger(ledger: SpawnLedger) -> Self {
+        Self {
+            ledger: Some(ledger),
+        }
+    }
+}
 
 #[async_trait]
 impl ProcessRunner for TokioProcessRunner {
@@ -166,26 +185,34 @@ impl ProcessRunner for TokioProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        apply_launch_policy(command.as_std_mut());
         for name in &spec.env_remove {
             command.env_remove(name);
         }
         for (name, value) in &spec.env_set {
             command.env(name, value);
         }
-        let mut child = command.spawn().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ProcessError::NotFound
-            } else {
-                ProcessError::Spawn(error.kind().to_string())
-            }
-        })?;
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
+        let mut child = {
+            // The admission holds the spawn fence open: use it without an await.
+            let admission = SpawnLedger::admit_optional(self.ledger.as_ref())
+                .map_err(|error| ProcessError::Spawn(error.to_string()))?;
+            admission
+                .spawn_group(ChildKind::PullRequestSource, None, &mut command)
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        ProcessError::NotFound
+                    } else {
+                        ProcessError::Spawn(error.kind().to_string())
+                    }
+                })?
+        };
+        let mut stdout = child.take_stdout().expect("piped stdout");
+        let mut stderr = child.take_stderr().expect("piped stderr");
         let (out, err) = tokio::join!(
             async {
                 let read = read_capped(&mut stdout, spec.stdout_limit).await;
                 if matches!(read, Ok((_, true))) {
-                    let _ = child.start_kill();
+                    child.kill();
                 }
                 read
             },
@@ -256,7 +283,7 @@ impl GhSource {
     /// `gh` from `PATH`, run as a real process.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_runner(Arc::new(TokioProcessRunner))
+        Self::with_runner(Arc::new(TokioProcessRunner::default()))
     }
 
     /// `gh` from `PATH`, run by `runner` (a fake in tests).

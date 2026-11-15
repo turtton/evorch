@@ -2,6 +2,8 @@
 use super::api::*;
 use crate::mcp::{McpError, McpErrorKind, types::*};
 use async_trait::async_trait;
+use sandbox::SpawnLedger;
+use sandbox::ledger::ChildKind;
 use sandbox::process::{GroupChild, apply_launch_policy};
 use serde::Serialize;
 use serde_json::json;
@@ -86,6 +88,10 @@ impl StdioShutdownClock for TokioShutdownClock {
 #[derive(Debug, Default)]
 pub struct StdioTransportFactory {
     pub shutdown_policy: StdioShutdownPolicy,
+    /// The core's ledger of owned children and workers. Every server process
+    /// and its supervisor are registered in it, and none starts once its spawn
+    /// fence is closed. `None` keeps the unregistered behaviour.
+    pub ledger: Option<SpawnLedger>,
 }
 #[async_trait]
 impl McpTransportFactory for StdioTransportFactory {
@@ -96,12 +102,13 @@ impl McpTransportFactory for StdioTransportFactory {
         limiter: Arc<dyn McpProcessLimiter>,
         cancel: CancelContext,
     ) -> Result<Arc<dyn McpTransport>, McpError> {
-        Ok(StdioTransport::connect_with_policy(
+        Ok(StdioTransport::connect_owned(
             server,
             permit,
             limiter,
             cancel,
             self.shutdown_policy.clone(),
+            self.ledger.clone(),
         )
         .await?)
     }
@@ -117,6 +124,7 @@ pub struct StdioTransport {
     restarts: AtomicUsize,
     closed: AtomicBool,
     policy: StdioShutdownPolicy,
+    ledger: Option<SpawnLedger>,
 }
 impl StdioTransport {
     pub async fn connect(
@@ -141,9 +149,29 @@ impl StdioTransport {
         cancel: CancelContext,
         policy: StdioShutdownPolicy,
     ) -> Result<Arc<Self>, McpError> {
+        Self::connect_owned(server, permit, limiter, cancel, policy, None).await
+    }
+    /// [`connect_with_policy`](Self::connect_with_policy) whose server process
+    /// and supervisor (and those of every restart) are registered in `ledger`.
+    /// A closed spawn fence makes the connection fail as `Unavailable`.
+    pub async fn connect_owned(
+        server: ResolvedMcpServer,
+        permit: ApprovalPermit,
+        limiter: Arc<dyn McpProcessLimiter>,
+        cancel: CancelContext,
+        policy: StdioShutdownPolicy,
+        ledger: Option<SpawnLedger>,
+    ) -> Result<Arc<Self>, McpError> {
         let server = Arc::new(server);
         let permit = Arc::new(permit);
-        let session = spawn_session(&server, &permit, &*limiter, &cancel, policy.clone())?;
+        let session = spawn_session(
+            &server,
+            &permit,
+            &*limiter,
+            &cancel,
+            policy.clone(),
+            ledger.as_ref(),
+        )?;
         Ok(Arc::new(Self {
             server,
             permit,
@@ -152,6 +180,7 @@ impl StdioTransport {
             restarts: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             policy,
+            ledger,
         }))
     }
     /// At most one explicit replacement for this run/server, after old reap.
@@ -171,6 +200,7 @@ impl StdioTransport {
             &*self.limiter,
             &cancel,
             self.policy.clone(),
+            self.ledger.as_ref(),
         )?;
         Ok(())
     }
@@ -535,6 +565,7 @@ fn spawn_session(
     limiter: &dyn McpProcessLimiter,
     cancel: &CancelContext,
     policy: StdioShutdownPolicy,
+    ledger: Option<&SpawnLedger>,
 ) -> Result<Arc<Session>, McpError> {
     let error = |k| safe_error(server, k);
     validate_approval(server, approval).map_err(error)?;
@@ -576,12 +607,16 @@ fn spawn_session(
     apply_launch_policy(&mut command);
     let mut command = tokio::process::Command::from(command);
     command.kill_on_drop(true);
+    // The final spawn fence waits for this launch until the child and its
+    // supervisor are registered; after it, nothing starts.
+    let admission =
+        SpawnLedger::admit_optional(ledger).map_err(|_| error(McpErrorKind::Unavailable))?;
     // Admission may have raced with revocation/cancellation; check once more at spawn.
     validate_approval(server, approval).map_err(error)?;
     if cancel.is_cancelled() {
         return Err(error(McpErrorKind::Cancelled));
     }
-    let child = GroupChild::spawn(&mut command).map_err(|_| {
+    let child = admission.spawn_group(ChildKind::McpStdio, Some(&server.scope.server_id), &mut command).map_err(|_| {
         // Never emit the OS error: command paths or env values can be secrets.
         let keys: Vec<String> = std::env::vars_os().filter_map(|(key, _)| key.into_string().ok())
             .filter(|key| !INHERITED_ENVIRONMENT.contains(&key.as_str()) && !env.contains_key(key))
@@ -616,7 +651,7 @@ fn spawn_session(
     // Discard stderr in fixed chunks, without retaining or tracing any raw bytes.
     let drainer = tokio::spawn(async move { drain_stderr(stderr).await });
     let supervisor_session = session.clone();
-    tokio::spawn(async move {
+    admission.spawn_worker("mcp-stdio-supervisor", async move {
         supervise(owner, supervisor_session, reader, drainer, done, policy).await;
     });
     Ok(session)

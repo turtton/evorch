@@ -917,3 +917,91 @@ async fn legacy_stdio_sends_cancelled_for_calls() {
     event(&mut peer, "complete").await;
     h.assert_released().await;
 }
+
+impl Harness {
+    async fn connect_owned(
+        &self,
+        ledger: &sandbox::SpawnLedger,
+    ) -> Result<Arc<StdioTransport>, tools::mcp::McpError> {
+        StdioTransport::connect_owned(
+            self.server(),
+            self.approval(),
+            self.limiter.clone(),
+            CancelContext::default(),
+            StdioShutdownPolicy {
+                stdin_grace: Duration::ZERO,
+                term_grace: Duration::ZERO,
+                clock: Arc::new(TestClock(true)),
+            },
+            Some(ledger.clone()),
+        )
+        .await
+    }
+}
+
+fn descendant_script() -> Vec<Value> {
+    vec![
+        json!({"event":"spawn_descendant"}),
+        json!({"event":"gate","name":"remain_alive"}),
+        json!({"event":"close"}),
+    ]
+}
+
+// Given: a server registered in the core's ledger / When: the fence closes and
+// the ledger stops and reaps what it owns / Then: the server, its descendant and
+// its supervisor are all gone and the permit is released, without any Drop
+#[tokio::test]
+async fn ledger_stops_and_reaps_a_stdio_server_its_descendant_and_supervisor() {
+    let mut h = Harness::new(&descendant_script());
+    let ledger = sandbox::SpawnLedger::new();
+    let _transport = h.connect_owned(&ledger).await.unwrap();
+    let _peer = h.peer().await;
+    let mut descendant = BufReader::new(h.listener.accept().await.unwrap().0);
+    event(&mut descendant, "descendant_ready").await;
+
+    let children = ledger.children();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].kind, sandbox::ChildKind::McpStdio);
+    assert_eq!(children[0].label.as_deref(), Some("fixture"));
+    assert_eq!(ledger.workers().len(), 1);
+
+    ledger.close_fence();
+    assert_eq!(ledger.stop_all_children(), 1);
+    ledger.reap_all_children().await;
+    ledger.join_workers().await;
+
+    let mut byte = [0];
+    assert_eq!(descendant.read(&mut byte).await.unwrap(), 0);
+    assert_eq!(h.limiter.live.load(Ordering::Acquire), 0);
+    assert!(ledger.workers().is_empty());
+    assert_eq!(ledger.child_stats().reaped, 1);
+    h.assert_released().await;
+}
+
+// Given: a closed spawn fence / When: a server connects, or a live one restarts /
+// Then: no process starts, and the refusal is Unavailable
+#[tokio::test]
+async fn closed_fence_refuses_stdio_connect_and_restart() {
+    let h = Harness::new(&descendant_script());
+    let ledger = sandbox::SpawnLedger::new();
+    let transport = h.connect_owned(&ledger).await.unwrap();
+    let mut peer = h.peer().await;
+    let mut descendant = BufReader::new(h.listener.accept().await.unwrap().0);
+    event(&mut descendant, "descendant_ready").await;
+
+    ledger.close_fence();
+    let restart = transport.restart(CancelContext::default()).await;
+
+    assert!(matches!(restart, Err(error) if error.kind == McpErrorKind::Unavailable));
+    let mut byte = [0];
+    assert_eq!(descendant.read(&mut byte).await.unwrap(), 0);
+    assert_eq!(peer.read(&mut byte).await.unwrap(), 0);
+    ledger.join_workers().await;
+    assert!(ledger.children().is_empty());
+    assert_eq!(ledger.child_stats().registered, 1);
+
+    let refused = h.connect_owned(&ledger).await;
+    assert!(matches!(refused, Err(error) if error.kind == McpErrorKind::Unavailable));
+    assert_eq!(ledger.child_stats().registered, 1);
+    assert_eq!(h.limiter.live.load(Ordering::Acquire), 0);
+}

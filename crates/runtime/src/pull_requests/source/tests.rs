@@ -855,7 +855,7 @@ mod processes {
             "cat >/dev/null; printf 'stdin-closed %s %s' \"${FIXED:-unset}\" \"${HOME-unset}\"; echo err >&2; exit 3",
         );
 
-        let output = TokioProcessRunner
+        let output = TokioProcessRunner::default()
             .run(spec(&program, &["HOME"], &[("FIXED", "yes")]))
             .await
             .unwrap();
@@ -876,7 +876,7 @@ mod processes {
         let dir = tempfile::tempdir().unwrap();
         let program = script(dir.path(), "flood.sh", "exec yes");
 
-        let output = TokioProcessRunner
+        let output = TokioProcessRunner::default()
             .run(spec(&program, &[], &[]))
             .await
             .unwrap();
@@ -897,7 +897,7 @@ mod processes {
             "head -c 300000 /dev/zero | tr '\\0' 'e' >&2; echo done",
         );
 
-        let output = TokioProcessRunner
+        let output = TokioProcessRunner::default()
             .run(spec(&program, &[], &[]))
             .await
             .unwrap();
@@ -933,13 +933,65 @@ mod processes {
         }
     }
 
+    // Given: a runner owned by the core's ledger and a gh that never answers /
+    // When: the fence closes and the ledger stops and reaps / Then: the child was
+    // registered as a pull request source, the run ends with the kill and the
+    // ledger holds nothing
+    #[tokio::test]
+    async fn a_ledger_stops_and_reaps_a_running_source_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(dir.path(), "hang.sh", "exec sleep 3600");
+        let ledger = SpawnLedger::new();
+        let runner = TokioProcessRunner::with_ledger(ledger.clone());
+        let mut activity = ledger.watch_children();
+        let run = tokio::spawn(async move { runner.run(spec(&program, &[], &[])).await });
+        activity
+            .wait_for(|activity| activity.live == 1)
+            .await
+            .unwrap();
+        assert_eq!(ledger.children()[0].kind, ChildKind::PullRequestSource);
+
+        ledger.close_fence();
+        assert_eq!(ledger.stop_all_children(), 1);
+        let output = run.await.unwrap().unwrap();
+        ledger.reap_all_children().await;
+
+        assert_eq!(output.exit_code, None, "it was killed");
+        assert!(ledger.children().is_empty());
+        assert_eq!(ledger.child_stats().reaped, 1);
+    }
+
+    // Given: a closed spawn fence / When: the runner is asked to run / Then: no
+    // process starts and the refusal is a spawn error
+    #[tokio::test]
+    async fn a_closed_fence_refuses_to_start_a_source_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let program = script(
+            dir.path(),
+            "mark.sh",
+            &format!("touch '{}'", marker.display()),
+        );
+        let ledger = SpawnLedger::new();
+        ledger.close_fence();
+
+        let error = TokioProcessRunner::with_ledger(ledger.clone())
+            .run(spec(&program, &[], &[]))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProcessError::Spawn(_)), "{error:?}");
+        assert!(!marker.exists());
+        assert_eq!(ledger.child_stats().registered, 0);
+    }
+
     // Given: a program that is not there / When: run / Then: NotFound
     #[tokio::test]
     async fn a_missing_program_is_reported_as_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("no-such-gh");
 
-        let error = TokioProcessRunner
+        let error = TokioProcessRunner::default()
             .run(spec(&missing, &[], &[]))
             .await
             .unwrap_err();

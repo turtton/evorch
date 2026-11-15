@@ -22,6 +22,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 
+use crate::ledger::ChildEntry;
+
 /// Start the child in a new session, which is also a new process group.
 ///
 /// A child left in evorch's session sits in a background process group of
@@ -243,6 +245,8 @@ pub struct GroupChild {
     group: ProcessGroup,
     #[cfg(target_os = "linux")]
     exit: ExitNotifier,
+    /// The ledger's record of this child, when it was started through one.
+    entry: Option<ChildEntry>,
 }
 
 /// Turns readable once the watched process has exited.
@@ -268,7 +272,25 @@ impl GroupChild {
         {
             let child = command.spawn()?;
             let group = ProcessGroup::new(child.id());
-            Ok(Self { child, group })
+            Ok(Self {
+                child,
+                group,
+                entry: None,
+            })
+        }
+    }
+
+    /// Record the ledger entry that [`Admission::spawn_group`] made for this
+    /// child. It is told when the leader is reaped.
+    ///
+    /// [`Admission::spawn_group`]: crate::ledger::Admission::spawn_group
+    pub(crate) fn attach(&mut self, entry: ChildEntry) {
+        self.entry = Some(entry);
+    }
+
+    fn note_reaped(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            entry.reaped();
         }
     }
 
@@ -302,7 +324,12 @@ impl GroupChild {
                 ));
             }
         };
-        Ok(Self { child, group, exit })
+        Ok(Self {
+            child,
+            group,
+            exit,
+            entry: None,
+        })
     }
 
     pub const fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
@@ -371,6 +398,7 @@ impl GroupChild {
                 None => child.try_wait()?,
             };
             if let Some(status) = reaped {
+                self.note_reaped();
                 return Ok(status);
             }
             // Readiness without an exit is not expected; do not spin on it.
@@ -392,6 +420,7 @@ impl GroupChild {
             let child = &mut self.child;
             self.group.kill_and_reap(|| child.try_wait())?;
         }
+        self.note_reaped();
         Ok(())
     }
 
