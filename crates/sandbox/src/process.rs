@@ -22,6 +22,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 
+use crate::ledger::ChildEntry;
+
 /// Start the child in a new session, which is also a new process group.
 ///
 /// A child left in evorch's session sits in a background process group of
@@ -239,10 +241,13 @@ pub fn wait_for_exit(leader: Pid) -> io::Result<()> {
 /// clone of the group handle before Tokio reaps the child in the background.
 #[derive(Debug)]
 pub struct GroupChild {
-    child: tokio::process::Child,
+    /// `None` only while `Drop` hands the child to the ledger's reaper.
+    child: Option<tokio::process::Child>,
     group: ProcessGroup,
     #[cfg(target_os = "linux")]
     exit: ExitNotifier,
+    /// The ledger's record of this child, when it was started through one.
+    entry: Option<ChildEntry>,
 }
 
 /// Turns readable once the watched process has exited.
@@ -268,7 +273,25 @@ impl GroupChild {
         {
             let child = command.spawn()?;
             let group = ProcessGroup::new(child.id());
-            Ok(Self { child, group })
+            Ok(Self {
+                child: Some(child),
+                group,
+                entry: None,
+            })
+        }
+    }
+
+    /// Record the ledger entry that [`Admission::spawn_group`] made for this
+    /// child. It is told when the leader is reaped.
+    ///
+    /// [`Admission::spawn_group`]: crate::ledger::Admission::spawn_group
+    pub(crate) fn attach(&mut self, entry: ChildEntry) {
+        self.entry = Some(entry);
+    }
+
+    fn note_reaped(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            entry.reaped();
         }
     }
 
@@ -302,19 +325,24 @@ impl GroupChild {
                 ));
             }
         };
-        Ok(Self { child, group, exit })
+        Ok(Self {
+            child: Some(child),
+            group,
+            exit,
+            entry: None,
+        })
     }
 
-    pub const fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
-        self.child.stdin.take()
+    pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+        self.child.as_mut().and_then(|child| child.stdin.take())
     }
 
-    pub const fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
-        self.child.stdout.take()
+    pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        self.child.as_mut().and_then(|child| child.stdout.take())
     }
 
-    pub const fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
-        self.child.stderr.take()
+    pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+        self.child.as_mut().and_then(|child| child.stderr.take())
     }
 
     /// The child's process group, for stopping it from elsewhere.
@@ -360,7 +388,7 @@ impl GroupChild {
             let child = &mut self.child;
             let reaped = match self.group.leader() {
                 Some(leader) => match has_exited(leader) {
-                    Ok(true) => self.group.kill_and_reap(|| child.try_wait())?,
+                    Ok(true) => self.group.kill_and_reap(|| try_wait(child))?,
                     Ok(false) => None,
                     Err(error) => {
                         // Not an unreaped child any more: its id may be reused.
@@ -368,9 +396,10 @@ impl GroupChild {
                         return Err(error);
                     }
                 },
-                None => child.try_wait()?,
+                None => try_wait(child)?,
             };
             if let Some(status) = reaped {
+                self.note_reaped();
                 return Ok(status);
             }
             // Readiness without an exit is not expected; do not spin on it.
@@ -390,8 +419,9 @@ impl GroupChild {
             // Reap through Tokio's synchronous try_wait so its Child also knows
             // the id is retired (including its kill_on_drop bookkeeping).
             let child = &mut self.child;
-            self.group.kill_and_reap(|| child.try_wait())?;
+            self.group.kill_and_reap(|| try_wait(child))?;
         }
+        self.note_reaped();
         Ok(())
     }
 
@@ -405,13 +435,33 @@ impl GroupChild {
     }
 }
 
+fn try_wait(child: &mut Option<tokio::process::Child>) -> io::Result<Option<ExitStatus>> {
+    child
+        .as_mut()
+        .map_or(Ok(None), tokio::process::Child::try_wait)
+}
+
 impl Drop for GroupChild {
     fn drop(&mut self) {
         // Tokio reaps a dropped child in the background, when no handle can
         // tell any more. So the group is killed one last time and every clone
         // retired before the child is handed over.
         self.group.kill_and_release();
+        // A child in a ledger is not handed to Tokio: the ledger reaps it and
+        // counts it only once the leader is really gone, so that waiting for
+        // the ledger to empty still means "no child is left".
+        if let (Some(entry), Some(child)) = (self.entry.take(), self.child.take()) {
+            entry.reap_in_background(child);
+        }
     }
+}
+
+/// Pid of a Tokio child that has not been reaped.
+pub(crate) fn unreaped_pid(child: &tokio::process::Child) -> Option<Pid> {
+    child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(Pid::from_raw)
 }
 
 #[cfg(target_os = "linux")]

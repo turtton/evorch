@@ -994,3 +994,32 @@ async fn cancelling_the_tool_drops_the_calls_in_flight() {
         "dropped with the tool future"
     );
 }
+
+// Given: a launcher owned by the core's ledger / When: it starts a worker, the
+// fence closes, and the ledger stops and reaps / Then: the worker was registered
+// and flagged stopped, a launch after the fence is refused, and once the
+// connection is released the ledger holds nothing
+#[tokio::test]
+async fn a_ledger_registers_stops_and_reaps_a_worker_and_refuses_one_after_the_fence() {
+    let ledger = sandbox::SpawnLedger::new();
+    let launcher = launcher_raw("exec cat").with_ledger(ledger.clone());
+    let connection = launcher.launch(far_deadline(), noop()).await.unwrap();
+    let listed = ledger.children();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].kind, sandbox::ChildKind::SandboxSession);
+
+    ledger.close_fence();
+    assert_eq!(ledger.stop_all_children(), 1);
+    assert!(ledger.children()[0].stop_requested);
+    let refused = launcher.launch(far_deadline(), noop()).await;
+    drop(connection);
+    ledger.reap_all_children().await.unwrap();
+
+    assert!(matches!(
+        refused,
+        Err(super::worker::LaunchError::Failed(_))
+    ));
+    assert_eq!(ledger.child_stats().registered, 1);
+    assert_eq!(ledger.child_stats().reaped, 1);
+    assert!(ledger.children().is_empty());
+}

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use sandbox::{CommandSpec, MinimalSandbox, Sandbox, StdioSession};
+use sandbox::{CommandSpec, MinimalSandbox, Sandbox, SpawnLedger, StdioSession};
 use tokio::io::BufReader;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::time::Instant;
@@ -31,6 +31,7 @@ const LIBRARY_PATH_ENV: &str = "LD_LIBRARY_PATH";
 pub struct WorkerLauncher {
     mode: Mode,
     cancel_confirmation: Duration,
+    ledger: Option<SpawnLedger>,
 }
 
 #[derive(Clone)]
@@ -153,6 +154,7 @@ impl WorkerLauncher {
                 })
             })),
             cancel_confirmation: CANCEL_CONFIRMATION,
+            ledger: None,
         }
     }
 
@@ -160,7 +162,16 @@ impl WorkerLauncher {
         Self {
             mode: Mode::Production,
             cancel_confirmation: CANCEL_CONFIRMATION,
+            ledger: None,
         }
+    }
+
+    /// Register every worker this launcher starts in the core's ledger; once
+    /// its spawn fence is closed no worker starts.
+    #[must_use]
+    pub fn with_ledger(mut self, ledger: SpawnLedger) -> Self {
+        self.ledger = Some(ledger);
+        self
     }
 
     /// How long a cancelled start may take to confirm it stopped what it started.
@@ -180,6 +191,7 @@ impl WorkerLauncher {
                 args,
             },
             cancel_confirmation: CANCEL_CONFIRMATION,
+            ledger: None,
         }
     }
 
@@ -198,6 +210,7 @@ impl WorkerLauncher {
         on_unconfirmed: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Result<WorkerConnection, LaunchError> {
         let mode = self.mode.clone();
+        let ledger = self.ledger.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(Finished::default());
         let mut preparation = Preparation {
@@ -209,7 +222,7 @@ impl WorkerLauncher {
         };
         let task = tokio::task::spawn_blocking(move || {
             let _signal = SignalOnDrop(finished);
-            spawn(&mode, &cancel)
+            spawn(&mode, &cancel, ledger.as_ref())
         });
         tokio::pin!(task);
         let outcome = tokio::select! {
@@ -350,7 +363,11 @@ impl Spawned {
 /// Prepares and starts the worker. `cancel` is checked after every step that
 /// takes time: once it is set no worker is started, and one already started is
 /// killed and reaped before this returns.
-fn spawn(mode: &Mode, cancel: &AtomicBool) -> Result<Spawned, String> {
+fn spawn(
+    mode: &Mode,
+    cancel: &AtomicBool,
+    ledger: Option<&SpawnLedger>,
+) -> Result<Spawned, String> {
     let cancelled = || "the start of the JS worker was cancelled".to_owned();
     let prepared = match mode {
         #[cfg(test)]
@@ -393,6 +410,7 @@ fn spawn(mode: &Mode, cancel: &AtomicBool) -> Result<Spawned, String> {
         prepared.sandbox.as_ref(),
         prepared.spec,
         prepared.keep_alive,
+        ledger,
     )?;
     if cancel.load(Ordering::SeqCst) {
         // Dropping kills the process group and reaps it.
@@ -406,8 +424,9 @@ fn start(
     sandbox: &dyn Sandbox,
     spec: CommandSpec,
     keep_alive: Vec<Box<dyn std::any::Any + Send + Sync>>,
+    ledger: Option<&SpawnLedger>,
 ) -> Result<Spawned, String> {
-    let mut session = StdioSession::spawn(sandbox, spec)
+    let mut session = StdioSession::spawn_owned(ledger, sandbox, spec)
         .map_err(|error| format!("cannot start the JS worker: {error}"))?;
     let (Some(stdin), Some(stdout), Some(stderr)) = (
         session.take_stdin(),

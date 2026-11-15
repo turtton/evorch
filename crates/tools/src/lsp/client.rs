@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use sandbox::{CommandSpec, Sandbox, StdioSession};
+use sandbox::{CommandSpec, Sandbox, SpawnLedger, StdioSession};
 use serde_json::json;
 use tokio::{
     io::BufReader,
@@ -22,11 +22,18 @@ pub(super) struct Connection {
 }
 
 impl Connection {
-    pub async fn spawn(sandbox: Arc<dyn Sandbox>, command: CommandSpec) -> Result<Self, LspError> {
-        let mut session =
-            tokio::task::spawn_blocking(move || StdioSession::spawn(sandbox.as_ref(), command))
-                .await
-                .map_err(|_| LspError::Worker)??;
+    /// Starts the server. With a ledger the server is registered in it, and a
+    /// closed spawn fence refuses the start.
+    pub async fn spawn(
+        sandbox: Arc<dyn Sandbox>,
+        command: CommandSpec,
+        ledger: Option<SpawnLedger>,
+    ) -> Result<Self, LspError> {
+        let mut session = tokio::task::spawn_blocking(move || {
+            StdioSession::spawn_owned(ledger.as_ref(), sandbox.as_ref(), command)
+        })
+        .await
+        .map_err(|_| LspError::Worker)??;
         let stdin = ChildStdin::from_std(session.take_stdin().ok_or(LspError::Closed)?)?;
         let stdout = ChildStdout::from_std(session.take_stdout().ok_or(LspError::Closed)?)?;
         let mut stderr = ChildStderr::from_std(session.take_stderr().ok_or(LspError::Closed)?)?;

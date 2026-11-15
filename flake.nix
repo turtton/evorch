@@ -20,7 +20,7 @@
   };
   # No `follows`: it keeps its own nixpkgs / fenix / crane so that the cargo
   # package is the derivation turtton/cargo pushes to attic.
-  inputs.turtton-cargo.url = "github:turtton/cargo/v0.102.0-9-turtton.2";
+  inputs.turtton-cargo.url = "github:turtton/cargo/v0.102.0-9-turtton.3";
 
   outputs =
     { self, nixpkgs, flake-utils, intent-system-flake, crane, fenix, ... }@inputs:
@@ -399,9 +399,9 @@
         # The input is pinned to a tag and does not follow this flake's
         # nixpkgs / fenix / crane, so the package is the one turtton/cargo
         # builds and pushes to attic. Bump the tag in `inputs` to update.
-        # turtton/cargo outputs packages for x86_64-linux only; a system
-        # without the package gets no fork and its default dev shell keeps the
-        # upstream cargo.
+        # turtton/cargo outputs packages for x86_64-linux and aarch64-darwin; a
+        # system without the package gets no fork and its default dev shell
+        # keeps the upstream cargo.
         cargoFork = inputs.turtton-cargo.packages.${system}.cargo or null;
         # Dev shell with the fenix toolchain's own cargo; the fork shell is built from it.
         # `rustcWrapperDefault` is RUSTC_WRAPPER when the caller leaves it unset.
