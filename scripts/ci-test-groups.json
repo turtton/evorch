@@ -17,6 +17,7 @@
       "packages": [
         "gui",
         "browser-cef",
+        "evorch-renderer",
         "workspace-ui",
         "workspace-state",
         "core-client-e2e"
@@ -54,6 +55,7 @@
         "apply-patch",
         "catalog",
         "core-client-refs",
+        "renderer-ipc",
         "core-instance",
         "core-launcher",
         "eval",

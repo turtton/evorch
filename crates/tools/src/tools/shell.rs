@@ -434,7 +434,8 @@ impl Tool for Shell {
             .default_cwd
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
         let cwd = args
             .cwd
             .as_ref()
@@ -446,7 +447,7 @@ impl Tool for Shell {
                     root.as_ref().map_or(path.clone(), |root| root.join(path))
                 }
             })
-            .or(root);
+            .or_else(|| root.clone());
         let access = match args.sandbox_access {
             SandboxAccess::Isolated => None,
             SandboxAccess::Network => Some(ShellAccess::Network),
@@ -478,12 +479,15 @@ impl Tool for Shell {
             };
             match escalation
                 .gate
-                .decide_scoped_with_cwd(
+                .decide_execution(
                     ctx,
                     &shell_args[1],
                     &args.justification,
-                    cwd.as_deref(),
-                    access,
+                    super::shell_escalation::ShellExecutionContext {
+                        cwd: cwd.as_deref(),
+                        workspace_root: root.as_deref(),
+                        access,
+                    },
                 )
                 .await
             {
@@ -493,6 +497,7 @@ impl Tool for Shell {
                         command: shell_args[1].clone(),
                         justification: args.justification.clone(),
                         cwd: cwd.clone(),
+                        workspace_root: root.clone(),
                         access,
                     });
                     network_sandbox.unwrap_or(escalation.unsandboxed)

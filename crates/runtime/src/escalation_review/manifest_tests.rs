@@ -13,7 +13,7 @@ use tools::tools::shell_escalation::{FileAccessRequest, ShellAccess};
 const USER_WORDS: &str = "USER-WORDS-needle: CI通ったらマージしていいよ";
 const SKILL_BODY: &str = "SKILL-BODY-needle: remove the task worktree after merging.";
 const RULES_TEXT: &str = "RULES-TEXT-needle: sign every commit.";
-const APPROVE: &str = r#"{"approve":true,"reason":"fine","risk_level":"low","authorization_level":"high","procedure_step":"defined"}"#;
+const APPROVE: &str = r#"{"approve":true,"reason":"fine","risk_level":"low","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high","procedure_step":"defined"}"#;
 const EVIDENCE_ID: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 fn rules_source(project: &std::path::Path) -> RulesSource {
@@ -274,6 +274,12 @@ async fn every_review_kind_records_a_manifest_matching_what_the_model_received()
             "{name}"
         );
         assert_eq!(verdict.procedure_step, ProcedureStep::Defined, "{name}");
+        assert_eq!(
+            verdict.authorization_basis,
+            Some(AuthorizationBasis::OrdinaryTask)
+        );
+        assert_eq!(verdict.authorization_refs.as_deref(), Some([0].as_slice()));
+        assert_eq!(verdict.scope_match, Some(ScopeMatch::Full));
         assert_eq!(verdict.decision, Decision::Approve, "{name}");
         let context = manifest.context.as_ref().unwrap();
         assert_eq!(context.root_run_id, "run-1");
@@ -587,7 +593,7 @@ async fn failed_reviews_are_recorded_with_the_payload_that_was_sent() {
 async fn a_denial_decided_by_the_threshold_records_both_the_verdict_and_the_decision() {
     let mut fixture = Fixture::new(RULES_TEXT);
     let context = fixture.context(run_with(&[]));
-    let high_without_authorization = r#"{"approve":true,"reason":"push","risk_level":"high","authorization_level":"low","procedure_step":"none"}"#;
+    let high_without_authorization = r#"{"approve":true,"reason":"push","risk_level":"high","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"low","procedure_step":"none"}"#;
     let verdict = QuickModelReviewer::new(scripted(high_without_authorization))
         .review_scoped_with_context(
             "run-1",

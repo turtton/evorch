@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use event_bus::{AgentRunPhase, EventKind, LifecycleEvent};
 
 use super::*;
-use crate::escalation_review::{DENIAL_GUIDANCE, ReviewRunContext, support::ScriptedModel};
+use crate::escalation_review::{
+    DENIAL_GUIDANCE, ReviewRunContext, review_context,
+    support::{self, ScriptedModel},
+};
 
 #[path = "denial_result_tests.rs"]
 mod denial_result_tests;
@@ -283,7 +286,7 @@ async fn settings_change_during_fallback_approval_neither_counts_nor_resets() {
     fixture.deny("existing").await;
     let model = Arc::new(ScriptedModel::new([Ok(
         super::super::support::text_response(
-            r#"{"approve":false,"reason":"pending","risk_level":"low","authorization_level":"high"}"#,
+            r#"{"approve":false,"reason":"pending","risk_level":"low","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#,
             providers::FinishReason::Stop,
         ),
     )]));
@@ -320,9 +323,9 @@ async fn parallel_old_generation_completions_cannot_change_current_streak() {
                 .add_user_request(&fixture.ctx.run_id, "old request");
             let release = Arc::new(tokio::sync::Notify::new());
             let response = if approve {
-                r#"{"approve":true,"reason":"old critical","risk_level":"critical","authorization_level":"high"}"#
+                r#"{"approve":true,"reason":"old critical","risk_level":"critical","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#
             } else {
-                r#"{"approve":false,"reason":"old denial","risk_level":"low","authorization_level":"high"}"#
+                r#"{"approve":false,"reason":"old denial","risk_level":"low","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#
             };
             let model = Arc::new(ScriptedModel::gated(
                 [Ok(super::super::support::text_response(
@@ -441,7 +444,7 @@ async fn authorization_and_missing_user_request_policy_denials_count() {
     for missing_request in [false, true] {
         let mut fixture = Fixture::new(false);
         let model = Arc::new(ScriptedModel::new((0..3).map(|_| Ok(text_response(
-            r#"{"approve":true,"reason":"insufficient authority","risk_level":"high","authorization_level":"low"}"#,
+            r#"{"approve":true,"reason":"insufficient authority","risk_level":"high","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"low"}"#,
             FinishReason::Stop,
         )))));
         fixture.gate.reviewer = Some(Arc::new(QuickModelReviewer::new(model.clone())));
@@ -563,6 +566,51 @@ async fn environment_failures_and_requires_user_do_not_count() {
         describe(&decision)
     );
     assert_eq!(fixture.denials(&fixture.ctx), 1);
+}
+
+#[tokio::test]
+async fn uncertain_nonapproval_prompts_without_fallback_and_does_not_count() {
+    let fixture = Fixture::new(false);
+    fixture
+        .run
+        .add_user_request(&fixture.ctx.run_id, "Tidy up the work area.");
+    fixture.deny("a definite denial").await;
+    for response in crate::escalation_review::authorization_tests::uncertain_responses() {
+        let reviewer = QuickModelReviewer::new(Arc::new(ScriptedModel::new([Ok(
+            support::text_response(&response.to_string(), providers::FinishReason::Stop),
+        )])));
+        let context = review_context(fixture.run.clone(), None).unwrap().0;
+        let verdict = reviewer
+            .review_with_context(
+                &fixture.ctx.run_id,
+                "rm -rf worktrees",
+                "cleanup",
+                Some(context),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(verdict, ReviewVerdict::RequiresUser { .. }));
+        assert!(matches!(fixture.decide(Ok(verdict), false).await,
+            EscalationDecision::Deny { reason } if reason == "shell escalation denied by user"));
+        assert_eq!(fixture.denials(&fixture.ctx), 1);
+    }
+    assert_eq!(
+        fixture.asked(),
+        3,
+        "uncertainty must prompt even without denial fallback"
+    );
+    assert_eq!(
+        fixture.reviewed(),
+        4,
+        "uncertainty must not suspend subsequent reviews"
+    );
+    fixture.deny("another definite denial").await;
+    assert_eq!(fixture.denials(&fixture.ctx), 2);
+    assert_eq!(
+        fixture.asked(),
+        3,
+        "a definite denial must not prompt without fallback"
+    );
 }
 
 #[tokio::test]

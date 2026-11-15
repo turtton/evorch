@@ -55,7 +55,7 @@ async fn shell_and_file_denials_keep_event_reasons_bare_and_guidance_once() {
                 _ => {
                     fixture.gate.reviewer = Some(Arc::new(QuickModelReviewer::new(Arc::new(
                         ScriptedModel::new([Ok(super::super::super::support::text_response(
-                            r#"{"approve":false,"reason":"policy denial","risk_level":"low","authorization_level":"high"}"#,
+                            r#"{"approve":false,"reason":"policy denial","risk_level":"low","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#,
                             providers::FinishReason::Stop,
                         ))]),
                     ))));

@@ -18,6 +18,13 @@ use std::{
     path::Path,
 };
 
+#[path = "handoff_boot.rs"]
+pub mod boot;
+#[path = "handoff_entry.rs"]
+pub mod entry;
+#[path = "handoff_receipt.rs"]
+pub mod receipt;
+
 const SEALS: i32 = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
 const TICKET_LIMIT: u64 = 8192;
 
@@ -31,9 +38,11 @@ pub struct HandoffRecord {
     pub successor_epoch: u64,
     pub nonce_hash: String,
     pub successor_build: String,
+    pub boot_deadline: boot::BootDeadline,
 }
 impl HandoffRecord {
     fn validate(&self) -> io::Result<()> {
+        self.boot_deadline.validate()?;
         if self.successor_epoch == 0
             || [
                 &self.restart_id,
@@ -192,7 +201,11 @@ impl HandoffEntry {
     /// transferred from the OS (not owned by another Rust object). On error the
     /// caller must terminate, never try ordinary acquire.
     pub unsafe fn inspect(lifetime: i32, ticket: i32) -> io::Result<Self> {
-        if lifetime < 3 || ticket < 3 || lifetime == ticket {
+        if fs::read_dir("/proc/self/task")?.count() != 1
+            || lifetime < 3
+            || ticket < 3
+            || lifetime == ticket
+        {
             return Err(unsafe_path());
         }
         let fds = fd_snapshot()?;
@@ -254,22 +267,18 @@ impl Instance {
     /// Adopt the inherited OFD, without launch acquisition, open, flock or unlock.
     /// All errors are fatal for this entry; there is no cold-start fallback.
     ///
-    /// The callback is invoked exactly once, after physical and identity checks.
-    /// It must read back the transaction/manifest and consume the ticket with an
-    /// Adopted CAS (or confirm that exact CAS on ACK loss). A failure produces no
-    /// proof. The callback's types do not depend on storage/runtime. Complete
-    /// adoption before starting other threads or any producer.
+    /// Physical adoption only, before threads. The returned proof must next be
+    /// passed to the existing writer's DB Adopt CAS/readback in restricted
+    /// bootstrap. No ordinary claim, scan, producer or cold fallback is allowed.
     pub fn adopt_handoff(
         config: &ConfigIdentity,
         ipc_parent: &Path,
         entry: HandoffEntry,
-        expected: &HandoffRecord,
-        verify_and_consume: impl FnOnce(&HandoffRecord) -> io::Result<()>,
     ) -> io::Result<(Self, InheritedHandoffProof)> {
         let HandoffEntry { lifetime, ticket } = entry;
         let record = ticket.record;
-        if record != *expected
-            || record.config_identity != config.identity()
+        record.validate()?;
+        if record.config_identity != config.identity()
             || record.successor_build != running_elf_identity()?
         {
             return Err(unsafe_path());
@@ -282,8 +291,10 @@ impl Instance {
         {
             return Err(unsafe_path());
         }
+        if fs::read_dir("/proc/self/task")?.count() != 1 {
+            return Err(unsafe_path());
+        }
         let socket = config.socket(ipc_parent)?;
-        verify_and_consume(&record)?;
         reap_socket(&socket)?;
         let proof = InheritedHandoffProof::new(
             record.restart_id,
@@ -698,6 +709,7 @@ mod tests {
                 successor_epoch: 1,
                 nonce_hash: "n".into(),
                 successor_build: "b".into(),
+                boot_deadline: boot::BootDeadline::start().unwrap(),
             },
         };
         let f = sealed_ticket(&t).unwrap();
@@ -709,7 +721,7 @@ mod tests {
         );
     }
     #[test]
-    fn adoption_rejects_unlocked_or_wrong_lifetime_without_calling_db() {
+    fn physical_adoption_rejects_unlocked_or_wrong_lifetime() {
         use std::os::unix::fs::OpenOptionsExt;
         for wrong_inode in [false, true] {
             let directory = tempfile::tempdir().unwrap();
@@ -734,8 +746,8 @@ mod tests {
                 successor_epoch: 1,
                 nonce_hash: "n".into(),
                 successor_build: running_elf_identity().unwrap(),
+                boot_deadline: boot::BootDeadline::start().unwrap(),
             };
-            let expected = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
             let ticket = Ticket {
                 version: 1,
                 pid: std::process::id(),
@@ -744,14 +756,8 @@ mod tests {
                 record,
             };
             let entry = HandoffEntry { lifetime, ticket };
-            let mut called = false;
-            let result =
-                Instance::adopt_handoff(&config, directory.path(), entry, &expected, |_| {
-                    called = true;
-                    Ok(())
-                });
+            let result = Instance::adopt_handoff(&config, directory.path(), entry);
             assert!(result.is_err());
-            assert!(!called);
         }
     }
 }
