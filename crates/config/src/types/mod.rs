@@ -35,7 +35,10 @@ pub use agents::{
 pub use budget::BudgetConfig;
 pub use comment_checker::CommentCheckerConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};
-pub use core::{CoreConfig, WebConfig};
+pub use core::{
+    CoreConfig, RestartConfig, RestartTargetConfig, WebConfig, reject_restart_target_changes,
+    validate_restart_target_id,
+};
 pub use edit_tool::{EditToolConfig, EditToolSelection, gpt_generation};
 pub use eval::{EvalBudgetConfig, EvalConfig};
 pub use misc::{

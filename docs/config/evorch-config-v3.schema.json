@@ -89,7 +89,11 @@
     "core": {
       "$ref": "#/$defs/CoreConfig",
       "default": {
-        "idle_grace_secs": 60
+        "idle_grace_secs": 60,
+        "restart": {
+          "targets": {},
+          "timeout_secs": 300
+        }
       }
     },
     "diagnostics": {
@@ -755,6 +759,13 @@
           "format": "uint64",
           "default": 60,
           "minimum": 0
+        },
+        "restart": {
+          "$ref": "#/$defs/RestartConfig",
+          "default": {
+            "targets": {},
+            "timeout_secs": 300
+          }
         }
       },
       "additionalProperties": false
@@ -1568,6 +1579,39 @@
         }
       },
       "additionalProperties": false
+    },
+    "RestartConfig": {
+      "type": "object",
+      "properties": {
+        "targets": {
+          "description": "Local files only. The ID current is reserved for the running ELF.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RestartTargetConfig"
+          },
+          "default": {}
+        },
+        "timeout_secs": {
+          "description": "Fixed on acceptance. After capture this is a target, not a kill timer.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RestartTargetConfig": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
     },
     "RoleBindingConfig": {
       "description": "ロール 1 件分のバインディング設定。",

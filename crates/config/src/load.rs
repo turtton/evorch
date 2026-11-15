@@ -23,9 +23,9 @@ pub const PROJECT_CONFIG_DIR: &str = ".evorch";
 
 /// ドロップイン設定ディレクトリ名。
 const DROPIN_DIR: &str = "config.d";
-/// Sections only defaults and user/global files may set: they run programs or
-/// widen agent capabilities, so project files, env and CLI overrides cannot.
-const TRUSTED_SECTIONS: &[&str] = &["comment_checker", "tools", "pull_requests"];
+/// File-local snapshots for executable/capability settings. Restore the trusted
+/// subsections after merging project/env/CLI data (only restart within core).
+const TRUSTED_SECTIONS: &[&str] = &["comment_checker", "tools", "pull_requests", "core"];
 
 /// [`Config::load`] の読み込みオプション。
 #[derive(Debug, Clone)]
@@ -83,6 +83,17 @@ impl Default for LoadOptions {
 }
 
 impl Config {
+    /// Re-read at each restart request. This snapshot is independent of general
+    /// settings reload, projects, environment variables and CLI overrides.
+    pub fn load_restart_settings(config_dir: &Path) -> Result<crate::RestartConfig, ConfigError> {
+        Ok(Self::load_strict(&LoadOptions {
+            user_config_dir: Some(config_dir.to_owned()),
+            read_env: false,
+            ..Default::default()
+        })?
+        .core
+        .restart)
+    }
     /// オプションに従って各レイヤーを読み込み、マージした設定を返す。
     ///
     /// レイヤーの優先順位 (低い順):
@@ -236,6 +247,11 @@ impl Config {
             }
         }
         crate::strict::validate_strict(&trusted)?;
+        let trusted_core: crate::CoreConfig = trusted["core"]
+            .clone()
+            .try_into()
+            .map_err(|e| ConfigError::Migration(format!("invalid trusted core config: {e}")))?;
+        trusted_core.restart.validate()?;
         let checker: crate::CommentCheckerConfig = trusted["comment_checker"]
             .clone()
             .try_into()
@@ -268,6 +284,15 @@ impl Config {
         }
 
         let mut merged = merged.finish();
+        let core = merged
+            .get_mut("core")
+            .and_then(toml::Value::as_table_mut)
+            .ok_or_else(|| crate::save::invalid_field("core", "must be a table"))?;
+        core.insert(
+            "restart".into(),
+            toml::Value::try_from(trusted_core.restart)
+                .map_err(|e| ConfigError::Migration(e.to_string()))?,
+        );
 
         if !reject_unknown_fields {
             for path in crate::strict::remove_unknown_fields(&mut merged)? {
@@ -284,6 +309,7 @@ impl Config {
         let config: Config = merged.try_into().map_err(|err| {
             ConfigError::Migration(format!("failed to deserialize merged config: {err}"))
         })?;
+        config.core.restart.validate()?;
         config.self_improvement.validate()?;
         config.storage.validate()?;
         config.pull_requests.validate()?;

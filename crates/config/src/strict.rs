@@ -268,7 +268,21 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "comment_checker", COMMENT_CHECKER_KEYS)?;
     validate_section(root, "tools", TOOLS_KEYS)?;
     validate_section(root, "pull_requests", PULL_REQUESTS_KEYS)?;
-    validate_section(root, "core", &["idle_grace_secs"])?;
+    validate_section(root, "core", &["idle_grace_secs", "restart"])?;
+    if let Some(restart) = root
+        .get("core")
+        .and_then(|v| v.get("restart"))
+        .and_then(toml::Value::as_table)
+    {
+        check_keys(restart, "core.restart", &["timeout_secs", "targets"])?;
+        if let Some(targets) = restart.get("targets").and_then(toml::Value::as_table) {
+            for (id, target) in targets {
+                if let Some(target) = target.as_table() {
+                    check_keys(target, &format!("core.restart.targets.{id}"), &["path"])?;
+                }
+            }
+        }
+    }
     validate_section(
         root,
         "web",
@@ -483,7 +497,7 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("eval", EVAL_KEYS),
         ("storage", STORAGE_KEYS),
         ("pull_requests", PULL_REQUESTS_KEYS),
-        ("core", &["idle_grace_secs"]),
+        ("core", &["idle_grace_secs", "restart"]),
         (
             "web",
             &["enabled", "port", "allowed_hosts", "allowed_origins"],
@@ -492,6 +506,33 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
     for &(name, allowed) in sections {
         if let Some(table) = root.get_mut(name).and_then(toml::Value::as_table_mut) {
             retain_known(table, name, allowed, &mut ignored);
+        }
+    }
+    if let Some(restart) = root
+        .get_mut("core")
+        .and_then(|v| v.get_mut("restart"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        retain_known(
+            restart,
+            "core.restart",
+            &["timeout_secs", "targets"],
+            &mut ignored,
+        );
+        if let Some(targets) = restart
+            .get_mut("targets")
+            .and_then(toml::Value::as_table_mut)
+        {
+            for (id, target) in targets {
+                if let Some(target) = target.as_table_mut() {
+                    retain_known(
+                        target,
+                        &format!("core.restart.targets.{id}"),
+                        &["path"],
+                        &mut ignored,
+                    );
+                }
+            }
         }
     }
     if let Some(browser) = root

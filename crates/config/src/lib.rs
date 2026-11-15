@@ -79,6 +79,10 @@ pub use types::{
 };
 pub use types::{ChainPurpose, chain_kind_problems, route_mixing_problems, scope_kind_problems};
 pub use types::{
+    CoreConfig, RestartConfig, RestartTargetConfig, reject_restart_target_changes,
+    validate_restart_target_id,
+};
+pub use types::{
     DEFAULT_ARCHIVED_DELETE_AFTER_DAYS, DEFAULT_THREAD_INDEX_MAX_BYTES, MAX_THREAD_INDEX_MAX_BYTES,
     MIN_THREAD_INDEX_MAX_BYTES, StorageConfig, ThreadIndexConfig, ThreadRetentionConfig,
 };
