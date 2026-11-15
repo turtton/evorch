@@ -69,6 +69,7 @@ scripts/ci-scope-gate.sh
 scripts/tests/test_check_central_files.sh
 scripts/core-client-refs-baseline.txt
 scripts/check-core-client-refs.sh
+scripts/check-core-client-refs.pl
 
 # storage: migration registration and the shared migration tests
 crates/storage/src/migrations.rs

@@ -144,8 +144,9 @@ async fn two_turns_around_the_reload_hook_keep_the_sent_prefix_on_the_production
         };
         cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
 
-        // What a settings save ends with: every model is recomposed from the
-        // files. The production hook is the one the Evaluator's reload tool uses.
+        // The hook a settings save ends with, the one the Evaluator's reload tool
+        // uses. The test seam's fixed model is not replaced, so this only shows that
+        // calling it between two turns leaves the sent prefix alone.
         (core
             .evaluator
             .reload

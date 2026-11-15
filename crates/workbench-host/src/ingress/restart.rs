@@ -106,9 +106,14 @@ pub(super) fn command_access(
 mod tests {
     use super::*;
     use workbench_protocol::commands::{
-        ComposerRole, SendChat, StopRun, ThreadTarget, WithdrawFollowUp,
+        AnswerUserQuestion, ApprovalDecision, ComposerRole, DecideToolApproval, SendChat, StopRun,
+        ThreadTarget, WithdrawFollowUp,
     };
-    use workbench_protocol::ids::{ProjectId, RunId, SubmissionId, ThreadId};
+    use workbench_protocol::ids::{
+        ApprovalId, ProjectId, QuestionId, RunId, SubmissionId, ThreadId,
+    };
+    use workbench_protocol::namespaces::{ApprovalsCommand, QuestionsCommand};
+    use workbench_protocol::wire::{InstanceEpoch, Revision};
 
     fn name(access: CommandAccess) -> &'static str {
         match access {
@@ -171,6 +176,31 @@ mod tests {
                     thread: ThreadId::new("t").unwrap(),
                     run: RunId::new("r").unwrap(),
                     submission_id: SubmissionId::new("s").unwrap(),
+                })),
+                not_chat
+            )),
+            "existing"
+        );
+        // Answering a question and deciding an approval feed work that already exists.
+        assert_eq!(
+            name(command_access(
+                &Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {
+                    thread: ThreadId::new("t").unwrap(),
+                    question_id: QuestionId::new("q").unwrap(),
+                    answer: "yes".into(),
+                    question_revision: Revision(1),
+                })),
+                not_chat
+            )),
+            "existing"
+        );
+        assert_eq!(
+            name(command_access(
+                &Command::Approvals(ApprovalsCommand::DecideToolApproval(DecideToolApproval {
+                    approval_id: ApprovalId::new("a").unwrap(),
+                    core_epoch: InstanceEpoch(1),
+                    approval_revision: Revision(1),
+                    decision: ApprovalDecision::Approve,
                 })),
                 not_chat
             )),

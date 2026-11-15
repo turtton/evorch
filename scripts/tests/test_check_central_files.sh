@@ -139,6 +139,29 @@ ref_case ok "an absolute tokio runtime" 'use ::tokio::runtime::Builder;'
 ref_case ok "a local module of the same name" 'use super::config;'
 ref_case ok "an identifier that only contains a crate name" 'let storage_path = 1; let runtime_id = 2;'
 ref_case ok "a comment word" '// the storage layer is behind the protocol'
+ref_case fail "a multi-line group with an alias" 'use {
+    runtime as rt,
+    serde,
+};'
+ref_case fail "a nested group" 'use {serde, storage::{db, Database}};'
+ref_case fail "a path through an alias is counted" 'use runtime as rt;
+fn f() { rt::AgentRuntime::new(); }'
+ref_case fail "an absolute path in an expression" 'fn f() { let d = ::storage::open(); }'
+ref_case fail "a self import with an alias" 'use storage::{self as s};
+fn f() { s::open(); }'
+ref_case ok "a tokio alias in a group" 'use {tokio::runtime as rt, serde};
+fn f() { let _ = rt::Builder::new_multi_thread(); }'
+ref_case ok "a local module in a group" 'use {super::config, serde};
+fn f() { config::load(); }'
+ref_case ok "a multi-line group of other crates" 'use {
+    serde::Serialize,
+    tokio::runtime::Handle,
+};'
+ref_case ok "a crate named in a string and a comment" 'const A: &str = "use storage::Db;"; // use runtime as rt;
+/* use sandbox::X; */'
+ref_case ok "a raw string" 'const A: &str = r#"use storage::Db;"#;'
+ref_case ok "a method turbofish" 'fn f(x: X) { x.config::<u8>(); }'
+ref_case ok "a lifetime and a character literal" "fn f<'a>(x: &'a str) -> char { '''; '\\'' }"
 
 if (( fails > 0 )); then
   echo "$fails check(s) failed" >&2
