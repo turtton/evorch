@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::artifact::{ArtifactContext, NetLog};
 use crate::browser::{Dialogs, OsrBrowser, Shared};
 use crate::devtools::DevTools;
+use crate::notices::NoticeCursor;
 use crate::offline::{ArtifactBundle, INDEX};
 use crate::snapshot::SNAPSHOT_SIZE;
 
@@ -68,16 +69,8 @@ pub struct AgentPage {
     agent: Arc<PageAgent>,
     target: Arc<CefTarget>,
     log: Arc<NetLog>,
-    reported: Mutex<Reported>,
+    reported: Mutex<NoticeCursor>,
     browser: OsrBrowser,
-}
-
-#[derive(Default)]
-struct Reported {
-    requests: usize,
-    navigations: usize,
-    popups: usize,
-    dialogs: usize,
 }
 
 impl AgentPage {
@@ -117,39 +110,15 @@ impl AgentPage {
 
     /// What the offline policy refused since the last call.
     pub fn take_blocked(&self) -> Vec<String> {
-        let mut guard = self.reported.lock().unwrap_or_else(|e| e.into_inner());
-        let reported = &mut *guard;
-        let requests = self.log.blocked.lock().unwrap_or_else(|e| e.into_inner());
-        let status = self.browser.status();
-        let mut blocked = Vec::new();
-        for (label, entries, seen) in [
-            ("request", &requests[..], &mut reported.requests),
-            (
-                "navigation",
-                &status.blocked_navigations[..],
-                &mut reported.navigations,
-            ),
-            ("popup", &status.blocked_popups[..], &mut reported.popups),
-        ] {
-            blocked.extend(
-                entries
-                    .iter()
-                    .skip(*seen)
-                    .map(|url| format!("{label} {url} (artifacts are offline)")),
-            );
-            *seen = entries.len();
-        }
-        blocked
+        let mut cursor = self.reported.lock().unwrap_or_else(|e| e.into_inner());
+        cursor.take_blocked(&self.log, &self.browser.status())
     }
 
     /// Dialogs the page opened since the last call. Nobody sees them: alerts
     /// are closed, confirm and prompt dismissed and beforeunload left.
     pub fn take_dialogs(&self) -> Vec<String> {
-        let mut reported = self.reported.lock().unwrap_or_else(|e| e.into_inner());
-        let status = self.browser.status();
-        let dialogs = status.suppressed_dialogs[reported.dialogs..].to_vec();
-        reported.dialogs = status.suppressed_dialogs.len();
-        dialogs
+        let mut cursor = self.reported.lock().unwrap_or_else(|e| e.into_inner());
+        cursor.take_dialogs(&self.browser.status())
     }
 
     /// Detaches the agent and closes the browser. Agent calls made afterwards

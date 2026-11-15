@@ -361,7 +361,7 @@ async fn fallback_wrapper_exec_with_concurrent_cloexec_open_and_close() {
     assert!(launch.lifetime_available().unwrap());
 }
 #[tokio::test]
-async fn adoption_failures_are_fatal_and_callback_is_once_only() {
+async fn db_stage_failures_do_not_fall_back_after_physical_adopt() {
     for (scenario, message) in [
         ("leak", "rejected-fds"),
         ("mismatch", "rejected-adoption"),
@@ -373,8 +373,95 @@ async fn adoption_failures_are_fatal_and_callback_is_once_only() {
         assert_eq!(p.line().await, "before-exec");
         p.go().await;
         assert_eq!(p.line().await, message);
+        if scenario != "leak" {
+            let identity = ConfigIdentity::new(config.path()).unwrap();
+            assert!(
+                !LaunchGuard::acquire(&identity)
+                    .unwrap()
+                    .lifetime_available()
+                    .unwrap()
+            );
+            p.go().await;
+        }
         p.finish().await;
     }
+}
+
+#[tokio::test]
+async fn configured_target_freezes_selection_and_checks_all_three_boundaries() {
+    use core_launcher::handoff::{
+        CurrentElf,
+        targets::{RestartTarget, TargetRequirements, TargetSelection},
+    };
+    let dist = tempfile::tempdir().unwrap();
+    let path = wrapper(dist.path(), "", false);
+    let current = CurrentElf::record().unwrap();
+    let platform = format!("linux-{}", std::env::consts::ARCH);
+    let requirements = || TargetRequirements {
+        handoff: 1,
+        snapshot: 1,
+        storage_schema: 63,
+        protocol: 1,
+        platform: &platform,
+    };
+    let selection = || TargetSelection {
+        id: "next",
+        configured_path: Some(&path),
+        timeout: Duration::from_secs(47),
+    };
+    let request = RestartTarget::preflight(
+        selection(),
+        &current,
+        requirements(),
+        ProbeLimits::default(),
+        std::future::pending(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(request.id(), "next");
+    assert_eq!(request.timeout(), Duration::from_secs(47));
+    assert_eq!(request.description().schema.maximum, 63);
+    let checked = request
+        .before_capture(&current, ProbeLimits::default(), std::future::pending())
+        .await
+        .unwrap();
+    assert_eq!(checked.request().timeout(), Duration::from_secs(47));
+    checked.before_exec(&current).unwrap();
+    fs::write(&path, "#!/missing-interpreter\n").unwrap();
+    assert!(checked.before_exec(&current).is_err());
+    wrapper(dist.path(), "", false);
+    let request = RestartTarget::preflight(
+        selection(),
+        &current,
+        requirements(),
+        ProbeLimits::default(),
+        std::future::pending(),
+    )
+    .await
+    .unwrap();
+    fs::write(&path, "#!/missing-interpreter\n").unwrap();
+    assert!(
+        request
+            .before_capture(&current, ProbeLimits::default(), std::future::pending())
+            .await
+            .is_err()
+    );
+    wrapper(dist.path(), "", false);
+    let incompatible = TargetRequirements {
+        storage_schema: 64,
+        ..requirements()
+    };
+    assert!(
+        RestartTarget::preflight(
+            selection(),
+            &current,
+            incompatible,
+            ProbeLimits::default(),
+            std::future::pending()
+        )
+        .await
+        .is_err()
+    );
 }
 #[tokio::test]
 async fn failed_exec_restores_attributes_and_keeps_lifetime_lock() {

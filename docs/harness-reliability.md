@@ -85,17 +85,33 @@ outside access without consulting the reviewer or the user and records an Info
 so it is never mistaken for a reviewed approval; the consecutive-denial breaker
 is neither advanced nor reset by it. An approval the
 reviewer rates critical-risk goes to the user for the final decision,
-whatever `escalate_to_user_on_deny` says. The one exception is a shell
-command whose verdict carries `procedure_step: verified` with at least medium
-authorization, while approved project rules or a loaded skill are in the
-review context: the reviewer declares that the real user requested the work,
-that rules or a skill define this step, that the command touches only the
-work's own products or what the procedure names, and that the command itself
-performs the prerequisite check the procedure calls for. The runtime checks
-the declared level, the context and the access kind (file, web and upload
-reviews ignore `verified`), and logs the basis. A missing `procedure_step`
-counts as `none`, and rules or skills with no text do not count as a
-procedure in the context.
+whatever `escalate_to_user_on_deny` says. Shell has two alternative routes for
+automatic critical-risk approval: the existing `procedure_step: verified`
+route with at least medium authorization and an approved project rule or loaded
+skill defining the step (the real user requested the work, the command is
+limited to its products or procedure-named targets, and the command itself
+checks the required prerequisite), or an explicit-permission route. The latter
+requires model approval, a real user's explicit permission identifying the
+operation and targets, `authorization_basis: explicit_permission`,
+`authorization_level: high`, `scope_match: full`, and nonempty
+`authorization_refs` that correctly cite the sent, lineage-filtered
+`real_user_requests`. A yes-answer to a question listing targets permits only
+those listed targets. Permission comes only from real-user requests and
+answers in the run's lineage: justification, delegation, rules, skills,
+harness facts and execution context never grant it. The explicit-permission
+route needs no procedure; neither route lowers risk. Risk is based on actual
+effects, not command syntax or location alone. For example, fresh harness facts
+showing a PR is `MERGED`, the cleanup target's HEAD matches the PR head, and
+there are no uncommitted changes can make that cleanup low risk. Unknown scope
+asks the user even for a nonapproval; a known partial scope is denied.
+
+The shell review payload includes `cwd`, `workspace_root` and `access` as
+context, not as permission. Its verdict adds `authorization_basis`,
+`authorization_refs` and `scope_match`, recorded in manifest v2. This shell
+policy does not change file, web or upload reviews: their critical-risk
+approvals still go to the user, and `verified` remains shell-only. A missing
+`procedure_step` counts as `none`, and rules or skills with no text do not
+count as a procedure in the context.
 
 The review context carries `loaded_skills`: the skill bodies the runtime read
 for the run (`skill_load` without a resource, `load_skills` of a delegated

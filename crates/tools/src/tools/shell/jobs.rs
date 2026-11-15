@@ -84,6 +84,7 @@ pub(super) struct EscalatedInput {
     pub command: String,
     pub justification: String,
     pub cwd: Option<std::path::PathBuf>,
+    pub workspace_root: Option<std::path::PathBuf>,
     pub access: ShellAccess,
 }
 
@@ -454,12 +455,15 @@ impl JobRegistry {
                     );
                     let decision = escalated
                         .gate
-                        .decide_scoped_with_cwd(
+                        .decide_execution(
                             ctx,
                             &command,
                             &escalated.justification,
-                            escalated.cwd.as_deref(),
-                            escalated.access,
+                            crate::tools::shell_escalation::ShellExecutionContext {
+                                cwd: escalated.cwd.as_deref(),
+                                workspace_root: escalated.workspace_root.as_deref(),
+                                access: escalated.access,
+                            },
                         )
                         .await;
                     if let Some((reason, guidance)) = decision.denial() {

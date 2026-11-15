@@ -37,7 +37,7 @@ impl AgentModel for RecordingReviewer {
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![ContentBlock::Text {
-                    text: r#"{"approve":true,"reason":"current human request","risk_level":"high","authorization_level":"high"}"#.into(),
+                    text: r#"{"approve":true,"reason":"current human request","risk_level":"high","authorization_level":"high","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full"}"#.into(),
                 }],
             },
             finish_reason: FinishReason::Stop,

@@ -20,6 +20,10 @@ pub mod devtools;
 #[cfg(feature = "cef")]
 mod host;
 #[cfg(feature = "cef")]
+mod notices;
+#[cfg(feature = "cef")]
+mod page;
+#[cfg(feature = "cef")]
 mod runtime;
 #[cfg(feature = "cef")]
 mod snapshot;
@@ -31,7 +35,9 @@ pub use agent::{AgentPage, CefTarget};
 #[cfg(feature = "cef")]
 pub use artifact::{ArtifactContext, NetLog};
 #[cfg(feature = "cef")]
-pub use browser::{DialogKind, Dialogs, JsDialog, OsrBrowser, Status};
+pub use browser::{DialogKind, Dialogs, JsDialog, OsrBrowser, RawFrame, Status};
+#[cfg(feature = "cef")]
+pub use page::{ArtifactPage, PageSpec};
 #[cfg(feature = "cef")]
 pub use runtime::{CefRuntime, RuntimeConfig, subprocess_app};
 #[cfg(feature = "cef")]

@@ -19,7 +19,11 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+#[path = "handoff_diagnostics.rs"]
+pub mod diagnostics;
 mod supervisor;
+#[path = "handoff_targets.rs"]
+pub mod targets;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -254,7 +258,15 @@ impl HandoffTarget {
     /// Capture-time re-probe. A changed build/catalog/format is a reversible
     /// cancellation, not permission to replace the recorded transaction target.
     pub async fn reprobe(&self, limits: ProbeLimits) -> io::Result<()> {
-        let next = Self::probe(&self.requested, limits).await?;
+        self.reprobe_cancellable(limits, std::future::pending())
+            .await
+    }
+    pub async fn reprobe_cancellable(
+        &self,
+        limits: ProbeLimits,
+        cancel: impl Future<Output = ()>,
+    ) -> io::Result<()> {
+        let next = Self::probe_cancellable(&self.requested, limits, cancel).await?;
         if next.description != self.description || next.entry != self.entry || next.elf != self.elf
         {
             return Err(changed());

@@ -548,6 +548,30 @@ fn checked_text_for_save_text(
     scope: SaveScope<'_>,
 ) -> Result<ValidatedSave, ConfigError> {
     check_file_structure(&text)?;
+    // All library save paths preserve the local executable allowlist, including
+    // deletion by omission in a future full-document save. Caller serializes
+    // this read/compare/write together with its revision check.
+    let previous = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let targets = |text: &str| -> Result<toml::Value, ConfigError> {
+        let doc: toml::Value = toml::from_str(text)
+            .map_err(|e: toml::de::Error| ConfigError::Migration(e.to_string()))?;
+        Ok(doc
+            .get("core")
+            .and_then(|v| v.get("restart"))
+            .and_then(|v| v.get("targets"))
+            .cloned()
+            .unwrap_or_else(|| toml::Value::Table(Default::default())))
+    };
+    if targets(&previous)? != targets(&text)? {
+        return Err(invalid_field(
+            "core.restart.targets",
+            "restart targets may only be changed in local config files",
+        ));
+    }
     let config = scope.compose(path, &text)?;
     config
         .model_kind_problems()
@@ -574,6 +598,7 @@ fn check_file_structure(text: &str) -> Result<(), ConfigError> {
             "failed to deserialize config before saving: {error}"
         ))
     })?;
+    config.core.restart.validate()?;
     config.self_improvement.validate()?;
     config.storage.validate()
 }
@@ -613,4 +638,33 @@ fn normalized_string_models(input: &[String]) -> Vec<&str> {
         }
     }
     models
+}
+
+#[cfg(test)]
+mod restart_target_tests {
+    use super::*;
+    #[test]
+    fn all_document_saves_preserve_file_local_targets_including_full_omission() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let initial = "[core.restart.targets.next]\npath='/local/core'\n";
+        assert!(checked_text_for_save_text(&path, initial.into(), SaveScope::Standalone).is_err());
+        std::fs::write(&path, initial).unwrap();
+        for candidate in [
+            "",
+            "[core.restart.targets.next]\npath='/changed'\n",
+            "[core.restart.targets.next]\npath='/local/core'\n[core.restart.targets.extra]\npath='/extra'\n",
+        ] {
+            assert!(
+                checked_text_for_save_text(&path, candidate.into(), SaveScope::Standalone).is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), initial);
+        }
+        let candidate = format!("{initial}[core]\nidle_grace_secs=123\n");
+        checked_text_for_save_text(&path, candidate.clone(), SaveScope::Standalone)
+            .unwrap()
+            .write()
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), candidate);
+    }
 }

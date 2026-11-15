@@ -36,7 +36,7 @@ use serde_json::json;
 use support::{ScriptedModel, text_response, tool_response};
 use tools::ToolExecutor;
 
-const APPROVE: &str = r#"{"approve":true,"reason":"requested","risk_level":"medium","authorization_level":"high","procedure_step":"none"}"#;
+const APPROVE: &str = r#"{"approve":true,"reason":"requested","risk_level":"medium","authorization_level":"high","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full"}"#;
 const SHELL_REVIEW: &str = "Review a shell sandbox permission request.";
 
 /// Everything published before a marker that is published now has been received once the marker

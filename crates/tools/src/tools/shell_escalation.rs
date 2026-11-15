@@ -16,6 +16,14 @@ pub enum ShellAccess {
     Network,
 }
 
+/// The same resolved paths/access used by the shell invocation. No environment data.
+#[derive(Debug, Clone, Copy)]
+pub struct ShellExecutionContext<'a> {
+    pub cwd: Option<&'a Path>,
+    pub workspace_root: Option<&'a Path>,
+    pub access: ShellAccess,
+}
+
 macro_rules! denial_guidance {
     () => {
         "Do not pursue the same goal through a workaround, a reworded request, or indirect execution. If no safer alternative exists, consult instead: ask_user (a root run asks the user; a subagent asks its parent), handoff_to_lane when available, or report the blocker in your result."
@@ -97,6 +105,17 @@ pub trait ShellEscalationGate: Send + Sync {
         _cwd: Option<&Path>,
     ) -> EscalationDecision {
         self.decide(ctx, command, justification).await
+    }
+
+    async fn decide_execution(
+        &self,
+        ctx: &ToolExecutionContext,
+        command: &str,
+        justification: &str,
+        execution: ShellExecutionContext<'_>,
+    ) -> EscalationDecision {
+        self.decide_scoped_with_cwd(ctx, command, justification, execution.cwd, execution.access)
+            .await
     }
 
     async fn decide_scoped_with_cwd(

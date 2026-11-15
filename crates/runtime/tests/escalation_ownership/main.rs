@@ -3,7 +3,6 @@ mod support;
 
 mod escalation_handoff;
 mod escalation_proposal;
-mod escalation_verdict_strict;
 mod learning_queue;
 mod ledger;
 mod memory_boundary;

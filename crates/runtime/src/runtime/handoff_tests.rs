@@ -1033,7 +1033,7 @@ async fn handoff_copies_authentic_question_answers_without_sharing_review_author
     let (review_context, _) = crate::escalation_review::review_context(context, None).unwrap();
     let reviewer = Arc::new(crate::escalation_review::support::ScriptedModel::new([Ok(
         crate::escalation_review::support::text_response(
-            r#"{"approve":true,"reason":"inspect","risk_level":"low","authorization_level":"high"}"#,
+            r#"{"approve":true,"reason":"inspect","risk_level":"low","authorization_level":"high","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full"}"#,
             providers::FinishReason::Stop,
         ),
     )]));

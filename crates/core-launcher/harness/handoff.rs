@@ -42,6 +42,7 @@ mod linux {
             successor_epoch: epoch,
             nonce_hash: "fixture-nonce-hash".into(),
             successor_build: running_elf_identity().unwrap(),
+            boot_deadline: core_instance::handoff::boot::BootDeadline::start().unwrap(),
         }
     }
     fn install() {
@@ -186,7 +187,20 @@ mod linux {
                 d.build_identity = "sha256:old".into();
                 say(&serde_json::to_string(&d).unwrap());
             }
-            _ => say(&serde_json::to_string(&description()).unwrap()),
+            _ => {
+                let entry = core_instance::handoff::entry::EntryOptions::parse([OsString::from(
+                    "--describe-handoff",
+                )])
+                .unwrap();
+                assert!(
+                    core_launcher::handoff::targets::describe_at_entry(
+                        &entry,
+                        || Ok(description()),
+                        io::stdout()
+                    )
+                    .unwrap()
+                );
+            }
         }
     }
     fn description() -> HandoffDescription {
@@ -206,6 +220,8 @@ mod linux {
     pub fn run() {
         let signals = BlockedShutdownSignals::at_entry().unwrap();
         let args: Vec<_> = std::env::args_os().skip(1).collect();
+        let entry_options =
+            core_instance::handoff::entry::EntryOptions::parse(args.clone()).unwrap();
         if args.iter().any(|a| a == "--probe-parent") {
             // A separate test process owns this subreaper setting; neither the
             // product host nor the test runner's process state is modified.
@@ -270,7 +286,12 @@ mod linux {
         } else {
             None
         };
-        let entry = inherited.map(|fd| unsafe { HandoffEntry::inspect(fd, ticket.unwrap()) });
+        let entry = match entry_options.mode {
+            core_instance::handoff::entry::BootMode::Cold => None,
+            core_instance::handoff::entry::BootMode::PlannedHandoff(planned) => {
+                Some(unsafe { planned.inspect() })
+            }
+        };
         if scenario == "leak" && inherited.is_some() {
             assert!(entry.unwrap().is_err());
             say("rejected-fds");
@@ -285,27 +306,17 @@ mod linux {
             .and_then(|s| s.to_str().unwrap().parse::<u64>().ok())
             .unwrap_or(1);
         let instance = if let Some(entry) = entry {
-            let mut expected = record(&config, round);
-            if scenario == "mismatch" {
-                expected.successor_epoch += 1;
-            }
-            let mut calls = 0;
-            let result = Instance::adopt_handoff(&config, ipc, entry, &expected, |_| {
-                calls += 1;
-                if scenario == "callback-fails" {
-                    Err(io::Error::other("DB CAS rejected"))
-                } else {
-                    Ok(())
-                }
-            });
+            let expected: HandoffRecord =
+                serde_json::from_slice(&serde_json::to_vec(entry.record()).unwrap()).unwrap();
+            let (instance, proof) = Instance::adopt_handoff(&config, ipc, entry).unwrap();
+            // Simulated DB stage is now after physical adopt. A real DB-stage
+            // failure retains this Instance/proof until the dedicated exit.
             if scenario == "mismatch" || scenario == "callback-fails" {
-                assert!(result.is_err());
-                assert_eq!(calls, usize::from(scenario == "callback-fails"));
+                assert_eq!(proof.restart_id(), expected.restart_id);
                 say("rejected-adoption");
+                step();
                 return;
             }
-            let (instance, proof) = result.unwrap();
-            assert_eq!(calls, 1);
             assert_eq!(proof.restart_id(), expected.restart_id);
             assert_eq!(proof.config_identity(), config.identity());
             assert_eq!(proof.successor_epoch(), round);

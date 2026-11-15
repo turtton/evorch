@@ -423,7 +423,7 @@ async fn upload_world(model: Arc<ScriptedModel>) -> (World, Arc<UploadPage>, tem
     (world(model, executor, bus), page, workspace)
 }
 
-const APPROVE: &str = r#"{"approve":true,"reason":"requested","risk_level":"medium","authorization_level":"high","procedure_step":"none"}"#;
+const APPROVE: &str = r#"{"approve":true,"reason":"requested","risk_level":"medium","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high","procedure_step":"none"}"#;
 
 // Given: a linked thread whose stored facts are old / When: an upload is reviewed through the real
 // browser_upload_file path / Then: the review gets the stored facts marked stale, nothing is

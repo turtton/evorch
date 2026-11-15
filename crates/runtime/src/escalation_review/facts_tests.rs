@@ -37,7 +37,7 @@ use crate::pull_requests::{
 };
 use crate::{AgentInvocationContext, AgentModel, Role, RuntimeError};
 
-const APPROVE: &str = r#"{"approve":true,"reason":"fine","risk_level":"low","authorization_level":"high","procedure_step":"none"}"#;
+const APPROVE: &str = r#"{"approve":true,"reason":"fine","risk_level":"low","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high","procedure_step":"none"}"#;
 const THREAD: &str = "thread-1";
 const REPOSITORY: &str = "turtton/evorch";
 

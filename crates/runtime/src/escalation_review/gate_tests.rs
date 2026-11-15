@@ -44,11 +44,11 @@ async fn escalation_off_denies_without_calling_reviewer() {
 
 // Given: a structured approval / When: deciding / Then: escalation is granted.
 #[tokio::test]
-async fn auto_approve_grants_escalation() {
+async fn auto_approval_without_user_context_fails_closed() {
     let (gate, _) = fixture(EscalationApproval::Auto, false, Some(r#"{"approve":true}"#));
     assert!(matches!(
         gate.decide(&context(), "pwd", "inspect").await,
-        EscalationDecision::Approve
+        EscalationDecision::Deny { .. }
     ));
 }
 
@@ -86,6 +86,15 @@ async fn auto_invalid_verdict_denies_fail_closed() {
 }
 
 async fn respond(gate: &SandboxEscalationGate, approved: bool) -> tokio::task::JoinHandle<()> {
+    respond_for_run(gate, approved, "run-review").await
+}
+
+async fn respond_for_run(
+    gate: &SandboxEscalationGate,
+    approved: bool,
+    run_id: &str,
+) -> tokio::task::JoinHandle<()> {
+    let prefix = format!("{run_id}:call-review:");
     let bus = gate.bus.clone();
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
@@ -98,7 +107,7 @@ async fn respond(gate: &SandboxEscalationGate, approved: bool) -> tokio::task::J
             }) = rx.recv().await.expect("event").kind
             {
                 assert_eq!(tool_name, "shell");
-                assert!(call_id.starts_with("run-review:call-review:"));
+                assert!(call_id.starts_with(&prefix));
                 assert_eq!(
                     input,
                     Some(
@@ -189,7 +198,10 @@ async fn user_mode_timeout_denies() {
 #[tokio::test]
 async fn approved_and_denied_decisions_emit_escalation_diagnostics() {
     for (text, severity) in [
-        (r#"{"approve":true}"#, event_bus::DiagnosticSeverity::Info),
+        (
+            r#"{"approve":true}"#,
+            event_bus::DiagnosticSeverity::Warning,
+        ),
         (
             r#"{"approve":false}"#,
             event_bus::DiagnosticSeverity::Warning,
@@ -208,11 +220,7 @@ async fn approved_and_denied_decisions_emit_escalation_diagnostics() {
         assert_eq!(event.call_id.as_deref(), Some("call-review"));
         assert!(!event.detail.contains("run_id="));
         assert!(!event.detail.contains("call_id="));
-        if severity == event_bus::DiagnosticSeverity::Info {
-            assert_eq!(event.detail, "approved");
-        } else {
-            assert!(event.detail.starts_with("denied: "));
-        }
+        assert!(event.detail.starts_with("denied: "));
     }
 }
 
@@ -271,8 +279,7 @@ fn file_request() -> tools::tools::shell_escalation::FileAccessRequest {
     }
 }
 
-const LOW_RISK_APPROVAL: &str =
-    r#"{"approve":true,"reason":"requested","risk_level":"low","authorization_level":"low"}"#;
+const LOW_RISK_APPROVAL: &str = r#"{"approve":true,"reason":"requested","risk_level":"low","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"low"}"#;
 
 // Given: Off / When: a file access is requested / Then: it is denied without review.
 #[tokio::test]
@@ -291,7 +298,7 @@ async fn file_access_auto_review_receives_request_and_applies_verdict() {
     for (verdict, approved) in [
         (LOW_RISK_APPROVAL, true),
         (
-            r#"{"approve":true,"reason":"broad","risk_level":"high","authorization_level":"low"}"#,
+            r#"{"approve":true,"reason":"broad","risk_level":"high","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"low"}"#,
             false,
         ),
         (r#"{"approve":true}"#, false),
@@ -373,7 +380,7 @@ async fn file_access_user_and_fallback_follow_the_user_answer() {
             EscalationApproval::Auto,
             true,
             Some(
-                r#"{"approve":false,"reason":"ask","risk_level":"medium","authorization_level":"none"}"#,
+                r#"{"approve":false,"reason":"ask","risk_level":"medium","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"none"}"#,
             ),
         );
         let responder = respond_file_access(&gate, approved).await;
@@ -391,7 +398,7 @@ async fn file_access_auto_decline_without_fallback_keeps_reason() {
         EscalationApproval::Auto,
         false,
         Some(
-            r#"{"approve":false,"reason":"unrelated to the task","risk_level":"medium","authorization_level":"none"}"#,
+            r#"{"approve":false,"reason":"unrelated to the task","risk_level":"medium","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"none"}"#,
         ),
     );
     assert!(matches!(
@@ -400,7 +407,7 @@ async fn file_access_auto_decline_without_fallback_keeps_reason() {
     ));
 }
 
-const CRITICAL_APPROVAL: &str = r#"{"approve":true,"reason":"irreversible","risk_level":"critical","authorization_level":"high"}"#;
+const CRITICAL_APPROVAL: &str = r#"{"approve":true,"reason":"irreversible","risk_level":"critical","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#;
 
 // Given: auto mode without deny fallback / When: the model approves a critical-risk
 // shell or file request / Then: the user decides, and the reviewer runs once.
@@ -408,8 +415,20 @@ const CRITICAL_APPROVAL: &str = r#"{"approve":true,"reason":"irreversible","risk
 async fn critical_approvals_ask_the_user_even_without_deny_fallback() {
     for approved in [false, true] {
         let (gate, model) = fixture(EscalationApproval::Auto, false, Some(CRITICAL_APPROVAL));
-        let responder = respond(&gate, approved).await;
-        let decision = gate.decide(&context(), "pwd", "inspect").await;
+        let runtime = crate::AgentRuntime::new(
+            gate.bus.clone(),
+            Arc::new(tools::ToolExecutor::new(gate.bus.clone())),
+            model.clone(),
+        );
+        let id = runtime.reserve_run_id();
+        let mut ctx = context();
+        ctx.run_id = id.to_string();
+        let run = ReviewRunContext::empty(&ctx.run_id);
+        run.add_user_request(&ctx.run_id, "inspect the project");
+        runtime.shared.review_runs.lock().unwrap().insert(id, run);
+        let gate = gate.with_runtime(Arc::downgrade(&runtime.shared));
+        let responder = respond_for_run(&gate, approved, &ctx.run_id).await;
+        let decision = gate.decide(&ctx, "pwd", "inspect").await;
         assert_eq!(matches!(decision, EscalationDecision::Approve), approved);
         responder.await.expect("responder");
         assert_eq!(model.observed().await.len(), 1);

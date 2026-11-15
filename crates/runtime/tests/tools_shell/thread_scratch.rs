@@ -108,7 +108,7 @@ async fn thread_runs_share_tmpdir_with_children_escalation_and_file_tools() {
             }),
         )),
         Ok(text_response(
-            r#"{"approve":true,"reason":"reads a file this thread wrote","risk_level":"low","authorization_level":"low"}"#,
+            r#"{"approve":true,"reason":"reads a file this thread wrote","risk_level":"low","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"low"}"#,
             FinishReason::Stop,
         )),
         Ok(tool_response("child-read", "read", json!({"path": file}))),
