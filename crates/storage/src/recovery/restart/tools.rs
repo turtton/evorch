@@ -101,6 +101,20 @@ impl RestartToolsEvidence {
                     return Err(invalid("built-in order differs from catalog"));
                 }
             }
+            // Preserve external placement relative to every surviving built-in.
+            for external in old_names.iter().filter(|n| !old_builtin.contains(n)) {
+                for builtin in old_builtin.iter().filter(|n| {
+                    new_builtin.contains(n) && old_names.contains(n) && new_names.contains(n)
+                }) {
+                    let before = |names: &[&str]| {
+                        names.iter().position(|n| n == external).unwrap()
+                            < names.iter().position(|n| n == builtin).unwrap()
+                    };
+                    if before(&old_names) != before(&new_names) {
+                        return Err(invalid("external tool placement changed"));
+                    }
+                }
+            }
             for name in old_builtin.iter().filter(|n| new_builtin.contains(n)) {
                 if old_names.contains(name) != new_names.contains(name) {
                     return Err(invalid("configuration changed built-in availability"));
@@ -156,7 +170,31 @@ pub(super) fn capture(
     conn.execute("INSERT INTO restart_run_tools(restart_id,run_id,incarnation,old_snapshot_json) VALUES(?1,?2,?3,?4)",params![tx.metadata.restart_id,run,incarnation,json])?;
     Ok(())
 }
+fn eligible(
+    conn: &Connection,
+    tx: &RestartTransaction,
+    run: &str,
+    incarnation: &str,
+) -> Result<bool, StorageError> {
+    if !tx
+        .expected
+        .iter()
+        .any(|m| m.run_id == run && m.incarnation == incarnation)
+    {
+        return Ok(false);
+    }
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM restart_expected_members m JOIN restart_components c ON c.restart_id=m.restart_id AND c.manifest_id=m.manifest_id WHERE m.restart_id=?1 AND m.run_id=?2 AND c.disposition='retry_pending')", params![tx.metadata.restart_id,run], |r| r.get(0))?)
+}
 impl Database {
+    pub fn restart_tool_member_eligible(
+        &self,
+        id: &str,
+        run: &str,
+        incarnation: &str,
+    ) -> Result<bool, StorageError> {
+        let tx = load(&self.conn, id)?.ok_or_else(|| invalid("missing restart"))?;
+        eligible(&self.conn, &tx, run, incarnation)
+    }
     pub fn restart_tool_snapshot(
         &self,
         id: &str,
@@ -189,10 +227,7 @@ pub(super) fn save(
             .expected
             .iter()
             .any(|m| m.run_id == e.run_id && m.incarnation == e.incarnation)
-        || tx
-            .components
-            .iter()
-            .any(|c| c.disposition != RestartDisposition::RetryPending)
+        || !eligible(conn, tx, &e.run_id, &e.incarnation)?
         || RestartToolsEvidence::compare(
             e.run_id.clone(),
             e.incarnation.clone(),

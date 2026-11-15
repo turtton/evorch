@@ -252,6 +252,58 @@ fn tool_attribution_rejects_same_build_external_permissions_and_unexplained_orde
     let mut availability = new;
     availability.effective.pop();
     assert!(compare(old, availability, "b").is_err());
+    let (mut old, mut new) = snapshots();
+    old.effective.push(tool("mcp", 1));
+    new.effective.insert(0, tool("mcp", 1));
+    assert!(
+        compare(old, new, "b").is_err(),
+        "external placement is not a compiled change"
+    );
+}
+
+#[test]
+fn cold_graph_quarantine_does_not_decode_corrupt_learning_members_or_mutate_unknown_jobs() {
+    let db = Database::open_in_memory().unwrap();
+    admit(&db, "job", "old");
+    interrupted(&db, "job");
+    let t = capture(&db);
+    let inventory = db
+        .restart_learning_inventory(origin("old"), "suspend".into())
+        .unwrap();
+    let t = step(&db, t, RestartMutation::LearningInventory(inventory));
+    let t = armed(&db, t);
+    db.conn
+        .execute(
+            "UPDATE restart_learning_members SET member_json='broken'",
+            [],
+        )
+        .unwrap();
+    crate::recovery::write(
+        &db.conn,
+        crate::recovery::Write::RestartColdQuarantine {
+            id: "restart".into(),
+            expected_revision: t.revision,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        db.restart_transaction("restart").unwrap().unwrap().phase,
+        RestartPhase::Invalidated
+    );
+    assert_eq!(
+        db.learning_job("job").unwrap().unwrap().state,
+        LearningJobState::Interrupted
+    );
+    // The origin janitor/cold Interrupted pass handles jobs whose saved membership is unreadable.
+    let disposition: String = db
+        .conn
+        .query_row(
+            "SELECT disposition FROM restart_learning_members",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(disposition, "quarantined");
 }
 
 #[test]

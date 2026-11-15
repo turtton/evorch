@@ -123,6 +123,8 @@ pub enum RestartMutation {
         manifest_id: String,
     },
     LearningInventory(handoff::LearningInventory),
+    /// Cold-only disposition, including learning left pending after graph completion.
+    QuarantineLearningCold,
     ResumeLearning {
         task_id: String,
         to: crate::learning_jobs::LearningOrigin,
@@ -407,6 +409,7 @@ pub(super) fn mutate(
     }
     match mutation {
         RestartMutation::Create(_) => unreachable!(),
+        RestartMutation::QuarantineLearningCold => handoff::quarantine_learning(conn, id)?,
         RestartMutation::LearningInventory(inventory) => {
             handoff::save_inventory(conn, &tx, inventory)?
         }

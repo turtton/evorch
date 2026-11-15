@@ -350,6 +350,17 @@ impl AgentRuntime {
         }
     }
 
+    pub(crate) fn validate_learning_handoff(
+        &self,
+        pause: &LearningPause,
+        suspension: &LearningSuspension,
+    ) -> Result<(), String> {
+        if pause.id != suspension.id || !self.learning_gate().is_paused_by(pause.pause) {
+            return Err("learning handoff pause is stale or foreign".into());
+        }
+        Ok(())
+    }
+
     pub fn pause_learning(&self) -> LearningPause {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         LearningPause {

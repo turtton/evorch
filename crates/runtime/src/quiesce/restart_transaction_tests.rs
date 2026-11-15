@@ -5,6 +5,7 @@ use crate::{Role, RunConfig, RuntimeError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 use storage::recovery::restart::*;
+mod handoff;
 fn metadata() -> RestartMetadata {
     RestartMetadata {
         restart_id: "restart".into(),

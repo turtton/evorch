@@ -41,10 +41,24 @@ fn process(
     Arc<runtime::compose::RoutedModel>,
     EventReceiver,
 ) {
+    process_with_read(h, current, storage, config, Arc::new(BulkRead))
+}
+
+fn process_with_read(
+    h: &Harness,
+    current: &Config,
+    storage: &storage::Storage,
+    config: &storage::StorageConfig,
+    read: Arc<dyn Tool>,
+) -> (
+    AgentRuntime,
+    Arc<runtime::compose::RoutedModel>,
+    EventReceiver,
+) {
     let bus = Arc::new(EventBus::new(1024));
     let receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
-    executor.register(Arc::new(BulkRead)).unwrap();
+    executor.register(read).unwrap();
     let model = runtime::compose::compose_routed_model(
         current,
         routing::ComposeDeps {
@@ -77,8 +91,57 @@ async fn routed_recovery_same_model_changed_temperature_blocks_before_ack_or_htt
 }
 
 async fn recover(changed_settings: bool) {
+    recover_case(changed_settings, false, false, false).await;
+}
+
+#[tokio::test]
+async fn planned_tool_schema_boundary_preserves_sent_history_and_reuses_the_new_prefix() {
+    for (different_build, changed_tool) in
+        [(false, false), (true, false), (true, true), (false, true)]
+    {
+        recover_case(false, true, different_build, changed_tool).await;
+    }
+}
+
+struct ChangedRead;
+#[async_trait::async_trait]
+impl Tool for ChangedRead {
+    fn name(&self) -> &'static str {
+        BulkRead.name()
+    }
+    fn schema(&self) -> Value {
+        changed_schema()
+    }
+    fn permissions(&self) -> Permissions {
+        BulkRead.permissions()
+    }
+    async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+        BulkRead.execute(input).await
+    }
+}
+fn changed_schema() -> Value {
+    let mut schema = BulkRead.schema();
+    schema["properties"]["offset"] = json!({"type":"integer"});
+    schema
+}
+
+async fn recover_case(
+    changed_settings: bool,
+    tools_case: bool,
+    different_build: bool,
+    changed_tool: bool,
+) {
     let h = harness(
-        vec![text_response("completed"), text_response("followup")],
+        if tools_case {
+            vec![
+                read_response(0),
+                text_response("completed"),
+                text_response("followup"),
+                text_response("reuse"),
+            ]
+        } else {
+            vec![text_response("completed"), text_response("followup")]
+        },
         1_000_000,
     );
     let mut current = settings(&h);
@@ -129,16 +192,45 @@ async fn recover(changed_settings: bool) {
     let gate = runtime::quiesce::HostRestartGate::default();
     assert!(gate.transition(1, runtime::quiesce::HostRestartPhase::Sealing));
     let sealed = gate.sealed(&old, 1, fence).await.unwrap();
+    let old_input = old
+        .resume_intents()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.run_id == run)
+        .unwrap()
+        .provider_input
+        .unwrap();
+    let mut metadata = support::fixture_restart_metadata("routed-wire");
+    if tools_case {
+        metadata.old_builtin_tool_names = old_input
+            .request
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        if different_build {
+            metadata.successor_build = "different-fixture-build".into();
+        }
+    }
     let tx = storage
         .handle()
         .mutate_restart(
             "routed-wire".into(),
             None,
-            RestartMutation::Create(Box::new(support::fixture_restart_metadata("routed-wire"))),
+            RestartMutation::Create(Box::new(metadata)),
         )
         .unwrap();
     let mut session = sealed.begin_capture(&old, &tx, recipes).unwrap();
     old.persist_restart_capture_expected(&mut session).unwrap();
+    if tools_case {
+        old.persist_restart_tool_snapshot(
+            &mut session,
+            run,
+            &old_input.request.tools,
+            "fixture-permissions",
+        )
+        .unwrap();
+    }
     let committed = old.commit_restart_capture(&mut session).unwrap();
     storage
         .handle()
@@ -156,17 +248,129 @@ async fn recover(changed_settings: bool) {
         .into_iter()
         .filter(|r| r.path == "/v1/chat/completions")
         .collect::<Vec<_>>();
-    assert_eq!(before.len(), 1);
-    let original = before[0].body.clone();
+    assert_eq!(before.len(), if tools_case { 2 } else { 1 });
+    let original = before.last().unwrap().body.clone();
     if changed_settings {
         current.agents.worker.base.generation.temperature = Some(0.75);
     }
-    let (restarted, model, mut events) = process(&h, &current, &storage, &config);
+    let (restarted, model, mut events) = process_with_read(
+        &h,
+        &current,
+        &storage,
+        &config,
+        if changed_tool {
+            Arc::new(ChangedRead)
+        } else {
+            Arc::new(BulkRead)
+        },
+    );
     let fixture_db = storage::Database::open(&config).unwrap();
     let proof = support::inherited_fixture_proof(&fixture_db, &storage.handle())
         .unwrap()
         .unwrap();
     restarted.adopt_restart_handoff(proof).unwrap();
+    if tools_case {
+        let tx = fixture_db
+            .restart_transaction("routed-wire")
+            .unwrap()
+            .unwrap();
+        let incarnation = &tx
+            .expected
+            .iter()
+            .find(|m| m.run_id == run.to_string())
+            .unwrap()
+            .incarnation;
+        let mut candidate = old_input.clone();
+        if changed_tool {
+            candidate
+                .request
+                .tools
+                .iter_mut()
+                .find(|t| t.name == "read")
+                .unwrap()
+                .input_schema = changed_schema();
+        }
+        let comparison = restarted.prepare_restart_tool_evidence(
+            run,
+            incarnation,
+            &candidate,
+            &candidate.request.tools,
+            "fixture-permissions",
+        );
+        if changed_tool && !different_build {
+            assert!(comparison.is_err());
+            assert!(restarted.list_agents().is_empty());
+            assert_eq!(
+                h.mock
+                    .recorded_requests()
+                    .iter()
+                    .filter(|r| r.path == h.wire.path())
+                    .count(),
+                before.len()
+            );
+            return;
+        }
+        let evidence = comparison.unwrap();
+        assert_eq!(evidence.boundary, changed_tool);
+        if changed_tool {
+            assert!(
+                restarted
+                    .consume_restart_tool_boundary(evidence.clone(), candidate.clone())
+                    .is_err(),
+                "Ready required"
+            );
+        }
+        let tx = fixture_db
+            .restart_transaction("routed-wire")
+            .unwrap()
+            .unwrap();
+        storage
+            .handle()
+            .mutate_restart(
+                "routed-wire".into(),
+                Some(tx.revision),
+                RestartMutation::Ready { at_ms: 123 },
+            )
+            .unwrap();
+        let boundary = restarted
+            .consume_restart_tool_boundary(evidence.clone(), candidate.clone())
+            .unwrap();
+        if changed_tool {
+            assert_eq!(boundary.unwrap().apply(&old_input).unwrap(), candidate);
+            assert!(
+                restarted
+                    .consume_restart_tool_boundary(evidence, candidate.clone())
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            assert!(boundary.is_none());
+        }
+        let mut changed_permissions = candidate.clone();
+        changed_permissions.request.temperature = Some(0.99);
+        assert!(
+            restarted
+                .prepare_restart_tool_evidence(
+                    run,
+                    incarnation,
+                    &changed_permissions,
+                    &candidate.request.tools,
+                    "fixture-permissions"
+                )
+                .is_err()
+        );
+        assert!(
+            restarted
+                .prepare_restart_tool_evidence(
+                    run,
+                    incarnation,
+                    &candidate,
+                    &candidate.request.tools,
+                    "changed-permissions"
+                )
+                .is_err()
+        );
+    }
     assert!(model.route_pins(&run.to_string()).is_empty());
     let ownership = h._directory.path().join("ownership");
     let leases =
@@ -232,6 +436,12 @@ async fn recover(changed_settings: bool) {
         .send_message(run, "Actual followup".into())
         .unwrap();
     all_events.extend(through_phase(&mut events, run, AgentRunPhase::Waiting).await);
+    if tools_case {
+        restarted
+            .send_message(run, "After schema boundary".into())
+            .unwrap();
+        all_events.extend(through_phase(&mut events, run, AgentRunPhase::Waiting).await);
+    }
     restarted.cancel(run).unwrap();
     restarted.wait(run).await.unwrap();
     let requests = h
@@ -241,16 +451,37 @@ async fn recover(changed_settings: bool) {
         .filter(|r| r.path == "/v1/chat/completions")
         .map(|r| r.body)
         .collect::<Vec<_>>();
-    assert_eq!(requests.len(), 2);
-    let after = &requests[1];
-    assert_append_only(CacheProtocol::OpenAi, &original, after).unwrap();
+    assert_eq!(requests.len(), if tools_case { 4 } else { 2 });
+    let after = &requests[if tools_case { 2 } else { 1 }];
+    if changed_tool {
+        assert_ne!(original["tools"], after["tools"]);
+    } else {
+        assert_append_only(CacheProtocol::OpenAi, &original, after).unwrap();
+    }
+    if tools_case {
+        assert_append_only(CacheProtocol::OpenAi, after, &requests[3]).unwrap();
+    }
     // Independent assertions, not the mock cache's comparison algorithm.
     let prefix = original["messages"].as_array().unwrap();
     assert_eq!(
         &after["messages"].as_array().unwrap()[..prefix.len()],
         prefix
     );
-    for key in ["model", "temperature", "max_tokens", "tools", "tool_choice"] {
+    // Affinity and already-sent ToolResults are independent wire assertions.
+    assert_eq!(after["prompt_cache_key"], original["prompt_cache_key"]);
+    if tools_case {
+        assert!(
+            original["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["role"] == "tool")
+        );
+    }
+    if !changed_tool {
+        assert_eq!(after["tools"], original["tools"]);
+    }
+    for key in ["model", "temperature", "max_tokens", "tool_choice"] {
         assert_eq!(after[key], original[key], "changed {key}");
     }
     let usage: Vec<_> = all_events
@@ -264,7 +495,15 @@ async fn recover(changed_settings: bool) {
             _ => None,
         })
         .collect();
-    assert_eq!(usage.len(), 2);
+    assert_eq!(usage.len(), if tools_case { 4 } else { 2 });
     assert!(usage[0].0 > 0);
     assert_eq!(usage[1].1, usage[0].0);
+    if tools_case {
+        if changed_tool {
+            assert!(usage[2].1 < usage[1].0);
+        } else {
+            assert_eq!(usage[2].1, usage[1].0);
+        }
+        assert_eq!(usage[3].1, usage[2].0);
+    }
 }

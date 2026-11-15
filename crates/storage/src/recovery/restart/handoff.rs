@@ -108,6 +108,20 @@ impl Database {
     ) -> Result<LearningInventory, StorageError> {
         inventory(&self.conn, origin, suspension_id)
     }
+    pub fn restart_saved_learning_inventory(
+        &self,
+        id: &str,
+    ) -> Result<Option<LearningInventory>, StorageError> {
+        let raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT inventory_json FROM restart_learning_inventory WHERE restart_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        raw.map(|s| decode(&s)).transpose()
+    }
     pub fn restart_learning_members(
         &self,
         id: &str,
@@ -266,8 +280,10 @@ pub(super) fn quarantine_learning(conn: &Connection, id: &str) -> Result<(), Sto
         })?
         .collect::<Result<Vec<_>, _>>()?;
     for (task, raw) in rows {
-        let member: LearningMember = decode(&raw)?;
-        if let Some(job) = job(conn, &task)?
+        // Corrupt membership grants no authority over a job and cannot block cold graph quarantine.
+        let member: Option<LearningMember> = decode(&raw).ok();
+        if let Some(member) = member
+            && let Some(job) = job(conn, &task)?
             && job.key() == member.key
         {
             learning_jobs::attempts::apply_in_transaction(
