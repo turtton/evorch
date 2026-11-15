@@ -123,7 +123,7 @@ async fn graph_exclusion_precedes_limit_and_only_the_201st_lane_is_admitted() {
     assert!(f.runtime.recover_unstarted_lanes(None).unwrap().is_empty());
     let owner = Arc::new(
         crate::ownership::OwnerHost::open(
-            &f._dir.path().join("ownership"),
+            f._dir.sockets(),
             Default::default(),
             Arc::new(EventBus::new(32)),
         )
@@ -165,7 +165,7 @@ async fn stopped_graph_lane_is_rejected_before_ownership_or_ledger_changes() {
     let before = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
     let owner = Arc::new(
         crate::ownership::OwnerHost::open(
-            &f._dir.path().join("ownership"),
+            f._dir.sockets(),
             Default::default(),
             Arc::new(EventBus::new(32)),
         )
@@ -264,7 +264,7 @@ async fn idempotent_open_of_a_graph_lane_never_creates_an_owner_or_admits() {
     let mut f = Fixture::new();
     let owner = Arc::new(
         crate::ownership::OwnerHost::open(
-            &f._dir.path().join("ownership"),
+            f._dir.sockets(),
             Default::default(),
             Arc::new(EventBus::new(32)),
         )

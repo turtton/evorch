@@ -15,7 +15,7 @@ use workbench_protocol::{
 };
 
 struct Fixture {
-    dir: tempfile::TempDir,
+    dir: test_socket_dir::SplitDir,
     storage: storage::Storage,
     runtime: AgentRuntime,
     owner: Arc<runtime::ownership::OwnerHost>,
@@ -25,7 +25,7 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("host.db"),
             ..Default::default()
@@ -40,12 +40,7 @@ impl Fixture {
         )
         .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
         let owner = Arc::new(
-            runtime::ownership::OwnerHost::open(
-                &dir.path().join("owners"),
-                Default::default(),
-                bus,
-            )
-            .unwrap(),
+            runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus).unwrap(),
         );
         let permit = owner.start("lead").unwrap();
         let lead = runtime
@@ -274,7 +269,7 @@ async fn foreign_missing_owner_agent_and_unmirrored_pin_are_rejected() {
     );
     let foreign = Arc::new(
         runtime::ownership::OwnerHost::open(
-            &f.dir.path().join("owners"),
+            f.dir.sockets(),
             Default::default(),
             f.runtime.event_bus(),
         )

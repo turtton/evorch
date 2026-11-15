@@ -226,7 +226,7 @@ async fn child_forward_answer_nudge_ready_verify_close_are_append_only() {
     );
     let owner = Arc::new(
         runtime::ownership::OwnerHost::open(
-            h._directory.path(),
+            h._directory.sockets(),
             Default::default(),
             Arc::new(event_bus::EventBus::new(128)),
         )

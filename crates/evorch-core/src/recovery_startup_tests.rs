@@ -75,7 +75,7 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
     for activate in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        let owners = tempfile::tempdir().unwrap();
+        let owners = test_socket_dir::SocketDir::new();
         let options = BootstrapOptions {
             config_dir: root.clone(),
             project_root: root.clone(),
@@ -301,7 +301,7 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
 #[tokio::test]
 async fn wrong_startup_evidence_or_missing_high_watermarks_do_not_install_the_lane_fence() {
     let dir = tempfile::tempdir().unwrap();
-    let owners = tempfile::tempdir().unwrap();
+    let owners = test_socket_dir::SocketDir::new();
     let root = dir.path().canonicalize().unwrap();
     let options = BootstrapOptions {
         config_dir: root.clone(),
@@ -430,12 +430,12 @@ async fn wrong_startup_evidence_or_missing_high_watermarks_do_not_install_the_la
 
 #[tokio::test]
 async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let options = BootstrapOptions {
         config_dir: root.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     };
     let config = storage::StorageConfig {
         db_path: root.join("events.db"),

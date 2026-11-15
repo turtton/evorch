@@ -23,6 +23,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+test-socket-dir = { path = "../test-socket-dir" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }

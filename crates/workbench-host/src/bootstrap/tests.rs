@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn project_directory_preserves_sidebar_ids_without_writing_sidebar_state() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let sidebar = serde_json::json!({
         "projects": [{"id":"desktop-project", "repo_root":root, "name":"Project"}],
@@ -13,7 +13,7 @@ fn project_directory_preserves_sidebar_ids_without_writing_sidebar_state() {
     let options = BootstrapOptions {
         config_dir: root.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     };
     let projects = known_projects(&options).unwrap().directory.entries();
     assert_eq!(projects.len(), 1);
@@ -27,12 +27,12 @@ fn project_directory_preserves_sidebar_ids_without_writing_sidebar_state() {
 
 #[tokio::test]
 async fn bootstrap_drains_before_releasing_its_owner() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let mut boot = BootstrappedHost::open(BootstrapOptions {
         config_dir: root.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     })
     .await
     .unwrap();
@@ -59,7 +59,7 @@ async fn bootstrap_drains_before_releasing_its_owner() {
 
 #[tokio::test]
 async fn saved_access_only_declares_approved_existing_directories_without_rewriting_state() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let allowed = root.join("allowed");
     let rejected = root.join("unapproved");
@@ -100,7 +100,7 @@ async fn saved_access_only_declares_approved_existing_directories_without_rewrit
     let mut boot = BootstrappedHost::open(BootstrapOptions {
         config_dir: root.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     })
     .await
     .unwrap();
@@ -128,7 +128,7 @@ fn absent_access_is_unapproved_and_unknown_trust_does_not_grant_access() {
 
 #[tokio::test]
 async fn core_catalog_prices_usage_and_diagnostics_are_flushed_once() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let catalog = root.join("catalog");
     std::fs::create_dir(&catalog).unwrap();
@@ -151,7 +151,7 @@ async fn core_catalog_prices_usage_and_diagnostics_are_flushed_once() {
     let mut boot = BootstrappedHost::open(BootstrapOptions {
         config_dir: root.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     })
     .await
     .unwrap();
@@ -229,12 +229,12 @@ async fn core_catalog_prices_usage_and_diagnostics_are_flushed_once() {
 
 #[tokio::test]
 async fn restart_quiesce_keeps_owner_alive_until_explicit_operator_shutdown() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let mut boot = BootstrappedHost::open(BootstrapOptions {
         config_dir: root.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     })
     .await
     .unwrap();
@@ -258,12 +258,12 @@ async fn restart_quiesce_keeps_owner_alive_until_explicit_operator_shutdown() {
 
 #[tokio::test]
 async fn area_tasks_are_stopped_and_drained_by_the_bootstrap_shutdown() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let mut boot = BootstrappedHost::open(BootstrapOptions {
         config_dir: root.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     })
     .await
     .unwrap();
@@ -292,12 +292,12 @@ async fn area_tasks_are_stopped_and_drained_by_the_bootstrap_shutdown() {
 
 #[tokio::test]
 async fn a_failing_area_task_is_reported_but_the_drain_flush_and_owner_release_still_happen() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let mut boot = BootstrappedHost::open(BootstrapOptions {
         config_dir: root.clone(),
         project_root: root.clone(),
-        ownership_root: root.join("owners"),
+        ownership_root: dir.sockets().to_path_buf(),
     })
     .await
     .unwrap();

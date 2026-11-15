@@ -49,6 +49,7 @@ rustix = { version = "1", features = ["fs"] }
 socket2 = "0.6"
 
 [dev-dependencies]
+test-socket-dir = { path = "../test-socket-dir" }
 recorder = { path = "../recorder" }
 # The conversion tests take a database the runtime wrote back to version 39 and convert it.
 storage = { path = "../storage", features = ["unchecked-open"] }

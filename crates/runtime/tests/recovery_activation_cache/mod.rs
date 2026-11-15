@@ -159,7 +159,7 @@ async fn recover(changed_settings: bool) {
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
     let owner = runtime::ownership::OwnerHost::open(
-        &h._directory.path().join("owner"),
+        h._directory.sockets(),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )

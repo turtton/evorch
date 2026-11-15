@@ -42,6 +42,7 @@ thiserror = { workspace = true }
 test-support = []
 
 [dev-dependencies]
+test-socket-dir = { path = "../test-socket-dir" }
 storage = { path = "../storage", features = ["test-support"] }
 async-trait = { workspace = true }
 rusqlite = { workspace = true }

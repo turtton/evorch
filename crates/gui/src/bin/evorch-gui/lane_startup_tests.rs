@@ -70,24 +70,20 @@ async fn waiting(events: &mut EventReceiver, id: RunId) {
 }
 
 struct Fixture {
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
     config: StorageConfig,
     storage: Storage,
     root: PathBuf,
 }
 impl Fixture {
     fn new() -> Self {
-        // Explicitly relative socket paths avoid SUN_LEN without global chdir/env.
-        let dir = tempfile::Builder::new()
-            .prefix(".lane-startup-")
-            .tempdir_in(".")
-            .unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let config = StorageConfig {
             db_path: dir.path().join("lanes.db"),
             ..Default::default()
         };
         let storage = Storage::open(config.clone()).unwrap();
-        let root = PathBuf::from(dir.path().file_name().unwrap()).join("owners");
+        let root = dir.sockets().to_path_buf();
         Self {
             _dir: dir,
             config,

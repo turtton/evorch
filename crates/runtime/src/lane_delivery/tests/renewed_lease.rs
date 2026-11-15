@@ -7,7 +7,7 @@ use crate::ownership::OwnerHost;
 async fn a_renewed_lease_is_still_the_owner_of_the_live_root() {
     let mut f = Fixture::new();
     let owner = OwnerHost::open(
-        f._dir.path(),
+        f._dir.sockets(),
         Default::default(),
         f.runtime.shared.bus.clone(),
     )

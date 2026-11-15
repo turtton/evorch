@@ -69,7 +69,7 @@ struct Fixture {
     invocations: Arc<Mutex<Vec<ObservedInvocation>>>,
     model: Arc<ScriptedModel>,
     _storage: storage::Storage,
-    _directory: tempfile::TempDir,
+    _directory: test_socket_dir::SplitDir,
     messages: Arc<Mutex<Vec<Vec<Message>>>>,
     rt: tokio::runtime::Runtime,
     sink: RuntimeCommandSink,
@@ -80,7 +80,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_socket_dir::SplitDir::new();
         let storage_config = storage::StorageConfig {
             db_path: directory.path().join("chat.sqlite3"),
             ..storage::StorageConfig::default()

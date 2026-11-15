@@ -62,22 +62,22 @@ impl runtime::SandboxFactory for Unisolated {
 }
 
 struct World {
-    dir: tempfile::TempDir,
+    dir: test_socket_dir::SplitDir,
     root: PathBuf,
     core: BootstrappedHost,
 }
 
-fn options(root: &Path) -> BootstrapOptions {
+fn options(root: &Path, sockets: &Path) -> BootstrapOptions {
     BootstrapOptions {
         config_dir: root.join("config"),
         project_root: root.join("repo"),
-        ownership_root: root.join("owners"),
+        ownership_root: sockets.to_path_buf(),
     }
 }
 
-async fn open(root: &Path) -> BootstrappedHost {
+async fn open(root: &Path, sockets: &Path) -> BootstrappedHost {
     BootstrappedHost::open_with_test_seams(
-        options(root),
+        options(root, sockets),
         TestSeams {
             model: Arc::new(Idle),
             sandbox: Arc::new(Unisolated),
@@ -89,10 +89,7 @@ async fn open(root: &Path) -> BootstrappedHost {
 
 /// A sidebar that lists project `p` at `repo`, with the threads named.
 async fn world(threads: &[&str]) -> World {
-    let dir = tempfile::Builder::new()
-        .prefix("ws-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join("repo")).unwrap();
     std::fs::create_dir_all(root.join("config")).unwrap();
@@ -115,7 +112,7 @@ async fn world(threads: &[&str]) -> World {
         let lock = store.lock().unwrap();
         store.write(&lock, &document).unwrap();
     }
-    let core = open(&root).await;
+    let core = open(&root, dir.sockets()).await;
     World { dir, root, core }
 }
 
@@ -334,7 +331,7 @@ async fn what_a_user_granted_is_declared_again_after_the_core_restarts() {
     );
     w.core.shutdown().await.unwrap();
 
-    let mut again = open(&w.root).await;
+    let mut again = open(&w.root, w.dir.sockets()).await;
     assert_eq!(
         again.runtime.thread_read_only_directories("t1"),
         vec![extra.canonicalize().unwrap()],

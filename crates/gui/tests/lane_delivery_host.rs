@@ -116,12 +116,12 @@ struct World {
     /// Every event received and not yet handed to a workbench.
     seen: Vec<event_bus::Event>,
     config: storage::StorageConfig,
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
 }
 
 impl World {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let config = storage::StorageConfig {
             db_path: dir.path().join("delivery.db"),
             ..Default::default()

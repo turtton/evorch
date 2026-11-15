@@ -9,7 +9,7 @@ use workspace_ui::UiSettings;
 #[test]
 fn app_close_is_not_cancelled_when_echoed_by_the_backend() {
     // Given: an idle owner and a real workbench frame.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SocketDir::new();
     let host = Arc::new(
         OwnerHost::open(
             dir.path(),

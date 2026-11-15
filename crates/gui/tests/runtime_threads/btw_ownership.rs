@@ -126,7 +126,7 @@ fn a_handed_off_thread_refuses_side_questions_even_with_its_context_still_held()
             script: Mutex::new([text("main answer")].into()),
         }),
     );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::SocketDir::new();
     let owner =
         Arc::new(OwnerHost::open(directory.path(), Default::default(), Arc::clone(&bus)).unwrap());
     owner.start("thread").unwrap();

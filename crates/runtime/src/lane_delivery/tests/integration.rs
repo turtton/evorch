@@ -258,7 +258,7 @@ async fn run_scale() {
         .await
         .unwrap();
     let owner = crate::ownership::OwnerHost::open(
-        f._dir.path(),
+        f._dir.sockets(),
         Default::default(),
         f.runtime.shared.bus.clone(),
     )

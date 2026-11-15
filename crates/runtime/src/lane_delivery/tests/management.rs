@@ -935,7 +935,7 @@ async fn report_rejects_replaced_root_and_original_execution_authority_loss() {
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "report-authority").await;
     let host = crate::ownership::OwnerHost::open(
-        f._dir.path(),
+        f._dir.sockets(),
         Default::default(),
         f.runtime.shared.bus.clone(),
     )

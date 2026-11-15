@@ -75,7 +75,7 @@ run_case() {
   fi
 }
 
-WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","evorch","core-instance","core-launcher","test-support"]'
+WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","evorch","core-instance","core-launcher","test-support","test-socket-dir"]'
 EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu","axum","http","futures-core","http-body-util","hyper","hyper-util"]'
 GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","to":"serde_json"},{"from":"workbench-protocol","to":"thiserror"},
       {"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-client","to":"tokio"},{"from":"workbench-client","to":"thiserror"},
@@ -443,6 +443,26 @@ SPEC
 
 run_case core_launcher_reaching_runtime_through_a_dependency fail "core-launcher must not depend on workspace crate runtime: core-launcher -> test-support [normal; resolved] -> runtime" <<SPEC
 {$WS, $EXT, "deps": [$GOOD, {"from":"core-launcher","to":"test-support"},{"from":"test-support","to":"runtime"}]}
+SPEC
+
+run_case client_and_launcher_dev_depend_on_the_test_socket_leaf ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-client","to":"test-socket-dir","kind":"dev"},{"from":"core-launcher","to":"core-instance"},{"from":"core-launcher","to":"test-socket-dir","kind":"dev"},{"from":"runtime","to":"test-socket-dir","kind":"dev"},{"from":"gui","to":"test-socket-dir","kind":"dev"}]}
+SPEC
+
+run_case test_socket_leaf_as_a_normal_dependency fail "runtime must depend on test-socket-dir only as a dev-dependency" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"test-socket-dir"}]}
+SPEC
+
+run_case client_depends_on_the_test_socket_leaf_normally fail "workbench-client must depend on test-socket-dir only as a dev-dependency" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-client","to":"test-socket-dir"}]}
+SPEC
+
+run_case test_socket_leaf_with_a_workspace_dependency fail "test-socket-dir must not depend on workspace crate runtime" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"test-socket-dir","to":"runtime"}]}
+SPEC
+
+run_case client_dev_dependency_on_test_support_stays_rejected fail "workbench-client -> test-support [dev;" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-client","to":"test-support","kind":"dev"},{"from":"workbench-client","to":"test-socket-dir","kind":"dev"}]}
 SPEC
 
 # Cases built from real Cargo manifests: `cargo metadata` output for small

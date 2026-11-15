@@ -152,11 +152,11 @@ struct Fixture {
     storage: storage::Storage,
     _service: Option<PullRequestService>,
     _owner: Arc<runtime::ownership::OwnerHost>,
-    _directory: tempfile::TempDir,
+    _directory: test_socket_dir::SplitDir,
 }
 
 fn fixture(model: Arc<dyn AgentModel>, observed: bool) -> Fixture {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::SplitDir::new();
     let storage = storage::Storage::open(storage::StorageConfig {
         db_path: directory.path().join("observer.db"),
         ..Default::default()
@@ -164,12 +164,8 @@ fn fixture(model: Arc<dyn AgentModel>, observed: bool) -> Fixture {
     .unwrap();
     let bus = Arc::new(EventBus::new(4096));
     let owner = Arc::new(
-        runtime::ownership::OwnerHost::open(
-            &directory.path().join("owners"),
-            Default::default(),
-            bus.clone(),
-        )
-        .unwrap(),
+        runtime::ownership::OwnerHost::open(directory.sockets(), Default::default(), bus.clone())
+            .unwrap(),
     );
     owner.start(THREAD).unwrap();
     let events = bus.subscribe();

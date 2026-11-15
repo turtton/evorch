@@ -124,7 +124,7 @@ async fn claimed_admission_keeps_accepted_until_snapshot_delivery() {
 
 #[tokio::test]
 async fn restart_recovers_accepted_without_chataccepted_run_binding() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let path = dir.path().join("sidebar.json");
     let config = storage::StorageConfig {
         db_path: dir.path().join("events.db"),
@@ -145,7 +145,7 @@ async fn restart_recovers_accepted_without_chataccepted_run_binding() {
     ));
     let bus = Arc::new(event_bus::EventBus::new(32));
     let owner =
-        runtime::ownership::OwnerHost::open(&dir.path().join("owner"), Default::default(), bus)
+        runtime::ownership::OwnerHost::open(&dir.sockets().join("owner"), Default::default(), bus)
             .unwrap();
     let permit = owner.start("thread").unwrap();
     // A different, live owner protects even a run absent from sidebar.run_ids.

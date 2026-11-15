@@ -1,0 +1,13 @@
+[package]
+name = "test-socket-dir"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Short temporary directories for Unix domain sockets in tests."
+
+# Tests only: production crates must list this crate under [dev-dependencies].
+# It is deliberately a leaf with no workspace dependency, so the client crates
+# that scripts/check-workbench-boundaries.sh keeps small (workbench-client,
+# core-launcher) can use it without reaching the core.
+[dependencies]
+tempfile = { workspace = true }

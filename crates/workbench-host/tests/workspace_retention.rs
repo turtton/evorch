@@ -9,16 +9,16 @@ use workbench_protocol::namespaces::workspace::{RetentionBlock, RetentionState};
 use workspace_state::{ProjectId, SidebarDocument, ThreadId, ThreadRecord};
 
 struct Fixture {
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
     database: Database,
     source: RetentionSource,
     document: SidebarDocument,
 }
 
 fn fixture(days: u32, threads: &[&str]) -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().join("project");
-    let owners = dir.path().join("owners");
+    let owners = dir.sockets().to_path_buf();
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&owners).unwrap();
     let sidebar_path = dir.path().join("sidebar.json");

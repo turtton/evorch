@@ -107,7 +107,7 @@ impl Tool for GatedRead {
 }
 
 struct Harness {
-    _directory: tempfile::TempDir,
+    _directory: test_socket_dir::SplitDir,
     runtime: AgentRuntime,
     receiver: EventReceiver,
     mock: StreamingMockOpenAi,
@@ -322,7 +322,7 @@ fn harness_with_catalog_and_executor(
     configure: impl FnOnce(&mut Config),
     configure_executor: impl FnOnce(&mut ToolExecutor, &Arc<EventBus>),
 ) -> Harness {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::SplitDir::new();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(script, vec![model.into()]);
     let mock = match catalog_capabilities {
         Some(capabilities) => mock.with_codex_model_capabilities(model, capabilities),

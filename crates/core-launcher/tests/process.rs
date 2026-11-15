@@ -96,17 +96,14 @@ impl Drop for Peer {
     }
 }
 struct Rig {
-    root: tempfile::TempDir,
+    root: test_socket_dir::SocketDir,
     config: PathBuf,
     runtime: PathBuf,
     control: UnixListener,
 }
 impl Rig {
     fn new() -> Self {
-        let root = tempfile::Builder::new()
-            .prefix("p10-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let root = test_socket_dir::SocketDir::new();
         let config = root.path().join("cfg");
         private(&config);
         let runtime = root.path().join("run");

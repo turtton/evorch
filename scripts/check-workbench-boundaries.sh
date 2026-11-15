@@ -28,6 +28,11 @@
 #      Because those four are exempt, core-instance must reach no other workspace
 #      crate and core-launcher only core-instance, workbench-client and
 #      workbench-protocol (checked once the crates exist).
+#   8. test-socket-dir (short temporary directories for Unix sockets in tests)
+#      is a leaf: it reaches no workspace crate and only dev edges point at it.
+#      Under that rule workbench-client and core-launcher may list it as a
+#      dev-dependency, which rule 2 and the core-launcher check below would
+#      otherwise reject for any workspace crate.
 # Each violation prints the dependency path that causes it.
 #
 # Usage: scripts/check-workbench-boundaries.sh [metadata.json]
@@ -64,7 +69,9 @@ RATCHET_CRATES="gui evorch"
 # core-instance (a leaf) and core-launcher (client launcher over core-instance,
 # workbench-client and workbench-protocol) are client-side crates added by PR 04;
 # listing them here keeps the ratchet independent of which PR merges first.
-RATCHET_FREE_TARGETS="workbench-client workbench-protocol core-instance core-launcher"
+RATCHET_FREE_TARGETS="workbench-client workbench-protocol core-instance core-launcher test-socket-dir"
+# The one workspace crate the client crates may use as a dev-dependency (rule 8).
+TEST_LEAF=test-socket-dir
 ALLOWLIST="${WORKBENCH_BOUNDARY_ALLOWLIST:-scripts/workbench-boundary-allowlist.txt}"
 # WORKBENCH_BOUNDARY_ALLOWLIST lets the fixture tests supply their own list.
 STALE_ALLOWLIST="${WORKBENCH_BOUNDARY_STALE_ALLOWLIST:-warn}"
@@ -323,7 +330,7 @@ ratchet_violations() {
 ratchet_violations >> "$violations"
 
 closure_violations "$PROTOCOL" "" >> "$violations"
-closure_violations "$CLIENT" "$PROTOCOL" >> "$violations"
+closure_violations "$CLIENT" "$PROTOCOL $TEST_LEAF" >> "$violations"
 gui_free_violations "$HOST" "$HOST_FORBIDDEN_WORKSPACE" >> "$violations"
 # evorch-core is a composition root, not a runtime implementation crate. Its
 # integration tests may use workbench-client, but no rendering/GUI dependency.
@@ -343,7 +350,19 @@ if has_member core-instance; then
   closure_violations core-instance "" >> "$violations"
 fi
 if has_member core-launcher; then
-  closure_violations core-launcher "core-instance $CLIENT $PROTOCOL" >> "$violations"
+  closure_violations core-launcher "core-instance $CLIENT $PROTOCOL $TEST_LEAF" >> "$violations"
+fi
+
+# Rule 8. The leaf is checked once the crate exists in the workspace.
+test_leaf_violations() {
+  awk -F'\t' -v leaf="$TEST_LEAF" '
+    $1 == "E" && $3 == leaf && $4 != "dev" {
+      print "VIOLATION: " $2 " must depend on " leaf " only as a dev-dependency: " $2 " -> " leaf " [" $4 "; " $5 "]"
+    }' "$work/edges.tsv"
+}
+if has_member "$TEST_LEAF"; then
+  closure_violations "$TEST_LEAF" "" >> "$violations"
+  test_leaf_violations >> "$violations"
 fi
 
 if [[ -s "$work/stale.txt" ]]; then

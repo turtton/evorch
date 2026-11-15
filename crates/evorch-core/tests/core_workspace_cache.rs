@@ -152,7 +152,7 @@ async fn trust_and_sidebar_changes_keep_the_sent_prefix_on_the_production_wire()
             BootstrapOptions {
                 config_dir: user.clone(),
                 project_root: root.clone(),
-                ownership_root: root.join("owners"),
+                ownership_root: project.sockets().to_path_buf(),
             },
             TestSeams {
                 model,

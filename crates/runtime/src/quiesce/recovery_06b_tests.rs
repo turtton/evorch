@@ -191,7 +191,7 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
         storage::shared_with_wait(&f.config.db_path, &ownership, std::time::Duration::ZERO)
             .unwrap();
     let owner = crate::ownership::OwnerHost::open(
-        &f._dir.path().join("current-owner"),
+        f._dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )
@@ -634,7 +634,7 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
     let owner = crate::ownership::OwnerHost::open(
-        &f._dir.path().join("current-owner"),
+        f._dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )
@@ -777,7 +777,7 @@ async fn post_activation_fault(point: crate::runtime::HookPoint, published: bool
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
     let owner = crate::ownership::OwnerHost::open(
-        &f._dir.path().join("current-owner"),
+        f._dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )
@@ -900,7 +900,7 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
     let owner = crate::ownership::OwnerHost::open(
-        &f._dir.path().join("current-owner"),
+        f._dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )

@@ -763,7 +763,7 @@ async fn stopped_child_with_interrupted_tool_does_not_block_its_report_recipient
         .validate_prepared_claim(claim.claim_id.clone(), &startup, &root)
         .unwrap();
     let owner = crate::ownership::OwnerHost::open(
-        &f._dir.path().join("terminal-owner"),
+        f._dir.sockets(),
         Default::default(),
         std::sync::Arc::new(event_bus::EventBus::new(64)),
     )

@@ -9,7 +9,7 @@ use std::{
     },
     time::Duration,
 };
-use tempfile::TempDir;
+use test_socket_dir::SplitDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -75,7 +75,8 @@ impl McpProcessLimiter for Limiter {
     }
 }
 struct Harness {
-    dir: TempDir,
+    dir: SplitDir,
+    control: PathBuf,
     listener: UnixListener,
     limiter: Arc<Limiter>,
     released: mpsc::UnboundedReceiver<()>,
@@ -86,17 +87,15 @@ impl Harness {
     fn new(steps: &[Value]) -> Self {
         // Keep the Unix socket path below the OS's sockaddr_un limit even when
         // the runner's TMPDIR is a long scratch path.
-        let dir = tempfile::Builder::new()
-            .prefix("mcp-d-")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let root = dir.path().canonicalize().unwrap();
         std::fs::write(
             root.join("peer.jsonl"),
             steps.iter().map(|s| format!("{s}\n")).collect::<String>(),
         )
         .unwrap();
-        let listener = UnixListener::bind(root.join("control")).unwrap();
+        let control = dir.sockets().join("control");
+        let listener = UnixListener::bind(&control).unwrap();
         let (released, rx) = mpsc::unbounded_channel();
         let ledger = ApprovalLedger::at_user_config_dir(root.join("consent")).unwrap();
         let inspection = McpApprovalInspection {
@@ -118,6 +117,7 @@ impl Harness {
         };
         Self {
             dir,
+            control,
             listener,
             limiter: Arc::new(Limiter {
                 live: Arc::new(AtomicUsize::new(0)),
@@ -138,7 +138,7 @@ impl Harness {
                 executable: server_binary(),
                 args: vec![
                     Secret::from(root.join("peer.jsonl").to_string_lossy().into_owned()),
-                    Secret::from(root.join("control").to_string_lossy().into_owned()),
+                    Secret::from(self.control.to_string_lossy().into_owned()),
                 ],
                 cwd: root.clone(),
                 env: BTreeMap::new(),

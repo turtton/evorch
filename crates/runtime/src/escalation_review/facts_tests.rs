@@ -125,7 +125,7 @@ struct Harness {
     threads: Arc<Threads>,
     events: EventReceiver,
     _storage: storage::Storage,
-    _directory: tempfile::TempDir,
+    _directory: test_socket_dir::SplitDir,
 }
 
 impl Harness {
@@ -150,7 +150,7 @@ impl Harness {
         model: Arc<ScriptedModel>,
         executor: impl FnOnce(Arc<EventBus>) -> tools::ToolExecutor,
     ) -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_socket_dir::SplitDir::new();
         let storage = storage::Storage::open(storage::StorageConfig {
             db_path: directory.path().join("evorch.db"),
             ..Default::default()
@@ -160,7 +160,7 @@ impl Harness {
         let events = bus.subscribe();
         let host = Arc::new(
             OwnerHost::open(
-                &directory.path().join("owners"),
+                directory.sockets(),
                 config::OwnershipConfig::default(),
                 Arc::clone(&bus),
             )

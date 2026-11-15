@@ -78,6 +78,7 @@ core-launcher = { path = "../core-launcher" }
 notify-rust = "4"
 
 [dev-dependencies]
+test-socket-dir = { path = "../test-socket-dir" }
 workbench-host = { path = "../workbench-host", features = ["test-support"] }
 # The history restore test converts a database the build wrote, after taking it back to version 39.
 storage = { path = "../storage", features = ["unchecked-open"] }

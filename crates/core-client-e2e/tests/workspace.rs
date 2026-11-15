@@ -202,12 +202,13 @@ fn seed(config: &Path, repo: &Path) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_windows_edit_the_sidebar_through_the_core_and_converge_across_a_core_restart() {
-    let dir = tempfile::Builder::new()
-        .prefix("e2e-ws-")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
-    let (config, repo, owners) = (root.join("config"), root.join("repo"), root.join("owners"));
+    let (config, repo, owners) = (
+        root.join("config"),
+        root.join("repo"),
+        dir.sockets().to_path_buf(),
+    );
     std::fs::create_dir_all(&config).unwrap();
     std::fs::create_dir_all(&repo).unwrap();
     let repo = repo.canonicalize().unwrap();
@@ -217,7 +218,7 @@ async fn two_windows_edit_the_sidebar_through_the_core_and_converge_across_a_cor
     let identity = core_instance::ConfigIdentity::new(&root.join("identity")).unwrap();
     let instance = evorch_core::instance::Instance::acquire(
         &core_instance::LaunchGuard::acquire(&identity).unwrap(),
-        &root,
+        dir.sockets(),
     )
     .unwrap();
     let listener = instance.bind().unwrap();

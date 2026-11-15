@@ -98,7 +98,7 @@ impl PrNoticeDelivery for Delivery {
     }
 }
 struct World {
-    _dir: tempfile::TempDir,
+    _dir: test_socket_dir::SplitDir,
     runtime: AgentRuntime,
     mock: StreamingMockOpenAi,
     receiver: EventReceiver,
@@ -121,7 +121,7 @@ fn text(s: &str) -> ScriptedResponse {
 }
 impl World {
     async fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_socket_dir::SplitDir::new();
         let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(
             vec![text("initial answer")],
             vec![MODEL.into()],
@@ -212,7 +212,7 @@ threshold=0.95
         }
         let owner = Arc::new(
             OwnerHost::open(
-                &dir.path().join("owners"),
+                dir.sockets(),
                 config::OwnershipConfig::default(),
                 bus.clone(),
             )

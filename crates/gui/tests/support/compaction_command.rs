@@ -185,7 +185,7 @@ fn unknown_run_is_reported_and_unowned_threads_are_rejected() {
         if thread_id == "selected" && text.starts_with("Could not request context compaction:")));
     let host = Arc::new(
         runtime::ownership::OwnerHost::open(
-            fixture._directory.path(),
+            fixture._directory.sockets(),
             Default::default(),
             Arc::new(EventBus::new(64)),
         )

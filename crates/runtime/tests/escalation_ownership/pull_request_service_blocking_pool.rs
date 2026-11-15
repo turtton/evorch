@@ -51,7 +51,7 @@ fn answer() -> FetchedPullRequest {
 }
 
 struct Setup {
-    _directory: tempfile::TempDir,
+    _directory: test_socket_dir::SplitDir,
     _storage: storage::Storage,
     host: Arc<OwnerHost>,
     source: FakePullRequestSource,
@@ -60,7 +60,7 @@ struct Setup {
 }
 
 fn setup(enabled: bool) -> Setup {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_socket_dir::SplitDir::new();
     let storage = storage::Storage::open(storage::StorageConfig {
         db_path: directory.path().join("service.db"),
         ..Default::default()
@@ -70,7 +70,7 @@ fn setup(enabled: bool) -> Setup {
     let events = bus.subscribe();
     let host = Arc::new(
         OwnerHost::open(
-            &directory.path().join("owners"),
+            directory.sockets(),
             config::OwnershipConfig::default(),
             Arc::clone(&bus),
         )
@@ -178,7 +178,7 @@ async fn an_unlink_and_a_lost_lease_during_a_fetch_deliver_nothing_to_that_threa
         .unwrap();
     let successor = Arc::new(
         OwnerHost::open(
-            &setup._directory.path().join("owners"),
+            setup._directory.sockets(),
             config::OwnershipConfig::default(),
             Arc::new(EventBus::new(16)),
         )

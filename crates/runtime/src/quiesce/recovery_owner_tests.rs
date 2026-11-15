@@ -36,7 +36,7 @@ async fn prepared_owner_handoff_rejects_old_stop_and_shutdown_but_successor_can_
         .adopt_prepared_claim(proof, startup, &root, &current)
         .unwrap();
     let next = crate::ownership::OwnerHost::open(
-        &f._dir.path().join("adopt-owner"),
+        f._dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )
@@ -126,7 +126,7 @@ async fn stopped_prepared_shutdown_cannot_release_after_owner_handoff() {
         .unwrap();
     runtime.stop(run, StopScope::SelfOnly).unwrap();
     let next = crate::ownership::OwnerHost::open(
-        &f._dir.path().join("adopt-owner"),
+        f._dir.sockets(),
         Default::default(),
         Arc::new(EventBus::new(64)),
     )
