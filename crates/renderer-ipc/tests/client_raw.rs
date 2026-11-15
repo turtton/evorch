@@ -130,7 +130,6 @@ fn damaged_frames_end_the_connection_and_fail_what_is_pending() {
 fn a_frame_announcing_more_than_the_limit_is_refused_before_it_is_read() {
     let (client, mut peer) = connect_to_raw_helper();
     peer.frames.write_all(&raw_header(4, 2, u32::MAX)).unwrap();
-    peer.frames.write_all(b"{}").unwrap();
     assert!(matches!(
         client.wait_closed(),
         CloseReason::ProtocolViolation(_)
