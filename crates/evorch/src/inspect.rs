@@ -250,6 +250,16 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
     if !path.is_file() {
         return Err(format!("database not found: {}", path.display()));
     }
+    // `open_for_inspection` creates a missing lease file; an inspection must not add a file
+    // next to the database, so a database that has none is refused first.
+    let lease = lease_path(&path)?;
+    if !lease.is_file() {
+        return Err(format!(
+            "no maintenance lease file {} next to the database; inspecting would have to create it. \
+             Start current evorch once and exit cleanly, or create the file yourself (empty, mode 0600)",
+            lease.display()
+        ));
+    }
     let db = Database::open_for_inspection(&path).map_err(|error| error.to_string())?;
     let result = match args.command {
         InspectCommand::Candidates {
@@ -338,6 +348,15 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
 /// a problem): the document is still printed, and the process exits with status 1.
 pub fn reports_failure(document: &Value) -> bool {
     document["result"]["ok"] == Value::Bool(false)
+}
+
+/// The maintenance lease of `database`: `<canonical path>.maintenance-lock`, the path
+/// writers and offline maintenance share.
+fn lease_path(database: &std::path::Path) -> Result<PathBuf, String> {
+    let canonical = database.canonicalize().map_err(|error| error.to_string())?;
+    let mut name = canonical.into_os_string();
+    name.push(".maintenance-lock");
+    Ok(name.into())
 }
 
 fn candidate_json(candidate: &ImprovementCandidate) -> Value {

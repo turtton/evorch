@@ -439,6 +439,261 @@ fn command_and_spec_errors_fail_before_execution() {
     assert!(evorch::benchmark::TaskSpec::load(&spec).is_err());
 }
 
+/// Every entry under `root` (relative path, bytes). Symlinks are listed by their target and
+/// special files by name only.
+fn tree_state(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.strip_prefix(root).unwrap().display().to_string();
+            let kind = std::fs::symlink_metadata(&path).unwrap().file_type();
+            if kind.is_symlink() {
+                let target = std::fs::read_link(&path).unwrap();
+                out.push((name, target.to_string_lossy().into_owned().into_bytes()));
+            } else if kind.is_dir() {
+                out.push((format!("{name}/"), Vec::new()));
+                walk(root, &path, out);
+            } else if kind.is_file() {
+                out.push((name, std::fs::read(&path).unwrap()));
+            } else {
+                out.push((name, b"<special file>".to_vec()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// A regular file standing where the settings database would be, with its access and
+/// modification times set to the same old instant. Reading it moves the access time (the
+/// kernel does so when that is not later than the modification time, the `relatime`
+/// default), writing or replacing it moves the other fields; so a changed stamp proves that
+/// something opened the file, with no timing assumption and no hook in the code under test.
+/// An attempt that fails before reading is invisible, but SQLite reads the header on its
+/// first statement.
+struct AccessSentinel {
+    path: PathBuf,
+    stamp: Stamp,
+}
+
+type Stamp = (std::time::SystemTime, std::time::SystemTime, u64);
+
+impl AccessSentinel {
+    const CONTENT: &[u8] = b"not a database, only a sentinel for open attempts";
+
+    fn new(path: &Path) -> Self {
+        std::fs::write(path, Self::CONTENT).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(old)
+                    .set_modified(old),
+            )
+            .unwrap();
+        let stamp = Self::stamp(path);
+        Self {
+            path: path.to_path_buf(),
+            stamp,
+        }
+    }
+
+    fn stamp(path: &Path) -> Stamp {
+        let meta = std::fs::metadata(path).unwrap();
+        (
+            meta.accessed().unwrap(),
+            meta.modified().unwrap(),
+            meta.len(),
+        )
+    }
+
+    /// Call once: checking the content reads the file.
+    fn untouched(&self) -> bool {
+        let stamp = Self::stamp(&self.path);
+        stamp == self.stamp && std::fs::read(&self.path).is_ok_and(|bytes| bytes == Self::CONTENT)
+    }
+}
+
+/// Fails with its own message when the temporary directory's filesystem does not move the
+/// access time on a read (a `noatime` mount): the open-attempt measurement cannot work
+/// there, and that must not read as a regression of the code under test.
+fn require_atime_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = AccessSentinel::new(&dir.path().join("probe"));
+    let _ = std::fs::read(&probe.path).unwrap();
+    assert!(
+        AccessSentinel::stamp(&probe.path) != probe.stamp,
+        "cannot run the open-attempt measurement: reading a file does not update its access \
+         time on the filesystem of {} (a noatime mount?). This is the environment, not a \
+         failure of the benchmark: run the test where the temporary directory is on a \
+         relatime or strictatime filesystem",
+        dir.path().display()
+    );
+}
+
+// Control for the sentinel: a real attempt to open a database at that path is detected,
+// and a file nobody opened is not reported.
+#[test]
+fn the_sentinel_detects_an_attempt_to_open_a_database() {
+    require_atime_updates();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("evorch-events.db");
+    let sentinel = AccessSentinel::new(&path);
+    let _ = storage::Database::open(&storage::StorageConfig {
+        db_path: path,
+        ..Default::default()
+    });
+    assert!(!sentinel.untouched());
+
+    let quiet = tempfile::tempdir().unwrap();
+    assert!(AccessSentinel::new(&quiet.path().join("evorch-events.db")).untouched());
+}
+
+// The benchmark is an independent tool: it never opens the settings database and never
+// rewrites the credentials it reads. A sentinel file stands where the database is and the
+// lease files are directories (opening either as a file would fail), so an attempt shows
+// as a changed stamp; the existing credentials file must be byte for byte the
+// same afterwards, and nothing may appear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_never_opens_the_settings_database_or_rewrites_credentials() {
+    require_atime_updates();
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let mock = StreamingMockOpenAi::spawn_with_models(
+        vec![
+            call(
+                "delegate",
+                MODEL,
+                "delegate",
+                json!({"target":{"role":"worker","category":"quick"},"prompt":"Inspect the answer"}),
+            ),
+            text("worker", MODEL, "local complete"),
+            text("root", MODEL, "full complete"),
+        ],
+        mock_openai::WriteMode::default(),
+        vec![MODEL.into(), CANDIDATE.into()],
+    );
+    let spec = fixture(root.path(), &mock.base_url());
+    let user = root.path().join("user");
+    for sentinel in [
+        "evorch-events.db.maintenance-lock",
+        "evorch-events.db.reclaim-lock",
+        "evorch-events.db.improvement-lock",
+    ] {
+        std::fs::create_dir(user.join(sentinel)).unwrap();
+        std::fs::write(user.join(sentinel).join("keep"), sentinel).unwrap();
+    }
+    let credentials = user.join("credentials");
+    std::fs::create_dir(&credentials).unwrap();
+    std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        credentials.join("credentials.json"),
+        br#"{"provider/api-key":"sentinel-secret"}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        credentials.join("credentials.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let before = tree_state(&user);
+    let database = AccessSentinel::new(&user.join("evorch-events.db"));
+
+    let baseline = record(
+        &spec,
+        &root.path().join("record"),
+        Some(user.clone()),
+        env(),
+        SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(baseline.full.phase, AgentRunPhase::Done);
+    assert!(
+        database.untouched(),
+        "something opened the settings database during the benchmark"
+    );
+    let mut after = tree_state(&user);
+    after.retain(|(name, _)| name != "evorch-events.db");
+    assert!(
+        after == before,
+        "the benchmark changed or added a file under the user configuration directory"
+    );
+}
+
+// An output directory at the settings database's place, beside it (sidecars, lease files),
+// under it, or through an alias of the configuration directory would keep the next core
+// from creating its database. Each is refused before anything is created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_refuses_an_output_at_the_settings_databases_place() {
+    let root = tempfile::tempdir().unwrap();
+    let spec = fixture(root.path(), "http://127.0.0.1:1/v1");
+    let user = root.path().join("user");
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&user, &alias).unwrap();
+    let mut outputs = vec![
+        user.join("evorch-events.db"),
+        user.join("evorch-events.db-wal"),
+        user.join("evorch-events.db-shm"),
+        user.join("evorch-events.db.maintenance-lock"),
+        user.join("evorch-events.db.reclaim-lock"),
+        user.join("evorch-events.db.improvement-lock"),
+        user.join("evorch-events.db").join("inside"),
+        user.join("evorch-events.db.maintenance-lock")
+            .join("inside"),
+        user.join("evorch-events.db-wal").join("inside"),
+        user.join("evorch-events.db-shm")
+            .join("deep")
+            .join("inside"),
+        user.join("evorch-events.db.reclaim-lock").join("inside"),
+        user.join("evorch-events.db.improvement-lock")
+            .join("inside"),
+        alias
+            .join("evorch-events.db.maintenance-lock")
+            .join("inside"),
+        alias.join("evorch-events.db"),
+        alias.join("evorch-events.db.maintenance-lock"),
+        user.join("not-yet").join("..").join("evorch-events.db"),
+        user.clone(),
+        root.path().to_path_buf(),
+    ];
+    std::fs::write(user.join("evorch-events.db-journal"), b"existing").unwrap();
+    outputs.push(user.join("evorch-events.db-journal"));
+    let before = tree_state(root.path());
+
+    for output in &outputs {
+        let error = record(
+            &spec,
+            output,
+            Some(user.clone()),
+            env(),
+            SandboxChoice::DirectUnchecked,
+            Some(test_support::model_catalog_dir()),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{} was accepted", output.display()));
+        assert!(
+            error.to_string().contains("settings database"),
+            "{}: {error}",
+            output.display()
+        );
+    }
+    let mut after = tree_state(root.path());
+    after.retain(|(name, _)| name != "user/evorch-events.db-journal");
+    let mut expected = before;
+    expected.retain(|(name, _)| name != "user/evorch-events.db-journal");
+    assert!(after == expected, "a refused output created something");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn final_usage_over_budget_poison_is_durable_and_skips_verification() {
     let root = tempfile::tempdir().unwrap();
