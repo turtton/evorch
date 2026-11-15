@@ -360,6 +360,118 @@ fn a_failed_page_keeps_the_displayed_prefix_and_releases_the_read() {
 }
 
 #[test]
+fn a_cursor_conflict_restarts_the_prefix_without_waiting_for_a_run_changed_event() {
+    for during_refresh in [false, true] {
+        let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+        let first = asked(&mut screen);
+        answer(
+            &mut screen,
+            runs_tag(&first),
+            runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+        );
+        screen.get_by_label("さらに読み込む").click();
+        let more = asked(&mut screen);
+        let conflicting = if during_refresh {
+            answer(
+                &mut screen,
+                runs_tag(&more),
+                runs_reply(vec![run("run-b", None, "active", "live", 1)], false),
+            );
+            run_changed(&mut screen);
+            let refresh = asked(&mut screen);
+            answer(
+                &mut screen,
+                runs_tag(&refresh),
+                runs_reply(vec![run("run-new", None, "active", "live", 0)], true),
+            );
+            asked(&mut screen)
+        } else {
+            more
+        };
+        // A checkpoint can invalidate this cursor without changing RunSummary,
+        // so no RunChanged arrives after the Conflict to trigger recovery.
+        answer(
+            &mut screen,
+            runs_tag(&conflicting),
+            FeatureReply::Query(Err(
+                FeatureError::new("snapshot changed").with_code(ErrorCode::Conflict)
+            )),
+        );
+        screen.get_by_label("name-run-a");
+        if during_refresh {
+            screen.get_by_label("子 run (1)");
+        }
+        let restarted = asked(&mut screen);
+        let Query::Execution(ExecutionQuery::ListRunDetails(query)) = query_of(&restarted[0])
+        else {
+            panic!("the prefix must restart without another event");
+        };
+        assert!(
+            query.page.cursor.is_none(),
+            "never resend the invalid cursor"
+        );
+        answer(
+            &mut screen,
+            runs_tag(&restarted),
+            runs_reply(vec![run("run-new", None, "active", "live", 0)], true),
+        );
+        screen.get_by_label("name-run-a");
+        let next = asked(&mut screen);
+        answer(
+            &mut screen,
+            runs_tag(&next),
+            runs_reply(vec![run("run-b", None, "active", "live", 2)], false),
+        );
+        screen.get_by_label("name-run-new");
+        screen.get_by_label("子 run (2)");
+        assert!(screen.query_by_label("name-run-a").is_none());
+        assert!(asked(&mut screen).is_empty());
+    }
+}
+
+#[test]
+fn a_conflict_on_the_first_page_is_reported_without_restarting() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        FeatureReply::Query(Err(
+            FeatureError::new("first page failed").with_code(ErrorCode::Conflict)
+        )),
+    );
+    screen.get_by_label("first page failed");
+    assert!(asked(&mut screen).is_empty());
+}
+
+#[test]
+fn repeated_run_ids_across_pages_keep_one_row_per_id() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+    );
+    screen.get_by_label("さらに読み込む").click();
+    let more = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&more),
+        runs_reply(
+            vec![
+                run("run-a", None, "active", "live", 0),
+                run("run-b", None, "active", "live", 1),
+                run("run-b", None, "active", "live", 1),
+            ],
+            false,
+        ),
+    );
+    assert_eq!(screen.query_all_by_label("name-run-a").count(), 1);
+    assert_eq!(screen.query_all_by_label("name-run-b").count(), 1);
+}
+
+#[test]
 fn a_refresh_follows_cursors_for_a_prefix_larger_than_the_maximum_page_size() {
     use workbench_protocol::limits::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
     let pages = MAX_PAGE_SIZE / DEFAULT_PAGE_SIZE + 1;
@@ -383,21 +495,39 @@ fn a_refresh_follows_cursors_for_a_prefix_larger_than_the_maximum_page_size() {
     let count = (pages * DEFAULT_PAGE_SIZE) as usize;
     assert_eq!(screen.query_all_by_label("Worker").count(), count);
     run_changed(&mut screen);
-    for page in 0..pages {
-        let actions = asked(&mut screen);
-        let Query::Execution(ExecutionQuery::ListRunDetails(query)) = query_of(&actions[0]) else {
-            panic!("a page was expected");
-        };
-        assert_eq!(query.page.limit, DEFAULT_PAGE_SIZE);
-        assert_eq!(query.page.cursor.is_some(), page > 0);
-        answer(
-            &mut screen,
-            runs_tag(&actions),
-            runs_reply(items(page), page + 1 < pages),
-        );
-        assert_eq!(screen.query_all_by_label("Worker").count(), count);
+    let mut queries = 0;
+    let mut events = 1;
+    let refreshes = 3;
+    for cycle in 0..refreshes {
+        for page in 0..pages {
+            let actions = asked(&mut screen);
+            assert_eq!(actions.len(), 1, "one serial run query per page");
+            queries += actions.len();
+            let Query::Execution(ExecutionQuery::ListRunDetails(query)) = query_of(&actions[0])
+            else {
+                panic!("a page was expected");
+            };
+            assert_eq!(query.page.limit, DEFAULT_PAGE_SIZE);
+            assert_eq!(query.page.cursor.is_some(), page > 0);
+            // Bursts while a read is in flight coalesce into one later refresh,
+            // rather than restarting the prefix for each event.
+            if cycle + 1 < refreshes {
+                for _ in 0..10 {
+                    run_changed(&mut screen);
+                    events += 1;
+                }
+            }
+            answer(
+                &mut screen,
+                runs_tag(&actions),
+                runs_reply(items(page), page + 1 < pages),
+            );
+            assert_eq!(screen.query_all_by_label("Worker").count(), count);
+        }
     }
+    assert_eq!(queries, (pages * refreshes) as usize);
     assert!(asked(&mut screen).is_empty());
+    eprintln!("{count} rows / {pages} pages / {events} events: {queries} refresh queries");
 }
 
 #[test]

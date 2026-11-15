@@ -6,12 +6,13 @@
 //! that arrives late never moves the screen back to an older state. A run that
 //! left the runtime stays listed, with what became of it. Stop goes out for one
 //! run of the shown thread only; the core refuses a run it no longer holds.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::layout::{bounded_list, paged_list};
 use super::{Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply};
 use workbench_protocol::{
     commands::{Command, SetGoalChecksPaused, SetGoalReview, StopRun, ThreadTarget},
+    errors::ErrorCode,
     events::UiEvent,
     handshake::Capability,
     ids::{PageCursor, RunId, ThreadId},
@@ -39,6 +40,7 @@ enum Pending {
 struct RunsRead {
     tag: Option<u64>,
     items: Vec<RunDetail>,
+    ids: HashSet<RunId>,
     pages: usize,
     target_pages: usize,
     next_cursor: Option<PageCursor>,
@@ -119,6 +121,7 @@ impl ExecutionFeature {
             } else if more {
                 self.runs_read = Some(RunsRead {
                     items: self.runs.clone(),
+                    ids: self.runs.iter().map(|run| run.summary.id.clone()).collect(),
                     pages: self.loaded_pages,
                     target_pages: self.loaded_pages + 1,
                     next_cursor: self.next_cursor.clone(),
@@ -454,7 +457,7 @@ impl Feature for ExecutionFeature {
                 let read = self.runs_read.as_mut().unwrap();
                 read.tag = None;
                 for run in page.items {
-                    if !read.items.iter().any(|r| r.summary.id == run.summary.id) {
+                    if read.ids.insert(run.summary.id.clone()) {
                         read.items.push(run);
                     }
                 }
@@ -478,8 +481,18 @@ impl Feature for ExecutionFeature {
                 }
             }
             (Pending::Runs { .. }, FeatureReply::Query(Err(error))) => {
-                self.runs_read = None;
-                self.status = error.message;
+                let read = self.runs_read.take().unwrap();
+                if error.code == Some(ErrorCode::Conflict) && read.next_cursor.is_some() {
+                    // Checkpoints can invalidate a cursor without a RunChanged.
+                    // Preserve the display and requested depth, but read a fresh
+                    // snapshot from the start instead of resending that cursor.
+                    self.runs_read = Some(RunsRead {
+                        target_pages: read.target_pages,
+                        ..Default::default()
+                    });
+                } else {
+                    self.status = error.message;
+                }
             }
             (Pending::Execution { .. }, FeatureReply::Query(Err(error))) => {
                 self.status = error.message;
