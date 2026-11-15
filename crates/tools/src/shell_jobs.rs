@@ -11,6 +11,19 @@ pub enum ShellJobState {
     Terminal,
 }
 
+impl ShellJobIdentity {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// A bounded, immutable terminal outcome. Reading it does not acknowledge it.
+#[derive(Clone, Debug)]
+pub struct ShellJobResult {
+    pub snapshot: ShellJobSnapshot,
+    pub result: crate::ToolResult,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShellJobSnapshot {
     pub identity: ShellJobIdentity,
@@ -19,4 +32,6 @@ pub struct ShellJobSnapshot {
     pub state: ShellJobState,
     pub exit_code: Option<i32>,
     pub observed: bool,
+    /// Independent of observation: an error outcome is not proof of reap.
+    pub teardown_confirmed: bool,
 }

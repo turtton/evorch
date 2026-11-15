@@ -162,6 +162,16 @@ impl Shell {
         self
     }
 
+    /// Attach the core-owned ledger before admitting any jobs (07b-4b).
+    pub fn with_spawn_ledger(self, ledger: sandbox::ledger::SpawnLedger) -> Self {
+        *self
+            .jobs
+            .ledger
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ledger);
+        self
+    }
+
     /// Wait for an owned job to finish without cancelling it, observing its
     /// result, or consuming its completion notification. The handle must match
     /// both the run and thread in `ctx`, just as shell control calls do.
@@ -301,6 +311,21 @@ impl Tool for Shell {
         self.jobs.reserve_handles(next)
     }
 
+    fn interrupt_shell_job(&self, identity: &crate::ShellJobIdentity) -> Result<(), ToolError> {
+        self.jobs.interrupt(identity)
+    }
+    fn shell_job_result(
+        &self,
+        identity: &crate::ShellJobIdentity,
+    ) -> Result<crate::ShellJobResult, ToolError> {
+        self.jobs.terminal_result(identity)
+    }
+    fn acknowledge_shell_job_result(
+        &self,
+        identity: &crate::ShellJobIdentity,
+    ) -> Result<(), ToolError> {
+        self.jobs.acknowledge_result(identity)
+    }
     fn shell_job_snapshots(&self, run_id: &str) -> Vec<crate::ShellJobSnapshot> {
         self.jobs.snapshots(run_id)
     }

@@ -3,6 +3,58 @@ use super::*;
 use crate::{ShellJobIdentity, ShellJobSnapshot, ShellJobState};
 
 impl JobRegistry {
+    fn exact_job(&self, identity: &ShellJobIdentity) -> Result<Arc<Job>, ToolError> {
+        self.jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&identity.id)
+            .filter(|job| job.owner == identity.owner)
+            .cloned()
+            .ok_or_else(|| {
+                invalid("shell job identity is no longer available; commands are never replayed")
+            })
+    }
+    pub(in crate::tools::shell) fn interrupt(
+        &self,
+        identity: &ShellJobIdentity,
+    ) -> Result<(), ToolError> {
+        self.exact_job(identity)?.cancel_now();
+        Ok(())
+    }
+    pub(in crate::tools::shell) fn terminal_result(
+        &self,
+        identity: &ShellJobIdentity,
+    ) -> Result<crate::ShellJobResult, ToolError> {
+        let job = self.exact_job(identity)?;
+        let mut state = job
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.completion.is_none() || !state.teardown_confirmed {
+            return Err(invalid("shell process teardown is not confirmed"));
+        }
+        let snapshot = job.observation_locked(&state);
+        let (result, _) = job.snapshot_locked(&mut state, 0, false, false);
+        Ok(crate::ShellJobResult { snapshot, result })
+    }
+    pub(in crate::tools::shell) fn acknowledge_result(
+        &self,
+        identity: &ShellJobIdentity,
+    ) -> Result<(), ToolError> {
+        let job = self.exact_job(identity)?;
+        let mut state = job
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.completion.is_none() || !state.teardown_confirmed {
+            return Err(invalid("cannot acknowledge an unreaped shell job"));
+        }
+        state.observed = true;
+        state.completion_notified = true;
+        job.observation_changed();
+        Ok(())
+    }
+
     pub(in crate::tools::shell) fn snapshots(&self, owner: &str) -> Vec<ShellJobSnapshot> {
         let jobs = self
             .jobs
@@ -37,6 +89,7 @@ impl JobRegistry {
         loop {
             let snapshot = job.observation();
             if snapshot.state == ShellJobState::Terminal {
+                self.terminal_result(identity)?;
                 return Ok(snapshot);
             }
             changes
@@ -53,6 +106,10 @@ impl Job {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.observation_locked(&state)
+    }
+
+    fn observation_locked(&self, state: &State) -> ShellJobSnapshot {
         ShellJobSnapshot {
             identity: ShellJobIdentity {
                 id: self.id.clone(),
@@ -67,6 +124,7 @@ impl Job {
             },
             exit_code: state.completion.as_ref().and_then(|c| c.exit_code),
             observed: state.observed,
+            teardown_confirmed: state.teardown_confirmed,
         }
     }
 

@@ -3,7 +3,8 @@ use super::super::{io_failed, spawn_failed};
 use super::{Completion, Input, Job};
 use crate::ToolError;
 use sandbox::WrappedCommand;
-use sandbox::process::{GroupChild, ProcessGroup, ProcessGroupGuard};
+use sandbox::ledger::{ChildKind, SpawnLedger};
+use sandbox::process::{ProcessGroup, ProcessGroupGuard};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,8 +35,12 @@ pub(super) async fn run_pipe(
         } else {
             std::process::Stdio::piped()
         });
-    let mut child =
-        GroupChild::spawn(&mut command).map_err(|error| spawn_failed(&wrapped.program, error))?;
+    let mut child = {
+        let admission = SpawnLedger::admit_optional(job.ledger.as_ref()).map_err(io_failed)?;
+        admission
+            .spawn_group(ChildKind::ShellJob, Some("shell-pipe"), &mut command)
+            .map_err(|error| spawn_failed(&wrapped.program, error))?
+    };
     job.register_process(Some(child.group().clone()));
     let result = async {
         let mut stdout = child
@@ -52,14 +57,15 @@ pub(super) async fn run_pipe(
         let mut out_open = true;
         let mut err_open = true;
         let mut exit = None;
+        let mut stopped = None;
         loop {
             if exit.is_some() && !out_open && !err_open {
                 break;
             }
             tokio::select! {
                 biased;
-                _ = async { let _ = cancel.wait_for(|value| *value).await; } => { let _ = child.kill_and_wait().await; return Ok(Completion { status: "cancelled", exit_code: None, error: None }); }
-                _ = &mut timer => { let _ = child.kill_and_wait().await; return Ok(Completion { status: "timed_out", exit_code: None, error: Some(format!("timed out after {} ms; process group stopped", timeout.expect("timer only resolves with a timeout").as_millis())) }); }
+                _ = async { let _ = cancel.wait_for(|value| *value).await; }, if stopped.is_none() => { child.kill_and_wait().await.map_err(io_failed)?; exit = Some(-1); stdin = None; stopped = Some(Completion { status: "cancelled", exit_code: None, error: None }); }
+                _ = &mut timer, if stopped.is_none() => { child.kill_and_wait().await.map_err(io_failed)?; exit = Some(-1); stdin = None; stopped = Some(Completion { status: "timed_out", exit_code: None, error: Some(format!("timed out after {} ms; process group stopped", timeout.expect("timer only resolves with a timeout").as_millis())) }); }
                 // A shell exiting must not leave detached descendants holding the
                 // output pipes or mutating the workspace after completion: waiting
                 // kills them before it reaps the shell.
@@ -79,6 +85,7 @@ pub(super) async fn run_pipe(
                 read = stderr.read(&mut err), if err_open => { let count = read.map_err(io_failed)?; err_open = count > 0; job.push(1, &err[..count]); }
             }
         }
+        if let Some(completion) = stopped { return Ok(completion); }
         let code = exit.unwrap_or(-1);
         Ok(Completion {
             status: if code == 0 { "completed" } else { "failed" },
@@ -86,7 +93,7 @@ pub(super) async fn run_pipe(
             error: None,
         })
     }.await;
-    let _ = child.kill_and_wait().await;
+    child.kill_and_wait().await.map_err(io_failed)?;
     result
 }
 
@@ -104,14 +111,6 @@ pub(super) async fn run_pty(
             error: None,
         });
     }
-    let pair = portable_pty::native_pty_system()
-        .openpty(portable_pty::PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(io_failed)?;
     let mut command = portable_pty::CommandBuilder::new(&wrapped.program);
     command.args(&wrapped.args);
     if !wrapped.inherit_env {
@@ -128,14 +127,29 @@ pub(super) async fn run_pty(
             .unwrap_or_else(std::env::current_dir)
             .map_err(io_failed)?,
     );
-    let mut reader = pair.master.try_clone_reader().map_err(io_failed)?;
-    let writer = Arc::new(Mutex::new(Some(
-        pair.master.take_writer().map_err(io_failed)?,
-    )));
-    let mut child = pair
-        .slave
-        .spawn_command(command)
-        .map_err(|error| spawn_failed(&wrapped.program, error))?;
+    // PTY descriptors and child registration share the final spawn fence.
+    let (pair, mut reader, writer, mut child, group, entry) = {
+        let admission = SpawnLedger::admit_optional(job.ledger.as_ref()).map_err(io_failed)?;
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(io_failed)?;
+        let reader = pair.master.try_clone_reader().map_err(io_failed)?;
+        let writer = Arc::new(Mutex::new(Some(
+            pair.master.take_writer().map_err(io_failed)?,
+        )));
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(|error| spawn_failed(&wrapped.program, error))?;
+        let group = ProcessGroup::new(child.process_id());
+        let entry = admission.register_group(ChildKind::ShellJob, Some("shell-pty"), &group);
+        (pair, reader, writer, child, group, entry)
+    };
     drop(pair.slave);
     if job.synchronous {
         *writer
@@ -143,7 +157,6 @@ pub(super) async fn run_pty(
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
-    let group = ProcessGroup::new(child.process_id());
     // Cancelling the job future stops the PTY session's group; once the waiter
     // has reaped the shell, nothing is signalled.
     let _stop_on_drop = ProcessGroupGuard::new(group.clone());
@@ -162,24 +175,26 @@ pub(super) async fn run_pty(
         Ok(())
     });
     let reaper = group.clone();
-    let mut waiting = tokio::task::spawn_blocking(move || {
+    let mut waiting = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
         // The exited shell stays unreaped until what is left of its group is
         // killed, so the group id cannot have been reused by then.
-        let Some(leader) = reaper.leader() else {
-            return child.wait();
-        };
-        if sandbox::process::wait_for_exit(leader).is_err() {
-            reaper.release();
-            return child.wait();
-        }
-        reaper
+        let leader = reaper
+            .leader()
+            .ok_or_else(|| std::io::Error::other("missing shell group leader"))?;
+        sandbox::process::wait_for_exit(leader)?;
+        let status = reaper
             .kill_and_reap(|| child.wait().map(Some))?
-            .ok_or_else(|| std::io::Error::other("the shell was not reaped"))
+            .ok_or_else(|| std::io::Error::other("the shell was not reaped"))?;
+        if let Some(entry) = entry {
+            entry.reaped();
+        }
+        Ok(status)
     });
     let mut writing: Option<tokio::task::JoinHandle<()>> = None;
     let timer = deadline(timeout);
     tokio::pin!(timer);
     let mut reaped = false;
+    let mut wait_error = None;
     let completion = loop {
         tokio::select! {
             biased;
@@ -189,7 +204,7 @@ pub(super) async fn run_pty(
                 reaped = true;
                 break match status.map_err(io_failed).and_then(|status| status.map_err(io_failed)) {
                     Ok(status) => { let code = status.exit_code() as i32; Completion { status: if code == 0 { "completed" } else { "failed" }, exit_code: Some(code), error: None } },
-                    Err(error) => Completion { status: "failed", exit_code: None, error: Some(error.to_string()) },
+                    Err(error) => { wait_error = Some(error); Completion { status: "failed", exit_code: None, error: None } },
                 };
             }
             _ = async { if let Some(task) = writing.as_mut() { let _ = task.await; } else { std::future::pending::<()>().await; } } => { writing = None; }
@@ -217,13 +232,16 @@ pub(super) async fn run_pty(
     // The group is dead before the job reports completion, even when a
     // portable-pty reader/waiter takes a moment to observe EOF.
     if !reaped {
-        let _ = waiting.await;
+        waiting.await.map_err(io_failed)?.map_err(io_failed)?;
     }
     let read_result = reader_task.await;
     if let Some(writing) = writing {
         let _ = writing.await;
     }
     read_result.map_err(io_failed)??;
+    if let Some(error) = wait_error {
+        return Err(error);
+    }
     Ok(completion)
 }
 
