@@ -23,7 +23,9 @@ pub use host_restart::{
 };
 pub(crate) mod runtime;
 mod safe_point;
+mod shell;
 pub use restart::{RestartAttempt, RestartAttemptState, ResumeReceipt};
+pub use shell::RestartShellJob;
 #[cfg(test)]
 mod accepted_resume_tests;
 #[cfg(test)]
@@ -58,6 +60,7 @@ struct Inner {
     // Storage health is sticky, but only an explicit request gates normal turns.
     requested: bool,
     planned: bool,
+    shell_scope: Option<(u64, String, String)>,
     generation: u64,
     resumed_through: u64,
     cancellation_finished_through: u64,

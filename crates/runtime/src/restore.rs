@@ -336,7 +336,8 @@ pub(crate) fn persist_tools_waiting(
     if state
         .shared
         .executor
-        .has_unobserved_shell_jobs(&state.task.run_id.to_string())
+        .has_running_shell_jobs(&state.task.run_id.to_string())
+        || state.has_unstaged_shell_results()
         || state.run_js_unconfirmed_detail().is_some()
     {
         return Err(SnapshotError::UnrecordedShellEffects);

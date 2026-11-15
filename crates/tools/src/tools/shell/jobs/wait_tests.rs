@@ -16,6 +16,7 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
         call_id: None,
         thread: None,
         synchronous: false,
+        ledger: None,
         stream_output: false,
         timeout_ms: None,
         state: Mutex::new(State {
@@ -23,6 +24,7 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
             final_result: None,
             exposed: true,
             completion: None,
+            teardown_confirmed: false,
             observed: false,
             completion_notified: false,
             artifact: None,

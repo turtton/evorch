@@ -45,7 +45,9 @@ impl LoopState {
                         .acknowledged(self.task.run_id, &self.task.publication.incarnation())
                 {
                     let incarnation = self.task.publication.incarnation();
-                    if let Some(kind) = self.restart_safety_blocker() {
+                    if let Err(error) = self.stage_restart_shell_results() {
+                        runtime.shared.quiesce.fail(error);
+                    } else if let Some(kind) = self.restart_safety_blocker() {
                         runtime
                             .shared
                             .quiesce
@@ -56,11 +58,14 @@ impl LoopState {
                             .quiesce
                             .clear_blocker(self.task.run_id, &incarnation);
                         match self.capture_safe_point(boundary) {
-                            Ok(()) => runtime.shared.quiesce.acknowledge(
-                                self.task.run_id,
-                                &self.task.publication.incarnation(),
-                                generation,
-                            ),
+                            Ok(()) => match self.acknowledge_restart_shell_results() {
+                                Ok(()) => runtime.shared.quiesce.acknowledge(
+                                    self.task.run_id,
+                                    &self.task.publication.incarnation(),
+                                    generation,
+                                ),
+                                Err(error) => runtime.shared.quiesce.fail(error),
+                            },
                             Err(error) => runtime.shared.quiesce.fail(error),
                         }
                     }
@@ -80,11 +85,78 @@ impl LoopState {
         }
     }
 
+    fn stage_restart_shell_results(&mut self) -> Result<(), String> {
+        for job in self
+            .shared
+            .executor
+            .shell_job_snapshots(&self.task.run_id.to_string())
+        {
+            if job.state == tools::ShellJobState::Terminal && !job.teardown_confirmed {
+                return Err("shell process teardown is unconfirmed".into());
+            }
+            if job.state != tools::ShellJobState::Terminal
+                || job.observed
+                || self
+                    .shell_checkpoint_results
+                    .contains_key(job.identity.id())
+            {
+                continue;
+            }
+            let outcome = self
+                .shared
+                .executor
+                .shell_job_result(&job.identity)
+                .map_err(|error| error.to_string())?;
+            let call = job
+                .call_id
+                .as_deref()
+                .ok_or("shell result has no original call identity")?;
+            // This call already returned its continuing-job handle. A second
+            // ToolResult for it would be invalid, and replacing it would break
+            // the sent cache prefix. Append an identity-bound completion instead.
+            self.context.push_user(&format!(
+                "Shell job terminal result (original call: {call}, job: {}):\n{}",
+                job.identity.id(),
+                outcome.result.content
+            ));
+            self.shell_checkpoint_results
+                .insert(job.identity.id().into(), job.identity);
+            self.publish_message_count();
+        }
+        Ok(())
+    }
+
+    fn acknowledge_restart_shell_results(&mut self) -> Result<(), String> {
+        for identity in self.shell_checkpoint_results.values() {
+            self.shared
+                .executor
+                .acknowledge_shell_job_result(identity)
+                .map_err(|error| error.to_string())?;
+        }
+        self.shell_checkpoint_results.clear();
+        Ok(())
+    }
+
+    pub(crate) fn has_unstaged_shell_results(&self) -> bool {
+        let run = self.task.run_id.to_string();
+        let jobs = self.shared.executor.shell_job_snapshots(&run);
+        if jobs.is_empty() {
+            return self.shared.executor.has_unobserved_shell_jobs(&run);
+        }
+        jobs.iter().any(|job| {
+            !job.teardown_confirmed
+                || (!job.observed
+                    && !self
+                        .shell_checkpoint_results
+                        .contains_key(job.identity.id()))
+        })
+    }
+
     fn restart_safety_blocker(&self) -> Option<RestartBlockerKind> {
         let run = self.task.run_id.to_string();
         if self.shared.executor.has_running_shell_jobs(&run) {
             Some(RestartBlockerKind::ShellRunning)
-        } else if self.shared.executor.has_unobserved_shell_jobs(&run) {
+        } else if self.has_unstaged_shell_results() {
             Some(RestartBlockerKind::ShellResultUnobserved)
         } else if self.run_js_unconfirmed_detail().is_some() {
             Some(RestartBlockerKind::UnconfirmedRunJs)
@@ -104,7 +176,8 @@ impl LoopState {
         if self
             .shared
             .executor
-            .has_unobserved_shell_jobs(&self.task.run_id.to_string())
+            .has_running_shell_jobs(&self.task.run_id.to_string())
+            || self.has_unstaged_shell_results()
             || self.run_js_unconfirmed_detail().is_some()
         {
             return Err("unconfirmed external tool/job effects; cannot quiesce".into());
