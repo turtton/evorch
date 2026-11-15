@@ -84,11 +84,17 @@ impl LearningExecution {
                 state.uncertain = Some((key.clone(), change));
                 Err("learning write outcome unconfirmed".into())
             }
-            Err(_) => {
-                if matches!(
-                    change,
-                    Change::Publish | Change::Fail(_) | Change::Abandon(_)
-                ) {
+            Err(error) => {
+                // A publish the content itself makes impossible (SecretGuard, an identity
+                // clash) is final: the caller ends the job through the failure terminal.
+                let content_rejected =
+                    matches!(change, Change::Publish) && error.is_content_rejection();
+                if !content_rejected
+                    && matches!(
+                        change,
+                        Change::Publish | Change::Fail(_) | Change::Abandon(_)
+                    )
+                {
                     // A rejected terminal write leaves Started + evidence behind. Keep
                     // owning it so a later reconcile re-runs the same transaction.
                     state.unsafe_result = Some("learning terminal write rejected".into());
@@ -192,7 +198,7 @@ impl LearningExecution {
                 state.settle();
             }
         }
-        if let Some((key, change)) = state.retry_terminal.clone() {
+        while let Some((key, change)) = state.retry_terminal.clone() {
             match queue.change(&key, change.clone()) {
                 Ok(Some(next)) => {
                     // Any fence/readback that was pending is superseded by the commit.
@@ -206,6 +212,15 @@ impl LearningExecution {
                     state.retry_terminal = None;
                     state.uncertain = Some((key, change));
                 }
+                Err(error) if matches!(change, Change::Publish) && error.is_content_rejection() => {
+                    // The held publish turned out to be impossible for its content: end the
+                    // job through the failure terminal instead, still owned until it commits.
+                    state.retry_terminal = Some((
+                        key,
+                        Change::Fail(storage::learning_jobs::LearningEndReason::PipelineFailed),
+                    ));
+                    continue;
+                }
                 _ => match queue.job(&key.task_id) {
                     // The job moved on (fenced or ended by someone with authority):
                     // adopt that state; never re-run a terminal on a stale key.
@@ -217,6 +232,7 @@ impl LearningExecution {
                     _ => return,
                 },
             }
+            break;
         }
         let Some((key, change)) = state.uncertain.clone() else {
             return;

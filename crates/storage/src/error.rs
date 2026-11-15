@@ -373,6 +373,15 @@ pub enum FailureClass {
 }
 
 impl StorageError {
+    /// The content of a learning write, not the database, made it impossible. Retrying the
+    /// same write can never succeed; only the failure terminal can end the job.
+    pub fn is_content_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::SecretDetected { .. } | Self::Serialization(_) | Self::LessonFavorite { .. }
+        )
+    }
+
     pub fn class(&self) -> FailureClass {
         use rusqlite::ErrorCode;
         match self {

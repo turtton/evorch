@@ -1123,45 +1123,77 @@ async fn learning_rejected_terminal_write_keeps_cleanup_owned_until_it_commits()
     assert!(runtime.list_agents().is_empty());
 }
 
+/// Runs `hook` with the instance of the first judged origin when the second origin is judged,
+/// which is after the first job was adopted and before the rescan resumes it.
+struct SyncProbe<F: Fn(&str) + Send + Sync> {
+    judged: std::sync::Mutex<Vec<String>>,
+    hook: F,
+}
+impl<F: Fn(&str) + Send + Sync> OriginProbe for SyncProbe<F> {
+    fn liveness(&self, origin: &LearningOrigin) -> OriginLiveness {
+        let mut judged = self.judged.lock().unwrap();
+        if judged.len() == 1 {
+            (self.hook)(&judged[0]);
+        }
+        judged.push(origin.instance.clone());
+        OriginLiveness::Dead
+    }
+}
+
 #[tokio::test]
-async fn learning_rescan_never_ends_a_job_the_scheduler_already_owns() {
+async fn learning_rescan_never_ends_a_job_the_scheduler_started_after_its_adoption() {
     let f = Fixture::new();
     let worker = f.bare_runtime();
     let source = worker.delegate_background(Role::Worker, "work".into(), RunConfig::default());
     assert_eq!(worker.wait(source).await.unwrap(), AgentRunPhase::Done);
-    let mut request = admit_request("raced", &source.to_string());
-    request.evidence_json = worker
+    let evidence = worker
         .freeze_run_learning(source)
         .unwrap()
         .to_json()
         .unwrap();
-    f.queue(origin(LearningOriginKind::Core, "old", Some("cfg")))
+    for name in ["a", "b"] {
+        let mut request = admit_request(&format!("job-{name}"), &source.to_string());
+        request.roots = vec![format!("root-{name}")];
+        request.evidence_json = evidence.clone();
+        f.queue(origin(
+            LearningOriginKind::Core,
+            &format!("old-{name}"),
+            Some("cfg"),
+        ))
         .admit(request)
         .unwrap();
-
+    }
     let owner = origin(LearningOriginKind::Core, "new", Some("cfg"));
     let successor = f.runtime(owner.clone());
-    // The scheduler registered its execution for this task before the rescan resumes it.
-    let scheduled = successor
-        .shared
-        .learning_executions
-        .register("raced", successor.shared.learning_jobs_changed.clone())
-        .unwrap();
-    let probe = FakeProbe::new(&[("old", OriginLiveness::Dead)]);
-    assert!(
-        successor
-            .rescan_pending_learning(&probe)
-            .unwrap()
-            .is_empty()
-    );
-
     let queue = f.queue(owner);
-    assert_eq!(f.state("raced"), LearningJobState::Pending);
-    assert!(f.has_evidence("raced"));
-    let permit = successor.learning_gate().try_enter().unwrap();
-    assert!(scheduled.start(&queue, &permit).unwrap());
-    assert_eq!(f.state("raced"), LearningJobState::Started);
-    assert!(f.has_evidence("raced"));
+    let started = std::sync::Mutex::new(Vec::new());
+    let probe = SyncProbe {
+        judged: std::sync::Mutex::default(),
+        hook: |first: &str| {
+            // The scheduler wins the race for the job adopted first: it registers and
+            // starts it while the rescan is still judging the next origin.
+            let task = format!("job-{}", first.trim_start_matches("old-"));
+            let entry = successor
+                .shared
+                .learning_executions
+                .register(&task, successor.shared.learning_jobs_changed.clone())
+                .unwrap();
+            let permit = successor.learning_gate().try_enter().unwrap();
+            assert!(entry.start(&queue, &permit).unwrap());
+            started.lock().unwrap().push((task, entry));
+        },
+    };
+    let resumed = successor.rescan_pending_learning(&probe).unwrap();
+
+    let started = started.into_inner().unwrap();
+    assert_eq!(started.len(), 1);
+    let (raced, _entry) = &started[0];
+    // The raced job keeps running under the scheduler's attempt, evidence included.
+    assert_eq!(f.state(raced), LearningJobState::Started);
+    assert!(f.has_evidence(raced));
+    // Only the other job was resumed by the rescan itself.
+    assert_eq!(resumed.len(), 1);
+    assert_ne!(&resumed[0].task_id, raced);
 }
 
 #[tokio::test]

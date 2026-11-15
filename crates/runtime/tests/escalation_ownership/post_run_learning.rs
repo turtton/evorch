@@ -24,6 +24,8 @@ enum ReviewMode {
     WaitForRoot,
     /// Two private candidates: one rejected and one approved.
     MixedReviewBatch,
+    /// An approving review whose rationale the SecretGuard refuses at publication.
+    SecretRationale,
 }
 
 const FAVORITE_PREFIX: &str = "Keep the bounded completion check";
@@ -283,10 +285,16 @@ impl AgentModel for Model {
                         ReviewMode::Approve
                             | ReviewMode::PartialReview
                             | ReviewMode::WaitForExtraction
+                            | ReviewMode::SecretRationale
                     ) {
                         "approve"
                     } else {
                         "reject"
+                    };
+                    let rationale = if matches!(self.mode, ReviewMode::SecretRationale) {
+                        format!("sk-{}", "a".repeat(32))
+                    } else {
+                        "Checked the cited source record".to_owned()
                     };
                     return Ok(tool_response(
                         "review-submit",
@@ -294,7 +302,7 @@ impl AgentModel for Model {
                         json!({
                             "candidate_id": candidate["id"],
                             "verdict": verdict,
-                            "rationale": "Checked the cited source record",
+                            "rationale": rationale,
                             "evidence_refs": candidate["evidence_refs"]
                         }),
                     ));
@@ -909,4 +917,38 @@ async fn cancelled_suspend_retries_same_evidence_with_fresh_runs_and_no_old_conv
         serde_json::to_value(&requests[0].2).unwrap(),
         serde_json::to_value(&requests[1].2).unwrap()
     );
+}
+
+// The SecretGuard refuses the batch at publication. Retrying that publish can never
+// succeed, so the job must end through the failure terminal and release its cleanup.
+#[tokio::test]
+async fn secret_guard_rejected_publication_ends_failed_and_releases_cleanup() {
+    use storage::learning_jobs::LearningJobState;
+    let fixture = Fixture::new(ReviewMode::SecretRationale);
+    let source = fixture.start().await;
+    assert!(fixture.learning(source).await.is_err());
+    assert_eq!(job_states(&fixture), [LearningJobState::Failed]);
+    let database = Database::open(&fixture.config).unwrap();
+    let job = &database.learning_jobs(&[LearningJobState::Failed]).unwrap()[0];
+    assert_eq!(
+        job.reason.as_deref(),
+        Some(storage::learning_jobs::LearningEndReason::PipelineFailed.as_str())
+    );
+    assert!(
+        database
+            .learning_job_evidence(&job.task_id)
+            .unwrap()
+            .is_none()
+    );
+    // The secret never reaches a promoted lesson.
+    assert!(
+        fixture
+            .entries()
+            .iter()
+            .all(|entry| entry.status != MemoryStatus::Promoted)
+    );
+    // Nothing remains owned: a suspension has no cleanup to wait for.
+    let pause = fixture.runtime.pause_learning();
+    let suspension = fixture.runtime.suspend_learning(&pause).unwrap();
+    suspension.wait().await.unwrap();
 }
