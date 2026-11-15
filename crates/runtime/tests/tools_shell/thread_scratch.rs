@@ -238,5 +238,5 @@ async fn rebinding_a_thread_root_keeps_its_scratch_directory() {
         .collect::<Vec<_>>();
     assert_eq!(dirs[0], scratch.thread_dir("thread"));
     assert_eq!(dirs[1], dirs[0]);
-    assert_eq!(dirs[2], scratch.parent().join(format!("r-{unbound}")));
+    assert_eq!(dirs[2], scratch.parent().join(format!("r.{unbound}")));
 }

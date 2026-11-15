@@ -144,7 +144,7 @@ mod tests {
             ro_binds: vec![PathBuf::from("/opt/reference")],
             thread_ro_identities: Vec::new(),
             rw_binds: vec![PathBuf::from("/opt/shared")],
-            scratch: Some(PathBuf::from("/var/tmp/evorch-scratch-test/t-1")),
+            scratch: Some(PathBuf::from("/var/tmp/evo-test/thread-1")),
             allowed: Some(sandbox::AllowedRegions {
                 paths: sandbox::LivePaths::new(vec![PathBuf::from("/srv/allowed")]),
                 access: sandbox::PathAccess::ReadOnly,
@@ -159,7 +159,7 @@ mod tests {
             (Path::new("/usr"), sandbox::PathAccess::ReadOnly),
             (Path::new("/opt/shared"), sandbox::PathAccess::ReadWrite),
             (
-                Path::new("/var/tmp/evorch-scratch-test/t-1"),
+                Path::new("/var/tmp/evo-test/thread-1"),
                 sandbox::PathAccess::ReadWrite,
             ),
             (Path::new("/srv/allowed"), sandbox::PathAccess::ReadOnly),
