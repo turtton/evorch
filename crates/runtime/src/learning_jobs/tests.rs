@@ -180,18 +180,44 @@ async fn a_job_goes_pending_started_finished_and_its_evidence_goes_with_it() {
     );
 
     let permit = gate.try_enter().unwrap();
-    assert!(queue.start("t1", &permit).unwrap());
+    assert!(queue.start_attempt("t1", &permit).unwrap().is_some());
     assert!(
-        !queue.start("t1", &permit).unwrap(),
+        !queue.start_attempt("t1", &permit).unwrap().is_some(),
         "start is a single CAS"
     );
     assert_eq!(fixture.state("t1"), LearningJobState::Started);
 
-    assert!(queue.finish("t1", true).unwrap());
+    let key = queue.job("t1").unwrap().unwrap().key();
+    let key = queue
+        .change(
+            &key,
+            LearningAttemptChange::BindRun {
+                run: "extract".into(),
+                review: false,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let key = queue
+        .change(&key, LearningAttemptChange::ExtractionReady(vec![]))
+        .unwrap()
+        .unwrap();
+    assert!(
+        queue
+            .change(&key, LearningAttemptChange::Publish)
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(fixture.state("t1"), LearningJobState::Finished);
     assert!(!fixture.has_evidence("t1"));
     assert!(
-        !queue.finish("t1", false).unwrap(),
+        queue
+            .change(
+                &key,
+                LearningAttemptChange::Fail(LearningEndReason::PipelineFailed)
+            )
+            .unwrap()
+            .is_none(),
         "an ended job stays ended"
     );
 }
@@ -205,7 +231,7 @@ async fn only_the_admitting_incarnation_can_start_or_end_its_job() {
     owner.admit(admit_request("t1", "run-1")).unwrap();
 
     let permit = gate.try_enter().unwrap();
-    assert!(!other.start("t1", &permit).unwrap());
+    assert!(!other.start_attempt("t1", &permit).unwrap().is_some());
     assert!(!other.abandon("t1", "not mine").unwrap());
     assert_eq!(fixture.state("t1"), LearningJobState::Pending);
 }
@@ -256,7 +282,7 @@ async fn rescan_takes_only_pending_jobs_of_a_dead_core_of_the_same_config() {
             .admit(admit_request(task, &format!("run-{index}")))
             .unwrap();
         if *task == "dead-started" {
-            assert!(queue.start(task, &permit).unwrap());
+            assert!(queue.start_attempt(task, &permit).unwrap().is_some());
         }
     }
     let probe = FakeProbe::new(&[
@@ -322,7 +348,7 @@ async fn the_janitor_ends_dead_work_without_running_anything_and_spares_the_rest
             .admit(admit_request(task, &format!("run-{index}")))
             .unwrap();
         if *started {
-            assert!(queue.start(task, &permit).unwrap());
+            assert!(queue.start_attempt(task, &permit).unwrap().is_some());
         }
     }
     let probe = FakeProbe::new(&[
@@ -485,7 +511,7 @@ fn child_that_dies_owning_jobs() {
         );
         queue.admit(admit_request(task, task)).unwrap();
         if started {
-            assert!(queue.start(task, &permit).unwrap());
+            assert!(queue.start_attempt(task, &permit).unwrap().is_some());
         }
     }
     std::process::exit(0);
@@ -554,7 +580,7 @@ async fn a_live_process_never_sweeps_or_adopts_its_own_other_origins_jobs() {
     let permit = gate.try_enter().unwrap();
     gui.admit(admit_request("gui-pending", "run-1")).unwrap();
     gui.admit(admit_request("gui-started", "run-2")).unwrap();
-    assert!(gui.start("gui-started", &permit).unwrap());
+    assert!(gui.start_attempt("gui-started", &permit).unwrap().is_some());
     sibling
         .admit(admit_request("core-pending", "run-3"))
         .unwrap();
@@ -596,7 +622,12 @@ fn exec_predecessor() {
         );
         queue.admit(admit_request("exec-pending", "run-1")).unwrap();
         queue.admit(admit_request("exec-started", "run-2")).unwrap();
-        assert!(queue.start("exec-started", &permit).unwrap());
+        assert!(
+            queue
+                .start_attempt("exec-started", &permit)
+                .unwrap()
+                .is_some()
+        );
     }
     let error = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -676,7 +707,7 @@ async fn concurrent_starts_of_one_job_succeed_exactly_once() {
         handles.push(tokio::spawn(async move {
             let permit = gate.try_enter().unwrap();
             barrier.wait().await;
-            queue.start("t1", &permit).unwrap()
+            queue.start_attempt("t1", &permit).unwrap().is_some()
         }));
     }
     let mut started = 0;
@@ -713,6 +744,14 @@ fn race_child() {
     let mut go = String::new();
     std::io::stdin().lock().read_line(&mut go).unwrap();
 
+    if std::env::var("EVORCH_LEARNING_JOBS_RACE_ACTION").as_deref() == Ok("janitor") {
+        queue
+            .sweep_dead_origins(&FakeProbe::new(&[("old", OriginLiveness::Dead)]))
+            .unwrap();
+        println!("RESULT admitted=0 adopted=0 started=0");
+        std::io::stdout().flush().unwrap();
+        return;
+    }
     let admitted = queue
         .admit(admit_request("race-task", "race-root"))
         .unwrap()
@@ -721,7 +760,12 @@ fn race_child() {
     let adopted = queue.rescan_core(&probe).unwrap();
     let mut started = 0;
     for job in &adopted {
-        started += usize::from(queue.start(&job.job.task_id, &permit).unwrap());
+        started += usize::from(
+            queue
+                .start_attempt(&job.job.task_id, &permit)
+                .unwrap()
+                .is_some(),
+        );
     }
     println!(
         "RESULT admitted={} adopted={} started={started}",
@@ -732,7 +776,7 @@ fn race_child() {
 }
 
 #[tokio::test]
-async fn two_processes_racing_admit_and_adopt_win_exactly_once() {
+async fn independent_processes_racing_admission_adoption_and_janitor_win_exactly_once() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let fixture = Fixture::new();
     fixture
@@ -741,10 +785,11 @@ async fn two_processes_racing_admit_and_adopt_win_exactly_once() {
         .unwrap();
     let exe = std::env::current_exe().unwrap();
     let mut children = Vec::new();
-    for _ in 0..2 {
+    for action in ["adopt", "adopt", "janitor"] {
         let mut child = tokio::process::Command::new(&exe)
             .args(["--exact", "learning_jobs::tests::race_child", "--nocapture"])
             .env("EVORCH_LEARNING_JOBS_RACE_DB", &fixture.config.db_path)
+            .env("EVORCH_LEARNING_JOBS_RACE_ACTION", action)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -752,7 +797,7 @@ async fn two_processes_racing_admit_and_adopt_win_exactly_once() {
         let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
         children.push((child, stdout));
     }
-    // Both children report READY before either gets the go-ahead, so their
+    // All three children report READY before any gets the go-ahead, so their
     // admissions and rescans overlap instead of running one after the other.
     for (_, stdout) in &mut children {
         loop {
@@ -792,4 +837,224 @@ async fn two_processes_racing_admit_and_adopt_win_exactly_once() {
     assert_eq!(totals, [1, 1, 1], "admitted, adopted, started");
     assert_eq!(fixture.state("race-task"), LearningJobState::Pending);
     assert_eq!(fixture.state("dead-pending"), LearningJobState::Started);
+}
+
+#[tokio::test]
+async fn learning_ack_loss_reads_the_exact_operation_and_never_speculates_a_start() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "ack-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    let permit = runtime.learning_gate().try_enter().unwrap();
+    queue.admit(admit_request("before", "before-root")).unwrap();
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register("before", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    queue.ack_fault.store(1, Ordering::SeqCst);
+    assert!(entry.start(&queue, &permit).is_err());
+    runtime.learning_returned(&entry).await;
+    let ended = queue.job("before").unwrap().unwrap();
+    assert_eq!(
+        (ended.state, ended.attempt),
+        (LearningJobState::Abandoned, 0)
+    );
+    assert_eq!(ended.reason.as_deref(), Some("unconfirmed_write"));
+    assert!(!f.has_evidence("before"));
+    assert!(runtime.list_agents().is_empty());
+    queue.admit(admit_request("after", "after-root")).unwrap();
+    let before = queue.job("after").unwrap().unwrap().key();
+    queue.ack_fault.store(2, Ordering::SeqCst);
+    let started = queue
+        .change(&before, LearningAttemptChange::Start)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (started.attempt, started.revision),
+        (1, before.revision + 1)
+    );
+    let bound = queue
+        .change(
+            &started,
+            LearningAttemptChange::BindRun {
+                run: "fresh".into(),
+                review: false,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert!(bound.revision > started.revision);
+    assert_eq!(
+        queue
+            .receipt(&before, &LearningAttemptChange::Start)
+            .unwrap(),
+        Some(started)
+    );
+    let mut foreign = before.clone();
+    foreign.owner = "foreign".into();
+    assert!(
+        queue
+            .receipt(&foreign, &LearningAttemptChange::Start)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        queue
+            .change(&before, LearningAttemptChange::Start)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(queue.job("after").unwrap().unwrap().attempt, 1);
+}
+
+#[tokio::test]
+async fn learning_unknown_commit_readback_ends_without_candidates_after_normal_return() {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "readback-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let mut queue = f.queue(owner);
+    queue
+        .admit(admit_request("unconfirmed", "unconfirmed-root"))
+        .unwrap();
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register("unconfirmed", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    let permit = runtime.learning_gate().try_enter().unwrap();
+    assert!(entry.start(&queue, &permit).unwrap());
+    assert!(
+        entry
+            .change(
+                &queue,
+                LearningAttemptChange::BindRun {
+                    run: "extract".into(),
+                    review: false
+                }
+            )
+            .unwrap()
+    );
+    queue.storage.db_path = f._dir.path().join("not-a-directory").join("unavailable.db");
+    // Real writer commit; only independent readback is unavailable.
+    assert!(
+        entry
+            .change(&queue, LearningAttemptChange::ExtractionReady(Vec::new()))
+            .is_err()
+    );
+    runtime.learning_returned(&entry).await;
+    let job = Database::open(&f.config)
+        .unwrap()
+        .learning_job("unconfirmed")
+        .unwrap()
+        .unwrap();
+    assert_eq!((job.state, job.attempt), (LearningJobState::Abandoned, 1));
+    assert_eq!(job.reason.as_deref(), Some("unconfirmed_write"));
+    assert_eq!(job.publication.as_deref(), Some("None"));
+    assert!(!f.has_evidence("unconfirmed"));
+    assert!(runtime.list_agents().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_late_cleanup_does_not_reopen_a_later_pause_or_retry_before_return() {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "late-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    queue.admit(admit_request("late", "late-root")).unwrap();
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register("late", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    {
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(entry.start(&queue, &permit).unwrap());
+    }
+    let mut changed = runtime.subscribe_learning_changes();
+    let pause = runtime.pause_learning();
+    let suspension = Arc::new(runtime.suspend_learning(&pause).unwrap());
+    loop {
+        if queue.job("late").unwrap().unwrap().state == LearningJobState::Interrupted {
+            break;
+        }
+        changed.changed().await.unwrap();
+    }
+    assert_eq!(
+        suspension
+            .wait_until(tokio::time::Instant::now())
+            .await
+            .unwrap(),
+        crate::learning_suspend::LearningSuspendWait::DeadlineExceeded
+    );
+    runtime
+        .cancel_learning_suspension(pause, suspension)
+        .unwrap();
+    assert_eq!(
+        queue.job("late").unwrap().unwrap().state,
+        LearningJobState::Interrupted
+    );
+    let later = runtime.pause_learning();
+    // This explicit receipt stands in for a root scope held by an owned task;
+    // the full journal/dispatch path is exercised by post_run_learning.
+    runtime.learning_returned(&entry).await;
+    loop {
+        if queue.job("late").unwrap().unwrap().state == LearningJobState::Pending {
+            break;
+        }
+        changed.changed().await.unwrap();
+    }
+    assert!(!runtime.learning_gate().is_open());
+    assert_eq!(queue.job("late").unwrap().unwrap().attempt, 1);
+    assert!(runtime.list_agents().is_empty());
+    assert!(!runtime.learning_gate().is_open());
+    drop(later);
+}
+
+#[tokio::test]
+async fn learning_interrupted_core_jobs_are_reserved_for_exclusive_recovery_not_shared_janitor() {
+    let f = Fixture::new();
+    let gate = ProducerGate::default();
+    let permit = gate.try_enter().unwrap();
+    for (kind, id, cfg) in [
+        (LearningOriginKind::Core, "dead-core", "cfg"),
+        (LearningOriginKind::Core, "other-config", "other"),
+        (LearningOriginKind::Gui, "dead-gui", "cfg"),
+        (LearningOriginKind::Gui, "live-gui", "cfg"),
+        (LearningOriginKind::Gui, "unknown-gui", "cfg"),
+    ] {
+        let queue = f.queue(origin(kind, id, Some(cfg)));
+        queue.admit(admit_request(id, id)).unwrap();
+        let key = queue.start_attempt(id, &permit).unwrap().unwrap();
+        queue
+            .change(
+                &key,
+                LearningAttemptChange::Interrupt {
+                    suspension_id: "planned".into(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+    }
+    let current = f.queue(origin(LearningOriginKind::Core, "new", Some("cfg")));
+    let probe = FakeProbe::new(&[
+        ("dead-core", OriginLiveness::Dead),
+        ("other-config", OriginLiveness::Dead),
+        ("dead-gui", OriginLiveness::Dead),
+        ("live-gui", OriginLiveness::Alive),
+    ]);
+    assert!(current.rescan_core(&probe).unwrap().is_empty());
+    current.sweep_dead_origins(&probe).unwrap();
+    for id in ["dead-core", "other-config", "live-gui", "unknown-gui"] {
+        assert_eq!(f.state(id), LearningJobState::Interrupted);
+        assert!(f.has_evidence(id));
+    }
+    assert_eq!(f.state("dead-gui"), LearningJobState::Abandoned);
+    assert_eq!(
+        current.job("dead-gui").unwrap().unwrap().reason.as_deref(),
+        Some(LearningEndReason::OriginDied.as_str())
+    );
+    assert!(!f.has_evidence("dead-gui"));
+    assert!(f.bare_runtime().list_agents().is_empty());
 }

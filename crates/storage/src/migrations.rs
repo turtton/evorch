@@ -79,6 +79,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v60.sql"),
     include_str!("migrations/v61.sql"),
     include_str!("migrations/v62.sql"),
+    // v63 is supplied when #603 takes #602; no production v63 schema lives here.
+    "",
+    include_str!("migrations/v64.sql"),
 ];
 
 /// Migration v40 without its last step: the new tables, the header columns and the

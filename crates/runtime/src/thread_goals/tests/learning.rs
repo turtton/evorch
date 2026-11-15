@@ -54,7 +54,7 @@ async fn goal_learning_without_source_inspection_fails_and_emits_diagnostic() {
         })
         .expect("learning failure diagnostic");
     assert_eq!(diagnostic.run_id, Some(root.to_string()));
-    assert!(diagnostic.detail.contains(&error));
+    assert!(diagnostic.detail.ends_with("cause: pipeline_failed"));
     let extractor = runtime
         .list_agents()
         .into_iter()

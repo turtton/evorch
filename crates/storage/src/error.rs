@@ -103,6 +103,7 @@ pub enum LaneCursorError {
 // `rusqlite::Error` が `Eq` を実装しないため、ワークスペースの慣例に反して `Eq` は導出しません。
 #[derive(Debug, PartialEq)]
 pub enum StorageError {
+    LearningWriteUnconfirmed,
     QuestionCapacity(crate::lane_delivery::QuestionCapacity),
     LaneDeliveryConflict(&'static str),
     LaneOperation(event_bus::lane::LaneOperationError),
@@ -260,6 +261,9 @@ impl fmt::Display for StorageError {
                 )
             }
             Self::WriterClosed => write!(formatter, "storage writer is closed"),
+            Self::LearningWriteUnconfirmed => {
+                write!(formatter, "learning write outcome is unconfirmed")
+            }
             Self::RawUsageEventNotPersisted => write!(
                 formatter,
                 "raw usage events are not persisted; submit downsampled usage through UsageSink (ADR 0012)"
@@ -412,6 +416,7 @@ impl std::error::Error for StorageError {
             | Self::ConversionRequired { .. }
             | Self::LimitExceeded { .. }
             | Self::WriterClosed
+            | Self::LearningWriteUnconfirmed
             | Self::RawUsageEventNotPersisted
             | Self::Serialization(_)
             | Self::OutOfRange(_)

@@ -4378,16 +4378,45 @@ async fn paused_goal_restore_and_idle_checks_resume_preserve_the_wire_cache() {
 
 #[tokio::test]
 async fn goal_complete_learning_isolated_from_the_conversation_wire_prefix() {
-    let mut harness = harness(vec![
+    learning_wire_case(false).await;
+}
+#[tokio::test]
+async fn learning_suspension_restarts_fresh_without_invalidating_the_conversation_wire_prefix() {
+    learning_wire_case(true).await;
+}
+async fn learning_wire_case(retry: bool) {
+    let (gate, arrived) = mock_openai::ResponseGate::new();
+    struct ReleaseOnDrop(mock_openai::ResponseGate);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    // Declared after the harness below so panics unblock the HTTP worker first.
+    let mut script=vec![
         text_response("Prepared requested report"),
         ScriptedResponse::tool_call("check", MODEL, 0, "check", "submit_goal_check", [
             json!({"epoch":1,"checks":[{"criterion":0,"met":true,"evidence":"Report and sources verified"}]}).to_string()
         ]),
         text_response("Verified report"),
-        ScriptedResponse::tool_call("inspect", MODEL, 0, "inspect", "inspect_learning_source", ["{}"]),
+    ];
+    if retry {
+        script.push(text_response("discard this response").with_gate(gate.clone()));
+    }
+    script.extend([
+        ScriptedResponse::tool_call(
+            "inspect",
+            MODEL,
+            0,
+            "inspect",
+            "inspect_learning_source",
+            ["{}"],
+        ),
         text_response("No reusable lesson"),
         text_response("Follow-up answer"),
-    ], 1_000_000);
+    ]);
+    let mut harness = harness(script, 1_000_000);
+    let _release = ReleaseOnDrop(gate.clone());
     let config = storage::StorageConfig {
         db_path: harness._directory.path().join("goal-learning.db"),
         ..Default::default()
@@ -4398,14 +4427,18 @@ async fn goal_complete_learning_isolated_from_the_conversation_wire_prefix() {
         .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap())
         .with_learning(runtime::memory_queue::LearningSettings {
             writer: storage.handle(),
-            storage: config,
+            storage: config.clone(),
             project: "test".into(),
             quick: runtime::ModelPreference {
                 profile: "local".into(),
                 model: None,
                 reasoning_effort: None,
             },
-        });
+        })
+        .with_learning_origin(runtime::learning_jobs::current_origin(
+            storage::learning_jobs::LearningOriginKind::Core,
+            Some("learning-wire".into()),
+        ));
     let root = harness.runtime.reserve_run_id();
     harness
         .runtime
@@ -4436,6 +4469,26 @@ async fn goal_complete_learning_isolated_from_the_conversation_wire_prefix() {
         harness.runtime.thread_goal("learning-cache").unwrap().phase,
         event_bus::ThreadGoalPhase::Complete
     );
+    if retry {
+        tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+            .await
+            .unwrap();
+        let pause = harness.runtime.pause_learning();
+        let suspension = Arc::new(harness.runtime.suspend_learning(&pause).unwrap());
+        suspension.wait().await.unwrap();
+        let job = storage::Database::open(&config)
+            .unwrap()
+            .learning_jobs(&[storage::learning_jobs::LearningJobState::Interrupted])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(job.attempt, 1);
+        gate.release();
+        harness
+            .runtime
+            .cancel_learning_suspension(pause, suspension)
+            .unwrap();
+    }
     harness.runtime.wait_learning(root).await.unwrap().unwrap();
     harness
         .runtime
@@ -4443,14 +4496,21 @@ async fn goal_complete_learning_isolated_from_the_conversation_wire_prefix() {
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, root, AgentRunPhase::Waiting).await);
     let requests = chat_requests(&harness);
-    assert_eq!(requests.len(), 6);
+    let offset = usize::from(retry);
+    assert_eq!(requests.len(), 6 + offset);
     assert_eq!(harness.mock.remaining_scripts(), 0);
     // The internal extraction occupies wire calls 3/4, not the conversation.
     // Independent wire assertions and input-derived mock hits both guard reuse.
-    for (before, after) in [(0, 1), (1, 2), (2, 5), (3, 4)] {
+    for (before, after) in [(0, 1), (1, 2), (2, 5 + offset), (3 + offset, 4 + offset)] {
         assert_append_only(CacheProtocol::OpenAi, &requests[before], &requests[after]).unwrap();
     }
     assert_ne!(requests[2]["tools"], requests[3]["tools"]);
+    if retry {
+        assert_eq!(requests[3]["messages"], requests[4]["messages"]);
+        assert_eq!(requests[3]["tools"], requests[4]["tools"]);
+        // Chat Completions has no explicit affinity field; the distinct
+        // internal RunIds below and identical initial messages guard freshness.
+    }
     let usage: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -4477,7 +4537,7 @@ async fn goal_complete_learning_isolated_from_the_conversation_wire_prefix() {
             .iter()
             .filter(|run| run.category.as_deref() == Some("lesson"))
             .count(),
-        1
+        1 + offset
     );
     harness
         .runtime

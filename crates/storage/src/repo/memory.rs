@@ -31,7 +31,7 @@ pub(crate) fn append(conn: &Connection, mutation: &Mutation) -> Result<(), Stora
     Ok(())
 }
 
-fn apply(transaction: &Connection, mutation: &Mutation) -> Result<(), StorageError> {
+pub(crate) fn apply(transaction: &Connection, mutation: &Mutation) -> Result<(), StorageError> {
     let (lesson, status) = match mutation {
         Mutation::Finding(finding) => return crate::memory::append_finding(transaction, finding),
         Mutation::Candidate(lesson) => {
