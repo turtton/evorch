@@ -17,9 +17,16 @@ mod execution;
 
 type Receipt = watch::Receiver<Option<Result<(), String>>>;
 
+/// A returned entry whose terminal or readback write is unresolved is retried after
+/// `BASE`, doubling up to `CAP`. At the cap it logs once and then keeps retrying every
+/// `CAP`: ownership is never given up while the durable state is unknown.
+const LEARNING_RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(1);
+const LEARNING_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Default)]
 pub(crate) struct LearningExecutions {
     scheduler: AtomicBool,
+    retrying: AtomicBool,
     active: Mutex<HashMap<String, Arc<LearningExecution>>>,
     internal: Mutex<HashMap<RunId, watch::Sender<bool>>>,
     detached: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -53,6 +60,13 @@ pub(crate) struct LearningExecution {
     cancelled: AtomicBool,
     returned: watch::Sender<Option<Result<(), String>>>,
     changed: watch::Sender<u64>,
+}
+
+impl LearningExecution {
+    #[cfg(test)]
+    pub(crate) fn returned_receipt(&self) -> Receipt {
+        self.returned.subscribe()
+    }
 }
 
 impl LearningExecutions {
@@ -89,6 +103,17 @@ impl LearningExecutions {
         if result.is_ok() {
             self.active.lock().unwrap().remove(&entry.task_id);
         }
+    }
+
+    /// Entries that returned but still hold an unresolved durable write.
+    fn unresolved(&self) -> Vec<Arc<LearningExecution>> {
+        self.active
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| matches!(*entry.returned.borrow(), Some(Err(_))))
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn own(&self, task: tokio::task::JoinHandle<()>) {
@@ -191,6 +216,58 @@ impl LearningSuspension {
 
 impl AgentRuntime {
     pub(crate) async fn learning_returned(&self, entry: &Arc<LearningExecution>) {
+        self.reconcile_returned(entry).await;
+        self.retry_unresolved_learning();
+    }
+
+    /// Keeps re-running the cleanup of returned entries whose terminal or readback write is
+    /// still unresolved, so a database that recovers needs no operator or suspend request.
+    /// Only the already-keyed change or receipt readback runs again: no provider call, and
+    /// the entry stays owned until the durable state is settled.
+    pub(crate) fn retry_unresolved_learning(&self) {
+        let executions = &self.shared.learning_executions;
+        if executions.unresolved().is_empty() || executions.retrying.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let weak = Arc::downgrade(&self.shared);
+        let task = tokio::spawn(async move {
+            let mut delay = LEARNING_RETRY_BASE;
+            let mut stalled = false;
+            loop {
+                tokio::time::sleep(delay).await;
+                let Some(shared) = weak.upgrade() else { break };
+                let runtime = AgentRuntime { shared };
+                let executions = &runtime.shared.learning_executions;
+                let pending = executions.unresolved();
+                if pending.is_empty() {
+                    executions.retrying.store(false, Ordering::Release);
+                    // An entry can return between the scan and the release; if so, either
+                    // that caller started a new task or this one carries on.
+                    if executions.unresolved().is_empty()
+                        || executions.retrying.swap(true, Ordering::AcqRel)
+                    {
+                        break;
+                    }
+                    delay = LEARNING_RETRY_BASE;
+                    continue;
+                }
+                for entry in pending {
+                    runtime.reconcile_returned(&entry).await;
+                }
+                if delay >= LEARNING_RETRY_CAP && !stalled {
+                    stalled = true;
+                    tracing::error!(
+                        interval_secs = LEARNING_RETRY_CAP.as_secs(),
+                        "learning cleanup is still unresolved after repeated retries; it stays owned and keeps retrying"
+                    );
+                }
+                delay = (delay * 2).min(LEARNING_RETRY_CAP);
+            }
+        });
+        executions.own(task);
+    }
+
+    async fn reconcile_returned(&self, entry: &Arc<LearningExecution>) {
         if let Some(queue) = self.learning_job_queue() {
             let owned = entry.clone();
             if tokio::task::spawn_blocking(move || owned.reconcile(&queue))
@@ -417,6 +494,7 @@ impl AgentRuntime {
                         .send_modify(|n| *n = n.wrapping_add(1));
                 }
                 runtime.dispatch_pending_learning();
+                runtime.retry_unresolved_learning();
                 if runtime.learning_gate().is_closed() || runtime.producer_gate().is_closed() {
                     break;
                 }

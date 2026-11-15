@@ -1123,6 +1123,103 @@ async fn learning_rejected_terminal_write_keeps_cleanup_owned_until_it_commits()
     assert!(runtime.list_agents().is_empty());
 }
 
+/// A started job whose terminal write the database keeps rolling back, returned with the
+/// write still rejected. The returned connection holds the injected trigger.
+async fn returned_with_rejected_terminal(
+    f: &Fixture,
+    task: &str,
+) -> (
+    AgentRuntime,
+    Arc<crate::learning_suspend::LearningExecution>,
+    rusqlite::Connection,
+) {
+    let owner = origin(LearningOriginKind::Core, "retry-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    queue.admit(admit_request(task, "retry-root")).unwrap();
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register(task, runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    {
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(entry.start(&queue, &permit).unwrap());
+    }
+    let injected = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    injected
+        .execute_batch(
+            "CREATE TRIGGER inject_terminal_rollback BEFORE UPDATE ON learning_jobs
+             WHEN NEW.state IN ('Finished','Failed')
+             BEGIN SELECT RAISE(ABORT, 'injected rollback'); END;",
+        )
+        .unwrap();
+    assert!(
+        entry
+            .change(
+                &queue,
+                LearningAttemptChange::Fail(LearningEndReason::PipelineFailed)
+            )
+            .is_err()
+    );
+    runtime.learning_returned(&entry).await;
+    assert_eq!(f.state(task), LearningJobState::Started);
+    (runtime, entry, injected)
+}
+
+async fn returned_cleanly(entry: &crate::learning_suspend::LearningExecution) {
+    let mut receipt = entry.returned_receipt();
+    while !matches!(*receipt.borrow_and_update(), Some(Ok(()))) {
+        receipt.changed().await.unwrap();
+    }
+}
+
+// The database recovers after the pipeline and its first reconcile both failed. Nobody
+// calls suspend or reconcile: the runtime's own retry settles the job.
+#[tokio::test(start_paused = true)]
+async fn learning_unresolved_terminal_is_retried_by_the_runtime_once_the_database_recovers() {
+    let f = Fixture::new();
+    let (runtime, entry, injected) = returned_with_rejected_terminal(&f, "retried").await;
+    injected
+        .execute_batch("DROP TRIGGER inject_terminal_rollback;")
+        .unwrap();
+
+    returned_cleanly(&entry).await;
+
+    let ended = f.queue(origin(LearningOriginKind::Core, "retry-owner", Some("cfg")));
+    let ended = ended.job("retried").unwrap().unwrap();
+    assert_eq!(ended.state, LearningJobState::Failed);
+    assert_eq!(
+        ended.reason.as_deref(),
+        Some(LearningEndReason::PipelineFailed.as_str())
+    );
+    assert!(!f.has_evidence("retried"));
+    assert!(runtime.list_agents().is_empty());
+}
+
+// The backoff is capped, not abandoned: the entry stays owned through many failed attempts
+// and still settles when the database finally recovers.
+#[tokio::test(start_paused = true)]
+async fn learning_unresolved_terminal_keeps_retrying_past_the_backoff_cap() {
+    let f = Fixture::new();
+    let (runtime, entry, injected) = returned_with_rejected_terminal(&f, "capped").await;
+    let mut attempts = runtime.subscribe_learning_changes();
+    for _ in 0..9 {
+        attempts.changed().await.unwrap();
+        assert_eq!(f.state("capped"), LearningJobState::Started);
+        assert!(f.has_evidence("capped"));
+        assert!(matches!(*entry.returned_receipt().borrow(), Some(Err(_))));
+    }
+    injected
+        .execute_batch("DROP TRIGGER inject_terminal_rollback;")
+        .unwrap();
+
+    returned_cleanly(&entry).await;
+
+    assert_eq!(f.state("capped"), LearningJobState::Failed);
+    assert!(!f.has_evidence("capped"));
+}
+
 /// Runs `hook` with the instance of the first judged origin when the second origin is judged,
 /// which is after the first job was adopted and before the rescan resumes it.
 struct SyncProbe<F: Fn(&str) + Send + Sync> {
