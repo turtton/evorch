@@ -1,4 +1,7 @@
-use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+use std::os::unix::{
+    fs::{MetadataExt, PermissionsExt},
+    net::UnixListener,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock,
@@ -16,6 +19,10 @@ use super::{
 use crate::scratch::ThreadScratch;
 use crate::thread_retention::TombstoneGuard;
 
+#[cfg(test)]
+#[path = "planned_tests.rs"]
+mod planned_tests;
+
 pub struct OwnerHost {
     root: PathBuf,
     owner_id: String,
@@ -28,8 +35,14 @@ pub struct OwnerHost {
     scratch: Arc<ThreadScratch>,
     /// Threads retention deleted; set once after the startup phase.
     tombstones: OnceLock<TombstoneGuard>,
+    worker: Mutex<Option<WorkerControl>>,
+}
+
+struct WorkerControl {
     stop: mpsc::Sender<()>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    join: Option<std::thread::JoinHandle<()>>,
+    failure: Option<String>,
+    socket_identity: (u64, u64),
 }
 
 impl OwnerHost {
@@ -53,10 +66,12 @@ impl OwnerHost {
         let listener = UnixListener::bind(&socket)?;
         listener.set_nonblocking(true)?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-        let registry = Registry::open(&root.join("owners.db"))?;
+        let metadata = std::fs::symlink_metadata(&socket)?;
+        let socket_identity = (metadata.dev(), metadata.ino());
+        let mut registry = Registry::open(&root.join("owners.db"))?;
         let reader = Mutex::new(Registry::open_readonly(&root.join("owners.db"))?);
         let scratch = Arc::new(ThreadScratch::for_ownership_root(root)?);
-        sweep_scratch(&scratch, root, &owner_id, &registry);
+        sweep_scratch(&scratch, root, &owner_id, &mut registry);
         let worker_scratch = Arc::clone(&scratch);
         let (stop, receiver) = mpsc::channel();
         let id = owner_id.clone();
@@ -89,8 +104,12 @@ impl OwnerHost {
             release_deferred,
             scratch,
             tombstones: OnceLock::new(),
-            stop,
-            worker: Some(worker),
+            worker: Mutex::new(Some(WorkerControl {
+                stop,
+                join: Some(worker),
+                failure: None,
+                socket_identity,
+            })),
         })
     }
 
@@ -129,7 +148,13 @@ impl OwnerHost {
         );
         owner.settings = self.settings.clone();
         Registry::open_existing(&self.root.join("owners.db"))?.start(&owner)?;
-        self.scratch.reset_thread(thread_id);
+        clean_scratch(
+            &self.db(),
+            &owner.thread_id,
+            &owner.lease,
+            &self.scratch,
+            true,
+        );
         emit(&self.bus, &owner, OwnershipAction::Claimed);
         Ok(self.permit(&owner))
     }
@@ -151,7 +176,13 @@ impl OwnerHost {
             &self.settings,
         )?;
         authority::record_fenced(&self.db(), &expected.thread_id, &expected.lease);
-        self.scratch.reset_thread(&owner.thread_id);
+        clean_scratch(
+            &self.db(),
+            &owner.thread_id,
+            &owner.lease,
+            &self.scratch,
+            true,
+        );
         emit(&self.bus, &owner, OwnershipAction::Claimed);
         Ok(self.permit(&owner))
     }
@@ -180,8 +211,20 @@ impl OwnerHost {
             owner.claim(&permit.lease, &successor.owner_id, now_ms(), 0)
         })?;
         authority::record_fenced(&self.db(), &permit.thread_id, &permit.lease);
-        self.scratch.release_thread(&owner.thread_id);
-        successor.scratch.reset_thread(&owner.thread_id);
+        clean_scratch(
+            &self.db(),
+            &owner.thread_id,
+            &owner.lease,
+            &self.scratch,
+            false,
+        );
+        clean_scratch(
+            &self.db(),
+            &owner.thread_id,
+            &owner.lease,
+            &successor.scratch,
+            true,
+        );
         emit(&successor.bus, &owner, OwnershipAction::Handoff);
         Ok(successor.permit(&owner))
     }
@@ -222,11 +265,20 @@ impl OwnerHost {
             owner.lease.owner_id == self.owner_id && owner.state != OwnerState::Released
         }) {
             active |= owner.active_turn;
-            if owner.state == OwnerState::Quiescing && !owner.active_turn {
+            if owner.state == OwnerState::Quiescing
+                && !owner.active_turn
+                && !owner.has_planned_hold()
+            {
                 let released =
                     registry.update(&owner.thread_id, |state| state.release(&owner.lease))?;
                 authority::record_fenced(&self.db(), &owner.thread_id, &owner.lease);
-                self.scratch.release_thread(&released.thread_id);
+                clean_scratch(
+                    &self.db(),
+                    &released.thread_id,
+                    &released.lease,
+                    &self.scratch,
+                    false,
+                );
                 emit(&self.bus, &released, OwnershipAction::Released);
             }
         }
@@ -251,6 +303,152 @@ impl OwnerHost {
     /// The thread scratch directories this host empties on claim and deletes on release.
     pub fn thread_scratch(&self) -> Arc<ThreadScratch> {
         Arc::clone(&self.scratch)
+    }
+
+    /// Call after admission fencing and before Armed. Includes idle threads.
+    pub fn hold_for_restart(
+        &self,
+        tx: &str,
+        capture: &str,
+        expected: &super::ExpectedActiveRuns,
+    ) -> Result<Vec<super::PlannedHold>, RegistryError> {
+        self.release_deferred.store(true, Ordering::SeqCst);
+        Registry::open_existing(&self.db())?.hold_owned(&self.owner_id, tx, capture, expected)
+    }
+
+    /// FailedClosed cleanup, independent of the reason for failure. Does not
+    /// reopen producers, clear active runs, release ownership or delete scratch.
+    pub fn clear_planned_hold(
+        &self,
+        hold: &super::PlannedHold,
+    ) -> Result<ThreadOwner, RegistryError> {
+        if hold.owner_id != self.owner_id {
+            return Err(super::OwnershipError::PlannedOwnerBlocked.into());
+        }
+        self.release_deferred.store(true, Ordering::SeqCst);
+        Registry::open_existing(&self.db())?.clear_planned_hold(hold)
+    }
+
+    /// Call immediately after Adopted, before other bootstrap work. open() has
+    /// already started this host's worker; claiming renews the lease immediately
+    /// and enrolls the successor generation in its heartbeat scan.
+    /// Map PlannedOwnerBlocked to 06c OwnerBlocked, NOT a normal claim fallback.
+    pub fn claim_planned(
+        &self,
+        hold: &super::PlannedHold,
+        evidence: &dyn super::AdoptedOwnershipEvidence,
+    ) -> Result<OwnerPermit, RegistryError> {
+        self.deny_deleted(&hold.thread_id)?;
+        let owner = ipc::claim_planned(
+            &mut Registry::open_existing(&self.db())?,
+            hold,
+            &self.root,
+            &self.owner_id,
+            now_ms(),
+            &self.settings,
+            evidence,
+        )?;
+        authority::record_fenced(&self.db(), &hold.thread_id, &hold.lease());
+        emit(&self.bus, &owner, OwnershipAction::Claimed);
+        // Deliberately no reset/release: scratch remains byte-for-byte intact.
+        Ok(self.permit(&owner))
+    }
+
+    /// Armed readback -> stop/join -> identity-checked unlink -> exec. No Drop,
+    /// release or PID-liveness assumption. Idempotent after successful stopping.
+    pub fn stop_worker_for_exec(&self) -> Result<(), RegistryError> {
+        let mut slot = self
+            .worker
+            .lock()
+            .map_err(|_| RegistryError::ReaderPoisoned)?;
+        if let Some(worker) = slot.as_mut() {
+            if let Some(error) = &worker.failure {
+                return Err(RegistryError::Preparation(error.clone()));
+            }
+            let _ = worker.stop.send(());
+            if let Some(join) = worker.join.take()
+                && join.join().is_err()
+            {
+                let error = "owner worker panicked while joining".to_owned();
+                worker.failure = Some(error.clone());
+                return Err(RegistryError::Preparation(error));
+            }
+            let socket = socket_path(&self.root, &self.owner_id)?;
+            let cleanup = match std::fs::symlink_metadata(&socket) {
+                Ok(metadata) if (metadata.dev(), metadata.ino()) == worker.socket_identity => {
+                    std::fs::remove_file(socket)
+                }
+                Ok(_) => Err(std::io::Error::other(
+                    "owner socket identity changed; refusing unlink",
+                )),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = cleanup {
+                worker.failure = Some(error.to_string());
+                return Err(error.into());
+            }
+            *slot = None;
+        }
+        Ok(())
+    }
+
+    /// Restore only owner heartbeat/IPC after failed exec. Admission and run
+    /// gates stay closed; call clear_planned_hold for every installed hold.
+    pub fn restart_worker_failed_closed(&self) -> Result<(), RegistryError> {
+        let mut slot = self
+            .worker
+            .lock()
+            .map_err(|_| RegistryError::ReaderPoisoned)?;
+        if let Some(worker) = slot.as_ref() {
+            if let Some(error) = &worker.failure {
+                return Err(RegistryError::Preparation(error.clone()));
+            }
+            return Ok(());
+        }
+        self.release_deferred.store(true, Ordering::SeqCst);
+        let mut registry = Registry::open_existing(&self.db())?;
+        registry.heartbeat_owned(
+            &self.owner_id,
+            now_ms(),
+            self.settings.heartbeat_ms.get(),
+            false,
+        )?;
+        let socket = socket_path(&self.root, &self.owner_id)?;
+        let listener = UnixListener::bind(&socket)?;
+        listener.set_nonblocking(true)?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        let metadata = std::fs::symlink_metadata(&socket)?;
+        let socket_identity = (metadata.dev(), metadata.ino());
+        let (stop, receiver) = mpsc::channel();
+        let db = self.db();
+        let id = self.owner_id.clone();
+        let settings = self.settings.clone();
+        let bus = Arc::clone(&self.bus);
+        let deferred = Arc::clone(&self.release_deferred);
+        let scratch = Arc::clone(&self.scratch);
+        let join = std::thread::spawn(move || {
+            serve(
+                registry,
+                listener,
+                receiver,
+                Worker {
+                    db: &db,
+                    id: &id,
+                    settings: &settings,
+                    bus: &bus,
+                    release_deferred: &deferred,
+                    scratch: &scratch,
+                },
+            )
+        });
+        *slot = Some(WorkerControl {
+            stop,
+            join: Some(join),
+            failure: None,
+            socket_identity,
+        });
+        Ok(())
     }
 
     fn reader(&self) -> Result<MutexGuard<'_, Registry>, RegistryError> {
@@ -320,42 +518,53 @@ pub(super) fn socket_path(root: &Path, id: &str) -> Result<PathBuf, RegistryErro
 impl Drop for OwnerHost {
     fn drop(&mut self) {
         let _ = self.quiesce();
-        let _ = self.stop.send(());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-        let _ = std::fs::remove_file(self.root.join(format!("{}.sock", self.owner_id)));
+        let _ = self.stop_worker_for_exec();
+    }
+}
+
+/// Best-effort cleanup; uncertainty always preserves scratch.
+fn clean_scratch(db: &Path, thread: &str, lease: &Lease, scratch: &ThreadScratch, reset: bool) {
+    let result = Registry::open_existing(db).and_then(|mut registry| {
+        registry.clean_scratch(thread, lease, || {
+            if reset {
+                scratch.reset_thread(thread);
+            } else {
+                scratch.release_thread(thread);
+            }
+        })
+    });
+    if let Err(error) = result {
+        tracing::warn!(%thread, %error, "scratch cleanup skipped");
     }
 }
 
 /// Delete scratch directories of threads without a live owner, before this
 /// host can claim any. Uncertain liveness keeps a directory, as for claims.
-fn sweep_scratch(scratch: &ThreadScratch, root: &Path, owner_id: &str, registry: &Registry) {
-    let owners = match registry.list() {
-        Ok(owners) => owners,
-        Err(error) => {
-            tracing::warn!(%error, "scratch sweep skipped: owner registry unreadable");
-            return;
-        }
-    };
-    let live = owners
-        .into_iter()
-        .filter(|owner| {
-            owner.state != OwnerState::Released
-                && ipc::owner_may_be_live(root, &owner.lease.owner_id)
-        })
-        .map(|owner| owner.thread_id)
-        .collect();
-    let other_process_may_be_live = std::fs::read_dir(root).map_or(true, |entries| {
-        entries.filter_map(Result::ok).any(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.strip_suffix(".sock"))
-                .is_some_and(|id| id != owner_id && ipc::owner_may_be_live(root, id))
-        })
+fn sweep_scratch(scratch: &ThreadScratch, root: &Path, owner_id: &str, registry: &mut Registry) {
+    let result = registry.scratch_sweep(|owners| {
+        let live = owners
+            .into_iter()
+            .filter(|owner| {
+                owner.protects_scratch()
+                    || (owner.state != OwnerState::Released
+                        && ipc::owner_may_be_live(root, &owner.lease.owner_id))
+            })
+            .map(|owner| owner.thread_id)
+            .collect();
+        let other_process_may_be_live = std::fs::read_dir(root).map_or(true, |entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.strip_suffix(".sock"))
+                    .is_some_and(|id| id != owner_id && ipc::owner_may_be_live(root, id))
+            })
+        });
+        scratch.sweep(&live, other_process_may_be_live);
     });
-    scratch.sweep(&live, other_process_may_be_live);
+    if let Err(error) = result {
+        tracing::warn!(%error, "scratch sweep skipped: owner registry unreadable");
+    }
 }
 
 fn emit(bus: &EventBus, owner: &ThreadOwner, action: OwnershipAction) {
@@ -405,10 +614,10 @@ fn serve(
                     &mut registry,
                     now_ms(),
                     bus,
-                    &|thread, previous| {
+                    &|thread, previous, current| {
                         if previous.owner_id == id {
                             authority::record_fenced(db, thread, previous);
-                            scratch.release_thread(thread);
+                            clean_scratch(db, thread, &current.lease, scratch, false);
                         }
                     },
                 );
@@ -492,7 +701,7 @@ fn heartbeat_tick(
             Ok((super::registry::HeartbeatChange::Released, owner)) => {
                 authority::record_fenced(db, &previous.thread_id, &previous.lease);
                 held.remove(&previous.thread_id);
-                scratch.release_thread(&owner.thread_id);
+                clean_scratch(db, &owner.thread_id, &owner.lease, scratch, false);
                 emit(bus, &owner, OwnershipAction::Released);
             }
             Err(error) => {
