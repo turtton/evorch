@@ -75,6 +75,16 @@ pub struct JsDialog {
 
 type Repaint = Box<dyn Fn() + Send + Sync>;
 
+/// One painted frame as CEF delivers it: premultiplied BGRA in physical
+/// pixels, borrowed only for the duration of the callback.
+pub struct RawFrame<'a> {
+    pub bgra: &'a [u8],
+    pub width: i32,
+    pub height: i32,
+}
+
+type RawFrameSink = Box<dyn Fn(RawFrame<'_>) + Send + Sync>;
+
 pub(crate) struct Shared {
     view: Mutex<ViewGeometry>,
     pub(crate) frame: Mutex<PaintBuffer>,
@@ -87,6 +97,7 @@ pub(crate) struct Shared {
     changes: Mutex<u64>,
     changed: Condvar,
     repaint: Mutex<Option<Repaint>>,
+    raw_sink: Mutex<Option<RawFrameSink>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -185,6 +196,7 @@ impl OsrBrowser {
             changes: Mutex::new(0),
             changed: Condvar::new(),
             repaint: Mutex::default(),
+            raw_sink: Mutex::default(),
         });
         let window_info = WindowInfo {
             windowless_rendering_enabled: 1,
@@ -268,9 +280,7 @@ impl OsrBrowser {
     /// Captures the loaded document through Chromium's renderer snapshot
     /// callback, not an unrelated (possibly initial, blank) OSR paint.
     pub fn capture_settled(&self, timeout: Duration) -> Result<egui::ColorImage, String> {
-        let shot = self.capture_loaded(timeout)?;
-        let data = shot["data"].as_str().ok_or("the snapshot has no image")?;
-        let png = STANDARD.decode(data).map_err(|error| error.to_string())?;
+        let png = self.capture_png(timeout)?;
         let view = *lock(&self.shared.view);
         let mut limits = image::Limits::default();
         limits.max_image_width = Some((view.width as f32 * view.scale).ceil() as u32);
@@ -286,6 +296,14 @@ impl OsrBrowser {
             [image.width() as usize, image.height() as usize],
             image.as_raw(),
         ))
+    }
+
+    /// The PNG of the loaded document, taken the way [`Self::capture_settled`]
+    /// takes it, without decoding it.
+    pub fn capture_png(&self, timeout: Duration) -> Result<Vec<u8>, String> {
+        let shot = self.capture_loaded(timeout)?;
+        let data = shot["data"].as_str().ok_or("the snapshot has no image")?;
+        STANDARD.decode(data).map_err(|error| error.to_string())
     }
 
     /// Waits for the page to load and then paint. Chromium routes input by the
@@ -335,6 +353,23 @@ impl OsrBrowser {
             let status = shared.status();
             status.closed || (status.load_end_count > 0 && !status.loading)
         }) && !self.status().closed
+    }
+
+    /// Hands every painted view frame, unconverted, to `sink` (or stops doing
+    /// so). It runs on CEF's UI thread inside the paint callback: copy what you
+    /// need and return, never wait. Independent of the egui frame buffer, so
+    /// an out-of-process renderer can forward pixels without an egui type.
+    pub fn set_raw_frame_sink(&self, sink: Option<impl Fn(RawFrame<'_>) + Send + Sync + 'static>) {
+        *lock(&self.shared.raw_sink) = sink.map(|sink| Box::new(sink) as RawFrameSink);
+    }
+
+    /// Asks CEF to repaint the whole view, so a new consumer of raw frames
+    /// gets one without waiting for the page to change.
+    pub fn request_repaint(&self) {
+        if let Some(host) = self.host() {
+            let host = SendCell(host);
+            post_ui(move || host.0.invalidate(PaintElementType::VIEW));
+        }
     }
 
     pub fn set_repaint_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
@@ -532,6 +567,11 @@ wrap_render_handler! {
             let len = width as usize * height as usize * 4;
             // SAFETY: CEF passes a `width * height` BGRA buffer valid for this call.
             let source = unsafe { std::slice::from_raw_parts(buffer, len) };
+            if type_ == PaintElementType::VIEW
+                && let Some(sink) = lock(&self.shared.raw_sink).as_ref()
+            {
+                sink(RawFrame { bgra: source, width, height });
+            }
             let dirty: Vec<_> = dirty_rects.unwrap_or_default().iter().map(pixel_rect).collect();
             lock(target).paint(source, width, height, &dirty);
             self.shared.notify();
