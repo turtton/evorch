@@ -125,14 +125,22 @@ pub fn parse_remote(remote: &str) -> Option<RemoteIdentity> {
 /// origin`. Falls back to the directory name when that fails. For display only.
 #[must_use]
 pub fn derive_repo_slug(repo_root: &Path) -> String {
-    origin_url(repo_root)
+    derive_repo_slug_owned(repo_root, None)
+}
+
+/// [`derive_repo_slug`] whose `git` is registered in `ledger`, when there is
+/// one; once the ledger's spawn fence is closed it falls back to the directory
+/// name without starting git.
+#[must_use]
+pub fn derive_repo_slug_owned(repo_root: &Path, ledger: Option<sandbox::SpawnLedger>) -> String {
+    origin_url(repo_root, ledger)
         .as_deref()
         .and_then(parse_remote_slug)
         .unwrap_or_else(|| fallback_slug(repo_root))
 }
 
-fn origin_url(repo_root: &Path) -> Option<String> {
-    let output = GitReader::new(Instant::now() + REMOTE_READ_DEADLINE)
+fn origin_url(repo_root: &Path, ledger: Option<sandbox::SpawnLedger>) -> Option<String> {
+    let output = GitReader::owned(Instant::now() + REMOTE_READ_DEADLINE, ledger)
         .run(
             repo_root,
             &["remote", "get-url", "origin"],
@@ -286,6 +294,22 @@ mod tests {
         );
         assert_eq!(parse_remote_slug("not a remote"), None);
         assert_eq!(parse_remote_slug("https://github.com/only"), None);
+    }
+
+    // Given: a closed spawn fence / When: the label is derived / Then: the directory name
+    // answers and no git starts
+    #[test]
+    fn a_closed_fence_derives_the_slug_without_starting_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("my-project");
+        std::fs::create_dir(&root).unwrap();
+        let ledger = sandbox::SpawnLedger::new();
+        ledger.close_fence();
+
+        let slug = derive_repo_slug_owned(&root, Some(ledger.clone()));
+
+        assert_eq!(slug, "my-project");
+        assert_eq!(ledger.child_stats().registered, 0);
     }
 
     // Given: a directory that is not a repository, or has no origin / When: its label is

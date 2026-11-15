@@ -287,7 +287,7 @@ mod tests {
         let ledger = SpawnLedger::new();
         let mut command = std::process::Command::new("sh");
         command
-            .args(["-c", "cat; echo err >&2; sleep 600 &"])
+            .args(["-c", "cat; echo err >&2; sh -c 'kill -STOP $$' &"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

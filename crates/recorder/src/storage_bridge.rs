@@ -294,7 +294,8 @@ pub async fn run_until_shutdown(
     let bus_lifetime = Arc::downgrade(&bus);
     drop(bus);
     let (_flush_sender, flush_requests) = tokio::sync::mpsc::unbounded_channel();
-    run_subscribed(
+    // The unchecked entry point keeps its warnings as the only report.
+    let _ = run_subscribed(
         subscriber,
         bus_lifetime,
         bridge,
@@ -312,7 +313,7 @@ async fn run_subscribed(
     flush_every: Duration,
     shutdown: impl Future<Output = ()>,
     mut flush_requests: tokio::sync::mpsc::UnboundedReceiver<FlushReply>,
-) {
+) -> Result<(), String> {
     #[cfg(test)]
     let automatic_flush_enabled = bridge.automatic_flush_enabled;
     #[cfg(not(test))]
@@ -355,8 +356,16 @@ async fn run_subscribed(
                         .warn(&format!("failed to persist event or usage: {error}"));
                 }
             }
-            bridge.flush_usage();
-        });
+            // What failed after the last barrier (a barrier reports and clears
+            // its own interval), and the final usage flush, are the stop's.
+            if let Err(error) = bridge.flush_usage_checked() {
+                bridge
+                    .monitor
+                    .warn(&format!("failed to flush usage metrics: {error}"));
+                failure.get_or_insert_with(|| error.to_string());
+            }
+            failure
+        })
     });
     let mut ticker =
         tokio::time::interval_at(tokio::time::Instant::now() + flush_every, flush_every);
@@ -367,6 +376,7 @@ async fn run_subscribed(
     );
     delta_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut draining = false;
+    let mut stop_failure: Option<&'static str> = None;
     loop {
         let received = if draining {
             // EventReceiver owns a Sender: poll buffered events without waiting
@@ -404,6 +414,9 @@ async fn run_subscribed(
                 // keep an application close waiting forever on live producers.
                 for event in subscriber.drain_pending_snapshot() {
                     if queue.push(event).await.is_err() {
+                        stop_failure.get_or_insert(
+                            "the write queue closed before the final snapshot was accepted",
+                        );
                         break;
                     }
                 }
@@ -426,13 +439,25 @@ async fn run_subscribed(
             }
         };
         if result.is_err() {
+            stop_failure.get_or_insert("the write queue closed while events were accepted");
             break;
         }
     }
-    let _ = queue.flush().await;
+    if queue.flush().await.is_err() {
+        stop_failure.get_or_insert("the final flush could not reach the writer");
+    }
     drop(queue);
-    if let Err(error) = writer.await {
-        monitor.warn(&format!("storage bridge worker failed: {error}"));
+    let written = match writer.await {
+        Ok(failure) => failure,
+        Err(error) => {
+            monitor.warn(&format!("storage bridge worker failed: {error}"));
+            Some(format!("the storage bridge writer failed to join: {error}"))
+        }
+    };
+    match (written, stop_failure) {
+        (Some(failure), _) => Err(failure),
+        (None, Some(failure)) => Err(failure.to_owned()),
+        (None, None) => Ok(()),
     }
 }
 
@@ -459,7 +484,7 @@ fn spawn_test_bridge_until_shutdown(
     let (flush_sender, flush_requests) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         let _flush_sender = flush_sender;
-        run_subscribed(
+        let _ = run_subscribed(
             subscriber,
             lifetime,
             bridge,

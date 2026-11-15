@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::bwrap::{locate_bwrap, probe};
+use crate::bwrap::{locate_bwrap, probe_owned};
 use crate::error::SandboxError;
 use crate::exec::{CommandSpec, Sandbox, WrappedCommand};
 use crate::ledger::SpawnLedger;
@@ -113,7 +113,7 @@ impl MinimalSandbox {
         let bwrap = locate_bwrap().ok_or_else(|| SandboxError::BwrapUnavailable {
             detail: "bwrap 実行ファイルが見つかりません".to_owned(),
         })?;
-        probe(&bwrap)?;
+        probe_owned(&bwrap, ledger)?;
         let env: Vec<(String, String)> = forward_env
             .iter()
             .filter_map(|name| {

@@ -57,9 +57,19 @@ impl GitReader {
         }
     }
 
+    /// A reader whose git processes are registered in `ledger`, when there is
+    /// one: the core's reads pass its ledger, a read outside the core passes
+    /// `None`.
+    pub(crate) fn owned(deadline: Instant, ledger: Option<SpawnLedger>) -> Self {
+        Self {
+            ledger,
+            ..Self::new(deadline)
+        }
+    }
+
     /// Registers every git process this reader starts in `ledger`.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn with_ledger(mut self, ledger: SpawnLedger) -> Self {
         self.ledger = Some(ledger);
         self

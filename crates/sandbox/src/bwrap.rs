@@ -251,7 +251,18 @@ impl Sandbox for BwrapSandbox {
 
 /// Runs bubblewrap once with the features every sandbox here needs.
 pub(crate) fn probe(program: &Path) -> Result<(), SandboxError> {
-    let status = Command::new(program)
+    probe_owned(program, None)
+}
+
+/// [`probe`] whose process is registered in `ledger`, when there is one: once
+/// the ledger's spawn fence is closed the probe does not start.
+pub(crate) fn probe_owned(
+    program: &Path,
+    ledger: Option<&crate::SpawnLedger>,
+) -> Result<(), SandboxError> {
+    let unavailable = |detail: String| SandboxError::BwrapUnavailable { detail };
+    let mut command = Command::new(program);
+    command
         .args([
             "--ro-bind",
             "/",
@@ -260,24 +271,43 @@ pub(crate) fn probe(program: &Path) -> Result<(), SandboxError> {
             "--die-with-parent",
             "true",
         ])
-        .status()
-        .map_err(|error| SandboxError::BwrapUnavailable {
-            detail: error.to_string(),
-        })?;
-    if status.success() {
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = crate::StdioSession::spawn_command_owned(
+        ledger,
+        crate::ChildKind::Other,
+        Some("bwrap-probe"),
+        command,
+    )
+    .and_then(|session| session.output(None))
+    .map_err(|error| unavailable(error.to_string()))?;
+    if output.status.success() {
         Ok(())
     } else {
-        Err(SandboxError::BwrapUnavailable {
-            detail: format!("機能確認が終了コード {status} で失敗しました"),
-        })
+        Err(unavailable(format!(
+            "機能確認が終了コード {} で失敗しました",
+            output.status
+        )))
     }
 }
 
+/// The first executable `bwrap` on `PATH`, else the pinned Nix store path.
+/// Nothing is spawned: a lookup helper would be an unregistered child.
 pub(crate) fn locate_bwrap() -> Option<PathBuf> {
-    let path = Command::new("which").arg("bwrap").output().ok()?;
-    if path.status.success() {
-        let program = String::from_utf8(path.stdout).ok()?;
-        return Some(PathBuf::from(program.trim()));
+    use std::os::unix::fs::PermissionsExt;
+
+    let on_path = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join("bwrap"))
+            .find(|candidate| {
+                candidate
+                    .metadata()
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            })
+    });
+    if on_path.is_some() {
+        return on_path;
     }
     let fallback =
         PathBuf::from("/nix/store/lqndphylsxqwbwm804n473pb4sqb98sh-bubblewrap-0.11.2/bin/bwrap");
@@ -811,5 +841,23 @@ mod tests {
         ] {
             assert!(position("/var") < position(later), "{later}");
         }
+    }
+
+    #[test]
+    fn a_probe_is_registered_in_the_ledger_and_refused_once_its_fence_closes() {
+        let ledger = crate::SpawnLedger::new();
+
+        // `true` ignores the probe's arguments, so it stands for a capable bwrap.
+        probe_owned(Path::new("true"), Some(&ledger)).unwrap();
+        let stats = ledger.child_stats();
+        assert_eq!(
+            (stats.registered, stats.reaped, stats.unconfirmed),
+            (1, 1, 0)
+        );
+        ledger.close_fence();
+        let refused = probe_owned(Path::new("true"), Some(&ledger));
+
+        assert!(refused.is_err(), "no probe starts under a closed fence");
+        assert_eq!(ledger.child_stats().registered, 1);
     }
 }

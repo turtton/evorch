@@ -15,7 +15,7 @@ pub struct OwnedStorageBridge {
     storage: Storage,
     shutdown: Option<oneshot::Sender<()>>,
     flush_requests: tokio::sync::mpsc::UnboundedSender<FlushReply>,
-    thread: Option<JoinHandle<()>>,
+    thread: Option<JoinHandle<Result<(), String>>>,
     monitor: StorageBridgeMonitor,
 }
 
@@ -52,8 +52,8 @@ impl OwnedStorageBridge {
                             let _ = stop.await;
                         },
                         flush_receiver,
-                    ));
-                });
+                    ))
+                })
             })?;
         Ok(Self {
             storage,
@@ -97,28 +97,44 @@ impl OwnedStorageBridge {
     /// even with live producers. Later arrivals are not persisted by this bridge.
     /// Returns after durable writes complete; may wait for storage I/O. Idempotent.
     pub fn shutdown(&mut self) {
-        if self.try_shutdown().is_err() {
+        // A write that failed was already warned about where it failed; only a
+        // thread that never ended cleanly adds a warning here.
+        if self.stop().is_err() {
             self.monitor
                 .warn("storage bridge thread failed during shutdown");
         }
     }
 
-    /// [`shutdown`](Self::shutdown) that says whether the bridge thread ended
-    /// cleanly. A restart must not go on after an `Err`: the bridge may have
-    /// left accepted events unwritten.
+    /// [`shutdown`](Self::shutdown) that says whether the stop was clean. A
+    /// restart must not go on after an `Err`: accepted events may be unwritten.
     ///
     /// # Errors
-    /// The bridge thread panicked.
+    /// The bridge thread panicked, an event or the usage metrics failed to be
+    /// written since the last [`flush`](Self::flush), the final flush could not
+    /// reach the writer, or the writer failed to join.
     pub fn try_shutdown(&mut self) -> io::Result<()> {
+        match self.stop() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(failure)) => Err(io::Error::other(failure)),
+            Err(()) => Err(io::Error::other(
+                "the storage bridge thread panicked during shutdown",
+            )),
+        }
+    }
+
+    /// Stop and join the thread. `Err(())`: it panicked. `Ok(Err(..))`: it
+    /// ended with the failure it recorded.
+    fn stop(&mut self) -> Result<Result<(), String>, ()> {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
         let Some(thread) = self.thread.take() else {
-            return Ok(());
+            return Ok(Ok(()));
         };
-        thread
-            .join()
-            .map_err(|_| io::Error::other("the storage bridge thread panicked during shutdown"))
+        match thread.join() {
+            Ok(result) => Ok(result),
+            Err(_) => Err(()),
+        }
     }
 }
 

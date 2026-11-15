@@ -195,6 +195,14 @@ impl AgentRuntime {
         self
     }
 
+    /// Registers the git processes of the runtime's own reads in the core's
+    /// ledger. Set it before the first thread starts; first wins.
+    #[must_use]
+    pub fn with_spawn_ledger(self, ledger: sandbox::SpawnLedger) -> Self {
+        let _ = self.shared.spawn_ledger.set(ledger);
+        self
+    }
+
     /// The name a run in `root` files its learned memory under, so the host
     /// reads lessons back from the same partition; `None` without a resolver.
     pub fn project_slug(&self, root: &std::path::Path) -> Option<String> {

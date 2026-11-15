@@ -41,6 +41,20 @@ pub struct SnapshotStore {
 
 impl SnapshotStore {
     pub fn open(root: &Path, directory: &Path) -> Result<Self, SnapshotError> {
+        Self::open_owned(root, directory, None)
+    }
+
+    /// [`open`](Self::open) whose every git process, the repository
+    /// initialization included, is registered in `ledger`. Once the ledger's
+    /// spawn fence is closed the store is not created.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open), or the fence is closed.
+    pub fn open_owned(
+        root: &Path,
+        directory: &Path,
+        ledger: Option<SpawnLedger>,
+    ) -> Result<Self, SnapshotError> {
         let root = root.canonicalize()?;
         let parent = directory
             .parent()
@@ -65,7 +79,7 @@ impl SnapshotStore {
         let store = Self {
             root,
             git_dir: directory.join("repository"),
-            ledger: None,
+            ledger,
         };
         if store.git_dir.is_symlink() {
             return Err(SnapshotError::InvalidStore);
@@ -74,14 +88,6 @@ impl SnapshotStore {
             store.git(&["init", "--quiet"])?;
         }
         Ok(store)
-    }
-
-    /// Registers every git process of this store in the core's ledger. Set it
-    /// before the first snapshot is taken.
-    #[must_use]
-    pub fn with_spawn_ledger(mut self, ledger: SpawnLedger) -> Self {
-        self.ledger = Some(ledger);
-        self
     }
 
     pub fn diff(&self, before: &SnapshotId, after: &SnapshotId) -> Result<String, SnapshotError> {

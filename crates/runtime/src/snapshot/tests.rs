@@ -187,9 +187,9 @@ fn every_git_of_a_store_is_registered_in_the_ledger_and_reaped() {
     fs::create_dir(&root).unwrap();
     fs::write(root.join("file"), "content").unwrap();
     let ledger = SpawnLedger::new();
-    let mut store = SnapshotStore::open(&root, &temp.path().join("snapshots"))
-        .unwrap()
-        .with_spawn_ledger(ledger.clone());
+    let mut store =
+        SnapshotStore::open_owned(&root, &temp.path().join("snapshots"), Some(ledger.clone()))
+            .unwrap();
 
     store.capture_all().unwrap();
 
@@ -208,12 +208,28 @@ fn a_closed_fence_starts_no_snapshot_git() {
     let root = temp.path().join("trial");
     fs::create_dir(&root).unwrap();
     let ledger = SpawnLedger::new();
-    let mut store = SnapshotStore::open(&root, &temp.path().join("snapshots"))
-        .unwrap()
-        .with_spawn_ledger(ledger.clone());
+    let mut store =
+        SnapshotStore::open_owned(&root, &temp.path().join("snapshots"), Some(ledger.clone()))
+            .unwrap();
     let before = ledger.child_stats().registered;
     ledger.close_fence();
 
     assert!(store.capture_all().is_err());
     assert_eq!(ledger.child_stats().registered, before);
+}
+
+#[test]
+fn a_store_is_not_created_once_the_fence_is_closed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("trial");
+    fs::create_dir(&root).unwrap();
+    let directory = temp.path().join("snapshots");
+    let ledger = SpawnLedger::new();
+    ledger.close_fence();
+
+    let result = SnapshotStore::open_owned(&root, &directory, Some(ledger.clone()));
+
+    assert!(result.is_err(), "the repository init must not start");
+    assert!(!directory.join("repository").exists());
+    assert_eq!(ledger.child_stats().registered, 0);
 }

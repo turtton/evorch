@@ -46,6 +46,12 @@ impl ThreadEnvironment for RuntimeEnvironment {
         runtime.goal_thread(run_id.parse().ok()?)
     }
 
+    fn spawn_ledger(&self) -> Option<sandbox::SpawnLedger> {
+        self.runtime
+            .upgrade()
+            .and_then(|runtime| runtime.shared.spawn_ledger.get().cloned())
+    }
+
     /// The thread's project, the project's allowed directories and the thread's read-only
     /// directories. The project is the one the thread is bound to, never the one a window
     /// has selected.

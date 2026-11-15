@@ -35,11 +35,14 @@ pub(crate) async fn record(
         return;
     };
     let captured_at_ns = crate::run_store::review_time_ns();
+    let ledger = shared
+        .upgrade()
+        .and_then(|shared| shared.spawn_ledger.get().cloned());
     let root = project_root.clone();
     let deadline = Instant::now() + CAPTURE_DEADLINE;
     let capture = tokio::time::timeout(
         CAPTURE_DEADLINE,
-        tokio::task::spawn_blocking(move || capture(&root, deadline)),
+        tokio::task::spawn_blocking(move || capture(&root, deadline, ledger)),
     )
     .await
     .unwrap_or(Ok(ThreadStartCapture::NotReplayable(
@@ -66,8 +69,12 @@ pub(crate) async fn record(
     }
 }
 
-pub(crate) fn capture(project_root: &Path, deadline: Instant) -> ThreadStartCapture {
-    capture_with(project_root, &GitReader::new(deadline))
+pub(crate) fn capture(
+    project_root: &Path,
+    deadline: Instant,
+    ledger: Option<sandbox::SpawnLedger>,
+) -> ThreadStartCapture {
+    capture_with(project_root, &GitReader::owned(deadline, ledger))
 }
 
 fn capture_with(project_root: &Path, git: &GitReader) -> ThreadStartCapture {
