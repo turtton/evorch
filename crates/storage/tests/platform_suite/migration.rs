@@ -13,7 +13,7 @@ use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
 const LATEST_SCHEMA: u32 = 64;
 
-const EXPECTED_TABLES: [&str; 112] = [
+const EXPECTED_TABLES: [&str; 115] = [
     "restart_transactions",
     "restart_expected_members",
     "restart_components",
@@ -126,6 +126,9 @@ const EXPECTED_TABLES: [&str; 112] = [
     "recovery_claim_members",
     "learning_jobs",
     "learning_job_evidence",
+    "learning_job_staging",
+    "learning_job_publications",
+    "learning_attempt_receipts",
 ];
 
 const EXPECTED_INDICES: [&str; 96] = [
