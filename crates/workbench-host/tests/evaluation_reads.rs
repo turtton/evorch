@@ -352,3 +352,39 @@ fn a_credential_cut_by_the_size_limit_leaves_no_fragment_in_a_report_or_a_candid
         }
     }
 }
+
+#[test]
+fn a_credential_longer_than_any_search_range_leaves_no_fragment_in_a_report() {
+    let w = evaluation_world();
+    seed(&w);
+    let root = w.dir.path().join("eval");
+    let limit = 65_536 - 64;
+    // Given: a report whose credential runs from `opening` bytes before the read limit
+    // to past it, with words (so whitespace) only in front of it. The openings sit on
+    // both sides of where a fixed range back from the end would have started.
+    for (round, opening) in [8_448 + 15, 8_448, 8_448 - 1, 8 * 1024 + 15, 12_000]
+        .into_iter()
+        .enumerate()
+    {
+        let body = "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv".repeat(opening / 32 + 40);
+        let words = "intro words ".repeat((limit - opening) / 12 - 1);
+        std::fs::write(
+            root.join("member-a/report.md"),
+            format!("{words}\nsk-{body}\n"),
+        )
+        .unwrap();
+
+        // When: the report is read.
+        let text = w
+            .read(|| report(&w, &format!("long-{round}"), "member-a"))
+            .data
+            .unwrap()
+            .text
+            .unwrap();
+
+        // Then: nothing of the credential is shown.
+        assert!(text.truncated, "{opening}");
+        assert!(!text.text.contains("sk-"), "{opening}");
+        assert!(!text.text.contains("Ab1Cd2"), "{opening}");
+    }
+}

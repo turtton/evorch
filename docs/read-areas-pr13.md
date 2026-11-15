@@ -52,11 +52,11 @@ namespace.
 
 Every body is bounded (`BoundedText`, 64 KiB) and masked for secrets. A body that is only the
 head of a longer file (an evaluation report, a candidate overlay) is read a little
-short of the limit, and the unfinished word at its end is dropped (back to the last
-whitespace, at most the longest credential plus some room, all of that range if there
-is no whitespace) before the rest is masked and a cut marker is added: a credential
-holds no whitespace, so no fragment of one the cut falls inside is left, whatever the
-detector would have made of it (`bounded_head`). A list is a
+short of the limit, and the unfinished word at its end is dropped before the rest is
+masked and a cut marker is added: the head is cut at its last whitespace (none at all
+keeps nothing), with no search range, because a credential holds no whitespace, so a
+cut there never falls inside one and no fragment of a credential the read limit cut
+through is left, however long it is (`bounded_head`). A list is a
 `Page` cut by the host's `Pager`; a cursor is bound to its operation and snapshot.
 
 ## Client

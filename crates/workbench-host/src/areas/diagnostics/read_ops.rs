@@ -303,30 +303,21 @@ const CUT_MARKER: &str = " [truncated]";
 /// byte limit). A secret that straddles the end of the head would not match whole,
 /// and the detector cannot be relied on to recognise a fragment (it looks at a word's
 /// opening, which depends on the character before it). So the unfinished word at the
-/// end of a head that was cut is dropped altogether: a credential holds no
-/// whitespace, so no part of one that the cut falls inside is left. The drop reaches
-/// back to the last whitespace, but never further than the longest credential the
-/// redactor must mask (plus some room); if there is none in that range, all of the
-/// range goes. Then what is kept is masked in the usual way, and [`CUT_MARKER`] ends it.
+/// end of a head that was cut is dropped altogether: the head is cut at its last
+/// whitespace (space, tab or newline), anywhere in it, or kept as nothing if it has
+/// none. A credential holds no whitespace, so a cut at whitespace cannot fall inside
+/// one, and no part of a credential the original cut falls inside is left, however
+/// long the credential is. A search range would only move the place where a new cut
+/// could split a credential. Then what is kept is masked in the usual way, and
+/// [`CUT_MARKER`] ends it.
 pub fn bounded_head(
     head: &str,
     cut: bool,
 ) -> workbench_protocol::namespaces::diagnostics::BoundedText {
-    static REDACTOR: std::sync::OnceLock<secret_guard::SecretRedactor> = std::sync::OnceLock::new();
     if !cut {
         return bounded(head);
     }
-    let window = REDACTOR
-        .get_or_init(secret_guard::SecretRedactor::from_env)
-        .max_credential_len()
-        + 256;
-    let mut from = head.len().saturating_sub(window);
-    while !head.is_char_boundary(from) {
-        from += 1;
-    }
-    let keep = head[from..]
-        .rfind(char::is_whitespace)
-        .map_or(from, |at| from + at);
+    let keep = head.rfind(char::is_whitespace).unwrap_or(0);
     let mut text = crate::queries::masked(&head[..keep]);
     text.push_str(CUT_MARKER);
     cut_masked(text)
@@ -436,10 +427,37 @@ mod tests {
     }
 
     #[test]
-    fn a_head_without_whitespace_loses_the_whole_range_the_credential_could_start_in() {
-        let head = "y".repeat(4096);
+    fn a_head_without_any_whitespace_keeps_nothing() {
+        let head = "y".repeat(65_536);
         let out = bounded_head(&head, true);
         assert_eq!(out.text, CUT_MARKER, "nothing of an unbroken run is kept");
+    }
+
+    /// A credential longer than any fixed search range, whose cut falls at the end of
+    /// the head and whose opening lies just inside, on, or just outside the edge of the
+    /// range an earlier version searched for whitespace in (the longest credential the
+    /// redactor must mask, plus 256 bytes, back from the end).
+    #[test]
+    fn a_credential_as_long_as_the_search_range_of_an_earlier_version_leaves_no_fragment() {
+        let head_len = 65_536 - 64;
+        let edge = secret_guard::SecretRedactor::from_env().max_credential_len() + 256;
+        for shown_before_edge in [1, 15, 19, 20, 30, 0] {
+            for offset in [shown_before_edge + edge, edge - 1, edge + 1, 8 * 1024 + 15] {
+                // The credential opens `offset` bytes before the end of the head.
+                let body = "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv".repeat(offset / 32 + 1);
+                let credential = format!("sk-{body}");
+                let shown = &credential[..offset];
+                let head = format!(
+                    "{}\n{shown}",
+                    "intro words ".repeat((head_len - offset) / 12 - 1)
+                );
+                let out = bounded_head(&head, true);
+                let label = format!("offset {offset}");
+                assert!(!out.text.contains("sk-"), "{label}");
+                assert!(!out.text.contains("Ab1Cd2"), "{label}");
+                assert!(out.text.ends_with(CUT_MARKER), "{label}");
+            }
+        }
     }
 
     #[test]
