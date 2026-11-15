@@ -54,6 +54,16 @@ pub(super) fn judge_shell(
     procedure_source: bool,
     user_request_count: usize,
 ) -> ReviewVerdict {
+    // A nonapproval can mean "I cannot establish permission", not a definite
+    // refusal. Ask the user even when denial fallback is disabled; never turn it
+    // into automatic approval or count it as a reviewer denial.
+    if verdict.scope_match == Some(ScopeMatch::Unknown) {
+        return ReviewVerdict::RequiresUser {
+            reason: verdict.reason.clone().unwrap_or_else(|| {
+                "shell action's complete authorization scope is uncertain".into()
+            }),
+        };
+    }
     if !verdict.approve {
         return judge(verdict, "shell action", false);
     }
@@ -83,19 +93,10 @@ pub(super) fn judge_shell(
             reason: "shell authorization fields are incomplete".into(),
         };
     }
-    match verdict.scope_match {
-        Some(ScopeMatch::Partial) => {
-            return ReviewVerdict::Deny {
-                reason: "shell action includes targets or effects outside the authorized scope"
-                    .into(),
-            };
-        }
-        Some(ScopeMatch::Unknown) => {
-            return ReviewVerdict::RequiresUser {
-                reason: "shell action's complete authorization scope is uncertain".into(),
-            };
-        }
-        _ => {}
+    if verdict.scope_match == Some(ScopeMatch::Partial) {
+        return ReviewVerdict::Deny {
+            reason: "shell action includes targets or effects outside the authorized scope".into(),
+        };
     }
     // Keep the existing verified-procedure route as an OR, including medium authorization.
     let existing = judge(verdict, "shell action", procedure_source);

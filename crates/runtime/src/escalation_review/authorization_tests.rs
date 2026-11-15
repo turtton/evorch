@@ -202,6 +202,74 @@ fn non_shell_thresholds_ignore_every_shell_claim() {
     }
 }
 
+fn recorded_response(result: &Value) -> Value {
+    let mut result = result.clone();
+    result["risk_level"] = result["risk"].clone();
+    result["authorization_level"] = result["authorization"].clone();
+    for field in ["risk", "authorization", "decision"] {
+        result.as_object_mut().unwrap().remove(field);
+    }
+    result
+}
+
+pub(super) fn uncertain_responses() -> Vec<Value> {
+    let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("fixtures/shell-review/uncertain-denials.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    fixture["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| recorded_response(&record["result"]))
+        .collect()
+}
+
+#[tokio::test]
+async fn recorded_uncertain_nonapprovals_request_clarification_instead_of_denying() {
+    let responses = uncertain_responses();
+    assert_eq!(responses.len(), 3);
+    for response in responses {
+        assert_eq!(response["approve"], false);
+        assert_eq!(response["scope_match"], "unknown");
+        let reason = response["reason"].as_str().unwrap().to_owned();
+        assert_eq!(
+            review(response, Some(context())).await,
+            ReviewVerdict::RequiresUser { reason }
+        );
+    }
+}
+
+#[tokio::test]
+async fn uncertain_permission_and_scope_never_automatically_approve() {
+    for reason in [
+        "The target is unspecified",
+        "Real-user permission is uncertain",
+    ] {
+        let mut value = explicit();
+        value["approve"] = false.into();
+        value["reason"] = reason.into();
+        value["authorization_level"] = "none".into();
+        value["authorization_basis"] = "none".into();
+        value["authorization_refs"] = json!([]);
+        value["scope_match"] = "unknown".into();
+        assert_eq!(
+            review(value.clone(), Some(context())).await,
+            ReviewVerdict::RequiresUser {
+                reason: reason.into()
+            }
+        );
+        for scope in ["partial", "full"] {
+            value["scope_match"] = scope.into();
+            assert_eq!(
+                review(value.clone(), Some(context())).await,
+                ReviewVerdict::Deny {
+                    reason: reason.into()
+                }
+            );
+        }
+    }
+}
+
 #[test]
 fn recorded_model_decisions_replay_through_the_current_policy() {
     let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
@@ -225,18 +293,13 @@ fn recorded_model_decisions_replay_through_the_current_policy() {
             );
             assert_eq!(header["schema"], shell_verdict_schema().schema);
         }
-        let mut replayed = 0;
+        let mut replayed = std::collections::BTreeMap::<String, usize>::new();
         for row in rows {
-            let mut result = row["result"].clone();
-            if result.get("error").is_some() {
+            if row["result"].get("error").is_some() {
                 continue;
             }
-            result["risk_level"] = result["risk"].clone();
-            result["authorization_level"] = result["authorization"].clone();
-            for field in ["risk", "authorization", "decision"] {
-                result.as_object_mut().unwrap().remove(field);
-            }
-            let wire: WireVerdict = serde_json::from_value(result).unwrap();
+            let wire: WireVerdict =
+                serde_json::from_value(recorded_response(&row["result"])).unwrap();
             assert!(wire.risk_level.is_some() && wire.authorization_level.is_some());
             let case = corpus["cases"]
                 .as_array()
@@ -264,12 +327,16 @@ fn recorded_model_decisions_replay_through_the_current_policy() {
                 "{file} {}",
                 row["id"]
             );
-            replayed += 1;
+            *replayed
+                .entry(row["profile"].as_str().unwrap().to_owned())
+                .or_default() += 1;
         }
         assert_eq!(
-            replayed, 51,
-            "the committed primary measurement is complete; fallback is explicitly unavailable"
+            replayed.get("codex-personal"),
+            Some(&51),
+            "the primary measurement is complete"
         );
+        assert!(replayed.values().all(|count| *count <= 51));
     }
     let mut malformed = explicit();
     malformed["procedure_step"] = Value::Null;

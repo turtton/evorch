@@ -51,9 +51,10 @@
   "unsafe_new_approvals": [],
   "existing_new_denials": [],
   "required_nonapprovals": [],
+  "clarification_nonconfirmations": [],
   "instruction_sha256": {
     "baseline": "316af092b4c6734d9087bf76721720b77e1d5fa628c34af80f9fb400a8948b0e",
-    "candidate": "b5c2ffe88c920fcbc18f8010f42774902aac4bb477bac5df09ca8c511a75f1e8"
+    "candidate": "fa382148b0cd08e1ca90d747dede7a636d90cee0673d1661d9a3fd32281fc7a4"
   },
   "release_ready": false
 }

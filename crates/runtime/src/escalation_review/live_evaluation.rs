@@ -9,6 +9,22 @@ async fn live_shell_review_corpus() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let corpus_text = std::fs::read_to_string(root.join("fixtures/shell-review/corpus.json"))?;
     let corpus: Value = serde_json::from_str(&corpus_text)?;
+    // Evaluation-only selection permits independent recovery of a rate-limited
+    // profile. It cannot change the frozen profiles, model, cases or repetitions.
+    let selected_profile = match std::env::var("EVORCH_REVIEW_EVAL_PROFILE") {
+        Ok(profile) => Some(profile),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(profile) = &selected_profile
+        && !corpus["protocol"]["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str() == Some(profile))
+    {
+        return Err("selected profile is outside the frozen protocol".into());
+    }
     let output = PathBuf::from(std::env::var("EVORCH_REVIEW_EVAL_OUTPUT")?);
     let baseline: Option<Value> = std::env::var_os("EVORCH_REVIEW_EVAL_BASELINE")
         .map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap());
@@ -36,10 +52,14 @@ async fn live_shell_review_corpus() -> Result<(), Box<dyn std::error::Error>> {
             "corpus_sha256": sha256_hex(corpus_text.as_bytes()),
             "instruction_sha256": sha256_hex(instruction.as_bytes()),
             "schema": schema.schema,
+            "selected_profile": selected_profile,
         })
     )?;
     for profile in corpus["protocol"]["profiles"].as_array().unwrap() {
         let profile = profile.as_str().unwrap();
+        if selected_profile.as_deref().is_some_and(|p| p != profile) {
+            continue;
+        }
         let candidate = candidates
             .iter()
             .find(|c| c.profile == profile)

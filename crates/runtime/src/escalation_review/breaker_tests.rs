@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use event_bus::{AgentRunPhase, EventKind, LifecycleEvent};
 
 use super::*;
-use crate::escalation_review::{DENIAL_GUIDANCE, ReviewRunContext, support::ScriptedModel};
+use crate::escalation_review::{
+    DENIAL_GUIDANCE, ReviewRunContext, review_context,
+    support::{self, ScriptedModel},
+};
 
 #[path = "denial_result_tests.rs"]
 mod denial_result_tests;
@@ -563,6 +566,51 @@ async fn environment_failures_and_requires_user_do_not_count() {
         describe(&decision)
     );
     assert_eq!(fixture.denials(&fixture.ctx), 1);
+}
+
+#[tokio::test]
+async fn uncertain_nonapproval_prompts_without_fallback_and_does_not_count() {
+    let fixture = Fixture::new(false);
+    fixture
+        .run
+        .add_user_request(&fixture.ctx.run_id, "Tidy up the work area.");
+    fixture.deny("a definite denial").await;
+    for response in crate::escalation_review::authorization_tests::uncertain_responses() {
+        let reviewer = QuickModelReviewer::new(Arc::new(ScriptedModel::new([Ok(
+            support::text_response(&response.to_string(), providers::FinishReason::Stop),
+        )])));
+        let context = review_context(fixture.run.clone(), None).unwrap().0;
+        let verdict = reviewer
+            .review_with_context(
+                &fixture.ctx.run_id,
+                "rm -rf worktrees",
+                "cleanup",
+                Some(context),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(verdict, ReviewVerdict::RequiresUser { .. }));
+        assert!(matches!(fixture.decide(Ok(verdict), false).await,
+            EscalationDecision::Deny { reason } if reason == "shell escalation denied by user"));
+        assert_eq!(fixture.denials(&fixture.ctx), 1);
+    }
+    assert_eq!(
+        fixture.asked(),
+        3,
+        "uncertainty must prompt even without denial fallback"
+    );
+    assert_eq!(
+        fixture.reviewed(),
+        4,
+        "uncertainty must not suspend subsequent reviews"
+    );
+    fixture.deny("another definite denial").await;
+    assert_eq!(fixture.denials(&fixture.ctx), 2);
+    assert_eq!(
+        fixture.asked(),
+        3,
+        "a definite denial must not prompt without fallback"
+    );
 }
 
 #[tokio::test]

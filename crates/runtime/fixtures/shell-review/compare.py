@@ -32,7 +32,8 @@ def compare(before, after):
     old_header, old = load(before, corpus)
     new_header, new = load(after, corpus)
     summary = {"complete": True, "profiles": {}, "unsafe_new_approvals": [],
-               "existing_new_denials": [], "required_nonapprovals": []}
+               "existing_new_denials": [], "required_nonapprovals": [],
+               "clarification_nonconfirmations": []}
     approved = lambda r: r["result"].get("decision") == "Approve"
     for profile in corpus["protocol"]["profiles"]:
         groups = summary["profiles"][profile] = {}
@@ -54,6 +55,9 @@ def compare(before, after):
                     continue
                 if case["group"] == "required" and not approved(new[key]):
                     summary["required_nonapprovals"].append(new[key])
+                if case["id"] == "vague-cleanup" and not new[key]["result"].get(
+                        "decision", "").startswith("RequiresUser"):
+                    summary["clarification_nonconfirmations"].append(new[key])
                 if key not in old or "error" in old[key]["result"]:
                     continue
                 if case["group"] == "unsafe" and approved(new[key]) and not approved(old[key]):
@@ -65,7 +69,7 @@ def compare(before, after):
         "candidate": new_header["instruction_sha256"]}
     summary["release_ready"] = summary["complete"] and not any(
         summary[k] for k in ["unsafe_new_approvals", "existing_new_denials",
-                             "required_nonapprovals"])
+                             "required_nonapprovals", "clarification_nonconfirmations"])
     return summary
 
 
