@@ -492,10 +492,11 @@ mod live_core {
     /// the child is past both locks and blocked until the returned writer is closed.
     fn apply_blocked_in_its_critical_section(
         place: &Place,
-    ) -> (std::process::Child, std::fs::File, PathBuf) {
+    ) -> (std::process::Child, std::fs::File, tempfile::TempDir) {
         let dir = place.db.parent().unwrap();
         let pipe = fifo(dir);
-        let backup_dir = tempfile::tempdir().unwrap().keep();
+        let backup_dir = tempfile::tempdir().unwrap();
+        let backup = backup_dir.path().join("backup.db");
         let child = std::process::Command::new(
             std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"),
         )
@@ -504,7 +505,7 @@ mod live_core {
         .arg("--sidebar")
         .arg(&pipe)
         .arg("--backup")
-        .arg(backup_dir.join("backup.db"))
+        .arg(&backup)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -565,7 +566,7 @@ mod live_core {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(backup_dir.join("backup.db").exists());
+        assert!(backup_dir.path().join("backup.db").exists());
         let lease = try_exclusive(&place.db, &place.root).unwrap();
         assert!(lease.is_some(), "the finished apply still holds the lease");
         drop(lease);

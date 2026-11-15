@@ -98,11 +98,19 @@ fn refuse_settings_database_output(
     let user_dir = resolve(&user_dir)?;
     let output_resolved = resolve(output)?;
     let database = user_dir.join(SETTINGS_DATABASE);
-    let beside_database = output_resolved.parent() == Some(user_dir.as_path())
-        && output_resolved
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with(SETTINGS_DATABASE));
-    if beside_database
+    // The first name below the configuration directory decides: `evorch-events.db`,
+    // `evorch-events.db-wal`, `evorch-events.db.maintenance-lock`, ... and everything under any of them.
+    let in_settings_names = output_resolved
+        .strip_prefix(&user_dir)
+        .ok()
+        .and_then(|below| below.components().next())
+        .is_some_and(|first| {
+            first
+                .as_os_str()
+                .to_string_lossy()
+                .starts_with(SETTINGS_DATABASE)
+        });
+    if in_settings_names
         || output_resolved.starts_with(&database)
         || database.starts_with(&output_resolved)
     {

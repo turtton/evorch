@@ -519,10 +519,28 @@ impl AccessSentinel {
     }
 }
 
+/// Fails with its own message when the temporary directory's filesystem does not move the
+/// access time on a read (a `noatime` mount): the open-attempt measurement cannot work
+/// there, and that must not read as a regression of the code under test.
+fn require_atime_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = AccessSentinel::new(&dir.path().join("probe"));
+    let _ = std::fs::read(&probe.path).unwrap();
+    assert!(
+        AccessSentinel::stamp(&probe.path) != probe.stamp,
+        "cannot run the open-attempt measurement: reading a file does not update its access \
+         time on the filesystem of {} (a noatime mount?). This is the environment, not a \
+         failure of the benchmark: run the test where the temporary directory is on a \
+         relatime or strictatime filesystem",
+        dir.path().display()
+    );
+}
+
 // Control for the sentinel: a real attempt to open a database at that path is detected,
 // and a file nobody opened is not reported.
 #[test]
 fn the_sentinel_detects_an_attempt_to_open_a_database() {
+    require_atime_updates();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("evorch-events.db");
     let sentinel = AccessSentinel::new(&path);
@@ -543,6 +561,7 @@ fn the_sentinel_detects_an_attempt_to_open_a_database() {
 // same afterwards, and nothing may appear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_never_opens_the_settings_database_or_rewrites_credentials() {
+    require_atime_updates();
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempfile::tempdir().unwrap();
@@ -628,6 +647,18 @@ async fn record_refuses_an_output_at_the_settings_databases_place() {
         user.join("evorch-events.db.reclaim-lock"),
         user.join("evorch-events.db.improvement-lock"),
         user.join("evorch-events.db").join("inside"),
+        user.join("evorch-events.db.maintenance-lock")
+            .join("inside"),
+        user.join("evorch-events.db-wal").join("inside"),
+        user.join("evorch-events.db-shm")
+            .join("deep")
+            .join("inside"),
+        user.join("evorch-events.db.reclaim-lock").join("inside"),
+        user.join("evorch-events.db.improvement-lock")
+            .join("inside"),
+        alias
+            .join("evorch-events.db.maintenance-lock")
+            .join("inside"),
         alias.join("evorch-events.db"),
         alias.join("evorch-events.db.maintenance-lock"),
         user.join("not-yet").join("..").join("evorch-events.db"),

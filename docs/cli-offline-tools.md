@@ -20,8 +20,11 @@ before it reads or writes anything: no backup, no sidecar, no new lock file.
   releases it with the process (it is an advisory lock on an inode that is never unlinked).
 - While an apply is inside its critical section, a core, a writer, another offline command,
   an inspection and a plain SQLite reader are all kept out (the lease, plus SQLite's
-  exclusive lock that apply takes), and when it ends or is killed the lease is free again
-  and the database file is as it was.
+  exclusive lock that apply takes). When it ends or is killed the lease is free again.
+  The database file is unchanged only for a kill at the synchronization point the test
+  uses (after both locks, before the first write). A kill later, between batches, keeps the
+  batches already committed, which is the existing contract of the maintenance commands
+  (recover from the verified backup); the tests do not cover that case.
 - A hard link to the database file is *not* an alias: it canonicalizes to another path and
   therefore another lease file. SQLite itself does not support hard links to a database
   (WAL sidecars are named after the path). Do not point `--db` at one.
@@ -51,7 +54,7 @@ create the empty file (mode 0600). A copy of the database alone needs that once.
 `evorch benchmark` composes a runtime without a store: it never opens the settings database
 (`<user-config>/evorch-events.db`) or any file next to it. `record` also refuses an output
 directory that is that database, a file beside it (`evorch-events.db*`: sidecars and lease
-files), a path under it, or a place that contains it, with aliases (symlinks, `..`) resolved
+files), a path under any of those, or a place that contains it, with aliases (symlinks, `..`) resolved
 and before anything is created; such a directory would keep the next core from creating its
 database.
 
@@ -59,8 +62,9 @@ The tests measure open attempts from outside: a sentinel file stands at the data
 with equal, old access and modification times; reading it moves the access time and writing
 it moves the rest, so an unchanged stamp means nothing opened it. A control test shows that
 a real `Database::open` is detected. This needs a filesystem that updates access times
-(`relatime`, the default); on a `noatime` mount the control test fails instead of the
-measurement passing silently.
+(`relatime`, the default); on a `noatime` mount the tests first fail with a message that
+names the environment (a probe file is read and its access time must move), so it cannot be
+mistaken for a regression and the measurement never passes silently.
 
 Known side effects, kept on purpose:
 
