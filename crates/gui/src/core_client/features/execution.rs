@@ -28,15 +28,20 @@ use workbench_protocol::{
 /// What a request in flight was for.
 #[derive(Debug, Clone)]
 enum Pending {
-    Runs {
-        thread: ThreadId,
-        path: Vec<RunId>,
-        append: bool,
-    },
-    Execution {
-        thread: ThreadId,
-    },
+    Runs { thread: ThreadId, path: Vec<RunId> },
+    Execution { thread: ThreadId },
     Command(&'static str),
+}
+
+/// A cursor chain is read serially and published as one prefix. Keeping the old
+/// prefix visible avoids losing a row (or its pointer target) between pages.
+#[derive(Default)]
+struct RunsRead {
+    tag: Option<u64>,
+    items: Vec<RunDetail>,
+    pages: usize,
+    target_pages: usize,
+    next_cursor: Option<PageCursor>,
 }
 
 #[derive(Default)]
@@ -50,6 +55,8 @@ pub struct ExecutionFeature {
     path: Vec<RunId>,
     runs: Vec<RunDetail>,
     next_cursor: Option<PageCursor>,
+    loaded_pages: usize,
+    runs_read: Option<RunsRead>,
     execution: Option<ThreadExecution>,
     status: String,
     runs_stale: bool,
@@ -67,19 +74,24 @@ impl ExecutionFeature {
     fn switch_thread(&mut self, thread: Option<ThreadId>) {
         self.thread = thread;
         self.path.clear();
-        self.runs.clear();
-        self.next_cursor = None;
+        self.clear_runs();
         self.execution = None;
-        self.runs_stale = self.thread.is_some();
         self.execution_stale = self.thread.is_some();
     }
 
     /// Show the children of `run`: a new level below the current one.
     fn drill_into(&mut self, run: RunId) {
         self.path.push(run);
+        self.clear_runs();
+    }
+
+    fn clear_runs(&mut self) {
         self.runs.clear();
         self.next_cursor = None;
-        self.runs_stale = true;
+        self.loaded_pages = 0;
+        self.runs_read = None;
+        self.more_requested = false;
+        self.runs_stale = self.thread.is_some();
     }
 
     fn scope(&self) -> RunScope {
@@ -91,20 +103,41 @@ impl ExecutionFeature {
         }
     }
 
-    fn request_runs(&mut self, ctx: &mut FeatureContext<'_>, append: bool) {
+    fn request_runs(&mut self, ctx: &mut FeatureContext<'_>) {
         let Some(thread) = self.thread.clone() else {
             return;
         };
-        let cursor = if append {
-            self.next_cursor.clone()
-        } else {
-            None
+        if self.runs_read.is_none() {
+            let more = self.more_requested && self.next_cursor.is_some();
+            self.more_requested = false;
+            if self.runs_stale {
+                self.runs_stale = false;
+                self.runs_read = Some(RunsRead {
+                    target_pages: self.loaded_pages.max(1) + usize::from(more),
+                    ..Default::default()
+                });
+            } else if more {
+                self.runs_read = Some(RunsRead {
+                    items: self.runs.clone(),
+                    pages: self.loaded_pages,
+                    target_pages: self.loaded_pages + 1,
+                    next_cursor: self.next_cursor.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+        let Some(read) = &self.runs_read else {
+            return;
         };
+        if read.tag.is_some() {
+            return;
+        }
+        let cursor = read.next_cursor.clone();
         let tag = self.tag(Pending::Runs {
             thread: thread.clone(),
             path: self.path.clone(),
-            append,
         });
+        self.runs_read.as_mut().unwrap().tag = Some(tag);
         ctx.query(
             tag,
             Query::Execution(ExecutionQuery::ListRunDetails(RunDetailsQuery {
@@ -127,23 +160,19 @@ impl ExecutionFeature {
         ui.horizontal_wrapped(|ui| {
             if ui.button("ルート").clicked() && !self.path.is_empty() {
                 self.path.clear();
-                self.runs.clear();
-                self.next_cursor = None;
-                self.runs_stale = true;
+                self.clear_runs();
             }
             for index in 0..self.path.len() {
                 let id = self.path[index].clone();
                 ui.label("›");
                 if ui.button(id.as_str()).clicked() && index + 1 < self.path.len() {
                     self.path.truncate(index + 1);
-                    self.runs.clear();
-                    self.next_cursor = None;
-                    self.runs_stale = true;
+                    self.clear_runs();
                     break;
                 }
             }
         });
-        if self.runs.is_empty() && !self.runs_stale {
+        if self.runs.is_empty() && !self.runs_stale && self.runs_read.is_none() {
             ui.label("この階層に run はありません。");
         }
         let mut drill = None;
@@ -186,7 +215,12 @@ impl ExecutionFeature {
         if let Some(run) = stop {
             self.command(ctx, "run の停止", stop_run(thread, run));
         }
-        if more {
+        if more
+            && !self
+                .runs_read
+                .as_ref()
+                .is_some_and(|read| read.target_pages > self.loaded_pages)
+        {
             self.more_requested = true;
         }
     }
@@ -367,14 +401,11 @@ impl Feature for ExecutionFeature {
     fn reset(&mut self) {
         // What came from the core is dropped and asked for again; `pending`
         // stays, because a tag may still be answered.
-        let thread = self.thread.clone();
-        let path = std::mem::take(&mut self.path);
-        self.runs.clear();
-        self.next_cursor = None;
+        let loaded_pages = self.loaded_pages;
+        self.clear_runs();
+        self.loaded_pages = loaded_pages;
         self.execution = None;
-        self.runs_stale = thread.is_some();
-        self.execution_stale = thread.is_some();
-        self.path = path;
+        self.execution_stale = self.thread.is_some();
     }
 
     fn event(&mut self, event: &UiEvent) {
@@ -405,28 +436,36 @@ impl Feature for ExecutionFeature {
         let Some(pending) = self.pending.remove(&tag) else {
             return;
         };
+        if let Pending::Runs { thread, path } = &pending {
+            // A navigation or reset invalidates the read, even when the user has
+            // since returned to the same thread and breadcrumb.
+            if self.thread.as_ref() != Some(thread)
+                || self.path != *path
+                || self.runs_read.as_ref().and_then(|read| read.tag) != Some(tag)
+            {
+                return;
+            }
+        }
         match (pending, reply) {
             (
-                Pending::Runs {
-                    thread,
-                    path,
-                    append,
-                },
+                Pending::Runs { .. },
                 FeatureReply::Query(Ok(QueryReply::Execution(ExecutionReply::RunDetails(page)))),
             ) => {
-                if self.thread.as_ref() != Some(&thread) || self.path != path {
-                    return;
-                }
-                if append {
-                    for run in page.items {
-                        if !self.runs.iter().any(|r| r.summary.id == run.summary.id) {
-                            self.runs.push(run);
-                        }
+                let read = self.runs_read.as_mut().unwrap();
+                read.tag = None;
+                for run in page.items {
+                    if !read.items.iter().any(|r| r.summary.id == run.summary.id) {
+                        read.items.push(run);
                     }
-                } else {
-                    self.runs = page.items;
                 }
-                self.next_cursor = page.next_cursor;
+                read.pages += 1;
+                read.next_cursor = page.next_cursor;
+                if read.pages >= read.target_pages || read.next_cursor.is_none() {
+                    let read = self.runs_read.take().unwrap();
+                    self.runs = read.items;
+                    self.loaded_pages = read.pages;
+                    self.next_cursor = read.next_cursor;
+                }
             }
             (
                 Pending::Execution { thread },
@@ -438,7 +477,11 @@ impl Feature for ExecutionFeature {
                     self.execution = Some(*execution);
                 }
             }
-            (Pending::Runs { .. } | Pending::Execution { .. }, FeatureReply::Query(Err(error))) => {
+            (Pending::Runs { .. }, FeatureReply::Query(Err(error))) => {
+                self.runs_read = None;
+                self.status = error.message;
+            }
+            (Pending::Execution { .. }, FeatureReply::Query(Err(error))) => {
                 self.status = error.message;
             }
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
@@ -468,14 +511,7 @@ impl Feature for ExecutionFeature {
             ui.label("会話を選択すると run・ゴール・Todo を表示します。");
             return;
         };
-        if self.runs_stale {
-            self.runs_stale = false;
-            self.request_runs(ctx, false);
-        }
-        if self.more_requested {
-            self.more_requested = false;
-            self.request_runs(ctx, true);
-        }
+        self.request_runs(ctx);
         if self.execution_stale {
             self.execution_stale = false;
             let tag = self.tag(Pending::Execution {
