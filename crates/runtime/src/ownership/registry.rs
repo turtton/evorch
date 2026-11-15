@@ -166,6 +166,9 @@ thread_local! {
     static WRITER_CONTENTION: std::cell::RefCell<Option<(
         std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>
     )>> = const { std::cell::RefCell::new(None) };
+    static HOLD_COMMIT: std::cell::RefCell<Option<(
+        std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>
+    )>> = const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Clone, Copy)]
@@ -192,6 +195,16 @@ impl Registry {
         resume: std::sync::mpsc::Receiver<()>,
     ) {
         WRITER_CONTENTION.with(|observer| *observer.borrow_mut() = Some((entered, resume)));
+    }
+
+    /// Pause after writing holds but before commit, so cleanup can observe the
+    /// actual SQLite reservation rather than relying on thread scheduling.
+    #[cfg(test)]
+    pub(super) fn observe_hold_commit(
+        written: std::sync::mpsc::SyncSender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) {
+        HOLD_COMMIT.with(|observer| *observer.borrow_mut() = Some((written, resume)));
     }
 
     fn site<'a>(
@@ -453,9 +466,11 @@ impl Registry {
         Ok(serde_json::from_str(&json.ok_or(RegistryError::Absent)?)?)
     }
 
-    /// Atomically install and read back holds for ALL unreleased threads of this
-    /// owner, including idle threads omitted by capture. The caller fences new
-    /// admissions before calling. No restart/storage DB transaction is assumed.
+    /// Atomically install holds for ALL unreleased threads of this owner,
+    /// including idle threads omitted by capture, and return the saved inventory.
+    /// The caller fences new admissions before calling and performs readback
+    /// after an uncertain ACK and before Armed. This method does not read back
+    /// after commit or assume a transaction across the restart/storage DBs.
     pub fn hold_owned(
         &mut self,
         owner_id: &str,
@@ -504,6 +519,11 @@ impl Registry {
                 params![owner.thread_id, serde_json::to_string(&owner)?],
             )?;
             holds.push(*owner.handoff_hold.expect("installed hold"));
+        }
+        #[cfg(test)]
+        if let Some((written, resume)) = HOLD_COMMIT.with(|observer| observer.borrow_mut().take()) {
+            written.send(()).expect("holds await commit");
+            resume.recv().expect("test releases hold commit");
         }
         transaction.commit()?;
         Ok(holds)

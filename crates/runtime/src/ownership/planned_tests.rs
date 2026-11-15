@@ -505,3 +505,107 @@ fn missing_hold_is_not_adoption_authority_and_failed_closed_keeps_parked_runs() 
     ));
     assert_eq!(next.attach("parked").unwrap(), cleared);
 }
+
+#[test]
+fn scratch_cleanup_before_hold_serializes_the_saved_inventory() {
+    use std::sync::mpsc::sync_channel;
+
+    let f = Fixture::new();
+    let permit = f.host.start("idle").unwrap();
+    let file = f.marker("idle");
+    let mut cleaner = f.registry();
+    let path = f.directory.path().join("owners.db");
+    let owner_id = f.host.owner_id().to_owned();
+    std::thread::scope(|scope| {
+        // Keep senders local: a failed assertion drops them before scope joins,
+        // so a blocked participant also exits instead of hiding the failure.
+        let (cleaning, entered_cleanup) = sync_channel(0);
+        let (finish_cleanup, resume_cleanup) = sync_channel(0);
+        let (contended, entered_contention) = sync_channel(0);
+        let (retry_hold, resume_hold) = sync_channel(0);
+
+        let file_to_clean = file.clone();
+        let cleanup = scope.spawn(move || {
+            cleaner
+                .clean_scratch("idle", &permit.lease, || {
+                    cleaning.send(()).unwrap();
+                    resume_cleanup.recv().unwrap();
+                    std::fs::remove_file(file_to_clean).unwrap();
+                })
+                .unwrap();
+        });
+        entered_cleanup.recv().unwrap();
+        let holder = scope.spawn(move || {
+            Registry::observe_writer_contention(contended, resume_hold);
+            let mut registry = Registry::open_existing(&path).unwrap();
+            registry
+                .hold_owned(&owner_id, "tx", "capture", &ExpectedActiveRuns::new())
+                .unwrap()
+        });
+        // The hold really attempted its write while cleanup owned the reservation.
+        entered_contention.recv().unwrap();
+        kept(&file);
+        finish_cleanup.send(()).unwrap();
+        cleanup.join().unwrap();
+        assert!(!file.exists(), "cleanup completed before hold installation");
+        // Data produced after cleanup must not be removed by the later hold.
+        std::fs::write(&file, b"keep\0bytes").unwrap();
+        retry_hold.send(()).unwrap();
+        let holds = holder.join().unwrap();
+        assert_eq!(holds.len(), 1);
+        assert_eq!(
+            f.registry().attach("idle").unwrap().handoff_hold,
+            Some(Box::new(holds[0].clone()))
+        );
+    });
+    kept(&file);
+}
+
+#[test]
+fn scratch_cleanup_waits_for_hold_commit_and_skips_deletion() {
+    use std::sync::mpsc::sync_channel;
+
+    let f = Fixture::new();
+    let permit = f.host.start("idle").unwrap();
+    let file = f.marker("idle");
+    let mut holder = f.registry();
+    let path = f.directory.path().join("owners.db");
+    let owner_id = f.host.owner_id().to_owned();
+    std::thread::scope(|scope| {
+        // Keep senders local: a failed assertion drops them before scope joins,
+        // so a blocked participant also exits instead of hiding the failure.
+        let (written, holds_written) = sync_channel(0);
+        let (commit, resume_commit) = sync_channel(0);
+        let (contended, entered_contention) = sync_channel(0);
+        let (retry_cleanup, resume_cleanup) = sync_channel(0);
+
+        let hold = scope.spawn(move || {
+            Registry::observe_hold_commit(written, resume_commit);
+            holder
+                .hold_owned(&owner_id, "tx", "capture", &ExpectedActiveRuns::new())
+                .unwrap()
+        });
+        holds_written.recv().unwrap();
+        let cleanup = scope.spawn(move || {
+            Registry::observe_writer_contention(contended, resume_cleanup);
+            let mut registry = Registry::open_existing(&path).unwrap();
+            registry
+                .clean_scratch("idle", &permit.lease, || {
+                    panic!("committed hold must skip destructive cleanup")
+                })
+                .unwrap();
+            registry.attach("idle").unwrap()
+        });
+        // Cleanup reached SQLite while the actual hold write was still uncommitted.
+        entered_contention.recv().unwrap();
+        kept(&file);
+        commit.send(()).unwrap();
+        let holds = hold.join().unwrap();
+        assert_eq!(holds.len(), 1);
+        retry_cleanup.send(()).unwrap();
+        let observed = cleanup.join().unwrap();
+        assert_eq!(observed.handoff_hold, Some(Box::new(holds[0].clone())));
+        assert_eq!(f.registry().attach("idle").unwrap(), observed);
+    });
+    kept(&file);
+}
