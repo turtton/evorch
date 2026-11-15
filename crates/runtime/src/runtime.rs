@@ -154,6 +154,10 @@ pub(crate) struct Shared {
     pub(crate) wake_reset_generations: Mutex<HashMap<RunId, u64>>,
     pub(crate) question_delivery: Mutex<questions::delivery::QuestionDelivery>,
     pub(crate) producers: crate::producer::ProducerGate,
+    /// Learning pipelines start behind this gate. Pausing it stops only new learning
+    /// pipelines (their jobs stay `Pending`), never lanes or chats, which use `producers`.
+    pub(crate) learning_gate: crate::producer::ProducerGate,
+    pub(crate) learning_origin: OnceLock<storage::learning_jobs::LearningOrigin>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) self_improvement: OnceLock<crate::self_improvement::ImprovementSettings>,
     pub(crate) self_improvement_task: OnceLock<crate::self_improvement::lifecycle::ObserverTask>,
@@ -822,6 +826,8 @@ impl AgentRuntime {
                 question_delivery: Mutex::new(Default::default()),
                 topology: OnceLock::new(),
                 producers: crate::producer::ProducerGate::default(),
+                learning_gate: crate::producer::ProducerGate::default(),
+                learning_origin: OnceLock::new(),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
                 self_improvement_task: OnceLock::new(),
@@ -1238,6 +1244,8 @@ impl AgentRuntime {
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 sandbox_factory: Some(factory),
                 producers: crate::producer::ProducerGate::default(),
+                learning_gate: crate::producer::ProducerGate::default(),
+                learning_origin: OnceLock::new(),
                 learning: OnceLock::new(),
                 self_improvement: OnceLock::new(),
                 self_improvement_task: OnceLock::new(),

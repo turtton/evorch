@@ -610,3 +610,72 @@ async fn pending_learning_starts_once_after_resume_and_never_after_shutdown() {
     assert!(!gate.resume(pause));
     assert_eq!(fixture.runtime.list_agents().len(), 1);
 }
+
+fn job_states(fixture: &Fixture) -> Vec<storage::learning_jobs::LearningJobState> {
+    use storage::learning_jobs::LearningJobState;
+    let database = Database::open(&fixture.config).unwrap();
+    LearningJobState::ALL
+        .into_iter()
+        .flat_map(|state| {
+            database
+                .learning_jobs(&[state])
+                .unwrap()
+                .into_iter()
+                .map(move |_| state)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_completed_pipeline_ends_its_durable_job_and_drops_the_evidence() {
+    use storage::learning_jobs::LearningJobState;
+    let fixture = Fixture::new(ReviewMode::Approve);
+    let source = fixture.start().await;
+    assert_eq!(fixture.learning(source).await, Ok(()));
+    assert_eq!(job_states(&fixture), [LearningJobState::Finished]);
+    let database = Database::open(&fixture.config).unwrap();
+    let job = &database
+        .learning_jobs(&[LearningJobState::Finished])
+        .unwrap()[0];
+    assert!(
+        database
+            .learning_job_evidence(&job.task_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+// New pipelines wait behind a paused learning gate, but a paused learning gate is
+// not the shared producer gate: chats and lanes keep going.
+#[tokio::test]
+async fn a_learning_pause_holds_the_job_pending_without_pausing_other_producers() {
+    use storage::learning_jobs::LearningJobState;
+    let fixture = Fixture::new(ReviewMode::Approve);
+    let learning = fixture.runtime.learning_gate();
+    let pause = learning.pause();
+    let source = fixture.start().await;
+    // The pipeline admits its job on a spawned task and gives no completion signal
+    // before it waits at the paused gate, so yield until the job is recorded. Only
+    // scheduling is awaited, never a duration; a missing job hangs and the runner's
+    // slow-timeout reports it.
+    while job_states(&fixture).is_empty() {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(job_states(&fixture), [LearningJobState::Pending]);
+    let database = Database::open(&fixture.config).unwrap();
+    let pending = &database
+        .learning_jobs(&[LearningJobState::Pending])
+        .unwrap()[0];
+    assert!(
+        database
+            .learning_job_evidence(&pending.task_id)
+            .unwrap()
+            .is_some(),
+        "a pending job keeps its evidence for a successor"
+    );
+    assert!(fixture.runtime.producer_gate().try_enter().is_some());
+    assert_eq!(fixture.runtime.list_agents().len(), 1);
+    assert!(learning.resume(pause));
+    assert_eq!(fixture.learning(source).await, Ok(()));
+    assert_eq!(job_states(&fixture), [LearningJobState::Finished]);
+}

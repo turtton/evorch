@@ -79,6 +79,13 @@ pub fn start(
     storage: &storage::StorageConfig,
     evaluations: eval::evaluator::EvaluationService,
 ) -> Result<(), BootstrapError> {
+    // Ends the learning jobs that dead processes left behind. It runs nothing: a
+    // started job is never re-run, and only a core takes over pending jobs.
+    match runtime.sweep_dead_learning_origins_from_proc() {
+        Some(Ok(report)) => tracing::debug!(?report, "learning job janitor ran"),
+        Some(Err(error)) => tracing::warn!(%error, "learning job janitor failed"),
+        None => {}
+    }
     let Some(drafts) = draft_dir(config, &storage.db_path) else {
         let runtime = runtime.clone();
         services.start("learning", |stop| async move {

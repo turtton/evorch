@@ -24,6 +24,21 @@ fn claim_on_day(
     day: i64,
 ) -> Result<bool, StorageError> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let admitted = claim_in(&tx, task, roots, goal, daily_limit, day)?;
+    tx.commit()?;
+    Ok(admitted)
+}
+
+/// The claim steps inside a caller-owned transaction, so a job can be admitted with its
+/// claim atomically. Returns `false` (inserting nothing) for a repeat or a spent quota.
+pub(crate) fn claim_in(
+    tx: &rusqlite::Transaction<'_>,
+    task: &str,
+    roots: &[String],
+    goal: bool,
+    daily_limit: u32,
+    day: i64,
+) -> Result<bool, StorageError> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM learning_claims WHERE task_id=?1)",
         [task],
@@ -58,7 +73,6 @@ fn claim_on_day(
             params![task, root],
         )?;
     }
-    tx.commit()?;
     Ok(true)
 }
 

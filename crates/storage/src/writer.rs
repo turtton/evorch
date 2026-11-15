@@ -20,6 +20,7 @@ mod lane_delivery;
 mod lane_instructions;
 mod lane_management;
 mod lanes;
+mod learning_jobs;
 mod pull_request_auto_fix;
 mod pull_requests;
 mod recovery;
@@ -79,6 +80,10 @@ enum Command {
     SaveAssistantReference(crate::AssistantReferenceRow, ReplyTx),
     AssistantReference(String, ReplyTx<Option<crate::AssistantReferenceRow>>),
     ClaimLearning(String, Vec<String>, bool, u32, ReplyTx<bool>),
+    LearningJob(
+        crate::learning_jobs::Write,
+        ReplyTx<crate::learning_jobs::Written>,
+    ),
     SaveThreadStartState(crate::thread_start::ThreadStartState, ReplyTx<bool>),
     SaveEvalSample(crate::eval_sample::EvalSample, ReplyTx),
     DeleteEvalSample(String, ReplyTx<bool>),

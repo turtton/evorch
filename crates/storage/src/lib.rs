@@ -76,6 +76,7 @@ pub mod lane_instructions;
 pub mod lane_management;
 pub mod lanes;
 mod learning;
+pub mod learning_jobs;
 pub mod maintenance;
 pub mod memory;
 mod migrations;
