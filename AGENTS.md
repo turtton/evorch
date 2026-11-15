@@ -64,8 +64,9 @@ mismatch. Revisit this policy before cutting a v1 release.
 
 ## Development environment
 
-- On `x86_64-linux`, the default Nix dev shell resolves `cargo` to the
-  turtton/cargo fork from the tag-pinned `turtton-cargo` flake input. Other
+- On `x86_64-linux` and `aarch64-darwin`, the default Nix dev shell resolves
+  `cargo` to the turtton/cargo fork from the tag-pinned `turtton-cargo` flake
+  input (the systems for which that flake outputs a cargo package). Other
   systems use upstream cargo. rustc, rustfmt, clippy and rust-analyzer still
   come from the fenix toolchain. CI and the crane builds keep the upstream
   cargo. `nix develop .#upstream-cargo` gives the previous setup: fenix's
