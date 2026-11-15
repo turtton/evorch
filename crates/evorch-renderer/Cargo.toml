@@ -1,0 +1,17 @@
+[package]
+name = "evorch-renderer"
+description = "Out-of-process CEF renderer helper for the evorch core (ADR 0045); the only crate besides browser-cef and gui that links CEF"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+browser-cef = { path = "../browser-cef", features = ["cef"] }
+renderer-ipc = { path = "../renderer-ipc" }
+rustix = { version = "1", features = ["fs", "stdio"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+rustix = { version = "1", features = ["process"] }
+tempfile = { workspace = true }

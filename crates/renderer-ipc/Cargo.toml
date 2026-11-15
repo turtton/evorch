@@ -1,0 +1,11 @@
+[package]
+name = "renderer-ipc"
+description = "Internal IPC between the core and the evorch-renderer helper (ADR 0045); free of CEF, egui and every core crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
