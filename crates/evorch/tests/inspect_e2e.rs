@@ -291,6 +291,86 @@ fn inspection_refused_by_the_lease_prints_an_error_and_no_json() {
     assert!(inspect(&db, &["storage"]).is_ok());
 }
 
+/// Every file next to the database with its bytes. SQLite's own reader protocol may
+/// create the `-wal` and `-shm` files (see `storage::inspect::open`), so those are left
+/// out; any other file, and every byte of the rest, must stay as it was.
+fn directory_state(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type().unwrap().is_dir()
+                || name.ends_with("-wal")
+                || name.ends_with("-shm")
+            {
+                return None;
+            }
+            Some((name, std::fs::read(entry.path()).unwrap()))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+// Given: a core holding the database lease shared, as the host does for its whole life /
+// When: every kind of inspection runs / Then: it is not refused (an inspection neither
+// keeps a core from starting nor is kept out by one) and it changes and adds no file.
+#[test]
+fn inspection_next_to_a_live_core_changes_and_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _) = fixture(dir.path());
+    let root = dir.path().join("ownership");
+    let core = storage::shared_with_wait(&db, &root, std::time::Duration::ZERO).unwrap();
+    let before = directory_state(dir.path());
+
+    for args in [
+        &["candidates"][..],
+        &["run", "run-7", "--full"],
+        &["events", "--run", "run-7"],
+        &["storage", "--physical"],
+        &["check-bodies", "--verify"],
+    ] {
+        inspect(&db, args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+        let after = directory_state(dir.path());
+        let names = |state: &[(String, Vec<u8>)]| {
+            state
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&after), names(&before), "{args:?} added a file");
+        for ((name, was), (_, now)) in before.iter().zip(&after) {
+            assert!(was == now, "{args:?} changed {name}");
+        }
+    }
+    drop(core);
+}
+
+// Given: offline maintenance holding the lease / When: inspecting through a symlink to
+// the database or to its directory / Then: refused like the direct path (the lease is
+// named after the canonical path), and it is available again once maintenance ends.
+#[test]
+fn inspection_through_an_alias_is_refused_while_maintenance_holds_the_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _) = fixture(dir.path());
+    let maintenance = storage::try_exclusive(&db, &dir.path().join("ownership"))
+        .unwrap()
+        .unwrap();
+    let aliases = tempfile::tempdir().unwrap();
+    let file_link = aliases.path().join("file.db");
+    std::os::unix::fs::symlink(&db, &file_link).unwrap();
+    let dir_link = aliases.path().join("dir");
+    std::os::unix::fs::symlink(dir.path(), &dir_link).unwrap();
+
+    for alias in [file_link, dir_link.join("evorch-events.db")] {
+        let error = inspect(&alias, &["storage"]).unwrap_err();
+        assert!(error.contains("offline maintenance"), "{error}");
+    }
+    drop(maintenance);
+    assert!(inspect(&db, &["storage"]).is_ok());
+}
+
 #[test]
 fn malformed_arguments_print_usage() {
     let dir = tempfile::tempdir().unwrap();

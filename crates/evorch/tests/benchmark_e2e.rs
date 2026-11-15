@@ -439,6 +439,93 @@ fn command_and_spec_errors_fail_before_execution() {
     assert!(evorch::benchmark::TaskSpec::load(&spec).is_err());
 }
 
+/// Every file under `root` (relative path, bytes); a directory is listed by its path.
+fn tree_state(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.strip_prefix(root).unwrap().display().to_string();
+            if path.is_dir() {
+                out.push((format!("{name}/"), Vec::new()));
+                walk(root, &path, out);
+            } else {
+                out.push((name, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+// The benchmark is an independent tool: it never opens the settings database and never
+// rewrites the credentials it reads. Directories stand where the database and its lease
+// file would be, so any attempt to open either as a file fails the run; the existing
+// credentials file must be byte for byte the same afterwards, and nothing may appear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_never_opens_the_settings_database_or_rewrites_credentials() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let mock = StreamingMockOpenAi::spawn_with_models(
+        vec![
+            call(
+                "delegate",
+                MODEL,
+                "delegate",
+                json!({"target":{"role":"worker","category":"quick"},"prompt":"Inspect the answer"}),
+            ),
+            text("worker", MODEL, "local complete"),
+            text("root", MODEL, "full complete"),
+        ],
+        mock_openai::WriteMode::default(),
+        vec![MODEL.into(), CANDIDATE.into()],
+    );
+    let spec = fixture(root.path(), &mock.base_url());
+    let user = root.path().join("user");
+    for sentinel in [
+        "evorch-events.db",
+        "evorch-events.db.maintenance-lock",
+        "evorch-events.db.reclaim-lock",
+        "evorch-events.db.improvement-lock",
+    ] {
+        std::fs::create_dir(user.join(sentinel)).unwrap();
+        std::fs::write(user.join(sentinel).join("keep"), sentinel).unwrap();
+    }
+    let credentials = user.join("credentials");
+    std::fs::create_dir(&credentials).unwrap();
+    std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        credentials.join("credentials.json"),
+        br#"{"provider/api-key":"sentinel-secret"}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        credentials.join("credentials.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let before = tree_state(&user);
+
+    let baseline = record(
+        &spec,
+        &root.path().join("record"),
+        Some(user.clone()),
+        env(),
+        SandboxChoice::DirectUnchecked,
+        Some(test_support::model_catalog_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(baseline.full.phase, AgentRunPhase::Done);
+    assert!(
+        tree_state(&user) == before,
+        "the benchmark changed or added a file under the user configuration directory"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn final_usage_over_budget_poison_is_durable_and_skips_verification() {
     let root = tempfile::tempdir().unwrap();

@@ -296,3 +296,181 @@ fn convert_bodies_cli_leaves_a_converted_database_alone_and_refuses_a_non_empty_
         );
     }
 }
+
+// Offline maintenance next to a running core (ADR 0045): a core holds the database lease
+// shared for as long as its writer lives (`shared_with_wait` is what the host takes), and
+// every offline command must refuse to start while that lease is held, change nothing, and
+// create nothing (no backup, no extra lock file).
+mod live_core {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use storage::{Storage, StorageConfig, shared_with_wait, try_exclusive};
+
+    use super::parse;
+
+    struct Place {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        db: PathBuf,
+    }
+
+    /// A current-format database whose maintenance lease file already exists, as it does
+    /// once any current evorch has run on it.
+    fn place() -> Place {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let db = root.join("events.db");
+        Storage::open(StorageConfig {
+            db_path: db.clone(),
+            ..Default::default()
+        })
+        .unwrap()
+        .close();
+        // The lease is released again; its file stays (it is never unlinked).
+        assert!(db.with_extension("db.maintenance-lock").exists());
+        Place {
+            root: root.join("ownership"),
+            db,
+            _dir: dir,
+        }
+    }
+
+    /// Everything the directory holds, with the bytes of every file.
+    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let bytes = std::fs::read(entry.path()).unwrap_or_default();
+                (entry.file_name().to_string_lossy().into_owned(), bytes)
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// Every offline command, in both modes where it has two.
+    fn commands() -> Vec<Vec<&'static str>> {
+        vec![
+            vec!["strip-task-progress-cursor"],
+            vec!["strip-task-progress-cursor", "--apply"],
+            vec!["strip-task-progress-cursor", "--apply", "--no-backup"],
+            vec!["preview-task-progress-retention"],
+            vec!["compact-events"],
+            vec!["compact-events", "--apply"],
+            vec!["vacuum"],
+            vec!["vacuum", "--apply"],
+            vec!["convert-bodies"],
+            vec!["convert-bodies", "--apply"],
+        ]
+    }
+
+    fn refused(db: &Path, command: &[&str]) -> String {
+        let mut argv = vec!["maintenance"];
+        argv.extend(command);
+        argv.extend(["--db", db.to_str().unwrap()]);
+        evorch::maintenance::run(parse(&argv).unwrap()).expect_err(&format!("{command:?}"))
+    }
+
+    // Given: a core holding the lease / When: any offline command targets the database,
+    // under its own name or an alias / Then: it is refused before it touches anything.
+    #[test]
+    fn every_offline_command_is_refused_while_a_core_holds_the_lease() {
+        let place = place();
+        let dir = place.db.parent().unwrap().to_path_buf();
+        let alias_dir = tempfile::tempdir().unwrap();
+        let link = alias_dir.path().join("link.db");
+        std::os::unix::fs::symlink(&place.db, &link).unwrap();
+        let dir_link = alias_dir.path().join("dir");
+        std::os::unix::fs::symlink(&dir, &dir_link).unwrap();
+        let dotted = dir.join(".").join("..").join(dir.file_name().unwrap());
+        let aliases = [
+            place.db.clone(),
+            link,
+            dir_link.join("events.db"),
+            dotted.join("events.db"),
+        ];
+
+        let core = shared_with_wait(&place.db, &place.root, Duration::ZERO).unwrap();
+        let before = snapshot(&dir);
+        for alias in &aliases {
+            for command in commands() {
+                let error = refused(alias, &command);
+                assert!(
+                    error.contains("in use") || error.contains("offline maintenance"),
+                    "{command:?} via {}: {error}",
+                    alias.display()
+                );
+            }
+        }
+        assert_eq!(
+            snapshot(&dir),
+            before,
+            "a refused command changed the directory"
+        );
+        drop(core);
+    }
+
+    // Given: the core exited / When: the same commands run / Then: the lease is free for
+    // them (a refusal above was the core's, not a leftover), and a refused or failed
+    // command leaves no lease behind.
+    #[test]
+    fn a_refusal_or_a_failure_leaves_no_lease_behind() {
+        let place = place();
+        let core = shared_with_wait(&place.db, &place.root, Duration::ZERO).unwrap();
+        refused(&place.db, &["strip-task-progress-cursor", "--apply"]);
+        drop(core);
+        assert!(try_exclusive(&place.db, &place.root).unwrap().is_some());
+
+        // A preview that succeeds, and an apply that fails after the lease was taken
+        // (the file is not a database): both release it.
+        let argv = ["maintenance", "preview-task-progress-retention", "--db"];
+        let db = place.db.to_str().unwrap();
+        evorch::maintenance::run(parse(&[argv[0], argv[1], argv[2], db]).unwrap()).unwrap();
+        assert!(try_exclusive(&place.db, &place.root).unwrap().is_some());
+
+        let broken = place.db.with_file_name("broken.db");
+        std::fs::write(&broken, b"not a database, not a database, not a database").unwrap();
+        let before = std::fs::read(&broken).unwrap();
+        for command in [
+            &["vacuum", "--apply"][..],
+            &["strip-task-progress-cursor", "--apply"],
+            &["compact-events", "--apply"],
+            &["convert-bodies", "--apply"],
+        ] {
+            let mut argv = vec!["maintenance"];
+            argv.extend(command);
+            argv.extend(["--db", broken.to_str().unwrap()]);
+            assert!(
+                evorch::maintenance::run(parse(&argv).unwrap()).is_err(),
+                "{command:?}"
+            );
+            assert_eq!(std::fs::read(&broken).unwrap(), before, "{command:?}");
+            assert!(
+                try_exclusive(&broken, &place.root).unwrap().is_some(),
+                "{command:?} kept the lease"
+            );
+        }
+    }
+
+    // The binary, not only the library: exit status 1, an error on stderr, no JSON.
+    #[test]
+    fn the_command_line_refuses_with_exit_status_1_and_no_json() {
+        let place = place();
+        let core = shared_with_wait(&place.db, &place.root, Duration::ZERO).unwrap();
+        let before = snapshot(place.db.parent().unwrap());
+        let output = std::process::Command::new(
+            std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"),
+        )
+        .args(["maintenance", "vacuum", "--apply", "--db"])
+        .arg(&place.db)
+        .output()
+        .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        assert_eq!(snapshot(place.db.parent().unwrap()), before);
+        drop(core);
+    }
+}
