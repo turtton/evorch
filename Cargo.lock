@@ -1561,6 +1561,7 @@ dependencies = [
 name = "core-instance"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -1574,8 +1575,11 @@ name = "core-launcher"
 version = "0.1.0"
 dependencies = [
  "core-instance",
+ "libc",
  "rustix 1.1.4",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "test-socket-dir",
  "thiserror 2.0.18",

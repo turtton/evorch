@@ -9,6 +9,7 @@ default = []
 recovery-test-support = []
 
 [dependencies]
+libc = "0.2"
 rustix = { version = "1", features = ["process", "fs"] }
 sha2.workspace = true
 serde.workspace = true

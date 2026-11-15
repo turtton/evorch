@@ -20,8 +20,9 @@ pub struct InheritedHandoffProof {
     successor_build: String,
 }
 impl InheritedHandoffProof {
+    // Production adoption is Linux-only; the shared proof stays portable.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     // 07b-4a calls this only after validating the inherited descriptors.
-    #[allow(dead_code)]
     pub(crate) fn new(
         restart_id: String,
         config_identity: String,
