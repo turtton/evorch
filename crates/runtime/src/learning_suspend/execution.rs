@@ -257,7 +257,9 @@ impl LearningExecution {
             let exact_requeue = acknowledged
                 && matches!(change, Change::Requeue { .. })
                 && next.state == LearningJobState::Pending;
-            if next.state.is_terminal() || exact_interrupt || exact_requeue {
+            // A newer attempt owns the task now; this stale write must not end its job.
+            let moved_on = self.superseded.load(Ordering::Acquire);
+            if next.state.is_terminal() || exact_interrupt || exact_requeue || moved_on {
                 return Ok(next);
             }
             queue

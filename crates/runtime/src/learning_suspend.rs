@@ -27,7 +27,9 @@ const LEARNING_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(6
 pub(crate) struct LearningExecutions {
     scheduler: AtomicBool,
     retrying: AtomicBool,
-    active: Mutex<HashMap<String, Arc<LearningExecution>>>,
+    /// Every entry that is not settled yet, by identity, in registration order. A task can
+    /// have a running newer attempt and older entries whose cleanup is still unresolved.
+    entries: Mutex<Vec<Arc<LearningExecution>>>,
     internal: Mutex<HashMap<RunId, watch::Sender<bool>>>,
     detached: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -58,6 +60,9 @@ pub(crate) struct LearningExecution {
     pub(crate) task_id: String,
     state: Mutex<ExecutionState>,
     cancelled: AtomicBool,
+    /// A newer attempt for the same task is registered: this entry only finishes its own
+    /// cleanup and no longer represents the task.
+    superseded: AtomicBool,
     returned: watch::Sender<Option<Result<(), String>>>,
     changed: watch::Sender<u64>,
 }
@@ -75,18 +80,27 @@ impl LearningExecutions {
         task_id: &str,
         changed: watch::Sender<u64>,
     ) -> Option<Arc<LearningExecution>> {
-        let mut active = self.active.lock().unwrap();
-        if active.contains_key(task_id) {
+        let mut entries = self.entries.lock().unwrap();
+        // Only a running attempt blocks a new one; an earlier attempt that returned may still
+        // be settling its own durable write.
+        if entries
+            .iter()
+            .any(|e| e.task_id == task_id && e.returned.borrow().is_none())
+        {
             return None;
+        }
+        for older in entries.iter().filter(|e| e.task_id == task_id) {
+            older.superseded.store(true, Ordering::Release);
         }
         let entry = Arc::new(LearningExecution {
             task_id: task_id.into(),
             state: Mutex::default(),
             cancelled: AtomicBool::new(false),
+            superseded: AtomicBool::new(false),
             returned: watch::channel(None).0,
             changed,
         });
-        active.insert(task_id.into(), entry.clone());
+        entries.push(entry.clone());
         Some(entry)
     }
 
@@ -100,28 +114,50 @@ impl LearningExecutions {
             .map_or(Ok(()), Err);
         entry.returned.send_replace(Some(result.clone()));
         // Unknown durable outcomes remain visible; they must block the next seal.
-        // A late callback for an older attempt must not drop the registration of a newer
-        // one that reuses the task id, so only this exact entry is removed.
+        // Only this exact entry is released; a late callback never touches another attempt.
         if result.is_ok() {
-            let mut active = self.active.lock().unwrap();
-            if active
-                .get(&entry.task_id)
-                .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), entry))
-            {
-                active.remove(&entry.task_id);
-            }
+            self.entries
+                .lock()
+                .unwrap()
+                .retain(|e| !std::ptr::eq(Arc::as_ptr(e), entry));
         }
     }
 
-    /// Entries that returned but still hold an unresolved durable write.
+    /// Every entry that returned but still holds an unresolved durable write, including
+    /// those a newer attempt has superseded. This is the retry set.
     fn unresolved(&self) -> Vec<Arc<LearningExecution>> {
-        self.active
+        self.entries
             .lock()
             .unwrap()
-            .values()
+            .iter()
             .filter(|entry| matches!(*entry.returned.borrow(), Some(Err(_))))
             .cloned()
             .collect()
+    }
+
+    /// The entries that stand for their task: what a suspend must wait for. A superseded
+    /// entry is not part of it; its newer attempt is.
+    fn cohort(&self) -> Vec<Arc<LearningExecution>> {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| !entry.superseded.load(Ordering::Acquire))
+            .cloned()
+            .collect()
+    }
+
+    /// Puts a settled entry back because its cleanup is unresolved again. It never
+    /// replaces another attempt: an older entry just joins the retry set as superseded.
+    fn readmit(&self, entry: &Arc<LearningExecution>) {
+        let mut entries = self.entries.lock().unwrap();
+        if entries.iter().any(|e| Arc::ptr_eq(e, entry)) {
+            return;
+        }
+        if entries.iter().any(|e| e.task_id == entry.task_id) {
+            entry.superseded.store(true, Ordering::Release);
+        }
+        entries.push(entry.clone());
     }
 
     pub(crate) fn own(&self, task: tokio::task::JoinHandle<()>) {
@@ -321,15 +357,7 @@ impl AgentRuntime {
         if !self.learning_gate().is_paused_by(pause.pause) {
             return Err("learning pause is stale or foreign".into());
         }
-        let entries: Vec<_> = self
-            .shared
-            .learning_executions
-            .active
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect();
+        let entries = self.shared.learning_executions.cohort();
         let (fenced, fence_receipt) = watch::channel(None);
         let runtime = self.clone();
         let cohort = entries.clone();
@@ -421,14 +449,7 @@ impl AgentRuntime {
                                 state.unsafe_result = Some("learning requeue unconfirmed".into());
                                 state.uncertain = Some((key, change));
                             }
-                            runtime
-                                .shared
-                                .learning_executions
-                                .active
-                                .lock()
-                                .unwrap()
-                                .entry(entry.task_id.clone())
-                                .or_insert_with(|| entry.clone());
+                            runtime.shared.learning_executions.readmit(entry);
                             runtime.learning_returned(entry).await;
                             let mut tail = entry.returned.subscribe();
                             loop {

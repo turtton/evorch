@@ -1220,6 +1220,93 @@ async fn learning_unresolved_terminal_keeps_retrying_past_the_backoff_cap() {
     assert!(!f.has_evidence("capped"));
 }
 
+// Cancelling a two-job suspension: the first job's requeue already landed (its ack was lost)
+// and a newer attempt of that task holds the registration, while reading its receipt back
+// fails. The cleanup is retried by the runtime, so once the database recovers the cancel
+// moves on and requeues the second job without any explicit reconcile.
+#[tokio::test(start_paused = true)]
+async fn learning_cancel_requeues_later_jobs_once_an_older_entrys_readback_recovers() {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "cancel-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner.clone());
+    let mut entries = Vec::new();
+    for task in ["first", "second"] {
+        queue
+            .admit(admit_request(task, &format!("{task}-root")))
+            .unwrap();
+        let entry = runtime
+            .shared
+            .learning_executions
+            .register(task, runtime.shared.learning_jobs_changed.clone())
+            .unwrap();
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(entry.start(&queue, &permit).unwrap());
+        entries.push(entry);
+    }
+    let mut changes = runtime.subscribe_learning_changes();
+    let pause = runtime.pause_learning();
+    let suspension = Arc::new(runtime.suspend_learning(&pause).unwrap());
+    while ["first", "second"]
+        .iter()
+        .any(|task| f.state(task) != LearningJobState::Interrupted)
+    {
+        changes.changed().await.unwrap();
+    }
+    for entry in &entries {
+        runtime.learning_returned(entry).await;
+    }
+    suspension.wait().await.unwrap();
+
+    // The requeue of the first job landed but was never acknowledged to its owner.
+    let landed = queue.job("first").unwrap().unwrap();
+    queue
+        .change(
+            &landed.key(),
+            LearningAttemptChange::Requeue {
+                suspension_id: landed.suspension_id.clone().unwrap(),
+                to: owner,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    // A newer attempt of that task holds the registration.
+    let newer = runtime
+        .shared
+        .learning_executions
+        .register("first", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    let broken = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    broken
+        .execute_batch(
+            "ALTER TABLE learning_attempt_receipts RENAME TO learning_attempt_receipts_off;",
+        )
+        .unwrap();
+
+    runtime
+        .cancel_learning_suspension(pause, suspension)
+        .unwrap();
+    let mut stuck = entries[0].returned_receipt();
+    while !matches!(*stuck.borrow_and_update(), Some(Err(_))) {
+        stuck.changed().await.unwrap();
+    }
+    assert_eq!(f.state("second"), LearningJobState::Interrupted);
+
+    broken
+        .execute_batch(
+            "ALTER TABLE learning_attempt_receipts_off RENAME TO learning_attempt_receipts;",
+        )
+        .unwrap();
+    while f.state("second") == LearningJobState::Interrupted {
+        changes.changed().await.unwrap();
+    }
+
+    assert_ne!(f.state("second"), LearningJobState::Abandoned);
+    returned_cleanly(&entries[0]).await;
+    assert_ne!(f.state("first"), LearningJobState::Abandoned);
+    assert!(newer.returned_receipt().borrow().is_none());
+}
+
 /// Runs `hook` with the instance of the first judged origin when the second origin is judged,
 /// which is after the first job was adopted and before the rescan resumes it.
 struct SyncProbe<F: Fn(&str) + Send + Sync> {
