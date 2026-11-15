@@ -7,7 +7,7 @@ use crate::{
 };
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
 use std::collections::HashMap;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 use storage::{Storage, StorageConfig};
 
 struct StopModel;
@@ -416,82 +416,6 @@ fn a_proc_probe_judges_liveness_from_start_ticks_and_never_guesses() {
         ..theirs(100, Some(7))
     };
     assert_eq!(probe.liveness(&other_ns), OriginLiveness::Unknown);
-}
-
-#[tokio::test]
-async fn a_drain_that_hits_its_limit_times_out_and_kills_nothing() {
-    let fixture = Fixture::new();
-    let runtime = fixture.runtime(origin(LearningOriginKind::Core, "a", Some("cfg")));
-    let queue = runtime.learning_job_queue().unwrap();
-    queue.admit(admit_request("t1", "run-1")).unwrap();
-    let permit = runtime.learning_gate().enter().await.unwrap();
-    assert!(queue.start("t1", &permit).unwrap());
-
-    let drain = runtime.begin_learning_drain();
-    let outcome = drain.wait_until(std::future::ready(())).await;
-
-    assert_eq!(outcome, LearningDrainOutcome::TimedOut);
-    assert_eq!(
-        runtime.learning_gate().active(),
-        1,
-        "the pipeline keeps its permit"
-    );
-    assert_eq!(fixture.state("t1"), LearningJobState::Started);
-
-    // The pipeline ends on its own; a later wait sees it.
-    assert!(queue.finish("t1", true).unwrap());
-    drop(permit);
-    assert_eq!(
-        drain.wait_until(std::future::pending::<()>()).await,
-        LearningDrainOutcome::Drained
-    );
-}
-
-#[tokio::test]
-async fn a_drain_blocks_new_starts_but_leaves_their_jobs_pending_until_resumed() {
-    let fixture = Fixture::new();
-    let runtime = fixture.runtime(origin(LearningOriginKind::Core, "a", Some("cfg")));
-    let queue = runtime.learning_job_queue().unwrap();
-    queue.admit(admit_request("t1", "run-1")).unwrap();
-
-    let drain = runtime.begin_learning_drain();
-    assert!(runtime.learning_gate().try_enter().is_none());
-    assert_eq!(
-        drain.wait_until(std::future::pending::<()>()).await,
-        LearningDrainOutcome::Drained
-    );
-    assert_eq!(fixture.state("t1"), LearningJobState::Pending);
-    assert!(fixture.has_evidence("t1"));
-    assert!(
-        runtime.producer_gate().try_enter().is_some(),
-        "the learning pause does not stop the shared producer gate"
-    );
-
-    assert!(drain.resume());
-    assert!(runtime.learning_gate().try_enter().is_some());
-}
-
-#[tokio::test]
-async fn a_drain_fails_rather_than_report_drained_over_a_started_job_nobody_runs() {
-    let fixture = Fixture::new();
-    let runtime = fixture.runtime(origin(LearningOriginKind::Core, "a", Some("cfg")));
-    let queue = runtime.learning_job_queue().unwrap();
-    queue.admit(admit_request("t1", "run-1")).unwrap();
-    let permit = runtime.learning_gate().enter().await.unwrap();
-    assert!(queue.start("t1", &permit).unwrap());
-    drop(permit);
-
-    let drain = runtime.begin_learning_drain();
-    assert!(matches!(
-        drain.wait_until(std::future::pending::<()>()).await,
-        LearningDrainOutcome::Failed(_)
-    ));
-
-    runtime.learning_gate().close();
-    assert!(matches!(
-        drain.wait_until(std::future::pending::<()>()).await,
-        LearningDrainOutcome::Failed(_)
-    ));
 }
 
 #[tokio::test]

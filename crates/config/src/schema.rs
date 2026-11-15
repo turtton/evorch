@@ -38,17 +38,4 @@ mod tests {
         assert!(schema.contains("\"anthropic\""));
         assert!(schema.contains("\"openai-compatible\""));
     }
-
-    #[test]
-    fn learning_drain_timeout_schema_carries_the_validated_range() {
-        let schema: serde_json::Value = serde_json::from_str(&json_schema()).unwrap();
-        let definition = ["$defs", "definitions"]
-            .iter()
-            .find_map(|key| schema.get(key)?.get("CoreRestartConfig"))
-            .expect("CoreRestartConfig is a schema definition");
-        let property = &definition["properties"]["learning_drain_timeout_secs"];
-        let range = crate::types::LEARNING_DRAIN_TIMEOUT_SECS;
-        assert_eq!(property["minimum"], *range.start());
-        assert_eq!(property["maximum"], *range.end());
-    }
 }

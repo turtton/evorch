@@ -285,7 +285,6 @@ impl Config {
             ConfigError::Migration(format!("failed to deserialize merged config: {err}"))
         })?;
         config.self_improvement.validate()?;
-        config.core.validate()?;
         config.storage.validate()?;
         config.pull_requests.validate()?;
         // 未定義 route の参照とモデルの種別の不一致 (ADR 0038) は、厳格な読み込みではエラー、

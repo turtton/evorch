@@ -35,7 +35,7 @@ pub use agents::{
 pub use budget::BudgetConfig;
 pub use comment_checker::CommentCheckerConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};
-pub use core::{CoreConfig, CoreRestartConfig, LEARNING_DRAIN_TIMEOUT_SECS, WebConfig};
+pub use core::{CoreConfig, WebConfig};
 pub use edit_tool::{EditToolConfig, EditToolSelection, gpt_generation};
 pub use eval::{EvalBudgetConfig, EvalConfig};
 pub use misc::{

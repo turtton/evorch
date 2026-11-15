@@ -1,14 +1,10 @@
 //! Durable learning queue for the runtime (07b-2): job admission, the `Pending ->
 //! Started` compare-and-set inside a producer permit, restart-time rescans, the shared
-//! janitor for dead origins, and the bounded learning drain.
-//!
-//! Nothing here kills a learning pipeline. A drain that hits its limit reports
-//! `TimedOut` and leaves every pipeline running; the caller decides what to cancel.
+//! janitor for dead origins.
 
-use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use storage::learning_jobs::NewLearningJob;
 pub use storage::learning_jobs::{
@@ -18,7 +14,7 @@ pub use storage::learning_jobs::{
 use storage::{Database, StorageConfig, StorageError, StorageHandle};
 
 use crate::AgentRuntime;
-use crate::producer::{ProducerGate, ProducerPause, ProducerPermit};
+use crate::producer::{ProducerGate, ProducerPermit};
 
 /// Whether the process that owns a job is still running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,63 +351,6 @@ impl LearningJobQueue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LearningDrainOutcome {
-    /// No pipeline of this incarnation is running or recorded as started.
-    Drained,
-    /// The limit came first. Nothing was stopped; the pipelines run on.
-    TimedOut,
-    Failed(String),
-}
-
-/// Pauses new learning pipelines (their jobs stay `Pending`, durably) and waits for
-/// the ones already started. Dropping it without [`Self::resume`] leaves the pause in
-/// place, as a seal that goes on to exec must.
-pub struct LearningDrain {
-    gate: ProducerGate,
-    pause: ProducerPause,
-    queue: Option<LearningJobQueue>,
-}
-
-impl LearningDrain {
-    /// Waits until the started pipelines end or `deadline` completes, whichever is
-    /// first; an already finished drain wins a tie.
-    pub async fn wait_until(&self, deadline: impl Future<Output = ()>) -> LearningDrainOutcome {
-        if self.gate.is_closed() {
-            return LearningDrainOutcome::Failed("learning gate is closed".into());
-        }
-        tokio::select! {
-            biased;
-            () = self.gate.drained() => self.verify_drained(),
-            () = deadline => LearningDrainOutcome::TimedOut,
-        }
-    }
-
-    pub async fn wait_for(&self, limit: Duration) -> LearningDrainOutcome {
-        self.wait_until(tokio::time::sleep(limit)).await
-    }
-
-    fn verify_drained(&self) -> LearningDrainOutcome {
-        let Some(queue) = &self.queue else {
-            return LearningDrainOutcome::Drained;
-        };
-        match queue.started_by_me() {
-            Ok(started) if started.is_empty() => LearningDrainOutcome::Drained,
-            Ok(started) => LearningDrainOutcome::Failed(format!(
-                "{} learning job(s) are recorded as started without a running pipeline",
-                started.len()
-            )),
-            Err(error) => LearningDrainOutcome::Failed(error.to_string()),
-        }
-    }
-
-    /// Lets new pipelines start again. `false` if a later pause or a shutdown owns
-    /// the gate now.
-    pub fn resume(self) -> bool {
-        self.gate.resume(self.pause)
-    }
-}
-
 impl AgentRuntime {
     /// The gate learning pipelines start behind. It is not the shared producer gate:
     /// pausing it stops learning only, never lanes or chats.
@@ -442,18 +381,6 @@ impl AgentRuntime {
             settings.storage.clone(),
             self.learning_origin(),
         ))
-    }
-
-    /// Stops new learning pipelines from starting; the caller then waits on the
-    /// returned drain.
-    pub fn begin_learning_drain(&self) -> LearningDrain {
-        let gate = self.learning_gate();
-        let pause = gate.pause();
-        LearningDrain {
-            gate,
-            pause,
-            queue: self.learning_job_queue(),
-        }
     }
 
     /// The shared janitor against the live `/proc`: ends the jobs dead origins left

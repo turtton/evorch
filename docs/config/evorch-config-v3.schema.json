@@ -89,10 +89,7 @@
     "core": {
       "$ref": "#/$defs/CoreConfig",
       "default": {
-        "idle_grace_secs": 60,
-        "restart": {
-          "learning_drain_timeout_secs": 120
-        }
+        "idle_grace_secs": 60
       }
     },
     "diagnostics": {
@@ -758,27 +755,6 @@
           "format": "uint64",
           "default": 60,
           "minimum": 0
-        },
-        "restart": {
-          "$ref": "#/$defs/CoreRestartConfig",
-          "default": {
-            "learning_drain_timeout_secs": 120
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "CoreRestartConfig": {
-      "description": "安全な再起動 (ADR 0045 §8) の待機上限。",
-      "type": "object",
-      "properties": {
-        "learning_drain_timeout_secs": {
-          "description": "再起動の準備で、開始済みの learning (抽出と review を含む) の完了を待つ上限秒数。\n上限を超えると再起動の要求だけを取り消し、learning は止めない。範囲は 1..=3600。",
-          "type": "integer",
-          "format": "uint64",
-          "default": 120,
-          "maximum": 3600,
-          "minimum": 1
         }
       },
       "additionalProperties": false

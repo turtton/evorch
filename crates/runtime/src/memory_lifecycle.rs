@@ -370,8 +370,8 @@ impl PendingLearning {
                 return Err(error.to_string());
             }
         }
-        // The permit spans the whole pipeline, review included, so a drain waits for
-        // it; a pipeline never needs another permit to reach its review.
+        // The permit spans the whole pipeline, review included; a pipeline never needs
+        // another permit to reach its review.
         let result = self.run_pipeline(runtime, &weak, run, snapshot).await;
         if let Err(error) = queue.finish(&self.task_id, result.is_ok()) {
             tracing::warn!(%error, task = %self.task_id, "learning job end was not recorded");
