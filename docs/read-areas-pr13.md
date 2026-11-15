@@ -14,8 +14,11 @@ mutex and must not wait. So every read is an *operation* (ADR 0045):
 1. The client names it with an `OperationId` and asks. The handler registers the
    operation and answers at once with its `OperationView` (`Pending`); the
    read runs on a blocking worker of an `AreaTasks` task. It opens the event
-   database read-only (`Database::open_read_only`), never through the runtime's
-   shared connection and never under the mutex.
+   database read-only (`Database::open_read_only`) and never holds the mutex. The one
+   exception is a run's saved context (`get_run_context`): the runtime keeps no
+   other reader of a run's messages, so it is read with `AgentRuntime::run_context_view`,
+   which takes the runtime store's shared connection for the length of that read. It
+   only reads, but it is not a separate read-only connection.
 2. When the operation settles, the area publishes `<area>_operation_changed`.
    The client asks the same request again under the same id; the core answers
    from the operation it kept, now `Ready` with the data (`ReadOutcome<T>`), or
@@ -42,12 +45,15 @@ namespace.
 
 | namespace | queries | notes |
 | --- | --- | --- |
-| diagnostics | `get_usage_summary`, `get_run_context`, `get_diagnostics_operation` | usage totals in micro-USD with unpriced tokens and unreported requests kept apart (the cost is a lower bound); a run's saved context as an overview, token budget by role and one summary line per message (no message body) |
+| diagnostics | `get_usage_summary`, `get_run_context`, `get_diagnostics_operation` | usage totals in micro-USD with unpriced tokens and unreported requests kept apart (the cost is a lower bound); the ledger rows and the daily totals are read as one moment (the daily totals are read before and after the rows and the read is repeated if a roll-up changed them in between); a run's saved context as an overview, token budget by role and one summary line per message (no message body) |
 | memory | `list_memory`, `get_memory`, `get_memory_operation` | lessons of the project (the repository slug is resolved on the worker); search words are quoted literals; revision = status rows + favorite changes; actions listed as `Allowed`/`Denied` with a `DenialReason` |
 | improvement | `list_improvement`, `get_improvement`, `get_improvement_operation` | candidates, the settings switch (`enabled`), the draft by **file name only**; the revision is a digest of the fields an update or a new occurrence changes |
 | evaluation | `list_evaluations`, `get_evaluation`, `get_evaluation_report`, `get_evaluation_operation` | `Present` / `Missing` / `Problem` are three states; the inspector confines paths, follows no symbolic link and bounds reads; no host path reaches a reply |
 
-Every body is bounded (`BoundedText`, 64 KiB) and masked for secrets. A list is a
+Every body is bounded (`BoundedText`, 64 KiB) and masked for secrets. A body that is only the
+head of a longer file (an evaluation report, a candidate overlay) is read a little
+short of the limit and masked as text still being written, so a credential the cut
+falls inside is masked whole and never leaves a fragment (`bounded_head`). A list is a
 `Page` cut by the host's `Pager`; a cursor is bound to its operation and snapshot.
 
 ## Client
@@ -57,6 +63,10 @@ are read-only features that need `Capability::Queries`. They share
 `features/diagnostics/read.rs` (the client side of an operation): a generation
 guard drops the answer to an earlier ask (another project, a replaced connection),
 a settling event asks again once, and a `Pending` reply never undoes a settled one.
+Every available feature is stacked in one column, so an input a feature draws all the
+time is on screen with every other feature's: the memory search and the run id of the
+diagnostics screen sit in sections that are closed until asked for. The client does not
+judge a run id; the core's refusal is shown under the input.
 The older panes (`panes/memory.rs`, `self_improvement.rs`, `model/evaluations.rs`)
 are untouched.
 
@@ -71,11 +81,3 @@ are untouched.
 - Learning candidates (07b-2b, #613) are not shown; this PR adds no storage API.
 - The cache end-to-end scenarios are not extended: these reads send nothing to a
   provider and change no prompt prefix.
-
-## Central tests that change with this PR
-
-A feature that becomes implemented changes what two shared tests assume. They are
-central files, so they are fixed in an integration PR, not here:
-
-- `crates/gui/src/core_client/features/tests.rs`: the list of implemented
-  features and the "a placeholder sends nothing" check.

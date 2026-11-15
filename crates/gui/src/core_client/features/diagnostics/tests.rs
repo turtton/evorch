@@ -76,24 +76,53 @@ fn the_usage_summary_is_asked_once_and_an_unpriced_total_is_a_lower_bound() {
 }
 
 #[test]
-fn a_malformed_run_id_asks_nothing_and_says_so() {
+fn the_core_judges_a_run_id_and_its_refusal_is_shown_under_the_input() {
     let mut screen = screen(Box::<DiagnosticsFeature>::default(), None);
     let _ = asked(&mut screen);
     screen.state_mut().feature = Box::new(DiagnosticsFeature {
-        run_input: "not a run id!".into(),
+        run_input: " not a run id! ".into(),
         ..Default::default()
     });
     let _ = asked(&mut screen);
+    assert!(
+        screen
+            .query_by_role(egui::accesskit::Role::TextInput)
+            .is_none(),
+        "the input is shut until it is asked for"
+    );
+    screen.get_by_label("run id を指定して開く").click();
+    screen.run();
     screen.get_by_label("開く").click();
     let after = asked(&mut screen);
-    assert!(
-        after.iter().all(|action| !matches!(
-            query_of(action),
-            Query::Diagnostics(DiagnosticsQuery::GetRunContext(_))
-        )),
-        "no context ask for a malformed id"
+    let Query::Diagnostics(DiagnosticsQuery::GetRunContext(get)) = query_of(&after[0]) else {
+        panic!("a context ask was expected");
+    };
+    assert_eq!(
+        get.run.as_str(),
+        "not a run id!",
+        "what was typed goes to the core"
     );
-    screen.get_by_label("run id の形式が正しくありません。");
+    answer(
+        &mut screen,
+        after[0].tag,
+        FeatureReply::Query(Err(crate::core_client::features::FeatureError::new(
+            "not a run id",
+        ))),
+    );
+    screen.get_by_label("not a run id");
+}
+
+#[test]
+fn nothing_typed_asks_nothing() {
+    let mut screen = screen(Box::<DiagnosticsFeature>::default(), None);
+    let _ = asked(&mut screen);
+    screen.get_by_label("run id を指定して開く").click();
+    screen.run();
+    screen.get_by_label("開く").click();
+    assert!(asked(&mut screen).iter().all(|action| !matches!(
+        query_of(action),
+        Query::Diagnostics(DiagnosticsQuery::GetRunContext(_))
+    )));
 }
 
 #[test]
@@ -101,20 +130,4 @@ fn dollars_keep_every_micro_dollar() {
     assert_eq!(dollars(0), "$0.000000");
     assert_eq!(dollars(1), "$0.000001");
     assert_eq!(dollars(12_345_678), "$12.345678");
-}
-
-#[test]
-fn a_run_id_is_the_numbered_or_the_26_character_form_and_nothing_else() {
-    assert!(run_id(" run-12 ").is_some());
-    assert!(run_id("run-01m7g3rpyjwtpb574dsps9c462").is_some());
-    for bad in [
-        "",
-        "run-",
-        "run-1a",
-        "12",
-        "run-01m7g3rpyjwtpb574dsps9c46",
-        "run-01m7g3rpyjwtpb574dsps9c46u",
-    ] {
-        assert!(run_id(bad).is_none(), "{bad:?}");
-    }
 }

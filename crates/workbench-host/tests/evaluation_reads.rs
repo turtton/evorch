@@ -274,3 +274,59 @@ fn an_unknown_group_fails_as_not_found_and_an_unwired_area_is_unsupported() {
         ErrorCode::UnsupportedCapability
     );
 }
+
+/// Text that is `limit` bytes up to `keep` bytes into the credential, and then the
+/// rest of the credential: the read stops inside it.
+fn straddling(limit: usize, keep: usize, prefix: &str, rest: &str) -> String {
+    // A space before it: the credential is then a token of its own.
+    let lead = limit - keep - 1;
+    format!("{} {prefix}{rest}\nmore\n", "x".repeat(lead))
+}
+
+#[test]
+fn a_credential_cut_by_the_size_limit_leaves_no_fragment_in_a_report_or_a_candidate() {
+    let w = evaluation_world();
+    seed(&w);
+    let root = w.dir.path().join("eval");
+    let secret_rest = "Zq8Wm3Nv7Xc2Rb5Ty9Uh4Jk6Lp1Sd0FgAaBbCcDd";
+
+    // Given: a report whose credential starts 15 bytes before the cut (64 KiB less the room kept for a marker), so the
+    // shown part holds only the opening and the shape rule finds no whole key.
+    std::fs::write(
+        root.join("member-a/report.md"),
+        straddling(65_536 - 64, 15, "sk-", secret_rest),
+    )
+    .unwrap();
+    // Given: a candidate overlay whose credential starts 12 bytes before the 4 KiB cut.
+    std::fs::write(
+        root.join(".groups").join(GOOD).join("candidate.toml"),
+        straddling(4 * 1024, 12, "ghp_", secret_rest),
+    )
+    .unwrap();
+
+    // When: both are read.
+    let report_text = w
+        .read(|| report(&w, "cut-report", "member-a"))
+        .data
+        .unwrap()
+        .text
+        .unwrap();
+    let candidate_text = w
+        .read(|| group(&w, "cut-group", GOOD))
+        .data
+        .unwrap()
+        .candidate
+        .unwrap();
+
+    // Then: no fragment of the credential is shown, and both say they were cut.
+    for text in [&report_text, &candidate_text] {
+        assert!(text.truncated);
+        assert!(text.text.contains("[REDACTED:partial-credential]"));
+        assert!(
+            !text.text.contains("Zq8W"),
+            "{}",
+            &text.text[text.text.len() - 60..]
+        );
+        assert!(!text.text.contains("sk-") && !text.text.contains("ghp_"));
+    }
+}

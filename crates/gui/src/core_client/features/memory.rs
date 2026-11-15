@@ -279,12 +279,19 @@ impl Feature for MemoryFeature {
             if before != (self.status, self.favorite_only) {
                 self.list_due = true;
             }
-            let response = ui.add(egui::TextEdit::singleline(&mut self.words).hint_text("検索語"));
-            let submitted =
-                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.button("検索").clicked() || submitted {
-                self.list_due = true;
-            }
+            // Closed until asked for: every available feature is stacked in one column,
+            // so an input drawn all the time would share the screen with every other one.
+            egui::CollapsingHeader::new("検索語で絞り込む")
+                .default_open(false)
+                .show(ui, |ui| {
+                    let response =
+                        ui.add(egui::TextEdit::singleline(&mut self.words).hint_text("検索語"));
+                    let submitted = response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui.button("検索").clicked() || submitted {
+                        self.list_due = true;
+                    }
+                });
         });
 
         if std::mem::take(&mut self.list_due) {

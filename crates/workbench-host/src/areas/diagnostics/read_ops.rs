@@ -287,7 +287,31 @@ impl<T: Clone + Send + 'static> Drop for Settle<T> {
 /// [`workbench_protocol::namespaces::diagnostics::MAX_TEXT_BYTES`] on a
 /// character boundary. `total_bytes` is the size of the masked whole.
 pub fn bounded(text: &str) -> workbench_protocol::namespaces::diagnostics::BoundedText {
-    let masked = crate::queries::masked(text);
+    cut_masked(crate::queries::masked(text))
+}
+
+/// How much of a file to read for a body that is shown with [`bounded_head`]: a little
+/// less than the reply limit, so that the marker which replaces an unfinished credential
+/// at the end of the head still fits and is never itself cut.
+pub const HEAD_BYTES: u64 = workbench_protocol::namespaces::diagnostics::MAX_TEXT_BYTES as u64 - 64;
+
+/// [`bounded`] for text that is only the *head* of a longer one (a file read up to a
+/// byte limit). A secret that straddles the end of the head would not match whole,
+/// and its first half would reach the wire, so a head that was cut is masked as text
+/// still being written: an unfinished credential at its end is masked too.
+pub fn bounded_head(
+    head: &str,
+    cut: bool,
+) -> workbench_protocol::namespaces::diagnostics::BoundedText {
+    static REDACTOR: std::sync::OnceLock<secret_guard::SecretRedactor> = std::sync::OnceLock::new();
+    if !cut {
+        return bounded(head);
+    }
+    let redactor = REDACTOR.get_or_init(secret_guard::SecretRedactor::from_env);
+    cut_masked(redactor.redact_streaming(head).text)
+}
+
+fn cut_masked(masked: String) -> workbench_protocol::namespaces::diagnostics::BoundedText {
     let max = workbench_protocol::namespaces::diagnostics::MAX_TEXT_BYTES;
     let mut end = masked.len().min(max);
     while !masked.is_char_boundary(end) {

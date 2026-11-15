@@ -19,7 +19,7 @@
 //!   status is `Unverified` until its report appears).
 use super::{
     AreaHandles, AreaTasks, ProjectionSource,
-    diagnostics::read_ops::{ReadOps, bounded, digest_of, first_line, page_of},
+    diagnostics::read_ops::{HEAD_BYTES, ReadOps, bounded_head, digest_of, first_line, page_of},
 };
 use crate::bootstrap::BootstrapError;
 use crate::queries::{Pager, error, revision};
@@ -34,7 +34,7 @@ use workbench_protocol::{
     ids::{EvaluationGroupId, EvaluationMemberId, OperationId},
     management::{ArtifactPresence, EvaluationArtifactKind, EvaluationArtifactRef},
     namespaces::{
-        diagnostics::{MAX_TEXT_BYTES, ReadOutcome},
+        diagnostics::ReadOutcome,
         evaluation::{
             EvaluationEvent, EvaluationGroupDetail, EvaluationGroupPhase, EvaluationGroupSummary,
             EvaluationList, EvaluationMemberPhase, EvaluationMemberSummary, EvaluationProblemKind,
@@ -211,32 +211,30 @@ impl EvaluationArea {
                     kind: EvaluationArtifactKind::Report,
                     presence,
                 };
-                let report = match inspector.member_report_markdown(
-                    group.as_str(),
-                    index,
-                    MAX_TEXT_BYTES as u64,
-                ) {
-                    Artifact::Present(text) => {
-                        let mut out = bounded(&text.text);
-                        out.total_bytes = out.total_bytes.max(text.total_bytes);
-                        out.truncated |= text.truncated || out.total_bytes > out.text.len() as u64;
-                        EvaluationReportText {
-                            artifact: artifact(ArtifactPresence::Present),
-                            text: Some(out),
-                            problem: None,
+                let report =
+                    match inspector.member_report_markdown(group.as_str(), index, HEAD_BYTES) {
+                        Artifact::Present(text) => {
+                            let mut out = bounded_head(&text.text, text.truncated);
+                            out.total_bytes = out.total_bytes.max(text.total_bytes);
+                            out.truncated |=
+                                text.truncated || out.total_bytes > out.text.len() as u64;
+                            EvaluationReportText {
+                                artifact: artifact(ArtifactPresence::Present),
+                                text: Some(out),
+                                problem: None,
+                            }
                         }
-                    }
-                    Artifact::Missing => EvaluationReportText {
-                        artifact: artifact(ArtifactPresence::Missing),
-                        text: None,
-                        problem: None,
-                    },
-                    Artifact::Problem(problem) => EvaluationReportText {
-                        artifact: artifact(ArtifactPresence::Problem),
-                        text: None,
-                        problem: Some(problem_kind(problem.kind)),
-                    },
-                };
+                        Artifact::Missing => EvaluationReportText {
+                            artifact: artifact(ArtifactPresence::Missing),
+                            text: None,
+                            problem: None,
+                        },
+                        Artifact::Problem(problem) => EvaluationReportText {
+                            artifact: artifact(ArtifactPresence::Problem),
+                            text: None,
+                            problem: Some(problem_kind(problem.kind)),
+                        },
+                    };
                 Ok(EvaluationRead::Report(Box::new(report)))
             },
         )?;
@@ -437,7 +435,7 @@ fn group_detail(group: &EvaluationGroupSnapshot) -> Result<EvaluationGroupDetail
             .as_deref()
             .map(|notice| first_line(notice, 1024)),
         candidate: group.candidate.present().map(|text| {
-            let mut out = bounded(&text.text);
+            let mut out = bounded_head(&text.text, text.truncated);
             out.total_bytes = out.total_bytes.max(text.total_bytes);
             out.truncated |= text.truncated || out.total_bytes > out.text.len() as u64;
             out

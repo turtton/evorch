@@ -292,15 +292,39 @@ fn merge(into: &mut UsageTotals, from: &UsageTotals) {
     into.unreported_requests += from.unreported_requests;
 }
 
+/// How often the ledger is read again when a roll-up commits between its two parts.
+const CONSISTENT_ATTEMPTS: usize = 3;
+
+/// The ledger rows and the daily totals of one moment. A roll-up moves rows from
+/// the first to the second in one transaction, so reading them separately could
+/// count a moved row twice. The storage API has no read that spans both, and a daily
+/// row only ever changes through a roll-up: the daily totals are read before and
+/// after the rows, and the rows are used only if both reads agree, because then no
+/// roll-up committed in between. Otherwise the whole read is repeated.
+fn consistent_rows<D: PartialEq, R>(
+    mut daily: impl FnMut() -> Result<D, storage::StorageError>,
+    mut requests: impl FnMut() -> Result<R, storage::StorageError>,
+) -> Result<(R, D), WorkbenchError> {
+    for _ in 0..CONSISTENT_ATTEMPTS {
+        let before = daily().map_err(storage_error)?;
+        let rows = requests().map_err(storage_error)?;
+        if daily().map_err(storage_error)? == before {
+            return Ok((rows, before));
+        }
+    }
+    Err(error(
+        ErrorCode::StorageUnavailable,
+        "the usage ledger kept changing while it was read",
+    ))
+}
+
 fn usage_summary(database: &Database, range: UsageRange) -> Result<UsageSummary, WorkbenchError> {
     let clock = database.usage_local_clock().map_err(storage_error)?;
     let from = first_day(range, &clock.today).unwrap_or_else(|| "0000-01-01".to_owned());
-    let requests = database
-        .usage_requests_in_days(&from, &clock.today)
-        .map_err(storage_error)?;
-    let daily = database
-        .usage_daily_between(&from, &clock.today)
-        .map_err(storage_error)?;
+    let (requests, daily) = consistent_rows(
+        || database.usage_daily_between(&from, &clock.today),
+        || database.usage_requests_in_days(&from, &clock.today),
+    )?;
     Ok(reduce(range, &from, &clock.today, &requests, &daily))
 }
 
@@ -505,6 +529,49 @@ fn context_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ledger as a roll-up leaves it: a row is in `requests` or in `daily`, never both.
+    #[test]
+    fn a_roll_up_between_the_two_reads_is_not_counted_twice() {
+        use std::cell::Cell;
+        let rolled_up = Cell::new(false);
+        let daily_reads = Cell::new(0);
+        // A roll-up commits right after the rows were read, once.
+        let (rows, daily) = consistent_rows(
+            || {
+                daily_reads.set(daily_reads.get() + 1);
+                Ok(if rolled_up.get() { 1 } else { 0 })
+            },
+            || {
+                let rows = if rolled_up.get() { 0 } else { 1 };
+                rolled_up.set(true);
+                Ok(rows)
+            },
+        )
+        .unwrap();
+        assert_eq!(rows + daily, 1, "the row is counted once");
+        assert_eq!(
+            (rows, daily),
+            (0, 1),
+            "the read was repeated after the roll-up"
+        );
+        assert_eq!(daily_reads.get(), 4);
+    }
+
+    #[test]
+    fn a_ledger_that_never_settles_fails_instead_of_returning_a_torn_read() {
+        let ticks = std::cell::Cell::new(0);
+        let failed = consistent_rows(
+            || {
+                ticks.set(ticks.get() + 1);
+                Ok(ticks.get())
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(failed.code, ErrorCode::StorageUnavailable);
+        assert_eq!(ticks.get(), 2 * CONSISTENT_ATTEMPTS);
+    }
 
     #[test]
     fn a_range_starts_on_the_right_local_day() {

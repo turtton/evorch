@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use super::layout::{bounded_list, paged_list};
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
-use read::{Phase, Read, phase_line};
+use read::{Read, phase_line};
 use workbench_protocol::{
     events::UiEvent,
     handshake::Capability,
@@ -77,18 +77,14 @@ impl Default for DiagnosticsFeature {
     }
 }
 
-/// The run id typed in, if its shape is one a run id has: `run-` and then digits
-/// (the numbered form) or 26 lowercase Crockford base32 characters. The host checks
-/// it again; this only spares a request that cannot be answered.
+/// The run id typed in. Whether it is one is for the core to say: it holds the rule
+/// for what a run id is, and a refusal comes back as text shown under the input.
 fn run_id(input: &str) -> Option<RunId> {
     let input = input.trim();
-    let rest = input.strip_prefix("run-")?;
-    let numbered = !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
-    let ulid = rest.len() == 26
-        && rest
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b.is_ascii_lowercase() && !b"ilou".contains(&b)));
-    (numbered || ulid).then(|| RunId::new(input).ok())?
+    if input.is_empty() {
+        return None;
+    }
+    RunId::new(input).ok()
 }
 
 fn range_label(range: UsageRange) -> &'static str {
@@ -362,16 +358,23 @@ impl Feature for DiagnosticsFeature {
 
         ui.separator();
         ui.strong("run の保存済みコンテキスト");
-        ui.horizontal(|ui| {
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.run_input).hint_text("run id (例: run-…)"),
-            );
-            let submitted =
-                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.button("開く").clicked() || submitted {
-                self.context_due = true;
-            }
-        });
+        // Closed until asked for: every available feature is stacked in one column, so
+        // an input drawn all the time would share the screen with every other one.
+        egui::CollapsingHeader::new("run id を指定して開く")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.run_input)
+                            .hint_text("run id (例: run-…)"),
+                    );
+                    let submitted = response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui.button("開く").clicked() || submitted {
+                        self.context_due = true;
+                    }
+                });
+            });
         if std::mem::take(&mut self.context_due) {
             self.begin_context(ctx);
         } else if self.context_read.take_ask_again() {
@@ -380,12 +383,6 @@ impl Feature for DiagnosticsFeature {
         if std::mem::take(&mut self.more_requested) {
             let cursor = self.next_cursor.clone();
             self.ask_context(ctx, cursor);
-        }
-        if self.context_read.phase() == &Phase::Idle
-            && !self.run_input.trim().is_empty()
-            && run_id(&self.run_input).is_none()
-        {
-            ui.label("run id の形式が正しくありません。");
         }
         if let Some(line) = phase_line(self.context_read.phase()) {
             ui.label(line);

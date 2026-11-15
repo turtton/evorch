@@ -187,6 +187,14 @@ fn a_failed_read_is_shown_and_a_new_search_is_a_new_operation() {
     );
     screen.get_by_label("保存先を読み取れませんでした。");
 
+    // The search input is shut until it is asked for, and draws no text input before.
+    assert!(
+        screen
+            .query_by_role(egui::accesskit::Role::TextInput)
+            .is_none()
+    );
+    screen.get_by_label("検索語で絞り込む").click();
+    screen.run();
     screen.get_by_label("検索").click();
     let next = asked(&mut screen);
     assert_eq!(next.len(), 1);
