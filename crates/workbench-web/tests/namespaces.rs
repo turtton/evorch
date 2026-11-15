@@ -8,6 +8,7 @@ use common::*;
 use http::StatusCode;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use workbench_protocol::namespaces::{NAMESPACES, NamespaceStatus};
 use workbench_web::{WebApp, WebServerConfig};
 
 /// An operation no namespace has or will have: the refusal below must not depend
@@ -34,27 +35,17 @@ async fn post(backend: &Arc<FakeBackend>, body: Value) -> (StatusCode, Value) {
 async fn reserved_namespaces_are_unsupported_and_never_reach_the_backend() {
     let backend = Arc::new(FakeBackend::new());
     let secret = format!("sk-proj-{}", "W".repeat(48));
-    for namespace in [
-        "settings",
-        "auth",
-        "mcp",
-        "teams",
-        "diagnostics",
-        "memory",
-        "evaluation",
-        "improvement",
-        "pull_requests",
-        "browser",
-        "artifacts",
-        "maintenance",
-    ] {
+    for namespace in NAMESPACES
+        .iter()
+        .filter(|namespace| namespace.status == NamespaceStatus::Reserved)
+    {
         for kind in ["command", "query"] {
             let payload = json!({
-                "type": namespace,
+                "type": namespace.name,
                 "payload": {"type": NO_SUCH_OPERATION, "payload": {"token": secret}},
             });
             let (status, body) = post(&backend, request(kind, payload)).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}/{namespace}");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}/{}", namespace.name);
             assert_eq!(body["status"], "error");
             assert_eq!(body["payload"]["code"], "unsupported_capability");
             assert_eq!(body["request_id"], "req-ns");
