@@ -63,9 +63,6 @@ pub struct SettingsParts {
     pub source: ProjectionSource,
 }
 
-/// How often one reload runs the hook again because the file moved while it ran.
-const MAX_RELOAD_ATTEMPTS: u32 = 3;
-
 struct Inner {
     store: Arc<ConfigStore>,
     reload: ReloadModels,
@@ -403,35 +400,23 @@ impl Inner {
     /// the next request of every conversation goes to, and that request still
     /// extends the prefix that was sent.
     async fn reload_models(&self) -> Result<Done, Failure> {
-        // The revision is read before the hook and again after it. When they
-        // agree, the hook composed from exactly that file; when a save landed
-        // meanwhile, the hook may have seen either, so it runs again (a few
-        // times at most) instead of leaving the screen to show "not applied"
-        // until somebody reloads once more. What is marked applied is never
-        // newer than what the hook can have composed from.
-        let mut revision;
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            let store = self.store.clone();
-            revision = Self::blocking(move || store.revision())
-                .await?
-                .map_err(Failure::from)?;
-            let reload = self.reload.clone();
-            Self::blocking(move || reload())
-                .await?
-                .map_err(|message| Failure {
-                    code: ErrorCode::Internal,
-                    message: sanitize(&message),
-                })?;
-            let store = self.store.clone();
-            let after = Self::blocking(move || store.revision())
-                .await?
-                .map_err(Failure::from)?;
-            if after == revision || attempts >= MAX_RELOAD_ATTEMPTS {
-                break;
-            }
-        }
+        // A save cannot land between the read of the revision and the end of the
+        // hook: the writer lock is held from the one to the other, so the hook
+        // composes from exactly the file whose revision is marked applied, and
+        // runs once. A save accepted meanwhile waits for the reload (its
+        // operation stays pending); queries and every other area go on.
+        let _writer = self.writer.lock().await;
+        let store = self.store.clone();
+        let revision = Self::blocking(move || store.revision())
+            .await?
+            .map_err(Failure::from)?;
+        let reload = self.reload.clone();
+        Self::blocking(move || reload())
+            .await?
+            .map_err(|message| Failure {
+                code: ErrorCode::Internal,
+                message: sanitize(&message),
+            })?;
         let announce = {
             let mut state = lock(&self.state);
             let changed = state.snapshot.applied_revision != revision;

@@ -44,6 +44,9 @@ struct Reload {
     released: Condvar,
     calls: AtomicUsize,
     entered: tokio::sync::Notify,
+    /// The configuration the hook composed from: the file as the hook reads it
+    /// when it gets going again after being held.
+    composed: Mutex<Vec<String>>,
 }
 
 struct Fixture {
@@ -59,6 +62,7 @@ impl Fixture {
         std::fs::write(dir.path().join("config.toml"), initial).unwrap();
         let reload = Arc::new(Reload::default());
         let hook = reload.clone();
+        let config_path = dir.path().join("config.toml");
         let reload_models: workbench_host::areas::ReloadModels = Arc::new(move || {
             hook.calls.fetch_add(1, Ordering::SeqCst);
             hook.entered.notify_one();
@@ -66,6 +70,10 @@ impl Fixture {
             while *held {
                 held = hook.released.wait(held).unwrap();
             }
+            hook.composed
+                .lock()
+                .unwrap()
+                .push(std::fs::read_to_string(&config_path).unwrap());
             Ok(())
         });
         let service = CommandService::new(common::runtime(), tokio::runtime::Handle::current());
@@ -344,7 +352,7 @@ async fn an_invalid_document_is_refused_without_echoing_its_secrets() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_stalled_reload_does_not_stop_the_other_clients() {
+async fn a_stalled_reload_stops_no_client_but_the_saves_wait_for_it() {
     let mut f = Fixture::new("version = 3\n");
     *f.reload.held.lock().unwrap() = true;
     f.run(SettingsCommand::ReloadModels(ReloadModels {
@@ -353,7 +361,8 @@ async fn a_stalled_reload_does_not_stop_the_other_clients() {
     .unwrap();
     f.reload.entered.notified().await;
 
-    // The reload is stuck; reads and another save still answer.
+    // The reload is stuck: reads answer, and a save is accepted at once (the
+    // handler does not wait) but does not run before the reload ends.
     assert_eq!(
         f.settings
             .operation(&op("reload-1"))
@@ -363,26 +372,29 @@ async fn a_stalled_reload_does_not_stop_the_other_clients() {
         OperationState::Pending
     );
     let revision = f.snapshot().revision;
-    let state = f
-        .finish(
-            "save-1",
-            save_provider("save-1", revision, provider("one", "a")),
-        )
-        .await;
-    assert_eq!(state, OperationState::Ready);
+    f.run(save_provider("save-1", revision, provider("one", "a")))
+        .unwrap();
+    assert_eq!(
+        f.settings.operation(&op("save-1")).unwrap().operation.state,
+        OperationState::Pending
+    );
     assert_eq!(f.settings.operations().unwrap().len(), 2);
+    assert_eq!(f.file(), "version = 3\n", "the save waits for the reload");
 
     *f.reload.held.lock().unwrap() = false;
     f.reload.released.notify_all();
-    assert_eq!(
-        f.settings
-            .wait_operation(&op("reload-1"))
-            .await
-            .unwrap()
-            .operation
-            .state,
-        OperationState::Ready
-    );
+    for id in ["reload-1", "save-1"] {
+        assert_eq!(
+            f.settings
+                .wait_operation(&op(id))
+                .await
+                .unwrap()
+                .operation
+                .state,
+            OperationState::Ready
+        );
+    }
+    assert!(f.file().contains("[providers.one]"));
 }
 
 /// The newest snapshot announcement once `completed` operations have ended.
@@ -416,19 +428,15 @@ fn subscribe(f: &Fixture) -> workbench_host::subscriptions::Subscription {
         .unwrap()
 }
 
+/// A save cannot land while the hook composes: what the hook composed from is
+/// the file whose revision is marked applied, the hook runs once, and the saves
+/// that waited then run on top (A, then B written during the reload, then A
+/// again: the revision alone could not tell the first A from the last).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_save_during_a_held_reload_is_applied_by_a_second_run_of_the_hook() {
-    let mut f = Fixture::new("version = 3\n");
+async fn what_the_hook_composed_is_what_is_marked_applied_whatever_is_saved_meanwhile() {
+    let base = format!("version = 3\n{PROVIDER}");
+    let mut f = Fixture::new(&base);
     let mut events = subscribe(&f);
-    let revision = f.snapshot().revision;
-    assert_eq!(
-        f.finish(
-            "save-1",
-            save_provider("save-1", revision, provider("one", "a"))
-        )
-        .await,
-        OperationState::Ready
-    );
     let first = f.snapshot().revision;
 
     *f.reload.held.lock().unwrap() = true;
@@ -437,26 +445,35 @@ async fn a_save_during_a_held_reload_is_applied_by_a_second_run_of_the_hook() {
     }))
     .unwrap();
     f.reload.entered.notified().await;
-    // A second save lands while the hook composes from the first file.
-    assert_eq!(
-        f.finish(
-            "save-2",
-            save_provider("save-2", first.clone(), provider("two", "b"))
-        )
-        .await,
-        OperationState::Ready
-    );
+    let changed = format!("{base}# changed meanwhile\n");
+    f.run(SettingsCommand::SaveDocument(SaveDocument {
+        operation_id: op("save-b"),
+        expected_revision: first.clone(),
+        text: changed.clone(),
+    }))
+    .unwrap();
     *f.reload.held.lock().unwrap() = false;
     f.reload.released.notify_all();
     f.settings.wait_operation(&op("reload-1")).await.unwrap();
 
-    // The file moved while the hook ran, so the hook ran again on the new
-    // file and the screen converges without another reload: what is applied is
-    // the second save, and what the clients are told is what the query answers.
+    // Composed once, from the file as it was when the reload began, and that
+    // is the revision it marked applied.
+    assert_eq!(f.reload.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*f.reload.composed.lock().unwrap(), vec![base.clone()]);
+    f.settings.wait_operation(&op("save-b")).await.unwrap();
     let snapshot = f.snapshot();
+    assert_eq!(f.file(), changed);
     assert_ne!(snapshot.revision, first);
-    assert_eq!(snapshot.applied_revision, snapshot.revision);
-    assert_eq!(f.reload.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(snapshot.applied_revision, first, "B was never composed");
+
+    // Back to A: the saved file is what was composed, and is shown applied.
+    assert_eq!(
+        f.save_document("save-a", &base).await,
+        OperationState::Ready
+    );
+    let snapshot = f.snapshot();
+    assert_eq!(snapshot.revision, first);
+    assert_eq!(snapshot.applied_revision, first);
     assert_eq!(
         last_announced(&mut events, 3).await,
         Some((snapshot.revision, snapshot.applied_revision))
