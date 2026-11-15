@@ -417,7 +417,7 @@ fn subscribe(f: &Fixture) -> workbench_host::subscriptions::Subscription {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_save_during_a_held_reload_is_not_marked_as_applied() {
+async fn a_save_during_a_held_reload_is_applied_by_a_second_run_of_the_hook() {
     let mut f = Fixture::new("version = 3\n");
     let mut events = subscribe(&f);
     let revision = f.snapshot().revision;
@@ -450,11 +450,13 @@ async fn a_save_during_a_held_reload_is_not_marked_as_applied() {
     f.reload.released.notify_all();
     f.settings.wait_operation(&op("reload-1")).await.unwrap();
 
-    // What the clients are told is what the query answers: the second save is
-    // saved, the first is applied, and nothing claims more.
+    // The file moved while the hook ran, so the hook ran again on the new
+    // file and the screen converges without another reload: what is applied is
+    // the second save, and what the clients are told is what the query answers.
     let snapshot = f.snapshot();
     assert_ne!(snapshot.revision, first);
-    assert_eq!(snapshot.applied_revision, first);
+    assert_eq!(snapshot.applied_revision, snapshot.revision);
+    assert_eq!(f.reload.calls.load(Ordering::SeqCst), 2);
     assert_eq!(
         last_announced(&mut events, 3).await,
         Some((snapshot.revision, snapshot.applied_revision))

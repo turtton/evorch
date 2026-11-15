@@ -539,3 +539,80 @@ fn a_cursor_profile_takes_a_typed_api_key_next_to_its_login() {
     assert_eq!(save.profile, "cursor");
     assert_eq!(save.value.expose(), SECRET);
 }
+
+/// A login that is still being prepared has an operation but no session yet:
+/// the question for the session is answered `not_found`, which must not end
+/// the screen's tracking. The core announces the session with `login_changed`
+/// and the link is then shown.
+#[test]
+fn a_login_still_being_prepared_is_not_taken_for_lost() {
+    let mut screen = loaded();
+    screen.get_by_label("Claude でログイン").click();
+    let sent = asked(&mut screen);
+    let AuthCommand::StartLogin(start) = auth_command(&sent[0]).clone() else {
+        panic!("a login start was expected");
+    };
+    let id = start.operation_id;
+    answer(
+        &mut screen,
+        sent[0].tag,
+        operation_reply(op_view(
+            &id,
+            AuthOperationKind::Login,
+            OperationState::Pending,
+        )),
+    );
+    let questions = asked(&mut screen);
+    let login = questions
+        .iter()
+        .find(|a| matches!(query_of(a), Query::Auth(AuthQuery::GetLogin { login_id }) if *login_id == id))
+        .expect("the login is asked for");
+    // The core has not registered the session yet.
+    answer(&mut screen, login.tag, not_found());
+    let after = asked(&mut screen);
+    let operation = after
+        .iter()
+        .find(|a| {
+            matches!(query_of(a), Query::Auth(AuthQuery::GetAuthOperation { operation_id }) if *operation_id == id)
+        })
+        .expect("the operation is asked for");
+    answer(
+        &mut screen,
+        operation.tag,
+        operation_reply(op_view(
+            &id,
+            AuthOperationKind::Login,
+            OperationState::Pending,
+        )),
+    );
+    screen.run_steps(4);
+    // Still tracked as a login in preparation: nothing says it is lost.
+    assert!(
+        screen
+            .query_all_by_label_contains("操作の結果を確認できませんでした")
+            .next()
+            .is_none()
+    );
+    screen.get_by_label("ログインを準備しています。");
+
+    // The core announces the session, and the link is shown.
+    screen
+        .state_mut()
+        .feature
+        .event(&UiEvent::Auth(AuthEvent::LoginChanged {
+            login_id: id.clone(),
+        }));
+    screen.run_steps(4);
+    let again = asked(&mut screen);
+    let login = again
+        .iter()
+        .find(|a| matches!(query_of(a), Query::Auth(AuthQuery::GetLogin { login_id }) if *login_id == id))
+        .expect("the login is asked for again");
+    answer(
+        &mut screen,
+        login.tag,
+        login_reply(login_view(&id, LoginPhase::Waiting, true)),
+    );
+    screen.run_steps(4);
+    screen.get_by_label("ログインページを開く");
+}

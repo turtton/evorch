@@ -42,8 +42,8 @@ accepted at once and settle through `settings_operation_completed` /
 | A login's preparation (reading the profile, binding the callback port) runs in the tracked operation task, the handler only looks at memory, and the accepted permit is held until the login waits for a person | `areas/auth.rs`, `areas/auth/login.rs` | `auth_login.rs` (a held preparation does not block the handler and keeps the profile; a cancel during it ends the login) |
 | Whatever way a login ends, its callback listener and flow are released before the outcome is written | `areas/auth/provider_logins.rs` (`LoginFlow::release`) | `auth_login.rs`, `provider_logins.rs` unit tests (real listeners are bound again after the release) |
 | Cursor signs in with a dashboard API key through the provider's own exchange; the key is never stored | `areas/auth.rs` (`LoginStarter::exchange_api_key`) | `auth_login.rs` (`a_cursor_api_key_is_exchanged_and_stored_as_a_login`) |
-| `applied_revision` is never newer than the file the reload hook composed from, and a slow re-read never replaces a newer snapshot; every change is announced | `areas/settings.rs` | `settings_save.rs` (a save during a held reload; overlapping saves and reloads) |
-| An operation the restarted core does not know is *unknown*, not running: the screen is not busy for ever and the draft is kept; text typed while a save runs is not discarded when it ends | `gui/src/core_client/features/{settings,auth}.rs` | the feature tests of both |
+| `applied_revision` is never newer than the file the reload hook composed from (the hook runs again, a few times at most, when the file moved while it ran, so the display converges without another reload), and a slow re-read never replaces a newer snapshot; every change is announced | `areas/settings.rs` | `settings_save.rs` (a save during a held reload; overlapping saves and reloads) |
+| An operation the restarted core does not know is *unknown*, not running (a login still being prepared has no session yet: `not_found` for the session is answered by asking for the operation, and only an operation the core does not know either is lost): the screen is not busy for ever and the draft is kept; text typed while a save runs is not discarded when it ends | `gui/src/core_client/features/{settings,auth}.rs` | the feature tests of both |
 | `core.restart.targets` cannot be added, removed, repointed or omitted by a settings save, whole or partial, judged inside the revision lock | `areas/settings/store.rs` on `config::reject_restart_target_changes` | `workbench-host/tests/settings_save.rs`; through the real desktop screen and the real Web HTTP API in `core-client-e2e/tests/settings_restart_targets.rs` |
 | A save never rewrites a sent provider prefix; a reload replaces the model of the projects and the next request still extends what was sent | `bootstrap` reload hook (`SwitchableModel::replace`) | `evorch-core/tests/core_settings_cache.rs` (the replacement is observed at a second endpoint) |
 
@@ -70,7 +70,8 @@ are the commands where that matters most, so:
   starts with: an unknown field or a wrong type is refused, not dropped) accepts.
   A typed save (`save_provider`, `delete_provider`) does not edit a file that
   loader already refuses, and puts back a result it refuses. A whole save keeps
-  the mode of the file it replaces. The revision is compared in the
+  the mode of the file it replaces. The scratch copy the check loads is
+  owner-only (0700 directory, 0600 files). The revision is compared in the
   same critical section as the write, so two clients saving one revision end as
   one success and one `stale_revision`.
 - **Secrets are write-only.** An API key travels once inside `save_api_key` and

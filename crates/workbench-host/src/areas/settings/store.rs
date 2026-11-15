@@ -316,15 +316,16 @@ impl ConfigStore {
     fn strict_check(&self, text: &str) -> Result<(), SaveError> {
         let scratch = Scratch::new()?;
         let io = |_| SaveError::Io("the configuration could not be checked".into());
-        std::fs::write(scratch.path().join(CONFIG_FILE), text).map_err(io)?;
+        write_private(&scratch.path().join(CONFIG_FILE), text.as_bytes()).map_err(io)?;
         let drop_ins = self.dir.join("config.d");
         if let Ok(entries) = std::fs::read_dir(&drop_ins) {
             let target = scratch.path().join("config.d");
-            std::fs::create_dir(&target).map_err(io)?;
+            create_private_dir(&target).map_err(io)?;
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|ext| ext == "toml") && path.is_file() {
-                    std::fs::copy(&path, target.join(entry.file_name())).map_err(io)?;
+                    let bytes = std::fs::read(&path).map_err(io)?;
+                    write_private(&target.join(entry.file_name()), &bytes).map_err(io)?;
                 }
             }
         }
@@ -413,6 +414,31 @@ impl ConfigStore {
     }
 }
 
+/// A new directory only its owner can enter (the copy of a configuration is
+/// as private as the configuration itself).
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// A new file only its owner can read.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)
+}
+
 /// A directory for one check, removed afterwards.
 struct Scratch(PathBuf);
 
@@ -424,7 +450,7 @@ impl Scratch {
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        std::fs::create_dir(&path)
+        create_private_dir(&path)
             .map_err(|_| SaveError::Io("the configuration could not be checked".into()))?;
         Ok(Self(path))
     }
@@ -566,5 +592,22 @@ mod tests {
             Err(SaveError::Invalid(_))
         ));
         assert!(!dir.path().join(CONFIG_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    /// The copy a strict check makes is as private as the configuration: only
+    /// its owner can enter the directory or read the files, whatever the umask.
+    #[test]
+    fn the_scratch_copy_of_a_configuration_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new().unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(scratch.path()), 0o700);
+        let file = scratch.path().join(CONFIG_FILE);
+        write_private(&file, b"version = 3\n").unwrap();
+        assert_eq!(mode(&file), 0o600);
+        let nested = scratch.path().join("config.d");
+        create_private_dir(&nested).unwrap();
+        assert_eq!(mode(&nested), 0o700);
     }
 }

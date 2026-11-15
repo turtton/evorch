@@ -487,11 +487,15 @@ impl Feature for AuthFeature {
                         }
                     }
                     Ok(_) => {}
-                    Err(error) if error.code == Some(ErrorCode::NotFound) => {
-                        self.operation_lost(&id);
-                    }
+                    // `not_found` is not "lost": a login still being prepared has
+                    // no session yet (the core announces it with `login_changed`,
+                    // which asks for it again). Only the operation tells: it is
+                    // asked for, and only an operation the core does not know
+                    // either is lost.
                     Err(error) => {
-                        self.message = error.message;
+                        if error.code != Some(ErrorCode::NotFound) {
+                            self.message = error.message;
+                        }
                         self.to_check.insert(id);
                     }
                 }
