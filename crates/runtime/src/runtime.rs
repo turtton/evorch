@@ -162,6 +162,9 @@ pub(crate) struct Shared {
     pub(crate) self_improvement: OnceLock<crate::self_improvement::ImprovementSettings>,
     pub(crate) self_improvement_task: OnceLock<crate::self_improvement::lifecycle::ObserverTask>,
     pub(crate) learning_runs: LearningRunReceivers,
+    pub(crate) learning_sources: Mutex<HashMap<RunId, String>>,
+    pub(crate) learning_jobs_changed: watch::Sender<u64>,
+    pub(crate) learning_executions: crate::learning_suspend::LearningExecutions,
     topology: OnceLock<crate::CoordinationTopology>,
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Mutex<Arc<ToolExecutor>>,
@@ -836,6 +839,9 @@ impl AgentRuntime {
                 self_improvement: OnceLock::new(),
                 self_improvement_task: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),
+                learning_sources: Mutex::new(HashMap::new()),
+                learning_jobs_changed: watch::channel(0).0,
+                learning_executions: crate::learning_suspend::LearningExecutions::default(),
                 bus,
                 executor: Mutex::new(executor),
                 artifacts: OnceLock::new(),
@@ -1255,6 +1261,9 @@ impl AgentRuntime {
                 self_improvement: OnceLock::new(),
                 self_improvement_task: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),
+                learning_sources: Mutex::new(HashMap::new()),
+                learning_jobs_changed: watch::channel(0).0,
+                learning_executions: crate::learning_suspend::LearningExecutions::default(),
                 artifacts: OnceLock::new(),
                 artifact_pages: OnceLock::new(),
                 workspaces: Mutex::new(HashMap::new()),
@@ -2199,16 +2208,19 @@ impl AgentRuntime {
             .is_none()
             .then(|| self.prepare_learning(&task))
             .flatten();
+        if task.config.learning_internal {
+            self.shared.learning_executions.internal_started(run_id);
+        }
+        let finish = weak.clone();
         let join = tokio::spawn(async move {
+            let learning_tail=async move {
             let learning = if let Some(mut gate) = start_gate {
                 while !*gate.borrow_and_update() {
                     if gate.changed().await.is_err() {
-                        return;
+                        return None;
                     }
                 }
-                let Some(shared) = weak.upgrade() else {
-                    return;
-                };
+                let shared = weak.upgrade()?;
                 let runtime = AgentRuntime { shared };
                 let model = task
                     .recovery_model
@@ -2273,7 +2285,7 @@ impl AgentRuntime {
                             },
                         );
                     }
-                    return;
+                    return None;
                 }
                 None => None,
             };
@@ -2290,7 +2302,17 @@ impl AgentRuntime {
                     channels.phase_tx.subscribe(),
                 )
             });
-            Self::run_guarded(weak, task, channels, learning).await;
+            Self::run_guarded_learning_tail(weak, task, channels, learning).await
+            }.await;
+            // The dispatch scope AND whole run body, including slot and monitor,
+            // returned normally before either completion receipt is issued.
+            if let Some(shared) = finish.upgrade() {
+                let runtime = AgentRuntime { shared };
+                if let Some(entry) = learning_tail {
+                    runtime.learning_returned(&entry).await;
+                }
+                runtime.shared.learning_executions.internal_returned(run_id);
+            }
         });
         if let Some(entry) = lock_runs(&self.shared.runs).get_mut(&run_id) {
             entry._join = Some(join);
@@ -2298,30 +2320,44 @@ impl AgentRuntime {
         run_id
     }
 
+    // Kept for the restore dispatcher; no restore wiring changes in 2b.
     async fn run_guarded(
         weak: Weak<Shared>,
         task: RunTask,
         channels: LoopChannels,
         learning: Option<crate::memory_lifecycle::PendingLearning>,
     ) {
+        if let Some(entry) =
+            Self::run_guarded_learning_tail(weak.clone(), task, channels, learning).await
+            && let Some(shared) = weak.upgrade()
+        {
+            AgentRuntime { shared }.learning_returned(&entry).await;
+        }
+    }
+
+    async fn run_guarded_learning_tail(
+        weak: Weak<Shared>,
+        task: RunTask,
+        channels: LoopChannels,
+        learning: Option<crate::memory_lifecycle::PendingLearning>,
+    ) -> Option<Arc<crate::learning_suspend::LearningExecution>> {
         let run_id = task.run_id;
         match crate::panic_capture::catch_panic(run_agent(weak.clone(), task, channels)).await {
             Ok(dispatch) => {
                 if let Some(learning) = learning {
                     if let Some(dispatch) = dispatch {
-                        dispatch.scope(learning.complete(weak, run_id)).await;
-                    } else {
-                        tracing::warn!(%run_id, "learning skipped without terminal dispatch lineage");
+                        return dispatch.scope(learning.complete(weak, run_id)).await;
                     }
+                    tracing::warn!(%run_id,"learning skipped without terminal dispatch lineage");
                 }
             }
-            // No lessons from a run whose loop state is unknown.
             Err(panic) => {
                 if let Some(shared) = weak.upgrade() {
                     let _dispatch = AgentRuntime { shared }.run_panicked(run_id, panic).await;
                 }
             }
         }
+        None
     }
 
     pub(crate) fn spawn_lane_root(

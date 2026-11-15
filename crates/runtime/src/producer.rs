@@ -102,6 +102,14 @@ impl ProducerGate {
         state.paused = true;
         self.admission_changed();
     }
+    pub fn is_open(&self) -> bool {
+        let state = self.0.state.lock().unwrap();
+        !state.paused && !state.closed
+    }
+    pub fn is_paused_by(&self, pause: ProducerPause) -> bool {
+        let state = self.0.state.lock().unwrap();
+        state.paused && !state.closed && self.0.identity == pause.0 && state.generation == pause.1
+    }
     pub fn is_closed(&self) -> bool {
         self.0.state.lock().unwrap().closed
     }

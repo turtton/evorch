@@ -69,6 +69,7 @@ pub fn undo_v40(connection: &Connection) {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../../undo/undo_v64.sql"),
                 include_str!("../../../undo/undo_v63.sql"),
                 include_str!("../../../undo/undo_v62.sql"),
                 include_str!("../../../undo/undo_v61.sql"),

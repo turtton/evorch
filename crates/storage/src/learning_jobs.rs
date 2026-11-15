@@ -1,14 +1,8 @@
-//! Durable learning job queue (07b-2).
-//!
-//! A job is admitted together with its dedup claim and immutable evidence in one
-//! transaction. It then moves `Pending -> Started -> Finished | Failed | Abandoned`;
-//! every step is a compare-and-set, and nothing here ever moves a job backwards.
-//! Only `Pending` jobs may run again after their origin died: a `Started` job (or one
-//! whose start may or may not have been recorded) is ended, never queued again.
-//!
-//! The origin names the process that owns a job, with enough identity for a caller to
-//! judge whether that process is still alive. This module stores and compares the
-//! identity; deciding liveness is the caller's job.
+//! Durable immutable admission and fenced learning attempts.
+//! Attempt changes, private staging and atomic publication live in `attempts`.
+mod attempts;
+pub use attempts::*;
+
 use crate::{Database, StorageError};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -53,19 +47,21 @@ pub struct LearningOrigin {
     pub config_identity: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LearningJobState {
     Pending,
     Started,
+    Interrupted,
     Finished,
     Failed,
     Abandoned,
 }
 
 impl LearningJobState {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Pending,
         Self::Started,
+        Self::Interrupted,
         Self::Finished,
         Self::Failed,
         Self::Abandoned,
@@ -74,13 +70,14 @@ impl LearningJobState {
         match self {
             Self::Pending => "Pending",
             Self::Started => "Started",
+            Self::Interrupted => "Interrupted",
             Self::Finished => "Finished",
             Self::Failed => "Failed",
             Self::Abandoned => "Abandoned",
         }
     }
     pub fn is_terminal(self) -> bool {
-        !matches!(self, Self::Pending | Self::Started)
+        !matches!(self, Self::Pending | Self::Started | Self::Interrupted)
     }
     fn parse(text: &str) -> Result<Self, StorageError> {
         Self::ALL
@@ -121,6 +118,13 @@ pub struct LearningJob {
     pub source_run_id: String,
     pub origin: LearningOrigin,
     pub revision: u64,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub generation: u64,
+    pub suspension_id: Option<String>,
+    pub publication: Option<String>,
+    pub extraction_run: Option<String>,
+    pub review_run: Option<String>,
     pub admitted_at_ns: i64,
     pub started_at_ns: Option<i64>,
     pub finished_at_ns: Option<i64>,
@@ -137,28 +141,12 @@ pub struct LearningJobEvidence {
 #[derive(Debug)]
 pub(crate) enum Write {
     Admit(Box<NewLearningJob>, i64),
-    Start {
-        task_id: String,
-        instance: String,
-        at_ns: i64,
-    },
-    Finish {
-        task_id: String,
-        instance: String,
-        ok: bool,
-        at_ns: i64,
-    },
+    Attempt(Box<LearningAttemptWrite>, i64),
     Adopt {
         task_id: String,
         from_instance: String,
         revision: u64,
         to: Box<LearningOrigin>,
-    },
-    Abandon {
-        task_id: String,
-        instance: String,
-        reason: String,
-        at_ns: i64,
     },
 }
 
@@ -169,41 +157,35 @@ pub(crate) enum Written {
 }
 
 pub(crate) fn write(conn: &Connection, write: Write) -> Result<Written, StorageError> {
+    let previous: i64 = conn.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    let result = write_full(conn, write);
+    conn.pragma_update(None, "synchronous", previous)?;
+    result
+}
+
+fn write_full(conn: &Connection, write: Write) -> Result<Written, StorageError> {
     match write {
         Write::Admit(job, at_ns) => admit(conn, &job, at_ns).map(Written::Admission),
-        Write::Start {
-            task_id,
-            instance,
-            at_ns,
-        } => in_transaction(conn, |tx| {
-            Ok(tx.execute(
-                "UPDATE learning_jobs SET state='Started', started_at_ns=?3, revision=revision+1
-                 WHERE task_id=?1 AND state='Pending' AND origin_instance=?2",
-                params![task_id, instance, at_ns],
-            )? == 1)
-        })
-        .map(Written::Applied),
-        Write::Finish {
-            task_id,
-            instance,
-            ok,
-            at_ns,
-        } => in_transaction(conn, |tx| {
-            let state = if ok { "Finished" } else { "Failed" };
-            end(tx, &task_id, &instance, state, None, at_ns, &["Started"])
-        })
-        .map(Written::Applied),
+        Write::Attempt(command, at_ns) => {
+            attempts::write(conn, *command, at_ns).map(Written::Applied)
+        }
         Write::Adopt {
             task_id,
             from_instance,
             revision,
             to,
         } => in_transaction(conn, |tx| {
+            if to.kind != LearningOriginKind::Core
+                || to.config_identity.as_deref().is_none_or(str::is_empty)
+            {
+                return Ok(false);
+            }
             Ok(tx.execute(
                 "UPDATE learning_jobs SET origin_instance=?4, origin_pid=?5, origin_start_ticks=?6,
                         origin_boot_id=?7, origin_pid_ns=?8, config_identity=?9, revision=revision+1
                  WHERE task_id=?1 AND state='Pending' AND origin_kind='Core'
-                   AND origin_instance=?2 AND revision=?3",
+                   AND origin_instance=?2 AND revision=?3 AND config_identity=?9",
                 params![
                     task_id,
                     from_instance,
@@ -221,23 +203,6 @@ pub(crate) fn write(conn: &Connection, write: Write) -> Result<Written, StorageE
             )? == 1)
         })
         .map(Written::Applied),
-        Write::Abandon {
-            task_id,
-            instance,
-            reason,
-            at_ns,
-        } => in_transaction(conn, |tx| {
-            end(
-                tx,
-                &task_id,
-                &instance,
-                "Abandoned",
-                Some(&reason),
-                at_ns,
-                &["Pending", "Started"],
-            )
-        })
-        .map(Written::Applied),
     }
 }
 
@@ -249,41 +214,6 @@ fn in_transaction<T>(
     let value = body(&tx)?;
     tx.commit()?;
     Ok(value)
-}
-
-/// Ends a job owned by `instance` and deletes its evidence in the same transaction.
-fn end(
-    tx: &rusqlite::Transaction<'_>,
-    task_id: &str,
-    instance: &str,
-    state: &str,
-    reason: Option<&str>,
-    at_ns: i64,
-    from: &[&str],
-) -> Result<bool, StorageError> {
-    let current: Option<(String, String)> = tx
-        .query_row(
-            "SELECT state, origin_instance FROM learning_jobs WHERE task_id=?1",
-            [task_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let Some((current_state, owner)) = current else {
-        return Ok(false);
-    };
-    if owner != instance || !from.contains(&current_state.as_str()) {
-        return Ok(false);
-    }
-    tx.execute(
-        "UPDATE learning_jobs SET state=?2, reason=?3, finished_at_ns=?4, revision=revision+1
-         WHERE task_id=?1",
-        params![task_id, state, reason, at_ns],
-    )?;
-    tx.execute(
-        "DELETE FROM learning_job_evidence WHERE task_id=?1",
-        [task_id],
-    )?;
-    Ok(true)
 }
 
 fn admit(
@@ -302,8 +232,8 @@ fn admit(
         tx.execute(
             "INSERT INTO learning_jobs(task_id, state, is_goal, project, source_run_id,
                  origin_kind, origin_instance, origin_pid, origin_start_ticks, origin_boot_id,
-                 origin_pid_ns, config_identity, admitted_at_ns)
-             VALUES(?1,'Pending',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                 origin_pid_ns, config_identity, admitted_at_ns, max_attempts)
+             VALUES(?1,'Pending',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 job.task_id,
                 job.goal,
@@ -321,6 +251,7 @@ fn admit(
                 origin.pid_ns,
                 origin.config_identity,
                 at_ns,
+                MAX_LEARNING_ATTEMPTS,
             ],
         )?;
         tx.execute(
@@ -387,7 +318,8 @@ fn corrupt(message: String) -> StorageError {
 
 const JOB_COLUMNS: &str = "task_id, state, is_goal, project, source_run_id, origin_kind,
     origin_instance, origin_pid, origin_start_ticks, origin_boot_id, origin_pid_ns,
-    config_identity, revision, admitted_at_ns, started_at_ns, finished_at_ns, reason";
+    config_identity, revision, admitted_at_ns, started_at_ns, finished_at_ns, reason,
+    attempt, max_attempts, generation, suspension_id, publication, extraction_run, review_run";
 
 fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<LearningJob, StorageError>> {
     let kind: String = row.get(5)?;
@@ -418,6 +350,13 @@ fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<LearningJob, Stor
             started_at_ns: row.get(14)?,
             finished_at_ns: row.get(15)?,
             reason: row.get(16)?,
+            attempt: row.get(17)?,
+            max_attempts: row.get(18)?,
+            generation: row.get(19)?,
+            suspension_id: row.get(20)?,
+            publication: row.get(21)?,
+            extraction_run: row.get(22)?,
+            review_run: row.get(23)?,
         })
     })();
     Ok(job)

@@ -1,4 +1,5 @@
 use super::*;
+mod attempts;
 use crate::{Database, Storage, StorageConfig};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, SystemTime};
@@ -100,8 +101,8 @@ fn admission_stores_claim_roots_job_and_evidence_together_and_spends_the_quota_o
         LearningAdmission::Admitted
     );
     // Starting and finishing never spend another slot.
-    assert!(writer.start_learning_job("t1", "a", day(5)).unwrap());
-    assert!(writer.finish_learning_job("t1", "a", true, day(5)).unwrap());
+    assert!(start_learning_job(&writer, &config, "t1", "a", day(5)).unwrap());
+    assert!(finish_learning_job(&writer, &config, "t1", "a", true, day(5)).unwrap());
     let claimed: u32 = db
         .conn
         .query_row(
@@ -146,22 +147,14 @@ fn a_job_starts_once_for_its_owner_and_ending_it_deletes_the_evidence_with_it() 
     writer
         .admit_learning_job(job("t1", "run-1", false, &owner), day(1))
         .unwrap();
-    assert!(!writer.start_learning_job("t1", "stranger", day(1)).unwrap());
-    assert!(!writer.finish_learning_job("t1", "a", true, day(1)).unwrap());
-    assert!(writer.start_learning_job("t1", "a", day(1)).unwrap());
-    assert!(!writer.start_learning_job("t1", "a", day(1)).unwrap());
+    assert!(!start_learning_job(&writer, &config, "t1", "stranger", day(1)).unwrap());
+    assert!(!finish_learning_job(&writer, &config, "t1", "a", true, day(1)).unwrap());
+    assert!(start_learning_job(&writer, &config, "t1", "a", day(1)).unwrap());
+    assert!(!start_learning_job(&writer, &config, "t1", "a", day(1)).unwrap());
     let db = Database::open(&config).unwrap();
     assert!(db.learning_job_evidence("t1").unwrap().is_some());
-    assert!(
-        !writer
-            .finish_learning_job("t1", "stranger", true, day(1))
-            .unwrap()
-    );
-    assert!(
-        writer
-            .finish_learning_job("t1", "a", false, day(2))
-            .unwrap()
-    );
+    assert!(!finish_learning_job(&writer, &config, "t1", "stranger", true, day(1)).unwrap());
+    assert!(finish_learning_job(&writer, &config, "t1", "a", false, day(2)).unwrap());
     let ended = db.learning_job("t1").unwrap().unwrap();
     assert_eq!(ended.state, LearningJobState::Failed);
     assert_eq!(
@@ -170,12 +163,8 @@ fn a_job_starts_once_for_its_owner_and_ending_it_deletes_the_evidence_with_it() 
     );
     assert!(db.learning_job_evidence("t1").unwrap().is_none());
     // An ended job is never started or ended again.
-    assert!(!writer.start_learning_job("t1", "a", day(2)).unwrap());
-    assert!(
-        !writer
-            .abandon_learning_job("t1", "a", "late", day(2))
-            .unwrap()
-    );
+    assert!(!start_learning_job(&writer, &config, "t1", "a", day(2)).unwrap());
+    assert!(!abandon_learning_job(&writer, &config, "t1", "a", "late", day(2)).unwrap());
     assert!(
         db.conn
             .execute(
@@ -208,11 +197,13 @@ fn evidence_cannot_change_or_disappear_while_its_job_is_live() {
     );
     write(
         &db.conn,
-        Write::Start {
-            task_id: "t1".into(),
-            instance: "a".into(),
-            at_ns: 6,
-        },
+        Write::Attempt(
+            Box::new(LearningAttemptWrite {
+                key: db.learning_job("t1").unwrap().unwrap().key(),
+                change: LearningAttemptChange::Start,
+            }),
+            6,
+        ),
     )
     .unwrap();
     assert!(
@@ -261,24 +252,16 @@ fn abandoning_ends_only_the_job_of_the_named_instance_and_removes_its_evidence()
             .admit_learning_job(job(task, root, false, &owner), day(1))
             .unwrap();
     }
-    writer.start_learning_job("started", "g", day(1)).unwrap();
+    start_learning_job(&writer, &config, "started", "g", day(1)).unwrap();
     for task in ["pending", "started"] {
-        assert!(
-            !writer
-                .abandon_learning_job(task, "other", "dead", day(2))
-                .unwrap()
-        );
-        assert!(
-            writer
-                .abandon_learning_job(task, "g", "origin died", day(2))
-                .unwrap()
-        );
+        assert!(!abandon_learning_job(&writer, &config, task, "other", "dead", day(2)).unwrap());
+        assert!(abandon_learning_job(&writer, &config, task, "g", "origin died", day(2)).unwrap());
     }
     let db = Database::open(&config).unwrap();
     for task in ["pending", "started"] {
         let job = db.learning_job(task).unwrap().unwrap();
         assert_eq!(job.state, LearningJobState::Abandoned);
-        assert_eq!(job.reason.as_deref(), Some("origin died"));
+        assert_eq!(job.reason.as_deref(), Some("origin_died"));
         assert!(db.learning_job_evidence(task).unwrap().is_none());
     }
     assert!(
@@ -352,7 +335,7 @@ fn a_gui_job_or_a_started_job_cannot_be_adopted() {
     writer
         .admit_learning_job(job("core", "run-2", false, &core), day(1))
         .unwrap();
-    writer.start_learning_job("core", "c", day(1)).unwrap();
+    start_learning_job(&writer, &config, "core", "c", day(1)).unwrap();
     let db = Database::open(&config).unwrap();
     for (task, from) in [("gui", "g"), ("core", "c")] {
         let revision = db.learning_job(task).unwrap().unwrap().revision;
@@ -396,4 +379,90 @@ fn concurrent_writers_admit_one_job_per_task() {
         .learning_jobs(&LearningJobState::ALL)
         .unwrap();
     assert_eq!(jobs.len(), 1);
+}
+
+// Test adapters retain the old queue tests' owner checks while all writes now use CAS keys.
+fn start_learning_job(
+    writer: &crate::StorageHandle,
+    config: &StorageConfig,
+    task: &str,
+    owner: &str,
+    at: SystemTime,
+) -> Result<bool, StorageError> {
+    let mut key = Database::open(config)?.learning_job(task)?.unwrap().key();
+    key.owner = owner.into();
+    writer.write_learning_attempt(
+        LearningAttemptWrite {
+            key,
+            change: LearningAttemptChange::Start,
+        },
+        at,
+    )
+}
+fn finish_learning_job(
+    writer: &crate::StorageHandle,
+    config: &StorageConfig,
+    task: &str,
+    owner: &str,
+    ok: bool,
+    at: SystemTime,
+) -> Result<bool, StorageError> {
+    let db = Database::open(config)?;
+    let mut key = db.learning_job(task)?.unwrap().key();
+    key.owner = owner.into();
+    if key.state != LearningJobState::Started || !ok {
+        return writer.write_learning_attempt(
+            LearningAttemptWrite {
+                key,
+                change: LearningAttemptChange::Fail(LearningEndReason::PipelineFailed),
+            },
+            at,
+        );
+    }
+    if !writer.write_learning_attempt(
+        LearningAttemptWrite {
+            key,
+            change: LearningAttemptChange::BindRun {
+                run: "extraction".into(),
+                review: false,
+            },
+        },
+        at,
+    )? {
+        return Ok(false);
+    }
+    let key = db.learning_job(task)?.unwrap().key();
+    writer.write_learning_attempt(
+        LearningAttemptWrite {
+            key,
+            change: LearningAttemptChange::ExtractionReady(vec![]),
+        },
+        at,
+    )?;
+    let key = db.learning_job(task)?.unwrap().key();
+    writer.write_learning_attempt(
+        LearningAttemptWrite {
+            key,
+            change: LearningAttemptChange::Publish,
+        },
+        at,
+    )
+}
+fn abandon_learning_job(
+    writer: &crate::StorageHandle,
+    config: &StorageConfig,
+    task: &str,
+    owner: &str,
+    _reason: &str,
+    at: SystemTime,
+) -> Result<bool, StorageError> {
+    let mut key = Database::open(config)?.learning_job(task)?.unwrap().key();
+    key.owner = owner.into();
+    writer.write_learning_attempt(
+        LearningAttemptWrite {
+            key,
+            change: LearningAttemptChange::Abandon(LearningEndReason::OriginDied),
+        },
+        at,
+    )
 }

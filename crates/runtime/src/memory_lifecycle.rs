@@ -1,12 +1,22 @@
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 
 use event_bus::event::diagnostic_codes;
 use tokio::sync::watch;
 
 use crate::agent_loop::RunTask;
 use crate::learning_jobs::{AdmitRequest, AdoptedJob, LearningAdmission};
+use crate::learning_suspend::LearningExecution;
 use crate::memory_queue::{LearningQueue, LearningSettings, QueuedTask};
 use crate::runtime::Shared;
+use storage::learning_jobs::{LearningAttemptChange as Change, LearningEndReason};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearningExecutionOutcome {
+    Completed,
+    Deferred,
+    Interrupted,
+    Skipped,
+}
 use crate::{AgentRuntime, RunConfig, RunId, RuntimeError};
 
 pub(crate) struct PendingLearning {
@@ -88,7 +98,15 @@ impl AgentRuntime {
         Some(PendingLearning {
             settings,
             prompt: task.prompt.clone(),
-            task_id: format!("learning-{:032x}", u128::from_le_bytes(nonce)),
+            task_id: {
+                let id = format!("learning-{:032x}", u128::from_le_bytes(nonce));
+                self.shared
+                    .learning_sources
+                    .lock()
+                    .unwrap()
+                    .insert(task.run_id, id.clone());
+                id
+            },
             snapshot: None,
             admitted: false,
             rescanned: false,
@@ -159,6 +177,11 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(task.run_id, receiver);
+        self.shared
+            .learning_sources
+            .lock()
+            .unwrap()
+            .insert(task.run_id, task_id.clone());
         let pending = PendingLearning {
             settings,
             prompt,
@@ -168,32 +191,77 @@ impl AgentRuntime {
             rescanned: false,
             result,
         };
-        tokio::spawn(pending.complete(std::sync::Arc::downgrade(&self.shared), task.run_id));
+        self.spawn_learning_pending(pending, task.run_id);
         Ok(())
+    }
+
+    fn spawn_learning_pending(&self, pending: PendingLearning, run: RunId) -> bool {
+        let Some(entry) = self
+            .shared
+            .learning_executions
+            .register(&pending.task_id, self.shared.learning_jobs_changed.clone())
+        else {
+            return false;
+        };
+        let weak = std::sync::Arc::downgrade(&self.shared);
+        let finish = weak.clone();
+        let completion = pending.complete_registered(weak, run, entry);
+        let task = tokio::spawn(async move {
+            if let Some(entry) = completion.await
+                && let Some(shared) = finish.upgrade()
+            {
+                AgentRuntime { shared }.learning_returned(&entry).await;
+            }
+        });
+        self.shared.learning_executions.own(task);
+        true
     }
 
     pub async fn wait_learning(&self, run: RunId) -> Result<Result<(), String>, RuntimeError> {
         self.inspect_agent(run)?;
-        let receiver = self
-            .shared
-            .learning_runs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&run)
-            .cloned();
-        let Some(mut receiver) = receiver else {
-            return Ok(Ok(()));
-        };
+        let mut changed = self.shared.learning_jobs_changed.subscribe();
         loop {
-            if let Some(result) = receiver.borrow_and_update().clone() {
+            let receiver = self.shared.learning_runs.lock().unwrap().get(&run).cloned();
+            let Some(mut receiver) = receiver else {
+                return Ok(Ok(()));
+            };
+            let result = loop {
+                if let Some(result) = receiver.borrow_and_update().clone() {
+                    break result;
+                }
+                if receiver.changed().await.is_err() {
+                    return Ok(Err("learning task ended before completion".into()));
+                }
+            };
+            let task = self
+                .shared
+                .learning_sources
+                .lock()
+                .unwrap()
+                .get(&run)
+                .cloned();
+            let job = match (task.as_deref(), self.learning_job_queue()) {
+                (Some(id), Some(queue)) => match queue.job(id) {
+                    Ok(job) => job,
+                    Err(_) => return Ok(Err("learning status read failed".into())),
+                },
+                _ => None,
+            };
+            if job.is_none_or(|j| j.state.is_terminal())
+                || self.learning_gate().is_closed()
+                || self.producer_gate().is_closed()
+            {
                 return Ok(result);
             }
-            if receiver.changed().await.is_err() {
-                return Ok(Err("learning task ended before completion".into()));
+            if changed.changed().await.is_err() {
+                return Ok(Err("learning observer closed".into()));
             }
         }
     }
 }
+
+/// Returned by `resume_adopted_learning` when a scheduler already owns the job's execution.
+pub(crate) const LEARNING_ALREADY_EXECUTING: &str = "learning is already executing";
 
 /// A job resumed from stored evidence. `completion` carries the pipeline's result once it ended.
 pub struct ResumedLearning {
@@ -204,6 +272,11 @@ pub struct ResumedLearning {
 impl AgentRuntime {
     /// Runs a job a core took over from a dead origin, from its stored evidence.
     pub fn resume_adopted_learning(&self, adopted: AdoptedJob) -> Result<ResumedLearning, String> {
+        if adopted.job.origin != self.learning_origin()
+            || adopted.job.state != storage::learning_jobs::LearningJobState::Pending
+        {
+            return Err("learning job is not pending under this origin".into());
+        }
         let mut settings = self
             .shared
             .learning
@@ -218,12 +291,6 @@ impl AgentRuntime {
             .parse()
             .map_err(|_| "stored source run id is invalid".to_string())?;
         let (result, receiver) = watch::channel(None);
-        self.shared
-            .learning_runs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(source)
-            .or_insert_with(|| receiver.clone());
         let pending = PendingLearning {
             settings,
             prompt: adopted.evidence.prompt,
@@ -233,7 +300,20 @@ impl AgentRuntime {
             rescanned: true,
             result,
         };
-        tokio::spawn(pending.complete(std::sync::Arc::downgrade(&self.shared), source));
+        if !self.spawn_learning_pending(pending, source) {
+            return Err(LEARNING_ALREADY_EXECUTING.into());
+        }
+        self.shared
+            .learning_runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(source, receiver.clone());
+        self.shared
+            .learning_sources
+            .lock()
+            .unwrap()
+            .insert(source, adopted.job.task_id.clone());
+
         Ok(ResumedLearning {
             task_id: adopted.job.task_id,
             completion: receiver,
@@ -255,11 +335,18 @@ impl AgentRuntime {
             .map_err(|error| error.to_string())?
         {
             let task = adopted.job.task_id.clone();
+            let observed = adopted.job.key();
             match self.resume_adopted_learning(adopted) {
                 Ok(job) => resumed.push(job),
                 Err(error) => {
+                    // An attempt that already runs (the scheduler won the race) or a job that
+                    // is no longer the Pending one this rescan observed is never ended here.
+                    // Only an unusable Pending job is ended, and only at the observed revision.
+                    if error == LEARNING_ALREADY_EXECUTING {
+                        continue;
+                    }
                     tracing::warn!(%error, %task, "adopted learning job cannot run; ending it");
-                    let _ = queue.abandon(&task, "adopted evidence cannot be used");
+                    let _ = queue.abandon_observed(&observed);
                 }
             }
         }
@@ -272,9 +359,33 @@ impl PendingLearning {
         self,
         weak: Weak<Shared>,
         run: RunId,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<std::sync::Arc<LearningExecution>>> + Send>,
+    > {
+        let entry = weak.upgrade().and_then(|shared| {
+            shared
+                .learning_executions
+                .register(&self.task_id, shared.learning_jobs_changed.clone())
+        });
+        if let Some(entry) = entry {
+            return self.complete_registered(weak, run, entry);
+        }
         Box::pin(async move {
-            let result = self.execute(weak.clone(), run).await;
+            self.result.send_replace(Some(Ok(())));
+            None
+        })
+    }
+
+    fn complete_registered(
+        self,
+        weak: Weak<Shared>,
+        run: RunId,
+        entry: std::sync::Arc<LearningExecution>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<std::sync::Arc<LearningExecution>>> + Send>,
+    > {
+        Box::pin(async move {
+            let result = self.execute(weak.clone(), run, &entry).await;
             if result.is_err() {
                 tracing::warn!(%run, "post-run learning failed; completed run result retained");
                 if let Some(shared) = weak.upgrade() {
@@ -285,7 +396,7 @@ impl PendingLearning {
                         // The cause stays in the detail so a candidate is diagnosable without logs.
                         detail: format!(
                             "Lesson extraction or review failed; unapproved candidates remain unpromoted. Inspect the learning runs of this source run for details.\ncause: {}",
-                            result.as_ref().err().map_or("", |error| error.as_str())
+                            "pipeline_failed"
                         ),
                         run_id: Some(run.to_string()),
                         thread_id: None,
@@ -293,20 +404,32 @@ impl PendingLearning {
                     }));
                 }
             }
-            self.result.send_replace(Some(result));
+            self.result.send_replace(Some(result.map(|_| ())));
+            if let Some(shared) = weak.upgrade() {
+                shared
+                    .learning_jobs_changed
+                    .send_modify(|n| *n = n.wrapping_add(1));
+            }
+            Some(entry)
         })
     }
 
-    async fn execute(&self, weak: Weak<Shared>, run: RunId) -> Result<(), String> {
+    async fn execute(
+        &self,
+        weak: Weak<Shared>,
+        run: RunId,
+        entry: &Arc<LearningExecution>,
+    ) -> Result<LearningExecutionOutcome, String> {
         let Some(runtime) = AgentRuntime::from_weak(&weak) else {
-            return Ok(());
+            return Ok(LearningExecutionOutcome::Skipped);
         };
+        runtime.ensure_learning_scheduler();
         // Claiming the source is terminal bookkeeping, even while paused.
         // LearningQueue gates only new extractor/reviewer provider starts.
         // A restored/fenced host must not become another learner of this source.
         // A job taken over from a dead origin has no run of ours to validate.
         if !self.rescanned && !runtime.owns_background_run(run) {
-            return Ok(());
+            return Ok(LearningExecutionOutcome::Skipped);
         }
         let queue = runtime
             .learning_job_queue()
@@ -319,7 +442,7 @@ impl PendingLearning {
                 .get()
                 .map(|settings| &settings.policy);
             if policy.is_some_and(|policy| !policy.collect_lessons) {
-                return Ok(());
+                return Ok(LearningExecutionOutcome::Skipped);
             }
             if runtime
                 .inspect_agent(run)
@@ -327,7 +450,7 @@ impl PendingLearning {
                 .phase
                 != crate::AgentRunPhase::Done
             {
-                return Ok(());
+                return Ok(LearningExecutionOutcome::Skipped);
             }
             // Escalated runs can be Done without publishing a completed task result.
             if runtime
@@ -335,49 +458,70 @@ impl PendingLearning {
                 .map_err(|error| error.to_string())?
                 .is_none()
             {
-                return Ok(());
+                return Ok(LearningExecutionOutcome::Skipped);
             }
             // The evidence is frozen with the admission, so a job that runs later
             // (or after a restart) reads exactly what was admitted.
-            let frozen = runtime.freeze_run_learning(run)?;
-            let admission = queue
-                .admit(AdmitRequest {
-                    task_id: self.task_id.clone(),
-                    roots: vec![run.to_string()],
-                    goal: false,
-                    daily_limit: policy.map_or(20, |policy| policy.daily_limit),
-                    project: self.settings.project.clone(),
-                    source_run_id: run.to_string(),
-                    prompt: self.prompt.clone(),
-                    evidence_json: frozen.to_json()?,
-                })
-                .map_err(|error| error.to_string())?;
-            if admission != LearningAdmission::Admitted {
-                return Ok(());
-            }
+            let (writer, runner, entry) = (queue.clone(), runtime.clone(), entry.clone());
+            let (task_id, project, prompt, daily_limit) = (
+                self.task_id.clone(),
+                self.settings.project.clone(),
+                self.prompt.clone(),
+                policy.map_or(20, |p| p.daily_limit),
+            );
+            let admitted = tokio::task::spawn_blocking(move || -> Result<_, String> {
+                let frozen = runner.freeze_run_learning(run)?;
+                let admission = writer
+                    .admit(AdmitRequest {
+                        task_id,
+                        roots: vec![run.to_string()],
+                        goal: false,
+                        daily_limit,
+                        project,
+                        source_run_id: run.to_string(),
+                        prompt,
+                        evidence_json: frozen.to_json()?,
+                    })
+                    .map_err(|_| {
+                        entry.intake_unconfirmed();
+                        "learning intake unconfirmed".to_string()
+                    })?;
+                if admission != LearningAdmission::Admitted {
+                    return Ok(None);
+                }
+                Ok(Some(frozen))
+            })
+            .await
+            .map_err(|_| "learning intake task failed")??;
+            let Some(frozen) = admitted else {
+                return Ok(LearningExecutionOutcome::Skipped);
+            };
             snapshot = Some(frozen);
         }
-        // A closed gate (shutdown) leaves the job Pending for a core to take over.
-        let Some(permit) = runtime.learning_gate().enter().await else {
-            return Ok(());
-        };
-        match queue.start(&self.task_id, &permit) {
-            Ok(true) => {}
-            Ok(false) => return Ok(()),
-            Err(error) => {
-                // The start may or may not be recorded. Never run it: end the job.
-                let _ = queue.abandon(&self.task_id, "start was not acknowledged");
-                return Err(error.to_string());
-            }
+        // No root dispatch lease waits for a paused learning gate.
+        if !runtime.producer_gate().is_open() {
+            return Ok(LearningExecutionOutcome::Deferred);
         }
-        // The permit spans the whole pipeline, review included; a pipeline never needs
-        // another permit to reach its review.
-        let result = self.run_pipeline(runtime, &weak, run, snapshot).await;
-        if let Err(error) = queue.finish(&self.task_id, result.is_ok()) {
-            tracing::warn!(%error, task = %self.task_id, "learning job end was not recorded");
+        let Some(permit) = runtime.learning_gate().try_enter() else {
+            return Ok(LearningExecutionOutcome::Deferred);
+        };
+        let permit = Arc::new(permit);
+        if !entry.start_async(&queue, &permit).await? {
+            return Ok(LearningExecutionOutcome::Deferred);
+        }
+        let result = self
+            .run_pipeline(runtime, &weak, run, snapshot, entry, &queue)
+            .await;
+        if entry.interrupted() {
+            return Ok(LearningExecutionOutcome::Interrupted);
+        }
+        if result.is_err() {
+            entry
+                .change_async(&queue, Change::Fail(LearningEndReason::PipelineFailed))
+                .await?;
         }
         drop(permit);
-        result
+        result.map(|()| LearningExecutionOutcome::Completed)
     }
 
     async fn run_pipeline(
@@ -386,6 +530,8 @@ impl PendingLearning {
         weak: &Weak<Shared>,
         run: RunId,
         snapshot: Option<std::sync::Arc<crate::learning::SourceSnapshot>>,
+        entry: &Arc<LearningExecution>,
+        jobs: &crate::learning_jobs::LearningJobQueue,
     ) -> Result<(), String> {
         let queue = LearningQueue::new(
             runtime,
@@ -402,6 +548,8 @@ impl PendingLearning {
                 },
                 run,
                 snapshot,
+                entry,
+                jobs,
             )
             .await
             .map_err(|error| error.to_string())?;

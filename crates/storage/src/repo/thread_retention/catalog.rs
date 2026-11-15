@@ -294,7 +294,26 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ("usage_run_threads", Keep, "cost attribution is kept"),
     ("learning_claims", Keep, "learning is kept"),
     ("learning_claim_roots", Keep, "learning is kept"),
-    ("learning_jobs", Keep, "learning is kept"),
+    (
+        "learning_jobs",
+        Keep,
+        "bounded job diagnostics outlive evidence",
+    ),
+    (
+        "learning_job_staging",
+        Keep,
+        "private extraction is deleted on interrupt or terminal commit",
+    ),
+    (
+        "learning_job_publications",
+        Keep,
+        "job publication is exactly once",
+    ),
+    (
+        "learning_attempt_receipts",
+        Keep,
+        "hashed CAS receipts resolve unknown ACKs without replay",
+    ),
     (
         "learning_job_evidence",
         Keep,

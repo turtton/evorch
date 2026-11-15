@@ -8,7 +8,8 @@ use std::time::SystemTime;
 
 use storage::learning_jobs::NewLearningJob;
 pub use storage::learning_jobs::{
-    LearningAdmission, LearningJob, LearningJobEvidence, LearningJobState, LearningOrigin,
+    LearningAdmission, LearningAttemptChange, LearningAttemptKey, LearningAttemptWrite,
+    LearningEndReason, LearningJob, LearningJobEvidence, LearningJobState, LearningOrigin,
     LearningOriginKind,
 };
 use storage::{Database, StorageConfig, StorageError, StorageHandle};
@@ -183,6 +184,8 @@ pub struct LearningJobQueue {
     storage: StorageConfig,
     origin: LearningOrigin,
     clock: Clock,
+    #[cfg(test)]
+    ack_fault: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl LearningJobQueue {
@@ -192,6 +195,8 @@ impl LearningJobQueue {
             storage,
             origin,
             clock: Arc::new(SystemTime::now),
+            #[cfg(test)]
+            ack_fault: Arc::default(),
         }
     }
 
@@ -228,23 +233,105 @@ impl LearningJobQueue {
         )
     }
 
-    /// `Pending -> Started`. Taking the producer permit as an argument makes a start
-    /// outside the learning gate unrepresentable. If this fails with an error the
-    /// start may or may not be recorded: end the job with [`Self::abandon`], never
-    /// run it.
-    pub fn start(&self, task_id: &str, _permit: &ProducerPermit) -> Result<bool, StorageError> {
-        self.writer
-            .start_learning_job(task_id, &self.origin.instance, self.now())
+    pub fn start_attempt(
+        &self,
+        task_id: &str,
+        _permit: &ProducerPermit,
+    ) -> Result<Option<LearningAttemptKey>, StorageError> {
+        let Some(job) = self.job(task_id)? else {
+            return Ok(None);
+        };
+        if job.origin != self.origin || job.state != LearningJobState::Pending {
+            return Ok(None);
+        }
+        let result = self.change(&job.key(), LearningAttemptChange::Start)?;
+        Ok(result.filter(|key| key.state == LearningJobState::Started))
     }
 
-    pub fn finish(&self, task_id: &str, ok: bool) -> Result<bool, StorageError> {
-        self.writer
-            .finish_learning_job(task_id, &self.origin.instance, ok, self.now())
+    pub(crate) fn receipt(
+        &self,
+        key: &LearningAttemptKey,
+        change: &LearningAttemptChange,
+    ) -> Result<Option<LearningAttemptKey>, StorageError> {
+        Database::open(&self.storage)?.learning_attempt_receipt(key, change)
     }
 
-    pub fn abandon(&self, task_id: &str, reason: &str) -> Result<bool, StorageError> {
-        self.writer
-            .abandon_learning_job(task_id, &self.origin.instance, reason, self.now())
+    pub fn change(
+        &self,
+        key: &LearningAttemptKey,
+        change: LearningAttemptChange,
+    ) -> Result<Option<LearningAttemptKey>, StorageError> {
+        let command = LearningAttemptWrite {
+            key: key.clone(),
+            change: change.clone(),
+        };
+        #[cfg(test)]
+        let fault = self.ack_fault.swap(0, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(test)]
+        let written = if fault == 1 {
+            Err(StorageError::WriterClosed)
+        } else {
+            let result = self.writer.write_learning_attempt(command, self.now());
+            if fault == 2 && result.is_ok() {
+                Err(StorageError::WriterClosed)
+            } else {
+                result
+            }
+        };
+        #[cfg(not(test))]
+        let written = self.writer.write_learning_attempt(command, self.now());
+        match written {
+            Ok(false) => Ok(None),
+            result => {
+                let receipt = Database::open(&self.storage)
+                    .and_then(|db| db.learning_attempt_receipt(key, &change))
+                    .map_err(|_| StorageError::LearningWriteUnconfirmed)?;
+                if let Some(key) = receipt {
+                    return Ok(Some(key));
+                }
+                match result {
+                    // Writer replies after transaction completion. Validation errors are
+                    // known rollbacks; a lost writer/commit ACK is never guessed safe.
+                    Err(StorageError::WriterClosed | StorageError::LearningWriteUnconfirmed)
+                    | Ok(true) => Err(StorageError::LearningWriteUnconfirmed),
+                    Err(error) => Err(error),
+                    Ok(false) => unreachable!(),
+                }
+            }
+        }
+    }
+
+    pub fn evidence(&self, task_id: &str) -> Result<Option<LearningJobEvidence>, StorageError> {
+        Database::open(&self.storage)?.learning_job_evidence(task_id)
+    }
+
+    /// Ends a job only at the Pending key a caller observed. A job that has moved on
+    /// (started, interrupted or ended since) fails the CAS and is left untouched.
+    pub fn abandon_observed(&self, observed: &LearningAttemptKey) -> Result<bool, StorageError> {
+        if observed.state != LearningJobState::Pending {
+            return Ok(false);
+        }
+        Ok(self
+            .change(
+                observed,
+                LearningAttemptChange::Abandon(LearningEndReason::EvidenceUnavailable),
+            )?
+            .is_some())
+    }
+
+    pub fn abandon(&self, task_id: &str, _reason: &str) -> Result<bool, StorageError> {
+        let Some(job) = self.job(task_id)? else {
+            return Ok(false);
+        };
+        if job.origin != self.origin {
+            return Ok(false);
+        }
+        Ok(self
+            .change(
+                &job.key(),
+                LearningAttemptChange::Abandon(LearningEndReason::EvidenceUnavailable),
+            )?
+            .is_some())
     }
 
     pub fn job(&self, task_id: &str) -> Result<Option<LearningJob>, StorageError> {
@@ -256,7 +343,7 @@ impl LearningJobQueue {
         Ok(Database::open(&self.storage)?
             .learning_jobs(&[LearningJobState::Started])?
             .into_iter()
-            .filter(|job| job.origin.instance == self.origin.instance)
+            .filter(|job| job.origin == self.origin)
             .collect())
     }
 
@@ -296,7 +383,9 @@ impl LearningJobQueue {
                 Ok(None) | Err(_) => {
                     // Without verified evidence the job cannot run; ending it keeps
                     // the claim and the quota spent, like any other ended job.
-                    self.abandon(&job.task_id, "evidence unavailable")?;
+                    if let Some(current) = database.learning_job(&job.task_id)? {
+                        self.abandon_observed(&current.key())?;
+                    }
                 }
             }
         }
@@ -310,17 +399,22 @@ impl LearningJobQueue {
     pub fn sweep_dead_origins(&self, probe: &dyn OriginProbe) -> Result<SweepReport, StorageError> {
         let database = Database::open(&self.storage)?;
         let mut report = SweepReport::default();
-        for job in
-            database.learning_jobs(&[LearningJobState::Pending, LearningJobState::Started])?
-        {
-            if job.origin.instance == self.origin.instance {
+        for job in database.learning_jobs(&[
+            LearningJobState::Pending,
+            LearningJobState::Started,
+            LearningJobState::Interrupted,
+        ])? {
+            if job.origin.instance == self.origin.instance
+                || (job.state == LearningJobState::Interrupted
+                    && job.origin.kind == LearningOriginKind::Core)
+            {
                 continue;
             }
             match probe.liveness(&job.origin) {
                 OriginLiveness::Alive => report.origin_alive += 1,
                 OriginLiveness::Unknown => report.origin_unknown += 1,
                 OriginLiveness::Dead => {
-                    let (reason, counter) = match (job.state, job.origin.kind) {
+                    let (_reason, counter) = match (job.state, job.origin.kind) {
                         (LearningJobState::Started, _) => (
                             "origin died after the job started",
                             &mut report.abandoned_started,
@@ -336,12 +430,13 @@ impl LearningJobQueue {
                     };
                     // Guarded by the dead instance: a job someone took over meanwhile
                     // no longer matches and is left alone.
-                    if self.writer.abandon_learning_job(
-                        &job.task_id,
-                        &job.origin.instance,
-                        reason,
-                        self.now(),
-                    )? {
+                    if self
+                        .change(
+                            &job.key(),
+                            LearningAttemptChange::Abandon(LearningEndReason::OriginDied),
+                        )?
+                        .is_some()
+                    {
                         *counter += 1;
                     }
                 }
@@ -351,7 +446,41 @@ impl LearningJobQueue {
     }
 }
 
+/// Internal bounded read model. Wire DTOs/events and UI projection belong to 5a.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearningJobStatus {
+    pub task_id: String,
+    pub state: LearningJobState,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub revision: u64,
+    pub reason: Option<String>,
+    pub publication: Option<String>,
+}
+
 impl AgentRuntime {
+    pub fn subscribe_learning_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.shared.learning_jobs_changed.subscribe()
+    }
+
+    pub fn learning_job_status(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<LearningJobStatus>, StorageError> {
+        let Some(queue) = self.learning_job_queue() else {
+            return Ok(None);
+        };
+        Ok(queue.job(task_id)?.map(|job| LearningJobStatus {
+            task_id: job.task_id,
+            state: job.state,
+            attempt: job.attempt,
+            max_attempts: job.max_attempts,
+            revision: job.revision,
+            reason: job.reason,
+            publication: job.publication,
+        }))
+    }
+
     /// The gate learning pipelines start behind. It is not the shared producer gate:
     /// pausing it stops learning only, never lanes or chats.
     pub fn learning_gate(&self) -> ProducerGate {

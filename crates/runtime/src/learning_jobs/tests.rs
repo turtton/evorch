@@ -180,18 +180,44 @@ async fn a_job_goes_pending_started_finished_and_its_evidence_goes_with_it() {
     );
 
     let permit = gate.try_enter().unwrap();
-    assert!(queue.start("t1", &permit).unwrap());
+    assert!(queue.start_attempt("t1", &permit).unwrap().is_some());
     assert!(
-        !queue.start("t1", &permit).unwrap(),
+        !queue.start_attempt("t1", &permit).unwrap().is_some(),
         "start is a single CAS"
     );
     assert_eq!(fixture.state("t1"), LearningJobState::Started);
 
-    assert!(queue.finish("t1", true).unwrap());
+    let key = queue.job("t1").unwrap().unwrap().key();
+    let key = queue
+        .change(
+            &key,
+            LearningAttemptChange::BindRun {
+                run: "extract".into(),
+                review: false,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let key = queue
+        .change(&key, LearningAttemptChange::ExtractionReady(vec![]))
+        .unwrap()
+        .unwrap();
+    assert!(
+        queue
+            .change(&key, LearningAttemptChange::Publish)
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(fixture.state("t1"), LearningJobState::Finished);
     assert!(!fixture.has_evidence("t1"));
     assert!(
-        !queue.finish("t1", false).unwrap(),
+        queue
+            .change(
+                &key,
+                LearningAttemptChange::Fail(LearningEndReason::PipelineFailed)
+            )
+            .unwrap()
+            .is_none(),
         "an ended job stays ended"
     );
 }
@@ -205,7 +231,7 @@ async fn only_the_admitting_incarnation_can_start_or_end_its_job() {
     owner.admit(admit_request("t1", "run-1")).unwrap();
 
     let permit = gate.try_enter().unwrap();
-    assert!(!other.start("t1", &permit).unwrap());
+    assert!(!other.start_attempt("t1", &permit).unwrap().is_some());
     assert!(!other.abandon("t1", "not mine").unwrap());
     assert_eq!(fixture.state("t1"), LearningJobState::Pending);
 }
@@ -256,7 +282,7 @@ async fn rescan_takes_only_pending_jobs_of_a_dead_core_of_the_same_config() {
             .admit(admit_request(task, &format!("run-{index}")))
             .unwrap();
         if *task == "dead-started" {
-            assert!(queue.start(task, &permit).unwrap());
+            assert!(queue.start_attempt(task, &permit).unwrap().is_some());
         }
     }
     let probe = FakeProbe::new(&[
@@ -322,7 +348,7 @@ async fn the_janitor_ends_dead_work_without_running_anything_and_spares_the_rest
             .admit(admit_request(task, &format!("run-{index}")))
             .unwrap();
         if *started {
-            assert!(queue.start(task, &permit).unwrap());
+            assert!(queue.start_attempt(task, &permit).unwrap().is_some());
         }
     }
     let probe = FakeProbe::new(&[
@@ -485,7 +511,7 @@ fn child_that_dies_owning_jobs() {
         );
         queue.admit(admit_request(task, task)).unwrap();
         if started {
-            assert!(queue.start(task, &permit).unwrap());
+            assert!(queue.start_attempt(task, &permit).unwrap().is_some());
         }
     }
     std::process::exit(0);
@@ -554,7 +580,7 @@ async fn a_live_process_never_sweeps_or_adopts_its_own_other_origins_jobs() {
     let permit = gate.try_enter().unwrap();
     gui.admit(admit_request("gui-pending", "run-1")).unwrap();
     gui.admit(admit_request("gui-started", "run-2")).unwrap();
-    assert!(gui.start("gui-started", &permit).unwrap());
+    assert!(gui.start_attempt("gui-started", &permit).unwrap().is_some());
     sibling
         .admit(admit_request("core-pending", "run-3"))
         .unwrap();
@@ -596,7 +622,12 @@ fn exec_predecessor() {
         );
         queue.admit(admit_request("exec-pending", "run-1")).unwrap();
         queue.admit(admit_request("exec-started", "run-2")).unwrap();
-        assert!(queue.start("exec-started", &permit).unwrap());
+        assert!(
+            queue
+                .start_attempt("exec-started", &permit)
+                .unwrap()
+                .is_some()
+        );
     }
     let error = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -676,7 +707,7 @@ async fn concurrent_starts_of_one_job_succeed_exactly_once() {
         handles.push(tokio::spawn(async move {
             let permit = gate.try_enter().unwrap();
             barrier.wait().await;
-            queue.start("t1", &permit).unwrap()
+            queue.start_attempt("t1", &permit).unwrap().is_some()
         }));
     }
     let mut started = 0;
@@ -713,6 +744,14 @@ fn race_child() {
     let mut go = String::new();
     std::io::stdin().lock().read_line(&mut go).unwrap();
 
+    if std::env::var("EVORCH_LEARNING_JOBS_RACE_ACTION").as_deref() == Ok("janitor") {
+        queue
+            .sweep_dead_origins(&FakeProbe::new(&[("old", OriginLiveness::Dead)]))
+            .unwrap();
+        println!("RESULT admitted=0 adopted=0 started=0");
+        std::io::stdout().flush().unwrap();
+        return;
+    }
     let admitted = queue
         .admit(admit_request("race-task", "race-root"))
         .unwrap()
@@ -721,7 +760,12 @@ fn race_child() {
     let adopted = queue.rescan_core(&probe).unwrap();
     let mut started = 0;
     for job in &adopted {
-        started += usize::from(queue.start(&job.job.task_id, &permit).unwrap());
+        started += usize::from(
+            queue
+                .start_attempt(&job.job.task_id, &permit)
+                .unwrap()
+                .is_some(),
+        );
     }
     println!(
         "RESULT admitted={} adopted={} started={started}",
@@ -732,7 +776,7 @@ fn race_child() {
 }
 
 #[tokio::test]
-async fn two_processes_racing_admit_and_adopt_win_exactly_once() {
+async fn independent_processes_racing_admission_adoption_and_janitor_win_exactly_once() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let fixture = Fixture::new();
     fixture
@@ -741,10 +785,11 @@ async fn two_processes_racing_admit_and_adopt_win_exactly_once() {
         .unwrap();
     let exe = std::env::current_exe().unwrap();
     let mut children = Vec::new();
-    for _ in 0..2 {
+    for action in ["adopt", "adopt", "janitor"] {
         let mut child = tokio::process::Command::new(&exe)
             .args(["--exact", "learning_jobs::tests::race_child", "--nocapture"])
             .env("EVORCH_LEARNING_JOBS_RACE_DB", &fixture.config.db_path)
+            .env("EVORCH_LEARNING_JOBS_RACE_ACTION", action)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -752,7 +797,7 @@ async fn two_processes_racing_admit_and_adopt_win_exactly_once() {
         let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
         children.push((child, stdout));
     }
-    // Both children report READY before either gets the go-ahead, so their
+    // All three children report READY before any gets the go-ahead, so their
     // admissions and rescans overlap instead of running one after the other.
     for (_, stdout) in &mut children {
         loop {
@@ -792,4 +837,874 @@ async fn two_processes_racing_admit_and_adopt_win_exactly_once() {
     assert_eq!(totals, [1, 1, 1], "admitted, adopted, started");
     assert_eq!(fixture.state("race-task"), LearningJobState::Pending);
     assert_eq!(fixture.state("dead-pending"), LearningJobState::Started);
+}
+
+#[tokio::test]
+async fn learning_ack_loss_reads_the_exact_operation_and_never_speculates_a_start() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "ack-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    let permit = runtime.learning_gate().try_enter().unwrap();
+    queue.admit(admit_request("before", "before-root")).unwrap();
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register("before", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    queue.ack_fault.store(1, Ordering::SeqCst);
+    assert!(entry.start(&queue, &permit).is_err());
+    runtime.learning_returned(&entry).await;
+    let ended = queue.job("before").unwrap().unwrap();
+    assert_eq!(
+        (ended.state, ended.attempt),
+        (LearningJobState::Abandoned, 0)
+    );
+    assert_eq!(ended.reason.as_deref(), Some("unconfirmed_write"));
+    assert!(!f.has_evidence("before"));
+    assert!(runtime.list_agents().is_empty());
+    queue.admit(admit_request("after", "after-root")).unwrap();
+    let before = queue.job("after").unwrap().unwrap().key();
+    queue.ack_fault.store(2, Ordering::SeqCst);
+    let started = queue
+        .change(&before, LearningAttemptChange::Start)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (started.attempt, started.revision),
+        (1, before.revision + 1)
+    );
+    let bound = queue
+        .change(
+            &started,
+            LearningAttemptChange::BindRun {
+                run: "fresh".into(),
+                review: false,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert!(bound.revision > started.revision);
+    assert_eq!(
+        queue
+            .receipt(&before, &LearningAttemptChange::Start)
+            .unwrap(),
+        Some(started)
+    );
+    let mut foreign = before.clone();
+    foreign.owner = "foreign".into();
+    assert!(
+        queue
+            .receipt(&foreign, &LearningAttemptChange::Start)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        queue
+            .change(&before, LearningAttemptChange::Start)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(queue.job("after").unwrap().unwrap().attempt, 1);
+}
+
+#[tokio::test]
+async fn learning_unknown_commit_readback_ends_without_candidates_after_normal_return() {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "readback-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let mut queue = f.queue(owner);
+    queue
+        .admit(admit_request("unconfirmed", "unconfirmed-root"))
+        .unwrap();
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register("unconfirmed", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    let permit = runtime.learning_gate().try_enter().unwrap();
+    assert!(entry.start(&queue, &permit).unwrap());
+    assert!(
+        entry
+            .change(
+                &queue,
+                LearningAttemptChange::BindRun {
+                    run: "extract".into(),
+                    review: false
+                }
+            )
+            .unwrap()
+    );
+    queue.storage.db_path = f._dir.path().join("not-a-directory").join("unavailable.db");
+    // Real writer commit; only independent readback is unavailable.
+    assert!(
+        entry
+            .change(&queue, LearningAttemptChange::ExtractionReady(Vec::new()))
+            .is_err()
+    );
+    runtime.learning_returned(&entry).await;
+    let job = Database::open(&f.config)
+        .unwrap()
+        .learning_job("unconfirmed")
+        .unwrap()
+        .unwrap();
+    assert_eq!((job.state, job.attempt), (LearningJobState::Abandoned, 1));
+    assert_eq!(job.reason.as_deref(), Some("unconfirmed_write"));
+    assert_eq!(job.publication.as_deref(), Some("None"));
+    assert!(!f.has_evidence("unconfirmed"));
+    assert!(runtime.list_agents().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_late_cleanup_does_not_reopen_a_later_pause_or_retry_before_return() {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "late-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    queue.admit(admit_request("late", "late-root")).unwrap();
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register("late", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    {
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(entry.start(&queue, &permit).unwrap());
+    }
+    let mut changed = runtime.subscribe_learning_changes();
+    let pause = runtime.pause_learning();
+    let suspension = Arc::new(runtime.suspend_learning(&pause).unwrap());
+    loop {
+        if queue.job("late").unwrap().unwrap().state == LearningJobState::Interrupted {
+            break;
+        }
+        changed.changed().await.unwrap();
+    }
+    assert_eq!(
+        suspension
+            .wait_until(tokio::time::Instant::now())
+            .await
+            .unwrap(),
+        crate::learning_suspend::LearningSuspendWait::DeadlineExceeded
+    );
+    runtime
+        .cancel_learning_suspension(pause, suspension)
+        .unwrap();
+    assert_eq!(
+        queue.job("late").unwrap().unwrap().state,
+        LearningJobState::Interrupted
+    );
+    let later = runtime.pause_learning();
+    // This explicit receipt stands in for a root scope held by an owned task;
+    // the full journal/dispatch path is exercised by post_run_learning.
+    runtime.learning_returned(&entry).await;
+    loop {
+        if queue.job("late").unwrap().unwrap().state == LearningJobState::Pending {
+            break;
+        }
+        changed.changed().await.unwrap();
+    }
+    assert!(!runtime.learning_gate().is_open());
+    assert_eq!(queue.job("late").unwrap().unwrap().attempt, 1);
+    assert!(runtime.list_agents().is_empty());
+    assert!(!runtime.learning_gate().is_open());
+    drop(later);
+}
+
+#[tokio::test]
+async fn learning_interrupted_core_jobs_are_reserved_for_exclusive_recovery_not_shared_janitor() {
+    let f = Fixture::new();
+    let gate = ProducerGate::default();
+    let permit = gate.try_enter().unwrap();
+    for (kind, id, cfg) in [
+        (LearningOriginKind::Core, "dead-core", "cfg"),
+        (LearningOriginKind::Core, "other-config", "other"),
+        (LearningOriginKind::Gui, "dead-gui", "cfg"),
+        (LearningOriginKind::Gui, "live-gui", "cfg"),
+        (LearningOriginKind::Gui, "unknown-gui", "cfg"),
+    ] {
+        let queue = f.queue(origin(kind, id, Some(cfg)));
+        queue.admit(admit_request(id, id)).unwrap();
+        let key = queue.start_attempt(id, &permit).unwrap().unwrap();
+        queue
+            .change(
+                &key,
+                LearningAttemptChange::Interrupt {
+                    suspension_id: "planned".into(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+    }
+    let current = f.queue(origin(LearningOriginKind::Core, "new", Some("cfg")));
+    let probe = FakeProbe::new(&[
+        ("dead-core", OriginLiveness::Dead),
+        ("other-config", OriginLiveness::Dead),
+        ("dead-gui", OriginLiveness::Dead),
+        ("live-gui", OriginLiveness::Alive),
+    ]);
+    assert!(current.rescan_core(&probe).unwrap().is_empty());
+    current.sweep_dead_origins(&probe).unwrap();
+    for id in ["dead-core", "other-config", "live-gui", "unknown-gui"] {
+        assert_eq!(f.state(id), LearningJobState::Interrupted);
+        assert!(f.has_evidence(id));
+    }
+    assert_eq!(f.state("dead-gui"), LearningJobState::Abandoned);
+    assert_eq!(
+        current.job("dead-gui").unwrap().unwrap().reason.as_deref(),
+        Some(LearningEndReason::OriginDied.as_str())
+    );
+    assert!(!f.has_evidence("dead-gui"));
+    assert!(f.bare_runtime().list_agents().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_rejected_terminal_write_keeps_cleanup_owned_until_it_commits() {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "terminal-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    queue
+        .admit(admit_request("rejected", "rejected-root"))
+        .unwrap();
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register("rejected", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    {
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(entry.start(&queue, &permit).unwrap());
+    }
+    let injected = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    injected
+        .execute_batch(
+            "CREATE TRIGGER inject_terminal_rollback BEFORE UPDATE ON learning_jobs
+             WHEN NEW.state IN ('Finished','Failed')
+             BEGIN SELECT RAISE(ABORT, 'injected rollback'); END;",
+        )
+        .unwrap();
+    assert!(
+        entry
+            .change(
+                &queue,
+                LearningAttemptChange::Fail(LearningEndReason::PipelineFailed)
+            )
+            .is_err()
+    );
+    // The pipeline returns with the terminal write still rejected: the entry is not
+    // released, so the job is neither forgotten nor reported as cleaned up.
+    runtime.learning_returned(&entry).await;
+    assert_eq!(f.state("rejected"), LearningJobState::Started);
+    assert!(f.has_evidence("rejected"));
+    let pause = runtime.pause_learning();
+    let suspension = runtime.suspend_learning(&pause).unwrap();
+    let deadline = || tokio::time::Instant::now() + Duration::from_secs(60);
+    // The unresolved terminal write is reported as an error and never as a clean return.
+    assert!(suspension.wait_until(deadline()).await.is_err());
+    assert_eq!(f.state("rejected"), LearningJobState::Started);
+
+    injected
+        .execute_batch("DROP TRIGGER inject_terminal_rollback;")
+        .unwrap();
+    runtime.reconcile_learning_suspension(&suspension).await;
+    assert_eq!(
+        suspension.wait_until(deadline()).await.unwrap(),
+        crate::learning_suspend::LearningSuspendWait::Complete
+    );
+    let ended = queue.job("rejected").unwrap().unwrap();
+    assert_eq!(ended.state, LearningJobState::Failed);
+    assert_eq!(
+        ended.reason.as_deref(),
+        Some(LearningEndReason::PipelineFailed.as_str())
+    );
+    assert!(!f.has_evidence("rejected"));
+    assert!(runtime.list_agents().is_empty());
+}
+
+/// A started job whose terminal write the database keeps rolling back, returned with the
+/// write still rejected. The returned connection holds the injected trigger.
+async fn returned_with_rejected_terminal(
+    f: &Fixture,
+    task: &str,
+) -> (
+    AgentRuntime,
+    Arc<crate::learning_suspend::LearningExecution>,
+    rusqlite::Connection,
+) {
+    let owner = origin(LearningOriginKind::Core, "retry-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    queue.admit(admit_request(task, "retry-root")).unwrap();
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register(task, runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    {
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(entry.start(&queue, &permit).unwrap());
+    }
+    let injected = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    injected
+        .execute_batch(
+            "CREATE TRIGGER inject_terminal_rollback BEFORE UPDATE ON learning_jobs
+             WHEN NEW.state IN ('Finished','Failed')
+             BEGIN SELECT RAISE(ABORT, 'injected rollback'); END;",
+        )
+        .unwrap();
+    assert!(
+        entry
+            .change(
+                &queue,
+                LearningAttemptChange::Fail(LearningEndReason::PipelineFailed)
+            )
+            .is_err()
+    );
+    runtime.learning_returned(&entry).await;
+    assert_eq!(f.state(task), LearningJobState::Started);
+    (runtime, entry, injected)
+}
+
+async fn returned_cleanly(entry: &crate::learning_suspend::LearningExecution) {
+    let mut receipt = entry.returned_receipt();
+    while !matches!(*receipt.borrow_and_update(), Some(Ok(()))) {
+        receipt.changed().await.unwrap();
+    }
+}
+
+// The database recovers after the pipeline and its first reconcile both failed. Nobody
+// calls suspend or reconcile: the runtime's own retry settles the job.
+#[tokio::test(start_paused = true)]
+async fn learning_unresolved_terminal_is_retried_by_the_runtime_once_the_database_recovers() {
+    let f = Fixture::new();
+    let (runtime, entry, injected) = returned_with_rejected_terminal(&f, "retried").await;
+    injected
+        .execute_batch("DROP TRIGGER inject_terminal_rollback;")
+        .unwrap();
+
+    returned_cleanly(&entry).await;
+
+    let ended = f.queue(origin(LearningOriginKind::Core, "retry-owner", Some("cfg")));
+    let ended = ended.job("retried").unwrap().unwrap();
+    assert_eq!(ended.state, LearningJobState::Failed);
+    assert_eq!(
+        ended.reason.as_deref(),
+        Some(LearningEndReason::PipelineFailed.as_str())
+    );
+    assert!(!f.has_evidence("retried"));
+    assert!(runtime.list_agents().is_empty());
+}
+
+// The backoff is capped, not abandoned: the entry stays owned through many failed attempts
+// and still settles when the database finally recovers.
+#[tokio::test(start_paused = true)]
+async fn learning_unresolved_terminal_keeps_retrying_past_the_backoff_cap() {
+    let f = Fixture::new();
+    let (runtime, entry, injected) = returned_with_rejected_terminal(&f, "capped").await;
+    let mut attempts = runtime.subscribe_learning_changes();
+    for _ in 0..9 {
+        attempts.changed().await.unwrap();
+        assert_eq!(f.state("capped"), LearningJobState::Started);
+        assert!(f.has_evidence("capped"));
+        assert!(matches!(*entry.returned_receipt().borrow(), Some(Err(_))));
+    }
+    injected
+        .execute_batch("DROP TRIGGER inject_terminal_rollback;")
+        .unwrap();
+
+    returned_cleanly(&entry).await;
+
+    assert_eq!(f.state("capped"), LearningJobState::Failed);
+    assert!(!f.has_evidence("capped"));
+}
+
+// Landed and rolled-back requeues both retain ownership until recovery unblocks later jobs.
+#[tokio::test(start_paused = true)]
+async fn learning_cancel_requeues_later_jobs_once_an_older_entrys_readback_recovers() {
+    cancel_recovers_and_requeues_later_jobs(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_cancel_requeues_later_jobs_once_a_rolled_back_requeue_recovers() {
+    cancel_recovers_and_requeues_later_jobs(true).await;
+}
+
+async fn cancel_recovers_and_requeues_later_jobs(rollback: bool) {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "cancel-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner.clone());
+    let mut entries = Vec::new();
+    for task in ["first", "second"] {
+        queue
+            .admit(admit_request(task, &format!("{task}-root")))
+            .unwrap();
+        let entry = runtime
+            .shared
+            .learning_executions
+            .register(task, runtime.shared.learning_jobs_changed.clone())
+            .unwrap();
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(entry.start(&queue, &permit).unwrap());
+        entries.push(entry);
+    }
+    let mut changes = runtime.subscribe_learning_changes();
+    let pause = runtime.pause_learning();
+    let suspension = Arc::new(runtime.suspend_learning(&pause).unwrap());
+    while ["first", "second"]
+        .iter()
+        .any(|task| f.state(task) != LearningJobState::Interrupted)
+    {
+        changes.changed().await.unwrap();
+    }
+    for entry in &entries {
+        runtime.learning_returned(entry).await;
+    }
+    suspension.wait().await.unwrap();
+    let broken = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    if rollback {
+        broken
+            .execute_batch(
+                "CREATE TRIGGER inject_cancel_rollback BEFORE UPDATE ON learning_jobs
+             WHEN NEW.state IN ('Pending','Abandoned')
+             BEGIN SELECT RAISE(ABORT, 'injected rollback'); END;",
+            )
+            .unwrap();
+    } else {
+        // Commit with a lost acknowledgement, then make receipt readback unavailable.
+        let interrupted = queue.job("first").unwrap().unwrap();
+        queue
+            .change(
+                &interrupted.key(),
+                LearningAttemptChange::Requeue {
+                    suspension_id: interrupted.suspension_id.clone().unwrap(),
+                    to: owner,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        broken
+            .execute_batch(
+                "ALTER TABLE learning_attempt_receipts RENAME TO learning_attempt_receipts_off;",
+            )
+            .unwrap();
+    }
+
+    runtime
+        .cancel_learning_suspension(pause, suspension)
+        .unwrap();
+    let mut stuck = entries[0].returned_receipt();
+    while !matches!(*stuck.borrow_and_update(), Some(Err(_))) {
+        stuck.changed().await.unwrap();
+    }
+    assert_eq!(f.state("second"), LearningJobState::Interrupted);
+    assert!(
+        runtime
+            .shared
+            .learning_executions
+            .register("first", runtime.shared.learning_jobs_changed.clone())
+            .is_none(),
+        "an unresolved cleanup keeps its task"
+    );
+
+    broken
+        .execute_batch(if rollback {
+            "DROP TRIGGER inject_cancel_rollback;"
+        } else {
+            "ALTER TABLE learning_attempt_receipts_off RENAME TO learning_attempt_receipts;"
+        })
+        .unwrap();
+    while f.state("second") == LearningJobState::Interrupted {
+        changes.changed().await.unwrap();
+    }
+
+    assert_ne!(f.state("first"), LearningJobState::Interrupted);
+    assert_ne!(f.state("second"), LearningJobState::Abandoned);
+    returned_cleanly(&entries[0]).await;
+    if !rollback {
+        assert_eq!(f.state("first"), LearningJobState::Pending);
+    }
+}
+
+// A stale Pending snapshot must not supersede a Publish whose rollback/readback was unknown.
+// After DB recovery, only the old entry may settle its Started job and delete private staging.
+#[tokio::test(start_paused = true)]
+async fn learning_a_refused_registration_does_not_settle_an_unresolved_publish_cleanup() {
+    let f = Fixture::new();
+    let worker = f.bare_runtime();
+    let source = worker.delegate_background(Role::Worker, "work".into(), RunConfig::default());
+    assert_eq!(worker.wait(source).await.unwrap(), AgentRunPhase::Done);
+    let owner = origin(LearningOriginKind::Core, "publish-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    let mut request = admit_request("held", &source.to_string());
+    request.evidence_json = worker
+        .freeze_run_learning(source)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    queue.admit(request).unwrap();
+    let stale = AdoptedJob {
+        job: queue.job("held").unwrap().unwrap(),
+        evidence: queue.evidence("held").unwrap().unwrap(),
+    };
+    let entry = runtime
+        .shared
+        .learning_executions
+        .register("held", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    {
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(entry.start(&queue, &permit).unwrap());
+    }
+    assert!(
+        entry
+            .change(
+                &queue,
+                LearningAttemptChange::BindRun {
+                    run: source.to_string(),
+                    review: false,
+                }
+            )
+            .unwrap()
+    );
+    assert!(
+        entry
+            .change(&queue, LearningAttemptChange::ExtractionReady(vec![]))
+            .unwrap()
+    );
+    let injected = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    injected
+        .execute_batch(
+            "CREATE TRIGGER inject_publish_rollback BEFORE UPDATE ON learning_jobs
+         WHEN NEW.state='Finished' BEGIN SELECT RAISE(ABORT, 'injected rollback'); END;
+         ALTER TABLE learning_attempt_receipts RENAME TO learning_attempt_receipts_off;",
+        )
+        .unwrap();
+    assert!(
+        entry
+            .change(&queue, LearningAttemptChange::Publish)
+            .is_err()
+    );
+    runtime.learning_returned(&entry).await;
+    assert!(matches!(*entry.returned_receipt().borrow(), Some(Err(_))));
+    assert_eq!(f.state("held"), LearningJobState::Started);
+    assert!(f.has_evidence("held"));
+    injected
+        .execute_batch(
+            "ALTER TABLE learning_attempt_receipts_off RENAME TO learning_attempt_receipts;
+         DROP TRIGGER inject_publish_rollback;",
+        )
+        .unwrap();
+
+    let dispatch = runtime.resume_adopted_learning(stale);
+    runtime.learning_returned(&entry).await;
+    assert!(
+        f.state("held").is_terminal(),
+        "the old Publish must not be forgotten by a registration"
+    );
+    assert!(
+        dispatch.is_err(),
+        "unsettled cleanup must refuse a stale dispatch"
+    );
+    let pause = runtime.pause_learning();
+    runtime
+        .suspend_learning(&pause)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert!(queue.started_by_me().unwrap().is_empty());
+    assert!(!f.has_evidence("held"));
+    let staging: u32 = injected
+        .query_row(
+            "SELECT count(*) FROM learning_job_staging WHERE task_id='held'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(staging, 0);
+    assert!(runtime.list_agents().is_empty());
+}
+
+// An entry with no attempt (its intake was never confirmed) may end only the Pending job it
+// observed. A job that a newer attempt already started is never written over.
+#[tokio::test(start_paused = true)]
+async fn learning_unconfirmed_intake_cleanup_never_ends_a_job_it_did_not_observe_pending() {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "intake-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    for task in ["running", "pending"] {
+        queue
+            .admit(admit_request(task, &format!("{task}-root")))
+            .unwrap();
+    }
+    let started = queue.job("running").unwrap().unwrap();
+    queue
+        .change(&started.key(), LearningAttemptChange::Start)
+        .unwrap()
+        .unwrap();
+    for task in ["running", "pending"] {
+        let entry = runtime
+            .shared
+            .learning_executions
+            .register(task, runtime.shared.learning_jobs_changed.clone())
+            .unwrap();
+        entry.intake_unconfirmed();
+        runtime.learning_returned(&entry).await;
+        returned_cleanly(&entry).await;
+    }
+
+    assert_eq!(f.state("running"), LearningJobState::Started);
+    assert!(f.has_evidence("running"));
+    let ended = queue.job("pending").unwrap().unwrap();
+    assert_eq!(ended.state, LearningJobState::Abandoned);
+    assert_eq!(
+        ended.reason.as_deref(),
+        Some(LearningEndReason::UnconfirmedWrite.as_str())
+    );
+    assert!(!f.has_evidence("pending"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_moved_interrupt_readback_never_authorizes_an_old_cancellation() {
+    moved_interrupted_cleanup_preserves_successor(CleanupReadback::UnappliedInterrupt).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_moved_terminal_retry_never_authorizes_an_old_cancellation() {
+    moved_interrupted_cleanup_preserves_successor(CleanupReadback::RejectedTerminal).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_moved_abandon_readback_never_authorizes_an_old_cancellation() {
+    moved_interrupted_cleanup_preserves_successor(CleanupReadback::AppliedBind).await;
+}
+
+enum CleanupReadback {
+    UnappliedInterrupt,
+    RejectedTerminal,
+    AppliedBind,
+}
+
+// Move the job using real storage transitions, not fabricated keys. Each case reaches a
+// different read-only settlement path before the old suspension's actual cancel task runs.
+async fn moved_interrupted_cleanup_preserves_successor(readback: CleanupReadback) {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "old-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    queue.admit(admit_request("moved", "moved-root")).unwrap();
+    let old = runtime
+        .shared
+        .learning_executions
+        .register("moved", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    {
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(old.start(&queue, &permit).unwrap());
+    }
+    let sql = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    match readback {
+        CleanupReadback::UnappliedInterrupt => sql
+            .execute_batch(
+                "CREATE TRIGGER inject_interrupt_rollback BEFORE UPDATE ON learning_jobs
+                 WHEN NEW.state='Interrupted'
+                 BEGIN SELECT RAISE(ABORT, 'injected interrupt rollback'); END;
+                 ALTER TABLE learning_attempt_receipts RENAME TO learning_attempt_receipts_off;",
+            )
+            .unwrap(),
+        CleanupReadback::RejectedTerminal => {
+            sql.execute_batch(
+                "CREATE TRIGGER inject_terminal_rollback BEFORE UPDATE ON learning_jobs
+                 WHEN NEW.state='Failed'
+                 BEGIN SELECT RAISE(ABORT, 'injected terminal rollback'); END;",
+            )
+            .unwrap();
+            assert!(
+                old.change(
+                    &queue,
+                    LearningAttemptChange::Fail(LearningEndReason::PipelineFailed)
+                )
+                .is_err()
+            );
+        }
+        CleanupReadback::AppliedBind => {
+            let mut unreadable = queue.clone();
+            unreadable.storage.db_path = f._dir.path().join("absent-parent").join("unavailable.db");
+            assert!(
+                old.change(
+                    &unreadable,
+                    LearningAttemptChange::BindRun {
+                        run: "confirmed-extract".into(),
+                        review: false,
+                    }
+                )
+                .is_err()
+            );
+        }
+    }
+    let mut fenced = runtime.subscribe_learning_changes();
+    let pause = runtime.pause_learning();
+    let suspension = Arc::new(runtime.suspend_learning(&pause).unwrap());
+    while !old.interrupted() {
+        fenced.changed().await.unwrap();
+    }
+    // Record the dispatch return without starting auto-retry yet: the separate writer's
+    // moves below happen before the old cleanup is allowed to reconcile.
+    runtime.shared.learning_executions.returned(&old);
+    assert!(suspension.wait().await.is_err());
+    assert!(matches!(*old.returned_receipt().borrow(), Some(Err(_))));
+    match readback {
+        CleanupReadback::UnappliedInterrupt => sql
+            .execute_batch(
+                "ALTER TABLE learning_attempt_receipts_off RENAME TO learning_attempt_receipts;
+                 DROP TRIGGER inject_interrupt_rollback;",
+            )
+            .unwrap(),
+        CleanupReadback::RejectedTerminal => sql
+            .execute_batch("DROP TRIGGER inject_terminal_rollback;")
+            .unwrap(),
+        CleanupReadback::AppliedBind => {}
+    }
+
+    let current = queue.job("moved").unwrap().unwrap().key();
+    let interrupted = queue
+        .change(
+            &current,
+            LearningAttemptChange::Interrupt {
+                suspension_id: "external-interrupt".into(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let successor = origin(LearningOriginKind::Core, "successor-owner", Some("cfg"));
+    let pending = queue
+        .change(
+            &interrupted,
+            LearningAttemptChange::Requeue {
+                suspension_id: "external-interrupt".into(),
+                to: successor,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let started = queue
+        .change(&pending, LearningAttemptChange::Start)
+        .unwrap()
+        .unwrap();
+    let successor_key = queue
+        .change(
+            &started,
+            LearningAttemptChange::Interrupt {
+                suspension_id: "successor-suspension".into(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(successor_key.attempt, 2);
+    runtime.learning_returned(&old).await;
+    returned_cleanly(&old).await;
+    assert_eq!(queue.job("moved").unwrap().unwrap().key(), successor_key);
+
+    let mut cancelled = runtime.subscribe_learning_changes();
+    runtime
+        .cancel_learning_suspension(pause, suspension)
+        .unwrap();
+    // No scheduler was started in this fixture; this notification is from the owned
+    // cancellation task after its cleanup, not an absence-of-events timeout.
+    cancelled.changed().await.unwrap();
+    assert_eq!(queue.job("moved").unwrap().unwrap().key(), successor_key);
+    assert!(f.has_evidence("moved"));
+    assert!(runtime.list_agents().is_empty());
+}
+
+/// Runs `hook` with the instance of the first judged origin when the second origin is judged,
+/// which is after the first job was adopted and before the rescan resumes it.
+struct SyncProbe<F: Fn(&str) + Send + Sync> {
+    judged: std::sync::Mutex<Vec<String>>,
+    hook: F,
+}
+impl<F: Fn(&str) + Send + Sync> OriginProbe for SyncProbe<F> {
+    fn liveness(&self, origin: &LearningOrigin) -> OriginLiveness {
+        let mut judged = self.judged.lock().unwrap();
+        if judged.len() == 1 {
+            (self.hook)(&judged[0]);
+        }
+        judged.push(origin.instance.clone());
+        OriginLiveness::Dead
+    }
+}
+
+#[tokio::test]
+async fn learning_rescan_never_ends_a_job_the_scheduler_started_after_its_adoption() {
+    let f = Fixture::new();
+    let worker = f.bare_runtime();
+    let source = worker.delegate_background(Role::Worker, "work".into(), RunConfig::default());
+    assert_eq!(worker.wait(source).await.unwrap(), AgentRunPhase::Done);
+    let evidence = worker
+        .freeze_run_learning(source)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    for name in ["a", "b"] {
+        let mut request = admit_request(&format!("job-{name}"), &source.to_string());
+        request.roots = vec![format!("root-{name}")];
+        request.evidence_json = evidence.clone();
+        f.queue(origin(
+            LearningOriginKind::Core,
+            &format!("old-{name}"),
+            Some("cfg"),
+        ))
+        .admit(request)
+        .unwrap();
+    }
+    let owner = origin(LearningOriginKind::Core, "new", Some("cfg"));
+    let successor = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    let started = std::sync::Mutex::new(Vec::new());
+    let probe = SyncProbe {
+        judged: std::sync::Mutex::default(),
+        hook: |first: &str| {
+            // The scheduler wins the race for the job adopted first: it registers and
+            // starts it while the rescan is still judging the next origin.
+            let task = format!("job-{}", first.trim_start_matches("old-"));
+            let entry = successor
+                .shared
+                .learning_executions
+                .register(&task, successor.shared.learning_jobs_changed.clone())
+                .unwrap();
+            let permit = successor.learning_gate().try_enter().unwrap();
+            assert!(entry.start(&queue, &permit).unwrap());
+            started.lock().unwrap().push((task, entry));
+        },
+    };
+    let resumed = successor.rescan_pending_learning(&probe).unwrap();
+
+    let started = started.into_inner().unwrap();
+    assert_eq!(started.len(), 1);
+    let (raced, _entry) = &started[0];
+    // The raced job keeps running under the scheduler's attempt, evidence included.
+    assert_eq!(f.state(raced), LearningJobState::Started);
+    assert!(f.has_evidence(raced));
+    // Only the other job was resumed by the rescan itself.
+    assert_eq!(resumed.len(), 1);
+    assert_ne!(&resumed[0].task_id, raced);
+}
+
+#[tokio::test]
+async fn learning_abandon_observed_only_ends_the_pending_key_it_saw() {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "observer", Some("cfg"));
+    let queue = f.queue(owner);
+    let permit = ProducerGate::default().try_enter().unwrap();
+    queue.admit(admit_request("seen", "seen-root")).unwrap();
+    let observed = queue.job("seen").unwrap().unwrap().key();
+    assert!(queue.start_attempt("seen", &permit).unwrap().is_some());
+    assert!(!queue.abandon_observed(&observed).unwrap());
+    assert_eq!(f.state("seen"), LearningJobState::Started);
+    assert!(f.has_evidence("seen"));
 }

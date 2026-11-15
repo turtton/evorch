@@ -110,7 +110,11 @@ const C_GC: u64 = 24;
 // v63 (learning job queue: 2 tables, 1 index, 5 triggers) adds only fixed schema; it
 // measured 20 frames above v61 on its own. Reserve 24 more fixed schema frames (the
 // measured 20 plus 4 of placement headroom).
-const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4 + 32 + 24;
+// v64 (learning attempts: state-constraint rebuild plus staging, publication and receipt
+// tables, 5 rebuilt triggers) adds only fixed schema: the full-chain probe measured 547
+// frames with 100,000 rows (29 above v63). Reserve 32 more fixed schema frames (the
+// measured 29 plus 3 of placement headroom).
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4 + 32 + 24 + 32;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -347,6 +351,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v64.sql"),
                     include_str!("../undo/undo_v63.sql"),
                     include_str!("../undo/undo_v62.sql"),
                     include_str!("../undo/undo_v61.sql"),
