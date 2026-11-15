@@ -11,8 +11,9 @@ use runtime::lane_delivery::{LaneDeliveryHost, LaneDeliveryTarget};
 use runtime::ownership::{OwnerHost, OwnerPermit};
 use runtime::pull_requests::checkout::Checkout;
 use runtime::pull_requests::{
-    CheckoutResolution, FakePullRequestLogSource, FakePullRequestSource, FetchedPullRequest,
-    PrNoticeDelivery, PullRequestService, ServiceParts, ThreadEnvironment, WallClock,
+    CheckoutResolution, CiLogBundle, FakePullRequestLogSource, FakePullRequestSource,
+    FetchedPullRequest, LogRequest, PrNoticeDelivery, PullRequestLogSource, PullRequestService,
+    ServiceParts, ThreadEnvironment, WallClock,
 };
 use runtime::{
     AgentRuntime, ModelSource, Role, RunConfig, RunId, RuntimeComposition, compose_runtime,
@@ -27,8 +28,46 @@ use std::{
     time::Duration,
 };
 use storage::{lane_delivery::LaneDeliveryNack, pull_request_auto_fix::*, pull_requests::*};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, oneshot, watch};
 use tools::ToolExecutor;
+
+type LogGate = (oneshot::Sender<()>, oneshot::Receiver<()>);
+
+#[derive(Default)]
+struct GatedLogs {
+    fake: FakePullRequestLogSource,
+    gate: Mutex<Option<LogGate>>,
+}
+impl GatedLogs {
+    fn pause_next(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (arrived, arrival) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        assert!(
+            self.gate
+                .lock()
+                .unwrap()
+                .replace((arrived, released))
+                .is_none()
+        );
+        (arrival, release)
+    }
+    fn requests(&self) -> Vec<LogRequest> {
+        self.fake.requests()
+    }
+}
+#[async_trait::async_trait]
+impl PullRequestLogSource for GatedLogs {
+    async fn fetch_failed_logs(&self, request: &LogRequest) -> CiLogBundle {
+        let bundle = self.fake.fetch_failed_logs(request).await;
+        let gate = self.gate.lock().unwrap().take();
+        if let Some((arrived, released)) = gate {
+            arrived.send(()).unwrap();
+            released.await.unwrap();
+        }
+        bundle
+    }
+}
+
 const MODEL: &str = "mock-model";
 const THREAD: &str = "pr-auto-cache";
 const MARKER: &str = "[harness-notice kind=pr_checks_failed";
@@ -109,7 +148,7 @@ struct World {
     run: RunId,
     service: PullRequestService,
     source: FakePullRequestSource,
-    logs: FakePullRequestLogSource,
+    logs: Arc<GatedLogs>,
     clock: Arc<Clock>,
     environment: Arc<Environment>,
     delivery: Arc<Delivery>,
@@ -221,7 +260,7 @@ threshold=0.95
         let permit = owner.start(THREAD).unwrap();
         let environment = Arc::new(Environment(Mutex::new("a".repeat(40))));
         let source = FakePullRequestSource::new();
-        let logs = FakePullRequestLogSource::default();
+        let logs = Arc::new(GatedLogs::default());
         let delivery = Arc::new(Delivery {
             runtime: runtime.clone(),
             ready: Notify::new(),
@@ -239,7 +278,7 @@ threshold=0.95
                 },
                 clock: clock.clone(),
             },
-            Arc::new(logs.clone()),
+            logs.clone(),
             delivery.clone(),
         )
         .unwrap();
@@ -419,7 +458,17 @@ threshold=0.95
             "evaluation and empty delivery must not call the model"
         );
         assert_eq!(self.notices().len(), expected_notices);
-        assert_eq!(self.logs.requests().len(), expected_notices);
+        let logged_heads: Vec<_> = self
+            .logs
+            .requests()
+            .into_iter()
+            .map(|r| r.head_sha)
+            .collect();
+        assert_eq!(
+            logged_heads.len(),
+            expected_notices,
+            "log request heads: {logged_heads:?}"
+        );
         self.mock.enqueue(vec![text("ordinary answer")]);
         self.runtime
             .send_message(self.run, "ordinary human followup".into())
@@ -508,11 +557,39 @@ async fn off_unknown_pending_and_cooldown_are_silent_then_notices_append_and_reu
     w.toggle(true).await;
     w.silent_turn(1).await;
     // At exactly 600 seconds, reevaluate only the newest head, never a queue of old heads.
+    let policy_revision = w
+        .service
+        .auto_fix_state(THREAD)
+        .await
+        .unwrap()
+        .policy_revision;
+    let (arrived, release) = w.logs.pause_next();
     w.clock.0.store(until, Ordering::SeqCst);
     w.mock.enqueue(vec![text("handled latest CI failure")]);
-    w.toggle(true).await;
+    // Let another scheduler wake observe expiry before our explicit reevaluation hint.
+    // A policy toggle here would cancel this in-flight reservation and fetch its logs again.
+    w.service.notify_changed();
+    arrived.await.unwrap();
+    let preparing = w
+        .notices()
+        .into_iter()
+        .find(|n| n.head_sha == "c".repeat(40))
+        .unwrap();
+    assert_eq!(preparing.phase, PrNoticePhase::Reserved);
+    assert_eq!(preparing.reservation_revision, 1);
+    assert_eq!(preparing.policy_revision, policy_revision);
+    w.service.notify_changed();
+    release.send(()).unwrap();
     w.notified(2).await;
     w.silent_turn(2).await;
+    assert_eq!(
+        w.service
+            .auto_fix_state(THREAD)
+            .await
+            .unwrap()
+            .policy_revision,
+        policy_revision
+    );
     w.verify();
     w.service.shutdown();
     w.runtime.cancel(w.run).unwrap();
