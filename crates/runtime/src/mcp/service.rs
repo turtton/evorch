@@ -52,6 +52,8 @@ struct ServiceInner {
     guard: Arc<NetworkGuard>,
     limiter: Arc<ProjectMcpLimiter>,
     stdio: Option<Arc<dyn McpTransportFactory>>,
+    /// The core's ledger for the stdio servers this service starts itself.
+    ledger: Option<sandbox::SpawnLedger>,
     http: Arc<dyn McpTransportFactory>,
     statuses: Mutex<BTreeMap<PathBuf, watch::Sender<Vec<McpStatusEvent>>>>,
     admission: RwLock<()>,
@@ -72,6 +74,7 @@ impl ProjectMcpService {
                 secret_write: Mutex::new(()),
                 http: Arc::new(HttpTransportFactory::new(guard.clone())),
                 stdio: None,
+                ledger: None,
                 guard,
                 limiter: Arc::new(ProjectMcpLimiter::default()),
                 statuses: Mutex::new(BTreeMap::new()),
@@ -80,6 +83,16 @@ impl ProjectMcpService {
                 sessions: Mutex::new(Vec::new()),
             }),
         }
+    }
+    /// Register every stdio server process (and its supervisor) this service
+    /// starts in the core's ledger; none starts once its spawn fence is closed.
+    /// Configure it before sharing the service. Transport factories injected
+    /// with [`with_transport_factories`](Self::with_transport_factories) own
+    /// their spawns themselves.
+    pub fn with_spawn_ledger(mut self, ledger: sandbox::SpawnLedger) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("configure MCP service before sharing it");
+        inner.ledger = Some(ledger);
+        self
     }
     /// Inert host/test injection, not an agent-facing approval mechanism.
     pub fn with_transport_factories(
@@ -351,11 +364,13 @@ impl ServiceInner {
         let connect = async {
             let pair: (Arc<dyn McpTransport>, Option<Arc<StdioTransport>>) =
                 if kind == TransportKind::Stdio && self.stdio.is_none() {
-                    let transport = StdioTransport::connect(
+                    let transport = StdioTransport::connect_owned(
                         resolved,
                         permit,
                         self.limiter.clone(),
                         owner.cancel.clone(),
+                        Default::default(),
+                        self.ledger.clone(),
                     )
                     .await
                     .map_err(|error| error.kind)?;

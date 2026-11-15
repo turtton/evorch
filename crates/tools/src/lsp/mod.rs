@@ -38,7 +38,7 @@ pub struct LspDiagnostics {
     language: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
-    ledger: Option<SpawnLedger>,
+    ledger: std::sync::RwLock<Option<SpawnLedger>>,
 }
 
 #[derive(Deserialize)]
@@ -55,15 +55,22 @@ impl LspDiagnostics {
             language,
             timeout: Duration::from_secs(10),
             event_bus: None,
-            ledger: None,
+            ledger: std::sync::RwLock::new(None),
         }
     }
 
     /// Register every server this tool starts in the core's ledger; once its
     /// spawn fence is closed no server starts.
-    pub fn with_ledger(mut self, ledger: SpawnLedger) -> Self {
-        self.ledger = Some(ledger);
+    pub fn with_ledger(self, ledger: SpawnLedger) -> Self {
+        self.set_ledger(ledger);
         self
+    }
+
+    fn set_ledger(&self, ledger: SpawnLedger) {
+        *self
+            .ledger
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ledger);
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -85,12 +92,13 @@ impl LspDiagnostics {
         if !args.path.is_absolute() {
             return Err(LspError::Path);
         }
-        let mut client = client::Connection::spawn(
-            self.sandbox.clone(),
-            self.command.clone(),
-            self.ledger.clone(),
-        )
-        .await?;
+        let ledger = self
+            .ledger
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut client =
+            client::Connection::spawn(self.sandbox.clone(), self.command.clone(), ledger).await?;
         let batch = tokio::time::timeout(self.timeout, client.open(&args.path, &self.language))
             .await
             .map_err(|_| LspError::Timeout)??;
@@ -158,6 +166,9 @@ impl Tool for LspDiagnostics {
             process_spawn: true,
             network: false,
         }
+    }
+    fn set_spawn_ledger(&self, ledger: SpawnLedger) {
+        self.set_ledger(ledger);
     }
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
         self.invoke(args, None).await

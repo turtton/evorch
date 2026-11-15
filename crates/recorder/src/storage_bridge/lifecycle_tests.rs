@@ -253,3 +253,55 @@ fn flush_barrier_reports_a_rejected_write_instead_of_acknowledging_success() {
     // Failures are reported once per barrier interval, while the bridge stays usable.
     owner.flush().unwrap();
 }
+
+#[test]
+fn a_checked_shutdown_reports_a_tail_write_that_failed_after_the_last_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(StorageConfig {
+        db_path: dir.path().join("tail-rejected.db"),
+        hard_limits: storage::HardLimits {
+            max_event_bytes: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(32));
+    let mut owner = OwnedStorageBridge::spawn(
+        bus.clone(),
+        storage,
+        shutdown_only_bridge,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    owner.flush().unwrap();
+    bus.emit(delta("rejected tail"));
+
+    let error = owner.try_shutdown().unwrap_err();
+
+    assert!(error.to_string().contains("EventSize"), "{error}");
+    assert_eq!(owner.monitor().snapshot().failed_events, 1);
+    // The unchecked shutdown stays a warning, and a stopped bridge stops cleanly.
+    owner.shutdown();
+    owner.try_shutdown().unwrap();
+}
+
+#[test]
+fn a_checked_shutdown_reports_a_clean_join_once_the_tail_is_written() {
+    let (_dir, storage, db) = fixture();
+    let bus = Arc::new(EventBus::new(32));
+    let mut owner = OwnedStorageBridge::spawn(
+        bus.clone(),
+        storage,
+        shutdown_only_bridge,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    bus.emit(delta("tail"));
+
+    owner.try_shutdown().unwrap();
+    owner.try_shutdown().unwrap();
+
+    assert_eq!(db.events_all_ordered().unwrap().len(), 1);
+    assert_eq!(bus.receiver_count(), 0);
+}

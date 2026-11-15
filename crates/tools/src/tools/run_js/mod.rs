@@ -133,11 +133,11 @@ pub struct RunJs {
 
 impl RunJs {
     /// Starts workers in bubblewrap when a call runs; nothing is detected here.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_launcher(WorkerLauncher::production())
     }
 
-    pub const fn with_launcher(launcher: WorkerLauncher) -> Self {
+    pub fn with_launcher(launcher: WorkerLauncher) -> Self {
         Self {
             launcher,
             after_drain: None,
@@ -187,6 +187,10 @@ impl Default for RunJs {
 impl Tool for RunJs {
     fn name(&self) -> &str {
         NAME
+    }
+
+    fn set_spawn_ledger(&self, ledger: sandbox::SpawnLedger) {
+        self.launcher.set_ledger(ledger);
     }
 
     fn description(&self) -> &str {

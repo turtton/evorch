@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 use sandbox::{CommandSpec, MinimalSandbox, Sandbox, SpawnLedger, StdioSession};
@@ -31,7 +31,7 @@ const LIBRARY_PATH_ENV: &str = "LD_LIBRARY_PATH";
 pub struct WorkerLauncher {
     mode: Mode,
     cancel_confirmation: Duration,
-    ledger: Option<SpawnLedger>,
+    ledger: Arc<RwLock<Option<SpawnLedger>>>,
 }
 
 #[derive(Clone)]
@@ -154,24 +154,33 @@ impl WorkerLauncher {
                 })
             })),
             cancel_confirmation: CANCEL_CONFIRMATION,
-            ledger: None,
+            ledger: Arc::default(),
         }
     }
 
-    pub const fn production() -> Self {
+    pub fn production() -> Self {
         Self {
             mode: Mode::Production,
             cancel_confirmation: CANCEL_CONFIRMATION,
-            ledger: None,
+            ledger: Arc::default(),
         }
     }
 
     /// Register every worker this launcher starts in the core's ledger; once
     /// its spawn fence is closed no worker starts.
     #[must_use]
-    pub fn with_ledger(mut self, ledger: SpawnLedger) -> Self {
-        self.ledger = Some(ledger);
+    pub fn with_ledger(self, ledger: SpawnLedger) -> Self {
+        self.set_ledger(ledger);
         self
+    }
+
+    /// [`with_ledger`](Self::with_ledger) on a launcher that is already shared
+    /// by clones: every clone registers workers from now on.
+    pub fn set_ledger(&self, ledger: SpawnLedger) {
+        *self
+            .ledger
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ledger);
     }
 
     /// How long a cancelled start may take to confirm it stopped what it started.
@@ -191,7 +200,7 @@ impl WorkerLauncher {
                 args,
             },
             cancel_confirmation: CANCEL_CONFIRMATION,
-            ledger: None,
+            ledger: Arc::default(),
         }
     }
 
@@ -210,7 +219,11 @@ impl WorkerLauncher {
         on_unconfirmed: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Result<WorkerConnection, LaunchError> {
         let mode = self.mode.clone();
-        let ledger = self.ledger.clone();
+        let ledger = self
+            .ledger
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(Finished::default());
         let mut preparation = Preparation {
@@ -388,8 +401,9 @@ fn spawn(
         },
         Mode::Production => {
             let program = locate_worker()?;
-            let sandbox = MinimalSandbox::detect_cancellable(&program, &[LIBRARY_PATH_ENV], cancel)
-                .map_err(|error| format!("bubblewrap is unavailable: {error}"))?;
+            let sandbox =
+                MinimalSandbox::detect_owned(&program, &[LIBRARY_PATH_ENV], cancel, ledger)
+                    .map_err(|error| format!("bubblewrap is unavailable: {error}"))?;
             let spec = CommandSpec {
                 program: sandbox.executable().to_string_lossy().into_owned(),
                 args: vec![WORKER_SUBCOMMAND.to_owned()],

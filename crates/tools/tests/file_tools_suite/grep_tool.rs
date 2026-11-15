@@ -19,7 +19,7 @@ async fn grep_rejects_invalid_utf8_after_cap() {
     let mut bytes = "hit\n".repeat(1000).into_bytes();
     bytes.push(0xff);
     fs::write(&path, bytes).expect("fixture");
-    let error = Grep
+    let error = Grep::default()
         .execute(serde_json::json!({"pattern": "hit", "path": path}))
         .await
         .expect_err("invalid UTF-8 must not be hidden by truncation");
@@ -32,7 +32,7 @@ async fn grep_sorts_paths_without_reordering_line_numbers() {
     let dir = tempdir().expect("tempdir");
     fs::write(dir.path().join("a:1"), "hit\n").expect("fixture");
     fs::write(dir.path().join("a"), "hit\n".repeat(12)).expect("fixture");
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({"pattern": "hit", "path": dir.path()}))
         .await
         .expect("search");
@@ -53,7 +53,7 @@ async fn grep_respects_gitignore() {
     fs::write(dir.path().join(".gitignore"), "target/\n").expect("ignore rule");
     fs::write(dir.path().join("target/decoy"), "needle decoy\n").expect("decoy");
     fs::write(dir.path().join(".hidden"), "needle visible\n").expect("fixture");
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({"pattern": "needle", "path": dir.path()}))
         .await
         .expect("search");
@@ -68,7 +68,7 @@ async fn grep_respects_gitignore() {
 async fn grep_many_matches_are_bounded() {
     let dir = short_tempdir();
     fs::write(dir.path().join("a"), "hit\n".repeat(100_000)).expect("fixture");
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({"pattern": "hit", "path": dir.path()}))
         .await
         .expect("search");
@@ -84,7 +84,7 @@ async fn grep_output_truncates_over_max_lines() {
     let dir = short_tempdir();
     let path = dir.path().join("a");
     fs::write(&path, "hit\n".repeat(201)).expect("fixture");
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({"pattern": "hit", "path": path}))
         .await
         .expect("search");
@@ -98,7 +98,7 @@ async fn grep_output_truncates_over_max_chars() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("a");
     fs::write(&path, "猫".repeat(100_000)).expect("fixture");
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({"pattern": "猫", "path": path}))
         .await
         .expect("search");
@@ -112,7 +112,7 @@ async fn grep_output_is_grouped_by_file() {
     let dir = tempdir().expect("tempdir");
     fs::write(dir.path().join("b"), "hit\nhit\n").expect("fixture");
     fs::write(dir.path().join("a"), "hit\nhit\n").expect("fixture");
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({"pattern": "hit", "path": dir.path()}))
         .await
         .expect("search");
@@ -132,7 +132,7 @@ async fn grep_matches_lines_in_file_with_line_numbers() {
         .expect("テストファイルの書き込みに失敗");
     let path = path.display().to_string();
 
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({ "pattern": "apple", "path": path.clone() }))
         .await
         .expect("ファイル内検索は成功するべき");
@@ -159,7 +159,7 @@ async fn grep_recurses_directories_sorted_and_skips_git_dir() {
     fs::write(a_dir.join("first.txt"), "needle in a1\n").expect("書き込みに失敗");
     let root = root.display().to_string();
 
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({ "pattern": "needle", "path": root.clone() }))
         .await
         .expect("ディレクトリ検索は成功するべき");
@@ -184,7 +184,7 @@ async fn grep_missing_path_is_path_not_found() {
     let missing = dir.path().join("missing.txt");
     let expected = missing.display().to_string();
 
-    let error = Grep
+    let error = Grep::default()
         .execute(serde_json::json!({ "pattern": "needle", "path": expected.clone() }))
         .await
         .expect_err("存在しないパスはエラーになるべき");
@@ -202,7 +202,7 @@ async fn grep_invalid_regex_is_invalid_pattern() {
     let path = dir.path().join("notes.txt");
     fs::write(&path, "content\n").expect("テストファイルの書き込みに失敗");
 
-    let error = Grep
+    let error = Grep::default()
         .execute(serde_json::json!({ "pattern": "[", "path": path.display().to_string() }))
         .await
         .expect_err("不正な正規表現はエラーになるべき");
@@ -220,7 +220,7 @@ async fn grep_no_match_returns_empty_success() {
     let path = dir.path().join("notes.txt");
     fs::write(&path, "alpha\nbeta\n").expect("テストファイルの書き込みに失敗");
 
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({ "pattern": "gamma", "path": path.display().to_string() }))
         .await
         .expect("一致なしはエラーではないべき");
@@ -239,7 +239,7 @@ async fn grep_skips_non_utf8_files_in_dir() {
     fs::write(root.join("text.txt"), "needle here\n").expect("テストファイルの書き込みに失敗");
     let root = root.display().to_string();
 
-    let result = Grep
+    let result = Grep::default()
         .execute(serde_json::json!({ "pattern": "needle", "path": root.clone() }))
         .await
         .expect("ディレクトリ検索は成功するべき");
@@ -255,7 +255,7 @@ async fn grep_explicit_non_utf8_file_is_io_error() {
     let path = dir.path().join("binary.bin");
     fs::write(&path, [0xFF, 0xFE]).expect("テストファイルの書き込みに失敗");
 
-    let error = Grep
+    let error = Grep::default()
         .execute(serde_json::json!({ "pattern": "needle", "path": path.display().to_string() }))
         .await
         .expect_err("明示的な非 UTF-8 ファイルはエラーになるべき");

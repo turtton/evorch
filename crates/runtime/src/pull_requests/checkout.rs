@@ -92,9 +92,16 @@ pub async fn resolve_checkout(
     head_repository: Option<String>,
     head_branch: String,
     budget: Duration,
+    ledger: Option<sandbox::SpawnLedger>,
 ) -> CheckoutResolution {
     tokio::task::spawn_blocking(move || {
-        resolve_blocking(&dirs, head_repository.as_deref(), &head_branch, budget)
+        resolve_blocking(
+            &dirs,
+            head_repository.as_deref(),
+            &head_branch,
+            budget,
+            ledger,
+        )
     })
     .await
     .unwrap_or(CheckoutResolution::Missing(CheckoutMiss::ReadFailed))
@@ -107,8 +114,9 @@ pub fn resolve_blocking(
     head_repository: Option<&str>,
     head_branch: &str,
     budget: Duration,
+    ledger: Option<sandbox::SpawnLedger>,
 ) -> CheckoutResolution {
-    let reader = GitReader::new(Instant::now() + budget);
+    let reader = GitReader::owned(Instant::now() + budget, ledger);
     resolve_with(&reader, dirs, head_repository, head_branch, &|_, _| {})
 }
 

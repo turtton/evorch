@@ -55,6 +55,19 @@ pub trait ThreadEnvironment: Send + Sync {
         head_branch: &str,
         budget: Duration,
     ) -> CheckoutResolution {
-        resolve_blocking(directories, head_repository, head_branch, budget)
+        resolve_blocking(
+            directories,
+            head_repository,
+            head_branch,
+            budget,
+            self.spawn_ledger(),
+        )
+    }
+
+    /// The core's ledger, when this environment is the core's: the `git` of
+    /// [`resolve_checkout`](Self::resolve_checkout) is registered in it and
+    /// does not start once its spawn fence is closed.
+    fn spawn_ledger(&self) -> Option<sandbox::SpawnLedger> {
+        None
     }
 }

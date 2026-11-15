@@ -94,6 +94,9 @@ pub struct QuotaConfig {
     pub wham_endpoint: String,
     pub timeout: Duration,
     pub refresh_interval: Duration,
+    /// The core's ledger: the app-server child and its supervisor are
+    /// registered in it, and none starts once its spawn fence is closed.
+    pub ledger: Option<sandbox::SpawnLedger>,
 }
 
 impl Default for QuotaConfig {
@@ -104,6 +107,7 @@ impl Default for QuotaConfig {
             wham_endpoint: "https://chatgpt.com/backend-api/wham/usage".into(),
             timeout: Duration::from_secs(10),
             refresh_interval: Duration::from_secs(60),
+            ledger: None,
         }
     }
 }

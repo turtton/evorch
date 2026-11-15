@@ -5360,6 +5360,7 @@ dependencies = [
  "mock-openai",
  "rcgen",
  "reqwest 0.12.28",
+ "sandbox",
  "secret-guard",
  "serde",
  "serde_json",

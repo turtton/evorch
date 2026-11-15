@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use sandbox::{ChildKind, SpawnLedger, StdioSession};
+
 mod benchmark;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,10 +36,25 @@ pub enum SnapshotError {
 pub struct SnapshotStore {
     root: PathBuf,
     git_dir: PathBuf,
+    ledger: Option<SpawnLedger>,
 }
 
 impl SnapshotStore {
     pub fn open(root: &Path, directory: &Path) -> Result<Self, SnapshotError> {
+        Self::open_owned(root, directory, None)
+    }
+
+    /// [`open`](Self::open) whose every git process, the repository
+    /// initialization included, is registered in `ledger`. Once the ledger's
+    /// spawn fence is closed the store is not created.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open), or the fence is closed.
+    pub fn open_owned(
+        root: &Path,
+        directory: &Path,
+        ledger: Option<SpawnLedger>,
+    ) -> Result<Self, SnapshotError> {
         let root = root.canonicalize()?;
         let parent = directory
             .parent()
@@ -62,6 +79,7 @@ impl SnapshotStore {
         let store = Self {
             root,
             git_dir: directory.join("repository"),
+            ledger,
         };
         if store.git_dir.is_symlink() {
             return Err(SnapshotError::InvalidStore);
@@ -139,18 +157,17 @@ impl SnapshotStore {
             ]);
         }
         command.args(arguments);
-        let output = if let Some(input) = input {
-            use std::io::Write;
-            let mut child = command
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?;
-            child.stdin.take().expect("piped stdin").write_all(input)?;
-            child.wait_with_output()?
-        } else {
-            command.output()?
-        };
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = StdioSession::spawn_command_owned(
+            self.ledger.as_ref(),
+            ChildKind::Other,
+            Some("snapshot-git"),
+            command,
+        )?
+        .output(input)?;
         if output.status.success() {
             Ok(output)
         } else {

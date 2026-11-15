@@ -77,6 +77,47 @@ impl StdioSession {
         })
     }
 
+    /// Starts `command` (stdio as the caller configured it) as a session of
+    /// `kind`, under the launch policy, registered in the admission's ledger.
+    /// For a short-lived program evorch runs itself rather than through a
+    /// sandbox, such as a read-only `git`. Dropping the session kills the group
+    /// and reaps the leader.
+    ///
+    /// # Errors
+    /// The OS process-spawn error.
+    pub fn spawn_command_in(
+        admission: &Admission<'_>,
+        kind: ChildKind,
+        label: Option<&str>,
+        mut command: std::process::Command,
+    ) -> io::Result<Self> {
+        process::apply_launch_policy(&mut command);
+        let child = command.spawn()?;
+        let group = ProcessGroup::new(Some(child.id()));
+        let entry = admission.register_group(kind, label, &group);
+        Ok(Self {
+            child,
+            group,
+            entry,
+        })
+    }
+
+    /// [`spawn_command_in`](Self::spawn_command_in) for a site whose ledger is
+    /// optional: admits the launch itself (a plain synchronous call).
+    ///
+    /// # Errors
+    /// An I/O error when the ledger's spawn fence is closed (nothing started),
+    /// otherwise the OS process-spawn error.
+    pub fn spawn_command_owned(
+        ledger: Option<&SpawnLedger>,
+        kind: ChildKind,
+        label: Option<&str>,
+        command: std::process::Command,
+    ) -> io::Result<Self> {
+        let admission = SpawnLedger::admit_optional(ledger).map_err(io::Error::from)?;
+        Self::spawn_command_in(&admission, kind, label, command)
+    }
+
     /// [`spawn_in`](Self::spawn_in) for a site whose ledger is optional: admits
     /// the launch itself, so it is a plain synchronous call (blocking thread).
     /// Without a ledger it behaves as [`spawn`](Self::spawn).
@@ -91,6 +132,67 @@ impl StdioSession {
     ) -> Result<Self, SessionError> {
         let admission = SpawnLedger::admit_optional(ledger).map_err(io::Error::from)?;
         Self::spawn_in(&admission, sandbox, spec)
+    }
+
+    /// Writes `input` (when given) to the child's stdin, collects its stdout and
+    /// stderr, and waits for it, like [`std::process::Child::wait_with_output`].
+    /// The exited leader's group is killed before it is reaped, so a helper that
+    /// kept the pipes open cannot hold the reads. Needs `command`'s stdio to be
+    /// piped, as [`spawn_command_in`](Self::spawn_command_in) leaves it.
+    ///
+    /// # Errors
+    /// A failed write (other than a closed pipe), read or wait.
+    pub fn output(mut self, input: Option<&[u8]>) -> io::Result<std::process::Output> {
+        use std::io::{Read, Write};
+
+        let read_all = |pipe: Option<Box<dyn Read + Send>>| {
+            move || {
+                let mut bytes = Vec::new();
+                pipe.map_or(Ok(()), |mut pipe| pipe.read_to_end(&mut bytes).map(drop))
+                    .map(|()| bytes)
+            }
+        };
+        let stdin = self.take_stdin();
+        let stdout = self.take_stdout().map(|pipe| Box::new(pipe) as _);
+        let stderr = self.take_stderr().map(|pipe| Box::new(pipe) as _);
+        std::thread::scope(|scope| {
+            let stdout = scope.spawn(read_all(stdout));
+            let stderr = scope.spawn(read_all(stderr));
+            let written = match (stdin, input) {
+                (Some(mut stdin), Some(input)) => match stdin.write_all(input) {
+                    Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                    result => result,
+                },
+                _ => Ok(()),
+            };
+            let status = self.wait_for_status();
+            let join = |reader: std::thread::ScopedJoinHandle<'_, io::Result<Vec<u8>>>| {
+                reader
+                    .join()
+                    .unwrap_or_else(|_| Err(io::Error::other("an output reader panicked")))
+            };
+            let (stdout, stderr) = (join(stdout), join(stderr));
+            written?;
+            Ok(std::process::Output {
+                status: status?,
+                stdout: stdout?,
+                stderr: stderr?,
+            })
+        })
+    }
+
+    fn wait_for_status(&mut self) -> io::Result<ExitStatus> {
+        let Some(leader) = self.group.leader() else {
+            return self.child.wait();
+        };
+        process::wait_for_exit(leader)?;
+        let child = &mut self.child;
+        let status = self
+            .group
+            .kill_and_reap(|| child.try_wait())?
+            .ok_or_else(|| io::Error::other("the exited child was not reapable"))?;
+        self.note_reaped();
+        Ok(status)
     }
 
     pub fn id(&self) -> u32 {
@@ -176,6 +278,58 @@ mod tests {
             stat.rsplit_once(')')
                 .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
         })
+    }
+
+    #[test]
+    fn output_collects_the_streams_and_stops_a_helper_that_holds_the_pipes() {
+        // Given: a command that echoes its input, then leaves a helper holding
+        // its stdout open as it exits.
+        let ledger = SpawnLedger::new();
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "cat; echo err >&2; sh -c 'kill -STOP $$' &"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let session = StdioSession::spawn_command_owned(
+            Some(&ledger),
+            ChildKind::Other,
+            Some("output-test"),
+            command,
+        )
+        .unwrap();
+        assert_eq!(ledger.children().len(), 1);
+
+        // When: its output is collected.
+        let output = session.output(Some(b"hello")).unwrap();
+
+        // Then: the reads ended, which they can only once the helper holding
+        // the pipes is gone, and the ledger saw the leader reaped.
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello");
+        assert_eq!(output.stderr, b"err\n");
+        let stats = ledger.child_stats();
+        assert_eq!(
+            (stats.registered, stats.reaped, stats.unconfirmed),
+            (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn a_command_session_under_a_closed_fence_does_not_start() {
+        let ledger = SpawnLedger::new();
+        ledger.close_fence();
+
+        let error = StdioSession::spawn_command_owned(
+            Some(&ledger),
+            ChildKind::Other,
+            None,
+            std::process::Command::new("true"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(ledger.child_stats().registered, 0);
     }
 
     #[test]

@@ -34,6 +34,8 @@ pub(super) struct Seams {
     /// Run once by `join_workers`, after it has started its joins and before it
     /// looks at what is left.
     pub join_window: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Run once by the next attempt to start a joiner thread, before it starts.
+    pub joiner_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[cfg(test)]
@@ -315,9 +317,16 @@ impl SpawnLedger {
             if started.is_err() {
                 unjoined += 1;
                 let handle = locked(&slot).take();
-                if let Some(record) = locked(&self.inner.workers).live.get_mut(&id) {
+                // Giving the handle back is a change a concurrent join must
+                // see: it found the record without a handle (this call had
+                // taken it), is waiting on the activity, and nothing else
+                // would wake it to start the join itself.
+                let mut table = locked(&self.inner.workers);
+                if let Some(record) = table.live.get_mut(&id) {
                     record.thread = handle;
                 }
+                table.epoch += 1;
+                self.inner.workers_activity.send_replace(table.activity());
             }
         }
         unjoined
@@ -327,6 +336,9 @@ impl SpawnLedger {
         #[cfg(test)]
         {
             use std::sync::atomic::Ordering;
+            if let Some(hook) = locked(&self.inner.seams.joiner_start).take() {
+                hook();
+            }
             let failing = &self.inner.seams.fail_joiner_starts;
             if failing
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {

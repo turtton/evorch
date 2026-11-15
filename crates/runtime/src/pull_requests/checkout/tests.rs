@@ -471,11 +471,32 @@ async fn the_async_entry_point_resolves_on_the_blocking_pool() {
         Some("turtton/evorch".to_owned()),
         "feat/x".to_owned(),
         Duration::from_secs(60),
+        None,
     )
     .await;
 
     // The user's own git configuration may apply here; the answer must not depend on it.
     assert_eq!(resolution.head_sha(), Some(head.as_str()));
+}
+
+// Given: a ledger whose fence is closed / When: a checkout is looked up / Then: no git starts
+#[test]
+fn a_closed_fence_starts_no_checkout_git() {
+    let f = Fixture::new();
+    let repo = f.repo("project", "feat/x", ORIGIN);
+    let ledger = sandbox::SpawnLedger::new();
+    ledger.close_fence();
+
+    let resolution = resolve_blocking(
+        &[repo],
+        Some("turtton/evorch"),
+        "feat/x",
+        Duration::from_secs(60),
+        Some(ledger.clone()),
+    );
+
+    assert!(matches!(resolution, CheckoutResolution::Missing(_)));
+    assert_eq!(ledger.child_stats().registered, 0);
 }
 
 // Given: the shared git reader / When: used through the blocking helper / Then: it runs and

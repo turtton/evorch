@@ -4,10 +4,9 @@
 //! 返す。v0.1 では差分の算出を git 本体に委ねる。
 
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use sandbox::process::GroupChild;
-use sandbox::{CommandSpec, Sandbox};
+use sandbox::{ChildKind, CommandSpec, Sandbox, SpawnLedger};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
@@ -19,12 +18,30 @@ use crate::tool::{Permissions, Tool, ToolExecutionMode};
 #[derive(Clone)]
 pub struct GitDiff {
     sandbox: Arc<dyn Sandbox>,
+    ledger: Arc<RwLock<Option<SpawnLedger>>>,
 }
 
 impl GitDiff {
     /// 指定したサンドボックスで git を実行する差分ツールを生成する。
     pub fn new(sandbox: Arc<dyn Sandbox>) -> Self {
-        Self { sandbox }
+        Self {
+            sandbox,
+            ledger: Arc::default(),
+        }
+    }
+
+    /// Registers every `git` this tool starts in the core's ledger.
+    #[must_use]
+    pub fn with_spawn_ledger(self, ledger: SpawnLedger) -> Self {
+        self.set_ledger(ledger);
+        self
+    }
+
+    fn set_ledger(&self, ledger: SpawnLedger) {
+        *self
+            .ledger
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ledger);
     }
 }
 
@@ -61,6 +78,10 @@ impl Tool for GitDiff {
 
     fn execution_mode(&self) -> ToolExecutionMode {
         ToolExecutionMode::Shared
+    }
+
+    fn set_spawn_ledger(&self, ledger: SpawnLedger) {
+        self.set_ledger(ledger);
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
@@ -111,7 +132,17 @@ impl Tool for GitDiff {
             command: wrapped.program.clone(),
             detail: error.to_string(),
         };
-        let mut child = GroupChild::spawn(&mut command).map_err(spawn_failed)?;
+        let ledger = self
+            .ledger
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut child = SpawnLedger::admit_optional(ledger.as_ref())
+            .map_err(std::io::Error::from)
+            .and_then(|admission| {
+                admission.spawn_group(ChildKind::Other, Some("git-diff"), &mut command)
+            })
+            .map_err(spawn_failed)?;
         let (stdout, stderr) = (child.take_stdout(), child.take_stderr());
         // Once git exits, waiting kills helpers that still hold its output, so
         // the reads end and no reaped group id is signalled later.

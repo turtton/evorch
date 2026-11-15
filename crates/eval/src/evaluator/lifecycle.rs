@@ -24,6 +24,7 @@ pub struct EvaluationService {
     pub producers: runtime::producer::ProducerGate,
     drained: watch::Sender<bool>,
     shutdown_lock: Arc<tokio::sync::Mutex<()>>,
+    ledger: Arc<Mutex<Option<sandbox::SpawnLedger>>>,
 }
 
 impl Default for EvaluationService {
@@ -34,11 +35,31 @@ impl Default for EvaluationService {
             producers: runtime::producer::ProducerGate::default(),
             drained: watch::channel(false).0,
             shutdown_lock: Arc::default(),
+            ledger: Arc::default(),
         }
     }
 }
 
 impl EvaluationService {
+    /// Register every evaluation child this service starts in the core's
+    /// ledger. Call it before the first evaluation starts; once the ledger's
+    /// spawn fence is closed no evaluation starts.
+    #[must_use]
+    pub fn with_spawn_ledger(self, ledger: sandbox::SpawnLedger) -> Self {
+        *self
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ledger);
+        self
+    }
+
+    pub(super) fn spawn_ledger(&self) -> Option<sandbox::SpawnLedger> {
+        self.ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Register host work while admission is open; shutdown owns its completion.
     pub fn spawn(
         &self,

@@ -365,6 +365,7 @@ impl AgentRuntime {
             return Err(operation(LaneOperationError::EvidenceUnavailable));
         }
         let refs = report.artifact_refs;
+        let ledger = self.shared.spawn_ledger.get().cloned();
         tokio::task::spawn_blocking(move || {
             let fail = || operation(LaneOperationError::EvidenceUnavailable);
             match revision {
@@ -385,8 +386,10 @@ impl AgentRuntime {
                 }
                 ArtifactRevision::CommitSha(expected) => {
                     let workspace = allowed_path(workspace.as_deref().ok_or_else(fail)?, &dirs)?;
-                    let reader =
-                        crate::git_read::GitReader::new(Instant::now() + Duration::from_secs(10));
+                    let reader = crate::git_read::GitReader::owned(
+                        Instant::now() + Duration::from_secs(10),
+                        ledger.clone(),
+                    );
                     let (repository, branch) = if let Some(facts) = facts {
                         if facts.head_sha != expected.to_ascii_lowercase() {
                             return Err(operation(LaneOperationError::ArtifactChanged));
@@ -413,6 +416,7 @@ impl AgentRuntime {
                         Some(&repository),
                         &branch,
                         Duration::from_secs(10),
+                        ledger,
                     );
                     let crate::pull_requests::CheckoutResolution::Found(checkout) = resolved else {
                         return Err(fail());

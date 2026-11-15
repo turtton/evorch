@@ -15,7 +15,7 @@ fn tool_specs_preserve_registered_schemas_and_descriptions() {
         Arc::new(Edit),
         Arc::new(Write),
         Arc::new(ApplyPatch::new()),
-        Arc::new(Grep),
+        Arc::new(Grep::default()),
         Arc::new(Shell::new(sandbox.clone())),
         Arc::new(GitDiff::new(sandbox)),
         Arc::new(WebSearch::keyless_default().unwrap()),

@@ -209,6 +209,7 @@ impl ThreadEnvironment for FakeEnvironment {
             head_repository,
             head_branch,
             budget,
+            None,
         )
     }
 }

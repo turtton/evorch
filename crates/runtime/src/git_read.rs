@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use sandbox::{ChildKind, SpawnLedger, StdioSession};
+
 /// The most stderr bytes read from a git command.
 pub(crate) const STDERR_LIMIT: usize = 64 * 1024;
 
@@ -38,6 +40,9 @@ pub(crate) struct GitOutput {
 #[derive(Debug, Clone)]
 pub(crate) struct GitReader {
     deadline: Instant,
+    /// The core's ledger, when the read is the core's; the git process is
+    /// registered in it and none starts once its fence is closed.
+    ledger: Option<SpawnLedger>,
     /// Replaces the user's global config; tests only.
     #[cfg_attr(not(test), allow(dead_code))]
     global_config: Option<PathBuf>,
@@ -47,8 +52,27 @@ impl GitReader {
     pub(crate) fn new(deadline: Instant) -> Self {
         Self {
             deadline,
+            ledger: None,
             global_config: None,
         }
+    }
+
+    /// A reader whose git processes are registered in `ledger`, when there is
+    /// one: the core's reads pass its ledger, a read outside the core passes
+    /// `None`.
+    pub(crate) fn owned(deadline: Instant, ledger: Option<SpawnLedger>) -> Self {
+        Self {
+            ledger,
+            ..Self::new(deadline)
+        }
+    }
+
+    /// Registers every git process this reader starts in `ledger`.
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn with_ledger(mut self, ledger: SpawnLedger) -> Self {
+        self.ledger = Some(ledger);
+        self
     }
 
     /// Reads `path` instead of the user's global git config. Tests use it to isolate a
@@ -121,17 +145,25 @@ impl GitReader {
         if let Some(path) = &self.global_config {
             command.env("GIT_CONFIG_GLOBAL", path);
         }
-        let mut child = command.spawn().map_err(|_| GitReadError::Failed)?;
+        // The session kills the command's whole group and reaps it when dropped,
+        // so a timeout leaves neither the command nor a helper of it behind.
+        let mut child = StdioSession::spawn_command_owned(
+            self.ledger.as_ref(),
+            ChildKind::Other,
+            Some("git-read"),
+            command,
+        )
+        .map_err(|_| GitReadError::Failed)?;
         let (sender, streams) = std::sync::mpsc::channel();
         for (index, stream, limit) in [
             (
                 0,
-                Box::new(child.stdout.take().expect("piped stdout")) as Box<dyn Read + Send>,
+                Box::new(child.take_stdout().expect("piped stdout")) as Box<dyn Read + Send>,
                 limit,
             ),
             (
                 1,
-                Box::new(child.stderr.take().expect("piped stderr")),
+                Box::new(child.take_stderr().expect("piped stderr")),
                 STDERR_LIMIT,
             ),
         ] {
@@ -166,8 +198,7 @@ impl GitReader {
             }
         };
         if let Some(reason) = failure {
-            let _ = child.kill();
-            let _ = child.wait();
+            drop(child);
             return Err(reason);
         }
         let status = loop {
@@ -177,8 +208,7 @@ impl GitReader {
                     std::thread::sleep(Duration::from_millis(5))
                 }
                 Ok(None) | Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    drop(child);
                     return Err(GitReadError::TimedOut);
                 }
             }
@@ -189,5 +219,46 @@ impl GitReader {
             stdout,
             stderr,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reader(ledger: &SpawnLedger) -> GitReader {
+        GitReader::new(Instant::now() + Duration::from_secs(600)).with_ledger(ledger.clone())
+    }
+
+    #[test]
+    fn a_read_registers_its_git_and_the_ledger_sees_it_reaped() {
+        let ledger = SpawnLedger::new();
+        let directory = tempfile::tempdir().unwrap();
+
+        let output = reader(&ledger)
+            .run(directory.path(), &["--version"], 4096)
+            .unwrap();
+
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("git version"));
+        let stats = ledger.child_stats();
+        assert_eq!(
+            (stats.registered, stats.reaped, stats.unconfirmed),
+            (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn a_closed_fence_starts_no_git() {
+        let ledger = SpawnLedger::new();
+        ledger.close_fence();
+        let directory = tempfile::tempdir().unwrap();
+
+        let error = reader(&ledger)
+            .run(directory.path(), &["--version"], 4096)
+            .err();
+
+        assert_eq!(error, Some(GitReadError::Failed));
+        assert_eq!(ledger.child_stats().registered, 0);
     }
 }

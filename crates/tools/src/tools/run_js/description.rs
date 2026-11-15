@@ -91,7 +91,7 @@ mod tests {
     fn tools() -> Vec<(String, Value)> {
         vec![
             ("read".to_owned(), crate::tools::Read.schema()),
-            ("grep".to_owned(), crate::tools::Grep.schema()),
+            ("grep".to_owned(), crate::tools::Grep::default().schema()),
         ]
     }
 

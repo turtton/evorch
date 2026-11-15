@@ -282,7 +282,7 @@ fn directory_outside_git_is_not_replayable() {
     let dir = tempfile::tempdir().unwrap();
 
     // When: its start state is captured.
-    let capture = capture(dir.path(), Instant::now() + CAPTURE_DEADLINE);
+    let capture = capture(dir.path(), Instant::now() + CAPTURE_DEADLINE, None);
 
     // Then: it is recorded as not a git repository.
     assert_eq!(
@@ -299,7 +299,7 @@ fn unborn_head_is_not_replayable() {
     std::fs::write(dir.path().join("file.txt"), "content").unwrap();
 
     // When: its start state is captured.
-    let capture = capture(dir.path(), Instant::now() + CAPTURE_DEADLINE);
+    let capture = capture(dir.path(), Instant::now() + CAPTURE_DEADLINE, None);
 
     // Then: it is recorded as having no commit.
     assert_eq!(
@@ -324,6 +324,22 @@ fn content_over_the_limit_is_not_replayable() {
         capture,
         ThreadStartCapture::NotReplayable(NotReplayableReason::TooLarge)
     );
+}
+
+#[test]
+fn a_closed_fence_captures_nothing_and_starts_no_git() {
+    let repo = Repo::new();
+    let ledger = sandbox::SpawnLedger::new();
+    ledger.close_fence();
+
+    let capture = capture(
+        &repo.root(),
+        Instant::now() + CAPTURE_DEADLINE,
+        Some(ledger.clone()),
+    );
+
+    assert!(matches!(capture, ThreadStartCapture::NotReplayable(_)));
+    assert_eq!(ledger.child_stats().registered, 0);
 }
 
 #[test]

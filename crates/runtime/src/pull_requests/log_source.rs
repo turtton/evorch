@@ -520,6 +520,12 @@ impl GhLogSource {
         Self::with_runner(Arc::new(TokioProcessRunner::default()))
     }
 
+    /// `gh` from `PATH`, run as a real process the core owns through `ledger`.
+    #[must_use]
+    pub fn with_ledger(ledger: sandbox::SpawnLedger) -> Self {
+        Self::with_runner(Arc::new(TokioProcessRunner::with_ledger(ledger)))
+    }
+
     /// `gh` from `PATH`, run by `runner` (a fake in tests).
     #[must_use]
     pub fn with_runner(runner: Arc<dyn ProcessRunner>) -> Self {

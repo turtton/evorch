@@ -304,6 +304,23 @@ fn the_thread_runs_a_cycle_and_releases_the_lease_on_shutdown() {
     );
 }
 
+#[test]
+fn a_checked_shutdown_reports_the_clean_join_and_frees_the_lease() {
+    let run = running();
+    let mut config = run.config();
+    config.interval = std::time::Duration::from_secs(3_600);
+    let executor = ReclaimExecutor::spawn(config).unwrap();
+    assert!(executor.wait_for_cycles(1).holds_lease);
+
+    executor.try_shutdown().unwrap();
+
+    assert!(
+        storage::reclaim_lease(&run.world.db_path)
+            .unwrap()
+            .is_some()
+    );
+}
+
 fn corrupt_meta(run: &Running) -> std::path::PathBuf {
     let path = run
         .world

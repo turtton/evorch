@@ -518,3 +518,60 @@ async fn a_handle_published_during_a_join_wakes_it() {
     assert!(ledger.workers().is_empty());
     assert_eq!(ledger.worker_stats().finished, 1);
 }
+
+// Given: a worker thread that has ended, one join that took its handle and then
+// fails to start a joiner, and a second join that found the record without a
+// handle and waits / When: the first join gives the handle back / Then: the
+// second join is woken by that, joins the thread and completes (S4), instead of
+// waiting for a change that never comes
+#[tokio::test]
+async fn a_handle_given_back_by_a_failed_join_wakes_a_concurrent_join() {
+    let ledger = SpawnLedger::new();
+    {
+        let admission = ledger.admit().unwrap();
+        admission
+            .spawn_worker_thread("quick-worker", || {})
+            .unwrap();
+    }
+    ledger
+        .watch_workers()
+        .wait_for(|_| ledger.worker_stats().finished == 1)
+        .await
+        .unwrap();
+    ledger
+        .inner
+        .seams
+        .fail_joiner_starts
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let (taken, handle_is_out) = std::sync::mpsc::channel::<()>();
+    let (parked, second_is_parked) = std::sync::mpsc::channel::<()>();
+    *locked(&ledger.inner.seams.joiner_start) = Some(Box::new(move || {
+        taken.send(()).unwrap();
+        second_is_parked.recv().unwrap();
+    }));
+    let first = {
+        let ledger = ledger.clone();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(ledger.join_workers())
+        })
+    };
+    handle_is_out.recv().unwrap();
+
+    // The first join holds the handle, so this one finds nothing to join and
+    // parks; the ready branch ends the poll once it has.
+    let mut second = std::pin::pin!(ledger.join_workers());
+    tokio::select! {
+        biased;
+        _ = &mut second => panic!("the thread is still held by the first join"),
+        () = std::future::ready(()) => {}
+    }
+    parked.send(()).unwrap();
+
+    assert_eq!(first.join().unwrap(), Err(JoinFailed { unjoined: 1 }));
+    second.await.unwrap();
+    assert!(ledger.workers().is_empty());
+    assert_eq!(ledger.worker_stats().finished, 1);
+}

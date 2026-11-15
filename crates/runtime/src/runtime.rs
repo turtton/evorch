@@ -210,6 +210,10 @@ pub(crate) struct Shared {
     pub(crate) projects: Mutex<HashMap<PathBuf, Arc<project::ProjectContext>>>,
     pub(crate) project_models: OnceLock<project::ProjectModelResolver>,
     pub(crate) project_slugs: OnceLock<project::ProjectSlugResolver>,
+    /// The core's spawn ledger, once the host handed it over: the git reads of
+    /// the runtime (thread start, lane verification, checkout lookup) register
+    /// in it.
+    pub(crate) spawn_ledger: OnceLock<sandbox::SpawnLedger>,
     /// Trust the host declared per canonical project root; undeclared roots keep the shared rules' trust.
     pub(crate) project_trust: Mutex<HashMap<PathBuf, crate::rules::ProjectTrust>>,
     /// Allowed directories per canonical project root; runs hold the same live list.
@@ -874,6 +878,7 @@ impl AgentRuntime {
                 thread_read_dirs: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
+                spawn_ledger: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
                 active_restart_capture: OnceLock::new(),
                 planned_adoption: OnceLock::new(),
@@ -1261,6 +1266,7 @@ impl AgentRuntime {
                 thread_read_dirs: Mutex::new(HashMap::new()),
                 project_models: OnceLock::new(),
                 project_slugs: OnceLock::new(),
+                spawn_ledger: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
                 active_restart_capture: OnceLock::new(),
                 planned_adoption: OnceLock::new(),
