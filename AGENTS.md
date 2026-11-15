@@ -168,6 +168,17 @@ when focused local cache validation is needed.
   the new member, the re-summary or compaction prepared for it is that
   boundary's one history replacement, and later turns must preserve the new
   member's prefix.
+- A verified planned core handoff to a different build may introduce a
+  one-request tool-schema cache boundary only when that build changes the
+  effective tool schemas or their order. Record the old/new build identities
+  and schema fingerprints. This is not a history-replacement boundary: keep
+  the sent conversation, ToolResults and cache affinity key unchanged. It does
+  not authorize unrelated instruction, model, settings or permission changes.
+  Subsequent turns must preserve the new prefix. A same-build restart, or a
+  build change with unchanged tool schemas/order, is not a cache boundary.
+- End-to-end tests for this boundary must use the input-derived mock cache
+  and independent wire assertions, proving unchanged history and affinity,
+  the intended schema transition, and prefix reuse on the following turn.
 - Cache-affecting features must extend the end-to-end scenarios for their
   affected paths. Keep the input-derived mock cache and independent wire-prefix
   assertions; fixed high cached-token fixtures alone cannot prove preservation.
