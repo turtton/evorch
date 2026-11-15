@@ -18,7 +18,7 @@ jobs:
   # checks configured today.
   ci:
     if: always()
-    needs: [quick-checks, lint, docs-schema, otel, tests]
+    needs: [quick-checks, scope-gate, lint, docs-schema, otel, tests]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -39,6 +39,24 @@ jobs:
           path: inventories
       - name: Merge the test inventories of every group and shard
         run: scripts/verify-test-inventory.sh --expected-sha "$GITHUB_SHA" inventories
+
+  # A feature PR of the single-core migration changes only the files of its scope;
+  # only an integration PR changes the central files (scripts/central-files.txt).
+  # The scope is the head branch name, see scripts/ci-scope-gate.sh. The full
+  # history is fetched so that the merge base with the target branch exists.
+  scope-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Files of the PR against its scope
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: scripts/ci-scope-gate.sh --head-ref "$HEAD_REF" --base "origin/$BASE_REF"
 
   # Cheap checks that need no compilation of the workspace.
   quick-checks:
@@ -76,6 +94,15 @@ jobs:
         run: |
           scripts/tests/test_check_workbench_boundaries.sh
           scripts/check-workbench-boundaries.sh
+      # Central files of the single-core migration (scripts/central-files.txt)
+      # change only in integration PRs; feature PRs are checked against their
+      # scope with `scripts/check-central-files.sh --scope <pr>`. The core-client
+      # desktop gains no reference to internal crates beyond its baseline.
+      - name: Central files and core-client references
+        run: |
+          scripts/tests/test_check_central_files.sh
+          scripts/check-central-files.sh --check-data
+          scripts/check-core-client-refs.sh
       # Every workspace member is in exactly one test group, and the merge gate
       # of the group inventories rejects what it should.
       - name: Test group definition and inventory merge gate

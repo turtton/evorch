@@ -14,6 +14,7 @@ impl CommandHost {
         &mut self,
         command: WorkspaceCommand,
         provenance: &Provenance,
+        _restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         let changes_projects = matches!(
             command,

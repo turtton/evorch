@@ -13,6 +13,7 @@ impl CommandHost {
         &mut self,
         command: LifecycleCommand,
         _provenance: &Provenance,
+        _restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         match command {}
     }

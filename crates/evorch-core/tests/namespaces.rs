@@ -2,6 +2,10 @@
 //! client is refused at the handshake, only implemented capabilities are
 //! offered, and nothing outside the namespace table gets through.
 
+/// An operation no namespace has or will have, so these checks stay true when
+/// a reserved namespace is implemented.
+const NO_SUCH_OPERATION: &str = "no_such_operation";
+
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt, process::Stdio};
 use tokio::{
@@ -147,8 +151,8 @@ async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_off
 
     // Reserved namespaces and the flat version 1 shape are unsupported, not accepted.
     for payload in [
-        json!({"type": "settings", "payload": {"type": "write", "payload": {}}}),
-        json!({"type": "maintenance", "payload": {"type": "restart"}}),
+        json!({"type": "settings", "payload": {"type": NO_SUCH_OPERATION, "payload": {}}}),
+        json!({"type": "maintenance", "payload": {"type": NO_SUCH_OPERATION}}),
         json!({"type": "get_core_status"}),
     ] {
         assert_eq!(
@@ -163,7 +167,7 @@ async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_off
         .header("Origin", &root)
         .json(&request(
             "command",
-            json!({"type": "auth", "payload": {"type": "login", "payload": {}}}),
+            json!({"type": "auth", "payload": {"type": NO_SUCH_OPERATION, "payload": {}}}),
         ))
         .send()
         .await

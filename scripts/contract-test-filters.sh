@@ -3,6 +3,11 @@
 # each test process, including providers' process-global cache tests.
 # cache_preservation_e2e includes approval_cache::approved_tool_preserves_next_provider_prefix
 # (Chat Completions, Responses and Codex; approval is not a cache boundary).
+# core_settings_cache is the baseline the integration PR S0 registered; PR 10 adds
+# scenarios to it. nextest rejects a binary name that matches nothing, so the
+# integration PR that precedes a feature PR registers its new cache binary (for
+# PR 15: core_pr_cache) together with a placeholder test file. (No comments
+# inside the filter itself: nextest does not parse them.)
 # shellcheck disable=SC2034 # Consumed by scripts that source this file.
 CACHE_CONTRACT_FILTER='
   package(=mock-openai)
@@ -53,7 +58,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=pull_request_review_cache) | binary(=pull_request_auto_fix_cache)
       | binary(=harness_notice_delivery_cache)
       | binary(=pull_request_e2e)))
-  | (package(=evorch-core) & (binary(=core_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery)))
+  | (package(=evorch-core) & (binary(=core_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery) | binary(=core_settings_cache)))
   | (package(=tools) & binary(=bounded_output))
   | (package(=gui) & (binary(=artifact_pages_cache) | binary(=pull_requests_cache) | binary(=pull_request_phase2_gui_cache) | binary(=harness_notice_recovery)
       | (binary(=lane_delivery_host) & test(attention_query_and_display))))

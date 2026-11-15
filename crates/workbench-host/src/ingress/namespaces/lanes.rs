@@ -14,6 +14,7 @@ impl CommandHost {
         &mut self,
         command: LanesCommand,
         provenance: &Provenance,
+        _restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         match command {
             LanesCommand::ManageLane(manage) => self.manage_lane_command(manage, provenance),

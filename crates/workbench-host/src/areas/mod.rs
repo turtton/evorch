@@ -1,7 +1,9 @@
 //! Host services of the areas that are filled in one PR each (ADR 0045).
 //!
-//! The protocol namespaces `workspace`, `mcp`, `execution`, `teams` and `lanes`
-//! each get one file here with the service behind them. A PR implementing an
+//! Every protocol namespace that is not a plain router has one file here with
+//! the service behind it. The files of the namespaces that are still reserved
+//! hold an empty placeholder service, constructed from the same handles as the
+//! others. A PR implementing an
 //! area edits only its own files and nothing shared:
 //!
 //! | what | where |
@@ -11,18 +13,33 @@
 //! | the service, its state and its tasks | `areas/<area>.rs` (this directory) |
 //! | the translation of its commands and queries | `ingress/namespaces/<area>.rs` |
 //!
+//! Each `<area>.rs` may grow into submodules in `<area>/`; those are the
+//! area's too. The registration here (`mod <area>;`, the `Areas` field and
+//! [`AreaHandles`]) is shared and changes only in an integration PR.
+//!
 //! The service is constructed once, from [`AreaHandles`]: the handles the
 //! bootstrap already owns (runtime, configuration, storage writer handle, MCP
-//! services, event bus). An area never builds a runtime, a database writer or
+//! services, event bus, credential store, the model reload, the evaluation
+//! service). An area never builds a runtime, a database writer or
 //! an MCP pool of its own. It starts background work only through
 //! [`AreaTasks`] and publishes events only through a [`ProjectionSource`].
 //!
 //! Handlers run synchronously under the host's mutex. They must not wait: work
 //! that has to wait becomes an [`AreaTasks`] task, whose outcome reaches
 //! clients as an event or a later query.
+pub mod artifacts;
+pub mod auth;
+pub mod browser;
+pub mod diagnostics;
+pub mod evaluation;
 pub mod execution;
+pub mod improvement;
 pub mod lanes;
+pub mod maintenance;
 pub mod mcp;
+pub mod memory;
+pub mod pull_requests;
+pub mod settings;
 pub mod tasks;
 pub mod teams;
 pub mod workspace;
@@ -49,7 +66,22 @@ pub struct AreaHandles {
     pub mcp: McpHostServices,
     pub tasks: AreaTasks,
     pub projection: Arc<Projection>,
+    /// The credential store the runs read (PR 10: `settings`, `auth`).
+    pub credentials: Arc<dyn sandbox::CredentialStore>,
+    /// Recomposes the startup model and every project model after a settings
+    /// save; the one the Evaluator's reload tool uses (PR 10).
+    pub reload_models: ReloadModels,
+    /// The evaluation service and the host callbacks of its tools (PR 13 reads,
+    /// PR 17c runs). An area never builds an evaluation service of its own.
+    pub evaluations: eval::evaluator::EvaluationService,
+    pub evaluator: Arc<crate::bootstrap::evaluation::EvaluatorHost>,
+    /// The event database file (PR 13, 17d). Opening it is the storage layer's
+    /// business: read through `runtime` or write through `storage`.
+    pub database: PathBuf,
 }
+
+/// See [`AreaHandles::reload_models`].
+pub type ReloadModels = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 impl AreaHandles {
     /// The event source of `namespace` (one of the area's own namespaces).
@@ -70,6 +102,16 @@ pub struct Areas {
     pub execution: execution::ExecutionArea,
     pub teams: teams::TeamsArea,
     pub lanes: lanes::LanesArea,
+    pub settings: settings::SettingsArea,
+    pub auth: auth::AuthArea,
+    pub diagnostics: diagnostics::DiagnosticsArea,
+    pub memory: memory::MemoryArea,
+    pub improvement: improvement::ImprovementArea,
+    pub evaluation: evaluation::EvaluationArea,
+    pub pull_requests: pull_requests::PullRequestsArea,
+    pub maintenance: maintenance::MaintenanceArea,
+    pub artifacts: artifacts::ArtifactsArea,
+    pub browser: browser::BrowserArea,
 }
 
 impl Areas {
@@ -84,6 +126,16 @@ impl Areas {
             execution: execution::ExecutionArea::new(handles)?,
             teams: teams::TeamsArea::new(handles)?,
             lanes: lanes::LanesArea::new(handles)?,
+            settings: settings::SettingsArea::new(handles)?,
+            auth: auth::AuthArea::new(handles)?,
+            diagnostics: diagnostics::DiagnosticsArea::new(handles)?,
+            memory: memory::MemoryArea::new(handles)?,
+            improvement: improvement::ImprovementArea::new(handles)?,
+            evaluation: evaluation::EvaluationArea::new(handles)?,
+            pull_requests: pull_requests::PullRequestsArea::new(handles)?,
+            maintenance: maintenance::MaintenanceArea::new(handles)?,
+            artifacts: artifacts::ArtifactsArea::new(handles)?,
+            browser: browser::BrowserArea::new(handles)?,
         })
     }
 }

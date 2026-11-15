@@ -10,6 +10,10 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use workbench_web::{WebApp, WebServerConfig};
 
+/// An operation no namespace has or will have: the refusal below must not depend
+/// on which namespaces are still reserved.
+const NO_SUCH_OPERATION: &str = "no_such_operation";
+
 fn app(backend: &Arc<FakeBackend>) -> Router {
     WebApp::new(&WebServerConfig::default(), Arc::clone(backend))
         .unwrap()
@@ -47,7 +51,7 @@ async fn reserved_namespaces_are_unsupported_and_never_reach_the_backend() {
         for kind in ["command", "query"] {
             let payload = json!({
                 "type": namespace,
-                "payload": {"type": "run", "payload": {"token": secret}},
+                "payload": {"type": NO_SUCH_OPERATION, "payload": {"token": secret}},
             });
             let (status, body) = post(&backend, request(kind, payload)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}/{namespace}");

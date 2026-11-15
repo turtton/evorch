@@ -11,6 +11,13 @@
 //! have an adapter file each too, with no operations: their types are empty, so
 //! the compiler, not a runtime check, refuses them, and the PR that implements
 //! one fills in its own file.
+//!
+//! Every `*_command` adapter receives the `HostCommandPermit` the command was
+//! accepted with. An adapter that hands work to a task gives the permit to that
+//! task, which holds it until the outcome is settled (and not while it waits for
+//! a person; see `workbench_protocol::operation`). How a planned restart treats
+//! a namespace's commands is the adapter's `<area>_command_access`, called from
+//! `ingress/restart.rs`.
 
 mod approvals;
 mod artifacts;
@@ -51,25 +58,25 @@ impl CommandHost {
     ) -> Result<CommandReply, WorkbenchError> {
         match command {
             Command::Conversation(c) => self.conversation_command(c, provenance, restart),
-            Command::Workspace(c) => self.workspace_command(c, provenance),
-            Command::Execution(c) => self.execution_command(c, provenance),
-            Command::Questions(c) => self.questions_command(c, provenance),
-            Command::Approvals(c) => self.approvals_command(c, provenance),
-            Command::Lanes(c) => self.lanes_command(c, provenance),
-            Command::Lifecycle(c) => self.lifecycle_command(c, provenance),
-            Command::Projection(c) => self.projection_command(c, provenance),
-            Command::Settings(c) => self.settings_command(c, provenance),
-            Command::Auth(c) => self.auth_command(c, provenance),
+            Command::Workspace(c) => self.workspace_command(c, provenance, restart),
+            Command::Execution(c) => self.execution_command(c, provenance, restart),
+            Command::Questions(c) => self.questions_command(c, provenance, restart),
+            Command::Approvals(c) => self.approvals_command(c, provenance, restart),
+            Command::Lanes(c) => self.lanes_command(c, provenance, restart),
+            Command::Lifecycle(c) => self.lifecycle_command(c, provenance, restart),
+            Command::Projection(c) => self.projection_command(c, provenance, restart),
+            Command::Settings(c) => self.settings_command(c, provenance, restart),
+            Command::Auth(c) => self.auth_command(c, provenance, restart),
             Command::Mcp(c) => self.mcp_command(c, provenance, restart),
-            Command::Teams(c) => self.teams_command(c, provenance),
-            Command::Diagnostics(c) => self.diagnostics_command(c, provenance),
-            Command::Memory(c) => self.memory_command(c, provenance),
-            Command::Evaluation(c) => self.evaluation_command(c, provenance),
-            Command::Improvement(c) => self.improvement_command(c, provenance),
-            Command::PullRequests(c) => self.pull_requests_command(c, provenance),
-            Command::Browser(c) => self.browser_command(c, provenance),
-            Command::Artifacts(c) => self.artifacts_command(c, provenance),
-            Command::Maintenance(c) => self.maintenance_command(c, provenance),
+            Command::Teams(c) => self.teams_command(c, provenance, restart),
+            Command::Diagnostics(c) => self.diagnostics_command(c, provenance, restart),
+            Command::Memory(c) => self.memory_command(c, provenance, restart),
+            Command::Evaluation(c) => self.evaluation_command(c, provenance, restart),
+            Command::Improvement(c) => self.improvement_command(c, provenance, restart),
+            Command::PullRequests(c) => self.pull_requests_command(c, provenance, restart),
+            Command::Browser(c) => self.browser_command(c, provenance, restart),
+            Command::Artifacts(c) => self.artifacts_command(c, provenance, restart),
+            Command::Maintenance(c) => self.maintenance_command(c, provenance, restart),
         }
     }
 

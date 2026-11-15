@@ -347,3 +347,36 @@ fn only_placeholders_that_say_so_are_listed_as_unsupported() {
     );
     assert_eq!(features.unsupported_notes(), [("recorder", "not yet")]);
 }
+
+/// Every slot S0 registered names a protocol namespace, and while that
+/// namespace is still `Reserved` its feature offers nothing. The test follows
+/// the namespace status, so the PR that implements a namespace changes no
+/// shared test: once the namespace leaves `Reserved`, its slot is exempt here
+/// and the feature's own tests take over.
+#[test]
+fn a_slot_of_a_reserved_namespace_is_not_offered() {
+    use workbench_protocol::namespaces::{NAMESPACES, NamespaceStatus};
+    let slots = [
+        FeatureId::Settings,
+        FeatureId::Auth,
+        FeatureId::Diagnostics,
+        FeatureId::Memory,
+        FeatureId::Improvement,
+        FeatureId::Evaluation,
+        FeatureId::PullRequests,
+        FeatureId::Maintenance,
+        FeatureId::Artifacts,
+        FeatureId::Browser,
+    ];
+    let features = Features::default();
+    let offered = features.available(true, &Capability::IMPLEMENTED);
+    for id in slots {
+        let namespace = NAMESPACES
+            .iter()
+            .find(|n| n.name == id.namespace())
+            .unwrap_or_else(|| panic!("{id:?} names no protocol namespace"));
+        if namespace.status == NamespaceStatus::Reserved {
+            assert!(!offered.contains(&id), "{id:?} is offered while reserved");
+        }
+    }
+}

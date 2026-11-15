@@ -54,6 +54,7 @@
         "agents",
         "apply-patch",
         "catalog",
+        "core-client-refs",
         "renderer-ipc",
         "core-instance",
         "core-launcher",

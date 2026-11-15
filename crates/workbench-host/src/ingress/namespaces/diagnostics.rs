@@ -14,6 +14,7 @@ impl CommandHost {
         &mut self,
         command: DiagnosticsCommand,
         _provenance: &Provenance,
+        _restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         match command {}
     }
@@ -24,5 +25,17 @@ impl CommandHost {
         query: &DiagnosticsQuery,
     ) -> Result<QueryReply, WorkbenchError> {
         match *query {}
+    }
+}
+
+impl CommandHost {
+    /// How a planned restart treats this namespace's commands. The namespace has
+    /// none yet, so this cannot be called; the PR that gives it its first command
+    /// writes the classification here (default: new work), not in the shared
+    /// `restart.rs`.
+    pub(in crate::ingress) fn diagnostics_command_access(
+        command: &DiagnosticsCommand,
+    ) -> crate::bootstrap::restart::CommandAccess {
+        match *command {}
     }
 }

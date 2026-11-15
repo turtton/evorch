@@ -1,6 +1,7 @@
 //! Wire samples of the namespaces later PRs fill in, one file per area.
 //!
-//! A PR that gives `workspace`, `mcp`, `execution`, `teams` or `lanes` new
+//! A PR that gives an area (`workspace`, `mcp`, `execution`, `teams`, `lanes`
+//! or one of the reserved ones, whose files are empty slots) new
 //! operations adds their samples to its own file here (`samples()`), and the
 //! shared consistency tests (`tests/namespaces.rs`) and the golden check
 //! (`tests/golden.rs`, file `tests/golden/areas/<area>.json`) pick them up
@@ -10,9 +11,19 @@ use workbench_protocol::commands::Command;
 use workbench_protocol::events::UiEvent;
 use workbench_protocol::queries::{Query, QueryReply};
 
+pub mod artifacts;
+pub mod auth;
+pub mod browser;
+pub mod diagnostics;
+pub mod evaluation;
 pub mod execution;
+pub mod improvement;
 pub mod lanes;
+pub mod maintenance;
 pub mod mcp;
+pub mod memory;
+pub mod pull_requests;
+pub mod settings;
 pub mod teams;
 pub mod workspace;
 
@@ -44,6 +55,16 @@ pub fn all() -> Vec<AreaSamples> {
         execution::samples(),
         teams::samples(),
         lanes::samples(),
+        settings::samples(),
+        auth::samples(),
+        diagnostics::samples(),
+        memory::samples(),
+        improvement::samples(),
+        evaluation::samples(),
+        pull_requests::samples(),
+        maintenance::samples(),
+        artifacts::samples(),
+        browser::samples(),
     ]
 }
 
