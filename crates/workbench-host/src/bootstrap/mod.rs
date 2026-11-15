@@ -418,7 +418,7 @@ impl BootstrappedHost {
             handle.clone(),
         )?);
         let (project_models, reload_projects) =
-            project_models::resolver(&options, credentials, bus.clone());
+            project_models::resolver(&options, credentials.clone(), bus.clone());
         let runtime = learning::configure(
             composed.runtime.with_mcp_service(mcp.runs.clone()),
             &config,
@@ -444,7 +444,7 @@ impl BootstrappedHost {
             .map_err(|_| "owner tombstone guard already set")?;
         runtime.set_thread_scratch(owner.thread_scratch());
         let _ = evaluator.runtime.set(runtime.downgrade());
-        let _ = evaluator.reload.set(Box::new(move || {
+        let reload_models: crate::areas::ReloadModels = Arc::new(move || {
             if let Some(live) = &live {
                 let config = config::Config::load_strict(&production.load_options)
                     .map_err(|e| e.to_string())?;
@@ -454,7 +454,11 @@ impl BootstrappedHost {
                 );
             }
             reload_projects()
-        }));
+        });
+        let _ = evaluator.reload.set({
+            let reload = reload_models.clone();
+            Box::new(move || reload())
+        });
         let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current())
             .with_event_bus(bus.clone())
             .with_memory_storage(storage_config.clone())
@@ -488,6 +492,11 @@ impl BootstrappedHost {
             mcp: mcp.clone(),
             tasks: area_tasks.clone(),
             projection: command_host.projection().clone(),
+            credentials,
+            reload_models,
+            evaluations: evaluations.clone(),
+            evaluator: evaluator.clone(),
+            database: storage_config.db_path.clone(),
         })?;
         // What the saved sidebar grants (trust, allowed directories, the
         // read-only directories of threads) is declared before any run starts

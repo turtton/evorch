@@ -76,6 +76,15 @@ jobs:
         run: |
           scripts/tests/test_check_workbench_boundaries.sh
           scripts/check-workbench-boundaries.sh
+      # Central files of the single-core migration (scripts/central-files.txt)
+      # change only in integration PRs; feature PRs are checked against their
+      # scope with `scripts/check-central-files.sh --scope <pr>`. The core-client
+      # desktop gains no reference to internal crates beyond its baseline.
+      - name: Central files and core-client references
+        run: |
+          scripts/tests/test_check_central_files.sh
+          scripts/check-central-files.sh --check-data
+          scripts/check-core-client-refs.sh
       # Every workspace member is in exactly one test group, and the merge gate
       # of the group inventories rejects what it should.
       - name: Test group definition and inventory merge gate

@@ -8,9 +8,9 @@
 //! connection of its own, never sees the transport, and has no untyped way to
 //! talk to the core.
 //!
-//! A PR implementing the `workspace`, `mcp`, `execution`, `teams` or `lanes`
-//! area edits only its own file in this directory (its state, its rendering,
-//! how it reads events and replies). The registration below and the connection
+//! A PR implementing an area edits only its own file in this directory (or
+//! the submodules in `<area>/`): its state, its rendering,
+//! how it reads events and replies. The registration below and the connection
 //! do not change.
 //!
 //! ## What a feature gets
@@ -55,9 +55,19 @@
 //! built-in selector stays as it is while no feature replaces it. The `workspace`
 //! feature draws its own selector by implementing [`Feature::render_selector`]
 //! and returning `true`, and only an available feature is asked.
+pub mod artifacts;
+pub mod auth;
+pub mod browser;
+pub mod diagnostics;
+pub mod evaluation;
 pub mod execution;
+pub mod improvement;
 pub mod lanes;
+pub mod maintenance;
 pub mod mcp;
+pub mod memory;
+pub mod pull_requests;
+pub mod settings;
 pub mod teams;
 pub mod workspace;
 
@@ -80,6 +90,16 @@ pub enum FeatureId {
     Execution,
     Teams,
     Lanes,
+    Settings,
+    Auth,
+    Diagnostics,
+    Memory,
+    Improvement,
+    Evaluation,
+    PullRequests,
+    Maintenance,
+    Artifacts,
+    Browser,
 }
 
 impl FeatureId {
@@ -91,6 +111,16 @@ impl FeatureId {
             Self::Execution => "execution",
             Self::Teams => "teams",
             Self::Lanes => "lanes",
+            Self::Settings => "settings",
+            Self::Auth => "auth",
+            Self::Diagnostics => "diagnostics",
+            Self::Memory => "memory",
+            Self::Improvement => "improvement",
+            Self::Evaluation => "evaluation",
+            Self::PullRequests => "pull_requests",
+            Self::Maintenance => "maintenance",
+            Self::Artifacts => "artifacts",
+            Self::Browser => "browser",
         }
     }
 }
@@ -340,6 +370,16 @@ impl Default for Features {
                 Box::<execution::ExecutionFeature>::default(),
                 Box::<teams::TeamsFeature>::default(),
                 Box::<lanes::LanesFeature>::default(),
+                Box::<settings::SettingsFeature>::default(),
+                Box::<auth::AuthFeature>::default(),
+                Box::<diagnostics::DiagnosticsFeature>::default(),
+                Box::<memory::MemoryFeature>::default(),
+                Box::<improvement::ImprovementFeature>::default(),
+                Box::<evaluation::EvaluationFeature>::default(),
+                Box::<pull_requests::PullRequestsFeature>::default(),
+                Box::<maintenance::MaintenanceFeature>::default(),
+                Box::<artifacts::ArtifactsFeature>::default(),
+                Box::<browser::BrowserFeature>::default(),
             ],
         }
     }

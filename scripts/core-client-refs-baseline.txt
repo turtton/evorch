@@ -1,0 +1,5 @@
+# Lines per file of crates/gui/src/core_client that name an internal crate
+# (see scripts/check-core-client-refs.sh). Only shrinks.
+# The MCP feature (PR 11) still builds its definitions from config and the host
+# area; the move to protocol types is owned by 19a.
+crates/gui/src/core_client/features/mcp.rs 2

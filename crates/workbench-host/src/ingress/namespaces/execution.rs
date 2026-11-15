@@ -12,6 +12,7 @@ impl CommandHost {
         &mut self,
         command: ExecutionCommand,
         provenance: &Provenance,
+        _restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         let host_command = match command {
             ExecutionCommand::StopChat(target) => HostCommand::StopChat {

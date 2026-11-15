@@ -14,6 +14,7 @@ impl CommandHost {
         &mut self,
         command: QuestionsCommand,
         provenance: &Provenance,
+        _restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         let QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {
             thread,

@@ -34,21 +34,7 @@ impl CommandHost {
         &self,
         command: &Command,
     ) -> Result<HostCommandPermit, WorkbenchError> {
-        let access = match command {
-            Command::Conversation(ConversationCommand::SendChat(send)) => {
-                self.chat_access(send.thread.as_str())
-            }
-            Command::Conversation(
-                ConversationCommand::WithdrawFollowUp(_)
-                | ConversationCommand::DeliverFollowUpsNextTurn(_),
-            )
-            | Command::Questions(_)
-            | Command::Approvals(_) => CommandAccess::ExistingInput,
-            Command::Execution(ExecutionCommand::StopChat(_) | ExecutionCommand::StopRun(_)) => {
-                CommandAccess::Stop
-            }
-            _ => CommandAccess::NewWork,
-        };
+        let access = command_access(command, |thread| self.chat_access(thread));
         self.service
             .restart_gate()
             .enter(access)
@@ -72,5 +58,116 @@ impl CommandHost {
                 "host is preparing restart; command was not accepted",
             )
         })
+    }
+}
+
+/// How a planned restart treats `command` (see `HostCommandPermit`): new work is
+/// refused while the host prepares, input to work that already exists is
+/// accepted until the safe point, and a stop always is. `chat_access` says which
+/// of the first two a chat message is.
+///
+/// What an area's commands are is that area's own decision: every namespace
+/// other than the ones classified here delegates to
+/// `CommandHost::<area>_command_access` in its adapter, which for a namespace
+/// without commands cannot be called, and which a PR adding the first command
+/// must write. A command left to the default below is new work.
+pub(super) fn command_access(
+    command: &Command,
+    chat_access: impl FnOnce(&str) -> CommandAccess,
+) -> CommandAccess {
+    match command {
+        Command::Conversation(ConversationCommand::SendChat(send)) => {
+            chat_access(send.thread.as_str())
+        }
+        Command::Conversation(
+            ConversationCommand::WithdrawFollowUp(_)
+            | ConversationCommand::DeliverFollowUpsNextTurn(_),
+        )
+        | Command::Questions(_)
+        | Command::Approvals(_) => CommandAccess::ExistingInput,
+        Command::Execution(ExecutionCommand::StopChat(_) | ExecutionCommand::StopRun(_)) => {
+            CommandAccess::Stop
+        }
+        Command::Settings(c) => CommandHost::settings_command_access(c),
+        Command::Auth(c) => CommandHost::auth_command_access(c),
+        Command::Diagnostics(c) => CommandHost::diagnostics_command_access(c),
+        Command::Memory(c) => CommandHost::memory_command_access(c),
+        Command::Evaluation(c) => CommandHost::evaluation_command_access(c),
+        Command::Improvement(c) => CommandHost::improvement_command_access(c),
+        Command::PullRequests(c) => CommandHost::pull_requests_command_access(c),
+        Command::Browser(c) => CommandHost::browser_command_access(c),
+        Command::Artifacts(c) => CommandHost::artifacts_command_access(c),
+        Command::Maintenance(c) => CommandHost::maintenance_command_access(c),
+        _ => CommandAccess::NewWork,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use workbench_protocol::commands::{ComposerRole, SendChat, ThreadTarget};
+    use workbench_protocol::ids::{ProjectId, SubmissionId, ThreadId};
+
+    fn name(access: CommandAccess) -> &'static str {
+        match access {
+            CommandAccess::NewWork => "new",
+            CommandAccess::ExistingInput => "existing",
+            CommandAccess::Stop => "stop",
+        }
+    }
+
+    fn thread() -> ThreadTarget {
+        ThreadTarget {
+            thread: ThreadId::new("t").unwrap(),
+        }
+    }
+
+    fn send_chat() -> Command {
+        Command::Conversation(ConversationCommand::SendChat(SendChat {
+            project: ProjectId::new("p").unwrap(),
+            thread: ThreadId::new("t").unwrap(),
+            submission_id: SubmissionId::new("s").unwrap(),
+            composer_role: ComposerRole::Worker,
+            text: "hello".into(),
+            skills: vec![],
+            images: vec![],
+            model_preference: None,
+            fork_seed: None,
+        }))
+    }
+
+    #[test]
+    fn existing_operations_keep_their_classification() {
+        let not_chat = |_: &str| -> CommandAccess { panic!("not a chat message") };
+        assert_eq!(
+            name(command_access(
+                &Command::Execution(ExecutionCommand::StopChat(thread())),
+                not_chat
+            )),
+            "stop"
+        );
+        assert_eq!(
+            name(command_access(
+                &Command::Conversation(ConversationCommand::DeliverFollowUpsNextTurn(thread())),
+                not_chat
+            )),
+            "existing"
+        );
+        // A chat message is classified by the thread's run, and by nothing else.
+        for access in [CommandAccess::NewWork, CommandAccess::ExistingInput] {
+            let classified = command_access(&send_chat(), |thread| {
+                assert_eq!(thread, "t");
+                access
+            });
+            assert_eq!(name(classified), name(access));
+        }
+        // Everything else the host classifies stays new work.
+        assert_eq!(
+            name(command_access(
+                &Command::Conversation(ConversationCommand::CompactChat(thread())),
+                not_chat
+            )),
+            "new"
+        );
     }
 }

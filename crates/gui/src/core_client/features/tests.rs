@@ -347,3 +347,32 @@ fn only_placeholders_that_say_so_are_listed_as_unsupported() {
     );
     assert_eq!(features.unsupported_notes(), [("recorder", "not yet")]);
 }
+
+#[test]
+fn the_placeholder_slots_belong_to_reserved_namespaces_and_stay_unavailable() {
+    use workbench_protocol::namespaces::{NAMESPACES, NamespaceStatus};
+    let placeholders = [
+        FeatureId::Settings,
+        FeatureId::Auth,
+        FeatureId::Diagnostics,
+        FeatureId::Memory,
+        FeatureId::Improvement,
+        FeatureId::Evaluation,
+        FeatureId::PullRequests,
+        FeatureId::Maintenance,
+        FeatureId::Artifacts,
+        FeatureId::Browser,
+    ];
+    for id in placeholders {
+        let namespace = NAMESPACES
+            .iter()
+            .find(|n| n.name == id.namespace())
+            .unwrap_or_else(|| panic!("{id:?} names no protocol namespace"));
+        assert_eq!(namespace.status, NamespaceStatus::Reserved, "{id:?}");
+    }
+    let features = Features::default();
+    let offered = features.available(true, &Capability::IMPLEMENTED);
+    assert!(placeholders.iter().all(|id| !offered.contains(id)));
+    // A placeholder adds nothing to the list of unsupported operations.
+    assert!(features.unsupported_notes().is_empty());
+}

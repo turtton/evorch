@@ -131,3 +131,30 @@ wire_id!(
     /// A process-local restart preparation attempt (not durable commit evidence).
     RestartId
 );
+
+wire_id!(
+    /// One asynchronous operation, chosen by the client (any unique id, a UUID
+    /// say) so that it can find the outcome again without resending. See
+    /// [`crate::operation`].
+    OperationId
+);
+wire_id!(
+    /// A lesson of the memory area (shared management data, see [`crate::management`]).
+    MemoryId
+);
+wire_id!(
+    /// A self-improvement candidate (shared management data).
+    ImprovementCandidateId
+);
+wire_id!(
+    /// A group of evaluation members that is judged together.
+    EvaluationGroupId
+);
+wire_id!(
+    /// One member of an evaluation group.
+    EvaluationMemberId
+);
+wire_id!(
+    /// One evaluation job: a run, a report generation or a rejudge.
+    EvaluationJobId
+);

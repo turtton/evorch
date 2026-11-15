@@ -15,6 +15,7 @@ impl CommandHost {
         &mut self,
         command: ProjectionCommand,
         _provenance: &Provenance,
+        _restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         match command {}
     }

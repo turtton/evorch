@@ -1,12 +1,10 @@
-//! Offline repair, read-only preview and lightweight online backfill. No runtime is started.
+//! Offline repair and read-only preview. No runtime is started. The online `backfill-events` is in [`crate::backfill`].
 
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use storage::EventBackfillOptions;
 use storage::maintenance::{
-    CompactOptions, ConvertBodiesOptions, DeltaMode, StripOptions, VacuumOptions, backfill_events,
-    compact_events, convert_bodies, preview_task_progress_retention, strip_task_progress_cursor,
-    vacuum_database,
+    CompactOptions, ConvertBodiesOptions, DeltaMode, StripOptions, VacuumOptions, compact_events,
+    convert_bodies, preview_task_progress_retention, strip_task_progress_cursor, vacuum_database,
 };
 
 pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
@@ -54,7 +52,6 @@ pub struct MaintenanceArgs {
     pub retention_preview: bool,
     pub strip: StripOptions,
     pub compact: Option<CompactOptions>,
-    pub backfill: Option<EventBackfillOptions>,
     pub vacuum: Option<VacuumOptions>,
     pub convert_bodies: Option<ConvertBodiesOptions>,
 }
@@ -66,11 +63,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
     }
     let command = argv.next().ok_or(USAGE)?;
     let retention_preview = match command.as_str() {
-        "strip-task-progress-cursor"
-        | "compact-events"
-        | "backfill-events"
-        | "vacuum"
-        | "convert-bodies" => false,
+        "strip-task-progress-cursor" | "compact-events" | "vacuum" | "convert-bodies" => false,
         "preview-task-progress-retention" => true,
         _ => return Err(USAGE.into()),
     };
@@ -79,7 +72,6 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
         retention_preview,
         strip: StripOptions::default(),
         compact: (command == "compact-events").then(CompactOptions::default),
-        backfill: (command == "backfill-events").then(EventBackfillOptions::default),
         vacuum: (command == "vacuum").then(VacuumOptions::default),
         convert_bodies: (command == "convert-bodies").then(ConvertBodiesOptions::default),
     };
@@ -118,7 +110,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
             "--sidebar" if args.compact.is_some() => {
                 args.compact.as_mut().unwrap().sidebar = Some(argv.next().ok_or(USAGE)?.into());
             }
-            "--batch-rows" if args.compact.is_some() || args.backfill.is_some() => {
+            "--batch-rows" if args.compact.is_some() => {
                 let n: usize = argv
                     .next()
                     .ok_or(USAGE)?
@@ -126,16 +118,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
                     .ok()
                     .filter(|n| (1..=100_000).contains(n))
                     .ok_or(USAGE)?;
-                if let Some(options) = &mut args.compact {
-                    options.batch_rows = n;
-                }
-                if let Some(options) = &mut args.backfill {
-                    options.batch_rows = n;
-                }
-            }
-            "--max-rows" if args.backfill.is_some() => {
-                args.backfill.as_mut().unwrap().max_rows =
-                    Some(argv.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?);
+                args.compact.as_mut().unwrap().batch_rows = n;
             }
             "--provider-retention-days" if args.compact.is_some() => {
                 let days: u64 = argv.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
@@ -180,11 +163,6 @@ pub fn run(args: MaintenanceArgs) -> Result<Value, String> {
             .ok_or("cannot resolve config directory; pass --db")?
             .join("evorch-events.db"),
     };
-    if let Some(options) = args.backfill {
-        return backfill_events(&path, &options)
-            .map(|summary| json!(summary))
-            .map_err(|error| error.to_string());
-    }
     if let Some(options) = args.convert_bodies {
         if options.apply {
             eprintln!(

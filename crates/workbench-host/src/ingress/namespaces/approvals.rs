@@ -12,6 +12,7 @@ impl CommandHost {
         &mut self,
         command: ApprovalsCommand,
         provenance: &Provenance,
+        _restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         match command {
             ApprovalsCommand::DecideToolApproval(decide) => {

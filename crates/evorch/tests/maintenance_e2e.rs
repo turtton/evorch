@@ -75,17 +75,21 @@ fn compact_and_online_backfill_have_separate_safety_options() {
     assert_eq!(options.provider_retention_days, 0);
     assert_eq!(options.batch_rows, 17);
     assert_eq!(options.sidebar, Some("saved-sidebar.json".into()));
-    let args = parse(&[
-        "maintenance",
-        "backfill-events",
-        "--batch-rows",
-        "2",
-        "--max-rows",
-        "3",
-    ])
+    let args = evorch::backfill::parse_args(
+        [
+            "maintenance",
+            "backfill-events",
+            "--batch-rows",
+            "2",
+            "--max-rows",
+            "3",
+        ]
+        .into_iter()
+        .map(String::from),
+    )
     .unwrap();
     assert_eq!(
-        args.backfill.unwrap(),
+        args.options,
         storage::EventBackfillOptions {
             batch_rows: 2,
             max_rows: Some(3)
@@ -97,6 +101,14 @@ fn compact_and_online_backfill_have_separate_safety_options() {
         vec!["compact-events", "--max-rows", "1"],
         vec!["compact-events", "--delta-mode", "unknown"],
         vec!["compact-events", "--provider-retention-days", "-1"],
+    ] {
+        let full = [vec!["maintenance"], args].concat();
+        assert!(parse(&full).is_err(), "{full:?}");
+    }
+    // The online backfill has a parser of its own and takes only its own options;
+    // the offline one no longer knows it.
+    assert!(parse(&["maintenance", "backfill-events"]).is_err());
+    for args in [
         vec!["backfill-events", "--apply"],
         vec!["backfill-events", "--backup", "saved.db"],
         vec!["backfill-events", "--sidebar", "sidebar.json"],
@@ -105,7 +117,10 @@ fn compact_and_online_backfill_have_separate_safety_options() {
         vec!["backfill-events", "--db", "a", "--db", "b"],
     ] {
         let full = [vec!["maintenance"], args].concat();
-        assert!(parse(&full).is_err(), "{full:?}");
+        assert!(
+            evorch::backfill::parse_args(full.iter().map(|arg| (*arg).into())).is_err(),
+            "{full:?}"
+        );
     }
 }
 

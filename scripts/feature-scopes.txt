@@ -1,0 +1,26 @@
+# What a feature PR may change (ADR 0045, single-core migration plan). Read by
+# scripts/check-central-files.sh together with central-files.txt: a changed file
+# must not be central and must match one pattern of the PR's scope.
+#
+# One scope per line: `<scope> <item>...`. An item is a bash glob (`*` also
+# matches `/`) or `area:<name>`, which stands for the files a PR owns for the
+# namespace <name>: its protocol module, adapter, host service, GUI feature,
+# samples and golden file, each as `<area>.rs` or inside `<area>/`, and the tests
+# whose file name starts with `<area>`.
+#
+# memory, improvement and evaluation are owned by PR 13 first; 14 and 17c take
+# them over only after 13 is merged, so no two scopes are open on them at once.
+# `docs/*` is every scope's. PR 16a-1 measures the renderer outside the
+# workspace (no new crate, manifest or CI group yet; ADR 0045 re-review R2), so
+# its scope is documents and measurement data only. The renderer crates enter
+# through a small integration PR once the measurement is accepted. The later
+# waves add their scopes in the integration PR that precedes them.
+
+pr10 area:settings area:auth crates/evorch-core/tests/core_settings_cache.rs docs/*
+pr13 area:diagnostics area:memory area:improvement area:evaluation docs/*
+pr14 area:memory area:improvement docs/*
+pr15 area:pull_requests crates/evorch-core/tests/core_pr_cache.rs docs/*
+pr17c area:evaluation crates/evorch/src/cli/eval.rs crates/evorch/src/evaluation.rs crates/evorch/tests/evaluation_e2e.rs crates/evorch-core/tests/core_eval_cache.rs docs/*
+pr17d area:maintenance crates/evorch/src/cli/backfill.rs crates/evorch/src/backfill.rs crates/evorch/src/cli/reindex.rs crates/evorch/src/reindex_threads.rs crates/evorch/src/reindex_threads/* crates/evorch/tests/maintenance_backfill* docs/*
+pr17e crates/evorch/src/cli/inspect.rs crates/evorch/src/cli/maintenance.rs crates/evorch/src/cli/benchmark.rs crates/evorch/src/maintenance.rs crates/evorch/src/inspect.rs crates/evorch/src/inspect/* crates/evorch/src/benchmark.rs crates/evorch/src/benchmark/* crates/evorch/tests/maintenance_e2e.rs crates/evorch/tests/inspect_e2e.rs crates/evorch/tests/lane_inspect_e2e.rs crates/evorch/tests/benchmark_e2e.rs crates/storage/src/maintenance/offline* docs/*
+pr16a1 docs/* scripts/measure-renderer*

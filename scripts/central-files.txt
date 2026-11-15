@@ -1,0 +1,75 @@
+# Central files of the single-core migration (ADR 0045): only an integration PR
+# (the "S" PRs of the plan) may change them; a feature PR's diff must not contain
+# any. scripts/check-central-files.sh reads this list and feature-scopes.txt.
+#
+# One bash glob per line (`*` also matches `/`). A line starting with `!`
+# removes what earlier lines matched. Blank lines and `#` comments are ignored.
+# Every pattern must match at least one tracked file (`--check-data`), so a
+# rename cannot silently take a file out of the list.
+
+# protocol: the routers, the shared vocabulary, the shared samples and goldens
+crates/workbench-protocol/src/lib.rs
+crates/workbench-protocol/src/namespaces/mod.rs
+crates/workbench-protocol/src/commands.rs
+crates/workbench-protocol/src/queries.rs
+crates/workbench-protocol/src/events.rs
+crates/workbench-protocol/src/envelope.rs
+crates/workbench-protocol/src/handshake.rs
+crates/workbench-protocol/src/ids.rs
+crates/workbench-protocol/src/errors.rs
+crates/workbench-protocol/src/limits.rs
+crates/workbench-protocol/src/operation.rs
+crates/workbench-protocol/src/management.rs
+crates/workbench-protocol/tests/common/mod.rs
+crates/workbench-protocol/tests/common/areas/mod.rs
+crates/workbench-protocol/tests/golden/*
+!crates/workbench-protocol/tests/golden/areas/*
+crates/workbench-protocol/tests/golden.rs
+crates/workbench-protocol/tests/namespaces.rs
+crates/workbench-protocol/tests/shared_dto.rs
+# shared tests that name namespaces
+crates/workbench-web/tests/namespaces.rs
+crates/evorch-core/tests/namespaces.rs
+
+# host: composition, the area registry, the shared router and restart classification
+crates/workbench-host/src/areas/mod.rs
+crates/workbench-host/src/bootstrap/mod.rs
+crates/workbench-host/src/bootstrap/models.rs
+crates/workbench-host/src/ingress.rs
+crates/workbench-host/src/ingress/namespaces/mod.rs
+crates/workbench-host/src/ingress/restart.rs
+
+# GUI: the feature registry and the composition root
+crates/gui/src/core_client/mod.rs
+crates/gui/src/core_client/features/mod.rs
+crates/gui/src/core_client/features/layout.rs
+
+# CLI: dispatch and the shared entry
+crates/evorch/src/main.rs
+crates/evorch/src/lib.rs
+crates/evorch/src/cli/mod.rs
+
+# build and packaging
+Cargo.toml
+Cargo.lock
+crates/*/Cargo.toml
+flake.nix
+flake.lock
+
+# CI and boundary data
+.github/workflows/*
+scripts/ci-test-groups.json
+scripts/contract-test-filters.sh
+scripts/workbench-boundary-allowlist.txt
+scripts/check-workbench-boundaries.sh
+scripts/central-files.txt
+scripts/feature-scopes.txt
+scripts/check-central-files.sh
+scripts/core-client-refs-baseline.txt
+scripts/check-core-client-refs.sh
+
+# storage: migration registration and the shared migration tests
+crates/storage/src/migrations.rs
+crates/storage/src/migrations/*
+crates/storage/undo/*
+crates/storage/tests/platform_suite/migration.rs
