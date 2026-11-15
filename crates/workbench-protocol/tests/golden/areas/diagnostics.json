@@ -1,1 +1,179 @@
-{}
+{
+  "query/diagnostics/get_diagnostics_operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_diagnostics_operation"
+    },
+    "type": "diagnostics"
+  },
+  "query/diagnostics/get_run_context": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-2",
+        "page": {
+          "limit": 50
+        },
+        "run": "run-1"
+      },
+      "type": "get_run_context"
+    },
+    "type": "diagnostics"
+  },
+  "query/diagnostics/get_usage_summary": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "range": "last7_days"
+      },
+      "type": "get_usage_summary"
+    },
+    "type": "diagnostics"
+  },
+  "query_reply/diagnostics/context": {
+    "payload": {
+      "payload": {
+        "data": {
+          "messages": {
+            "items": [
+              {
+                "index": 0,
+                "listed": true,
+                "role": "user",
+                "summary": "hello",
+                "tokens": 20
+              }
+            ],
+            "snapshot_revision": "3"
+          },
+          "overview": {
+            "compaction_checkpoints": 0,
+            "message_count": 2,
+            "phase": "checkpoint",
+            "role": "worker",
+            "run": "run-1",
+            "segments": [
+              {
+                "label": "user",
+                "tokens": 20
+              }
+            ],
+            "selected_model": "openai/gpt",
+            "tools": [
+              "read"
+            ],
+            "tools_omitted": 0,
+            "updated_at_ms": 1700000000000
+          }
+        },
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "context"
+    },
+    "type": "diagnostics"
+  },
+  "query_reply/diagnostics/operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "revision": "2",
+        "state": {
+          "type": "pending"
+        }
+      },
+      "type": "operation"
+    },
+    "type": "diagnostics"
+  },
+  "query_reply/diagnostics/usage": {
+    "payload": {
+      "payload": {
+        "data": {
+          "days": [
+            {
+              "day": "2026-01-07",
+              "totals": {
+                "cache_read_tokens": 800,
+                "cache_write_tokens": 100,
+                "failed": 1,
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "reasoning_tokens": 50,
+                "recorded_cost_micro_usd": 12500,
+                "requests": 3,
+                "unpriced_tokens": 0,
+                "unreported_requests": 0
+              }
+            }
+          ],
+          "days_omitted": 0,
+          "from_day": "2026-01-01",
+          "models": [
+            {
+              "model": "gpt",
+              "provider": "openai",
+              "totals": {
+                "cache_read_tokens": 800,
+                "cache_write_tokens": 100,
+                "failed": 1,
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "reasoning_tokens": 50,
+                "recorded_cost_micro_usd": 12500,
+                "requests": 3,
+                "unpriced_tokens": 0,
+                "unreported_requests": 0
+              }
+            }
+          ],
+          "models_omitted": 0,
+          "range": "last7_days",
+          "to_day": "2026-01-07",
+          "totals": {
+            "cache_read_tokens": 800,
+            "cache_write_tokens": 100,
+            "failed": 1,
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "reasoning_tokens": 50,
+            "recorded_cost_micro_usd": 12500,
+            "requests": 3,
+            "unpriced_tokens": 0,
+            "unreported_requests": 0
+          }
+        },
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "usage"
+    },
+    "type": "diagnostics"
+  },
+  "ui_event/diagnostics/diagnostics_operation_changed": {
+    "payload": {
+      "payload": {
+        "view": {
+          "operation_id": "op-1",
+          "revision": "2",
+          "state": {
+            "type": "ready"
+          }
+        }
+      },
+      "type": "diagnostics_operation_changed"
+    },
+    "type": "diagnostics"
+  }
+}
