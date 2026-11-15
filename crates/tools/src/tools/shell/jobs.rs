@@ -21,6 +21,9 @@ mod output;
 mod process;
 #[cfg(all(test, target_os = "linux"))]
 mod process_tests;
+#[cfg(unix)]
+#[cfg(test)]
+mod restart_tests;
 #[cfg(test)]
 mod wait_tests;
 use output::LiveOutput;
@@ -85,6 +88,7 @@ pub(super) struct EscalatedInput {
 }
 
 pub(super) struct JobRegistry {
+    pub(super) ledger: RwLock<Option<sandbox::ledger::SpawnLedger>>,
     changes: watch::Sender<u64>,
     // Writers hold jobs across updates to both indexes. Lock order is jobs →
     // by_handle → allocator → job state; handle-only readers never lock jobs.
@@ -97,6 +101,7 @@ pub(super) struct JobRegistry {
 impl Default for JobRegistry {
     fn default() -> Self {
         Self {
+            ledger: RwLock::default(),
             jobs: Mutex::default(),
             allocator: Default::default(),
             by_handle: Mutex::default(),
@@ -136,6 +141,7 @@ struct Job {
     /// `run_js` is waited for to its end, yet its card shows the output as it arrives.
     stream_output: bool,
     timeout_ms: Option<u64>,
+    ledger: Option<sandbox::ledger::SpawnLedger>,
     state: Mutex<State>,
     changed: watch::Sender<u64>,
     registry_changes: watch::Sender<u64>,
@@ -149,6 +155,7 @@ struct State {
     final_result: Option<Result<ToolResult, ToolError>>,
     exposed: bool,
     completion: Option<Completion>,
+    teardown_confirmed: bool,
     observed: bool,
     completion_notified: bool,
     artifact: Option<serde_json::Value>,
@@ -216,100 +223,119 @@ impl JobRegistry {
         let (input, input_rx) = mpsc::channel(4);
         let (changed, _) = watch::channel(0);
         let job = {
-            let mut jobs = self
-                .jobs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if jobs.values().filter(|job| job.running()).count() >= MAX_RUNNING {
-                return Ok(capacity_error(&jobs, ctx, true));
-            }
-            let mut by_handle = self
-                .by_handle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if jobs.len() >= MAX_RETAINED {
-                let removable = jobs
-                    .iter()
-                    .filter(|(_, job)| !job.unobserved())
-                    .map(|(id, _)| id.clone())
-                    .min();
-                if let Some(id) = removable {
-                    if let Some(removed) = jobs.remove(&id) {
-                        by_handle.remove(&removed.handle);
-                    }
-                } else {
-                    return Ok(capacity_error(&jobs, ctx, false));
+            let ledger = self
+                .ledger
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let admission =
+                sandbox::ledger::SpawnLedger::admit_optional(ledger.as_ref()).map_err(io_failed)?;
+            let job = {
+                let mut jobs = self
+                    .jobs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if jobs.values().filter(|job| job.running()).count() >= MAX_RUNNING {
+                    return Ok(capacity_error(&jobs, ctx, true));
                 }
-            }
-            let handle = format!("job-{}", self.allocator.allocate()?);
-            let job = Arc::new(Job {
-                id: uuid::Uuid::new_v4().to_string(),
-                handle,
-                owner: ctx.run_id.clone(),
-                call_id: ctx.call_id.clone(),
-                thread: ctx.thread_id.clone(),
-                synchronous,
-                stream_output: ctx.parent_call_id.is_some(),
-                timeout_ms,
-                state: Mutex::new(State {
-                    output: LiveOutput::new(synchronous),
-                    final_result: None,
-                    exposed: !synchronous,
-                    completion: None,
-                    observed: false,
-                    completion_notified: false,
-                    artifact: None,
-                    artifact_notice: None,
-                    process: None,
-                    sandbox: Some(sandbox),
-                    delivered_cursor: 0,
-                    last_seen: None,
-                }),
-                changed,
-                registry_changes: self.changes.clone(),
-                cancel,
-                input,
-                escalated,
+                let mut by_handle = self
+                    .by_handle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if jobs.len() >= MAX_RETAINED {
+                    let removable = jobs
+                        .iter()
+                        .filter(|(_, job)| !job.unobserved())
+                        .map(|(id, _)| id.clone())
+                        .min();
+                    if let Some(id) = removable {
+                        if let Some(removed) = jobs.remove(&id) {
+                            by_handle.remove(&removed.handle);
+                        }
+                    } else {
+                        return Ok(capacity_error(&jobs, ctx, false));
+                    }
+                }
+                let handle = format!("job-{}", self.allocator.allocate()?);
+                let job = Arc::new(Job {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    handle,
+                    owner: ctx.run_id.clone(),
+                    call_id: ctx.call_id.clone(),
+                    thread: ctx.thread_id.clone(),
+                    synchronous,
+                    ledger: ledger.clone(),
+                    stream_output: ctx.parent_call_id.is_some(),
+                    timeout_ms,
+                    state: Mutex::new(State {
+                        output: LiveOutput::new(synchronous),
+                        final_result: None,
+                        exposed: !synchronous,
+                        completion: None,
+                        teardown_confirmed: false,
+                        observed: false,
+                        completion_notified: false,
+                        artifact: None,
+                        artifact_notice: None,
+                        process: None,
+                        sandbox: Some(sandbox),
+                        delivered_cursor: 0,
+                        last_seen: None,
+                    }),
+                    changed,
+                    registry_changes: self.changes.clone(),
+                    cancel,
+                    input,
+                    escalated,
+                });
+                jobs.insert(job.id.clone(), Arc::clone(&job));
+                by_handle.insert(job.handle.clone(), Arc::clone(&job));
+                job
+            };
+            self.changes
+                .send_modify(|revision| *revision = revision.wrapping_add(1));
+            let timeout = timeout_ms.map(Duration::from_millis);
+            let worker = Arc::clone(&job);
+            // The registry owns cancellation; the task owns the process and reaping.
+            admission.spawn_worker("shell-supervisor", async move {
+                let completion = if interactive {
+                    run_pty(&wrapped, &worker, input_rx, cancel_rx, timeout).await
+                } else {
+                    run_pipe(&wrapped, &worker, input_rx, cancel_rx, timeout).await
+                };
+                match completion {
+                    Ok(completion) => {
+                        worker
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .teardown_confirmed = true;
+                        worker.complete(completion);
+                    }
+                    Err(error) => {
+                        worker
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .final_result = Some(Err(error.clone()));
+                        worker.complete(Completion {
+                            status: "failed",
+                            exit_code: None,
+                            error: Some(error.to_string()),
+                        });
+                    }
+                }
             });
-            jobs.insert(job.id.clone(), Arc::clone(&job));
-            by_handle.insert(job.handle.clone(), Arc::clone(&job));
+            let events = self
+                .events
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(bus) = events {
+                admission.spawn_worker("shell-output", forward_output(Arc::clone(&job), bus));
+            }
             job
         };
-        self.changes
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
-        let timeout = timeout_ms.map(Duration::from_millis);
-        let worker = Arc::clone(&job);
-        // The registry owns cancellation; the task owns the process and reaping.
-        tokio::spawn(async move {
-            let completion = if interactive {
-                run_pty(&wrapped, &worker, input_rx, cancel_rx, timeout).await
-            } else {
-                run_pipe(&wrapped, &worker, input_rx, cancel_rx, timeout).await
-            };
-            match completion {
-                Ok(completion) => worker.complete(completion),
-                Err(error) => {
-                    worker
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .final_result = Some(Err(error.clone()));
-                    worker.complete(Completion {
-                        status: "failed",
-                        exit_code: None,
-                        error: Some(error.to_string()),
-                    });
-                }
-            }
-        });
-        let events = self
-            .events
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(bus) = events {
-            tokio::spawn(forward_output(Arc::clone(&job), bus));
-        }
         // Cancelling the starting tool before the handle is delivered must not
         // orphan its process. Later control calls do not own process lifetime.
         let mut launch = LaunchGuard {
@@ -352,7 +378,7 @@ impl JobRegistry {
                     .expect("synchronous completion is finalized once")
             } else {
                 state.exposed = true;
-                let (mut result, _) = job.snapshot_locked(&mut state, 0, false);
+                let (mut result, _) = job.snapshot_locked(&mut state, 0, false, true);
                 if let Some(reason) = reason {
                     result.content.push_str(&format!("\n{reason} The command was not restarted. Stdin is closed. Continue with shell action:poll, job_id:{} (it waits until the command finishes or new input arrives), or action:stop to cancel. The ten-second boundary releases this shell wait; other tools may still delay the next model request.\n", job.handle));
                 }
@@ -1065,17 +1091,18 @@ impl Job {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.snapshot_locked(&mut state, cursor, prefer_tail)
+        self.snapshot_locked(&mut state, cursor, prefer_tail, true)
     }
     fn snapshot_locked(
         &self,
         state: &mut State,
         cursor: u64,
         prefer_tail: bool,
+        acknowledge: bool,
     ) -> (ToolResult, bool) {
         // A kill/drain alone is not an observed outcome. Only a terminal tool
         // response acknowledges the potentially partial filesystem effects.
-        if state.completion.is_some() && !state.observed {
+        if acknowledge && state.completion.is_some() && !state.observed {
             state.observed = true;
             self.observation_changed();
         }
@@ -1137,8 +1164,10 @@ impl Job {
         let seen = Some((total, status));
         // Paging through retained output also delivers something new.
         let changed = state.last_seen != seen || next_cursor > state.delivered_cursor;
-        state.last_seen = seen;
-        state.delivered_cursor = state.delivered_cursor.max(next_cursor);
+        if acknowledge {
+            state.last_seen = seen;
+            state.delivered_cursor = state.delivered_cursor.max(next_cursor);
+        }
         (result, changed)
     }
 }

@@ -183,6 +183,31 @@ pub trait Tool: Send + Sync + std::any::Any {
         })
     }
 
+    /// Explicit restart Interrupt: signals only the exact process-local identity.
+    fn interrupt_shell_job(&self, _identity: &crate::ShellJobIdentity) -> Result<(), ToolError> {
+        Err(ToolError::InvalidArgs {
+            detail: "shell interrupt is unavailable".into(),
+        })
+    }
+    /// Non-consuming terminal outcome, to append and checkpoint before acknowledging.
+    fn shell_job_result(
+        &self,
+        _identity: &crate::ShellJobIdentity,
+    ) -> Result<crate::ShellJobResult, ToolError> {
+        Err(ToolError::InvalidArgs {
+            detail: "shell result is unavailable".into(),
+        })
+    }
+    /// Called only after the outcome is in canonical history and its snapshot.
+    fn acknowledge_shell_job_result(
+        &self,
+        _identity: &crate::ShellJobIdentity,
+    ) -> Result<(), ToolError> {
+        Err(ToolError::InvalidArgs {
+            detail: "shell acknowledgement is unavailable".into(),
+        })
+    }
+
     /// Cancel processes still owned by a terminal/cancelled run. No replay occurs.
     fn cancel_shell_jobs(&self, _run_id: &str) {}
 

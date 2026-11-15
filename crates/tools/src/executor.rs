@@ -550,6 +550,30 @@ impl ToolExecutor {
             .await
     }
 
+    pub fn interrupt_shell_job(&self, identity: &crate::ShellJobIdentity) -> Result<(), ToolError> {
+        self.shell_tool()?.interrupt_shell_job(identity)
+    }
+    pub fn shell_job_result(
+        &self,
+        identity: &crate::ShellJobIdentity,
+    ) -> Result<crate::ShellJobResult, ToolError> {
+        self.shell_tool()?.shell_job_result(identity)
+    }
+    pub fn acknowledge_shell_job_result(
+        &self,
+        identity: &crate::ShellJobIdentity,
+    ) -> Result<(), ToolError> {
+        self.shell_tool()?.acknowledge_shell_job_result(identity)
+    }
+    fn shell_tool(&self) -> Result<&dyn Tool, ToolError> {
+        self.tools
+            .get("shell")
+            .map(|shell| shell.tool.as_ref())
+            .ok_or_else(|| ToolError::UnknownTool {
+                name: "shell".into(),
+            })
+    }
+
     pub fn has_running_shell_jobs(&self, run_id: &str) -> bool {
         self.tools
             .get("shell")

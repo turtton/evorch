@@ -213,6 +213,9 @@ pub(crate) struct LoopState {
     /// Reminders in a row about unobserved shell jobs, restarted when one of the jobs
     /// reminded of was dealt with.
     unobserved_job_reminders: u32,
+    /// Appended outcomes awaiting canonical checkpoint acknowledgement.
+    pub(crate) shell_checkpoint_results:
+        std::collections::BTreeMap<String, tools::ShellJobIdentity>,
     /// All reminders about unobserved shell jobs this run.
     total_job_reminders: u32,
     /// The jobs the last reminder named.
@@ -306,6 +309,7 @@ impl LoopState {
             identical_calls: identical_calls::IdenticalCalls::default(),
             run_js_unconfirmed: Arc::default(),
             unobserved_job_reminders: 0,
+            shell_checkpoint_results: Default::default(),
             total_job_reminders: 0,
             reminded_jobs: std::collections::BTreeSet::new(),
             reported_questions: std::collections::HashSet::new(),
