@@ -150,7 +150,8 @@ pub(crate) struct Shared {
     pub(crate) wake_reset_generations: Mutex<HashMap<RunId, u64>>,
     pub(crate) question_delivery: Mutex<questions::delivery::QuestionDelivery>,
     pub(crate) producers: crate::producer::ProducerGate,
-    /// Learning pipelines start behind this gate, so a drain can stop them without lanes.
+    /// Learning pipelines start behind this gate. Pausing it stops only new learning
+    /// pipelines (their jobs stay `Pending`), never lanes or chats, which use `producers`.
     pub(crate) learning_gate: crate::producer::ProducerGate,
     pub(crate) learning_origin: OnceLock<storage::learning_jobs::LearningOrigin>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
