@@ -9,6 +9,7 @@ pub mod error;
 pub mod exec;
 #[cfg(feature = "keychain")]
 pub mod keychain;
+pub mod ledger;
 pub mod minimal;
 pub mod network;
 pub mod policy;
@@ -31,6 +32,7 @@ pub use error::{CredentialError, SandboxError};
 pub use exec::{CommandSpec, DirectSandbox, Sandbox, WrappedCommand};
 #[cfg(feature = "keychain")]
 pub use keychain::KeyringCredentialStore;
+pub use ledger::{Admission, ChildId, ChildKind, SpawnError, SpawnLedger};
 pub use minimal::MinimalSandbox;
 pub use network::NetworkPolicy;
 pub use policy::{Action, ApprovalMode, ApprovalPolicy, Capabilities, PolicyDecision, resolve};

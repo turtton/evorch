@@ -517,7 +517,7 @@ impl GhLogSource {
     /// `gh` from `PATH`, run as a real process.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_runner(Arc::new(TokioProcessRunner))
+        Self::with_runner(Arc::new(TokioProcessRunner::default()))
     }
 
     /// `gh` from `PATH`, run by `runner` (a fake in tests).
