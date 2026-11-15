@@ -300,3 +300,18 @@ fn a_keyword_starts_the_path_after_it() {
         0
     );
 }
+
+/// What rustc does with a group: a leaf sees the names its siblings import, so
+/// the `runtime` of `runtime::Builder` below is `tokio::runtime`, not the crate.
+#[test]
+fn a_leaf_sees_the_names_its_siblings_import() {
+    assert_eq!(count("use {tokio::runtime, runtime::Builder};"), 0);
+    assert_eq!(count("use {runtime::Builder, tokio::runtime};"), 0);
+    assert_eq!(count("use {tokio::runtime as rt, rt::Builder, serde};"), 0);
+    // A leaf is not resolved through its own name, whatever its siblings are.
+    assert_eq!(count("use {storage::A as storage, serde::B};"), 1);
+    assert_eq!(
+        count("use {tokio::runtime, runtime::Builder, runtime::Other};"),
+        0
+    );
+}

@@ -97,10 +97,12 @@ enum Binding {
 struct Scope {
     /// Items, extern crates and generic parameters.
     defs: HashMap<String, Binding>,
-    /// Names a `use` declaration imports, with the address of that declaration:
-    /// the roots of a `use` are not resolved through the names it introduces
-    /// itself (`use tools::tools;`, `use storage::Database as storage;`).
-    imports: Vec<(usize, String, Binding)>,
+    /// Names a `use` declaration imports, with the declaration and the leaf that
+    /// introduces each: the root of a leaf is not resolved through the name that
+    /// leaf introduces itself (`use tools::tools;`, `use storage::Database as
+    /// storage;`). The other leaves of the same declaration are visible to it, as
+    /// they are to rustc (`use {tokio::runtime, runtime::Builder};`).
+    imports: Vec<(LeafId, String, Binding)>,
 }
 
 impl Scope {
@@ -112,11 +114,11 @@ impl Scope {
         self.defs.insert(name, binding);
     }
 
-    fn import(&mut self, owner: usize, name: String, binding: Binding) {
+    fn import(&mut self, owner: LeafId, name: String, binding: Binding) {
         self.imports.push((owner, name, binding));
     }
 
-    fn get(&self, name: &str, exclude: Option<usize>) -> Option<&Binding> {
+    fn get(&self, name: &str, exclude: Option<LeafId>) -> Option<&Binding> {
         self.defs.get(name).or_else(|| {
             self.imports
                 .iter()
@@ -127,8 +129,11 @@ impl Scope {
     }
 }
 
-fn address(item: &ItemUse) -> usize {
-    std::ptr::from_ref(item).addr()
+/// The address of a `use` declaration and the index of one of its leaves.
+type LeafId = (usize, usize);
+
+fn leaf_id(item: &ItemUse, index: usize) -> LeafId {
+    (std::ptr::from_ref(item).addr(), index)
 }
 
 /// Keywords that start a path in the token stream of a macro: what follows them
@@ -234,14 +239,14 @@ impl Checker<'_> {
     }
 
     /// `inner` is a scope that is still being built and is consulted before the
-    /// stack. The names the `use` declaration at `exclude` introduces are not
-    /// consulted: its own roots are resolved without them.
+    /// stack. The name the leaf `exclude` introduces is not consulted: a leaf's root
+    /// is resolved without its own binding.
     fn resolve_in(
         &self,
         inner: Option<&Scope>,
         name: &str,
         absolute: bool,
-        exclude: Option<usize>,
+        exclude: Option<LeafId>,
     ) -> Option<String> {
         if absolute {
             return self.internal.contains(name).then(|| name.to_owned());
@@ -294,13 +299,13 @@ impl Checker<'_> {
         // the scope defines itself.
         for item in &items {
             let Item::Use(item_use) = item else { continue };
-            for leaf in leaves(item_use) {
+            for (index, leaf) in leaves(item_use).into_iter().enumerate() {
                 let Some(bound) = &leaf.bound else { continue };
                 if leaf.glob {
                     continue;
                 }
                 let absolute = item_use.leading_colon.is_some();
-                let owner = address(item_use);
+                let owner = leaf_id(item_use, index);
                 let root = leaf
                     .path
                     .first()
@@ -441,9 +446,10 @@ impl<'ast> Visit<'ast> for Checker<'_> {
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         let absolute = item.leading_colon.is_some();
         let mut roots = BTreeSet::new();
-        for leaf in leaves(item) {
+        for (index, leaf) in leaves(item).into_iter().enumerate() {
             if let Some(first) = leaf.path.first()
-                && let Some(root) = self.resolve_in(None, first, absolute, Some(address(item)))
+                && let Some(root) =
+                    self.resolve_in(None, first, absolute, Some(leaf_id(item, index)))
             {
                 roots.insert(root);
             }
