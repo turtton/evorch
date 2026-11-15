@@ -65,20 +65,23 @@ struct ReviewStaging {
     submissions: BTreeMap<String, LessonReview>,
 }
 
+#[derive(Serialize, Deserialize)]
 pub(crate) struct SourceSnapshot {
     runs: BTreeMap<String, SourceRun>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct SourceRun {
     parent_run_id: Option<String>,
     phase: String,
     records: Vec<SourceRecord>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct SourceRecord {
     reference: String,
-    role: &'static str,
-    kind: &'static str,
+    role: String,
+    kind: String,
     content: String,
 }
 
@@ -159,6 +162,20 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         staging.extractions.remove(&run);
         staging.reviews.remove(&run);
+    }
+
+    /// Freeze the evidence of a completed root run when its learning job is admitted,
+    /// so a job that runs later (or elsewhere) reads exactly what was admitted.
+    pub(crate) fn freeze_run_learning(&self, source: RunId) -> Result<Arc<SourceSnapshot>, String> {
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or("persisted run context is required for learning")?;
+        let records = store
+            .learning_source_contexts(source)
+            .map_err(|error| error.to_string())?;
+        Ok(Arc::new(SourceSnapshot::from_records(source, records)?))
     }
 
     /// Capture evidence before the completed conversation can accept another turn.
@@ -486,6 +503,14 @@ fn purpose(caller: RunId, config: &RunConfig) -> Result<(RunId, RunId, bool), St
 }
 
 impl SourceSnapshot {
+    pub(crate) fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn from_json(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json).map_err(|error| error.to_string())
+    }
+
     fn from_records(
         source: RunId,
         records: Vec<storage::RunContextRecord>,
@@ -540,8 +565,8 @@ impl SourceSnapshot {
                             "{}@{}:m{message_index}:b{block_index}",
                             record.run_id, record.updated_at_ns
                         ),
-                        role,
-                        kind,
+                        role: role.to_owned(),
+                        kind: kind.to_owned(),
                         content,
                     });
                 }

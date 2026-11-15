@@ -278,6 +278,12 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ("usage_run_threads", Keep, "cost attribution is kept"),
     ("learning_claims", Keep, "learning is kept"),
     ("learning_claim_roots", Keep, "learning is kept"),
+    ("learning_jobs", Keep, "learning is kept"),
+    (
+        "learning_job_evidence",
+        Keep,
+        "live evidence is deleted in the transaction that ends its job",
+    ),
     ("improvement_candidates", Keep, "learning is kept"),
     ("improvement_intake", Keep, "learning is kept"),
     (

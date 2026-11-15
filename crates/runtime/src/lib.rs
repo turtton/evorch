@@ -41,6 +41,8 @@ mod lane_reports;
 pub mod lane_verification;
 pub mod lanes;
 pub mod learning;
+pub mod learning_jobs;
+pub use memory_lifecycle::ResumedLearning;
 pub mod mailbox;
 pub mod mcp;
 pub mod memory;

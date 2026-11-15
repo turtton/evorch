@@ -75,6 +75,21 @@ P7a は ADR 0024 の追加 owner。registry は GUI と同じ
 sidebar の draft・archive 状態は書き換えない。モデルのない設定ではツールを一切
 登録せず、履歴・health の閲覧は可能だがモデル実行は失敗する。
 
+## 再起動時の learning 待機
+
+`core.restart.learning_drain_timeout_secs`（1〜3600 秒、user 設定のみ。project 設定では上書きできない）は、
+再起動の準備が、開始済みの learning（抽出と review を含む）の完了を待つ上限を決める。
+上限は要求の受理時に確定する。超過しても learning は止めず、再起動の要求だけを取り消す。
+既定値 120 秒は**暫定値で、実測に基づくものではない**。実測値が揃い次第、置き換える。
+
+learning のジョブは durable queue（`learning_jobs`）に積まれる。admission で dedup claim、
+Pending のジョブ、不変の evidence を 1 つのトランザクションで作る。状態は
+Pending → Started（CAS）→ Finished / Failed / Abandoned と進み、戻らない。
+core の再起動時は、同じ config の死んだ core が残した Pending のジョブだけを引き継ぐ。
+GUI のジョブ、生きている別プロセスのジョブ、生死の判定できない origin のジョブは奪わない。
+Started のまま残ったジョブは再実行せず、終端にして evidence を削除する。
+共有 janitor は死んだ origin のジョブを清掃する。
+
 ## 出力と後続作業
 
 Unix/Web は同じ CommandHost と Projection を使う。`HostBackend` が reply、

@@ -1,0 +1,7 @@
+DROP TRIGGER learning_job_evidence_delete_after_end;
+DROP TRIGGER learning_job_evidence_immutable;
+DROP TRIGGER learning_job_no_delete;
+DROP TRIGGER learning_job_started_keeps_origin;
+DROP TRIGGER learning_job_forward_only;
+DROP TABLE learning_job_evidence;
+DROP TABLE learning_jobs;

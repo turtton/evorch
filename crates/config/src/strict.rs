@@ -157,6 +157,8 @@ const BUDGET_KEYS: &[&str] = &[
     "max_file_rereads",
     "max_identical_tool_call_repeats",
 ];
+const CORE_KEYS: &[&str] = &["idle_grace_secs", "restart"];
+const CORE_RESTART_KEYS: &[&str] = &["learning_drain_timeout_secs"];
 const OWNERSHIP_KEYS: &[&str] = &["heartbeat_ms", "lease_ms", "grace_ms"];
 const TEAM_KEYS: &[&str] = &["enabled", "max_workers"];
 const SANDBOX_KEYS: &[&str] = &[
@@ -268,7 +270,12 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "comment_checker", COMMENT_CHECKER_KEYS)?;
     validate_section(root, "tools", TOOLS_KEYS)?;
     validate_section(root, "pull_requests", PULL_REQUESTS_KEYS)?;
-    validate_section(root, "core", &["idle_grace_secs"])?;
+    validate_section(root, "core", CORE_KEYS)?;
+    if let Some(core) = root.get("core").and_then(toml::Value::as_table)
+        && let Some(restart) = core.get("restart").and_then(toml::Value::as_table)
+    {
+        check_keys(restart, "core.restart", CORE_RESTART_KEYS)?;
+    }
     validate_section(
         root,
         "web",
@@ -483,7 +490,7 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("eval", EVAL_KEYS),
         ("storage", STORAGE_KEYS),
         ("pull_requests", PULL_REQUESTS_KEYS),
-        ("core", &["idle_grace_secs"]),
+        ("core", CORE_KEYS),
         (
             "web",
             &["enabled", "port", "allowed_hosts", "allowed_origins"],
@@ -493,6 +500,14 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         if let Some(table) = root.get_mut(name).and_then(toml::Value::as_table_mut) {
             retain_known(table, name, allowed, &mut ignored);
         }
+    }
+    if let Some(restart) = root
+        .get_mut("core")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|core| core.get_mut("restart"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        retain_known(restart, "core.restart", CORE_RESTART_KEYS, &mut ignored);
     }
     if let Some(browser) = root
         .get_mut("tools")

@@ -465,6 +465,16 @@ pub(super) fn run_writer_with_index(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::LearningJob(write, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "learning writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::learning_jobs::write(&state.conn, write)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::SaveThreadStartState(start, reply)) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(

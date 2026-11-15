@@ -103,7 +103,10 @@ const C_GC: u64 = 24;
 // Add 4 fixed schema frames: the measured 2-frame increment plus 2 frames of
 // schema/pointer-map placement headroom. recovery_06a_io independently checks
 // v60 -> v61 row independence; the assertions below remain unchanged.
-const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4;
+// v62 (learning job queue: 2 tables, 1 index, 5 triggers) adds only fixed schema: the probe
+// measured 319/486 frames for 10/100,000 rows (135387 VM steps each), 20 more than v61.
+// Add 24 fixed schema frames (the measured 20 plus 4 of placement headroom).
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4 + 24;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -340,6 +343,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v62.sql"),
                     include_str!("../undo/undo_v61.sql"),
                     include_str!("../undo/undo_v60.sql"),
                     include_str!("../undo/undo_v59.sql"),
