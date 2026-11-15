@@ -15,7 +15,10 @@ mod linux {
         io::{self, Read, Write},
         os::{fd::AsRawFd, unix::net::UnixStream},
         path::Path,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
     static SIGNALS: AtomicUsize = AtomicUsize::new(0);
     extern "C" fn signal(s: i32) {
@@ -49,6 +52,55 @@ mod linux {
             assert_eq!(libc::sigaction(libc::SIGINT, &a, std::ptr::null_mut()), 0);
             assert_eq!(libc::sigaction(libc::SIGTERM, &a, std::ptr::null_mut()), 0);
         }
+    }
+    fn force_close_range_fallback() {
+        // Fixture-only syscall fault injection. No product switch or public
+        // test API: exercise the real old-kernel ENOSYS path through exec.
+        let instruction = |code, jt, jf, k| libc::sock_filter { code, jt, jf, k };
+        let mut filter = [
+            instruction((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0, 0, 0),
+            instruction(
+                (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                0,
+                1,
+                libc::SYS_close_range as u32,
+            ),
+            instruction(
+                (libc::BPF_RET | libc::BPF_K) as u16,
+                0,
+                0,
+                libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+            ),
+            instruction(
+                (libc::BPF_RET | libc::BPF_K) as u16,
+                0,
+                0,
+                libc::SECCOMP_RET_ALLOW,
+            ),
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::prctl(
+                    libc::PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &program as *const libc::sock_fprog,
+                ),
+                0
+            );
+            assert_eq!(
+                libc::syscall(libc::SYS_close_range, u32::MAX, u32::MAX, 0),
+                -1
+            );
+        }
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOSYS)
+        );
     }
     fn probe_mode(args: &[OsString]) {
         match value(args, "--probe-behavior")
@@ -391,6 +443,28 @@ mod linux {
         if scenario == "multithread" {
             worker_wait.recv().unwrap();
         }
+        let churn_barrier = Arc::new(Barrier::new(2));
+        let stop_churn = Arc::new(AtomicBool::new(false));
+        let churn_worker = if scenario == "fallback-churn" {
+            force_close_range_fallback();
+            let barrier = churn_barrier.clone();
+            let stop = stop_churn.clone();
+            Some(std::thread::spawn(move || {
+                let mut file = File::open("/dev/null").unwrap();
+                barrier.wait();
+                drop(file);
+                file = File::open("/dev/null").unwrap();
+                barrier.wait();
+                // Keep atomic-CLOEXEC open/close active through the actual FD
+                // snapshot/fallback/exec boundary, not merely fixture startup.
+                while !stop.load(Ordering::Acquire) {
+                    drop(file);
+                    file = File::open("/dev/null").unwrap();
+                }
+            }))
+        } else {
+            None
+        };
         say("before-exec");
         step();
         let next_round = if scenario == "twice" && inherited.is_some() {
@@ -410,8 +484,16 @@ mod linux {
             "--round".into(),
             next_round.to_string().into(),
         ];
+        if churn_worker.is_some() {
+            churn_barrier.wait();
+            churn_barrier.wait();
+        }
         let error = unsafe { target.exec(&instance, &signals, &next, record(&config, next_round)) }
             .unwrap_err();
+        stop_churn.store(true, Ordering::Release);
+        if let Some(worker) = churn_worker {
+            worker.join().unwrap();
+        }
         panic!("exec returned: {error}");
     }
 }

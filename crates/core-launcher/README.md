@@ -22,7 +22,7 @@ endpoint recordはconfig内のatomicな発見ヒントであり生存証明で�
 
 ## 後続PR
 
-- **07**: planned exec / adopt_handoffは別経路。lifetime FD移譲APIはまだ公開しない。cold launchの採用と混同しない。
+- **07**: planned exec / adopt_handoffは別経路。production への配線は 4b。cold launchの採用と混同しない。
 - **08 / 17**: GUI / CLIはこのLauncherを使い、embedded runtimeへのfallbackを作らない。client configは再接続時も同じrequest counterを再利用する。
 - **18b**: config単位の永続restart budgetを起動決定箇所へ追加する。現在は単一cold-start試行だけでクラッシュ再試行をしない。AlreadyRunningは予算消費対象にしない（`LaunchStage::AlreadyRunning`）。単なるpollingや接続を試行回数として数えない。
 

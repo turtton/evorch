@@ -149,6 +149,7 @@ enum ProbeEnd {
     Timeout,
     Cancel,
     LeaderExit,
+    Drop,
 }
 async fn probe_cleanup(behavior: &str, end: ProbeEnd) {
     let clock = ClockHold::new().await;
@@ -178,20 +179,28 @@ async fn probe_cleanup(behavior: &str, end: ProbeEnd) {
     let (mut stream, _) = listener.accept().await.unwrap();
     let mut pids = String::new();
     stream.read_to_string(&mut pids).await.unwrap();
-    match end {
-        ProbeEnd::Timeout => tokio::time::advance(Duration::from_secs(5)).await,
-        ProbeEnd::Cancel => tx.send(()).unwrap(),
-        ProbeEnd::LeaderExit => {}
-    }
-    let error = task.await.unwrap().err().unwrap();
-    assert_eq!(
-        error.kind(),
-        match end {
-            ProbeEnd::Timeout => io::ErrorKind::TimedOut,
-            ProbeEnd::Cancel => io::ErrorKind::Interrupted,
-            ProbeEnd::LeaderExit => io::ErrorKind::UnexpectedEof,
+    let expected = match end {
+        ProbeEnd::Timeout => {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            Some(io::ErrorKind::TimedOut)
         }
-    );
+        ProbeEnd::Cancel => {
+            tx.send(()).unwrap();
+            Some(io::ErrorKind::Interrupted)
+        }
+        ProbeEnd::LeaderExit => Some(io::ErrorKind::UnexpectedEof),
+        ProbeEnd::Drop => {
+            task.abort();
+            None
+        }
+    };
+    if let Some(expected) = expected {
+        assert_eq!(task.await.unwrap().err().unwrap().kind(), expected);
+    } else {
+        // Joining cancellation observes the future's Drop cleanup, including
+        // the supervisor waiter join, before inspecting any descendant PID.
+        assert!(task.await.err().unwrap().is_cancelled());
+    }
     for pid in pids.split_whitespace() {
         assert!(
             !Path::new(&format!("/proc/{pid}")).exists(),
@@ -216,6 +225,11 @@ async fn timeout_reaps_escaped_session_and_its_child() {
 #[tokio::test(start_paused = true)]
 async fn leader_exit_reaps_escaped_session_and_its_child() {
     probe_cleanup("escape-exit", ProbeEnd::LeaderExit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_probe_future_reaps_supervisor_and_escaped_descendants() {
+    probe_cleanup("escape", ProbeEnd::Drop).await;
 }
 
 struct Process {
@@ -322,6 +336,29 @@ async fn repeated_wrapper_exec_uses_new_ticket_without_stale_launch_arguments() 
     assert!(line.contains("path=/fixture/bin:/fixture/bin:"));
     p.go().await;
     p.finish().await;
+}
+#[tokio::test]
+async fn fallback_wrapper_exec_with_concurrent_cloexec_open_and_close() {
+    let config = tempfile::tempdir().unwrap();
+    let ipc = test_socket_dir::SocketDir::new();
+    let dist = tempfile::tempdir().unwrap();
+    let path = wrapper(dist.path(), "", false);
+    let mut p = Process::start(config.path(), ipc.path(), &path, "fallback-churn");
+    let pid = p.child.id().unwrap();
+    assert_eq!(p.line().await, "before-exec");
+    let identity = ConfigIdentity::new(config.path()).unwrap();
+    let launch = LaunchGuard::acquire(&identity).unwrap();
+    assert!(!launch.lifetime_available().unwrap());
+    p.go().await;
+    assert!(
+        p.line()
+            .await
+            .starts_with(&format!("adopted {pid} 1 signals=0 path=/fixture/bin:"))
+    );
+    assert!(!launch.lifetime_available().unwrap());
+    p.go().await;
+    p.finish().await;
+    assert!(launch.lifetime_available().unwrap());
 }
 #[tokio::test]
 async fn adoption_failures_are_fatal_and_callback_is_once_only() {

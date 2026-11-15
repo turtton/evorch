@@ -109,22 +109,34 @@ impl BlockedShutdownSignals {
         Ok(ShutdownInbox(unsafe { File::from_raw_fd(fd) }))
     }
     fn verify_masks(&self) -> io::Result<()> {
-        let required = (1u64 << (libc::SIGINT - 1)) | (1u64 << (libc::SIGTERM - 1));
         for thread in fs::read_dir("/proc/self/task")? {
-            let status = fs::read_to_string(thread?.path().join("status"))?;
-            let blocked = status
-                .lines()
-                .find_map(|line| line.strip_prefix("SigBlk:"))
-                .and_then(|s| u64::from_str_radix(s.trim(), 16).ok());
-            if blocked.is_none_or(|bits| bits & required != required) {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "every thread must inherit the shutdown-signal mask",
-                ));
-            }
+            verify_thread_mask(fs::read_to_string(thread?.path().join("status")))?;
         }
         Ok(())
     }
+}
+fn verify_thread_mask(status: io::Result<String>) -> io::Result<()> {
+    let status = match status {
+        Ok(status) => status,
+        // A thread may exit between task enumeration and reading its status.
+        // Only procfs's vanished-task errors are safe to ignore.
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let required = (1u64 << (libc::SIGINT - 1)) | (1u64 << (libc::SIGTERM - 1));
+    let blocked = status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigBlk:"))
+        .and_then(|s| u64::from_str_radix(s.trim(), 16).ok());
+    if blocked.is_none_or(|bits| bits & required != required) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "every thread must inherit the shutdown-signal mask",
+        ));
+    }
+    Ok(())
 }
 impl AsFd for ShutdownInbox {
     fn as_fd(&self) -> BorrowedFd<'_> {
@@ -600,6 +612,62 @@ impl Boundary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn thread_exit_between_enumeration_and_status_read_is_allowed() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let worker_barrier = barrier.clone();
+        let (ready, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut mask = mask_now().unwrap();
+            unsafe {
+                libc::sigaddset(&mut mask, libc::SIGINT);
+                libc::sigaddset(&mut mask, libc::SIGTERM);
+            }
+            set_mask(&mask).unwrap();
+            ready
+                .send(unsafe { libc::syscall(libc::SYS_gettid) }.to_string())
+                .unwrap();
+            worker_barrier.wait();
+        });
+        let tid = wait.recv().unwrap();
+        let entry = fs::read_dir("/proc/self/task")
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| entry.file_name().to_str() == Some(&tid))
+            .unwrap();
+        let status = entry.path().join("status");
+        verify_thread_mask(fs::read_to_string(&status)).unwrap();
+        barrier.wait();
+        worker.join().unwrap();
+        // Kernel procfs retirement may lag pthread_join: either a final blocked
+        // mask or a vanished-task error is valid. The errno cases below ensure
+        // the vanished branch is covered independently of that kernel timing.
+        verify_thread_mask(fs::read_to_string(&status)).unwrap();
+    }
+    #[test]
+    fn thread_mask_rejects_unknown_masks_and_non_exit_read_errors() {
+        for errno in [libc::ENOENT, libc::ESRCH] {
+            verify_thread_mask(Err(io::Error::from_raw_os_error(errno))).unwrap();
+        }
+        for errno in [libc::EACCES, libc::EIO, libc::EBADF] {
+            assert_eq!(
+                verify_thread_mask(Err(io::Error::from_raw_os_error(errno)))
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(errno)
+            );
+        }
+        // An unclassified NotFound is not evidence of a vanished procfs task.
+        assert!(
+            verify_thread_mask(Err(io::Error::new(io::ErrorKind::NotFound, "unknown"))).is_err()
+        );
+        for status in ["", "SigBlk:\tinvalid\n", "SigBlk:\t0000000000000002\n"] {
+            assert_eq!(
+                verify_thread_mask(Ok(status.into())).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+    }
     #[test]
     fn fallback_marks_all_and_restores_flags() {
         preflight_exec().unwrap();
