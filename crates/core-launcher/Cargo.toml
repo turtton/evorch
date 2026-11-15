@@ -8,7 +8,19 @@ publish = false
 name = "core-launch-harness"
 path = "harness/main.rs"
 
+[features]
+default = []
+handoff-test-support = []
+
+[[bin]]
+name = "core-handoff-fixture"
+path = "harness/handoff.rs"
+required-features = ["handoff-test-support"]
+
 [dependencies]
+libc = "0.2"
+serde.workspace = true
+sha2.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 core-instance = { path = "../core-instance" }

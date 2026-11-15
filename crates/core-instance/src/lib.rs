@@ -1,5 +1,8 @@
 //! Config-scoped discovery and launch -> lifetime locking. No runtime, DB or GUI.
 //! Locks are released only by close; lock files are never unlinked.
+#[cfg(target_os = "linux")]
+pub mod handoff;
+
 use rustix::fs::{FlockOperation, OFlags, flock};
 use sha2::{Digest, Sha256};
 mod handoff_proof;

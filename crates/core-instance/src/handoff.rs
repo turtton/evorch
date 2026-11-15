@@ -1,0 +1,689 @@
+//! Linux-only exec boundary. This module never opens a database or acquires a lock.
+//! Call entry inspection before initializing an executor, database, or producer.
+use crate::{ConfigIdentity, InheritedHandoffProof, Instance, reap_socket, regular, unsafe_path};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    convert::Infallible,
+    ffi::{CString, OsString},
+    fs::{self, File},
+    io::{self, Read, Write},
+    os::{
+        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd},
+        unix::{
+            ffi::OsStrExt,
+            fs::{FileExt, MetadataExt, PermissionsExt},
+        },
+    },
+    path::Path,
+};
+
+const SEALS: i32 = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+const TICKET_LIMIT: u64 = 8192;
+
+/// Values read back from the durable transaction by the integrator. A serialized
+/// record alone grants no authority: the inherited sealed FD and lock are required.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffRecord {
+    pub restart_id: String,
+    pub config_identity: String,
+    pub successor_epoch: u64,
+    pub nonce_hash: String,
+    pub successor_build: String,
+}
+impl HandoffRecord {
+    fn validate(&self) -> io::Result<()> {
+        if self.successor_epoch == 0
+            || [
+                &self.restart_id,
+                &self.config_identity,
+                &self.nonce_hash,
+                &self.successor_build,
+            ]
+            .iter()
+            .any(|s| s.is_empty() || s.len() > 256 || s.contains('\0'))
+        {
+            return Err(unsafe_path());
+        }
+        Ok(())
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Ticket {
+    version: u32,
+    pid: u32,
+    device: u64,
+    inode: u64,
+    record: HandoffRecord,
+}
+
+/// Establish the shutdown-signal policy before creating the first thread.
+/// All later threads inherit this mask. Use only signalfd/sigwait, not handlers;
+/// stop the inbox reader under the final fence so it cannot consume a shutdown
+/// concurrently with exec. There is deliberately no Drop that unblocks signals.
+pub struct BlockedShutdownSignals {
+    _private: (),
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum ShutdownSignal {
+    Interrupt,
+    Terminate,
+}
+pub struct ShutdownInbox(File);
+impl BlockedShutdownSignals {
+    pub fn at_entry() -> io::Result<Self> {
+        if fs::read_dir("/proc/self/task")?.count() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "block shutdown signals before creating threads",
+            ));
+        }
+        let mut mask = mask_now()?;
+        unsafe {
+            libc::sigaddset(&mut mask, libc::SIGINT);
+            libc::sigaddset(&mut mask, libc::SIGTERM);
+        }
+        set_mask(&mask)?;
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = libc::SIG_DFL;
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+        }
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            cvt(unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) })?;
+        }
+        Ok(Self { _private: () })
+    }
+    /// Create AFTER inherited-FD inspection in a successor. The FD itself is
+    /// CLOEXEC, never on the inheritance allowlist. The mask stays blocked.
+    pub fn inbox(&self) -> io::Result<ShutdownInbox> {
+        let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut mask);
+            libc::sigaddset(&mut mask, libc::SIGINT);
+            libc::sigaddset(&mut mask, libc::SIGTERM);
+        }
+        let fd = cvt(unsafe { libc::signalfd(-1, &mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) })?;
+        Ok(ShutdownInbox(unsafe { File::from_raw_fd(fd) }))
+    }
+    fn verify_masks(&self) -> io::Result<()> {
+        let required = (1u64 << (libc::SIGINT - 1)) | (1u64 << (libc::SIGTERM - 1));
+        for thread in fs::read_dir("/proc/self/task")? {
+            let status = fs::read_to_string(thread?.path().join("status"))?;
+            let blocked = status
+                .lines()
+                .find_map(|line| line.strip_prefix("SigBlk:"))
+                .and_then(|s| u64::from_str_radix(s.trim(), 16).ok());
+            if blocked.is_none_or(|bits| bits & required != required) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "every thread must inherit the shutdown-signal mask",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+impl AsFd for ShutdownInbox {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+impl ShutdownInbox {
+    pub fn read_pending(&self) -> io::Result<Vec<ShutdownSignal>> {
+        let mut pending = Vec::new();
+        // Bound a read even under a continuous signal flood. Standard signals
+        // coalesce; any remaining pending signal keeps signalfd readable.
+        for _ in 0..2 {
+            let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
+            let n = unsafe {
+                libc::read(
+                    self.0.as_raw_fd(),
+                    (&mut info as *mut libc::signalfd_siginfo).cast(),
+                    std::mem::size_of_val(&info),
+                )
+            };
+            if n < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    return Ok(pending);
+                }
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if n as usize != std::mem::size_of_val(&info) {
+                return Err(unsafe_path());
+            }
+            match info.ssi_signo as i32 {
+                libc::SIGINT => pending.push(ShutdownSignal::Interrupt),
+                libc::SIGTERM => pending.push(ShutdownSignal::Terminate),
+                _ => return Err(unsafe_path()),
+            }
+        }
+        Ok(pending)
+    }
+}
+
+/// Non-cloneable, owns exactly the two inherited descriptors. Inspection is
+/// deliberately separate so it can precede opening even the config directory.
+pub struct HandoffEntry {
+    lifetime: File,
+    ticket: Ticket,
+}
+impl HandoffEntry {
+    /// # Safety
+    /// Call at single-threaded process entry. Both descriptors must be exclusively
+    /// transferred from the OS (not owned by another Rust object). On error the
+    /// caller must terminate, never try ordinary acquire.
+    pub unsafe fn inspect(lifetime: i32, ticket: i32) -> io::Result<Self> {
+        if lifetime < 3 || ticket < 3 || lifetime == ticket {
+            return Err(unsafe_path());
+        }
+        let fds = fd_snapshot()?;
+        if !fds.iter().any(|(fd, _)| *fd == lifetime)
+            || !fds.iter().any(|(fd, _)| *fd == ticket)
+            || fds
+                .iter()
+                .any(|(fd, _)| *fd > 2 && *fd != lifetime && *fd != ticket)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "unexpected inherited descriptors",
+            ));
+        }
+        // SAFETY: caller transfers exclusive ownership; existence was checked.
+        let lifetime = unsafe { File::from_raw_fd(lifetime) };
+        let ticket = unsafe { File::from_raw_fd(ticket) };
+        set_flags(lifetime.as_raw_fd(), libc::FD_CLOEXEC)?;
+        set_flags(ticket.as_raw_fd(), libc::FD_CLOEXEC)?;
+        let meta = ticket.metadata()?;
+        if !meta.is_file()
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o7777 != 0o600
+            || meta.nlink() != 0
+            || meta.len() > TICKET_LIMIT
+            || cvt(unsafe { libc::fcntl(ticket.as_raw_fd(), libc::F_GET_SEALS) })? & SEALS != SEALS
+        {
+            return Err(unsafe_path());
+        }
+        let mut data = vec![0; meta.len() as usize];
+        ticket.read_exact_at(&mut data, 0)?;
+        let ticket: Ticket = serde_json::from_slice(&data)?;
+        ticket.record.validate()?;
+        let m = lifetime.metadata()?;
+        if ticket.version != 1
+            || ticket.pid != std::process::id()
+            || ticket.device != m.dev()
+            || ticket.inode != m.ino()
+        {
+            return Err(unsafe_path());
+        }
+        let mask = mask_now()?;
+        // SAFETY: initialized sigset and valid signal numbers.
+        if unsafe {
+            libc::sigismember(&mask, libc::SIGINT) != 1
+                || libc::sigismember(&mask, libc::SIGTERM) != 1
+        } {
+            return Err(unsafe_path());
+        }
+        // ticket FD is consumed/closed here; it cannot leak into a second exec.
+        Ok(Self { lifetime, ticket })
+    }
+    pub fn record(&self) -> &HandoffRecord {
+        &self.ticket.record
+    }
+}
+
+impl Instance {
+    /// Adopt the inherited OFD, without launch acquisition, open, flock or unlock.
+    /// All errors are fatal for this entry; there is no cold-start fallback.
+    ///
+    /// The callback is invoked exactly once, after physical and identity checks.
+    /// It must read back the transaction/manifest and consume the ticket with an
+    /// Adopted CAS (or confirm that exact CAS on ACK loss). A failure produces no
+    /// proof. The callback's types do not depend on storage/runtime. Complete
+    /// adoption before starting other threads or any producer.
+    pub fn adopt_handoff(
+        config: &ConfigIdentity,
+        ipc_parent: &Path,
+        entry: HandoffEntry,
+        expected: &HandoffRecord,
+        verify_and_consume: impl FnOnce(&HandoffRecord) -> io::Result<()>,
+    ) -> io::Result<(Self, InheritedHandoffProof)> {
+        let HandoffEntry { lifetime, ticket } = entry;
+        let record = ticket.record;
+        if record != *expected
+            || record.config_identity != config.identity()
+            || record.successor_build != running_elf_identity()?
+        {
+            return Err(unsafe_path());
+        }
+        regular(&lifetime, &config.lifetime_path())?;
+        if !rustix::fs::fcntl_getfl(&lifetime)?.contains(rustix::fs::OFlags::RDWR)
+            || !fs::read_to_string(format!("/proc/self/fdinfo/{}", lifetime.as_raw_fd()))?
+                .lines()
+                .any(|l| l.starts_with("lock:") && l.contains(" FLOCK ") && l.contains(" WRITE "))
+        {
+            return Err(unsafe_path());
+        }
+        let socket = config.socket(ipc_parent)?;
+        verify_and_consume(&record)?;
+        reap_socket(&socket)?;
+        let proof = InheritedHandoffProof::new(
+            record.restart_id,
+            record.config_identity,
+            record.successor_epoch,
+            record.nonce_hash,
+            record.successor_build,
+        );
+        Ok((
+            Self {
+                identity: config.identity().to_owned(),
+                socket,
+                config: config.clone(),
+                _lifetime: lifetime,
+            },
+            proof,
+        ))
+    }
+
+    /// Execute a canonical, freshly validated entrypoint. The launcher supplies
+    /// reconstructed effective options; no old launch-FD argument is retained.
+    /// Environment and cwd are preserved, including wrapper PATH additions.
+    ///
+    /// # Safety
+    /// The final spawn/FD fence and shutdown-inbox fence must be held. All
+    /// threads must inherit the startup SIGINT/SIGTERM mask and never unblock it.
+    /// Concurrent FD creation is allowed ONLY with atomic CLOEXEC. Pre-existing
+    /// non-CLOEXEC FDs and the stdio/lifetime allowlist must not close/reuse
+    /// their numbers until this call returns.
+    /// All owned child processes must already be stopped and reaped. On any
+    /// returned error keep this Instance alive and enter FailedClosed.
+    pub unsafe fn exec_handoff(
+        &self,
+        signals: &BlockedShutdownSignals,
+        path: &Path,
+        args: &[OsString],
+        record: HandoffRecord,
+    ) -> io::Result<Infallible> {
+        record.validate()?;
+        if record.config_identity != self.identity {
+            return Err(unsafe_path());
+        }
+        preflight_exec()?;
+        signals.verify_masks()?;
+        let path = cstring(path.as_os_str())?;
+        let mut argv = vec![path.clone()];
+        for arg in args {
+            if arg.as_os_str().as_bytes().starts_with(b"--launch-fd")
+                || arg.as_os_str().as_bytes().starts_with(b"--handoff-")
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "stale handoff/launch argument",
+                ));
+            }
+            argv.push(cstring(arg)?);
+        }
+        let env: Vec<_> = std::env::vars_os()
+            .map(|(k, v)| {
+                let mut s = k;
+                s.push("=");
+                s.push(v);
+                cstring(&s)
+            })
+            .collect::<io::Result<_>>()?;
+        let mut boundary = Boundary::block()?;
+        let result = (|| {
+            let meta = self._lifetime.metadata()?;
+            let ticket = Ticket {
+                version: 1,
+                pid: std::process::id(),
+                device: meta.dev(),
+                inode: meta.ino(),
+                record,
+            };
+            let mut file = sealed_ticket(&ticket)?;
+            let lifetime = self._lifetime.as_raw_fd();
+            let ticket_fd = file.as_raw_fd();
+            argv.extend([
+                CString::new("--handoff-lifetime-fd").unwrap(),
+                CString::new(lifetime.to_string()).unwrap(),
+                CString::new("--handoff-ticket-fd").unwrap(),
+                CString::new(ticket_fd.to_string()).unwrap(),
+            ]);
+            let argv = pointers(&argv);
+            let env = pointers(&env);
+            // Snapshot after creating the ticket. The proc enumeration FD has
+            // already closed; all actual FDs are restored on syscall failure.
+            boundary.flags = fd_snapshot()?;
+            // Other atomic-CLOEXEC FDs need no restoration. They may be created
+            // or closed by background threads without a stale-number rollback.
+            boundary.flags.retain(|(fd, flags)| {
+                flags & libc::FD_CLOEXEC == 0 || *fd <= 2 || *fd == lifetime || *fd == ticket_fd
+            });
+            cloexec_all(&boundary.flags, false)?;
+            set_flags(lifetime, 0)?;
+            set_flags(ticket_fd, 0)?;
+            // Ensure stdio survives even if an embedder originally marked it.
+            for (fd, _) in &boundary.flags {
+                if *fd <= 2 {
+                    set_flags(*fd, 0)?;
+                }
+            }
+            file.flush()?;
+            // SAFETY: all arrays are NUL-terminated and kept alive. Unlike
+            // CommandExt::exec, this call does not clear the signal mask.
+            unsafe {
+                libc::execve(path.as_ptr(), argv.as_ptr(), env.as_ptr());
+            }
+            Err(io::Error::last_os_error())
+        })();
+        let restore = boundary.restore();
+        match restore {
+            Ok(()) => result,
+            Err(e) => Err(io::Error::other(format!(
+                "exec/preparation failed: {result:?}; restoring attributes failed: {e}"
+            ))),
+        }
+    }
+}
+
+pub fn running_elf_identity() -> io::Result<String> {
+    elf_identity(Path::new("/proc/self/exe"))
+}
+pub fn elf_identity(path: &Path) -> io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut magic = [0; 4];
+    file.read_exact(&mut magic)?;
+    if &magic != b"\x7fELF" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not an ELF executable",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(magic);
+    let mut buffer = [0; 65536];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    Ok(format!("sha256:{:x}", hash.finalize()))
+}
+/// Preflight the fallback resources without changing flags. Actual CLOEXEC is
+/// applied only under the final spawn/FD fence.
+pub fn preflight_exec() -> io::Result<()> {
+    let check = || {
+        fd_snapshot()?;
+        let file = seal_bytes(&[])?;
+        // Never clear CLOEXEC during preflight: concurrent cold/tool spawns
+        // must not inherit even this temporary capability-check descriptor.
+        set_flags(file.as_raw_fd(), libc::FD_CLOEXEC)
+    };
+    check().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("cannot guarantee handoff FD inheritance: {e}"),
+        )
+    })
+}
+fn sealed_ticket(ticket: &Ticket) -> io::Result<File> {
+    let data = serde_json::to_vec(ticket)?;
+    if data.len() as u64 > TICKET_LIMIT {
+        return Err(unsafe_path());
+    }
+    seal_bytes(&data)
+}
+fn seal_bytes(data: &[u8]) -> io::Result<File> {
+    let fd = cvt(unsafe {
+        libc::memfd_create(
+            c"evorch-handoff".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    })?;
+    let mut f = unsafe { File::from_raw_fd(fd) };
+    f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    f.write_all(data)?;
+    cvt(unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, SEALS) })?;
+    Ok(f)
+}
+fn cstring(s: &std::ffi::OsStr) -> io::Result<CString> {
+    CString::new(s.as_bytes()).map_err(io::Error::other)
+}
+fn pointers(items: &[CString]) -> Vec<*const libc::c_char> {
+    items
+        .iter()
+        .map(|s| s.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect()
+}
+fn cvt(value: i32) -> io::Result<i32> {
+    if value < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(value)
+    }
+}
+fn set_flags(fd: i32, flags: i32) -> io::Result<()> {
+    cvt(unsafe { libc::fcntl(fd, libc::F_SETFD, flags) }).map(|_| ())
+}
+fn fd_snapshot() -> io::Result<Vec<(i32, i32)>> {
+    let names: Vec<_> = fs::read_dir("/proc/self/fd")?
+        .map(|e| {
+            e?.file_name()
+                .to_str()
+                .and_then(|s| s.parse::<i32>().ok())
+                .ok_or_else(unsafe_path)
+        })
+        .collect::<io::Result<_>>()?;
+    let mut out = Vec::new();
+    for fd in names {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 {
+            out.push((fd, flags));
+        } else if io::Error::last_os_error().raw_os_error() != Some(libc::EBADF) {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(out)
+}
+fn cloexec_all(flags: &[(i32, i32)], fallback: bool) -> io::Result<()> {
+    if !fallback {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        if !matches!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOSYS | libc::EINVAL | libc::EPERM)
+        ) {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // /proc was enumerated under the final fence. New FDs must be atomically
+    // CLOEXEC; pre-existing non-CLOEXEC FDs cannot close/reuse their numbers.
+    // Only those stable, inheritable descriptors need changing on old kernels.
+    for (fd, old) in flags {
+        if *fd >= 3 && old & libc::FD_CLOEXEC == 0 {
+            set_flags(*fd, *old | libc::FD_CLOEXEC)?;
+        }
+    }
+    Ok(())
+}
+fn mask_now() -> io::Result<libc::sigset_t> {
+    let mut set = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut set) };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc));
+    }
+    Ok(set)
+}
+fn set_mask(mask: &libc::sigset_t) -> io::Result<()> {
+    let rc = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, mask, std::ptr::null_mut()) };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc));
+    }
+    Ok(())
+}
+struct Boundary {
+    mask: libc::sigset_t,
+    actions: Vec<(i32, libc::sigaction)>,
+    flags: Vec<(i32, i32)>,
+}
+impl Boundary {
+    fn block() -> io::Result<Self> {
+        let mask = mask_now()?;
+        let mut blocked = mask;
+        unsafe {
+            libc::sigaddset(&mut blocked, libc::SIGINT);
+            libc::sigaddset(&mut blocked, libc::SIGTERM);
+        }
+        set_mask(&blocked)?;
+        let mut this = Self {
+            mask,
+            actions: Vec::new(),
+            flags: Vec::new(),
+        };
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            let mut old = unsafe { std::mem::zeroed() };
+            let mut default: libc::sigaction = unsafe { std::mem::zeroed() };
+            default.sa_sigaction = libc::SIG_DFL;
+            unsafe {
+                libc::sigemptyset(&mut default.sa_mask);
+            }
+            if let Err(e) = cvt(unsafe { libc::sigaction(signal, &default, &mut old) }) {
+                this.restore()?;
+                return Err(e);
+            }
+            this.actions.push((signal, old));
+        }
+        Ok(this)
+    }
+    fn restore(&mut self) -> io::Result<()> {
+        let mut error = None;
+        for (fd, flags) in self.flags.drain(..) {
+            // The newly created ticket closed on syscall failure. The retained
+            // pre-existing descriptors are stable under the fence.
+            if let Err(e) = set_flags(fd, flags)
+                && e.raw_os_error() != Some(libc::EBADF)
+            {
+                error = Some(e);
+            }
+        }
+        for (signal, action) in self.actions.drain(..) {
+            if let Err(e) = cvt(unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) }) {
+                error = Some(e);
+            }
+        }
+        if let Err(e) = set_mask(&self.mask) {
+            error = Some(e);
+        }
+        error.map_or(Ok(()), Err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fallback_marks_all_and_restores_flags() {
+        preflight_exec().unwrap();
+        // Already-CLOEXEC background descriptors may have closed since snapshot.
+        let temporary = File::open("/dev/null").unwrap();
+        let closed = temporary.as_raw_fd();
+        drop(temporary);
+        cloexec_all(&[(closed, libc::FD_CLOEXEC)], true).unwrap();
+        // Test only this file's FD, never mutate the test runner's FD table.
+        let f = File::open("/dev/null").unwrap();
+        let fd = f.as_raw_fd();
+        set_flags(fd, 0).unwrap();
+        cloexec_all(&[(fd, 0)], true).unwrap();
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, libc::FD_CLOEXEC);
+        set_flags(fd, 0).unwrap();
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, 0);
+    }
+    #[test]
+    fn ticket_cannot_be_written_resized_or_unsealed() {
+        let t = Ticket {
+            version: 1,
+            pid: std::process::id(),
+            device: 0,
+            inode: 0,
+            record: HandoffRecord {
+                restart_id: "r".into(),
+                config_identity: "c".into(),
+                successor_epoch: 1,
+                nonce_hash: "n".into(),
+                successor_build: "b".into(),
+            },
+        };
+        let f = sealed_ticket(&t).unwrap();
+        assert!(f.write_at(b"x", 0).is_err());
+        assert!(f.set_len(0).is_err());
+        assert_eq!(
+            unsafe { libc::fcntl(f.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_WRITE) },
+            -1
+        );
+    }
+    #[test]
+    fn adoption_rejects_unlocked_or_wrong_lifetime_without_calling_db() {
+        use std::os::unix::fs::OpenOptionsExt;
+        for wrong_inode in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = ConfigIdentity::new(directory.path()).unwrap();
+            let path = config.lifetime_path();
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            let lifetime = if wrong_inode {
+                let other = directory.path().join("other");
+                crate::lock(&other).unwrap()
+            } else {
+                file
+            };
+            let record = HandoffRecord {
+                restart_id: "r".into(),
+                config_identity: config.identity().into(),
+                successor_epoch: 1,
+                nonce_hash: "n".into(),
+                successor_build: running_elf_identity().unwrap(),
+            };
+            let expected = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+            let ticket = Ticket {
+                version: 1,
+                pid: std::process::id(),
+                device: 0,
+                inode: 0,
+                record,
+            };
+            let entry = HandoffEntry { lifetime, ticket };
+            let mut called = false;
+            let result =
+                Instance::adopt_handoff(&config, directory.path(), entry, &expected, |_| {
+                    called = true;
+                    Ok(())
+                });
+            assert!(result.is_err());
+            assert!(!called);
+        }
+    }
+}
