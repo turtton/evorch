@@ -473,4 +473,142 @@ mod live_core {
         assert_eq!(snapshot(place.db.parent().unwrap()), before);
         drop(core);
     }
+
+    /// A named pipe: opening it for reading or writing waits for the other side.
+    fn fifo(dir: &Path) -> PathBuf {
+        let path = dir.join("sidebar.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo");
+        path
+    }
+
+    /// `compact-events --apply` in a child process, stopped inside its critical section: with
+    /// the lease and SQLite's exclusive lock taken, the command reads the GUI sidebar, and the
+    /// sidebar is a named pipe nobody has written yet. Opening the pipe for writing returns
+    /// exactly when the child has opened it for reading, so there is no timing assumption:
+    /// the child is past both locks and blocked until the returned writer is closed.
+    fn apply_blocked_in_its_critical_section(
+        place: &Place,
+    ) -> (std::process::Child, std::fs::File, PathBuf) {
+        let dir = place.db.parent().unwrap();
+        let pipe = fifo(dir);
+        let backup_dir = tempfile::tempdir().unwrap().keep();
+        let child = std::process::Command::new(
+            std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"),
+        )
+        .args(["maintenance", "compact-events", "--apply", "--db"])
+        .arg(&place.db)
+        .arg("--sidebar")
+        .arg(&pipe)
+        .arg("--backup")
+        .arg(backup_dir.join("backup.db"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&pipe).unwrap();
+        (child, writer, backup_dir)
+    }
+
+    /// What every other party sees while the apply is inside its critical section.
+    fn assert_everyone_else_is_kept_out(place: &Place) {
+        assert!(
+            shared_with_wait(&place.db, &place.root, Duration::ZERO).is_err(),
+            "a core could start next to a running maintenance"
+        );
+        assert!(
+            Storage::open(StorageConfig {
+                db_path: place.db.clone(),
+                ..Default::default()
+            })
+            .is_err(),
+            "a writer could open the database during maintenance"
+        );
+        assert!(try_exclusive(&place.db, &place.root).unwrap().is_none());
+        refused(&place.db, &["vacuum", "--apply"]);
+        let inspected = evorch::inspect::run(
+            evorch::inspect::parse_args(
+                ["inspect", "--db", place.db.to_str().unwrap(), "storage"]
+                    .into_iter()
+                    .map(String::from),
+            )
+            .unwrap(),
+        );
+        assert!(inspected.unwrap_err().contains("offline maintenance"));
+        let reader = rusqlite::Connection::open(&place.db).unwrap();
+        reader.busy_timeout(Duration::ZERO).unwrap();
+        assert!(
+            reader
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                    .get::<_, i64>(0))
+                .is_err(),
+            "SQLite let another process read during the exclusive apply"
+        );
+    }
+
+    // Given: an apply stopped in its critical section / When: a core, a writer, another
+    // offline command, an inspection and a plain reader try to get in / Then: all are kept
+    // out; and when the apply finishes the lease is free again and the work is done.
+    #[test]
+    fn an_apply_in_progress_keeps_every_writer_out_until_it_ends() {
+        let place = place();
+        let (child, writer, backup_dir) = apply_blocked_in_its_critical_section(&place);
+        assert_everyone_else_is_kept_out(&place);
+
+        drop(writer);
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(backup_dir.join("backup.db").exists());
+        let lease = try_exclusive(&place.db, &place.root).unwrap();
+        assert!(lease.is_some(), "the finished apply still holds the lease");
+        drop(lease);
+        Storage::open(StorageConfig {
+            db_path: place.db.clone(),
+            ..Default::default()
+        })
+        .unwrap()
+        .close();
+    }
+
+    // Given: an apply stopped in its critical section / When: the process is killed /
+    // Then: the operating system releases the lease and SQLite's lock with it, the
+    // database is exactly as it was and passes its integrity check, and a writer can open it.
+    #[test]
+    fn a_killed_apply_releases_the_lease_and_leaves_the_database_as_it_was() {
+        let place = place();
+        let before = std::fs::read(&place.db).unwrap();
+        let (mut child, writer, _backup_dir) = apply_blocked_in_its_critical_section(&place);
+        assert_everyone_else_is_kept_out(&place);
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        drop(writer);
+
+        let lease = try_exclusive(&place.db, &place.root).unwrap();
+        assert!(lease.is_some(), "the killed apply left the lease behind");
+        drop(lease);
+        let connection = rusqlite::Connection::open(&place.db).unwrap();
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        drop(connection);
+        Storage::open(StorageConfig {
+            db_path: place.db.clone(),
+            ..Default::default()
+        })
+        .unwrap()
+        .close();
+        assert!(
+            std::fs::read(&place.db).unwrap() == before,
+            "the killed apply changed the database file"
+        );
+    }
 }

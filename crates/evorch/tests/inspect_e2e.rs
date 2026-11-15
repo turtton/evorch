@@ -291,26 +291,52 @@ fn inspection_refused_by_the_lease_prints_an_error_and_no_json() {
     assert!(inspect(&db, &["storage"]).is_ok());
 }
 
-/// Every file next to the database with its bytes. SQLite's own reader protocol may
-/// create the `-wal` and `-shm` files (see `storage::inspect::open`), so those are left
-/// out; any other file, and every byte of the rest, must stay as it was.
+/// Every file under `dir` with its bytes, directories included (recursively). SQLite's own
+/// reader protocol may create the database's `-wal` and `-shm` files (see
+/// `storage::inspect::open`), so exactly those are left out; any other file, and every byte
+/// of the rest, must stay as it was.
 fn directory_state(dir: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut files: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|entry| {
-            let entry = entry.unwrap();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.file_type().unwrap().is_dir()
-                || name.ends_with("-wal")
-                || name.ends_with("-shm")
-            {
-                return None;
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.strip_prefix(root).unwrap().display().to_string();
+            if path.is_dir() {
+                out.push((format!("{name}/"), Vec::new()));
+                walk(root, &path, out);
+            } else if !(name == "evorch-events.db-wal" || name == "evorch-events.db-shm") {
+                out.push((name, std::fs::read(&path).unwrap()));
             }
-            Some((name, std::fs::read(entry.path()).unwrap()))
-        })
-        .collect();
-    files.sort();
-    files
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+// Given: a database without a lease file (a copy of the database alone) / When: it is
+// inspected / Then: it is refused with the way out and nothing is created next to it;
+// once the empty lease file exists the same inspection works.
+#[test]
+fn inspecting_a_database_without_a_lease_file_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _) = fixture(dir.path());
+    let mut lease = db.as_os_str().to_owned();
+    lease.push(".maintenance-lock");
+    std::fs::remove_file(&lease).unwrap();
+    let before = directory_state(dir.path());
+
+    for args in [&["storage"][..], &["candidates"]] {
+        let error = inspect(&db, args).unwrap_err();
+        assert!(error.contains("maintenance lease file"), "{error}");
+        assert!(directory_state(dir.path()) == before, "{args:?}");
+        assert!(!Path::new(&lease).exists(), "{args:?} created the lease");
+        assert!(!dir.path().join("evorch-events.db-wal").exists());
+        assert!(!dir.path().join("evorch-events.db-shm").exists());
+    }
+
+    std::fs::File::create(&lease).unwrap();
+    assert!(inspect(&db, &["storage"]).is_ok());
 }
 
 // Given: a core holding the database lease shared, as the host does for its whole life /

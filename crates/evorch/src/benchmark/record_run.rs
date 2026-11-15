@@ -47,6 +47,74 @@ pub async fn record(
     result
 }
 
+/// The user configuration directory's settings database and everything SQLite or the
+/// lease protocol puts beside it (`-wal`, `-shm`, `.maintenance-lock`, ...) all start
+/// with this name.
+const SETTINGS_DATABASE: &str = "evorch-events.db";
+
+/// `path` made absolute with every symlink and `..` resolved as far as it exists; the rest
+/// is normalised lexically, so a path that does not exist yet still compares equal to its
+/// aliases.
+fn resolve(path: &Path) -> std::io::Result<PathBuf> {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => resolved.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(name) => {
+                resolved.push(name);
+                if resolved.symlink_metadata().is_ok() {
+                    resolved = resolved.canonicalize()?;
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// A benchmark never touches the settings database, so its output directory must not be
+/// that database, a file beside it, or a place that contains it: a directory created there
+/// would keep the next core from creating its database. The check runs before anything is
+/// created.
+fn refuse_settings_database_output(
+    output: &Path,
+    user_config_dir: Option<&Path>,
+) -> BenchmarkResult<()> {
+    let Some(user_dir) = user_config_dir
+        .map(Path::to_path_buf)
+        .or_else(config::user_config_dir)
+    else {
+        return Ok(());
+    };
+    let user_dir = resolve(&user_dir)?;
+    let output_resolved = resolve(output)?;
+    let database = user_dir.join(SETTINGS_DATABASE);
+    let beside_database = output_resolved.parent() == Some(user_dir.as_path())
+        && output_resolved
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(SETTINGS_DATABASE));
+    if beside_database
+        || output_resolved.starts_with(&database)
+        || database.starts_with(&output_resolved)
+    {
+        return Err(invalid(format!(
+            "benchmark output {} collides with the settings database {}; choose another directory",
+            output.display(),
+            database.display()
+        )));
+    }
+    Ok(())
+}
+
 async fn record_inner(
     spec_path: &Path,
     output: &Path,
@@ -55,6 +123,7 @@ async fn record_inner(
     sandbox: SandboxChoice,
     model_catalog_dir: Option<PathBuf>,
 ) -> BenchmarkResult<Baseline> {
+    refuse_settings_database_output(output, user_config_dir.as_deref())?;
     let spec = TaskSpec::load(spec_path)?;
     let user_config_dir = user_config_dir
         .map(|dir| {
