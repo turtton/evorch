@@ -37,6 +37,9 @@ pub enum CloseReason {
     LocalClose,
     /// The helper acknowledged `Shutdown` and ended.
     ShutdownAcknowledged,
+    /// The helper acknowledged `Shutdown` but the connection was still open at
+    /// the deadline, so this side closed it.
+    ShutdownTimedOut,
     /// The helper closed a channel without being asked: it exited or crashed.
     PeerClosed,
     /// A channel carried something the protocol forbids, or stalled.
@@ -620,20 +623,52 @@ impl RendererClient {
         }
     }
 
-    /// Asks the helper to end and waits for the connection to close.
+    /// Like [`wait_closed`](Self::wait_closed), but gives up after `timeout`
+    /// and returns `None` while the connection is still open.
+    pub fn wait_closed_for(&self, timeout: Duration) -> Option<CloseReason> {
+        let state = lock(&self.inner.state);
+        let (state, _) = self
+            .inner
+            .changed
+            .wait_timeout_while(state, timeout, |state| state.closed.is_none())
+            .unwrap_or_else(|e| e.into_inner());
+        state.closed.clone()
+    }
+
+    /// Asks the helper to end and waits for the connection to close, both within
+    /// `timeout` altogether. A helper that acknowledges but keeps the channels
+    /// open is cut off at the deadline ([`CloseReason::ShutdownTimedOut`]); the
+    /// returned reason is final either way.
     pub fn shutdown(&self, timeout: Duration) -> CloseReason {
+        let deadline = std::time::Instant::now().checked_add(timeout);
         match self.request(Request::Shutdown, &[], timeout) {
             // The helper closes its channels right after answering.
             Ok(_) => {
-                let reason = self.wait_closed();
-                self.join_threads();
-                reason
+                let budget = deadline
+                    .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+                self.finish_shutdown(budget)
             }
             Err(_) => {
                 self.close();
                 self.closed().unwrap_or(CloseReason::LocalClose)
             }
         }
+    }
+
+    /// Waits for the acknowledged helper to close the connection, at most
+    /// `budget` (unbounded for `None`). After that the connection is closed
+    /// from here, so the result is always final.
+    fn finish_shutdown(&self, budget: Option<Duration>) -> CloseReason {
+        let reason = match budget {
+            Some(budget) => self.wait_closed_for(budget),
+            None => Some(self.wait_closed()),
+        }
+        .unwrap_or_else(|| {
+            self.inner.close(CloseReason::ShutdownTimedOut);
+            self.closed().unwrap_or(CloseReason::ShutdownTimedOut)
+        });
+        self.join_threads();
+        reason
     }
 
     /// Ends the connection now. The helper sees its control channel close and
@@ -656,5 +691,84 @@ impl RendererClient {
 impl Drop for RendererClient {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::{CONTROL_LIMITS, Kind, encode_meta, read_message, write_message};
+    use crate::protocol::{Outcome, RequestFrame, ResponseFrame};
+
+    /// A connected client whose peer answers `Hello` and then keeps both
+    /// channels open until the client closes them.
+    fn client_with_a_silent_peer() -> (RendererClient, std::thread::JoinHandle<()>) {
+        let generation = RendererGeneration(1);
+        let (control, peer_control) = UnixStream::pair().unwrap();
+        let (frames, peer_frames) = UnixStream::pair().unwrap();
+        let peer = std::thread::spawn(move || {
+            let hello = read_message(
+                &peer_control,
+                CONTROL_LIMITS,
+                Vec::new(),
+                Duration::from_secs(3600),
+            )
+            .unwrap();
+            let request: RequestFrame = serde_json::from_slice(&hello.meta).unwrap();
+            let response = ResponseFrame {
+                generation,
+                id: request.id,
+                outcome: Outcome::Ok {
+                    reply: Reply::Hello {
+                        protocol: PROTOCOL_VERSION,
+                        helper: "silent".into(),
+                    },
+                },
+            };
+            write_message(
+                &peer_control,
+                Kind::Response,
+                &encode_meta(&response).unwrap(),
+                &[],
+                CONTROL_LIMITS,
+            )
+            .unwrap();
+            // Holds both channels until the client cuts them: reading ends
+            // with the close, and nothing else is ever sent.
+            let _ = read_message(
+                &peer_control,
+                CONTROL_LIMITS,
+                Vec::new(),
+                Duration::from_secs(3600),
+            );
+            drop(peer_frames);
+        });
+        let (client, _) = RendererClient::connect(control, frames, ClientConfig::new(generation))
+            .expect("the peer answers Hello");
+        (client, peer)
+    }
+
+    #[test]
+    fn a_helper_that_acknowledges_but_never_closes_is_cut_off_at_the_deadline() {
+        let (client, peer) = client_with_a_silent_peer();
+        // No budget left: the connection is still open, so it is closed here.
+        assert_eq!(client.wait_closed_for(Duration::ZERO), None);
+        assert_eq!(
+            client.finish_shutdown(Some(Duration::ZERO)),
+            CloseReason::ShutdownTimedOut
+        );
+        assert_eq!(client.closed(), Some(CloseReason::ShutdownTimedOut));
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn a_connection_that_closed_in_time_keeps_its_own_reason() {
+        let (client, peer) = client_with_a_silent_peer();
+        client.inner.close(CloseReason::PeerClosed);
+        assert_eq!(
+            client.finish_shutdown(Some(Duration::ZERO)),
+            CloseReason::PeerClosed
+        );
+        peer.join().unwrap();
     }
 }

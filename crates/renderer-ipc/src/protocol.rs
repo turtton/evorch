@@ -316,23 +316,78 @@ pub struct Ack {
     pub seq: u64,
 }
 
-/// DevTools commands an artifact page may receive. Navigation, targets,
-/// browser control and storage are not part of operating an offline page.
+/// The DevTools commands an artifact page may receive, by full name.
+///
+/// Whole domains are deliberately not allowed: `DOM` alone holds
+/// `setFileInputFiles` and `getFileInfo`, which would let a caller read host
+/// files the artifact never contained, and `Input` holds `dispatchDragEvent`
+/// with file paths. Only reading the page (DOM, accessibility, layout, styles,
+/// script evaluation) and operating it with input events are listed. Anything
+/// that navigates, replaces the document, touches files, downloads, the
+/// network, storage, targets, emulation or the browser itself is absent, and so
+/// is anything a future DevTools version adds.
+pub const CDP_ALLOWED_METHODS: &[&str] = &[
+    "Accessibility.disable",
+    "Accessibility.enable",
+    "Accessibility.getChildAXNodes",
+    "Accessibility.getFullAXTree",
+    "Accessibility.getPartialAXTree",
+    "Accessibility.getRootAXNode",
+    "Accessibility.queryAXTree",
+    "CSS.disable",
+    "CSS.enable",
+    "CSS.getComputedStyleForNode",
+    "CSS.getInlineStylesForNode",
+    "CSS.getMatchedStylesForNode",
+    "CSS.getPlatformFontsForNode",
+    "DOM.describeNode",
+    "DOM.disable",
+    "DOM.discardSearchResults",
+    "DOM.enable",
+    "DOM.focus",
+    "DOM.getAttributes",
+    "DOM.getBoxModel",
+    "DOM.getContentQuads",
+    "DOM.getDocument",
+    "DOM.getFlattenedDocument",
+    "DOM.getNodeForLocation",
+    "DOM.getOuterHTML",
+    "DOM.getSearchResults",
+    "DOM.performSearch",
+    "DOM.pushNodesByBackendIdsToFrontend",
+    "DOM.querySelector",
+    "DOM.querySelectorAll",
+    "DOM.requestChildNodes",
+    "DOM.requestNode",
+    "DOM.resolveNode",
+    "DOM.scrollIntoViewIfNeeded",
+    "DOMSnapshot.captureSnapshot",
+    "DOMSnapshot.disable",
+    "DOMSnapshot.enable",
+    "Input.dispatchKeyEvent",
+    "Input.dispatchMouseEvent",
+    "Input.imeSetComposition",
+    "Input.insertText",
+    "Log.clear",
+    "Log.disable",
+    "Log.enable",
+    "Page.captureScreenshot",
+    "Page.disable",
+    "Page.enable",
+    "Page.getFrameTree",
+    "Page.getLayoutMetrics",
+    "Runtime.awaitPromise",
+    "Runtime.callFunctionOn",
+    "Runtime.disable",
+    "Runtime.enable",
+    "Runtime.evaluate",
+    "Runtime.getProperties",
+    "Runtime.releaseObject",
+    "Runtime.releaseObjectGroup",
+];
+
 pub fn cdp_method_allowed(method: &str) -> bool {
-    let Some((domain, name)) = method.split_once('.') else {
-        return false;
-    };
-    if !method
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'.')
-    {
-        return false;
-    }
-    match domain {
-        "Accessibility" | "DOM" | "DOMSnapshot" | "Input" | "Runtime" | "CSS" | "Log" => true,
-        "Page" => !name.starts_with("navigate") && name != "setDocumentContent",
-        _ => false,
-    }
+    CDP_ALLOWED_METHODS.contains(&method)
 }
 
 fn validate_timeout(timeout_ms: u32) -> Result<(), RemoteError> {
@@ -623,6 +678,25 @@ mod tests {
             assert!(cdp_method_allowed(allowed), "{allowed}");
         }
         for denied in [
+            "DOM.setFileInputFiles",
+            "DOM.getFileInfo",
+            "DOM.setOuterHTML",
+            "DOM.setNodeValue",
+            "Input.dispatchDragEvent",
+            "Input.setInterceptDrags",
+            "Page.setInterceptFileChooserDialog",
+            "Page.setDownloadBehavior",
+            "Page.setBypassCSP",
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Page.reload",
+            "Page.printToPDF",
+            "Page.getResourceContent",
+            "Browser.setDownloadBehavior",
+            "IO.read",
+            "Emulation.setDeviceMetricsOverride",
+            "Runtime.compileScript",
+            "DOM.enable ",
+            "dom.enable",
             "Page.navigate",
             "Page.navigateToHistoryEntry",
             "Page.setDocumentContent",
@@ -637,6 +711,33 @@ mod tests {
         ] {
             assert!(!cdp_method_allowed(denied), "{denied}");
         }
+    }
+
+    #[test]
+    fn the_allowlist_lists_full_names_and_nothing_that_reaches_files_or_navigates() {
+        for method in CDP_ALLOWED_METHODS {
+            let (domain, name) = method.split_once('.').expect("Domain.method");
+            assert!(!domain.is_empty() && !name.is_empty(), "{method}");
+            for word in [
+                "File",
+                "navigate",
+                "Download",
+                "Drag",
+                "Intercept",
+                "Bypass",
+                "Script",
+                "ResourceContent",
+            ] {
+                assert!(!name.contains(word), "{method} contains {word}");
+            }
+        }
+        let mut sorted = CDP_ALLOWED_METHODS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted, CDP_ALLOWED_METHODS,
+            "keep the list sorted and unique"
+        );
     }
 
     #[test]

@@ -127,7 +127,17 @@ impl Backend for CefBackend {
                 );
             })
         };
-        lock(&self.watchers).push(watcher);
+        let mut watchers = lock(&self.watchers);
+        // Join the watchers of tabs that are already gone, so repeated opens and
+        // closes do not accumulate handles.
+        let (done, running): (Vec<_>, Vec<_>) = watchers
+            .drain(..)
+            .partition(|watcher| watcher.is_finished());
+        for watcher in done {
+            let _ = watcher.join();
+        }
+        *watchers = running;
+        watchers.push(watcher);
         Ok(open.viewport)
     }
 

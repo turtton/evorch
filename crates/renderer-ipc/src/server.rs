@@ -612,6 +612,12 @@ fn frame_loop(stream: UnixStream, shared: &Shared, config: ServeConfig) {
             height: frame.height,
         };
         let fail = |what: &str, detail: String| {
+            // An orderly stop closes this channel itself to wake the sender; that
+            // is not a failure and must not replace the stop reason or break the
+            // control channel the shutdown answer is still leaving through.
+            if shared.shutting_down.load(Ordering::Acquire) {
+                return;
+            }
             shared.abort(ExitReason::FrameChannelFailed(format!("{what}: {detail}")));
         };
         let Ok(meta_bytes) = encode_meta(&meta) else {

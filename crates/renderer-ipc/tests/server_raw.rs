@@ -296,3 +296,18 @@ fn a_core_that_never_acknowledges_a_frame_ends_the_helper() {
     ));
     drop(peer.control);
 }
+
+#[test]
+fn a_shutdown_while_a_frame_awaits_its_acknowledgement_is_still_a_clean_stop() {
+    let (peer, fake, helper) = serve_raw(ServeConfig::default());
+    raw_hello(&peer);
+    stream_one_frame(&peer);
+    // The frame was read and not acknowledged: the sender is blocked on the
+    // acknowledgement while the stop closes its channel.
+    raw_request(&peer.control, GENERATION, 50, Request::Shutdown, &[]);
+    let (answer, _) = read_response_frame(&peer.control);
+    assert_eq!(answer.id, RequestId(50));
+    assert!(matches!(answer.outcome, Outcome::Ok { reply: Reply::Done }));
+    fake.shutdown_seen.recv().unwrap();
+    assert_eq!(helper.join().unwrap(), ExitReason::ShutdownRequested);
+}
