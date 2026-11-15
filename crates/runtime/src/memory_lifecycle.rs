@@ -260,6 +260,9 @@ impl AgentRuntime {
     }
 }
 
+/// Returned by `resume_adopted_learning` when a scheduler already owns the job's execution.
+pub(crate) const LEARNING_ALREADY_EXECUTING: &str = "learning is already executing";
+
 /// A job resumed from stored evidence. `completion` carries the pipeline's result once it ended.
 pub struct ResumedLearning {
     pub task_id: String,
@@ -298,7 +301,7 @@ impl AgentRuntime {
             result,
         };
         if !self.spawn_learning_pending(pending, source) {
-            return Err("learning is already executing".into());
+            return Err(LEARNING_ALREADY_EXECUTING.into());
         }
         self.shared
             .learning_runs
@@ -332,11 +335,18 @@ impl AgentRuntime {
             .map_err(|error| error.to_string())?
         {
             let task = adopted.job.task_id.clone();
+            let observed = adopted.job.key();
             match self.resume_adopted_learning(adopted) {
                 Ok(job) => resumed.push(job),
                 Err(error) => {
+                    // An attempt that already runs (the scheduler won the race) or a job that
+                    // is no longer the Pending one this rescan observed is never ended here.
+                    // Only an unusable Pending job is ended, and only at the observed revision.
+                    if error == LEARNING_ALREADY_EXECUTING {
+                        continue;
+                    }
                     tracing::warn!(%error, %task, "adopted learning job cannot run; ending it");
-                    let _ = queue.abandon(&task, "adopted evidence cannot be used");
+                    let _ = queue.abandon_observed(&observed);
                 }
             }
         }

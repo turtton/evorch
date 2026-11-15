@@ -305,6 +305,20 @@ impl LearningJobQueue {
         Database::open(&self.storage)?.learning_job_evidence(task_id)
     }
 
+    /// Ends a job only at the Pending key a caller observed. A job that has moved on
+    /// (started, interrupted or ended since) fails the CAS and is left untouched.
+    pub fn abandon_observed(&self, observed: &LearningAttemptKey) -> Result<bool, StorageError> {
+        if observed.state != LearningJobState::Pending {
+            return Ok(false);
+        }
+        Ok(self
+            .change(
+                observed,
+                LearningAttemptChange::Abandon(LearningEndReason::EvidenceUnavailable),
+            )?
+            .is_some())
+    }
+
     pub fn abandon(&self, task_id: &str, _reason: &str) -> Result<bool, StorageError> {
         let Some(job) = self.job(task_id)? else {
             return Ok(false);

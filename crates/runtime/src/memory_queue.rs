@@ -100,6 +100,13 @@ impl LearningQueue {
         task: &QueuedTask<'_>,
         source_run_id: RunId,
     ) -> Result<Vec<Lesson>, LearningError> {
+        // Pause, suspend and reconcile reach a job only through the runtime's own queue; a
+        // standalone queue without it could never be resumed, so refuse before admitting.
+        if self.runtime.learning_job_queue().is_none() {
+            return Err(LearningError::Stage(
+                "learning is not configured on the runtime".into(),
+            ));
+        }
         let snapshot = self
             .runtime
             .freeze_run_learning(source_run_id)

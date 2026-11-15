@@ -112,17 +112,21 @@ async fn learning_queue_completes_without_candidates_after_extractor_finishes() 
         bus.clone(),
         Arc::new(sandbox::DirectSandbox::new_unchecked()),
     ));
+    let quick = ModelPreference {
+        profile: "quick".into(),
+        model: None,
+        reasoning_effort: None,
+    };
     let runtime = runtime::AgentRuntime::new(bus, executor, model.clone())
-        .with_run_store(RunStore::open(&config, store.handle()).unwrap());
-    let queue = runtime::memory_queue::LearningQueue::new(
-        runtime,
-        (store.handle(), config.clone()),
-        ModelPreference {
-            profile: "quick".into(),
-            model: None,
-            reasoning_effort: None,
-        },
-    );
+        .with_run_store(RunStore::open(&config, store.handle()).unwrap())
+        .with_learning(runtime::memory_queue::LearningSettings {
+            writer: store.handle(),
+            storage: config.clone(),
+            project: "p".into(),
+            quick: quick.clone(),
+        });
+    let queue =
+        runtime::memory_queue::LearningQueue::new(runtime, (store.handle(), config.clone()), quick);
     let lessons = queue
         .execute(runtime::memory_queue::QueuedTask {
             id: "task",
@@ -143,4 +147,58 @@ async fn learning_queue_completes_without_candidates_after_extractor_finishes() 
         storage::entity::TaskStatus::Completed
     );
     assert_eq!(model.0.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn standalone_queue_without_runtime_learning_is_refused_before_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("queue.db"),
+        ..Default::default()
+    };
+    let store = Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(event_bus::EventBus::new(128));
+    let executor = Arc::new(tools::ToolExecutor::with_standard_tools(
+        bus.clone(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+    ));
+    let runtime = runtime::AgentRuntime::new(bus, executor, Arc::new(QueueModel::default()))
+        .with_run_store(RunStore::open(&config, store.handle()).unwrap());
+    let source = runtime.delegate_background(
+        runtime::Role::Worker,
+        "work".into(),
+        runtime::RunConfig::default(),
+    );
+    runtime.wait(source).await.unwrap();
+    let queue = runtime::memory_queue::LearningQueue::new(
+        runtime,
+        (store.handle(), config.clone()),
+        ModelPreference {
+            profile: "quick".into(),
+            model: None,
+            reasoning_effort: None,
+        },
+    );
+    let refused = queue
+        .complete_task(
+            &runtime::memory_queue::QueuedTask {
+                id: "unconfigured",
+                project: "p",
+                prompt: "work",
+                config: runtime::RunConfig::default(),
+            },
+            source,
+        )
+        .await;
+    assert!(matches!(
+        refused,
+        Err(runtime::memory_queue::LearningError::Stage(_))
+    ));
+    assert!(
+        storage::Database::open(&config)
+            .unwrap()
+            .learning_job("unconfigured")
+            .unwrap()
+            .is_none()
+    );
 }

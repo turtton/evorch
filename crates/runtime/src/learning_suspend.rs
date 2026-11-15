@@ -32,7 +32,19 @@ struct ExecutionState {
     runs: Vec<RunId>,
     unsafe_result: Option<String>,
     uncertain: Option<(LearningAttemptKey, Change)>,
+    /// A terminal change the writer rejected with a known rollback. The entry keeps
+    /// owning the job until the same transaction commits (or the job is seen moved on).
+    retry_terminal: Option<(LearningAttemptKey, Change)>,
     unconfirmed_intake: bool,
+}
+
+impl ExecutionState {
+    /// The result is safe to report only when no unresolved write remains.
+    fn settle(&mut self) {
+        if !self.unconfirmed_intake && self.uncertain.is_none() && self.retry_terminal.is_none() {
+            self.unsafe_result = None;
+        }
+    }
 }
 
 pub(crate) struct LearningExecution {
@@ -435,7 +447,7 @@ impl AgentRuntime {
                     });
                 }
                 _ => {
-                    let _ = queue.abandon(&job.task_id, "evidence unavailable");
+                    let _ = queue.abandon_observed(&job.key());
                 }
             }
         }

@@ -84,7 +84,18 @@ impl LearningExecution {
                 state.uncertain = Some((key.clone(), change));
                 Err("learning write outcome unconfirmed".into())
             }
-            Err(_) => Err("learning write rejected".into()),
+            Err(_) => {
+                if matches!(
+                    change,
+                    Change::Publish | Change::Fail(_) | Change::Abandon(_)
+                ) {
+                    // A rejected terminal write leaves Started + evidence behind. Keep
+                    // owning it so a later reconcile re-runs the same transaction.
+                    state.unsafe_result = Some("learning terminal write rejected".into());
+                    state.retry_terminal = Some((key.clone(), change));
+                }
+                Err("learning write rejected".into())
+            }
         }
     }
 
@@ -178,7 +189,33 @@ impl LearningExecution {
             })();
             if outcome.is_ok() {
                 state.unconfirmed_intake = false;
-                state.unsafe_result = None;
+                state.settle();
+            }
+        }
+        if let Some((key, change)) = state.retry_terminal.clone() {
+            match queue.change(&key, change.clone()) {
+                Ok(Some(next)) => {
+                    // Any fence/readback that was pending is superseded by the commit.
+                    state.key = Some(next);
+                    state.retry_terminal = None;
+                    state.uncertain = None;
+                    state.settle();
+                    return;
+                }
+                Err(storage::StorageError::LearningWriteUnconfirmed) => {
+                    state.retry_terminal = None;
+                    state.uncertain = Some((key, change));
+                }
+                _ => match queue.job(&key.task_id) {
+                    // The job moved on (fenced or ended by someone with authority):
+                    // adopt that state; never re-run a terminal on a stale key.
+                    Ok(Some(job)) if job.origin == *queue.origin() && job.key() != key => {
+                        state.key = Some(job.key());
+                        state.retry_terminal = None;
+                        state.settle();
+                    }
+                    _ => return,
+                },
             }
         }
         let Some((key, change)) = state.uncertain.clone() else {
@@ -217,7 +254,7 @@ impl LearningExecution {
         if let Ok(next) = outcome {
             state.key = Some(next);
             state.uncertain = None;
-            state.unsafe_result = None;
+            state.settle();
         }
     }
 
