@@ -698,9 +698,27 @@ async fn a_learning_pause_holds_the_job_pending_without_pausing_other_producers(
     let learning = fixture.runtime.learning_gate();
     let pause = learning.pause();
     let source = fixture.start().await;
+    // The pipeline admits its job on a spawned task and gives no completion signal
+    // before it waits at the paused gate, so yield until the job is recorded. Only
+    // scheduling is awaited, never a duration; a missing job hangs and the runner's
+    // slow-timeout reports it.
+    while job_states(&fixture).is_empty() {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(job_states(&fixture), [LearningJobState::Pending]);
+    let database = Database::open(&fixture.config).unwrap();
+    let pending = &database
+        .learning_jobs(&[LearningJobState::Pending])
+        .unwrap()[0];
+    assert!(
+        database
+            .learning_job_evidence(&pending.task_id)
+            .unwrap()
+            .is_some(),
+        "a pending job keeps its evidence for a successor"
+    );
     assert!(fixture.runtime.producer_gate().try_enter().is_some());
     assert_eq!(fixture.runtime.list_agents().len(), 1);
-    assert!(!job_states(&fixture).contains(&LearningJobState::Started));
     assert!(learning.resume(pause));
     assert_eq!(fixture.learning(source).await, Ok(()));
     assert_eq!(job_states(&fixture), [LearningJobState::Finished]);

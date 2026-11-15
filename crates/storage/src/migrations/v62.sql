@@ -1,63 +1,47 @@
--- Durable learning queue (07b-2). A job is admitted together with its dedup claim
--- (learning_claims / learning_claim_roots) and immutable evidence in one transaction.
--- Pending -> Started (compare-and-set) -> Finished | Failed | Abandoned. Started and
--- terminal rows are never queued again; the evidence is deleted when the job ends.
-CREATE TABLE learning_jobs (
-    task_id TEXT PRIMARY KEY NOT NULL REFERENCES learning_claims(task_id),
-    state TEXT NOT NULL CHECK (state IN ('Pending', 'Started', 'Finished', 'Failed', 'Abandoned')),
-    is_goal INTEGER NOT NULL,
-    project TEXT NOT NULL,
-    source_run_id TEXT NOT NULL,
-    origin_kind TEXT NOT NULL CHECK (origin_kind IN ('Core', 'Gui')),
-    origin_instance TEXT NOT NULL,
-    origin_pid INTEGER NOT NULL,
-    origin_start_ticks INTEGER,
-    origin_boot_id TEXT,
-    origin_pid_ns TEXT,
-    config_identity TEXT,
-    revision INTEGER NOT NULL DEFAULT 0,
-    admitted_at_ns INTEGER NOT NULL,
-    started_at_ns INTEGER,
-    finished_at_ns INTEGER,
-    reason TEXT
+-- Restart evidence is deliberately independent of manifests and run tombstones.
+-- Failed partial captures must retain the full lane/scan exclusion set.
+CREATE TABLE restart_transactions (
+ restart_id TEXT PRIMARY KEY, capture_id TEXT UNIQUE NOT NULL,
+ revision INTEGER NOT NULL CHECK(revision >= 0), phase TEXT NOT NULL,
+ metadata_json TEXT NOT NULL,
+ old_effective_tools_fingerprint TEXT, new_effective_tools_fingerprint TEXT,
+ old_compiled_catalog_fingerprint TEXT, new_compiled_catalog_fingerprint TEXT,
+ old_builtin_tool_names_json TEXT NOT NULL,
+ tools_attribution TEXT, tools_boundary_reason TEXT, tools_boundary_consumption_json TEXT,
+ expected_digest TEXT, manifest_digest TEXT, ticket_nonce_hash TEXT,
+ adopted_epoch INTEGER, ready_at_ms INTEGER, failure_reason TEXT
 );
-CREATE INDEX learning_jobs_state ON learning_jobs(state, origin_kind);
-CREATE TABLE learning_job_evidence (
-    task_id TEXT PRIMARY KEY NOT NULL REFERENCES learning_jobs(task_id),
-    prompt TEXT NOT NULL,
-    evidence_json TEXT NOT NULL,
-    sha256 TEXT NOT NULL
+CREATE TABLE restart_expected_members (
+ restart_id TEXT NOT NULL REFERENCES restart_transactions(restart_id),
+ run_id TEXT NOT NULL, root_run_id TEXT NOT NULL, member_json TEXT NOT NULL,
+ manifest_id TEXT,
+ PRIMARY KEY(restart_id,run_id)
 );
--- A job never moves backwards, and its identity columns never change.
-CREATE TRIGGER learning_job_forward_only BEFORE UPDATE ON learning_jobs
-WHEN OLD.state IN ('Finished', 'Failed', 'Abandoned')
-  OR (OLD.state = 'Started' AND NEW.state = 'Pending')
-  OR NEW.task_id IS NOT OLD.task_id
-  OR NEW.is_goal IS NOT OLD.is_goal
-  OR NEW.project IS NOT OLD.project
-  OR NEW.source_run_id IS NOT OLD.source_run_id
-  OR NEW.origin_kind IS NOT OLD.origin_kind
-  OR NEW.admitted_at_ns IS NOT OLD.admitted_at_ns
+CREATE INDEX restart_expected_run ON restart_expected_members(run_id);
+CREATE TABLE restart_components (
+ restart_id TEXT NOT NULL REFERENCES restart_transactions(restart_id),
+ manifest_id TEXT NOT NULL UNIQUE, disposition TEXT NOT NULL,
+ claim_id TEXT, reason TEXT, revision INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(restart_id,manifest_id)
+);
+CREATE TABLE restart_owner_progress (
+ restart_id TEXT NOT NULL REFERENCES restart_transactions(restart_id),
+ thread_id TEXT NOT NULL, progress_json TEXT NOT NULL,
+ PRIMARY KEY(restart_id,thread_id)
+);
+-- A legacy writer cannot silently replace durable restart membership.
+CREATE TRIGGER invalidate_restart_manifest_delete BEFORE DELETE ON recovery_manifests
 BEGIN
-    SELECT RAISE(ABORT, 'learning job transition is not allowed');
+ UPDATE restart_transactions SET phase='invalidated', revision=revision+1,
+ failure_reason='manifest deleted'
+ WHERE restart_id IN (SELECT restart_id FROM restart_components WHERE manifest_id=OLD.manifest_id)
+ AND phase NOT IN ('completed','aborted','invalidated','superseded');
 END;
-CREATE TRIGGER learning_job_started_keeps_origin BEFORE UPDATE ON learning_jobs
-WHEN OLD.state = 'Started' AND NEW.state = 'Started'
-  AND (NEW.origin_instance IS NOT OLD.origin_instance)
+CREATE TRIGGER invalidate_restart_manifest_supersede AFTER UPDATE OF superseded ON recovery_manifests
+WHEN NEW.superseded=1 AND OLD.superseded=0
 BEGIN
-    SELECT RAISE(ABORT, 'a started learning job keeps its origin');
-END;
-CREATE TRIGGER learning_job_no_delete BEFORE DELETE ON learning_jobs
-BEGIN
-    SELECT RAISE(ABORT, 'learning jobs are kept');
-END;
--- Evidence is immutable while its job is live and removed only once the job ended.
-CREATE TRIGGER learning_job_evidence_immutable BEFORE UPDATE ON learning_job_evidence
-BEGIN
-    SELECT RAISE(ABORT, 'learning evidence is immutable');
-END;
-CREATE TRIGGER learning_job_evidence_delete_after_end BEFORE DELETE ON learning_job_evidence
-WHEN (SELECT state FROM learning_jobs WHERE task_id = OLD.task_id) IN ('Pending', 'Started')
-BEGIN
-    SELECT RAISE(ABORT, 'learning evidence of a live job is immutable');
+ UPDATE restart_transactions SET phase='superseded', revision=revision+1,
+ failure_reason='manifest superseded'
+ WHERE restart_id IN (SELECT restart_id FROM restart_components WHERE manifest_id=OLD.manifest_id AND disposition='retry_pending')
+ AND phase NOT IN ('completed','aborted','invalidated','superseded');
 END;

@@ -131,13 +131,27 @@ impl<'a> StartupCoordinator<'a> {
             .recovery_manifests()
             .map_err(|_| StartupBlocked::StorageUnavailable)?
         {
+            if db.restart_for_manifest(&load.manifest_id).is_ok_and(|t| {
+                t.is_some_and(|t| t.phase == storage::recovery::restart::RestartPhase::Completed)
+            }) {
+                continue;
+            }
             let disposition = match &load.record {
                 Ok(record) => match claims
                     .iter()
                     .find(|(manifest, _)| manifest == &load.manifest_id)
                     .map(|(_, claim)| claim.as_ref().map(|c| &c.state))
                 {
-                    Some(Ok(RecoveryClaimState::Prepared)) => Disposition::Prepared,
+                    Some(Ok(RecoveryClaimState::Prepared))
+                        if self
+                            .inputs
+                            .runtime
+                            .require_planned_manifest(&load.manifest_id)
+                            .is_ok() =>
+                    {
+                        Disposition::Prepared
+                    }
+                    Some(Ok(RecoveryClaimState::Prepared)) => Disposition::NeedsAttention,
                     Some(Ok(RecoveryClaimState::Activated)) => Disposition::AlreadyActivated,
                     Some(Ok(RecoveryClaimState::Released { .. })) => Disposition::Released,
                     Some(Err(_)) => Disposition::NeedsAttention,

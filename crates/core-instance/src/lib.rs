@@ -1,7 +1,34 @@
 //! Config-scoped discovery and launch -> lifetime locking. No runtime, DB or GUI.
 //! Locks are released only by close; lock files are never unlinked.
+#[cfg(target_os = "linux")]
+pub mod handoff;
+
 use rustix::fs::{FlockOperation, OFlags, flock};
 use sha2::{Digest, Sha256};
+mod handoff_proof;
+pub use handoff_proof::InheritedHandoffProof;
+
+/// Synthetic physical evidence for recovery tests only. Never enabled by default.
+#[cfg(feature = "recovery-test-support")]
+pub mod test_support {
+    use super::InheritedHandoffProof;
+    pub fn inherited_handoff_proof(
+        restart_id: String,
+        config_identity: String,
+        successor_epoch: u64,
+        nonce_hash: String,
+        successor_build: String,
+    ) -> InheritedHandoffProof {
+        InheritedHandoffProof::new(
+            restart_id,
+            config_identity,
+            successor_epoch,
+            nonce_hash,
+            successor_build,
+        )
+    }
+}
+
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},

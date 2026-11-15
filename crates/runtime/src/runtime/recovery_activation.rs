@@ -194,6 +194,7 @@ impl AgentRuntime {
         ownership_root: &std::path::Path,
     ) -> Result<PausedRecoveryComponent, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
+        self.require_planned_manifest(&component.manifest_id)?;
         let startup = Arc::new(startup);
         if !self
             .shared

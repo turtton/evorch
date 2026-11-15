@@ -1,5 +1,8 @@
 //! Local cold-start coordination. This is deliberately separate from the wire
 //! client: GUI/CLI integration and shared restart budgets belong to later PRs.
+#[cfg(target_os = "linux")]
+pub mod handoff;
+
 use core_instance::{ConfigIdentity, InstanceError, LaunchGuard, validate_socket};
 use std::{
     fs, io,

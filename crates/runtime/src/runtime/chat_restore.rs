@@ -822,6 +822,7 @@ impl AgentRuntime {
         mut config: RunConfig,
         seed: Option<crate::restore::ChatForkSeed>,
     ) -> Result<RunId, RuntimeError> {
+        let _external = self.external_admission_guard()?;
         let _dispatch = self.dispatch_registration_guard()?;
         let deleted = |deleted| RuntimeError::RunRestoreFailed {
             run_id: format!("chat:{thread_id}"),

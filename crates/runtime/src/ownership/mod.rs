@@ -7,12 +7,14 @@ pub use checkpoint::{
 pub(crate) mod authority;
 mod observe;
 mod permit;
+mod planned;
 mod retry;
 mod state;
 pub use observe::{DbOperation, DbPhase, TARGET as DB_TRACE_TARGET};
 #[cfg(test)]
 pub(crate) use permit::GenerationClockOverride;
 pub use permit::OwnerPermit;
+pub use planned::{AdoptedOwnershipEvidence, ExpectedActiveRuns, ExpectedThreadRuns, PlannedHold};
 pub use retry::RetryPolicy;
 #[cfg(test)]
 pub(crate) use retry::virtual_time::VirtualClock;

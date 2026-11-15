@@ -7,7 +7,7 @@ use storage::recovery::{RecoveryManifestRecord, RecoveryMemberRecord};
 fn graph_error(reason: impl ToString) -> RuntimeError {
     crate::quiesce::runtime::error(reason)
 }
-fn snapshot_receipt(intent: &ResumeIntent) -> Option<storage::RunContextReceipt> {
+pub(super) fn snapshot_receipt(intent: &ResumeIntent) -> Option<storage::RunContextReceipt> {
     intent
         .checkpoint
         .as_ref()
@@ -63,7 +63,10 @@ pub(super) fn edges(records: &[RunRecoveryRecord]) -> Vec<RecoveryEdge> {
         .map(|(from, to, kind)| RecoveryEdge { from, to, kind })
         .collect()
 }
-fn root_of(run: RunId, intents: &BTreeMap<RunId, ResumeIntent>) -> Result<RunId, RuntimeError> {
+pub(super) fn root_of(
+    run: RunId,
+    intents: &BTreeMap<RunId, ResumeIntent>,
+) -> Result<RunId, RuntimeError> {
     let mut current = run;
     let mut seen = BTreeSet::new();
     loop {
@@ -127,10 +130,19 @@ impl AgentRuntime {
     /// Non-destructive capture after restart quiescence and dispatch drain.
     /// The adapter MUST explicitly supply ownership/configuration references.
     /// Missing recipes remain Unsupported rather than guessing CoreOwned.
+    #[cfg(any(test, feature = "recovery-test-support"))]
     pub fn capture_recovery_records(
         &self,
         fence: &DispatchDrainFence,
         recipes: &BTreeMap<RunId, RecoveryRecipe>,
+    ) -> Result<Vec<RunRecoveryRecord>, RuntimeError> {
+        self.capture_records_impl(fence, recipes, None)
+    }
+    pub(super) fn capture_records_impl(
+        &self,
+        fence: &DispatchDrainFence,
+        recipes: &BTreeMap<RunId, RecoveryRecipe>,
+        expected: Option<&BTreeMap<RunId, ResumeIntent>>,
     ) -> Result<Vec<RunRecoveryRecord>, RuntimeError> {
         let _capture = self
             .shared
@@ -152,25 +164,64 @@ impl AgentRuntime {
             .run_store
             .get()
             .ok_or_else(|| graph_error("no run store"))?;
-        let (intents, revisions) = store
-            .with_database(|db| {
-                let mut intents = BTreeMap::new();
-                let mut revisions = BTreeMap::new();
-                for (_, row) in db.recovery_intent_loads()? {
-                    let Ok(row) = row else { continue };
-                    let id = row.run_id.clone();
-                    let Ok(intent) = ResumeIntent::decode(row) else {
-                        continue;
-                    };
-                    let Some(revision) = db.resume_intent_revision(&id).ok().flatten() else {
-                        continue;
-                    };
-                    revisions.insert(intent.run_id, revision);
-                    intents.insert(intent.run_id, intent);
-                }
-                Ok((intents, revisions))
-            })
-            .map_err(graph_error)?;
+        let (intents, revisions) =
+            store
+                .with_database(|db| {
+                    let mut intents = BTreeMap::new();
+                    let mut revisions = BTreeMap::new();
+                    for (id, row) in db.recovery_intent_loads()? {
+                        if let Some(expected) = expected
+                            && !id
+                                .as_ref()
+                                .and_then(|id| id.parse().ok())
+                                .is_some_and(|id| expected.contains_key(&id))
+                        {
+                            continue;
+                        }
+                        if expected.is_some() && row.is_err() {
+                            return Err(storage::StorageError::Serialization(
+                                "corrupt expected intent".into(),
+                            ));
+                        }
+                        let Ok(row) = row else { continue };
+                        let id = row.run_id.clone();
+                        let decoded = ResumeIntent::decode(row);
+                        if expected.is_some() && decoded.is_err() {
+                            return Err(storage::StorageError::Serialization(
+                                "corrupt expected intent payload".into(),
+                            ));
+                        }
+                        let Ok(intent) = decoded else { continue };
+                        // ChatRequest has process-local serde-skipped fields. Compare
+                        // the complete durable projection, not those unsent handles.
+                        if let Some(expected) = expected
+                            && expected
+                                .get(&intent.run_id)
+                                .map(serde_json::to_value)
+                                .transpose()
+                                .map_err(|e| storage::StorageError::Serialization(e.to_string()))?
+                                != Some(serde_json::to_value(&intent).map_err(|e| {
+                                    storage::StorageError::Serialization(e.to_string())
+                                })?)
+                        {
+                            return Err(storage::StorageError::Serialization(
+                                "expected intent changed".into(),
+                            ));
+                        }
+                        let Some(revision) = db.resume_intent_revision(&id).ok().flatten() else {
+                            continue;
+                        };
+                        revisions.insert(intent.run_id, revision);
+                        intents.insert(intent.run_id, intent);
+                    }
+                    Ok((intents, revisions))
+                })
+                .map_err(graph_error)?;
+        if let Some(expected) = expected
+            && expected.len() != intents.len()
+        {
+            return Err(graph_error("expected member missing"));
+        }
         let runs = lock_runs(&self.shared.runs);
         let held = self
             .shared
@@ -195,6 +246,9 @@ impl AgentRuntime {
         let mut records = Vec::new();
         for intent in intents.values() {
             let Ok(root) = root_of(intent.run_id, &intents) else {
+                if expected.is_some() {
+                    return Err(graph_error("incomplete expected parent component"));
+                }
                 tracing::warn!(run_id=%intent.run_id,"incomplete parent component excluded from recovery capture");
                 continue;
             };
@@ -219,12 +273,18 @@ impl AgentRuntime {
             {
                 Ok(snapshot) => snapshot,
                 Err(_) => {
+                    if expected.is_some() {
+                        return Err(graph_error("unreadable expected snapshot"));
+                    }
                     tracing::warn!(run_id=%intent.run_id, "unreadable snapshot excluded from recovery capture");
                     continue;
                 }
             };
             if let Some(snapshot) = snapshot {
                 let Ok(descriptor) = serde_json::from_str(&snapshot.config_json) else {
+                    if expected.is_some() {
+                        return Err(graph_error("corrupt expected snapshot descriptor"));
+                    }
                     tracing::warn!(run_id=%intent.run_id, "corrupt snapshot descriptor excluded from recovery capture");
                     continue;
                 };
@@ -323,10 +383,19 @@ impl AgentRuntime {
     /// and later healthy components are still attempted. On Err, inspect durable
     /// manifests / recovery_plan to discover committed IDs before retrying with a
     /// new capture_id; the error itself does not return those IDs.
+    #[cfg(any(test, feature = "recovery-test-support"))]
     pub fn save_recovery_graph(
         &self,
         capture_id: &str,
         records: &[RunRecoveryRecord],
+    ) -> Result<Vec<String>, RuntimeError> {
+        self.save_recovery_graph_inner(capture_id, records, None)
+    }
+    pub(super) fn save_recovery_graph_inner(
+        &self,
+        capture_id: &str,
+        records: &[RunRecoveryRecord],
+        mut restart: Option<(&str, &mut u64)>,
     ) -> Result<Vec<String>, RuntimeError> {
         let _capture = self
             .shared
@@ -417,14 +486,26 @@ impl AgentRuntime {
                     edges: edges(&component),
                     members,
                 };
-                store
-                    .handle
-                    .prepare_recovery_manifest(record)
-                    .map_err(graph_error)?;
-                store
-                    .handle
-                    .commit_recovery_manifest(manifest_id.clone())
-                    .map_err(graph_error)?;
+                if let Some((id, revision)) = restart.as_mut() {
+                    let tx = store
+                        .handle
+                        .mutate_restart(
+                            (*id).into(),
+                            Some(**revision),
+                            storage::recovery::restart::RestartMutation::SaveComponent(record),
+                        )
+                        .map_err(graph_error)?;
+                    **revision = tx.revision;
+                } else {
+                    store
+                        .handle
+                        .prepare_recovery_manifest(record)
+                        .map_err(graph_error)?;
+                    store
+                        .handle
+                        .commit_recovery_manifest(manifest_id.clone())
+                        .map_err(graph_error)?;
+                }
                 Ok(manifest_id)
             })();
             match saved {
@@ -631,7 +712,18 @@ impl AgentRuntime {
             })();
             match check {
                 Ok(()) => {
-                    if !candidates.is_empty() {
+                    if !candidates.is_empty()
+                        && !store
+                            .with_database(|db| db.restart_for_manifest(&id))
+                            .is_ok_and(|tx| tx.is_none())
+                        && self.require_planned_manifest(&id).is_err()
+                    {
+                        plan.report.blocked.push(RecoveryOutcome {
+                            manifest_id: Some(id),
+                            runs: component_runs,
+                            reason: RecoveryReason::PlannedAdoptionRequired,
+                        });
+                    } else if !candidates.is_empty() {
                         plan.components.push(RecoveryComponent {
                             manifest_id: id,
                             runs: candidates,

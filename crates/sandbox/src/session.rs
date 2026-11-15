@@ -5,6 +5,7 @@ use std::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, ExitStatus, Stdio},
 };
 
+use crate::ledger::{Admission, ChildEntry, ChildKind, SpawnLedger};
 use crate::process::{self, ProcessGroup};
 use crate::{CommandSpec, Sandbox, SandboxError};
 
@@ -37,6 +38,7 @@ pub enum SessionError {
 pub struct StdioSession {
     child: Child,
     group: ProcessGroup,
+    entry: Option<ChildEntry>,
 }
 
 impl StdioSession {
@@ -45,6 +47,20 @@ impl StdioSession {
     /// # Errors
     /// Returns the original wrapping error or the OS process-spawn error.
     pub fn spawn(sandbox: &dyn Sandbox, spec: CommandSpec) -> Result<Self, SessionError> {
+        Self::spawn_in(&Admission::unmanaged(), sandbox, spec)
+    }
+
+    /// [`spawn`](Self::spawn) inside a ledger admission: the child is
+    /// registered as a [`ChildKind::SandboxSession`] and the final spawn fence
+    /// waits for this launch.
+    ///
+    /// # Errors
+    /// Returns the original wrapping error or the OS process-spawn error.
+    pub fn spawn_in(
+        admission: &Admission<'_>,
+        sandbox: &dyn Sandbox,
+        spec: CommandSpec,
+    ) -> Result<Self, SessionError> {
         let wrapped = sandbox.wrap(spec)?;
         let mut command = wrapped.to_command();
         command
@@ -53,7 +69,28 @@ impl StdioSession {
             .stderr(Stdio::piped());
         let child = command.spawn()?;
         let group = ProcessGroup::new(Some(child.id()));
-        Ok(Self { child, group })
+        let entry = admission.register_group(ChildKind::SandboxSession, None, &group);
+        Ok(Self {
+            child,
+            group,
+            entry,
+        })
+    }
+
+    /// [`spawn_in`](Self::spawn_in) for a site whose ledger is optional: admits
+    /// the launch itself, so it is a plain synchronous call (blocking thread).
+    /// Without a ledger it behaves as [`spawn`](Self::spawn).
+    ///
+    /// # Errors
+    /// An I/O error when the ledger's spawn fence is closed (nothing started),
+    /// otherwise the error of [`spawn_in`](Self::spawn_in).
+    pub fn spawn_owned(
+        ledger: Option<&SpawnLedger>,
+        sandbox: &dyn Sandbox,
+        spec: CommandSpec,
+    ) -> Result<Self, SessionError> {
+        let admission = SpawnLedger::admit_optional(ledger).map_err(io::Error::from)?;
+        Self::spawn_in(&admission, sandbox, spec)
     }
 
     pub fn id(&self) -> u32 {
@@ -72,6 +109,12 @@ impl StdioSession {
         self.child.stderr.take()
     }
 
+    fn note_reaped(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            entry.reaped();
+        }
+    }
+
     /// Polls and reaps an exited child without blocking on a running child.
     ///
     /// The exit is observed first without reaping, so what is left of the
@@ -84,7 +127,11 @@ impl StdioSession {
             Ok(false) => Ok(None),
             Ok(true) => {
                 let child = &mut self.child;
-                self.group.kill_and_reap(|| child.try_wait())
+                let reaped = self.group.kill_and_reap(|| child.try_wait())?;
+                if reaped.is_some() {
+                    self.note_reaped();
+                }
+                Ok(reaped)
             }
             Err(error) => {
                 self.group.release();
@@ -101,7 +148,7 @@ impl Drop for StdioSession {
         // The group goes first, while the unreaped child still reserves its id;
         // after try_wait reaped the child, nothing is signalled.
         let child = &mut self.child;
-        let _ = self.group.kill_and_reap(|| {
+        let reaped = self.group.kill_and_reap(|| {
             let _ = child.kill();
             loop {
                 match child.wait() {
@@ -110,6 +157,9 @@ impl Drop for StdioSession {
                 }
             }
         });
+        if matches!(reaped, Ok(Some(_))) {
+            self.note_reaped();
+        }
     }
 }
 

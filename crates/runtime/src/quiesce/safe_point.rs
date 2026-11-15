@@ -166,6 +166,7 @@ impl LoopState {
         }
         // The active intent and its terminal tail must overlap. No sealer may
         // observe neither after finalization has closed the mailbox.
+        runtime.invalidate_active_restart_capture("terminal retirement during capture");
         runtime.prepare_terminal_dispatch(self.task.run_id);
         runtime.end_intent(
             self.task.run_id,

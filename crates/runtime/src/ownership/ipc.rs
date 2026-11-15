@@ -77,6 +77,43 @@ fn claim_inner(
     })
 }
 
+/// Limited claim: caller supplies Adopted evidence, never a PID-death check.
+/// Connecting to the predecessor endpoint is conservative: even a listener that
+/// cannot answer still blocks adoption. exec successors have the same PID.
+/// Liveness and generation/hold/run-set checks occur inside the registry write
+/// transaction; the claim is never retried implicitly.
+pub(super) fn claim_planned(
+    registry: &mut Registry,
+    hold: &super::PlannedHold,
+    root: &Path,
+    successor: &str,
+    now_ms: u64,
+    settings: &config::OwnershipConfig,
+    evidence: &dyn super::AdoptedOwnershipEvidence,
+) -> Result<ThreadOwner, RegistryError> {
+    evidence.validate_hold(hold)?;
+    let socket = super::host::socket_path(root, &hold.owner_id)?;
+    registry.update_as(super::DbOperation::Claim, &hold.thread_id, |owner| {
+        // ACK-loss retry reads back the exact receipt without clearing active
+        // runs again (activation may already have begun).
+        if owner.planned_claim.as_deref() == Some(hold)
+            && owner.lease.owner_id == successor
+            && hold.generation.checked_add(1) == Some(owner.lease.generation)
+            && owner.state != super::OwnerState::Released
+        {
+            return Ok(());
+        }
+        owner.validate_planned_generation(hold)?;
+        if endpoint_may_be_live(&socket) {
+            return Err(super::OwnershipError::OwnerResponsive);
+        }
+        owner.claim_planned(hold, successor, now_ms)?;
+        owner.settings = settings.clone();
+        owner.lease.expires_at = now_ms.saturating_add(settings.lease_ms.get());
+        Ok(())
+    })
+}
+
 pub struct ClaimRequest<'a> {
     pub thread_id: &'a str,
     pub expected: &'a Lease,
@@ -167,6 +204,17 @@ pub fn request_with_timeout(
     read_frame(&mut stream)
 }
 
+/// Event-driven test request: wait for the response frame, not a test deadline.
+#[cfg(test)]
+pub(super) fn request_without_timeout(
+    path: &Path,
+    request: &Request,
+) -> Result<Response, IpcError> {
+    let mut stream = UnixStream::connect(path)?;
+    write_frame(&mut stream, request)?;
+    read_frame(&mut stream)
+}
+
 fn timeouts(stream: &UnixStream) -> Result<(), std::io::Error> {
     stream.set_read_timeout(Some(Duration::from_millis(500)))?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))
@@ -177,7 +225,7 @@ pub fn serve_connection(
     registry: &mut Registry,
     now_ms: u64,
 ) -> Result<(), IpcError> {
-    serve_connection_inner(stream, registry, now_ms, None, &|_, _| {})
+    serve_connection_inner(stream, registry, now_ms, None, &|_, _, _| {})
 }
 
 pub fn serve_connection_with_bus(
@@ -186,10 +234,10 @@ pub fn serve_connection_with_bus(
     now_ms: u64,
     bus: &EventBus,
 ) -> Result<(), IpcError> {
-    serve_connection_inner(stream, registry, now_ms, Some(bus), &|_, _| {})
+    serve_connection_inner(stream, registry, now_ms, Some(bus), &|_, _, _| {})
 }
 
-/// Like [`serve_connection_with_bus`], calling `released(thread, previous lease)`
+/// Like [`serve_connection_with_bus`], calling `released(thread, previous lease, current owner)`
 /// when a request releases or hands off a thread, before the requester can
 /// observe the transition.
 pub(super) fn serve_connection_releasing(
@@ -197,7 +245,7 @@ pub(super) fn serve_connection_releasing(
     registry: &mut Registry,
     now_ms: u64,
     bus: &EventBus,
-    released: &dyn Fn(&str, &Lease),
+    released: &dyn Fn(&str, &Lease, &ThreadOwner),
 ) -> Result<(), IpcError> {
     serve_connection_inner(stream, registry, now_ms, Some(bus), released)
 }
@@ -207,7 +255,7 @@ fn serve_connection_inner(
     registry: &mut Registry,
     now_ms: u64,
     bus: Option<&EventBus>,
-    released: &dyn Fn(&str, &Lease),
+    released: &dyn Fn(&str, &Lease, &ThreadOwner),
 ) -> Result<(), IpcError> {
     timeouts(stream)?;
     let request: Request = read_frame(stream)?;
@@ -251,7 +299,7 @@ fn serve_connection_inner(
                 && (owner.state == super::OwnerState::Released
                     || matches!(action, Some(OwnershipAction::Handoff)))
             {
-                released(&owner.thread_id, previous);
+                released(&owner.thread_id, previous, &owner);
             }
             if let (Some(bus), Some(action)) = (bus, action) {
                 let action = if owner.state == super::OwnerState::Released {

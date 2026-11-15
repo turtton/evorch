@@ -128,6 +128,13 @@ impl DispatchTails {
         self.changed();
         Ok(())
     }
+    pub(crate) fn invalidate_capture(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .capture_invalidated = true;
+        self.changed();
+    }
     pub(crate) fn capture_started(&self) -> bool {
         self.state
             .lock()

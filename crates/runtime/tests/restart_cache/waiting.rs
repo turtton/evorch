@@ -30,15 +30,19 @@ async fn tools_waiting_cancel_then_completion_keeps_wire_prefix_and_next_capture
         h.runtime = h
             .runtime
             .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
-        let parent = h.runtime.delegate_background(
-            Role::Orchestrator,
-            "keep the original wait future".into(),
-            RunConfig {
-                interactive: true,
-                keep_alive: true,
-                ..Default::default()
-            },
-        );
+        let parent = h
+            .runtime
+            .delegate_chat(
+                "restart-wait-thread",
+                Role::Orchestrator,
+                "keep the original wait future".into(),
+                RunConfig {
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let mut events = through_phase(&mut h.receiver, parent, AgentRunPhase::Waiting).await;
         let child = h
             .runtime
@@ -113,12 +117,39 @@ async fn tools_waiting_cancel_then_completion_keeps_wire_prefix_and_next_capture
         verify_trace_of(&h, parent, &events, 0, &requests);
 
         // The completed wait must not leak into the next ordinary checkpoint.
+        let recipes = std::collections::BTreeMap::from([(
+            parent,
+            runtime::quiesce::RecoveryRecipe {
+                settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                policy: runtime::quiesce::ResumePolicy::CoreOwned,
+                goal_id: None,
+                team: None,
+                lane: None,
+                descriptor: None,
+            },
+        )]);
+        h.runtime.begin_planned_restart_quiesce(&recipes).unwrap();
+        h.runtime.wait_quiesced().await.unwrap();
         let fence = h.runtime.fence_dispatch_restart().await.unwrap();
-        h.runtime.drain_dispatch_tails(&fence).await.unwrap();
-        let records = h
-            .runtime
-            .capture_recovery_records(&fence, &Default::default())
+        let gate = runtime::quiesce::HostRestartGate::default();
+        assert!(gate.transition(1, runtime::quiesce::HostRestartPhase::Sealing));
+        let sealed = gate.sealed(&h.runtime, 1, fence).await.unwrap();
+        let tx = storage
+            .handle()
+            .mutate_restart(
+                "waiting-capture".into(),
+                None,
+                storage::recovery::restart::RestartMutation::Create(Box::new(
+                    support::fixture_restart_metadata("waiting-capture"),
+                )),
+            )
             .unwrap();
+        let mut session = sealed.begin_capture(&h.runtime, &tx, recipes).unwrap();
+        h.runtime
+            .persist_restart_capture_expected(&mut session)
+            .unwrap();
+        let records = h.runtime.read_restart_capture_records(&session).unwrap();
+        h.runtime.commit_restart_capture(&mut session).unwrap();
         let record = records
             .iter()
             .find(|record| record.run_id == parent)
@@ -133,6 +164,14 @@ async fn tools_waiting_cancel_then_completion_keeps_wire_prefix_and_next_capture
                 .recovery_waits
                 .is_empty()
         );
+        assert!(matches!(
+            h.runtime.stop(parent, runtime::StopScope::SelfOnly),
+            Err(runtime::RuntimeError::RestartBusy)
+        ));
+        h.runtime
+            .fence_dispatch_shutdown(|| async { Ok::<_, String>(()) })
+            .await
+            .unwrap();
         h.runtime
             .stop(parent, runtime::StopScope::SelfOnly)
             .unwrap();

@@ -10,10 +10,10 @@ pub mod catalog;
 #[path = "recovery_current.rs"]
 pub mod current;
 use super::BootstrapError;
-use runtime::{
-    AgentRuntime, RunId,
-    quiesce::{RecoveryPlan, RecoveryRecipe},
-};
+#[cfg(any(test, feature = "test-support"))]
+use runtime::quiesce::RecoveryRecipe;
+use runtime::{AgentRuntime, RunId, quiesce::RecoveryPlan};
+#[cfg(any(test, feature = "test-support"))]
 use std::collections::BTreeMap;
 
 pub fn plan(runtime: &AgentRuntime) -> Result<RecoveryPlan, BootstrapError> {
@@ -50,11 +50,9 @@ pub fn activate(
     Ok(runtime.activate_component(component, authority)?)
 }
 
-/// `capture_id` is unique per attempt, including retries. Components commit
-/// independently; on error inspect durable manifests before a fresh-ID retry.
-/// Before capture, a restart attempt can be cancelled with durable checkpoint
-/// invalidation. Once capture starts, only terminal-only shutdown/Stop is allowed;
-/// that handoff invalidates the captured graph and never grants normal resume.
+/// Legacy independent-manifest fixture writer, not the production capture protocol.
+/// Planned capture must use a SealedRestart-derived RestartCaptureSession.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn capture(
     runtime: &AgentRuntime,
     fence: Option<&runtime::quiesce::DispatchDrainFence>,
