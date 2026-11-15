@@ -25,7 +25,7 @@ use routing::factory::{
     CredentialStoreClaudeTokenStore, CredentialStoreCursorTokenStore, CredentialStoreTokenStore,
     DEFAULT_AUTH_BASE_URL,
 };
-use sandbox::CredentialStore;
+use sandbox::{CredentialStore, Secret};
 use std::{
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener},
@@ -64,6 +64,40 @@ impl LoginStarter for ProviderLogins {
             LoginMethod::Codex => Arc::new(CodexFlow::begin(store, account)?),
             LoginMethod::Claude => Arc::new(ClaudeFlow::begin(store, account)?),
             LoginMethod::Cursor => Arc::new(CursorFlow::begin(store, account)?),
+        })
+    }
+
+    fn exchange_api_key(
+        &self,
+        method: LoginMethod,
+        account: &str,
+        key: Secret,
+    ) -> BoxFuture<'_, Result<Option<u64>, LoginFailure>> {
+        let store = self.credentials.clone();
+        let account = account.to_owned();
+        Box::pin(async move {
+            if method != LoginMethod::Cursor {
+                return Err(LoginFailure::Unavailable);
+            }
+            let client = CursorOAuthClient::new(CursorOAuthConfig::default())
+                .map_err(|e| provider_failure(&e))?;
+            let bundle = client
+                .exchange_api_key(key.expose())
+                .await
+                // The provider's own text can carry the key it rejected; only
+                // the class is kept, and a refusal is the usual cause.
+                .map_err(|e| match provider_failure(&e) {
+                    LoginFailure::Unavailable => LoginFailure::Rejected,
+                    other => other,
+                })?;
+            let expires = bundle.expires_at;
+            let tokens = Arc::new(CredentialStoreCursorTokenStore::new(store, account));
+            let lock = tokens.refresh_lock();
+            let _guard = lock.lock().await;
+            blocking(move || tokens.save(&bundle))
+                .await?
+                .map_err(|_| LoginFailure::StoreUnavailable)?;
+            Ok(Some(expires))
         })
     }
 }
@@ -106,6 +140,21 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|_| LoginFailure::Unavailable)
+}
+
+/// Gives back a listener the flow still holds and waits until the blocking
+/// thread that served it let go too (it does within one slice once the stop
+/// flag is set), so the port is free when this returns.
+async fn drain<T: Send + Sync + 'static>(slot: &Mutex<Option<Arc<T>>>) {
+    let taken = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+    if let Some(held) = taken {
+        let _ = blocking(move || {
+            while Arc::strong_count(&held) > 1 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .await;
+    }
 }
 
 /// The code of a redirect URL of `path` on the loopback host, after the
@@ -182,7 +231,7 @@ fn respond(stream: &mut std::net::TcpStream, accepted: bool) {
 
 struct CodexFlow {
     client: BrowserAuthClient,
-    server: Arc<CallbackServer>,
+    server: Mutex<Option<Arc<CallbackServer>>>,
     request: Mutex<Option<BrowserAuthRequest>>,
     authorize_url: String,
     state: String,
@@ -199,7 +248,7 @@ impl CodexFlow {
             authorize_url: request.authorize_url.clone(),
             state: request.state.clone(),
             client,
-            server: Arc::new(server),
+            server: Mutex::new(Some(Arc::new(server))),
             request: Mutex::new(Some(request)),
             store: Arc::new(CredentialStoreTokenStore::new(credentials, account)),
         })
@@ -224,9 +273,14 @@ impl LoginFlow for CodexFlow {
         &self,
         stop: Arc<AtomicBool>,
     ) -> BoxFuture<'_, Result<Callback, LoginFailure>> {
-        let server = self.server.clone();
+        let server = self
+            .server
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         let state = self.state.clone();
         Box::pin(async move {
+            let server = server.ok_or(LoginFailure::Unavailable)?;
             blocking(move || {
                 loop {
                     if stop.load(Ordering::SeqCst) {
@@ -267,13 +321,17 @@ impl LoginFlow for CodexFlow {
             Ok(Some(expires))
         })
     }
+
+    fn release(&self) -> BoxFuture<'_, ()> {
+        Box::pin(drain(&self.server))
+    }
 }
 
 // ---- Claude ---------------------------------------------------------------
 
 struct ClaudeFlow {
     client: ClaudeOAuthClient,
-    listener: Option<Arc<TcpListener>>,
+    listener: Mutex<Option<Arc<TcpListener>>>,
     login: Mutex<Option<ClaudeLoginRequest>>,
     authorize_url: String,
     state: String,
@@ -294,7 +352,7 @@ impl ClaudeFlow {
             authorize_url: login.authorize_url.clone(),
             state: login.state.clone(),
             client,
-            listener,
+            listener: Mutex::new(listener),
             login: Mutex::new(Some(login)),
             tokens: Arc::new(CredentialStoreClaudeTokenStore::new(credentials, account)),
         })
@@ -337,7 +395,12 @@ impl LoginFlow for ClaudeFlow {
         &self,
         stop: Arc<AtomicBool>,
     ) -> BoxFuture<'_, Result<Callback, LoginFailure>> {
-        let Some(listener) = self.listener.clone() else {
+        let listener = self
+            .listener
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some(listener) = listener else {
             return Box::pin(std::future::pending());
         };
         let state = self.state.clone();
@@ -395,6 +458,10 @@ impl LoginFlow for ClaudeFlow {
                 .map_err(|_| LoginFailure::StoreUnavailable)?;
             Ok(Some(expires))
         })
+    }
+
+    fn release(&self) -> BoxFuture<'_, ()> {
+        Box::pin(drain(&self.listener))
     }
 }
 
@@ -510,5 +577,49 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    fn store() -> (tempfile::TempDir, Arc<dyn CredentialStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = sandbox::FileCredentialStore::open(dir.path()).unwrap();
+        (dir, Arc::new(store))
+    }
+
+    /// A login that ended gives its callback port back, whichever way it ended:
+    /// more logins than there are candidate ports can follow one another.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_released_codex_login_gives_its_port_back() {
+        let (_dir, store) = store();
+        for _ in 0..=CODEX_PORTS.len() {
+            let flow =
+                CodexFlow::begin(store.clone(), "account".into()).expect("a callback port is free");
+            let stop = Arc::new(AtomicBool::new(false));
+            // The wait exists (it holds the listener) before the login ends.
+            let waiting = flow.wait_loopback(stop.clone());
+            let (outcome, ()) = tokio::join!(waiting, async {
+                stop.store(true, Ordering::SeqCst);
+                flow.release().await;
+            });
+            assert!(outcome.is_err());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_released_claude_login_gives_its_port_back() {
+        let (_dir, store) = store();
+        let flow = ClaudeFlow::begin(store, "account".into()).unwrap();
+        assert!(
+            flow.listener.lock().unwrap().is_some(),
+            "the callback port is free for this test"
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let waiting = flow.wait_loopback(stop.clone());
+        let (outcome, ()) = tokio::join!(waiting, async {
+            stop.store(true, Ordering::SeqCst);
+            flow.release().await;
+        });
+        assert!(outcome.is_err());
+        TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, CLAUDE_PORT)))
+            .expect("the port was given back");
     }
 }

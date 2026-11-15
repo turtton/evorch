@@ -103,6 +103,14 @@ struct State {
     status: AuthStatus,
     profiles: Vec<Profile>,
     sessions: HashMap<OperationId, Arc<Session>>,
+    /// Logins accepted whose session is not built yet (the profile is being
+    /// read and the flow prepared on the operation task).
+    starting: HashMap<OperationId, Start>,
+}
+
+struct Start {
+    profile: String,
+    cancelled: bool,
 }
 
 /// What an accepted command answers.
@@ -276,6 +284,7 @@ impl AuthArea {
                     },
                     profiles,
                     sessions: HashMap::new(),
+                    starting: HashMap::new(),
                 }),
             })),
         }
@@ -560,33 +569,54 @@ impl Inner {
         Ok(())
     }
 
-    fn profile(&self, name: &str) -> Option<Profile> {
-        let find = |profiles: &[Profile]| {
+    /// The profile `name`: from what is known, or from the file when it is
+    /// not (read on the blocking pool, never on a handler).
+    async fn profile(&self, name: &str) -> Option<Profile> {
+        fn find(profiles: &[Profile], name: &str) -> Option<Profile> {
             profiles.iter().find(|p| p.name == name).map(|p| Profile {
                 name: p.name.clone(),
                 kind: p.kind,
                 credential: p.credential.clone(),
             })
-        };
-        let known = find(&lock(&self.state).profiles);
-        known.or_else(|| {
-            let fresh = read_profiles(&self.config_dir, &self.startup);
-            let found = find(&fresh);
-            lock(&self.state).profiles = fresh;
-            found
-        })
+        }
+        let known = find(&lock(&self.state).profiles, name);
+        if known.is_some() {
+            return known;
+        }
+        let (dir, startup) = (self.config_dir.clone(), self.startup.clone());
+        let fresh = tokio::task::spawn_blocking(move || read_profiles(&dir, &startup))
+            .await
+            .ok()?;
+        let found = find(&fresh, name);
+        lock(&self.state).profiles = fresh;
+        found
     }
 
     async fn execute(&self, work: Work) -> Result<(), Failure> {
         match work {
             Work::Refresh => {}
             Work::Save { profile, value } => {
-                let (account, kind) = self.key_account(&profile)?;
-                if login_method(kind).is_some() {
-                    return Err(Failure {
-                        code: ErrorCode::InvalidRequest,
-                        message: "this provider signs in with a login, not an API key",
-                    });
+                let (account, kind) = self.key_account(&profile).await?;
+                match login_method(kind) {
+                    // Cursor signs in with a dashboard API key too: the provider
+                    // exchanges it, and the result is stored as the login is.
+                    Some(LoginMethod::Cursor) => {
+                        self.starter
+                            .exchange_api_key(LoginMethod::Cursor, &account, value)
+                            .await
+                            .map_err(|failure| Failure {
+                                code: failure_code(failure),
+                                message: failure.message(),
+                            })?;
+                        return self.reread().await;
+                    }
+                    Some(_) => {
+                        return Err(Failure {
+                            code: ErrorCode::InvalidRequest,
+                            message: "this provider signs in with a login, not an API key",
+                        });
+                    }
+                    None => {}
                 }
                 let store = self.credentials.clone();
                 Self::blocking(move || store.set(&account, &value))
@@ -597,7 +627,7 @@ impl Inner {
                     })?;
             }
             Work::Delete { profile } => {
-                let (account, _) = self.key_account(&profile)?;
+                let (account, _) = self.key_account(&profile).await?;
                 let store = self.credentials.clone();
                 Self::blocking(move || store.delete(&account))
                     .await?
@@ -611,8 +641,11 @@ impl Inner {
     }
 
     /// The keychain account a profile's key lives under.
-    fn key_account(&self, name: &str) -> Result<(String, config::ProviderTypeConfig), Failure> {
-        let profile = self.profile(name).ok_or(Failure {
+    async fn key_account(
+        &self,
+        name: &str,
+    ) -> Result<(String, config::ProviderTypeConfig), Failure> {
+        let profile = self.profile(name).await.ok_or(Failure {
             code: ErrorCode::NotFound,
             message: "unknown profile",
         })?;
@@ -691,75 +724,55 @@ impl Inner {
                 )),
             };
         }
-        let profile = self
-            .profile(profile_name)
-            .ok_or_else(|| error(ErrorCode::NotFound, "unknown profile", RetryAdvice::Never))?;
-        let method = login_method(profile.kind).ok_or_else(|| {
-            error(
-                ErrorCode::InvalidRequest,
-                "this provider has no login",
-                RetryAdvice::Never,
-            )
-        })?;
-        let account = account_of(&profile.credential).ok_or_else(|| {
-            error(
-                ErrorCode::InvalidRequest,
-                "this profile has no keychain account for a login",
-                RetryAdvice::Never,
-            )
-        })?;
-        if lock(&self.state).sessions.values().any(|session| {
-            session.profile == profile_name && session.phase() != LoginPhase::Settled
-        }) {
-            return Err(error(
-                ErrorCode::Conflict,
-                "a login for this profile is already running",
-                RetryAdvice::UserActionRequired,
-            ));
+        // Only memory is looked at here. The profile is read from its file, the
+        // flow prepared (a loopback port bound) and the session built by the
+        // operation task, which keeps the accepted permit until the login waits
+        // for the person.
+        {
+            let mut state = lock(&self.state);
+            let running = state.sessions.values().any(|session| {
+                session.profile == profile_name && session.phase() != LoginPhase::Settled
+            }) || state.starting.values().any(|s| s.profile == profile_name);
+            if running {
+                return Err(error(
+                    ErrorCode::Conflict,
+                    "a login for this profile is already running",
+                    RetryAdvice::UserActionRequired,
+                ));
+            }
+            state.starting.insert(
+                id.clone(),
+                Start {
+                    profile: profile_name.to_owned(),
+                    cancelled: false,
+                },
+            );
         }
-        let flow = self.starter.begin(method, account).map_err(|failure| {
-            error(
-                failure_code(failure),
-                failure.message(),
-                RetryAdvice::UserActionRequired,
-            )
-        })?;
         let view = match self.register(
             &id,
             AuthOperationKind::Login,
             Some(profile_name.to_owned()),
             digest,
-        )? {
-            Ok(view) => view,
-            Err(answer) => return Ok(answer),
+        ) {
+            Ok(Ok(view)) => view,
+            Ok(Err(answer)) => {
+                lock(&self.state).starting.remove(&id);
+                return Ok(answer);
+            }
+            Err(refused) => {
+                lock(&self.state).starting.remove(&id);
+                return Err(refused);
+            }
         };
-        let session = Arc::new(Session::new(
-            id.clone(),
-            profile_name.to_owned(),
-            method,
-            flow,
-            Instant::now() + self.login_timeout,
-        ));
-        {
-            let mut state = lock(&self.state);
-            let State {
-                operations,
-                sessions,
-                ..
-            } = &mut *state;
-            sessions.retain(|known, _| operations.get(known).is_some());
-            sessions.insert(id.clone(), session.clone());
-        }
         let task = self.clone();
-        let task_session = session.clone();
+        let (task_id, name) = (id.clone(), profile_name.to_owned());
         let spawned = self.tasks.spawn("auth-login", move |stop| {
-            task.run_login(task_session, gate, accepted, stop)
+            task.run_login(task_id, name, gate, accepted, stop)
         });
         if let Err(refused) = spawned {
-            session.claim();
             let mut state = lock(&self.state);
+            state.starting.remove(&id);
             state.operations.forget(&id);
-            state.sessions.remove(&id);
             return Err(error(
                 ErrorCode::Draining,
                 &refused.to_string(),
@@ -772,16 +785,50 @@ impl Inner {
         })
     }
 
+    /// The first section of a login: read the profile, prepare the flow, build
+    /// the session. Runs under the permit the command was accepted with.
+    async fn prepare(&self, id: &OperationId, profile_name: &str) -> Result<Arc<Session>, Failure> {
+        let profile = self.profile(profile_name).await.ok_or(Failure {
+            code: ErrorCode::NotFound,
+            message: "unknown profile",
+        })?;
+        let method = login_method(profile.kind).ok_or(Failure {
+            code: ErrorCode::InvalidRequest,
+            message: "this provider has no login",
+        })?;
+        let account = account_of(&profile.credential)
+            .ok_or(Failure {
+                code: ErrorCode::InvalidRequest,
+                message: "this profile has no keychain account for a login",
+            })?
+            .to_owned();
+        let starter = self.starter.clone();
+        let flow = Self::blocking(move || starter.begin(method, &account))
+            .await?
+            .map_err(|failure| Failure {
+                code: failure_code(failure),
+                message: failure.message(),
+            })?;
+        Ok(Arc::new(Session::new(
+            id.clone(),
+            profile_name.to_owned(),
+            method,
+            flow,
+            Instant::now() + self.login_timeout,
+        )))
+    }
+
     fn cancel(&self, login_id: &OperationId) -> Result<Submitted, WorkbenchError> {
-        let session = self
-            .session(login_id)
-            .ok_or_else(|| error(ErrorCode::NotFound, "unknown login", RetryAdvice::Never))?;
-        if session.claim_while_waiting() {
-            self.settle(&session, Settle::Cancelled(CancelReason::Requested));
+        let unknown = || error(ErrorCode::NotFound, "unknown login", RetryAdvice::Never);
+        // The login task writes the outcome once the listener is released.
+        if let Some(session) = self.session(login_id) {
+            session.cancel();
+        } else if let Some(start) = lock(&self.state).starting.get_mut(login_id) {
+            start.cancelled = true;
+        } else {
+            return Err(unknown());
         }
-        let view = self
-            .operation_view(login_id)
-            .ok_or_else(|| error(ErrorCode::NotFound, "unknown login", RetryAdvice::Never))?;
+        let view = self.operation_view(login_id).ok_or_else(unknown)?;
         Ok(Submitted::Operation {
             view,
             already_applied: false,
@@ -790,11 +837,39 @@ impl Inner {
 
     async fn run_login(
         self: Arc<Self>,
-        session: Arc<Session>,
+        id: OperationId,
+        profile_name: String,
         gate: HostRestartGate,
         accepted: Option<HostCommandPermit>,
         mut stop: StopSignal,
     ) -> Result<(), BootstrapError> {
+        let prepared = self.prepare(&id, &profile_name).await;
+        let session = match prepared {
+            Ok(session) => session,
+            Err(failure) => {
+                lock(&self.state).starting.remove(&id);
+                self.finish(&id, Err(failure));
+                return Ok(());
+            }
+        };
+        let cancelled = {
+            let mut state = lock(&self.state);
+            let cancelled = state.starting.remove(&id).is_some_and(|s| s.cancelled);
+            let State {
+                operations,
+                sessions,
+                ..
+            } = &mut *state;
+            sessions.retain(|known, _| operations.get(known).is_some());
+            sessions.insert(id.clone(), session.clone());
+            cancelled
+        };
+        if cancelled {
+            session.cancel();
+        }
+        self.publish(AuthEvent::LoginChanged {
+            login_id: id.clone(),
+        });
         // The first section is over: the session exists and the URL is
         // offered. What follows waits for a person and holds no permit.
         drop(accepted);
@@ -802,6 +877,8 @@ impl Inner {
         session
             .stop_listener
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Nothing is settled before the port is free again.
+        session.flow.release().await;
         match waited {
             Waited::Ended(settle) => {
                 if let Some(settle) = settle {
@@ -845,7 +922,7 @@ impl Inner {
                 () = session.wake.notified() => match session.phase() {
                     LoginPhase::Waiting => {}
                     LoginPhase::Completing => return Waited::Callback,
-                    LoginPhase::Settled => return Waited::Ended(None),
+                    LoginPhase::Settled => return Self::ended(session),
                 },
                 () = &mut timeout => return self.end_waiting(session, Settle::TimedOut),
                 result = &mut loopback => {
@@ -868,10 +945,16 @@ impl Inner {
         if session.claim_while_waiting() {
             Waited::Ended(Some(settle))
         } else if session.phase() == LoginPhase::Settled {
-            Waited::Ended(None)
+            Self::ended(session)
         } else {
             Waited::Callback
         }
+    }
+
+    /// The wait ended because the login was settled by a person's cancel (whose
+    /// outcome is written here, after the release) or by another section.
+    fn ended(session: &Session) -> Waited {
+        Waited::Ended(session.take_cancel().map(Settle::Cancelled))
     }
 
     /// The last section: take the gate again, exchange the callback, store the

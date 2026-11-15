@@ -427,9 +427,9 @@ pub struct DeleteProvider {
     pub name: String,
 }
 
-/// Apply the saved file to the models of the runs that start afterwards. A run
-/// that already sent a request keeps what it sent: the reload never rewrites a
-/// provider prefix.
+/// Apply the saved file to the models the requests that follow use, the next
+/// request of a running conversation included. What was already sent is kept:
+/// the reload never rewrites a provider prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReloadModels {

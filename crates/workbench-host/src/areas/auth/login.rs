@@ -7,6 +7,7 @@
 //! `state` this login started with, and the outcome is claimed once.
 //!
 //! Nothing here logs, publishes or stores a callback, a code or a pasted text.
+use sandbox::Secret;
 use std::{
     fmt,
     future::Future,
@@ -23,6 +24,7 @@ use workbench_protocol::{
     namespaces::auth::{
         LoginInputOutcome, LoginInputRejection, LoginMethod, LoginPhase, LoginView,
     },
+    operation::CancelReason,
 };
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -92,6 +94,14 @@ pub trait LoginFlow: Send + Sync {
 
     /// Exchange `callback` for credentials and store them.
     fn complete(&self, callback: Callback) -> BoxFuture<'_, Result<Option<u64>, LoginFailure>>;
+
+    /// Give back what the login holds while it waits (the loopback port). Called
+    /// once the wait is over, after the stop flag was set and before the outcome
+    /// is written, so a settled login never keeps a port. Resolves when the
+    /// resources are gone; a flow that holds none keeps the default.
+    fn release(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// Starts flows. Production drives the real providers; a test supplies its own.
@@ -104,6 +114,23 @@ pub trait LoginStarter: Send + Sync {
     /// `PortBusy` or `Unavailable` when the login cannot be offered at all.
     fn begin(&self, method: LoginMethod, account: &str)
     -> Result<Arc<dyn LoginFlow>, LoginFailure>;
+
+    /// Sign in with an API key the person typed instead of a browser login
+    /// (Cursor). The key is exchanged with the provider and the result stored
+    /// under `account`; the key itself is never stored or repeated. Returns when
+    /// the credentials expire, when the provider says so.
+    ///
+    /// # Errors
+    /// `Unavailable` when the provider has no API-key sign-in.
+    fn exchange_api_key(
+        &self,
+        method: LoginMethod,
+        account: &str,
+        key: Secret,
+    ) -> BoxFuture<'_, Result<Option<u64>, LoginFailure>> {
+        let _ = (method, account, key);
+        Box::pin(async { Err(LoginFailure::Unavailable) })
+    }
 }
 
 struct Inner {
@@ -111,6 +138,9 @@ struct Inner {
     /// A callback was committed (from either source).
     input_used: bool,
     callback: Option<Callback>,
+    /// A person cancelled while the login waited; the login task writes the
+    /// outcome once the listener is released.
+    cancelled: Option<CancelReason>,
 }
 
 pub(super) struct Session {
@@ -143,6 +173,7 @@ impl Session {
                 phase: LoginPhase::Waiting,
                 input_used: false,
                 callback: None,
+                cancelled: None,
             }),
             wake: Notify::new(),
             stop_listener: Arc::new(AtomicBool::new(false)),
@@ -229,6 +260,27 @@ impl Session {
         self.stop_listener.store(true, Ordering::SeqCst);
         self.wake.notify_one();
         true
+    }
+
+    /// A person's cancel while nothing was committed. The outcome is written by
+    /// the login task (see `take_cancel`), after the listener was released.
+    pub(super) fn cancel(&self) -> bool {
+        let mut inner = self.lock();
+        if inner.phase != LoginPhase::Waiting {
+            return false;
+        }
+        inner.phase = LoginPhase::Settled;
+        inner.callback = None;
+        inner.cancelled = Some(CancelReason::Requested);
+        drop(inner);
+        self.stop_listener.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+        true
+    }
+
+    /// The reason a person's cancel left, once.
+    pub(super) fn take_cancel(&self) -> Option<CancelReason> {
+        self.lock().cancelled.take()
     }
 
     /// Claim the outcome from any phase; `false` when it was claimed already.

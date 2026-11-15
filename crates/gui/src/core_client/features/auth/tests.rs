@@ -374,3 +374,168 @@ fn a_lost_reply_asks_for_the_operation_and_never_sends_it_again() {
     );
     screen.get_by_label("API キーを保存しました。");
 }
+
+fn not_found() -> FeatureReply {
+    FeatureReply::Query(Err(
+        FeatureError::new("the operation is unknown").with_code(ErrorCode::NotFound)
+    ))
+}
+
+#[test]
+fn a_key_save_whose_end_was_lost_with_a_core_restart_is_unknown_not_busy() {
+    let mut screen = loaded();
+    type_secret(&mut screen, "value");
+    screen.get_by_label("キーを保存").click();
+    let sent = asked(&mut screen);
+    let AuthCommand::SaveApiKey(save) = auth_command(&sent[0]).clone() else {
+        panic!("a key save was expected");
+    };
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+    );
+    let after = asked(&mut screen);
+    let query = after
+        .iter()
+        .find(|a| {
+            matches!(
+                query_of(a),
+                Query::Auth(AuthQuery::GetAuthOperation { operation_id })
+                    if *operation_id == save.operation_id
+            )
+        })
+        .expect("the operation is asked for");
+    assert!(
+        screen
+            .get_by_label("資格情報を読み直す")
+            .accesskit_node()
+            .is_disabled(),
+        "busy while the end is unknown to the screen"
+    );
+    answer(&mut screen, query.tag, not_found());
+    screen.run_steps(4);
+    assert!(
+        screen
+            .query_all_by_label_contains("操作の結果を確認できませんでした")
+            .next()
+            .is_some()
+    );
+    assert!(
+        !screen
+            .get_by_label("資格情報を読み直す")
+            .accesskit_node()
+            .is_disabled()
+    );
+    // The credential status is read again: it shows what the save left.
+    let again = asked(&mut screen);
+    assert!(
+        again
+            .iter()
+            .any(|a| matches!(query_of(a), Query::Auth(AuthQuery::GetCredentialStatus {})))
+    );
+}
+
+#[test]
+fn a_login_the_restarted_core_does_not_know_is_dropped_as_unknown() {
+    let (mut screen, id) = waiting_login(true);
+    // The connection came back to a core that restarted meanwhile.
+    screen.state_mut().feature.reset();
+    let questions = asked(&mut screen);
+    let login = questions
+        .iter()
+        .find(|a| matches!(query_of(a), Query::Auth(AuthQuery::GetLogin { login_id }) if *login_id == id))
+        .expect("the login is asked for");
+    answer(&mut screen, login.tag, not_found());
+    let operation = questions
+        .iter()
+        .find(|a| {
+            matches!(query_of(a), Query::Auth(AuthQuery::GetAuthOperation { operation_id }) if *operation_id == id)
+        })
+        .expect("the operation is asked for");
+    answer(&mut screen, operation.tag, not_found());
+    screen.run_steps(4);
+    assert!(screen.query_by_label("ログインを取り消す").is_none());
+    assert!(
+        screen
+            .query_all_by_label_contains("操作の結果を確認できませんでした")
+            .next()
+            .is_some()
+    );
+    // The status is read again, and a new login can be started.
+    let status = questions
+        .iter()
+        .chain(asked(&mut screen).iter())
+        .find(|a| matches!(query_of(a), Query::Auth(AuthQuery::GetCredentialStatus {})))
+        .map(|a| a.tag)
+        .expect("the status is asked for");
+    answer(&mut screen, status, status_reply());
+    screen.get_by_label("Claude でログイン");
+}
+
+#[test]
+fn a_pending_reply_arriving_after_the_end_does_not_make_the_screen_busy_again() {
+    let mut screen = loaded();
+    type_secret(&mut screen, "value");
+    screen.get_by_label("キーを保存").click();
+    let sent = asked(&mut screen);
+    let AuthCommand::SaveApiKey(save) = auth_command(&sent[0]).clone() else {
+        panic!("a key save was expected");
+    };
+    screen
+        .state_mut()
+        .feature
+        .event(&UiEvent::Auth(AuthEvent::AuthOperationCompleted {
+            operation: op_view(
+                &save.operation_id,
+                AuthOperationKind::SaveApiKey,
+                OperationState::Ready,
+            ),
+        }));
+    answer(
+        &mut screen,
+        sent[0].tag,
+        operation_reply(op_view(
+            &save.operation_id,
+            AuthOperationKind::SaveApiKey,
+            OperationState::Pending,
+        )),
+    );
+    screen.run_steps(4);
+    assert!(
+        !screen
+            .get_by_label("資格情報を読み直す")
+            .accesskit_node()
+            .is_disabled()
+    );
+    screen.get_by_label("API キーを保存しました。");
+}
+
+#[test]
+fn a_cursor_profile_takes_a_typed_api_key_next_to_its_login() {
+    let mut screen = screen(Box::<AuthFeature>::default(), None);
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        first[0].tag,
+        FeatureReply::Query(Ok(QueryReply::Auth(AuthReply::Status(AuthStatus {
+            revision: Revision(1),
+            slots: vec![slot(
+                "cursor",
+                keyring("cursor-acct"),
+                CredentialState::Missing,
+                Some(LoginMethod::Cursor),
+            )],
+        })))),
+    );
+    screen.get_by_label("Cursor でログイン");
+    assert_eq!(screen.get_all_by_role(Role::PasswordInput).count(), 1);
+    type_secret(&mut screen, SECRET);
+    screen.get_by_label("キーを保存").click();
+    let sent = asked(&mut screen);
+    let [AuthCommand::SaveApiKey(save)] = commands(&sent)[..] else {
+        panic!("one key save was expected");
+    };
+    assert_eq!(save.profile, "cursor");
+    assert_eq!(save.value.expose(), SECRET);
+}

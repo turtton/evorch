@@ -34,12 +34,19 @@ use workbench_protocol::{
 
 const SENTINEL: &str = "SENTINEL-d41d8cd98f00b204";
 const STATE: &str = "state-1";
+/// The key the fake provider refuses.
+const REFUSED_KEY: &str = "refused-cursor-key";
 const CONFIG: &str = "version = 3\n\
 [providers.sub]\n\
 type = 'anthropic-subscription'\n\
 credential = { type = 'keyring', service = 'evorch', account = 'claude-acct' }\n\
 models = ['claude-test']\n\
 default_model = 'claude-test'\n\
+[providers.cur]\n\
+type = 'cursor'\n\
+credential = { type = 'keyring', service = 'evorch', account = 'cursor-acct' }\n\
+models = ['cursor-m']\n\
+default_model = 'cursor-m'\n\
 [providers.key]\n\
 type = 'openai-compatible'\n\
 base_url = 'https://llm.example.invalid/v1'\n\
@@ -121,6 +128,22 @@ struct Probe {
     hold_complete: AtomicBool,
     loopback: Mutex<Option<oneshot::Sender<String>>>,
     begun: AtomicUsize,
+    released: AtomicUsize,
+    /// Holds `begin` (as a port bind or a slow provider would).
+    begin_held: Mutex<bool>,
+    begin_released: Condvar,
+    begin_entered: Notify,
+}
+
+impl Probe {
+    fn hold_begin(&self) {
+        *self.begin_held.lock().unwrap() = true;
+    }
+
+    fn release_begin(&self) {
+        *self.begin_held.lock().unwrap() = false;
+        self.begin_released.notify_all();
+    }
 }
 
 struct FakeFlow {
@@ -163,6 +186,11 @@ impl LoginFlow for FakeFlow {
         })
     }
 
+    fn release(&self) -> BoxFuture<'_, ()> {
+        self.probe.released.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
+    }
+
     fn complete(&self, callback: Callback) -> BoxFuture<'_, Result<Option<u64>, LoginFailure>> {
         Box::pin(async move {
             self.probe
@@ -191,12 +219,36 @@ struct FakeStarter {
 }
 
 impl LoginStarter for FakeStarter {
+    fn exchange_api_key(
+        &self,
+        method: LoginMethod,
+        account: &str,
+        key: Secret,
+    ) -> BoxFuture<'_, Result<Option<u64>, LoginFailure>> {
+        let account = account.to_owned();
+        Box::pin(async move {
+            if method != LoginMethod::Cursor || key.expose() == REFUSED_KEY {
+                return Err(LoginFailure::Rejected);
+            }
+            self.store
+                .set(&account, &Secret::from("exchanged-session".to_owned()))
+                .map_err(|_| LoginFailure::StoreUnavailable)?;
+            Ok(Some(1_900_000_000))
+        })
+    }
+
     fn begin(
         &self,
         _method: LoginMethod,
         account: &str,
     ) -> Result<Arc<dyn LoginFlow>, LoginFailure> {
         self.probe.begun.fetch_add(1, Ordering::SeqCst);
+        self.probe.begin_entered.notify_one();
+        let mut held = self.probe.begin_held.lock().unwrap();
+        while *held {
+            held = self.probe.begin_released.wait(held).unwrap();
+        }
+        drop(held);
         let (sender, receiver) = oneshot::channel();
         *self.probe.loopback.lock().unwrap() = Some(sender);
         Ok(Arc::new(FakeFlow {
@@ -265,7 +317,10 @@ impl Fixture {
             .map(|reply| *reply.result.expect("a result"))
     }
 
-    fn start_login(&mut self, id: &str) {
+    /// Starts the login and returns once its session exists: the core announces
+    /// that with `login_changed`, and the first section of the login (reading the
+    /// profile, preparing the flow) has run by then.
+    async fn start_login(&mut self, id: &str) {
         match self
             .run(AuthCommand::StartLogin(StartLogin {
                 operation_id: op(id),
@@ -278,6 +333,14 @@ impl Fixture {
                 assert_eq!(view.kind, AuthOperationKind::Login);
             }
             other => panic!("{other:?}"),
+        }
+        loop {
+            let envelope = self.events.recv().await.expect("the subscription is open");
+            if let UiEvent::Auth(AuthEvent::LoginChanged { login_id }) = envelope.event
+                && login_id == op(id)
+            {
+                return;
+            }
         }
     }
 
@@ -345,7 +408,7 @@ fn save_key(id: &str, profile: &str, value: &str) -> AuthCommand {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_planned_restart_during_the_login_wait_seals_without_waiting_for_the_login() {
     let mut f = Fixture::new();
-    f.start_login("login-1");
+    f.start_login("login-1").await;
     let gate = f.gate();
     // The wait for the person holds no restart permit, so admission drains
     // while the login still waits for an answer.
@@ -371,7 +434,7 @@ async fn a_planned_restart_during_the_login_wait_seals_without_waiting_for_the_l
 #[tokio::test(flavor = "multi_thread")]
 async fn a_shutdown_during_the_login_wait_settles_it_as_cancelled_shutdown() {
     let mut f = Fixture::new();
-    f.start_login("login-1");
+    f.start_login("login-1").await;
     let gate = f.gate();
     gate.drained().await;
     assert!(gate.transition(1, HostRestartPhase::ShuttingDown));
@@ -383,7 +446,7 @@ async fn a_shutdown_during_the_login_wait_settles_it_as_cancelled_shutdown() {
 #[tokio::test]
 async fn a_callback_that_meets_a_closed_gate_writes_nothing() {
     let mut f = Fixture::new();
-    f.start_login("login-1");
+    f.start_login("login-1").await;
     // Single-threaded: the login task has not run since the command, so the
     // callback and the restart arrive together.
     assert_eq!(
@@ -400,7 +463,7 @@ async fn a_callback_that_meets_a_closed_gate_writes_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pasted_input_is_checked_against_the_login_and_used_once() {
     let mut f = Fixture::new();
-    f.start_login("login-1");
+    f.start_login("login-1").await;
     assert!(f.login("login-1").accepts_input);
     assert!(f.login("login-1").authorize_url.is_some());
 
@@ -447,7 +510,7 @@ async fn a_pasted_input_is_checked_against_the_login_and_used_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn of_the_loopback_and_a_paste_only_the_first_is_committed() {
     let mut f = Fixture::new();
-    f.start_login("login-1");
+    f.start_login("login-1").await;
     f.probe.hold_complete.store(true, Ordering::SeqCst);
     let loopback = f.probe.loopback.lock().unwrap().take().unwrap();
     loopback.send("from-loopback".into()).unwrap();
@@ -475,7 +538,7 @@ async fn of_the_loopback_and_a_paste_only_the_first_is_committed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelling_a_login_settles_it_and_frees_the_profile() {
     let mut f = Fixture::new();
-    f.start_login("login-1");
+    f.start_login("login-1").await;
     let other = f.run(AuthCommand::StartLogin(StartLogin {
         operation_id: op("login-2"),
         profile: "sub".into(),
@@ -495,6 +558,8 @@ async fn cancelling_a_login_settles_it_and_frees_the_profile() {
     assert_eq!(again.disposition, CommandDisposition::AlreadyApplied);
     assert_eq!(f.probe.begun.load(Ordering::SeqCst), 1);
 
+    // The cancel is accepted at once; the login task settles it once the
+    // flow gave back what it held.
     match f
         .run(AuthCommand::CancelLogin(CancelLogin {
             login_id: op("login-1"),
@@ -502,12 +567,19 @@ async fn cancelling_a_login_settles_it_and_frees_the_profile() {
         .unwrap()
     {
         CommandResult::Auth(AuthResult::Operation(view)) => {
-            assert_eq!(view.operation.state, cancelled(CancelReason::Requested));
+            assert_eq!(view.kind, AuthOperationKind::Login);
         }
         other => panic!("{other:?}"),
     }
+    let settled = f.settled("login-1").await;
+    assert_eq!(settled.operation.state, cancelled(CancelReason::Requested));
     assert_eq!(f.login("login-1").phase, LoginPhase::Settled);
-    f.start_login("login-3");
+    assert_eq!(
+        f.probe.released.load(Ordering::SeqCst),
+        1,
+        "the flow was released before the outcome"
+    );
+    f.start_login("login-3").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -582,7 +654,7 @@ async fn no_secret_leaves_the_credential_store() {
     let session = SessionId::new("session").unwrap();
     let mut seen: Vec<(&str, String)> = Vec::new();
 
-    f.start_login("login-1");
+    f.start_login("login-1").await;
     let request = RequestId::new("request-1").unwrap();
     let reply = f
         .host
@@ -661,7 +733,7 @@ async fn no_secret_leaves_the_credential_store() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stalled_credential_store_does_not_stop_the_other_clients() {
     let mut f = Fixture::new();
-    f.start_login("login-1");
+    f.start_login("login-1").await;
     f.store.hold();
     f.run(save_key("save-1", "key", "value")).unwrap();
     f.store.entered.notified().await;
@@ -691,4 +763,125 @@ async fn a_stalled_credential_store_does_not_stop_the_other_clients() {
         f.settled("save-1").await.operation.state,
         OperationState::Ready
     );
+}
+
+/// The handler of `start_login` looks at memory only: preparing the flow (a
+/// port bound, a provider reached) runs on the operation task, and the permit
+/// the command was accepted with is kept until the login waits for the person.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_login_preparation_does_not_block_the_handler_and_keeps_the_permit() {
+    let mut f = Fixture::new();
+    f.probe.hold_begin();
+    // Returns while `begin` is still held: were it called by the handler,
+    // this would never return.
+    f.run(AuthCommand::StartLogin(StartLogin {
+        operation_id: op("login-1"),
+        profile: "sub".into(),
+    }))
+    .unwrap();
+    f.probe.begin_entered.notified().await;
+    let again = f.run(AuthCommand::StartLogin(StartLogin {
+        operation_id: op("login-2"),
+        profile: "sub".into(),
+    }));
+    assert_eq!(
+        again.unwrap_err().code,
+        ErrorCode::Conflict,
+        "a login being prepared already holds its profile"
+    );
+    // The session does not exist yet, and the permit is still held: a planned
+    // restart cannot drain while the preparation runs.
+    assert!(matches!(
+        f.host.handle_query(
+            &SessionId::new("session").unwrap(),
+            &Query::Auth(AuthQuery::GetLogin { login_id: op("login-1") }),
+        ),
+        Err(error) if error.code == ErrorCode::NotFound
+    ));
+    f.probe.release_begin();
+    loop {
+        let envelope = f.events.recv().await.unwrap();
+        if let UiEvent::Auth(AuthEvent::LoginChanged { login_id }) = envelope.event
+            && login_id == op("login-1")
+        {
+            break;
+        }
+    }
+    assert_eq!(f.login("login-1").phase, LoginPhase::Waiting);
+    // Waiting for the person holds no permit any more.
+    f.gate().drained().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_during_the_preparation_ends_the_login_without_waiting_for_the_person() {
+    let mut f = Fixture::new();
+    f.probe.hold_begin();
+    f.run(AuthCommand::StartLogin(StartLogin {
+        operation_id: op("login-1"),
+        profile: "sub".into(),
+    }))
+    .unwrap();
+    f.probe.begin_entered.notified().await;
+    f.run(AuthCommand::CancelLogin(CancelLogin {
+        login_id: op("login-1"),
+    }))
+    .unwrap();
+    f.probe.release_begin();
+    let settled = f.settled("login-1").await;
+    assert_eq!(settled.operation.state, cancelled(CancelReason::Requested));
+    assert_eq!(f.probe.released.load(Ordering::SeqCst), 1);
+    assert_eq!(f.login("login-1").phase, LoginPhase::Settled);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_for_a_profile_without_a_login_fails_as_an_operation() {
+    let mut f = Fixture::new();
+    for (id, profile, code) in [
+        ("login-1", "envkey", ErrorCode::InvalidRequest),
+        ("login-2", "missing", ErrorCode::NotFound),
+    ] {
+        f.run(AuthCommand::StartLogin(StartLogin {
+            operation_id: op(id),
+            profile: profile.into(),
+        }))
+        .unwrap();
+        let settled = f.settled(id).await;
+        assert_eq!(settled.operation.state, OperationState::Failed { code });
+    }
+    assert_eq!(f.probe.begun.load(Ordering::SeqCst), 0);
+}
+
+/// Cursor also signs in with a dashboard API key: the core hands the key to the
+/// provider's own exchange and stores the result as a login is stored; the key
+/// itself is neither stored nor shown anywhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cursor_api_key_is_exchanged_and_stored_as_a_login() {
+    let mut f = Fixture::new();
+    let typed = "typed-cursor-dashboard-key";
+    f.run(save_key("cursor-1", "cur", typed)).unwrap();
+    let settled = f.settled("cursor-1").await;
+    assert_eq!(settled.operation.state, OperationState::Ready);
+    assert_eq!(
+        f.store.value("cursor-acct").as_deref(),
+        Some("exchanged-session")
+    );
+    assert!(!format!("{settled:?}").contains(typed));
+    match f.query(AuthQuery::GetCredentialStatus {}) {
+        AuthReply::Status(status) => {
+            let slot = status.slots.iter().find(|s| s.profile == "cur").unwrap();
+            assert!(matches!(slot.state, CredentialState::Present { .. }));
+            assert_eq!(slot.login, Some(LoginMethod::Cursor));
+        }
+        other => panic!("{other:?}"),
+    }
+    // A provider that refuses the key leaves nothing stored.
+    f.store.values.lock().unwrap().clear();
+    f.run(save_key("cursor-2", "cur", REFUSED_KEY)).unwrap();
+    assert_eq!(
+        f.settled("cursor-2").await.operation.state,
+        OperationState::Failed {
+            code: ErrorCode::InvalidRequest
+        }
+    );
+    assert_eq!(f.store.value("cursor-acct"), None);
 }

@@ -5,8 +5,9 @@
 //! The screen never writes a file. It sends commands that quote the revision
 //! the draft was made from, so a save over a newer file is refused by the core
 //! (`stale_revision`) and the draft is kept. *Saved* and *applied* are shown
-//! apart: a save does not change a run that already sent a request, and only
-//! `reload_models` makes later runs use it.
+//! apart: a save changes nothing a run already sent, and only
+//! `reload_models` makes the requests that follow (of a running conversation
+//! too) use it.
 //!
 //! As in the other areas an event only says something changed; the snapshot or
 //! the operation is then asked for again, and so is every operation whose end
@@ -33,7 +34,7 @@ use workbench_protocol::{
 #[derive(Debug, Clone)]
 enum Pending {
     Snapshot,
-    Operation,
+    Operation(OperationId),
     Command(OperationId),
 }
 
@@ -61,6 +62,12 @@ pub struct SettingsFeature {
     operations: BTreeMap<OperationId, SettingsOperationView>,
     /// Operations whose end is to be asked for.
     to_check: BTreeSet<OperationId>,
+    /// Operations the core no longer knows while their end was not seen (it
+    /// restarted): their result is unknown, and they no longer keep the screen
+    /// busy. The snapshot shows what they left in the file.
+    lost: BTreeSet<OperationId>,
+    /// The text each running whole-document save was sent with.
+    saving: BTreeMap<OperationId, String>,
     status: String,
     stale: bool,
     snapshot_in_flight: bool,
@@ -75,6 +82,8 @@ impl Default for SettingsFeature {
             draft: None,
             operations: BTreeMap::new(),
             to_check: BTreeSet::new(),
+            lost: BTreeSet::new(),
+            saving: BTreeMap::new(),
             status: String::new(),
             stale: true,
             snapshot_in_flight: false,
@@ -133,32 +142,80 @@ impl SettingsFeature {
 
     fn running(&self) -> bool {
         self.operations
-            .values()
-            .any(|view| !view.operation.state.is_final())
+            .iter()
+            .any(|(id, view)| !view.operation.state.is_final() && !self.lost.contains(id))
+    }
+
+    /// The core answers `not_found` for an operation whose end was not seen.
+    /// The save may or may not have been written: the busy state is cleared,
+    /// the draft is kept as it is, and the snapshot is read again (a draft
+    /// made from a revision the file has left is then offered a re-read, not
+    /// replaced).
+    fn operation_lost(&mut self, id: &OperationId) {
+        if !self.operations.contains_key(id) {
+            return;
+        }
+        self.lost.insert(id.clone());
+        self.saving.remove(id);
+        self.stale = true;
+        self.status =
+            "操作の結果を確認できませんでした（コアが再起動した可能性があります）。保存済みの内容を確認してください。編集中の内容は残してあります。"
+                .into();
+    }
+
+    /// A whole-document save was written: the draft is dropped only when it is
+    /// what was sent. Text typed since stays as the draft, now measured
+    /// against what was saved.
+    fn saved_document(&mut self, id: &OperationId, saved: Option<SettingsRevision>) {
+        let Some(sent) = self.saving.remove(id) else {
+            return;
+        };
+        match (&mut self.draft, saved) {
+            (Some(draft), Some(revision)) if draft.text != sent => {
+                draft.base_text = sent;
+                draft.based_on = revision;
+            }
+            (Some(draft), None) if draft.text != sent => {
+                // The revision is not known: the draft cannot be saved over
+                // the file it was made from, and is kept to be copied.
+                draft.base_text = sent;
+            }
+            _ => self.draft = None,
+        }
     }
 
     /// Record what the core says of an operation of this screen.
     fn operation_update(&mut self, view: SettingsOperationView) {
         let id = view.operation.operation_id.clone();
-        if !self.operations.contains_key(&id) {
+        let Some(known) = self.operations.get(&id) else {
+            return;
+        };
+        // An end is final: an older reply arriving after the completion
+        // (still `Pending`) does not make the screen busy again.
+        if known.operation.state.is_final() && !view.operation.state.is_final() {
             return;
         }
         let state = view.operation.state;
         let kind = view.kind;
         let message = view.message.clone();
-        self.operations.insert(id, view);
+        let revision = view.revision.clone();
+        self.operations.insert(id.clone(), view);
+        self.lost.remove(&id);
+        if state.is_final() && !matches!(state, OperationState::Ready) {
+            self.saving.remove(&id);
+        }
         match state {
             OperationState::Pending => {}
             OperationState::Ready => {
                 self.status = match kind {
                     SettingsOperationKind::ReloadModels => {
-                        "モデルを再読込しました。以降に始まる実行から反映されます。".into()
+                        "モデルを再読込しました。以降のリクエストから反映されます（送信済みの内容は変わりません）。".into()
                     }
                     SettingsOperationKind::Refresh => String::new(),
                     _ => "保存しました。反映するにはモデルを再読込してください。".into(),
                 };
                 if kind == SettingsOperationKind::SaveDocument {
-                    self.draft = None;
+                    self.saved_document(&id, revision);
                 }
                 self.stale = true;
             }
@@ -250,7 +307,7 @@ impl Feature for SettingsFeature {
         self.pending
             .retain(|_, pending| matches!(pending, Pending::Command(_)));
         for (id, view) in &self.operations {
-            if !view.operation.state.is_final() {
+            if !view.operation.state.is_final() && !self.lost.contains(id) {
                 self.to_check.insert(id.clone());
             }
         }
@@ -286,11 +343,12 @@ impl Feature for SettingsFeature {
                     }
                 }
             }
-            (Pending::Operation, FeatureReply::Query(result)) => match result {
+            (Pending::Operation(id), FeatureReply::Query(result)) => match result {
                 Ok(QueryReply::Settings(SettingsReply::Operation(view))) => {
                     self.operation_update(view);
                 }
                 Ok(_) => {}
+                Err(error) if error.code == Some(ErrorCode::NotFound) => self.operation_lost(&id),
                 Err(error) => self.status = error.message,
             },
             (Pending::Command(id), FeatureReply::Command(result)) => match result {
@@ -309,6 +367,7 @@ impl Feature for SettingsFeature {
                         self.to_check.insert(id);
                     } else {
                         self.operations.remove(&id);
+                        self.saving.remove(&id);
                     }
                 }
             },
@@ -324,7 +383,7 @@ impl Feature for SettingsFeature {
             ctx.query(tag, Query::Settings(SettingsQuery::GetSettingsSnapshot {}));
         }
         for id in std::mem::take(&mut self.to_check) {
-            let tag = self.tag(Pending::Operation);
+            let tag = self.tag(Pending::Operation(id.clone()));
             ctx.query(
                 tag,
                 Query::Settings(SettingsQuery::GetSettingsOperation { operation_id: id }),
@@ -436,6 +495,7 @@ impl Feature for SettingsFeature {
         }
         if let Some((text, expected_revision)) = save {
             let operation_id = new_operation();
+            self.saving.insert(operation_id.clone(), text.clone());
             self.send(
                 ctx,
                 SettingsCommand::SaveDocument(SaveDocument {

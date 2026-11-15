@@ -39,6 +39,11 @@ accepted at once and settle through `settings_operation_completed` /
 | Contract | Where it is held | Where it is tested |
 |---|---|---|
 | R1: a login wait holds no restart permit; a planned restart or shutdown ends it as `Cancelled(Restart \| Shutdown)`; the result is written only after entering the gate again | `areas/auth.rs`, `areas/auth/login.rs` | `workbench-host/tests/auth_login.rs` (a restart requested during the wait seals without the login, and the login ends settled) |
+| A login's preparation (reading the profile, binding the callback port) runs in the tracked operation task, the handler only looks at memory, and the accepted permit is held until the login waits for a person | `areas/auth.rs`, `areas/auth/login.rs` | `auth_login.rs` (a held preparation does not block the handler and keeps the profile; a cancel during it ends the login) |
+| Whatever way a login ends, its callback listener and flow are released before the outcome is written | `areas/auth/provider_logins.rs` (`LoginFlow::release`) | `auth_login.rs`, `provider_logins.rs` unit tests (real listeners are bound again after the release) |
+| Cursor signs in with a dashboard API key through the provider's own exchange; the key is never stored | `areas/auth.rs` (`LoginStarter::exchange_api_key`) | `auth_login.rs` (`a_cursor_api_key_is_exchanged_and_stored_as_a_login`) |
+| `applied_revision` is never newer than the file the reload hook composed from, and a slow re-read never replaces a newer snapshot; every change is announced | `areas/settings.rs` | `settings_save.rs` (a save during a held reload; overlapping saves and reloads) |
+| An operation the restarted core does not know is *unknown*, not running: the screen is not busy for ever and the draft is kept; text typed while a save runs is not discarded when it ends | `gui/src/core_client/features/{settings,auth}.rs` | the feature tests of both |
 | `core.restart.targets` cannot be added, removed, repointed or omitted by a settings save, whole or partial, judged inside the revision lock | `areas/settings/store.rs` on `config::reject_restart_target_changes` | `workbench-host/tests/settings_save.rs`; through the real desktop screen and the real Web HTTP API in `core-client-e2e/tests/settings_restart_targets.rs` |
 | A save never rewrites a sent provider prefix; a reload replaces the model of the projects and the next request still extends what was sent | `bootstrap` reload hook (`SwitchableModel::replace`) | `evorch-core/tests/core_settings_cache.rs` (the replacement is observed at a second endpoint) |
 
@@ -61,7 +66,11 @@ are the commands where that matters most, so:
   form the parser reads differently does not pass; an omission counts as a
   removal. It runs under the same lock as the revision comparison and the write.
 - **A save is checked as the core would load it.** `save_document` accepts only
-  text the core's own strict loader accepts; the revision is compared in the
+  text the core's own strict loader (`Config::load_strict`, the load the core
+  starts with: an unknown field or a wrong type is refused, not dropped) accepts.
+  A typed save (`save_provider`, `delete_provider`) does not edit a file that
+  loader already refuses, and puts back a result it refuses. A whole save keeps
+  the mode of the file it replaces. The revision is compared in the
   same critical section as the write, so two clients saving one revision end as
   one success and one `stale_revision`.
 - **Secrets are write-only.** An API key travels once inside `save_api_key` and
@@ -73,7 +82,10 @@ are the commands where that matters most, so:
   listens on a loopback port of the machine that runs the core, so a person on a
   phone finishes it by pasting the redirect address (or code) into the client;
   the pasted text is checked against the `state` the login started with and is
-  accepted once, whichever of the listener and the paste arrives first. Neither
+  accepted once, whichever of the listener and the paste arrives first. The
+  listener is released when the login ends, however it ends. Cursor's API-key
+  sign-in goes through `save_api_key` and the provider's exchange; the key is
+  not stored, only the session the exchange returns. Neither
   the callback nor the pasted text is logged or stored. Only the owner of the
   Web session's network position can finish a login, so a login started over the
   Web is as trusted as Tailscale's boundary and no more.

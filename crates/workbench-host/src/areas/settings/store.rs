@@ -157,6 +157,10 @@ impl ConfigStore {
             .map_err(|_| SaveError::Io("the configuration file is not text".into()))?;
         let effective = self.compose(text)?;
         self.guard_restart_targets(&current_text, text, &effective)?;
+        // The core starts with the strict load, which refuses what `compose`
+        // only drops (an unknown field): a file that passed only the lenient
+        // one would be saved and then not start.
+        self.strict_check(text)?;
         self.write(text)?;
         Ok(revision_of(text.as_bytes()))
     }
@@ -169,6 +173,15 @@ impl ConfigStore {
         input: &ProviderInput,
     ) -> Result<SettingsRevision, SaveError> {
         self.check_revision(expected)?;
+        self.typed_save(|| self.save_provider_unchecked(original_name, input))?;
+        self.revision()
+    }
+
+    fn save_provider_unchecked(
+        &self,
+        original_name: Option<&str>,
+        input: &ProviderInput,
+    ) -> Result<(), ConfigError> {
         let options = self.options();
         let context = config::LayeredSaveContext::new(&options);
         let path = self.path();
@@ -260,7 +273,7 @@ impl ConfigStore {
                 original_name,
             )?,
         }
-        self.revision()
+        Ok(())
     }
 
     pub(super) fn delete_provider(
@@ -269,9 +282,58 @@ impl ConfigStore {
         name: &str,
     ) -> Result<SettingsRevision, SaveError> {
         self.check_revision(expected)?;
-        let options = self.options();
-        config::LayeredSaveContext::new(&options).delete_provider(&self.path(), name)?;
+        self.typed_save(|| {
+            let options = self.options();
+            config::LayeredSaveContext::new(&options).delete_provider(&self.path(), name)
+        })?;
         self.revision()
+    }
+
+    /// A typed save of the configuration crate, held to the strict load the
+    /// core starts with. A file that does not pass it already is not edited
+    /// (the result would not start either); a result that does not pass is
+    /// put back as it was.
+    fn typed_save(&self, save: impl FnOnce() -> Result<(), ConfigError>) -> Result<(), SaveError> {
+        let original = self.read()?;
+        let original_text = String::from_utf8(original)
+            .map_err(|_| SaveError::Io("the configuration file is not text".into()))?;
+        self.strict_check(&original_text)?;
+        save()?;
+        let saved = self.read()?;
+        let checked = String::from_utf8(saved)
+            .map_err(|_| SaveError::Io("the configuration file is not text".into()))
+            .and_then(|text| self.strict_check(&text));
+        if let Err(error) = checked {
+            self.write(&original_text)?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// `text` as the file, loaded the way the core loads its configuration:
+    /// strictly, with the drop-ins and the project layer the real directory
+    /// has. Composed in a scratch directory so the file itself is not touched.
+    fn strict_check(&self, text: &str) -> Result<(), SaveError> {
+        let scratch = Scratch::new()?;
+        let io = |_| SaveError::Io("the configuration could not be checked".into());
+        std::fs::write(scratch.path().join(CONFIG_FILE), text).map_err(io)?;
+        let drop_ins = self.dir.join("config.d");
+        if let Ok(entries) = std::fs::read_dir(&drop_ins) {
+            let target = scratch.path().join("config.d");
+            std::fs::create_dir(&target).map_err(io)?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "toml") && path.is_file() {
+                    std::fs::copy(&path, target.join(entry.file_name())).map_err(io)?;
+                }
+            }
+        }
+        let options = LoadOptions {
+            user_config_dir: Some(scratch.path().to_path_buf()),
+            ..self.options()
+        };
+        Config::load_strict(&options)?;
+        Ok(())
     }
 
     fn check_revision(&self, expected: &SettingsRevision) -> Result<(), SaveError> {
@@ -328,6 +390,15 @@ impl ConfigStore {
             .create_new(true)
             .open(temporary)
             .map_err(io)?;
+        // The replacement keeps the mode of the file it replaces: a file made
+        // readable by its owner only does not become readable by others.
+        if let Ok(existing) = std::fs::metadata(&path)
+            && let Err(error) = file.set_permissions(existing.permissions())
+        {
+            drop(file);
+            let _ = std::fs::remove_file(temporary);
+            return Err(io(error));
+        }
         let written = file
             .write_all(text.as_bytes())
             .and_then(|()| file.sync_all())
@@ -339,6 +410,33 @@ impl ConfigStore {
             let _ = std::fs::remove_file(temporary);
         }
         written.map_err(io)
+    }
+}
+
+/// A directory for one check, removed afterwards.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Result<Self, SaveError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "evorch-settings-check-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path)
+            .map_err(|_| SaveError::Io("the configuration could not be checked".into()))?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

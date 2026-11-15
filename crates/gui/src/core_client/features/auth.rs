@@ -36,7 +36,7 @@ use workbench_protocol::{
 #[derive(Debug, Clone)]
 enum Pending {
     Status,
-    Operation,
+    Operation(OperationId),
     Login(OperationId),
     Command(Sent),
 }
@@ -59,6 +59,10 @@ pub struct AuthFeature {
     status: Option<AuthStatus>,
     operations: BTreeMap<OperationId, AuthOperationView>,
     to_check: BTreeSet<OperationId>,
+    /// Operations the core no longer knows (it restarted, or forgot them)
+    /// while their end was not seen: what became of them is not known, and
+    /// they no longer keep the screen busy.
+    lost: BTreeSet<OperationId>,
     session: Option<Session>,
     /// What is being typed into the box of the login link.
     paste: String,
@@ -79,6 +83,7 @@ impl Default for AuthFeature {
             status: None,
             operations: BTreeMap::new(),
             to_check: BTreeSet::new(),
+            lost: BTreeSet::new(),
             session: None,
             paste: String::new(),
             keys: BTreeMap::new(),
@@ -156,9 +161,29 @@ impl AuthFeature {
     }
 
     fn running(&self) -> bool {
-        self.operations
-            .values()
-            .any(|view| !view.operation.state.is_final() && view.kind != AuthOperationKind::Login)
+        self.operations.iter().any(|(id, view)| {
+            !view.operation.state.is_final()
+                && view.kind != AuthOperationKind::Login
+                && !self.lost.contains(id)
+        })
+    }
+
+    /// The core answers `not_found` for an operation whose end was not seen.
+    /// Its result is unknown, not failed: the busy state is cleared, a login
+    /// session of it is dropped, and the credential status is read again, which
+    /// shows what the operation left behind.
+    fn operation_lost(&mut self, id: &OperationId) {
+        if !self.operations.contains_key(id) {
+            return;
+        }
+        self.lost.insert(id.clone());
+        if self.session.as_ref().is_some_and(|s| &s.id == id) {
+            self.session = None;
+            self.paste.clear();
+        }
+        self.status_stale = true;
+        self.message =
+            "操作の結果を確認できませんでした（コアが再起動した可能性があります）。資格情報の状態を確認してください。".into();
     }
 
     fn login_active(&self) -> bool {
@@ -167,13 +192,19 @@ impl AuthFeature {
 
     fn operation_update(&mut self, view: AuthOperationView) {
         let id = view.operation.operation_id.clone();
-        if !self.operations.contains_key(&id) {
+        let Some(known) = self.operations.get(&id) else {
+            return;
+        };
+        // An end is final: an older reply arriving after the completion
+        // (still `Pending`) does not make the screen busy again.
+        if known.operation.state.is_final() && !view.operation.state.is_final() {
             return;
         }
         let state = view.operation.state;
         let kind = view.kind;
         let detail = view.message.clone();
         self.operations.insert(id.clone(), view);
+        self.lost.remove(&id);
         if !state.is_final() {
             return;
         }
@@ -258,7 +289,9 @@ impl AuthFeature {
                     ui.label(format!("環境変数 {var} から読み込みます。"));
                 }
                 CredentialRef::Keyring { .. } => {
-                    if slot.login.is_none() {
+                    // A Cursor profile signs in with a dashboard API key too (the
+                    // core exchanges it); the other logins have no key to type.
+                    if slot.login.is_none() || slot.login == Some(LoginMethod::Cursor) {
                         let typed = self.keys.entry(slot.profile.clone()).or_default();
                         ui.add(
                             egui::TextEdit::singleline(typed)
@@ -398,7 +431,7 @@ impl Feature for AuthFeature {
         self.pending
             .retain(|_, pending| matches!(pending, Pending::Command(_)));
         for (id, view) in &self.operations {
-            if !view.operation.state.is_final() {
+            if !view.operation.state.is_final() && !self.lost.contains(id) {
                 self.to_check.insert(id.clone());
             }
         }
@@ -435,9 +468,10 @@ impl Feature for AuthFeature {
                     }
                 }
             }
-            (Pending::Operation, FeatureReply::Query(result)) => match result {
+            (Pending::Operation(id), FeatureReply::Query(result)) => match result {
                 Ok(QueryReply::Auth(AuthReply::Operation(view))) => self.operation_update(view),
                 Ok(_) => {}
+                Err(error) if error.code == Some(ErrorCode::NotFound) => self.operation_lost(&id),
                 Err(error) => self.message = error.message,
             },
             (Pending::Login(id), FeatureReply::Query(result)) => {
@@ -453,6 +487,9 @@ impl Feature for AuthFeature {
                         }
                     }
                     Ok(_) => {}
+                    Err(error) if error.code == Some(ErrorCode::NotFound) => {
+                        self.operation_lost(&id);
+                    }
                     Err(error) => {
                         self.message = error.message;
                         self.to_check.insert(id);
@@ -531,7 +568,7 @@ impl Feature for AuthFeature {
             }
         }
         for id in std::mem::take(&mut self.to_check) {
-            let tag = self.tag(Pending::Operation);
+            let tag = self.tag(Pending::Operation(id.clone()));
             ctx.query(
                 tag,
                 Query::Auth(AuthQuery::GetAuthOperation { operation_id: id }),

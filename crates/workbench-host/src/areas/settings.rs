@@ -7,8 +7,9 @@
 //! lock, together with the restart-target guard and the write, so two saves
 //! quoting the same revision end as one success and one `stale_revision`.
 //! *Saved* (the file) and *applied* (the models the runs use) are kept apart:
-//! a save does not touch a run that already sent a request, and
-//! `reload_models` recomposes only what starts afterwards.
+//! a save does not touch what a run already sent, and
+//! `reload_models` recomposes the models the requests that follow use (the next
+//! request of a running conversation included).
 //!
 //! All file work runs on the blocking pool inside an operation task; the
 //! handlers only look at the table. The task keeps the restart permit its
@@ -75,6 +76,11 @@ struct Inner {
 struct State {
     operations: Operations<SettingsOperationView>,
     snapshot: SettingsSnapshot,
+    /// Numbers the re-reads in the order they started, and the number of the
+    /// newest one whose result was published: a slower, older re-read never
+    /// replaces what a newer one already published.
+    reads_started: u64,
+    reads_published: u64,
 }
 
 /// How an accepted command stands.
@@ -165,6 +171,8 @@ impl SettingsArea {
                 state: Mutex::new(State {
                     operations: Operations::new(MAX_OPERATIONS),
                     snapshot,
+                    reads_started: 0,
+                    reads_published: 0,
                 }),
                 writer: Arc::default(),
             })),
@@ -387,9 +395,10 @@ impl Inner {
         }
     }
 
-    /// Recompose the models the next runs use from the saved file. A run that
-    /// already sent a request keeps its model: the replacement is a new
-    /// `SwitchableModel` target for what starts afterwards.
+    /// Recompose the models from the saved file. What a run already sent is
+    /// never rewritten: the replacement is a new `SwitchableModel` target that
+    /// the next request of every conversation goes to, and that request still
+    /// extends the prefix that was sent.
     async fn reload_models(&self) -> Result<Done, Failure> {
         let store = self.store.clone();
         let revision = Self::blocking(move || store.revision())
@@ -402,14 +411,22 @@ impl Inner {
                 code: ErrorCode::Internal,
                 message: sanitize(&message),
             })?;
-        let changed = {
+        // The revision was read before the hook ran, so what is marked as
+        // applied is never newer than what the hook composed from. A save that
+        // lands meanwhile stays "not applied" until the next reload.
+        let announce = {
             let mut state = lock(&self.state);
             let changed = state.snapshot.applied_revision != revision;
             state.snapshot.applied_revision = revision.clone();
-            changed
+            changed.then(|| state.snapshot.revision.clone())
         };
-        if changed {
-            self.reread().await?;
+        // Announced from the state itself: a re-read finding the applied
+        // revision already moved would see no change to tell anybody about.
+        if let Some(saved) = announce {
+            self.publish(SettingsEvent::SettingsSnapshotChanged {
+                revision: saved,
+                applied_revision: revision.clone(),
+            });
         }
         Ok(Done {
             revision: Some(revision),
@@ -417,13 +434,28 @@ impl Inner {
         })
     }
 
-    /// Read the file again into the snapshot and announce a change.
+    /// Read the file again into the snapshot and announce a change. Several
+    /// re-reads may overlap (a save finishing while a reload does): each is
+    /// numbered when it starts, an older result is dropped once a newer one
+    /// published, and the applied revision is always the one the state holds
+    /// when the result is published, not the one seen when the read began.
     async fn reread(&self) -> Result<(), Failure> {
-        let applied = lock(&self.state).snapshot.applied_revision.clone();
+        let (ticket, applied) = {
+            let mut state = lock(&self.state);
+            state.reads_started += 1;
+            (state.reads_started, state.snapshot.applied_revision.clone())
+        };
         let store = self.store.clone();
-        let fresh = Self::blocking(move || store.snapshot(&applied)).await?;
+        let mut fresh = Self::blocking(move || store.snapshot(&applied)).await?;
         let announce = {
             let mut state = lock(&self.state);
+            if ticket < state.reads_published {
+                return Ok(());
+            }
+            state.reads_published = ticket;
+            fresh
+                .applied_revision
+                .clone_from(&state.snapshot.applied_revision);
             let announce = (state.snapshot.revision != fresh.revision
                 || state.snapshot.applied_revision != fresh.applied_revision)
                 .then(|| (fresh.revision.clone(), fresh.applied_revision.clone()));

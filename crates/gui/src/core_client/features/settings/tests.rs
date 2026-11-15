@@ -242,7 +242,7 @@ fn a_finished_save_asks_for_the_reload_and_the_reload_reports_its_end() {
         OperationState::Ready,
     )));
     screen.run_steps(4);
-    screen.get_by_label("モデルを再読込しました。以降に始まる実行から反映されます。");
+    screen.get_by_label("モデルを再読込しました。以降のリクエストから反映されます（送信済みの内容は変わりません）。");
 }
 
 #[test]
@@ -274,7 +274,7 @@ fn a_lost_reply_or_a_reconnect_asks_for_the_operation_and_does_not_resend() {
             OperationState::Ready,
         ))))),
     );
-    screen.get_by_label("モデルを再読込しました。以降に始まる実行から反映されます。");
+    screen.get_by_label("モデルを再読込しました。以降のリクエストから反映されます（送信済みの内容は変わりません）。");
 
     // A running operation survives a new snapshot as a question, not a command.
     let mut screen = loaded('a');
@@ -287,4 +287,155 @@ fn a_lost_reply_or_a_reconnect_asks_for_the_operation_and_does_not_resend() {
         action.request,
         crate::core_client::features::FeatureRequest::Query(_)
     )));
+}
+
+fn not_found() -> FeatureReply {
+    FeatureReply::Query(Err(
+        FeatureError::new("the operation is unknown").with_code(ErrorCode::NotFound)
+    ))
+}
+
+#[test]
+fn a_save_whose_end_was_lost_with_a_core_restart_is_unknown_and_keeps_the_draft() {
+    let mut screen = loaded('a');
+    type_into_document(&mut screen, "# edited\n");
+    screen.get_by_label("保存").click();
+    let sent = asked(&mut screen);
+    let SettingsCommand::SaveDocument(save) = settings_command(&sent[0]).clone() else {
+        panic!("a document save was expected");
+    };
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+    );
+    screen.get_by_label("実行中…");
+    // The core restarted: it does not know the operation any more.
+    let asked_again = asked(&mut screen);
+    let query = asked_again
+        .iter()
+        .find(|action| {
+            matches!(
+                query_of(action),
+                Query::Settings(SettingsQuery::GetSettingsOperation { operation_id })
+                    if *operation_id == save.operation_id
+            )
+        })
+        .expect("the operation is asked for");
+    answer(&mut screen, query.tag, not_found());
+    screen.run_steps(4);
+
+    // Not busy for ever, the result said to be unknown, the edit still there
+    // and the snapshot read again to show what the file holds.
+    assert!(screen.query_by_label("実行中…").is_none());
+    assert!(
+        screen
+            .query_all_by_label_contains("操作の結果を確認できませんでした")
+            .next()
+            .is_some()
+    );
+    screen.get_by_role(Role::MultilineTextInput);
+    assert!(
+        !screen
+            .get_by_label("モデルを再読込")
+            .accesskit_node()
+            .is_disabled()
+    );
+    let again = asked(&mut screen);
+    let snapshot_query = again
+        .iter()
+        .find(|a| {
+            matches!(
+                query_of(a),
+                Query::Settings(SettingsQuery::GetSettingsSnapshot {})
+            )
+        })
+        .expect("the snapshot is read again");
+    // The file moved on (the lost save was written): the draft is not replaced.
+    answer(&mut screen, snapshot_query.tag, snapshot('b', 'a'));
+    screen.run_steps(4);
+    screen.get_by_role(Role::MultilineTextInput);
+    assert!(!screen.get_by_label("保存").accesskit_node().is_disabled());
+}
+
+#[test]
+fn text_typed_while_a_save_runs_is_not_discarded_when_the_save_ends() {
+    let mut screen = loaded('a');
+    type_into_document(&mut screen, "# first\n");
+    screen.get_by_label("保存").click();
+    let sent = asked(&mut screen);
+    let SettingsCommand::SaveDocument(save) = settings_command(&sent[0]).clone() else {
+        panic!("a document save was expected");
+    };
+    answer(
+        &mut screen,
+        sent[0].tag,
+        command_reply(view(
+            &save.operation_id,
+            SettingsOperationKind::SaveDocument,
+            OperationState::Pending,
+        )),
+    );
+    // The person keeps typing while the save runs.
+    type_into_document(&mut screen, "# second\n");
+    let mut done = view(
+        &save.operation_id,
+        SettingsOperationKind::SaveDocument,
+        OperationState::Ready,
+    );
+    done.revision = Some(revision('b'));
+    screen.state_mut().feature.event(&completed(done));
+    screen.run_steps(4);
+    // What was typed after the sent text is still there, and is the only
+    // change left to save, over the revision the save produced.
+    screen.get_by_role(Role::MultilineTextInput);
+    assert!(!screen.get_by_label("保存").accesskit_node().is_disabled());
+    let _ = asked(&mut screen);
+    screen.get_by_label("保存").click();
+    let next = asked(&mut screen);
+    let SettingsCommand::SaveDocument(second) = next
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.request,
+                crate::core_client::features::FeatureRequest::Command(_)
+            )
+        })
+        .map(settings_command)
+        .next()
+        .expect("a second save")
+        .clone()
+    else {
+        panic!("a document save was expected");
+    };
+    assert_eq!(second.expected_revision, revision('b'));
+    assert!(second.text.contains("# second"), "{:?}", second.text);
+}
+
+#[test]
+fn a_pending_reply_arriving_after_the_end_does_not_make_the_screen_busy_again() {
+    let mut screen = loaded('a');
+    screen.get_by_label("モデルを再読込").click();
+    let sent = asked(&mut screen);
+    let SettingsCommand::ReloadModels(reload) = settings_command(&sent[0]).clone() else {
+        panic!("a reload was expected");
+    };
+    // The end is announced before the answer to the command that started it.
+    screen.state_mut().feature.event(&completed(view(
+        &reload.operation_id,
+        SettingsOperationKind::ReloadModels,
+        OperationState::Ready,
+    )));
+    answer(
+        &mut screen,
+        sent[0].tag,
+        command_reply(view(
+            &reload.operation_id,
+            SettingsOperationKind::ReloadModels,
+            OperationState::Pending,
+        )),
+    );
+    screen.run_steps(4);
+    assert!(screen.query_by_label("実行中…").is_none());
+    screen.get_by_label("モデルを再読込しました。以降のリクエストから反映されます（送信済みの内容は変わりません）。");
 }

@@ -18,6 +18,7 @@ use workbench_protocol::{
     WorkbenchError,
     commands::{Command, CommandDisposition},
     errors::ErrorCode,
+    events::{Subscribe, SubscriptionScope, UiEvent},
     ids::{OperationId, SessionId},
     namespaces::settings::*,
     operation::OperationState,
@@ -382,4 +383,209 @@ async fn a_stalled_reload_does_not_stop_the_other_clients() {
             .state,
         OperationState::Ready
     );
+}
+
+/// The newest snapshot announcement once `completed` operations have ended.
+/// A snapshot is announced before the operation that caused it completes, so
+/// nothing later can follow the last completion.
+async fn last_announced(
+    events: &mut workbench_host::subscriptions::Subscription,
+    completed: usize,
+) -> Option<(SettingsRevision, SettingsRevision)> {
+    let (mut last, mut done) = (None, 0);
+    while done < completed {
+        match events.recv().await.expect("the subscription is open").event {
+            UiEvent::Settings(SettingsEvent::SettingsSnapshotChanged {
+                revision,
+                applied_revision,
+            }) => last = Some((revision, applied_revision)),
+            UiEvent::Settings(SettingsEvent::SettingsOperationCompleted { .. }) => done += 1,
+            _ => {}
+        }
+    }
+    last
+}
+
+fn subscribe(f: &Fixture) -> workbench_host::subscriptions::Subscription {
+    f.host
+        .projection()
+        .subscribe_with_snapshot(&Subscribe {
+            scope: SubscriptionScope::All,
+            after: None,
+        })
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_during_a_held_reload_is_not_marked_as_applied() {
+    let mut f = Fixture::new("version = 3\n");
+    let mut events = subscribe(&f);
+    let revision = f.snapshot().revision;
+    assert_eq!(
+        f.finish(
+            "save-1",
+            save_provider("save-1", revision, provider("one", "a"))
+        )
+        .await,
+        OperationState::Ready
+    );
+    let first = f.snapshot().revision;
+
+    *f.reload.held.lock().unwrap() = true;
+    f.run(SettingsCommand::ReloadModels(ReloadModels {
+        operation_id: op("reload-1"),
+    }))
+    .unwrap();
+    f.reload.entered.notified().await;
+    // A second save lands while the hook composes from the first file.
+    assert_eq!(
+        f.finish(
+            "save-2",
+            save_provider("save-2", first.clone(), provider("two", "b"))
+        )
+        .await,
+        OperationState::Ready
+    );
+    *f.reload.held.lock().unwrap() = false;
+    f.reload.released.notify_all();
+    f.settings.wait_operation(&op("reload-1")).await.unwrap();
+
+    // What the clients are told is what the query answers: the second save is
+    // saved, the first is applied, and nothing claims more.
+    let snapshot = f.snapshot();
+    assert_ne!(snapshot.revision, first);
+    assert_eq!(snapshot.applied_revision, first);
+    assert_eq!(
+        last_announced(&mut events, 3).await,
+        Some((snapshot.revision, snapshot.applied_revision))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn overlapping_saves_and_reloads_end_with_one_consistent_snapshot() {
+    let mut f = Fixture::new("version = 3\n");
+    let mut events = subscribe(&f);
+    for round in 0..16 {
+        let (save, reload) = (format!("save-{round}"), format!("reload-{round}"));
+        let revision = f.snapshot().revision;
+        f.run(save_provider(
+            &save,
+            revision,
+            provider(&format!("p{round}"), "a"),
+        ))
+        .unwrap();
+        f.run(SettingsCommand::ReloadModels(ReloadModels {
+            operation_id: op(&reload),
+        }))
+        .unwrap();
+        for id in [&save, &reload] {
+            assert_eq!(
+                f.settings
+                    .wait_operation(&op(id))
+                    .await
+                    .unwrap()
+                    .operation
+                    .state,
+                OperationState::Ready
+            );
+        }
+
+        let snapshot = f.snapshot();
+        assert_eq!(
+            last_announced(&mut events, 2).await,
+            Some((snapshot.revision, snapshot.applied_revision)),
+            "round {round}"
+        );
+    }
+}
+
+/// The core starts with the strict load. A document the lenient load accepts by
+/// dropping what it does not know is not saved: it would be written and then
+/// refuse to start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_document_the_core_would_not_start_with_is_refused_on_a_whole_save() {
+    let base = format!("version = 3\n{PROVIDER}");
+    let mut f = Fixture::new(&base);
+    let unknown = format!("{base}[providers.local.not_a_setting]\nvalue = 'SENTINEL-UNKNOWN'\n");
+    let misspelt = base.replace("default_model", "defualt_model");
+    for (id, text) in [("save-1", unknown), ("save-2", misspelt)] {
+        let state = f.save_document(id, &text).await;
+        assert!(
+            matches!(
+                state,
+                OperationState::Failed {
+                    code: ErrorCode::InvalidRequest
+                }
+            ),
+            "{id}: {state:?}"
+        );
+        let view = f.settings.operation(&op(id)).unwrap();
+        let wire = serde_json::to_string(&view).unwrap();
+        assert!(!wire.contains("SENTINEL"), "{wire}");
+        assert_eq!(f.file(), base, "{id}");
+    }
+    // The same document without the stray field is saved.
+    let fixed = format!("{base}# a comment\n");
+    assert_eq!(
+        f.save_document("save-3", &fixed).await,
+        OperationState::Ready
+    );
+    assert_eq!(f.file(), fixed);
+}
+
+/// A typed (partial) save does not repair or extend a file the core would
+/// refuse: the file is left as it is, and the whole-document save is the way
+/// to fix it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_save_does_not_build_on_a_file_the_core_would_not_start_with() {
+    let broken = format!("version = 3\n{PROVIDER}[providers.local.not_a_setting]\nvalue = 1\n");
+    let mut f = Fixture::new(&broken);
+    let revision = f.snapshot().revision;
+    let state = f
+        .finish(
+            "save-1",
+            save_provider("save-1", revision, provider("two", "b")),
+        )
+        .await;
+    assert!(
+        matches!(
+            state,
+            OperationState::Failed {
+                code: ErrorCode::InvalidRequest
+            }
+        ),
+        "{state:?}"
+    );
+    assert_eq!(f.file(), broken);
+    // Fixed by a whole save, the typed saves work again.
+    let fixed = format!("version = 3\n{PROVIDER}");
+    assert_eq!(
+        f.save_document("save-2", &fixed).await,
+        OperationState::Ready
+    );
+    let revision = f.snapshot().revision;
+    assert_eq!(
+        f.finish(
+            "save-3",
+            save_provider("save-3", revision, provider("two", "b"))
+        )
+        .await,
+        OperationState::Ready
+    );
+    assert!(f.file().contains("[providers.two]"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_whole_save_keeps_the_mode_of_the_file_it_replaces() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new("version = 3\n");
+    let path = f.dir.path().join("config.toml");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        f.save_document("save-1", "version = 3\n# saved\n").await,
+        OperationState::Ready
+    );
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
 }
