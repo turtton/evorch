@@ -609,3 +609,263 @@ async fn a_core_recovers_the_jobs_of_a_process_that_really_died() {
         LearningJobState::Pending
     );
 }
+
+#[test]
+fn origins_made_in_one_process_share_an_instance_and_never_look_dead_to_each_other() {
+    let core = current_origin(LearningOriginKind::Core, Some("cfg".into()));
+    let gui = current_origin(LearningOriginKind::Gui, None);
+    assert_eq!(core.instance, gui.instance);
+    let probe = ProcOriginProbe::new(&core);
+    assert_eq!(probe.liveness(&gui), OriginLiveness::Alive);
+    assert_eq!(probe.liveness(&core), OriginLiveness::Alive);
+}
+
+#[tokio::test]
+async fn a_live_process_never_sweeps_or_adopts_its_own_other_origins_jobs() {
+    let fixture = Fixture::new();
+    let core = fixture.queue(current_origin(LearningOriginKind::Core, Some("cfg".into())));
+    let gui = fixture.queue(current_origin(LearningOriginKind::Gui, None));
+    let sibling = fixture.queue(current_origin(LearningOriginKind::Core, Some("cfg".into())));
+    let gate = ProducerGate::default();
+    let permit = gate.try_enter().unwrap();
+    gui.admit(admit_request("gui-pending", "run-1")).unwrap();
+    gui.admit(admit_request("gui-started", "run-2")).unwrap();
+    assert!(gui.start("gui-started", &permit).unwrap());
+    sibling
+        .admit(admit_request("core-pending", "run-3"))
+        .unwrap();
+    let probe = ProcOriginProbe::new(core.origin());
+
+    assert_eq!(
+        core.sweep_dead_origins(&probe).unwrap(),
+        SweepReport::default()
+    );
+    assert!(core.rescan_core(&probe).unwrap().is_empty());
+
+    assert_eq!(fixture.state("gui-pending"), LearningJobState::Pending);
+    assert_eq!(fixture.state("gui-started"), LearningJobState::Started);
+    assert_eq!(fixture.state("core-pending"), LearningJobState::Pending);
+    assert!(fixture.has_evidence("gui-started"));
+}
+
+/// Predecessor half of the exec test. It leaves a pending and a started job under its
+/// origin and then replaces its own image, keeping the pid and the start time.
+#[cfg(unix)]
+#[test]
+fn exec_predecessor() {
+    use std::os::unix::process::CommandExt;
+    let Ok(db_path) = std::env::var("EVORCH_LEARNING_JOBS_EXEC_DB") else {
+        return;
+    };
+    let config = StorageConfig {
+        db_path: db_path.into(),
+        ..Default::default()
+    };
+    {
+        let storage = Storage::open(config.clone()).unwrap();
+        let gate = ProducerGate::default();
+        let permit = gate.try_enter().unwrap();
+        let queue = LearningJobQueue::new(
+            storage.handle(),
+            config.clone(),
+            current_origin(LearningOriginKind::Core, Some("cfg".into())),
+        );
+        queue.admit(admit_request("exec-pending", "run-1")).unwrap();
+        queue.admit(admit_request("exec-started", "run-2")).unwrap();
+        assert!(queue.start("exec-started", &permit).unwrap());
+    }
+    let error = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "learning_jobs::tests::exec_successor",
+            "--nocapture",
+        ])
+        .exec();
+    panic!("exec failed: {error}");
+}
+
+/// Successor half: the same pid and start time as the predecessor, a new image.
+#[cfg(unix)]
+#[test]
+fn exec_successor() {
+    let Ok(db_path) = std::env::var("EVORCH_LEARNING_JOBS_EXEC_DB") else {
+        return;
+    };
+    let config = StorageConfig {
+        db_path: db_path.into(),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let me = current_origin(LearningOriginKind::Core, Some("cfg".into()));
+    let queue = LearningJobQueue::new(storage.handle(), config.clone(), me.clone());
+    let stored = queue.job("exec-pending").unwrap().unwrap();
+    assert_eq!(stored.origin.pid, me.pid, "exec keeps the pid");
+    assert_eq!(
+        stored.origin.start_ticks, me.start_ticks,
+        "and the start time"
+    );
+    assert_ne!(stored.origin.instance, me.instance, "but not the image");
+
+    let probe = ProcOriginProbe::new(&me);
+    assert_eq!(probe.liveness(&stored.origin), OriginLiveness::Dead);
+    let adopted = queue.rescan_core(&probe).unwrap();
+    let tasks: Vec<_> = adopted.iter().map(|job| job.job.task_id.as_str()).collect();
+    assert_eq!(tasks, ["exec-pending"]);
+    let report = queue.sweep_dead_origins(&probe).unwrap();
+    assert_eq!(report.abandoned_started, 1);
+    assert_eq!(
+        queue.job("exec-started").unwrap().unwrap().state,
+        LearningJobState::Abandoned
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_exec_successor_takes_over_its_predecessors_pending_jobs_only() {
+    let fixture = Fixture::new();
+    let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "learning_jobs::tests::exec_predecessor",
+            "--nocapture",
+        ])
+        .env("EVORCH_LEARNING_JOBS_EXEC_DB", &fixture.config.db_path)
+        .status()
+        .await
+        .unwrap();
+    assert!(status.success(), "the successor's own assertions failed");
+    assert_eq!(fixture.state("exec-pending"), LearningJobState::Pending);
+    assert_eq!(fixture.state("exec-started"), LearningJobState::Abandoned);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_starts_of_one_job_succeed_exactly_once() {
+    let fixture = Fixture::new();
+    let queue = fixture.queue(origin(LearningOriginKind::Core, "a", Some("cfg")));
+    queue.admit(admit_request("t1", "run-1")).unwrap();
+    let gate = ProducerGate::default();
+    let racers = 8;
+    let barrier = Arc::new(tokio::sync::Barrier::new(racers));
+    let mut handles = Vec::new();
+    for _ in 0..racers {
+        let (queue, gate, barrier) = (queue.clone(), gate.clone(), Arc::clone(&barrier));
+        handles.push(tokio::spawn(async move {
+            let permit = gate.try_enter().unwrap();
+            barrier.wait().await;
+            queue.start("t1", &permit).unwrap()
+        }));
+    }
+    let mut started = 0;
+    for handle in handles {
+        started += usize::from(handle.await.unwrap());
+    }
+    assert_eq!(started, 1);
+    assert_eq!(fixture.state("t1"), LearningJobState::Started);
+}
+
+/// Child of the cross-process race: waits for the parent's go-ahead on stdin (the
+/// barrier), then admits the shared task, rescans for the dead core's job and starts
+/// what it won. A no-op unless the parent asked for it.
+#[test]
+fn race_child() {
+    use std::io::{BufRead, Write};
+    let Ok(db_path) = std::env::var("EVORCH_LEARNING_JOBS_RACE_DB") else {
+        return;
+    };
+    let config = StorageConfig {
+        db_path: db_path.into(),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let queue = LearningJobQueue::new(
+        storage.handle(),
+        config,
+        current_origin(LearningOriginKind::Core, Some("cfg".into())),
+    );
+    let gate = ProducerGate::default();
+    let permit = gate.try_enter().unwrap();
+    println!("READY");
+    std::io::stdout().flush().unwrap();
+    let mut go = String::new();
+    std::io::stdin().lock().read_line(&mut go).unwrap();
+
+    let admitted = queue
+        .admit(admit_request("race-task", "race-root"))
+        .unwrap()
+        == LearningAdmission::Admitted;
+    let probe = FakeProbe::new(&[("old", OriginLiveness::Dead)]);
+    let adopted = queue.rescan_core(&probe).unwrap();
+    let mut started = 0;
+    for job in &adopted {
+        started += usize::from(queue.start(&job.job.task_id, &permit).unwrap());
+    }
+    println!(
+        "RESULT admitted={} adopted={} started={started}",
+        u8::from(admitted),
+        adopted.len()
+    );
+    std::io::stdout().flush().unwrap();
+}
+
+#[tokio::test]
+async fn two_processes_racing_admit_and_adopt_win_exactly_once() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let fixture = Fixture::new();
+    fixture
+        .queue(origin(LearningOriginKind::Core, "old", Some("cfg")))
+        .admit(admit_request("dead-pending", "run-0"))
+        .unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let mut children = Vec::new();
+    for _ in 0..2 {
+        let mut child = tokio::process::Command::new(&exe)
+            .args(["--exact", "learning_jobs::tests::race_child", "--nocapture"])
+            .env("EVORCH_LEARNING_JOBS_RACE_DB", &fixture.config.db_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+        children.push((child, stdout));
+    }
+    // Both children report READY before either gets the go-ahead, so their
+    // admissions and rescans overlap instead of running one after the other.
+    for (_, stdout) in &mut children {
+        loop {
+            let line = stdout
+                .next_line()
+                .await
+                .unwrap()
+                .expect("child exited early");
+            if line == "READY" {
+                break;
+            }
+        }
+    }
+    for (child, _) in &mut children {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"go\n").await.unwrap();
+        stdin.flush().await.unwrap();
+    }
+    let mut totals = [0_usize; 3];
+    for (child, stdout) in &mut children {
+        let mut result = None;
+        while let Some(line) = stdout.next_line().await.unwrap() {
+            if let Some(rest) = line.strip_prefix("RESULT ") {
+                result = Some(rest.to_owned());
+            }
+        }
+        assert!(child.wait().await.unwrap().success());
+        let result = result.expect("child printed a result");
+        for (slot, field) in ["admitted", "adopted", "started"].iter().enumerate() {
+            let value = result
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix(&format!("{field}=")))
+                .expect("field present");
+            totals[slot] += value.parse::<usize>().unwrap();
+        }
+    }
+    assert_eq!(totals, [1, 1, 1], "admitted, adopted, started");
+    assert_eq!(fixture.state("race-task"), LearningJobState::Pending);
+    assert_eq!(fixture.state("dead-pending"), LearningJobState::Started);
+}

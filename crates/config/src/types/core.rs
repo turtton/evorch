@@ -34,6 +34,7 @@ impl CoreConfig {
 pub struct CoreRestartConfig {
     /// 再起動の準備で、開始済みの learning (抽出と review を含む) の完了を待つ上限秒数。
     /// 上限を超えると再起動の要求だけを取り消し、learning は止めない。範囲は 1..=3600。
+    #[schemars(range(min = 1, max = 3600))]
     pub learning_drain_timeout_secs: u64,
 }
 

@@ -19,6 +19,8 @@ enum ReviewMode {
     FinalTextOnly,
     PartialReview,
     WaitForCancel,
+    /// The reviewer holds until the test releases it, then approves.
+    HoldThenApprove,
     /// Two candidates; the first is rejected after the user marks it a favorite, the
     /// second is approved.
     FavoriteRejectBatch,
@@ -32,6 +34,7 @@ struct Model {
     config: StorageConfig,
     reviewer_started: Notify,
     reviewer_calls: AtomicUsize,
+    release_review: tokio::sync::watch::Sender<bool>,
 }
 
 fn text_response(text: &str) -> ChatResponse {
@@ -185,6 +188,13 @@ impl AgentModel for Model {
                 if matches!(self.mode, ReviewMode::WaitForCancel) {
                     std::future::pending::<()>().await
                 }
+                if matches!(self.mode, ReviewMode::HoldThenApprove) {
+                    let _ = self
+                        .release_review
+                        .subscribe()
+                        .wait_for(|released| *released)
+                        .await;
+                }
                 if tool_result(messages, "review-list").is_none() {
                     return Ok(tool_response(
                         "review-list",
@@ -244,12 +254,16 @@ impl AgentModel for Model {
                 } else if tool_result(messages, "review-submit").is_none() {
                     let listed = tool_result(messages, "review-list").unwrap();
                     let candidate = &listed["candidates"][0];
-                    let verdict =
-                        if matches!(self.mode, ReviewMode::Approve | ReviewMode::PartialReview) {
-                            "approve"
-                        } else {
-                            "reject"
-                        };
+                    let verdict = if matches!(
+                        self.mode,
+                        ReviewMode::Approve
+                            | ReviewMode::PartialReview
+                            | ReviewMode::HoldThenApprove
+                    ) {
+                        "approve"
+                    } else {
+                        "reject"
+                    };
                     return Ok(tool_response(
                         "review-submit",
                         "submit_lesson_review",
@@ -309,6 +323,7 @@ impl Fixture {
             config: config.clone(),
             reviewer_started: Notify::new(),
             reviewer_calls: AtomicUsize::new(0),
+            release_review: tokio::sync::watch::channel(false).0,
         });
         let bus = Arc::new(event_bus::EventBus::new(512));
         let executor = Arc::new(tools::ToolExecutor::with_standard_tools(
@@ -698,4 +713,44 @@ async fn a_learning_pause_holds_the_job_pending_without_pausing_other_producers(
     assert!(drain.resume());
     assert_eq!(fixture.learning(source).await, Ok(()));
     assert_eq!(job_states(&fixture), [LearningJobState::Finished]);
+}
+
+// The limit only stops the wait. The held review is released afterwards, approves and
+// saves normally, and the job ends Finished with its evidence gone.
+#[tokio::test]
+async fn a_pipeline_that_outlives_a_timed_out_drain_still_completes_and_saves() {
+    use runtime::learning_jobs::LearningDrainOutcome;
+    use storage::learning_jobs::LearningJobState;
+    let fixture = Fixture::new(ReviewMode::HoldThenApprove);
+    let source = fixture.start().await;
+    fixture.model.reviewer_started.notified().await;
+
+    let drain = fixture.runtime.begin_learning_drain();
+    assert_eq!(
+        drain.wait_until(std::future::ready(())).await,
+        LearningDrainOutcome::TimedOut
+    );
+    assert_eq!(job_states(&fixture), [LearningJobState::Started]);
+
+    fixture.model.release_review.send_replace(true);
+    assert_eq!(fixture.learning(source).await, Ok(()));
+
+    assert_eq!(job_states(&fixture), [LearningJobState::Finished]);
+    let database = Database::open(&fixture.config).unwrap();
+    let job = &database
+        .learning_jobs(&[LearningJobState::Finished])
+        .unwrap()[0];
+    assert!(
+        database
+            .learning_job_evidence(&job.task_id)
+            .unwrap()
+            .is_none()
+    );
+    let entries = fixture.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, MemoryStatus::Promoted);
+    assert_eq!(
+        drain.wait_until(std::future::pending::<()>()).await,
+        LearningDrainOutcome::Drained
+    );
 }

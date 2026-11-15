@@ -777,7 +777,8 @@
           "type": "integer",
           "format": "uint64",
           "default": 120,
-          "minimum": 0
+          "maximum": 3600,
+          "minimum": 1
         }
       },
       "additionalProperties": false

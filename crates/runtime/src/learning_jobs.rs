@@ -33,17 +33,32 @@ pub trait OriginProbe: Send + Sync {
     fn liveness(&self, origin: &LearningOrigin) -> OriginLiveness;
 }
 
-/// Identity of the current process incarnation. `exec` keeps the pid but starts a new
-/// incarnation, so every call returns a fresh `instance`.
+/// Random per process image. `exec` keeps the pid and the start time but replaces the
+/// image, so a static is born again in the successor and its predecessor's instance
+/// differs; every origin made inside one image shares it.
+fn process_instance() -> &'static str {
+    static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| {
+        let mut nonce = [0_u8; 16];
+        if getrandom::fill(&mut nonce).is_err() {
+            // Without entropy, still tell images apart by their start time and address.
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos());
+            nonce = (now ^ (u128::from(std::process::id()) << 96)).to_le_bytes();
+        }
+        nonce.iter().map(|byte| format!("{byte:02x}")).collect()
+    })
+}
+
+/// Identity of the current process image. Every call in one image names the same
+/// instance, so a live process never judges its own origins dead; an `exec`
+/// successor gets a new instance and sees its predecessor's as dead.
 pub fn current_origin(kind: LearningOriginKind, config_identity: Option<String>) -> LearningOrigin {
-    let mut nonce = [0_u8; 16];
-    if getrandom::fill(&mut nonce).is_err() {
-        nonce = [0_u8; 16];
-    }
     let pid = std::process::id();
     LearningOrigin {
         kind,
-        instance: nonce.iter().map(|byte| format!("{byte:02x}")).collect(),
+        instance: process_instance().to_owned(),
         pid,
         start_ticks: read_start_ticks(&PathBuf::from("/proc"), &pid.to_string()),
         boot_id: read_trimmed(&PathBuf::from("/proc/sys/kernel/random/boot_id")),
