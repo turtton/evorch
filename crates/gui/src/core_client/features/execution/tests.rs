@@ -136,6 +136,400 @@ fn runs_tag(actions: &[FeatureAction]) -> u64 {
         .tag
 }
 
+fn run_changed(screen: &mut Harness<'_, Screen>) {
+    screen
+        .state_mut()
+        .feature
+        .event(&UiEvent::Execution(ExecutionEvent::RunChanged {
+            run: serde_json::from_value(
+                run("run-b", Some("parent"), "active", "live", 1)["summary"].clone(),
+            )
+            .unwrap(),
+        }));
+}
+
+#[test]
+fn a_run_refresh_keeps_loaded_pages_visible_until_the_whole_prefix_is_replaced() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    // Pages may be short because of the byte bound, not just the row limit.
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+    );
+    screen.get_by_label("さらに読み込む").click();
+    let more = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&more),
+        runs_reply(vec![run("run-b", None, "active", "live", 1)], false),
+    );
+    screen.get_by_label("子 run (1)");
+
+    // A delayed run event must not collapse the already loaded second page.
+    run_changed(&mut screen);
+    let refresh = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&refresh),
+        runs_reply(vec![run("run-c", None, "active", "live", 0)], true),
+    );
+    screen.get_by_label("name-run-a");
+    screen.get_by_label("子 run (1)");
+    let next = asked(&mut screen);
+    let Query::Execution(ExecutionQuery::ListRunDetails(query)) = query_of(&next[0]) else {
+        panic!("the refreshed prefix's next page");
+    };
+    assert_eq!(query.page.cursor.as_ref().unwrap().as_str(), "next");
+    answer(
+        &mut screen,
+        runs_tag(&next),
+        runs_reply(vec![run("run-b", None, "active", "live", 2)], false),
+    );
+    screen.get_by_label("name-run-c");
+    screen.get_by_label("子 run (2)");
+    assert!(screen.query_by_label("name-run-a").is_none());
+    assert!(screen.query_by_label("さらに読み込む").is_none());
+}
+
+#[test]
+fn a_run_change_during_load_more_waits_for_its_reply_then_refreshes_both_pages() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+    );
+    screen.get_by_label("さらに読み込む").click();
+    let more = asked(&mut screen);
+    run_changed(&mut screen);
+    screen.get_by_label("さらに読み込む").click();
+    assert!(
+        asked(&mut screen).is_empty(),
+        "no duplicate or competing read"
+    );
+    answer(
+        &mut screen,
+        runs_tag(&more),
+        runs_reply(vec![run("run-b", None, "active", "live", 1)], false),
+    );
+    let refresh = asked(&mut screen);
+    let Query::Execution(ExecutionQuery::ListRunDetails(query)) = query_of(&refresh[0]) else {
+        panic!("a refresh was expected");
+    };
+    assert!(query.page.cursor.is_none());
+    answer(
+        &mut screen,
+        runs_tag(&refresh),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+    );
+    screen.get_by_label("子 run (1)");
+    let next = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&next),
+        runs_reply(vec![run("run-b", None, "active", "live", 1)], false),
+    );
+    screen.get_by_label("子 run (1)");
+    assert!(asked(&mut screen).is_empty());
+}
+
+#[test]
+fn load_more_during_a_refresh_is_kept_and_a_shorter_refresh_can_finish_early() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+    );
+    run_changed(&mut screen);
+    let refresh = asked(&mut screen);
+    screen.get_by_label("さらに読み込む").click();
+    assert!(asked(&mut screen).is_empty());
+    answer(
+        &mut screen,
+        runs_tag(&refresh),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+    );
+    let more = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&more),
+        runs_reply(vec![run("run-b", None, "active", "live", 1)], false),
+    );
+    run_changed(&mut screen);
+    let refresh = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&refresh),
+        runs_reply(vec![run("run-c", None, "active", "live", 0)], false),
+    );
+    screen.get_by_label("name-run-c");
+    assert!(screen.query_by_label("name-run-b").is_none());
+    assert!(
+        asked(&mut screen).is_empty(),
+        "no cursor means the prefix is complete"
+    );
+}
+
+#[test]
+fn a_reset_or_a_revisited_level_drops_old_run_replies_including_errors() {
+    for reset in [false, true] {
+        let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+        let first = asked(&mut screen);
+        answer(
+            &mut screen,
+            runs_tag(&first),
+            runs_reply(vec![run("run-a", None, "active", "live", 1)], false),
+        );
+        run_changed(&mut screen);
+        let old = asked(&mut screen);
+        if reset {
+            screen.state_mut().feature.reset();
+        } else {
+            screen.get_by_label("子 run (1)").click();
+            let _children = asked(&mut screen);
+            screen.get_by_label("ルート").click();
+        }
+        let current = asked(&mut screen);
+        answer(
+            &mut screen,
+            runs_tag(&current),
+            runs_reply(vec![run("run-new", None, "active", "live", 0)], false),
+        );
+        answer(
+            &mut screen,
+            runs_tag(&old),
+            runs_reply(vec![run("run-old", None, "active", "live", 0)], false),
+        );
+        screen.get_by_label("name-run-new");
+        assert!(screen.query_by_label("name-run-old").is_none());
+        // The same invalidation also applies to failed reads, not only successful ones.
+        run_changed(&mut screen);
+        let old = asked(&mut screen);
+        screen.state_mut().feature.reset();
+        let current = asked(&mut screen);
+        answer(
+            &mut screen,
+            runs_tag(&old),
+            FeatureReply::Query(Err(FeatureError::new("obsolete failure"))),
+        );
+        assert!(screen.query_by_label("obsolete failure").is_none());
+        answer(
+            &mut screen,
+            runs_tag(&current),
+            runs_reply(vec![run("run-new", None, "active", "live", 0)], false),
+        );
+        screen.get_by_label("name-run-new");
+    }
+}
+
+#[test]
+fn a_failed_page_keeps_the_displayed_prefix_and_releases_the_read() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+    );
+    screen.get_by_label("さらに読み込む").click();
+    let more = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&more),
+        FeatureReply::Query(Err(FeatureError::new("page failed"))),
+    );
+    screen.get_by_label("page failed");
+    screen.get_by_label("name-run-a");
+    assert!(
+        asked(&mut screen).is_empty(),
+        "errors are not silently retried"
+    );
+    run_changed(&mut screen);
+    let refresh = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&refresh),
+        runs_reply(vec![run("run-new", None, "active", "live", 0)], false),
+    );
+    screen.get_by_label("name-run-new");
+}
+
+#[test]
+fn a_cursor_conflict_restarts_the_prefix_without_waiting_for_a_run_changed_event() {
+    for during_refresh in [false, true] {
+        let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+        let first = asked(&mut screen);
+        answer(
+            &mut screen,
+            runs_tag(&first),
+            runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+        );
+        screen.get_by_label("さらに読み込む").click();
+        let more = asked(&mut screen);
+        let conflicting = if during_refresh {
+            answer(
+                &mut screen,
+                runs_tag(&more),
+                runs_reply(vec![run("run-b", None, "active", "live", 1)], false),
+            );
+            run_changed(&mut screen);
+            let refresh = asked(&mut screen);
+            answer(
+                &mut screen,
+                runs_tag(&refresh),
+                runs_reply(vec![run("run-new", None, "active", "live", 0)], true),
+            );
+            asked(&mut screen)
+        } else {
+            more
+        };
+        // A checkpoint can invalidate this cursor without changing RunSummary,
+        // so no RunChanged arrives after the Conflict to trigger recovery.
+        answer(
+            &mut screen,
+            runs_tag(&conflicting),
+            FeatureReply::Query(Err(
+                FeatureError::new("snapshot changed").with_code(ErrorCode::Conflict)
+            )),
+        );
+        screen.get_by_label("name-run-a");
+        if during_refresh {
+            screen.get_by_label("子 run (1)");
+        }
+        let restarted = asked(&mut screen);
+        let Query::Execution(ExecutionQuery::ListRunDetails(query)) = query_of(&restarted[0])
+        else {
+            panic!("the prefix must restart without another event");
+        };
+        assert!(
+            query.page.cursor.is_none(),
+            "never resend the invalid cursor"
+        );
+        answer(
+            &mut screen,
+            runs_tag(&restarted),
+            runs_reply(vec![run("run-new", None, "active", "live", 0)], true),
+        );
+        screen.get_by_label("name-run-a");
+        let next = asked(&mut screen);
+        answer(
+            &mut screen,
+            runs_tag(&next),
+            runs_reply(vec![run("run-b", None, "active", "live", 2)], false),
+        );
+        screen.get_by_label("name-run-new");
+        screen.get_by_label("子 run (2)");
+        assert!(screen.query_by_label("name-run-a").is_none());
+        assert!(asked(&mut screen).is_empty());
+    }
+}
+
+#[test]
+fn a_conflict_on_the_first_page_is_reported_without_restarting() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        FeatureReply::Query(Err(
+            FeatureError::new("first page failed").with_code(ErrorCode::Conflict)
+        )),
+    );
+    screen.get_by_label("first page failed");
+    assert!(asked(&mut screen).is_empty());
+}
+
+#[test]
+fn repeated_run_ids_across_pages_keep_one_row_per_id() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
+    );
+    screen.get_by_label("さらに読み込む").click();
+    let more = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&more),
+        runs_reply(
+            vec![
+                run("run-a", None, "active", "live", 0),
+                run("run-b", None, "active", "live", 1),
+                run("run-b", None, "active", "live", 1),
+            ],
+            false,
+        ),
+    );
+    assert_eq!(screen.query_all_by_label("name-run-a").count(), 1);
+    assert_eq!(screen.query_all_by_label("name-run-b").count(), 1);
+}
+
+#[test]
+fn a_refresh_follows_cursors_for_a_prefix_larger_than_the_maximum_page_size() {
+    use workbench_protocol::limits::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
+    let pages = MAX_PAGE_SIZE / DEFAULT_PAGE_SIZE + 1;
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let items = |page: u32| {
+        (0..DEFAULT_PAGE_SIZE)
+            .map(|row| run(&format!("run-{page}-{row}"), None, "active", "live", 0))
+            .collect()
+    };
+    for page in 0..pages {
+        let actions = asked(&mut screen);
+        answer(
+            &mut screen,
+            runs_tag(&actions),
+            runs_reply(items(page), page + 1 < pages),
+        );
+        if page + 1 < pages {
+            screen.get_by_label("さらに読み込む").click();
+        }
+    }
+    let count = (pages * DEFAULT_PAGE_SIZE) as usize;
+    assert_eq!(screen.query_all_by_label("Worker").count(), count);
+    run_changed(&mut screen);
+    let mut queries = 0;
+    let mut events = 1;
+    let refreshes = 3;
+    for cycle in 0..refreshes {
+        for page in 0..pages {
+            let actions = asked(&mut screen);
+            assert_eq!(actions.len(), 1, "one serial run query per page");
+            queries += actions.len();
+            let Query::Execution(ExecutionQuery::ListRunDetails(query)) = query_of(&actions[0])
+            else {
+                panic!("a page was expected");
+            };
+            assert_eq!(query.page.limit, DEFAULT_PAGE_SIZE);
+            assert_eq!(query.page.cursor.is_some(), page > 0);
+            // Bursts while a read is in flight coalesce into one later refresh,
+            // rather than restarting the prefix for each event.
+            if cycle + 1 < refreshes {
+                for _ in 0..10 {
+                    run_changed(&mut screen);
+                    events += 1;
+                }
+            }
+            answer(
+                &mut screen,
+                runs_tag(&actions),
+                runs_reply(items(page), page + 1 < pages),
+            );
+            assert_eq!(screen.query_all_by_label("Worker").count(), count);
+        }
+    }
+    assert_eq!(queries, (pages * refreshes) as usize);
+    assert!(asked(&mut screen).is_empty());
+    eprintln!("{count} rows / {pages} pages / {events} events: {queries} refresh queries");
+}
+
 #[test]
 fn the_four_ends_of_a_run_and_history_only_are_told_apart() {
     let all: Vec<_> = [
