@@ -380,9 +380,31 @@ async fn live_private_key_body_is_redacted_across_lines() {
 
 #[tokio::test]
 async fn escalated_stdin_requires_a_fresh_review() {
-    struct Gate(std::sync::atomic::AtomicUsize);
+    type Execution = (
+        Option<std::path::PathBuf>,
+        Option<std::path::PathBuf>,
+        ShellAccess,
+    );
+    struct Gate(
+        std::sync::atomic::AtomicUsize,
+        std::sync::Mutex<Vec<Execution>>,
+    );
     #[async_trait::async_trait]
     impl ShellEscalationGate for Gate {
+        async fn decide_execution(
+            &self,
+            ctx: &ToolExecutionContext,
+            command: &str,
+            justification: &str,
+            execution: crate::tools::shell_escalation::ShellExecutionContext<'_>,
+        ) -> EscalationDecision {
+            self.1.lock().unwrap().push((
+                execution.cwd.map(ToOwned::to_owned),
+                execution.workspace_root.map(ToOwned::to_owned),
+                execution.access,
+            ));
+            self.decide(ctx, command, justification).await
+        }
         async fn decide(
             &self,
             _ctx: &ToolExecutionContext,
@@ -398,10 +420,15 @@ async fn escalated_stdin_requires_a_fresh_review() {
             }
         }
     }
-    let shell = shell();
-    let gate = Arc::new(Gate(std::sync::atomic::AtomicUsize::new(0)));
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("subdir")).unwrap();
+    let shell = shell().with_default_cwd(root.path().to_path_buf());
+    let gate = Arc::new(Gate(
+        std::sync::atomic::AtomicUsize::new(0),
+        Default::default(),
+    ));
     shell.set_shell_escalation(gate.clone(), Arc::new(DirectSandbox::new_unchecked()));
-    let start = invoke(&shell, "owner", json!({"command":"read value", "sandbox_access":"unsandboxed", "justification":"test", "yield_ms":0})).await;
+    let start = invoke(&shell, "owner", json!({"command":"read value", "cwd":"subdir", "sandbox_access":"unsandboxed", "justification":"test", "yield_ms":0})).await;
     let denied = invoke(
         &shell,
         "owner",
@@ -418,6 +445,17 @@ async fn escalated_stdin_requires_a_fresh_review() {
         1
     );
     assert_eq!(gate.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        *gate.1.lock().unwrap(),
+        vec![
+            (
+                Some(root.path().join("subdir")),
+                Some(root.path().to_path_buf()),
+                ShellAccess::Host
+            );
+            2
+        ]
+    );
     shell.drain_shell_jobs("owner").await.unwrap();
 }
 

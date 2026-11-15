@@ -491,9 +491,30 @@ impl ShellEscalationGate for SandboxEscalationGate {
         ctx: &ToolExecutionContext,
         command: &str,
         justification: &str,
-        _cwd: Option<&Path>,
+        cwd: Option<&Path>,
         access: ShellAccess,
     ) -> EscalationDecision {
+        self.decide_execution(
+            ctx,
+            command,
+            justification,
+            tools::tools::shell_escalation::ShellExecutionContext {
+                cwd,
+                workspace_root: None,
+                access,
+            },
+        )
+        .await
+    }
+
+    async fn decide_execution(
+        &self,
+        ctx: &ToolExecutionContext,
+        command: &str,
+        justification: &str,
+        execution: tools::tools::shell_escalation::ShellExecutionContext<'_>,
+    ) -> EscalationDecision {
+        let access = execution.access;
         let watch = &LinkWatch::default();
         self.arbitrate_watching(
             ctx,
@@ -511,12 +532,12 @@ impl ShellEscalationGate for SandboxEscalationGate {
                     (Some(context), Some(stamp))
                 });
                 let verdict = reviewer
-                    .review_scoped_with_context(
+                    .review_execution_with_context(
                         &ctx.run_id,
                         command,
                         justification,
                         context,
-                        access,
+                        execution,
                     )
                     .await;
                 if verdict.is_ok() {

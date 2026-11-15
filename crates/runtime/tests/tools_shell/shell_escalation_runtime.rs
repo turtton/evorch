@@ -96,7 +96,7 @@ impl Fixture {
 async fn escalated_shell_approved_runs_via_unsandboxed_and_returns_output() {
     let fixture = Fixture::new(
         EscalationApproval::Auto,
-        r#"{"approve":true,"risk_level":"low","authorization_level":"high"}"#,
+        r#"{"approve":true,"reason":"requested action","risk_level":"low","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#,
     );
     let result = fixture.execute().await;
     assert!(!result.is_error);
@@ -203,7 +203,7 @@ async fn escalated_shell_user_mode_uses_scoped_approval_responder() {
 async fn escalated_shell_live_setting_change_takes_effect_without_rebuild() {
     let fixture = Fixture::new(
         EscalationApproval::Auto,
-        r#"{"approve":true,"risk_level":"low","authorization_level":"high"}"#,
+        r#"{"approve":true,"reason":"requested action","risk_level":"low","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#,
     );
     fixture
         .runtime
@@ -242,7 +242,7 @@ async fn composed_executor_escalates_when_auto_reviewer_approves() {
         ),
         env: Arc::new(routing::MapEnv::default()),
         model_source: ModelSource::Fixed(Arc::new(ScriptedModel::new([Ok(text_response(
-            r#"{"approve":true,"risk_level":"low","authorization_level":"high"}"#,
+            r#"{"approve":true,"reason":"requested action","risk_level":"low","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"high"}"#,
             providers::FinishReason::Stop,
         ))]))),
         workspace: None,

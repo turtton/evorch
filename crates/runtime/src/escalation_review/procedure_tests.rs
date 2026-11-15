@@ -70,7 +70,7 @@ fn response(approve: bool, risk: &str, authorization: &str, step: Option<&str>) 
         .map(|step| format!(r#","procedure_step":"{step}""#))
         .unwrap_or_default();
     format!(
-        r#"{{"approve":{approve},"reason":"cleanup","risk_level":"{risk}","authorization_level":"{authorization}"{step}}}"#
+        r#"{{"approve":{approve},"reason":"cleanup","risk_level":"{risk}","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"{authorization}"{step}}}"#
     )
 }
 
@@ -146,7 +146,13 @@ async fn every_other_critical_shell_case_still_goes_to_the_user() {
     for (name, context, authorization, step) in cases {
         assert_eq!(
             shell(context, &response(true, "critical", authorization, step)).await,
-            requires_user(),
+            if step.is_none() {
+                ReviewVerdict::RequiresUser {
+                    reason: "shell authorization fields are incomplete".into(),
+                }
+            } else {
+                requires_user()
+            },
             "{name}"
         );
     }
