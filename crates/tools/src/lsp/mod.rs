@@ -7,7 +7,7 @@ mod protocol;
 use crate::{Permissions, Tool, ToolError, ToolExecutionContext, ToolResult};
 use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
-use sandbox::{CommandSpec, Sandbox};
+use sandbox::{CommandSpec, Sandbox, SpawnLedger};
 use serde::Deserialize;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -38,6 +38,7 @@ pub struct LspDiagnostics {
     language: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
+    ledger: Option<SpawnLedger>,
 }
 
 #[derive(Deserialize)]
@@ -54,7 +55,15 @@ impl LspDiagnostics {
             language,
             timeout: Duration::from_secs(10),
             event_bus: None,
+            ledger: None,
         }
+    }
+
+    /// Register every server this tool starts in the core's ledger; once its
+    /// spawn fence is closed no server starts.
+    pub fn with_ledger(mut self, ledger: SpawnLedger) -> Self {
+        self.ledger = Some(ledger);
+        self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -76,8 +85,12 @@ impl LspDiagnostics {
         if !args.path.is_absolute() {
             return Err(LspError::Path);
         }
-        let mut client =
-            client::Connection::spawn(self.sandbox.clone(), self.command.clone()).await?;
+        let mut client = client::Connection::spawn(
+            self.sandbox.clone(),
+            self.command.clone(),
+            self.ledger.clone(),
+        )
+        .await?;
         let batch = tokio::time::timeout(self.timeout, client.open(&args.path, &self.language))
             .await
             .map_err(|_| LspError::Timeout)??;

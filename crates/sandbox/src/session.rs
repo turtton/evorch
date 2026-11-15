@@ -5,7 +5,7 @@ use std::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, ExitStatus, Stdio},
 };
 
-use crate::ledger::{Admission, ChildEntry, ChildKind};
+use crate::ledger::{Admission, ChildEntry, ChildKind, SpawnLedger};
 use crate::process::{self, ProcessGroup};
 use crate::{CommandSpec, Sandbox, SandboxError};
 
@@ -75,6 +75,22 @@ impl StdioSession {
             group,
             entry,
         })
+    }
+
+    /// [`spawn_in`](Self::spawn_in) for a site whose ledger is optional: admits
+    /// the launch itself, so it is a plain synchronous call (blocking thread).
+    /// Without a ledger it behaves as [`spawn`](Self::spawn).
+    ///
+    /// # Errors
+    /// An I/O error when the ledger's spawn fence is closed (nothing started),
+    /// otherwise the error of [`spawn_in`](Self::spawn_in).
+    pub fn spawn_owned(
+        ledger: Option<&SpawnLedger>,
+        sandbox: &dyn Sandbox,
+        spec: CommandSpec,
+    ) -> Result<Self, SessionError> {
+        let admission = SpawnLedger::admit_optional(ledger).map_err(io::Error::from)?;
+        Self::spawn_in(&admission, sandbox, spec)
     }
 
     pub fn id(&self) -> u32 {

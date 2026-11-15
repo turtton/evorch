@@ -218,16 +218,13 @@ impl SpawnLedger {
     ///
     /// Does not stop anything and has no deadline; a worker that never ends
     /// keeps this pending, so bound it from outside.
+    ///
+    /// Cancel-safe: the joining of threads and the removal of their records is
+    /// done by the ledger, not by this future, so a join that is dropped can
+    /// simply be called again.
     pub async fn join_workers(&self) {
         loop {
-            let threads = self.take_thread_handles();
-            for (id, handle) in threads {
-                let _ = tokio::task::spawn_blocking(move || handle.join()).await;
-                let mut table = locked(&self.inner.workers);
-                table.live.remove(&id);
-                table.epoch += 1;
-                self.inner.workers_activity.send_replace(table.activity());
-            }
+            self.start_thread_joins();
             let mut activity = self.inner.workers_activity.subscribe();
             if locked(&self.inner.workers).live.is_empty() {
                 return;
@@ -238,11 +235,50 @@ impl SpawnLedger {
         }
     }
 
-    fn take_thread_handles(&self) -> Vec<(WorkerId, std::thread::JoinHandle<()>)> {
-        locked(&self.inner.workers)
+    /// Hand each unjoined thread to a joiner thread of the ledger, which
+    /// removes the record once the thread is gone.
+    fn start_thread_joins(&self) {
+        let threads: Vec<_> = locked(&self.inner.workers)
             .live
             .iter_mut()
             .filter_map(|(id, record)| record.thread.take().map(|handle| (*id, handle)))
-            .collect()
+            .collect();
+        for (id, handle) in threads {
+            let inner = self.inner.clone();
+            let spawned = std::thread::Builder::new()
+                .name("worker-joiner".to_owned())
+                .spawn(move || {
+                    let _ = handle.join();
+                    let mut table = locked(&inner.workers);
+                    table.live.remove(&id);
+                    table.epoch += 1;
+                    inner.workers_activity.send_replace(table.activity());
+                });
+            if spawned.is_err() {
+                // The handle went with the closure: the thread is detached
+                // and its record can only be dropped, not proven joined.
+                let mut table = locked(&self.inner.workers);
+                table.live.remove(&id);
+                table.epoch += 1;
+                self.inner.workers_activity.send_replace(table.activity());
+            }
+        }
+    }
+
+    /// Run cleanup of something the core already owns on a thread the ledger
+    /// tracks, so [`join_workers`](Self::join_workers) waits for it.
+    ///
+    /// Unlike [`Admission::spawn_worker_thread`] this is not refused by the
+    /// closed fence: it starts no new work, it finishes the release of what
+    /// was already started (a supervisor's fallback cleanup runs exactly when
+    /// the restart is shutting things down).
+    ///
+    /// # Errors
+    /// The error of starting the thread; `work` is dropped unrun.
+    pub fn spawn_cleanup_thread<F>(&self, name: &'static str, work: F) -> io::Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        spawn_thread(&self.inner, name, work)
     }
 }

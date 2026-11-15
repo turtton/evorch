@@ -963,17 +963,44 @@ async fn ledger_stops_and_reaps_a_stdio_server_its_descendant_and_supervisor() {
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].kind, sandbox::ChildKind::McpStdio);
     assert_eq!(children[0].label.as_deref(), Some("fixture"));
-    assert_eq!(ledger.workers().len(), 1);
+    assert_eq!(ledger.workers().len(), 3);
 
     ledger.close_fence();
     assert_eq!(ledger.stop_all_children(), 1);
-    ledger.reap_all_children().await;
+    ledger.reap_all_children().await.unwrap();
     ledger.join_workers().await;
 
     let mut byte = [0];
     assert_eq!(descendant.read(&mut byte).await.unwrap(), 0);
     assert_eq!(h.limiter.live.load(Ordering::Acquire), 0);
     assert!(ledger.workers().is_empty());
+    assert_eq!(ledger.child_stats().reaped, 1);
+    h.assert_released().await;
+}
+
+// Given: a live server whose workers the ledger aborts / When: the workers are
+// joined and the children reaped / Then: the supervisor, reader, drainer and the
+// fallback cleanup are all confirmed ended, the server and its descendant are
+// gone, and the permit is released
+#[tokio::test]
+async fn aborting_the_supervisor_still_confirms_reader_drainer_and_cleanup() {
+    let mut h = Harness::new(&descendant_script());
+    let ledger = sandbox::SpawnLedger::new();
+    let _transport = h.connect_owned(&ledger).await.unwrap();
+    let _peer = h.peer().await;
+    let mut descendant = BufReader::new(h.listener.accept().await.unwrap().0);
+    event(&mut descendant, "descendant_ready").await;
+    assert_eq!(ledger.workers().len(), 3);
+
+    ledger.close_fence();
+    assert_eq!(ledger.abort_workers(), 3);
+    ledger.join_workers().await;
+    ledger.reap_all_children().await.unwrap();
+
+    assert!(ledger.workers().is_empty());
+    let mut byte = [0];
+    assert_eq!(descendant.read(&mut byte).await.unwrap(), 0);
+    assert_eq!(h.limiter.live.load(Ordering::Acquire), 0);
     assert_eq!(ledger.child_stats().reaped, 1);
     h.assert_released().await;
 }

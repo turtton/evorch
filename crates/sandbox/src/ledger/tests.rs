@@ -1,7 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustix::process::Pid;
 
@@ -69,7 +68,7 @@ async fn children_spawned_before_the_fence_are_listed_and_reaped() {
 
     ledger.close_fence();
     assert_eq!(ledger.stop_all_children(), 3);
-    ledger.reap_all_children().await;
+    ledger.reap_all_children().await.unwrap();
 
     assert!(ledger.children().is_empty());
     assert_eq!(
@@ -77,7 +76,7 @@ async fn children_spawned_before_the_fence_are_listed_and_reaped() {
         ChildStats {
             registered: 3,
             reaped: 3,
-            released: 0
+            unconfirmed: 0
         }
     );
     for pid in pids {
@@ -114,78 +113,73 @@ async fn nothing_starts_after_the_fence() {
     assert_eq!(ledger.child_stats().registered, 0);
 }
 
-// Given: spawners racing the fence / When: each iteration runs to the end /
-// Then: every spawn that was admitted is in the ledger and is reaped, a spawn
-// never outlasts the fence's return, and a spawn begun after it is refused
+// Given: spawners that hold their admissions while the fence is asked to close /
+// When: the fence is released only after it has begun waiting / Then: it does not
+// complete while an admission lives, every admitted spawn is in the ledger and
+// reaped, and a spawn begun after it is refused
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_spawns_and_the_fence_are_exclusive() {
-    const SPAWNERS: usize = 6;
-    for _ in 0..12 {
-        let ledger = SpawnLedger::new();
-        let fence_returned = Arc::new(AtomicBool::new(false));
-        let start = Arc::new(tokio::sync::Barrier::new(SPAWNERS + 1));
-
-        let spawners: Vec<_> = (0..SPAWNERS)
-            .map(|_| {
-                let (ledger, fence_returned, start) =
-                    (ledger.clone(), fence_returned.clone(), start.clone());
-                tokio::spawn(async move {
-                    start.wait().await;
-                    let admission = match ledger.admit() {
-                        Ok(admission) => admission,
-                        Err(error) => {
-                            assert!(matches!(error, SpawnError::Fenced));
-                            return None;
-                        }
-                    };
-                    let child = admission
-                        .spawn_group(ChildKind::Other, None, &mut blocked_child())
-                        .expect("spawn");
-                    // The fence cannot have returned while this admission lives.
-                    assert!(
-                        !fence_returned.load(Ordering::SeqCst),
-                        "the fence returned during a spawn"
-                    );
-                    drop(admission);
-                    Some(own(child))
-                })
+async fn the_fence_waits_for_admitted_spawns_and_refuses_later_ones() {
+    const SPAWNERS: usize = 4;
+    let ledger = SpawnLedger::new();
+    let (held_sender, held) = std::sync::mpsc::channel::<()>();
+    let mut releases = Vec::new();
+    let spawners: Vec<_> = (0..SPAWNERS)
+        .map(|_| {
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            releases.push(release);
+            let (ledger, held_sender) = (ledger.clone(), held_sender.clone());
+            tokio::task::spawn_blocking(move || {
+                let admission = ledger.admit().expect("the fence is still open");
+                let child = admission
+                    .spawn_group(ChildKind::Other, None, &mut blocked_child())
+                    .expect("spawn");
+                held_sender.send(()).unwrap();
+                // The admission lives until the test lets it go.
+                released.recv().unwrap();
+                drop(admission);
+                child
             })
-            .collect();
-        let closer = {
-            let (ledger, fence_returned, start) =
-                (ledger.clone(), fence_returned.clone(), start.clone());
-            tokio::spawn(async move {
-                start.wait().await;
-                tokio::task::spawn_blocking(move || {
-                    ledger.close_fence();
-                    fence_returned.store(true, Ordering::SeqCst);
-                })
-                .await
-                .unwrap();
-            })
-        };
-        let mut admitted = Vec::new();
-        for spawner in spawners {
-            admitted.extend(spawner.await.unwrap());
-        }
-        closer.await.unwrap();
-
-        // Everything admitted before the fence is in the ledger; a later
-        // attempt is refused.
-        assert_eq!(ledger.children().len(), admitted.len());
-        assert!(matches!(
-            spawn_child(&ledger, ChildKind::Other),
-            Err(SpawnError::Fenced)
-        ));
-        ledger.stop_all_children();
-        ledger.reap_all_children().await;
-        for owner in admitted.iter_mut() {
-            owner.await.unwrap();
-        }
-        let stats = ledger.child_stats();
-        assert_eq!(stats.registered, stats.reaped);
-        assert_eq!(stats.registered as usize, admitted.len());
+        })
+        .collect();
+    for _ in 0..SPAWNERS {
+        held.recv().unwrap();
     }
+    let mut fence = ledger.watch_fence();
+    let closer = {
+        let ledger = ledger.clone();
+        tokio::task::spawn_blocking(move || ledger.close_fence())
+    };
+
+    // The closer announces that it has begun; it cannot finish while any
+    // admission is alive.
+    let state = *fence
+        .wait_for(|state| *state != FenceState::Open)
+        .await
+        .unwrap();
+    assert_eq!(state, FenceState::Closing);
+    for release in &releases {
+        release.send(()).unwrap();
+    }
+    let mut admitted = Vec::new();
+    for spawner in spawners {
+        admitted.push(own(spawner.await.unwrap()));
+    }
+    closer.await.unwrap();
+
+    assert_eq!(*fence.borrow(), FenceState::Closed);
+    assert_eq!(ledger.children().len(), SPAWNERS);
+    assert!(matches!(
+        spawn_child(&ledger, ChildKind::Other),
+        Err(SpawnError::Fenced)
+    ));
+    ledger.stop_all_children();
+    ledger.reap_all_children().await.unwrap();
+    for owner in admitted {
+        owner.await.unwrap();
+    }
+    let stats = ledger.child_stats();
+    assert_eq!(stats.registered as usize, SPAWNERS);
+    assert_eq!(stats.reaped, stats.registered);
 }
 
 // Given: two children / When: one is stopped by id / Then: only that one stops,
@@ -200,7 +194,7 @@ async fn stop_names_one_child_and_a_gone_id_is_unknown() {
     let second_leader = leader_of(&ledger, ids[1]);
 
     ledger.stop_child(ids[0]).unwrap();
-    ledger.reap_child(ids[0]).await;
+    ledger.reap_child(ids[0]).await.unwrap();
 
     assert!(first_owner.await.unwrap().code().is_none());
     assert_eq!(ledger.stop_child(ids[0]), Err(UnknownChild(ids[0])));
@@ -210,8 +204,10 @@ async fn stop_names_one_child_and_a_gone_id_is_unknown() {
     assert!(!has_exited(second_leader).unwrap());
 
     ledger.terminate_child(ids[1]).unwrap();
-    assert!(ledger.children()[0].stop_requested || ledger.children().is_empty());
-    ledger.reap_child(ids[1]).await;
+    // One listing: the child may already have gone, or shows the request.
+    let listed = ledger.children();
+    assert!(listed.is_empty() || listed[0].stop_requested);
+    ledger.reap_child(ids[1]).await.unwrap();
     second_owner.await.unwrap();
     assert!(ledger.children().is_empty());
 }
@@ -232,7 +228,7 @@ async fn a_process_the_ledger_does_not_own_is_never_signalled() {
 
     ledger.close_fence();
     ledger.stop_all_children();
-    ledger.reap_all_children().await;
+    ledger.reap_all_children().await.unwrap();
     owner.await.unwrap();
 
     // A live `cat` echoes; a killed one would only report end of file.
@@ -247,24 +243,54 @@ async fn a_process_the_ledger_does_not_own_is_never_signalled() {
     assert!(bystander.wait().unwrap().success());
 }
 
-// Given: an owner that drops its child without reaping / When: it is dropped /
-// Then: the entry leaves the ledger as released, so reaping does not hang
+// Given: an owner that drops its child without reaping / When: the ledger waits
+// for every child / Then: it resolves only once the ledger's reaper has reaped
+// the leader, which is gone by then
 #[tokio::test]
-async fn a_dropped_child_leaves_the_ledger_as_released() {
+async fn a_dropped_child_is_reaped_by_the_ledger_before_reaping_resolves() {
     let ledger = SpawnLedger::new();
     let child = spawn_child(&ledger, ChildKind::Other).unwrap();
+    let leader = leader_of(&ledger, ledger.children()[0].id);
 
     drop(child);
-    ledger.reap_all_children().await;
+    ledger.reap_all_children().await.unwrap();
 
     assert_eq!(
         ledger.child_stats(),
         ChildStats {
             registered: 1,
-            reaped: 0,
-            released: 1
+            reaped: 1,
+            unconfirmed: 0
         }
     );
+    // Reaped: it is not our child any more, so it cannot even be observed.
+    assert!(has_exited(leader).is_err());
+}
+
+// Given: an owner that lets go of a registered child without any reap / When:
+// the ledger waits / Then: the departure is reported, never taken for success
+#[tokio::test]
+async fn a_child_that_left_without_a_reap_is_reported_unconfirmed() {
+    let ledger = SpawnLedger::new();
+    // Started outside the ledger, as a shell job runtime would start its own.
+    let mut child = Admission::unmanaged()
+        .spawn_group(ChildKind::Other, None, &mut blocked_child())
+        .unwrap();
+    let entry = {
+        let admission = ledger.admit().unwrap();
+        admission
+            .register_group(ChildKind::ShellJob, None, child.group())
+            .unwrap()
+    };
+    let id = entry.id();
+
+    drop(entry);
+
+    let error = ledger.reap_child(id).await.unwrap_err();
+    assert_eq!(error, UnconfirmedReap(vec![id]));
+    assert_eq!(ledger.reap_all_children().await.unwrap_err(), error);
+    assert_eq!(ledger.child_stats().unconfirmed, 1);
+    child.kill_and_wait().await.unwrap();
 }
 
 // Given: a stdio session started in an admission / When: it is stopped by the
@@ -293,7 +319,7 @@ async fn a_stdio_session_is_registered_and_reaped_with_the_ledger() {
     ledger.close_fence();
     ledger.stop_all_children();
     drop(session);
-    ledger.reap_all_children().await;
+    ledger.reap_all_children().await.unwrap();
 
     assert_eq!(ledger.child_stats().reaped, 1);
 }
@@ -393,4 +419,34 @@ async fn an_unmanaged_admission_registers_nothing() {
     );
     child.kill();
     child.wait().await.unwrap();
+}
+
+// Given: a blocking worker and a join that is dropped before it finishes /
+// When: the worker is released and the join is called again / Then: the second
+// join completes, because the ledger, not the dropped future, owns the join
+#[tokio::test]
+async fn a_cancelled_join_can_be_repeated() {
+    let ledger = SpawnLedger::new();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    {
+        let admission = ledger.admit().unwrap();
+        admission
+            .spawn_worker_thread("blocking-worker", move || {
+                let _ = released.recv();
+            })
+            .unwrap();
+    }
+
+    // The worker is blocked, so the join is pending; the ready branch cancels it.
+    tokio::select! {
+        biased;
+        () = ledger.join_workers() => panic!("the worker is still blocked"),
+        () = std::future::ready(()) => {}
+    }
+    assert_eq!(ledger.workers().len(), 1);
+    release.send(()).unwrap();
+    ledger.join_workers().await;
+
+    assert!(ledger.workers().is_empty());
+    assert_eq!(ledger.worker_stats().finished, 1);
 }

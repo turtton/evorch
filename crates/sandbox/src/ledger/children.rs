@@ -1,6 +1,6 @@
 //! The child half of the ledger: registration, explicit stop, and reaping.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::{Inner, SpawnLedger, UnknownChild, locked};
@@ -58,12 +58,19 @@ pub struct ChildInfo {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChildStats {
     pub registered: u64,
-    /// The owner reaped the leader.
+    /// The leader was reaped: by its owner, or by the ledger's own reaper after
+    /// the owner dropped a [`GroupChild`](crate::process::GroupChild).
     pub reaped: u64,
-    /// The owner dropped the child without reaping it (its own `Drop` stopped
-    /// the group and handed the leader to a background reaper).
-    pub released: u64,
+    /// The owner let go of the child without confirming a reap. Never a
+    /// success: [`SpawnLedger::reap_all_children`] reports it.
+    pub unconfirmed: u64,
 }
+
+/// Children left the ledger without a confirmed reap, so a restart cannot be
+/// sure that none of them outlives the old image.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{} child(ren) left the ledger without a confirmed reap", .0.len())]
+pub struct UnconfirmedReap(pub Vec<ChildId>);
 
 /// The ledger's children as observers see them. `epoch` changes on every
 /// registration and every departure.
@@ -85,6 +92,9 @@ pub(super) struct Record {
 pub(super) struct Table {
     next: u64,
     live: BTreeMap<ChildId, Record>,
+    /// Children that left without a confirmed reap. Sticky: nothing here can
+    /// be confirmed later, because the ledger holds no handle to the leader.
+    unconfirmed: BTreeSet<ChildId>,
     stats: ChildStats,
     epoch: u64,
 }
@@ -134,7 +144,8 @@ fn depart(inner: &Inner, id: ChildId, reaped: bool) {
     if reaped {
         table.stats.reaped += 1;
     } else {
-        table.stats.released += 1;
+        table.stats.unconfirmed += 1;
+        table.unconfirmed.insert(id);
     }
     table.epoch += 1;
     inner.children_activity.send_replace(table.activity());
@@ -142,9 +153,12 @@ fn depart(inner: &Inner, id: ChildId, reaped: bool) {
 
 /// The registration of one child, held by whoever reaps it.
 ///
-/// [`reaped`](Self::reaped) says the leader has been reaped; dropping the
-/// entry says the owner let go of it some other way. Either way the child
-/// leaves the ledger, and [`SpawnLedger::reap_child`] resolves.
+/// [`reaped`](Self::reaped) says the leader has been reaped. Dropping the
+/// entry says the owner let go of the child without confirming that: it leaves
+/// the ledger as *unconfirmed*, which [`SpawnLedger::reap_child`] and
+/// [`SpawnLedger::reap_all_children`] report as an error. (A `GroupChild`
+/// never does this: when dropped it hands its leader to a reaper that
+/// confirms the reap.)
 #[derive(Debug)]
 pub struct ChildEntry {
     inner: Option<Arc<Inner>>,
@@ -161,6 +175,29 @@ impl ChildEntry {
         if let Some(inner) = self.inner.take() {
             depart(&inner, self.id, true);
         }
+    }
+}
+
+impl ChildEntry {
+    /// The owner is dropping the child. Its group has been killed; reap the
+    /// leader on a thread of the ledger and only then leave the ledger as
+    /// reaped. If that cannot be done (no thread, or the leader cannot be
+    /// observed) the entry is dropped, which the ledger reports as unconfirmed.
+    pub(crate) fn reap_in_background(self, mut child: tokio::process::Child) {
+        let spawned = std::thread::Builder::new()
+            .name("child-reaper".to_owned())
+            .spawn(move || {
+                let waited = match crate::process::unreaped_pid(&child) {
+                    Some(leader) => crate::process::wait_for_exit(leader).is_ok(),
+                    None => true,
+                };
+                if waited && matches!(child.try_wait(), Ok(Some(_))) {
+                    self.reaped();
+                }
+            });
+        // A failed spawn dropped the closure, and with it the entry (reported
+        // as unconfirmed) and the child (left to Tokio's reaper).
+        drop(spawned);
     }
 }
 
@@ -236,24 +273,45 @@ impl SpawnLedger {
         table.live.len()
     }
 
-    /// Wait until the child has left the ledger: its owner reaped it, or gave
-    /// it up. Resolves at once for an id that is not held.
-    pub async fn reap_child(&self, id: ChildId) {
+    /// Wait until the child has left the ledger. Resolves at once for an id
+    /// that is not held.
+    ///
+    /// # Errors
+    /// [`UnconfirmedReap`] when it left without a confirmed reap.
+    pub async fn reap_child(&self, id: ChildId) -> Result<(), UnconfirmedReap> {
         loop {
             let mut activity = self.inner.children_activity.subscribe();
-            if !locked(&self.inner.children).live.contains_key(&id) {
-                return;
+            {
+                let table = locked(&self.inner.children);
+                if !table.live.contains_key(&id) {
+                    return if table.unconfirmed.contains(&id) {
+                        Err(UnconfirmedReap(vec![id]))
+                    } else {
+                        Ok(())
+                    };
+                }
             }
             if activity.changed().await.is_err() {
-                return;
+                return Ok(());
             }
         }
     }
 
-    /// Wait until the ledger holds no child. With the fence open, children
-    /// registered meanwhile are waited for too.
-    pub async fn reap_all_children(&self) {
+    /// Wait until the ledger holds no child, and say whether every one of them
+    /// was confirmed reaped. With the fence open, children registered
+    /// meanwhile are waited for too.
+    ///
+    /// # Errors
+    /// [`UnconfirmedReap`] naming every child that left without a confirmed
+    /// reap, ever. The restart must not go on as if the children were gone.
+    pub async fn reap_all_children(&self) -> Result<(), UnconfirmedReap> {
         let mut activity = self.inner.children_activity.subscribe();
         let _ = activity.wait_for(|activity| activity.live == 0).await;
+        let table = locked(&self.inner.children);
+        if table.unconfirmed.is_empty() {
+            Ok(())
+        } else {
+            Err(UnconfirmedReap(table.unconfirmed.iter().copied().collect()))
+        }
     }
 }

@@ -954,11 +954,43 @@ mod processes {
         ledger.close_fence();
         assert_eq!(ledger.stop_all_children(), 1);
         let output = run.await.unwrap().unwrap();
-        ledger.reap_all_children().await;
+        ledger.reap_all_children().await.unwrap();
 
         assert_eq!(output.exit_code, None, "it was killed");
         assert!(ledger.children().is_empty());
         assert_eq!(ledger.child_stats().reaped, 1);
+    }
+
+    // Given: a runner without a ledger and one with a ledger / When: each runs a
+    // program that reports its process group / Then: only the owned child leads a
+    // group of its own, so the unowned one keeps the old leader-only behaviour
+    #[tokio::test]
+    async fn only_a_ledger_owned_child_leads_its_own_process_group() {
+        fn group_of(stat: &str) -> String {
+            let after_name = stat.rsplit_once(')').unwrap().1;
+            after_name.split_whitespace().nth(2).unwrap().to_owned()
+        }
+        let own = group_of(&std::fs::read_to_string("/proc/self/stat").unwrap());
+        let report = |runner: TokioProcessRunner| async move {
+            let output = runner
+                .run(ProcessSpec {
+                    program: "cat".into(),
+                    args: vec!["/proc/self/stat".into()],
+                    env_remove: Vec::new(),
+                    env_set: Vec::new(),
+                    stdout_limit: 4096,
+                    stderr_limit: 4096,
+                })
+                .await
+                .unwrap();
+            group_of(&String::from_utf8(output.stdout).unwrap())
+        };
+
+        let unowned = report(TokioProcessRunner::default()).await;
+        let owned = report(TokioProcessRunner::with_ledger(SpawnLedger::new())).await;
+
+        assert_eq!(unowned, own);
+        assert_ne!(owned, own);
     }
 
     // Given: a closed spawn fence / When: the runner is asked to run / Then: no

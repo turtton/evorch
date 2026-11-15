@@ -44,7 +44,9 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 
-pub use children::{ChildActivity, ChildEntry, ChildId, ChildInfo, ChildKind, ChildStats};
+pub use children::{
+    ChildActivity, ChildEntry, ChildId, ChildInfo, ChildKind, ChildStats, UnconfirmedReap,
+};
 pub use workers::{WorkerActivity, WorkerId, WorkerInfo, WorkerStats};
 
 use crate::process::{GroupChild, ProcessGroup};
@@ -68,6 +70,16 @@ impl From<SpawnError> for io::Error {
     }
 }
 
+/// Where the final spawn fence stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceState {
+    Open,
+    /// [`SpawnLedger::close_fence`] has begun and waits for the admissions in
+    /// flight; new ones are not guaranteed to succeed.
+    Closing,
+    Closed,
+}
+
 /// A [`ChildId`] the ledger does not hold: never registered, or already gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("child {0:?} is not in the ledger")]
@@ -81,6 +93,7 @@ struct Inner {
     fence: RwLock<bool>,
     /// Lock-free view of the fence for observers; written under the write side.
     fenced: AtomicBool,
+    fence_state: tokio::sync::watch::Sender<FenceState>,
     children: Mutex<children::Table>,
     children_activity: tokio::sync::watch::Sender<ChildActivity>,
     workers: Mutex<workers::Table>,
@@ -113,6 +126,7 @@ impl SpawnLedger {
             inner: Arc::new(Inner {
                 fence: RwLock::new(false),
                 fenced: AtomicBool::new(false),
+                fence_state: tokio::sync::watch::channel(FenceState::Open).0,
                 children: Mutex::new(children::Table::default()),
                 children_activity,
                 workers: Mutex::new(workers::Table::default()),
@@ -161,6 +175,11 @@ impl SpawnLedger {
     /// failed closed. Blocks only for the spawns in flight (each is a short
     /// synchronous section); calling it again is harmless.
     pub fn close_fence(&self) {
+        self.inner.fence_state.send_modify(|state| {
+            if *state == FenceState::Open {
+                *state = FenceState::Closing;
+            }
+        });
         let mut closed = self
             .inner
             .fence
@@ -168,6 +187,12 @@ impl SpawnLedger {
             .unwrap_or_else(PoisonError::into_inner);
         *closed = true;
         self.inner.fenced.store(true, Ordering::Release);
+        self.inner.fence_state.send_replace(FenceState::Closed);
+    }
+
+    /// A watch on the fence, for event-driven waits.
+    pub fn watch_fence(&self) -> tokio::sync::watch::Receiver<FenceState> {
+        self.inner.fence_state.subscribe()
     }
 
     /// Whether [`close_fence`](Self::close_fence) has completed.

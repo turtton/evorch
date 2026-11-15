@@ -629,6 +629,7 @@ fn spawn_session(
     let mut owner = ChildLease {
         child: Some(child),
         permit: Some(permit),
+        ledger: ledger.cloned(),
     };
     let child = owner.child.as_mut().expect("owned child");
     let stdin = child.take_stdin();
@@ -647,9 +648,18 @@ fn spawn_session(
         owner_cancel: cancel.clone(),
     });
     let reader_session = session.clone();
-    let reader = tokio::spawn(async move { read_stdout(stdout, &reader_session).await });
+    // The reader and the drainer are workers of the ledger too, so that
+    // joining the ledger's workers proves they ended even when the supervisor
+    // was aborted instead of running to its end.
+    let (reader_done, reader) = oneshot::channel();
+    admission.spawn_worker("mcp-stdio-reader", async move {
+        let _ = reader_done.send(read_stdout(stdout, &reader_session).await);
+    });
     // Discard stderr in fixed chunks, without retaining or tracing any raw bytes.
-    let drainer = tokio::spawn(async move { drain_stderr(stderr).await });
+    let (drainer_done, drainer) = oneshot::channel();
+    admission.spawn_worker("mcp-stdio-drainer", async move {
+        let _ = drainer_done.send(drain_stderr(stderr).await);
+    });
     let supervisor_session = session.clone();
     admission.spawn_worker("mcp-stdio-supervisor", async move {
         supervise(owner, supervisor_session, reader, drainer, done, policy).await;
@@ -661,25 +671,34 @@ fn spawn_session(
 struct ChildLease {
     child: Option<GroupChild>,
     permit: Option<Box<dyn McpProcessPermit>>,
+    /// Tracks the fallback cleanup thread, so that joining the ledger's
+    /// workers waits for it.
+    ledger: Option<SpawnLedger>,
 }
 impl Drop for ChildLease {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             child.kill();
             let permit = self.permit.take();
-            std::thread::spawn(move || {
+            let cleanup = move || {
                 let _ = child.kill_and_reap_blocking();
                 drop(child);
                 drop(permit);
-            });
+            };
+            match &self.ledger {
+                // A failed start drops the closure: the child is then reaped by
+                // the ledger's own reaper and the permit is released.
+                Some(ledger) => drop(ledger.spawn_cleanup_thread("mcp-stdio-cleanup", cleanup)),
+                None => drop(std::thread::spawn(cleanup)),
+            }
         }
     }
 }
 async fn supervise(
     mut owner: ChildLease,
     session: Arc<Session>,
-    mut reader: tokio::task::JoinHandle<Result<(), McpErrorKind>>,
-    drainer: tokio::task::JoinHandle<io::Result<()>>,
+    mut reader: oneshot::Receiver<Result<(), McpErrorKind>>,
+    drainer: oneshot::Receiver<io::Result<()>>,
     done: watch::Sender<Option<Result<(), McpErrorKind>>>,
     policy: StdioShutdownPolicy,
 ) {
