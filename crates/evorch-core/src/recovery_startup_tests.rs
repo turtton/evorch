@@ -52,8 +52,10 @@ fn runtime(
     model: Arc<ParkedModel>,
 ) -> AgentRuntime {
     let bus = Arc::new(event_bus::EventBus::new(256));
-    AgentRuntime::new(bus.clone(), Arc::new(tools::ToolExecutor::new(bus)), model)
-        .with_run_store(RunStore::open(config, writer.clone()).unwrap())
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(tools::ToolExecutor::new(bus)), model)
+        .with_run_store(RunStore::open(config, writer.clone()).unwrap());
+    runtime.install_planned_recovery_fixture().unwrap();
+    runtime
 }
 async fn available_catalog(options: &BootstrapOptions) -> RecoveryCatalog {
     let directory = options.config_dir.join("catalog");
@@ -522,6 +524,7 @@ async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
     };
     let bad = manifest(runs[0]);
     let good = manifest(runs[1]);
+    let first = runtime(&config, &writer, model.clone());
     writer
         .claim_recovery_manifest(storage::recovery::RecoveryClaimRequest {
             claim_id: "bad-claim".into(),
@@ -541,7 +544,6 @@ async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
         &workbench_protocol::ids::ProjectId::new("project").unwrap(),
         root.clone(),
     );
-    let first = runtime(&config, &writer, model.clone());
     let owner = Arc::new(
         OwnerHost::open(
             &options.ownership_root,

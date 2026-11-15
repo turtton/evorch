@@ -145,6 +145,17 @@ pub struct SealedRestart {
     fence: DispatchDrainFence,
 }
 impl SealedRestart {
+    /// Call under the lifecycle coordinator mutex; publish Capturing in that
+    /// same synchronous section. No database write or await occurs here.
+    pub fn begin_capture(
+        self,
+        runtime: &AgentRuntime,
+        tx: &storage::recovery::restart::RestartTransaction,
+        recipes: std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>,
+    ) -> Result<runtime::RestartCaptureSession, RuntimeError> {
+        self.validate(runtime)?;
+        runtime.begin_restart_capture_session(self.fence, tx, recipes)
+    }
     pub fn validate(&self, runtime: &AgentRuntime) -> Result<(), RuntimeError> {
         let state = self.gate.0.state.lock().unwrap();
         if state.generation != self.generation || state.phase != HostRestartPhase::Sealed {

@@ -52,7 +52,7 @@ pub(super) fn evidence(
 }
 
 #[tokio::test]
-async fn new_runtime_adopts_the_same_claim_revision_and_incarnation_before_activation() {
+async fn same_adopted_successor_reattaches_the_same_prepared_claim_before_activation() {
     let f = Fixture::new(0);
     let run = saved(&f).await;
     let first = new_process(&f);

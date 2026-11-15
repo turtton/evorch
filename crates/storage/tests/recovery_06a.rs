@@ -573,6 +573,11 @@ fn fresh_upgrade_and_undo_v61_preserve_previous_intents() {
     f.seed("run-1");
     f.storage.close();
     let sql = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    let package = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let undo_latest =
+        std::fs::read_to_string(std::path::Path::new(&package).join("undo/undo_v62.sql")).unwrap();
+    sql.execute_batch(&undo_latest).unwrap();
+    sql.pragma_update(None, "user_version", 61).unwrap();
     assert_eq!(
         sql.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),

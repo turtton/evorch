@@ -33,6 +33,40 @@ pub struct ResumeReceipt {
 }
 
 impl Coordinator {
+    pub(crate) fn planned_admission_closed(&self) -> bool {
+        let i = self.lock();
+        i.planned && i.requested && !i.cancelling
+    }
+    pub(crate) fn live_capture_intents(&self) -> std::collections::BTreeMap<RunId, ResumeIntent> {
+        let i = self.lock();
+        let mut wanted: std::collections::BTreeSet<_> = i
+            .intents
+            .values()
+            .filter(|i| i.active)
+            .map(|i| i.run_id)
+            .collect();
+        loop {
+            let before = wanted.len();
+            for intent in i.intents.values() {
+                if wanted.contains(&intent.run_id)
+                    && let Some(p) = intent.parent_run_id
+                {
+                    wanted.insert(p);
+                }
+                if intent.parent_run_id.is_some_and(|p| wanted.contains(&p)) {
+                    wanted.insert(intent.run_id);
+                }
+            }
+            if before == wanted.len() {
+                break;
+            }
+        }
+        i.intents
+            .iter()
+            .filter(|(id, _)| wanted.contains(id))
+            .map(|(id, intent)| (*id, intent.clone()))
+            .collect()
+    }
     pub(crate) fn strict_restart_accounting(&self) -> bool {
         let inner = self.lock();
         inner.requested
@@ -79,8 +113,18 @@ impl AgentRuntime {
         Ok(())
     }
     pub fn begin_restart_quiesce(&self) -> Result<RestartAttempt, RuntimeError> {
+        self.begin_restart_quiesce_mode(false)
+    }
+    pub(crate) fn begin_restart_quiesce_mode(
+        &self,
+        planned: bool,
+    ) -> Result<RestartAttempt, RuntimeError> {
         self.shared.dispatch_tails.result()?;
-        let generation = self.shared.quiesce.begin().map_err(runtime::error)?;
+        let generation = self
+            .shared
+            .quiesce
+            .begin_mode(planned)
+            .map_err(runtime::error)?;
         Ok(RestartAttempt {
             owner: self.shared.dispatch_tails.clone(),
             generation,
@@ -323,6 +367,12 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut inner = self.shared.quiesce.lock();
+        if self.shared.dispatch_tails.capture_started()
+            && !inner.shutting_down
+            && !matches!(inner.phase, QuiesceState::Failed { .. })
+        {
+            return Err(RuntimeError::RestartBusy);
+        }
         let terminal_only = self.shared.dispatch_tails.capture_started()
             || (inner.requested
                 && (inner.shutting_down || matches!(inner.phase, QuiesceState::Failed { .. })))

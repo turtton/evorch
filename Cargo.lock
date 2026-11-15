@@ -5864,6 +5864,7 @@ dependencies = [
  "browser",
  "catalog",
  "config",
+ "core-instance",
  "cssparser 0.36.0",
  "event-bus",
  "futures-util",

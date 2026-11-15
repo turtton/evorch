@@ -125,6 +125,7 @@ pub use run::{
     RunPurpose, WorkspaceInspection,
 };
 pub use run_store::RunStore;
+pub use runtime::RestartCaptureSession;
 pub use runtime::{
     AgentRuntime, AnswerOutcome, AnswerQuestionError, ChatResumeObservation,
     CurrentRecoveryAuthority, FollowUpStatus, FollowUpWithdrawalError, PausedRecoveryComponent,

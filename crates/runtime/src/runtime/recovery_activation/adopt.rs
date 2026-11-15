@@ -26,6 +26,7 @@ impl AgentRuntime {
         models: &RecoveryModels,
     ) -> Result<PausedRecoveryComponent, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
+        self.require_planned_manifest(&proof.claim().manifest_id)?;
         let startup = Arc::new(startup);
         if !self
             .shared

@@ -88,7 +88,19 @@ async fn recover(changed_settings: bool) {
     };
     let storage = storage::Storage::open(config.clone()).unwrap();
     let (old, old_model, mut events) = process(&h, &current, &storage, &config);
-    let run = old.reserve_run_id();
+    // Current-thread test: pin is installed before the admitted task is polled.
+    let run = old
+        .delegate_chat(
+            "wire-recovery-thread",
+            Role::Worker,
+            "Keep original task".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..RunConfig::default()
+            },
+        )
+        .unwrap();
     let pin = runtime::RoutePinRecord {
         chain: "worker".into(),
         position: 1,
@@ -98,39 +110,46 @@ async fn recover(changed_settings: bool) {
     // Persist a real fallback pin. Its production creation path is independently
     // covered by compose::tests::checkpoint::recovery_validates_fallback_pin… .
     old_model.restore_route_pins(&run.to_string(), std::slice::from_ref(&pin));
-    old.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "Keep original task",
-        RunConfig {
-            interactive: true,
-            keep_alive: true,
-            ..Default::default()
-        },
-    );
     let mut all_events = through_phase(&mut events, run, AgentRunPhase::Waiting).await;
-    old.request_quiesce();
+    use storage::recovery::restart::RestartMutation;
+    let recipes = BTreeMap::from([(
+        run,
+        RecoveryRecipe {
+            settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+            policy: ResumePolicy::CoreOwned,
+            goal_id: None,
+            team: None,
+            lane: None,
+            descriptor: None,
+        },
+    )]);
+    old.begin_planned_restart_quiesce(&recipes).unwrap();
     old.wait_quiesced().await.unwrap();
     let fence = old.fence_dispatch_restart().await.unwrap();
     old.drain_dispatch_tails(&fence).await.unwrap();
-    let records = old
-        .capture_recovery_records(
-            &fence,
-            &BTreeMap::from([(
-                run,
-                RecoveryRecipe {
-                    settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
-                    policy: ResumePolicy::CoreOwned,
-                    goal_id: None,
-                    team: None,
-                    lane: None,
-                    descriptor: None,
-                },
-            )]),
+    let tx = storage
+        .handle()
+        .mutate_restart(
+            "routed-wire".into(),
+            None,
+            RestartMutation::Create(Box::new(support::fixture_restart_metadata("routed-wire"))),
         )
         .unwrap();
-    old.save_recovery_graph("routed-wire", &records).unwrap();
+    let mut session = old
+        .begin_restart_capture_session(fence, &tx, recipes)
+        .unwrap();
+    old.persist_restart_capture_expected(&mut session).unwrap();
+    let committed = old.commit_restart_capture(&mut session).unwrap();
+    storage
+        .handle()
+        .mutate_restart(
+            "routed-wire".into(),
+            Some(committed.revision),
+            RestartMutation::Arm {
+                nonce_hash: "fixture-nonce".into(),
+            },
+        )
+        .unwrap();
     let before = h
         .mock
         .recorded_requests()
@@ -143,6 +162,11 @@ async fn recover(changed_settings: bool) {
         current.agents.worker.base.generation.temperature = Some(0.75);
     }
     let (restarted, model, mut events) = process(&h, &current, &storage, &config);
+    let fixture_db = storage::Database::open(&config).unwrap();
+    let proof = support::inherited_fixture_proof(&fixture_db, &storage.handle())
+        .unwrap()
+        .unwrap();
+    restarted.adopt_restart_handoff(proof).unwrap();
     assert!(model.route_pins(&run.to_string()).is_empty());
     let ownership = h._directory.path().join("ownership");
     let leases =
@@ -168,7 +192,7 @@ async fn recover(changed_settings: bool) {
         members: BTreeMap::from([(
             run,
             RunConfig {
-                ownership: Some(owner.start("current").unwrap()),
+                ownership: Some(owner.start("wire-recovery-thread").unwrap()),
                 interactive: true,
                 keep_alive: true,
                 ..Default::default()

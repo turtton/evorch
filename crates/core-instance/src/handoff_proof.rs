@@ -2,6 +2,15 @@
 /// Verified inheritance of a lifetime lock and sealed handoff ticket.
 /// No serialization or public production constructor: only the adopting
 /// process may authorize planned recovery (D10).
+///
+/// Durable JSON cannot manufacture execution authority:
+/// ```compile_fail
+/// let _: core_instance::InheritedHandoffProof = serde_json::from_str("{}").unwrap();
+/// ```
+/// The physical-evidence constructor is crate-private:
+/// ```compile_fail
+/// let _ = core_instance::InheritedHandoffProof::new("tx".into(),"config".into(),2,"nonce".into(),"build".into());
+/// ```
 #[derive(Debug)]
 pub struct InheritedHandoffProof {
     restart_id: String,
