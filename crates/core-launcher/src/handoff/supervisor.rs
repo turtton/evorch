@@ -365,10 +365,19 @@ unsafe fn supervise(parameters: ForkParameters) -> ! {
         },
     ];
     while !done {
-        let rc = libc::waitpid(child, &mut status, libc::WNOHANG);
-        if rc == child {
-            leader_status = if libc::WIFEXITED(status) {
-                libc::WEXITSTATUS(status)
+        // Observe without reaping: the leader (even a zombie) must pin its
+        // PID/PGID until group kill, or that number could target an unrelated
+        // new process group after reuse. Cleanup below owns the only reap.
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let rc = libc::waitid(
+            libc::P_PID,
+            child as u32,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        );
+        if rc == 0 && info.si_pid() == child {
+            leader_status = if info.si_code == libc::CLD_EXITED {
+                info.si_status()
             } else {
                 128
             };
@@ -396,14 +405,20 @@ unsafe fn supervise(parameters: ForkParameters) -> ! {
         }
         if poll[1].revents != 0 {
             let mut info: libc::signalfd_siginfo = std::mem::zeroed();
-            while libc::read(
-                signal_fd,
-                (&mut info as *mut libc::signalfd_siginfo).cast(),
-                std::mem::size_of_val(&info),
-            ) > 0
-            {
+            // CHLD/TERM coalesce. Bound the drain even if a broken probe
+            // continuously forks/exits, so control EOF/deadline stay live.
+            for _ in 0..2 {
+                if libc::read(
+                    signal_fd,
+                    (&mut info as *mut libc::signalfd_siginfo).cast(),
+                    std::mem::size_of_val(&info),
+                ) <= 0
+                {
+                    break;
+                }
                 if info.ssi_signo == libc::SIGTERM as u32 {
                     done = true;
+                    break;
                 }
             }
         }

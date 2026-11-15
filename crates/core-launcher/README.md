@@ -79,6 +79,8 @@ Both stdout and stderr count. The dedicated syscall-only subreaper supervisor
 has its own deadline, parent-death signal and control-EOF cleanup. Timeout,
 cancellation, dropped futures and even descendants escaping to other process
 groups trigger kill and wait/reap without changing the host's subreaper state.
+Leader exit is observed without reaping until group kill, pinning the PID/PGID
+against reuse. Signal draining is bounded so the deadline remains observable.
 The host must leave SIGCHLD waitable and not externally reap this supervisor;
 auto-reap dispositions are rejected before spawning.
 As with all SIGKILL/reap designs, cleanup ultimately relies on the kernel allowing

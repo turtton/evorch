@@ -64,8 +64,9 @@ mod linux {
                     }
                 }
             }
-            Some("hang") | Some("escape") => {
-                let escape = value(args, "--probe-behavior").unwrap() == "escape";
+            Some("hang") | Some("escape") | Some("escape-exit") => {
+                let behavior = value(args, "--probe-behavior").unwrap();
+                let escape = behavior != "hang";
                 let notify = value(args, "--notify").unwrap();
                 let mut stream = UnixStream::connect(notify).unwrap();
                 // Only this single-threaded fixture forks. Parent waits on a pipe
@@ -114,6 +115,9 @@ mod linux {
                 }
                 stream.write_all(&b[..n as usize]).unwrap();
                 drop(stream);
+                if behavior == "escape-exit" {
+                    return;
+                }
                 loop {
                     unsafe {
                         libc::pause();

@@ -145,7 +145,12 @@ async fn probes_same_wrapper_and_rejects_invalid_limits_output_build_and_symlink
     clock.finish().await;
 }
 
-async fn interrupted_probe(behavior: &str, timeout: bool) {
+enum ProbeEnd {
+    Timeout,
+    Cancel,
+    LeaderExit,
+}
+async fn probe_cleanup(behavior: &str, end: ProbeEnd) {
     let clock = ClockHold::new().await;
     let dir = test_socket_dir::SocketDir::new();
     let socket = dir.path().join("n");
@@ -173,18 +178,18 @@ async fn interrupted_probe(behavior: &str, timeout: bool) {
     let (mut stream, _) = listener.accept().await.unwrap();
     let mut pids = String::new();
     stream.read_to_string(&mut pids).await.unwrap();
-    if timeout {
-        tokio::time::advance(Duration::from_secs(5)).await;
-    } else {
-        tx.send(()).unwrap();
+    match end {
+        ProbeEnd::Timeout => tokio::time::advance(Duration::from_secs(5)).await,
+        ProbeEnd::Cancel => tx.send(()).unwrap(),
+        ProbeEnd::LeaderExit => {}
     }
     let error = task.await.unwrap().err().unwrap();
     assert_eq!(
         error.kind(),
-        if timeout {
-            io::ErrorKind::TimedOut
-        } else {
-            io::ErrorKind::Interrupted
+        match end {
+            ProbeEnd::Timeout => io::ErrorKind::TimedOut,
+            ProbeEnd::Cancel => io::ErrorKind::Interrupted,
+            ProbeEnd::LeaderExit => io::ErrorKind::UnexpectedEof,
         }
     );
     for pid in pids.split_whitespace() {
@@ -197,15 +202,20 @@ async fn interrupted_probe(behavior: &str, timeout: bool) {
 }
 #[tokio::test(start_paused = true)]
 async fn timeout_reaps_group_and_grandchildren() {
-    interrupted_probe("hang", true).await;
+    probe_cleanup("hang", ProbeEnd::Timeout).await;
 }
 #[tokio::test(start_paused = true)]
 async fn cancellation_reaps_escaped_session_and_its_child() {
-    interrupted_probe("escape", false).await;
+    probe_cleanup("escape", ProbeEnd::Cancel).await;
 }
 #[tokio::test(start_paused = true)]
 async fn timeout_reaps_escaped_session_and_its_child() {
-    interrupted_probe("escape", true).await;
+    probe_cleanup("escape", ProbeEnd::Timeout).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn leader_exit_reaps_escaped_session_and_its_child() {
+    probe_cleanup("escape-exit", ProbeEnd::LeaderExit).await;
 }
 
 struct Process {
@@ -247,13 +257,7 @@ impl Process {
         s.trim().into()
     }
     async fn go(&mut self) {
-        self.input
-            .write_all(
-                b"x
-",
-            )
-            .await
-            .unwrap();
+        self.input.write_all(b"x").await.unwrap();
     }
     async fn finish(mut self) {
         assert!(self.child.wait().await.unwrap().success());
