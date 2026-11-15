@@ -1469,6 +1469,159 @@ async fn learning_unconfirmed_intake_cleanup_never_ends_a_job_it_did_not_observe
     assert!(!f.has_evidence("pending"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn learning_moved_interrupt_readback_never_authorizes_an_old_cancellation() {
+    moved_interrupted_cleanup_preserves_successor(CleanupReadback::UnappliedInterrupt).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_moved_terminal_retry_never_authorizes_an_old_cancellation() {
+    moved_interrupted_cleanup_preserves_successor(CleanupReadback::RejectedTerminal).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn learning_moved_abandon_readback_never_authorizes_an_old_cancellation() {
+    moved_interrupted_cleanup_preserves_successor(CleanupReadback::AppliedBind).await;
+}
+
+enum CleanupReadback {
+    UnappliedInterrupt,
+    RejectedTerminal,
+    AppliedBind,
+}
+
+// Move the job using real storage transitions, not fabricated keys. Each case reaches a
+// different read-only settlement path before the old suspension's actual cancel task runs.
+async fn moved_interrupted_cleanup_preserves_successor(readback: CleanupReadback) {
+    let f = Fixture::new();
+    let owner = origin(LearningOriginKind::Core, "old-owner", Some("cfg"));
+    let runtime = f.runtime(owner.clone());
+    let queue = f.queue(owner);
+    queue.admit(admit_request("moved", "moved-root")).unwrap();
+    let old = runtime
+        .shared
+        .learning_executions
+        .register("moved", runtime.shared.learning_jobs_changed.clone())
+        .unwrap();
+    {
+        let permit = runtime.learning_gate().try_enter().unwrap();
+        assert!(old.start(&queue, &permit).unwrap());
+    }
+    let sql = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    match readback {
+        CleanupReadback::UnappliedInterrupt => sql
+            .execute_batch(
+                "CREATE TRIGGER inject_interrupt_rollback BEFORE UPDATE ON learning_jobs
+                 WHEN NEW.state='Interrupted'
+                 BEGIN SELECT RAISE(ABORT, 'injected interrupt rollback'); END;
+                 ALTER TABLE learning_attempt_receipts RENAME TO learning_attempt_receipts_off;",
+            )
+            .unwrap(),
+        CleanupReadback::RejectedTerminal => {
+            sql.execute_batch(
+                "CREATE TRIGGER inject_terminal_rollback BEFORE UPDATE ON learning_jobs
+                 WHEN NEW.state='Failed'
+                 BEGIN SELECT RAISE(ABORT, 'injected terminal rollback'); END;",
+            )
+            .unwrap();
+            assert!(
+                old.change(
+                    &queue,
+                    LearningAttemptChange::Fail(LearningEndReason::PipelineFailed)
+                )
+                .is_err()
+            );
+        }
+        CleanupReadback::AppliedBind => {
+            let mut unreadable = queue.clone();
+            unreadable.storage.db_path = f._dir.path().join("absent-parent").join("unavailable.db");
+            assert!(
+                old.change(
+                    &unreadable,
+                    LearningAttemptChange::BindRun {
+                        run: "confirmed-extract".into(),
+                        review: false,
+                    }
+                )
+                .is_err()
+            );
+        }
+    }
+    let mut fenced = runtime.subscribe_learning_changes();
+    let pause = runtime.pause_learning();
+    let suspension = Arc::new(runtime.suspend_learning(&pause).unwrap());
+    while !old.interrupted() {
+        fenced.changed().await.unwrap();
+    }
+    // Record the dispatch return without starting auto-retry yet: the separate writer's
+    // moves below happen before the old cleanup is allowed to reconcile.
+    runtime.shared.learning_executions.returned(&old);
+    assert!(suspension.wait().await.is_err());
+    assert!(matches!(*old.returned_receipt().borrow(), Some(Err(_))));
+    match readback {
+        CleanupReadback::UnappliedInterrupt => sql
+            .execute_batch(
+                "ALTER TABLE learning_attempt_receipts_off RENAME TO learning_attempt_receipts;
+                 DROP TRIGGER inject_interrupt_rollback;",
+            )
+            .unwrap(),
+        CleanupReadback::RejectedTerminal => sql
+            .execute_batch("DROP TRIGGER inject_terminal_rollback;")
+            .unwrap(),
+        CleanupReadback::AppliedBind => {}
+    }
+
+    let current = queue.job("moved").unwrap().unwrap().key();
+    let interrupted = queue
+        .change(
+            &current,
+            LearningAttemptChange::Interrupt {
+                suspension_id: "external-interrupt".into(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let successor = origin(LearningOriginKind::Core, "successor-owner", Some("cfg"));
+    let pending = queue
+        .change(
+            &interrupted,
+            LearningAttemptChange::Requeue {
+                suspension_id: "external-interrupt".into(),
+                to: successor,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let started = queue
+        .change(&pending, LearningAttemptChange::Start)
+        .unwrap()
+        .unwrap();
+    let successor_key = queue
+        .change(
+            &started,
+            LearningAttemptChange::Interrupt {
+                suspension_id: "successor-suspension".into(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(successor_key.attempt, 2);
+    runtime.learning_returned(&old).await;
+    returned_cleanly(&old).await;
+    assert_eq!(queue.job("moved").unwrap().unwrap().key(), successor_key);
+
+    let mut cancelled = runtime.subscribe_learning_changes();
+    runtime
+        .cancel_learning_suspension(pause, suspension)
+        .unwrap();
+    // No scheduler was started in this fixture; this notification is from the owned
+    // cancellation task after its cleanup, not an absence-of-events timeout.
+    cancelled.changed().await.unwrap();
+    assert_eq!(queue.job("moved").unwrap().unwrap().key(), successor_key);
+    assert!(f.has_evidence("moved"));
+    assert!(runtime.list_agents().is_empty());
+}
+
 /// Runs `hook` with the instance of the first judged origin when the second origin is judged,
 /// which is after the first job was adopted and before the rescan resumes it.
 struct SyncProbe<F: Fn(&str) + Send + Sync> {

@@ -3,8 +3,8 @@ use super::*;
 /// The outcome of re-reading a job to settle a write whose result is unknown.
 enum Reread {
     /// The job moved on to a state this entry must not write over (ended, another owner,
-    /// or reserved for requeue). Carries the job's key, if the job still exists.
-    Settled(Option<LearningAttemptKey>),
+    /// or reserved for requeue), or no longer exists. This carries no write authority.
+    Settled,
     /// The job still has exactly this entry's key: the write never applied.
     Unapplied,
     /// An own-origin Started job that is not this entry's attempt. Never written over.
@@ -187,7 +187,7 @@ impl LearningExecution {
         own: &LearningAttemptKey,
     ) -> Result<Reread, storage::StorageError> {
         let Some(job) = queue.job(task_id)? else {
-            return Ok(Reread::Settled(None));
+            return Ok(Reread::Settled);
         };
         if job.key() == *own {
             return Ok(Reread::Unapplied);
@@ -199,7 +199,7 @@ impl LearningExecution {
                 LearningJobState::Pending | LearningJobState::Interrupted
             )
         {
-            return Ok(Reread::Settled(Some(job.key())));
+            return Ok(Reread::Settled);
         }
         tracing::error!(task = %task_id, "own-origin started job is not this entry's attempt; keeping it unresolved");
         Ok(Reread::Foreign)
@@ -209,41 +209,38 @@ impl LearningExecution {
     /// other state belongs to someone else and is settled without a write.
     fn settle_intake(
         &self,
-        state: &mut ExecutionState,
         queue: &LearningJobQueue,
-    ) -> Result<(), storage::StorageError> {
+    ) -> Result<Option<LearningAttemptKey>, storage::StorageError> {
         let Some(job) = queue.job(&self.task_id)? else {
-            return Ok(());
+            return Ok(None);
         };
         if job.origin == *queue.origin() && job.state == LearningJobState::Pending {
-            if let Some(next) = queue.change(
+            // A rejected CAS means this entry never acquired authority; do not adopt the
+            // key that won the race. Only this command's confirmed result may be retained.
+            return queue.change(
                 &job.key(),
                 Change::Abandon(storage::learning_jobs::LearningEndReason::UnconfirmedWrite),
-            )? {
-                state.key = Some(next);
-                return Ok(());
-            }
-            // The Pending key moved while we looked: it is not ours to end.
-            return match queue.job(&self.task_id)? {
-                Some(job) => {
-                    state.key = Some(job.key());
-                    Ok(())
-                }
-                None => Ok(()),
-            };
+            );
         }
-        if job.state.is_terminal() {
-            state.key = Some(job.key());
-        }
-        Ok(())
+        Ok(None)
     }
 
     /// Only called after the enclosing dispatch scope and every internal tail returned.
     pub(super) fn reconcile(&self, queue: &LearningJobQueue) {
         let mut state = self.state.lock().unwrap();
-        if state.unconfirmed_intake && self.settle_intake(&mut state, queue).is_ok() {
-            state.unconfirmed_intake = false;
-            state.settle();
+        if state.unconfirmed_intake {
+            match self.settle_intake(queue) {
+                Ok(Some(next)) => {
+                    state.key = Some(next);
+                    state.unconfirmed_intake = false;
+                    state.settle();
+                }
+                Ok(None) => {
+                    state.settle_without_authority();
+                    return;
+                }
+                Err(_) => {}
+            }
         }
         while let Some((key, change)) = state.retry_terminal.clone() {
             match queue.change(&key, change.clone()) {
@@ -267,12 +264,9 @@ impl LearningExecution {
                     continue;
                 }
                 _ => {
-                    if let Ok(Reread::Settled(next)) = Self::reread(queue, &self.task_id, &key) {
-                        if next.is_some() {
-                            state.key = next;
-                        }
-                        state.retry_terminal = None;
-                        state.settle();
+                    if let Ok(Reread::Settled) = Self::reread(queue, &self.task_id, &key) {
+                        state.settle_without_authority();
+                        return;
                     }
                 }
             }
@@ -288,7 +282,7 @@ impl LearningExecution {
                 Some(own) => own,
                 None => match Self::reread(queue, &self.task_id, &key)? {
                     Reread::Unapplied => key.clone(),
-                    Reread::Settled(next) => return Ok(next),
+                    Reread::Settled => return Ok(None),
                     Reread::Foreign => return Err(storage::StorageError::LearningWriteUnconfirmed),
                 },
             };
@@ -307,17 +301,20 @@ impl LearningExecution {
             )? {
                 Some(next) => Ok(Some(next)),
                 None => match Self::reread(queue, &self.task_id, &own)? {
-                    Reread::Settled(next) => Ok(next),
+                    Reread::Settled => Ok(None),
                     _ => Err(storage::StorageError::LearningWriteUnconfirmed),
                 },
             }
         })();
         if let Ok(next) = outcome {
-            if next.is_some() {
-                state.key = next;
+            match next {
+                Some(next) => {
+                    state.key = Some(next);
+                    state.uncertain = None;
+                    state.settle();
+                }
+                None => state.settle_without_authority(),
             }
-            state.uncertain = None;
-            state.settle();
         }
     }
 

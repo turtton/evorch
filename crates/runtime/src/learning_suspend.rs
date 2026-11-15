@@ -37,6 +37,8 @@ pub(crate) struct LearningExecutions {
 
 #[derive(Default)]
 struct ExecutionState {
+    /// Write authority confirmed by this entry's command or its exact receipt. A key
+    /// observed by reading the current job must never be stored here.
     key: Option<LearningAttemptKey>,
     suspension: Option<String>,
     runs: Vec<RunId>,
@@ -49,6 +51,16 @@ struct ExecutionState {
 }
 
 impl ExecutionState {
+    /// The job moved on without this entry's command. Settle without retaining any
+    /// authority that a later cancellation could use to write to the successor.
+    fn settle_without_authority(&mut self) {
+        self.key = None;
+        self.uncertain = None;
+        self.retry_terminal = None;
+        self.unconfirmed_intake = false;
+        self.settle();
+    }
+
     /// The result is safe to report only when no unresolved write remains.
     fn settle(&mut self) {
         if !self.unconfirmed_intake && self.uncertain.is_none() && self.retry_terminal.is_none() {
