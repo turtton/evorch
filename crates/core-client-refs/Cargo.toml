@@ -1,0 +1,22 @@
+[package]
+name = "core-client-refs"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Counts the references the core-client desktop makes to internal workspace crates (ADR 0045)."
+
+# A leaf tool: it reads Rust source with syn and depends on no workspace crate, so
+# it is outside the boundaries that scripts/check-workbench-boundaries.sh keeps.
+[lib]
+name = "core_client_refs"
+
+[[bin]]
+name = "core-client-refs"
+path = "src/main.rs"
+
+[dependencies]
+proc-macro2 = "1"
+syn = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

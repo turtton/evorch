@@ -1508,6 +1508,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-client-refs"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+ "tempfile",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

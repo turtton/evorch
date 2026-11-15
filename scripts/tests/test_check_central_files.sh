@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Tests for scripts/check-central-files.sh, scripts/ci-scope-gate.sh and
-# scripts/check-core-client-refs.sh with hand-written change lists, source trees
-# and a throwaway git repository; no cargo.
+# Tests for scripts/check-central-files.sh and scripts/ci-scope-gate.sh with
+# hand-written change lists and a throwaway git repository; no cargo. The
+# core-client reference check is tested in crates/core-client-refs.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 central="$PWD/scripts/check-central-files.sh"
-refs="$PWD/scripts/check-core-client-refs.sh"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -107,64 +106,8 @@ expect ok "the gate accepts a pr17e branch for the same files" bash -c "cd '$rep
 expect ok "the gate leaves an unscoped branch alone" bash -c "cd '$repo' && scripts/ci-scope-gate.sh --head-ref fix/other --base main"
 expect fail "the gate fails when the base is missing" bash -c "cd '$repo' && scripts/ci-scope-gate.sh --head-ref feat/pr17e-offline --base origin/main"
 
-# core-client references: a new one fails, the baseline passes.
-mkdir -p "$work/src/features"
-printf 'use workbench_protocol::ids::*;\nuse tokio::runtime::Builder;\n' > "$work/src/mod.rs"
-printf '# none\n' > "$work/baseline.txt"
-expect ok "no internal crate in core_client" "$refs" --root "$work/src" --baseline "$work/baseline.txt"
-printf 'use storage::Database;\n' > "$work/src/features/x.rs"
-expect fail "a new internal crate reference" "$refs" --root "$work/src" --baseline "$work/baseline.txt"
-printf '%s 1\n' "$work/src/features/x.rs" > "$work/baseline.txt"
-expect ok "a baselined reference" "$refs" --root "$work/src" --baseline "$work/baseline.txt"
-printf 'use storage::A;\nuse runtime::B;\n' > "$work/src/features/x.rs"
-expect fail "more references than the baseline" "$refs" --root "$work/src" --baseline "$work/baseline.txt"
-expect ok "the real tree is within its baseline" "$refs"
-
-# Every spelling Rust accepts is found, and look-alikes are not.
-printf '' > "$work/baseline.txt"
-ref_case() { # <ok|fail> <description> <source line>
-  printf '%s\n' "$3" > "$work/src/features/x.rs"
-  expect "$1" "$2" "$refs" --root "$work/src" --baseline "$work/baseline.txt"
-}
-ref_case fail "an absolute path" 'use ::storage::Database;'
-ref_case fail "an absolute path in an expression" 'let d = ::runtime::Runtime::new();'
-ref_case fail "an alias" 'use runtime as rt;'
-ref_case fail "a bare use" 'use storage;'
-ref_case fail "a use list" 'use {tools, serde};'
-ref_case fail "a use list with a later crate" 'use {serde, sandbox as sb};'
-ref_case fail "an extern crate" 'extern crate providers;'
-ref_case fail "a nested path" 'let _ = storage::db::open();'
-ref_case ok "tokio runtime" 'use tokio::runtime::Builder;'
-ref_case ok "an absolute tokio runtime" 'use ::tokio::runtime::Builder;'
-ref_case ok "a local module of the same name" 'use super::config;'
-ref_case ok "an identifier that only contains a crate name" 'let storage_path = 1; let runtime_id = 2;'
-ref_case ok "a comment word" '// the storage layer is behind the protocol'
-ref_case fail "a multi-line group with an alias" 'use {
-    runtime as rt,
-    serde,
-};'
-ref_case fail "a nested group" 'use {serde, storage::{db, Database}};'
-ref_case fail "a path through an alias is counted" 'use runtime as rt;
-fn f() { rt::AgentRuntime::new(); }'
-ref_case fail "an absolute path in an expression" 'fn f() { let d = ::storage::open(); }'
-ref_case fail "a self import with an alias" 'use storage::{self as s};
-fn f() { s::open(); }'
-ref_case ok "a tokio alias in a group" 'use {tokio::runtime as rt, serde};
-fn f() { let _ = rt::Builder::new_multi_thread(); }'
-ref_case ok "a local module in a group" 'use {super::config, serde};
-fn f() { config::load(); }'
-ref_case ok "a multi-line group of other crates" 'use {
-    serde::Serialize,
-    tokio::runtime::Handle,
-};'
-ref_case ok "a crate named in a string and a comment" 'const A: &str = "use storage::Db;"; // use runtime as rt;
-/* use sandbox::X; */'
-ref_case ok "a raw string" 'const A: &str = r#"use storage::Db;"#;'
-ref_case ok "a method turbofish" 'fn f(x: X) { x.config::<u8>(); }'
-ref_case ok "a lifetime and a character literal" "fn f<'a>(x: &'a str) -> char { '''; '\\'' }"
-
 if (( fails > 0 )); then
   echo "$fails check(s) failed" >&2
   exit 1
 fi
-echo "central file and core-client reference checks behave as documented"
+echo "central file checks and the scope gate behave as documented"

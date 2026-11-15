@@ -53,6 +53,7 @@
         "agents",
         "apply-patch",
         "catalog",
+        "core-client-refs",
         "core-instance",
         "core-launcher",
         "eval",
