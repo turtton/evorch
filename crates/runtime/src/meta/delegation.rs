@@ -194,6 +194,7 @@ fn project_direct_wait_result(result: DispatchResult) -> DispatchResult {
         // when the direct delegate flattens its child's idle-turn result.
         for field in [
             "inbox_ready",
+            "messages",
             "user_input_ready",
             "answer_ready",
             "question_ids",
@@ -447,12 +448,20 @@ mod tests {
         let snapshot = serde_json::json!({
             "runs": [{"run_id":"child", "status":"turn_completed", "output":"child body", "turn_generation":7}],
             "inbox_ready":true, "user_input_ready":true, "answer_ready":true,
+            "messages":[{"message_id":"message", "sender_run_id":"parent", "recipient_run_id":"caller",
+                         "kind":"send", "content":"ordinary message", "reply_to":null}],
             "question_ids":["answer"], "attention_question_ids":["question"],
             "events":[{"kind":"shell", "job_id":"job"}, {"kind":"lane", "notification_id":"notice"}],
             "shell_jobs":[{"job_id":"job", "call_id":"original-shell", "content":"shell body"}]
         });
         let mut waited = super::super::serialize(&snapshot);
         waited.result.progress = Some(tools::Progress::Advanced);
+        waited
+            .observations
+            .messages
+            .push(crate::mailbox::QueuedMessage::explicit(
+                serde_json::from_value(snapshot["messages"][0].clone()).unwrap(),
+            ));
         waited.observations.questions.push("question".into());
         waited.observations.events.push("lane:notice".into());
         waited
@@ -468,6 +477,7 @@ mod tests {
         assert_eq!(value["turn_generation"], 7);
         for field in [
             "inbox_ready",
+            "messages",
             "user_input_ready",
             "answer_ready",
             "question_ids",
@@ -481,6 +491,11 @@ mod tests {
             );
         }
         assert_eq!(projected.result.progress, Some(tools::Progress::Advanced));
+        assert_eq!(projected.observations.messages.len(), 1);
+        assert_eq!(
+            projected.observations.messages[0].message.message_id,
+            "message"
+        );
         assert_eq!(projected.observations.questions, ["question"]);
         assert_eq!(projected.observations.events, ["lane:notice"]);
         assert_eq!(projected.observations.child_progress[0].run_id, "child");
