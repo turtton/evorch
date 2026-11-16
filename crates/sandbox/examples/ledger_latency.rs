@@ -11,9 +11,11 @@
 //! with the environment (kernel, CPU, parallelism) and prints the normal and
 //! the deliberately-stuck shapes (TERM ignored, grandchild, pipe held)
 //! separately. Children use a self-STOP, so they are provably alive and
-//! blocked before the stop starts; nothing sleeps to synchronize.
+//! configured before the stop starts (a pipe receipt confirms fixture setup);
+//! nothing sleeps to synchronize.
 
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use sandbox::{ChildKind, SpawnLedger};
 
@@ -30,10 +32,19 @@ fn command(script: &str) -> tokio::process::Command {
 
 /// What a child does while the core stops it.
 const SHAPES: [(&str, &str); 4] = [
-    ("plain", "kill -STOP $$"),
-    ("term-ignoring", "trap '' TERM; kill -STOP $$"),
-    ("grandchild", "sh -c 'kill -STOP $$' & wait"),
-    ("pipe-holder", "(exec sleep 3600) & kill -STOP $$"),
+    ("plain", "printf 'ready\n'; kill -STOP $$"),
+    (
+        "term-ignoring",
+        "trap '' TERM; printf 'ready\n'; kill -STOP $$",
+    ),
+    (
+        "grandchild",
+        "sh -c 'printf \"ready\\n\"; kill -STOP $$' & wait",
+    ),
+    (
+        "pipe-holder",
+        "(exec sleep 3600) & printf 'ready\n'; kill -STOP $$",
+    ),
 ];
 
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
@@ -91,7 +102,6 @@ async fn start(
     script: &str,
     children: usize,
 ) -> Vec<sandbox::process::GroupChild> {
-    let mut activity = ledger.watch_children();
     let mut owned = Vec::new();
     for _ in 0..children {
         let admission = ledger.admit().unwrap();
@@ -102,10 +112,17 @@ async fn start(
                 .unwrap(),
         );
     }
-    activity
-        .wait_for(|activity| activity.live == children)
-        .await
-        .unwrap();
+    // Registration only proves spawn, not that traps/descendants are installed.
+    // Each pipe's receipt comes from the child after its fixture setup. No timing
+    // assertion or delay is used, and measurement starts only after every receipt.
+    for child in &mut owned {
+        let mut line = String::new();
+        BufReader::new(child.take_stdout().unwrap())
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        assert_eq!(line.trim_end(), "ready");
+    }
     owned
 }
 
