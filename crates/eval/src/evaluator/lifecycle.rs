@@ -7,6 +7,7 @@ use tokio::{sync::watch, task::JoinHandle};
 pub(super) struct State {
     pub closed: bool,
     pub tasks: Vec<JoinHandle<()>>,
+    drain_failure: Option<tokio::task::JoinError>,
 }
 
 impl Drop for State {
@@ -41,6 +42,36 @@ impl Default for EvaluationService {
 }
 
 impl EvaluationService {
+    /// Admission must already be paused and drained. Cancellation drops only the
+    /// observer: unfinished JoinHandles remain owned by the service.
+    pub async fn drain_accepted(&self) -> Result<(), String> {
+        use std::{future::Future, pin::Pin, task::Poll};
+        let _shutdown = self.shutdown_lock.lock().await;
+        std::future::poll_fn(|cx| {
+            let mut state = self.state.lock().unwrap();
+            let mut index = 0;
+            while index < state.tasks.len() {
+                match Pin::new(&mut state.tasks[index]).poll(cx) {
+                    Poll::Pending => index += 1,
+                    Poll::Ready(result) => {
+                        drop(state.tasks.swap_remove(index));
+                        if let Err(error) = result {
+                            state.drain_failure.get_or_insert(error);
+                        }
+                    }
+                }
+            }
+            if let Some(error) = &state.drain_failure {
+                Poll::Ready(Err(error.to_string()))
+            } else if state.tasks.is_empty() {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
     /// Register every evaluation child this service starts in the core's
     /// ledger. Call it before the first evaluation starts; once the ledger's
     /// spawn fence is closed no evaluation starts.
@@ -65,6 +96,10 @@ impl EvaluationService {
         &self,
         work: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), &'static str> {
+        let _producer = self
+            .producers
+            .try_enter()
+            .ok_or("evaluation host is busy or stopping")?;
         let mut state = self.state.lock().unwrap();
         if state.closed {
             return Err("evaluation host is stopping");
@@ -90,8 +125,10 @@ impl EvaluationService {
     pub async fn shutdown(&self) -> Result<(), tokio::task::JoinError> {
         let _shutdown = self.shutdown_lock.lock().await;
         self.request_stop();
-        let tasks = std::mem::take(&mut self.state.lock().unwrap().tasks);
-        let mut failure = None;
+        let (tasks, mut failure) = {
+            let mut state = self.state.lock().unwrap();
+            (std::mem::take(&mut state.tasks), state.drain_failure.take())
+        };
         for task in tasks {
             if let Err(error) = task.await {
                 failure.get_or_insert(error);
@@ -108,5 +145,51 @@ impl EvaluationService {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod restart_drain_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_observer_retains_running_evaluation_without_stop() {
+        let service = EvaluationService::default();
+        let (release, returned) = tokio::sync::oneshot::channel();
+        service.spawn(async { returned.await.unwrap() }).unwrap();
+        let pause = service.producers.pause();
+        let mut observer = Box::pin(service.drain_accepted());
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(
+                    std::future::Future::poll(observer.as_mut(), cx).is_pending(),
+                )
+            })
+            .await
+        );
+        drop(observer);
+        assert!(service.is_busy());
+        assert!(!*service.stop.borrow());
+        release.send(()).unwrap();
+        service.drain_accepted().await.unwrap();
+        assert!(!service.is_busy());
+        assert!(service.producers.resume(pause));
+        service.spawn(async {}).unwrap();
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn natural_drain_failure_is_still_reported_by_shutdown() {
+        let service = EvaluationService::default();
+        let mut stopped = service.stop.subscribe();
+        service
+            .spawn(async move { stopped.changed().await.unwrap() })
+            .unwrap();
+        service.spawn(async { panic!("evaluation fault") }).unwrap();
+        service.producers.pause();
+        assert!(service.drain_accepted().await.is_err());
+        assert!(service.is_busy());
+        assert!(!*service.stop.borrow());
+        assert!(service.shutdown().await.is_err());
     }
 }

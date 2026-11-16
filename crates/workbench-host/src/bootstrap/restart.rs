@@ -8,3 +8,8 @@ use runtime::{RunId, RuntimeError, StopScope};
 pub trait RestartStopHandler: std::any::Any + Send + Sync {
     fn stop(&self, run: RunId, scope: StopScope) -> Result<(), RuntimeError>;
 }
+
+#[derive(Clone, Default)]
+pub struct PreparingServices {
+    pub evaluations: eval::evaluator::EvaluationService,
+}

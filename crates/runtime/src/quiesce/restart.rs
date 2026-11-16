@@ -106,6 +106,20 @@ impl Coordinator {
 }
 
 impl AgentRuntime {
+    /// Read-only preflight before pausing learning/evaluation; begin repeats this
+    /// check after their drain, without treating this reservation as a safe point.
+    pub fn check_restart_preparation(&self) -> Result<(), RuntimeError> {
+        self.shared.dispatch_tails.result()?;
+        let inner = self.shared.quiesce.lock();
+        if inner.requested || inner.cancelling || inner.shutting_down {
+            return Err(RuntimeError::RestartBusy);
+        }
+        if let QuiesceState::Failed { reason } = &inner.phase {
+            return Err(runtime::error(reason));
+        }
+        Ok(())
+    }
+
     pub(crate) fn require_manual_resume_open(&self) -> Result<(), RuntimeError> {
         if !self.shared.quiesce.running() {
             return Err(RuntimeError::RestartBusy);

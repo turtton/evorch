@@ -1,5 +1,5 @@
 //! Offline measurement, NOT a wall-clock correctness test.
-//! cargo run -p runtime --example measure_learning_suspend -- 100
+//! cargo run -p runtime --features recovery-test-support --example measure_learning_suspend -- 100 [raw.csv] [load-threads]
 //! Uses real SQLite/run journals, pending providers and normal dispatch sealing.
 //! 20 is the default daily admission quota, not a global concurrency limit.
 use std::{sync::Arc, time::Instant};
@@ -58,6 +58,10 @@ async fn sample(concurrency: usize) -> f64 {
     ));
     let (started, mut arrivals) = mpsc::unbounded_channel();
     let runtime = AgentRuntime::new(bus, executor, Arc::new(PendingProvider(started)))
+        .with_learning_origin(runtime::learning_jobs::current_origin(
+            runtime::learning_jobs::LearningOriginKind::Core,
+            Some("offline-measurement".into()),
+        ))
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap())
         .with_learning(runtime::memory_queue::LearningSettings {
             writer: storage.handle(),
@@ -103,10 +107,42 @@ async fn main() {
         .map(|n| n.parse::<usize>().expect("positive sample count"))
         .unwrap_or(100);
     assert!(repeats > 0);
+    let mut raw = std::env::args()
+        .nth(2)
+        .map(|p| std::fs::File::create(p).unwrap());
+    let load: usize = std::env::args()
+        .nth(3)
+        .map(|n| n.parse().unwrap())
+        .unwrap_or(0);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let busy: Vec<_> = (0..load)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+        })
+        .collect();
+    println!(
+        "parallelism={} load_threads={load} profile={}",
+        std::thread::available_parallelism().map_or(0, usize::from),
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
     for concurrency in [1, 4, 20] {
         let mut samples = Vec::with_capacity(repeats);
         for _ in 0..repeats {
-            samples.push(sample(concurrency).await);
+            let measured = sample(concurrency).await;
+            if let Some(file) = raw.as_mut() {
+                use std::io::Write;
+                writeln!(file, "cohort={concurrency},{measured:.6}").unwrap();
+            }
+            samples.push(measured);
         }
         samples.sort_by(f64::total_cmp);
         let percentile = |p: usize| samples[(repeats * p).div_ceil(100).saturating_sub(1)];
@@ -117,5 +153,9 @@ async fn main() {
             percentile(99),
             samples.last().unwrap()
         );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for thread in busy {
+        thread.join().unwrap();
     }
 }

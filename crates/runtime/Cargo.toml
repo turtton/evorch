@@ -7,6 +7,10 @@ publish = false
 [lib]
 name = "runtime"
 
+[[example]]
+name = "measure_learning_suspend"
+required-features = ["recovery-test-support"]
+
 [dependencies]
 core-instance = { path = "../core-instance" }
 agents = { path = "../agents" }

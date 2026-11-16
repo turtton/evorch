@@ -228,6 +228,9 @@ impl Tool for StartEvaluation {
         ctx: &ToolExecutionContext,
         args: Value,
     ) -> Result<ToolResult, ToolError> {
+        if !self.0.lifecycle.producers.is_open() {
+            return Ok(ToolResult::error("evaluation host is busy or stopping"));
+        }
         let args: StartArgs = parse(args)?;
         let user = self.0.context.user_config_dir.clone();
         let overlay = match runner::parse_overlay(&args.candidate, Some(&user)) {
@@ -280,8 +283,8 @@ impl Tool for StartEvaluation {
                 problem: planned.problem,
             })
             .collect();
-        let Some(producer) = self.0.lifecycle.producers.enter().await else {
-            return Ok(ToolResult::error("evaluation host is stopping"));
+        let Some(producer) = self.0.lifecycle.producers.try_enter() else {
+            return Ok(ToolResult::error("evaluation host is busy or stopping"));
         };
         let record = match groups::launch(&self.0, &ctx.run_id, &args.candidate, launches) {
             Ok(record) => record,

@@ -1,4 +1,6 @@
 use super::*;
+mod learning;
+mod preparing;
 use workbench_host::bootstrap::{BootstrapOptions, TestSeams};
 #[derive(Default)]
 struct Model(std::sync::atomic::AtomicUsize);
@@ -37,6 +39,43 @@ impl runtime::AgentModel for Model {
             finish_reason: providers::FinishReason::Stop,
         })
     }
+}
+// These fixtures explicitly reach an idle safe point before restart. PreparingDrains
+// intentionally permits provider work, so scheduling request immediately after
+// delegate is no longer evidence that a live loop was parked.
+async fn waiting(run: RunId, mut events: event_bus::EventReceiver) {
+    loop {
+        if matches!(events.recv().await.unwrap().kind, event_bus::EventKind::Lifecycle(
+            event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Waiting, .. }
+        ) if run_id == run.to_string())
+        {
+            break;
+        }
+    }
+}
+async fn idle_run(runtime: &AgentRuntime, role: runtime::Role, prompt: &str) -> RunId {
+    let events = runtime.event_bus().subscribe();
+    let run = runtime.delegate_background(
+        role,
+        prompt.into(),
+        runtime::RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    waiting(run, events).await;
+    run
+}
+async fn resume_idle(runtime: &AgentRuntime, run: RunId) {
+    let events = runtime.event_bus().subscribe();
+    runtime.send_message(run, "after resume".into()).unwrap();
+    waiting(run, events).await;
+    runtime.stop(run, StopScope::SelfOnly).unwrap();
+    assert_eq!(
+        runtime.wait(run).await.unwrap(),
+        event_bus::AgentRunPhase::Stopped
+    );
 }
 struct Direct;
 impl runtime::SandboxFactory for Direct {
@@ -133,8 +172,8 @@ async fn shared_request_survives_waiter_drop_and_stale_cancel_cannot_reopen() {
     let second = core.request().unwrap();
     assert_ne!(first, second);
     assert!(core.cancel(first).is_err());
-    assert!(producer.try_enter().is_none());
     core.wait_sealed(second).await.unwrap();
+    assert!(producer.try_enter().is_none());
     core.cancel(second).unwrap();
     host.shutdown().await.unwrap();
 }
@@ -394,17 +433,11 @@ async fn sealed_stop_retains_real_terminal_tail_until_next_attempt_drains_it() {
     let model = Arc::new(Model::default());
     let (_dir, mut host) = boot_with_model(model.clone()).await;
     let core = RestartCoordinator::new(&host);
-    let target = host.runtime.delegate_background(
-        runtime::Role::Orchestrator,
-        "target".into(),
-        runtime::RunConfig::default(),
-    );
-    let other = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "unaffected".into(),
-        runtime::RunConfig::default(),
-    );
+    let target = idle_run(&host.runtime, runtime::Role::Orchestrator, "target").await;
+    let other = idle_run(&host.runtime, runtime::Role::Worker, "unaffected").await;
+    let accepted = host.runtime.producer_gate().try_enter().unwrap();
     let a = core.request().unwrap();
+    phase(&core, RestartPhase::WaitingSafePoint).await;
     // This queued child has no provider admission; subtree Stop must never start it.
     let child = host
         .runtime
@@ -415,8 +448,9 @@ async fn sealed_stop_retains_real_terminal_tail_until_next_attempt_drains_it() {
             runtime::RunConfig::default(),
         )
         .unwrap();
+    drop(accepted);
     let proof = core.wait_sealed(a).await.unwrap();
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     host.runtime
         .set_terminal_registered_probe(move |run, lease| {
@@ -437,12 +471,9 @@ async fn sealed_stop_retains_real_terminal_tail_until_next_attempt_drains_it() {
         host.runtime.wait(child).await,
         Err(RuntimeError::RunTerminated { .. })
     ));
-    // Only the unaffected live future resumes and reaches its provider result.
-    assert_eq!(
-        host.runtime.wait(other).await.unwrap(),
-        event_bus::AgentRunPhase::Done
-    );
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // The unaffected idle loop accepts another real provider turn after resume.
+    resume_idle(&host.runtime, other).await;
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 3);
     // Duplicate Stop must neither create a new run nor discard the held tail.
     core.stop(target, runtime::StopScope::Subtree).unwrap();
     let b = core.request().unwrap();
@@ -469,16 +500,8 @@ async fn host_seal_failure_after_marker_keeps_stop_terminal_only() {
     let accepted = gate
         .enter(workbench_host::bootstrap::restart::CommandAccess::ExistingInput)
         .unwrap();
-    let target = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "stop target".into(),
-        Default::default(),
-    );
-    let other = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "must stay parked".into(),
-        Default::default(),
-    );
+    let target = idle_run(&host.runtime, runtime::Role::Worker, "stop target").await;
+    let other = idle_run(&host.runtime, runtime::Role::Worker, "must stay parked").await;
     let id = core.request().unwrap();
     phase(&core, RestartPhase::Sealing).await;
     // Inject a host-side sealing refusal after the synchronous runtime marker.
@@ -506,10 +529,10 @@ async fn host_seal_failure_after_marker_keeps_stop_terminal_only() {
             .is_pending()
     );
     drop(waiting);
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     core.transition_to_shutdown();
     assert!(host.shutdown().await.is_err());
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -521,11 +544,7 @@ async fn shutdown_during_host_permit_drain_never_reopens_or_calls_provider() {
     let accepted = gate
         .enter(workbench_host::bootstrap::restart::CommandAccess::ExistingInput)
         .unwrap();
-    let run = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "parked".into(),
-        Default::default(),
-    );
+    let run = idle_run(&host.runtime, runtime::Role::Worker, "parked").await;
     let id = core.request().unwrap();
     phase(&core, RestartPhase::Sealing).await;
     core.transition_to_shutdown();
@@ -537,7 +556,7 @@ async fn shutdown_during_host_permit_drain_never_reopens_or_calls_provider() {
         host.runtime.wait(run).await.unwrap(),
         event_bus::AgentRunPhase::Stopped
     );
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[derive(Default)]
@@ -628,6 +647,7 @@ async fn accepted_saved_compaction_retains_its_ingress_permit_until_persisted() 
             runtime.clone(),
             gate.clone(),
             vec![runtime.producer_gate()],
+            Default::default(),
         );
         let provenance = workbench_host::provenance::local_desktop();
         if protocol {
@@ -685,23 +705,17 @@ async fn direct_runtime_stop_reconciles(sealing: bool) {
         gate.enter(workbench_host::bootstrap::restart::CommandAccess::ExistingInput)
             .unwrap()
     });
-    let target = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "target".into(),
-        Default::default(),
-    );
-    let other =
-        host.runtime
-            .delegate_background(runtime::Role::Worker, "other".into(), Default::default());
+    let target = idle_run(&host.runtime, runtime::Role::Worker, "target").await;
+    let other = idle_run(&host.runtime, runtime::Role::Worker, "other").await;
     let id = core.request().unwrap();
-    let attempt = core.0.state.lock().unwrap().attempt.clone().unwrap();
     let proof = if sealing {
         phase(&core, RestartPhase::Sealing).await;
         None
     } else {
         Some(core.wait_sealed(id).await.unwrap())
     };
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let attempt = core.0.state.lock().unwrap().attempt.clone().unwrap();
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     host.runtime.stop(target, StopScope::SelfOnly).unwrap();
     phase(&core, RestartPhase::Running).await;
     assert_eq!(
@@ -723,11 +737,8 @@ async fn direct_runtime_stop_reconciles(sealing: bool) {
         host.runtime.wait(target).await.unwrap(),
         event_bus::AgentRunPhase::Stopped
     );
-    assert_eq!(
-        host.runtime.wait(other).await.unwrap(),
-        event_bus::AgentRunPhase::Done
-    );
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    resume_idle(&host.runtime, other).await;
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 3);
     drop(input);
     let next = core.request().unwrap();
     core.wait_sealed(next).await.unwrap();
@@ -755,14 +766,8 @@ async fn direct_runtime_stop_invalidation_failure_does_not_reopen_host_or_produc
     let model = Arc::new(Model::default());
     let (_dir, mut host) = boot_with_model(model.clone()).await;
     let core = RestartCoordinator::new(&host);
-    let target = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "target".into(),
-        Default::default(),
-    );
-    let other =
-        host.runtime
-            .delegate_background(runtime::Role::Worker, "other".into(), Default::default());
+    let target = idle_run(&host.runtime, runtime::Role::Worker, "target").await;
+    let other = idle_run(&host.runtime, runtime::Role::Worker, "other").await;
     let id = core.request().unwrap();
     core.wait_sealed(id).await.unwrap();
     let db = rusqlite::Connection::open(&host.composition.storage.db_path).unwrap();
@@ -774,8 +779,8 @@ async fn direct_runtime_stop_invalidation_failure_does_not_reopen_host_or_produc
         host.host.lock().unwrap().service().restart_gate().phase(),
         HostRestartPhase::FailedClosed
     );
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
-    // Parking retains the public Running phase; completion/provider execution must stay blocked.
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // The live idle loop stays parked; completion/provider execution must stay blocked.
     let mut waiting = Box::pin(host.runtime.wait(other));
     assert!(
         std::future::poll_fn(|cx| std::task::Poll::Ready(waiting.as_mut().poll(cx).is_pending()))
