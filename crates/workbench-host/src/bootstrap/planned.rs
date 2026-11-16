@@ -120,6 +120,7 @@ impl PlannedStorage {
                 owner_id: progress.old_owner_id.clone(),
                 generation: progress.old_generation,
                 active_runs: progress.active_runs.clone(),
+                parked_runs: progress.parked_runs.clone(),
                 orphaned: false,
             };
             match owner.claim_planned(&hold, &evidence) {

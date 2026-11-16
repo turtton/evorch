@@ -1,5 +1,11 @@
-//! Irreversible capture and the first five M2 stages. Nothing here can exec.
+//! Irreversible capture and M2 stages 1–8. Nothing here can exec.
+#[cfg(target_os = "linux")]
+mod later;
+#[cfg(not(target_os = "linux"))]
+#[path = "finalization/unsupported.rs"]
+mod later;
 use super::*;
+pub use later::FinalizationTarget;
 use storage::recovery::restart::RestartTransaction;
 use workbench_host::bootstrap::planned_exit::ExitStage;
 
@@ -9,19 +15,38 @@ impl RestartCoordinator {
     /// Internal wiring point, not a transport operation. The prepared transaction
     /// is created/read back through the existing writer BEFORE calling this.
     /// Returns only acceptance; use wait_finalization for completion (currently
-    /// always FailedClosed because stages 6..11 and raw exec are not connected).
+    /// always FailedClosed because stages 9..11 and raw exec are not connected).
     pub fn start_finalization(
         &self,
         id: RestartId,
         host: &mut BootstrappedHost,
         tx: RestartTransaction,
+        target: FinalizationTarget,
+    ) -> Result<(), RuntimeError> {
+        self.start_finalization_inner(id, host, tx, Some(target))
+    }
+    #[cfg(test)]
+    pub(super) fn start_finalization_without_target(
+        &self,
+        id: RestartId,
+        host: &mut BootstrappedHost,
+        tx: RestartTransaction,
+    ) -> Result<(), RuntimeError> {
+        self.start_finalization_inner(id, host, tx, None)
+    }
+    fn start_finalization_inner(
+        &self,
+        id: RestartId,
+        host: &mut BootstrappedHost,
+        tx: RestartTransaction,
+        target: Option<FinalizationTarget>,
     ) -> Result<(), RuntimeError> {
         // Host Stop enters with the host mutex held, then takes the coordinator
         // mutex. Never acquire that host mutex inside the atomic boundary.
         host.validate_planned_exit(&self.0.gate)
             .map_err(|reason| RuntimeError::Model { reason })?;
         let begun = self.capture_boundary(id, &tx)?;
-        self.own_finalizer(id, host, begun, tx);
+        self.own_finalizer(id, host, begun, tx, target);
         Ok(())
     }
     pub(super) fn capture_boundary(
@@ -76,6 +101,7 @@ impl RestartCoordinator {
         host: &mut BootstrappedHost,
         begun: BegunCapture,
         tx: RestartTransaction,
+        target: Option<FinalizationTarget>,
     ) {
         // This synchronous transfer cannot be cancelled. Shutdown after capture
         // still transfers resources and starts the owned invalidation/cleanup.
@@ -87,7 +113,8 @@ impl RestartCoordinator {
         let core = self.clone();
         state.worker = Some(
             tokio::spawn(async move {
-                core.drive_finalization(id, resources, begun.0, tx).await;
+                core.drive_finalization(id, resources, begun.0, tx, target)
+                    .await;
             })
             .abort_handle(),
         );
@@ -130,6 +157,7 @@ impl RestartCoordinator {
         resources: Arc<tokio::sync::Mutex<workbench_host::bootstrap::planned_exit::PlannedExit>>,
         session: Result<runtime::RestartCaptureSession, RuntimeError>,
         tx: RestartTransaction,
+        target: Option<FinalizationTarget>,
     ) {
         let runtime = self.0.runtime.clone();
         // The coordinator mutex is NOT held while SQLite or graph capture runs.
@@ -172,11 +200,22 @@ impl RestartCoordinator {
             }
             Err(error) => Err(error),
         };
-        // D-2c-2b is deliberately absent. Even a successful Commit + stage 5
-        // must not leave a resumable/armable intermediate result with callers.
+        let result = match result {
+            Ok(()) => {
+                let holds = resources.restart_holds();
+                let owner = self.clone();
+                let metadata = tx.metadata.clone();
+                tokio::task::spawn_blocking(move || owner.six_to_eight(id, target, holds, metadata))
+                    .await
+                    .map_err(|_| "later finalization worker panicked".to_owned())
+                    .and_then(|r| r)
+            }
+            Err(error) => Err(error),
+        };
+        // 9..11 and raw exec remain absent; never return an armable transaction.
         let reason = result
             .err()
-            .unwrap_or_else(|| "M2 stages 6..11 are not connected; exec prohibited".into());
+            .unwrap_or_else(|| "M2 stages 9..11 are not connected; exec prohibited".into());
         {
             let mut state = self.0.state.lock().unwrap();
             if let Some(attempt) = &state.attempt {
@@ -209,6 +248,15 @@ impl RestartCoordinator {
         if !matches!(invalidated, Ok(Ok(()))) {
             tracing::error!("planned exit invalidation unconfirmed; exec remains prohibited");
         }
+        let holds = resources.restart_holds();
+        if !matches!(
+            tokio::task::spawn_blocking(move || holds.cleanup()).await,
+            Ok(Ok(()))
+        ) {
+            tracing::error!(
+                "planned hold invalidation/removal unconfirmed; shared cleanup retains ownership"
+            );
+        }
         {
             let mut state = self.0.state.lock().unwrap();
             state.finalization_done = true;
@@ -224,7 +272,7 @@ impl RestartCoordinator {
     }
     /// M2 completion observer only; cleanup may still be joining its owned tails.
     /// Operator shutdown awaits that same cleanup owner. Dropping this observer
-    /// has no effect on cleanup. Success is forbidden until D-2c-2b/D-3.
+    /// has no effect on cleanup. Success is forbidden until D-2c-2c/D-3.
     pub async fn wait_finalization(&self, id: RestartId) -> Result<(), RuntimeError> {
         let mut changed = self.subscribe();
         loop {

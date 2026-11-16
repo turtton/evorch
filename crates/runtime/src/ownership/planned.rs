@@ -15,6 +15,8 @@ pub struct PlannedHold {
     pub owner_id: String,
     pub generation: u64,
     pub active_runs: BTreeSet<String>,
+    /// Captured resumable runs whose owner checkpoint has ended the live turn.
+    pub parked_runs: BTreeSet<String>,
     /// Cold claim observed an abandoned hold. Retained for quarantine/discard.
     #[serde(default)]
     pub orphaned: bool,
@@ -39,6 +41,14 @@ impl PlannedHold {
 /// Capture's active owner-run sets, keyed by thread. An omitted idle owned
 /// thread gets an empty set, but an omitted active thread is an error.
 pub type ExpectedActiveRuns = BTreeMap<String, ExpectedThreadRuns>;
+
+/// Capture membership is not the owners.db live-turn inventory.
+pub type ExpectedCapturedRuns = BTreeMap<String, CapturedThreadRuns>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedThreadRuns {
+    pub generation: u64,
+    pub captured_runs: BTreeSet<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpectedThreadRuns {
@@ -88,7 +98,21 @@ impl ThreadOwner {
         capture: &str,
         expected: &BTreeSet<String>,
     ) -> Result<(), OwnershipError> {
-        if tx.is_empty() || capture.is_empty() || self.state == super::OwnerState::Released {
+        self.install_captured_hold(tx, capture, expected, &BTreeSet::new())
+    }
+
+    pub(super) fn install_captured_hold(
+        &mut self,
+        tx: &str,
+        capture: &str,
+        expected: &BTreeSet<String>,
+        parked: &BTreeSet<String>,
+    ) -> Result<(), OwnershipError> {
+        if !expected.is_disjoint(parked)
+            || tx.is_empty()
+            || capture.is_empty()
+            || self.state == super::OwnerState::Released
+        {
             return Err(OwnershipError::PlannedMismatch);
         }
         self.check_active_runs(expected)?;
@@ -99,6 +123,7 @@ impl ThreadOwner {
             owner_id: self.lease.owner_id.clone(),
             generation: self.lease.generation,
             active_runs: expected.clone(),
+            parked_runs: parked.clone(),
             orphaned: false,
         };
         if self.protects_scratch() && self.handoff_hold.as_deref() != Some(&hold) {
@@ -140,6 +165,9 @@ impl ThreadOwner {
         self.validate_planned_generation(hold)?;
         if self.handoff_hold.as_deref() != Some(hold) || self.state != super::OwnerState::Quiescing
         {
+            return Err(OwnershipError::PlannedMismatch);
+        }
+        if !hold.active_runs.is_disjoint(&hold.parked_runs) {
             return Err(OwnershipError::PlannedMismatch);
         }
         self.check_active_runs(&hold.active_runs)?;

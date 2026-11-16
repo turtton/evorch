@@ -167,6 +167,7 @@ fn restart_component_owner_and_terminal_cas_are_atomic() {
             old_owner_id: "owner".into(),
             old_generation: 7,
             active_runs: BTreeSet::from(["run".into()]),
+            parked_runs: BTreeSet::new(),
             hold_saved: true,
             hold_read_back: true,
             worker_joined: false,

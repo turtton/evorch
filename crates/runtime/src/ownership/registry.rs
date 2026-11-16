@@ -6,6 +6,53 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use super::observe::{DbOperation, DbPhase, GuardHold, Site};
 use super::{OwnershipError, ThreadOwner};
 
+fn validate_parked_checkpoint(
+    db: &Connection,
+    owner: &ThreadOwner,
+    parked: &std::collections::BTreeSet<String>,
+    captured: &std::collections::BTreeSet<String>,
+) -> Result<(), RegistryError> {
+    let record: Option<(String, String)> = db
+        .query_row(
+            "SELECT generation,payload FROM owner_checkpoints WHERE thread_id=?1",
+            [&owner.thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((generation, payload)) = record else {
+        return if parked.is_empty() {
+            Ok(())
+        } else {
+            Err(OwnershipError::PlannedMismatch.into())
+        };
+    };
+    let checkpoint =
+        super::OwnerCheckpoint::decode(&payload).ok_or(OwnershipError::PlannedMismatch)?;
+    // The owner row and checkpoint are read in the SAME write transaction.
+    // A claim advances the generation, so another owner cannot lend provenance.
+    if generation != owner.lease.generation.to_string()
+        || checkpoint.generation != owner.lease.generation
+    {
+        // A previous generation is not evidence for any current parked member.
+        return if parked.is_empty() {
+            Ok(())
+        } else {
+            Err(OwnershipError::PlannedMismatch.into())
+        };
+    }
+    if checkpoint.runs.iter().any(|(run, saved)| {
+        saved.boundary != super::CheckpointBoundary::Terminal && !captured.contains(run)
+    }) || parked.iter().any(|run| {
+        checkpoint.runs.get(run).is_none_or(|saved| {
+            saved.boundary == super::CheckpointBoundary::Terminal
+                || !matches!(saved.snapshot, super::SnapshotReference::RunContext { .. })
+        })
+    }) {
+        return Err(OwnershipError::PlannedMismatch.into());
+    }
+    Ok(())
+}
+
 /// Threads removed by one `Registry::remove_threads` transaction.
 pub const REMOVE_BATCH: usize = 500;
 
@@ -478,6 +525,39 @@ impl Registry {
         capture_id: &str,
         expected: &super::ExpectedActiveRuns,
     ) -> Result<Vec<super::PlannedHold>, RegistryError> {
+        self.hold_owned_inner(owner_id, transaction_id, capture_id, expected, false)
+    }
+
+    pub fn hold_captured_owned(
+        &mut self,
+        owner_id: &str,
+        transaction_id: &str,
+        capture_id: &str,
+        expected: &super::ExpectedCapturedRuns,
+    ) -> Result<Vec<super::PlannedHold>, RegistryError> {
+        let captured = expected
+            .iter()
+            .map(|(thread, runs)| {
+                (
+                    thread.clone(),
+                    super::ExpectedThreadRuns {
+                        generation: runs.generation,
+                        active_runs: runs.captured_runs.clone(),
+                    },
+                )
+            })
+            .collect();
+        self.hold_owned_inner(owner_id, transaction_id, capture_id, &captured, true)
+    }
+
+    fn hold_owned_inner(
+        &mut self,
+        owner_id: &str,
+        transaction_id: &str,
+        capture_id: &str,
+        expected: &super::ExpectedActiveRuns,
+        captured: bool,
+    ) -> Result<Vec<super::PlannedHold>, RegistryError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -513,7 +593,17 @@ impl Registry {
                 }
                 None => &empty,
             };
-            owner.install_hold(transaction_id, capture_id, runs)?;
+            if captured {
+                if !owner.active_runs.is_subset(runs) {
+                    return Err(OwnershipError::PlannedMismatch.into());
+                }
+                let parked = runs.difference(&owner.active_runs).cloned().collect();
+                validate_parked_checkpoint(&transaction, &owner, &parked, runs)?;
+                let active = owner.active_runs.clone();
+                owner.install_captured_hold(transaction_id, capture_id, &active, &parked)?;
+            } else {
+                owner.install_hold(transaction_id, capture_id, runs)?;
+            }
             transaction.execute(
                 "UPDATE thread_owners SET state = ?2 WHERE thread_id = ?1",
                 params![owner.thread_id, serde_json::to_string(&owner)?],

@@ -14,6 +14,7 @@ use workbench_host::bootstrap::{
 };
 
 mod finalization;
+pub use finalization::FinalizationTarget;
 mod preparing;
 mod stop;
 const PREPARATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
