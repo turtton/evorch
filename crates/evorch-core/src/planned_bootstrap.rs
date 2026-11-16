@@ -4,7 +4,7 @@ use core_instance::{
     ConfigIdentity, InheritedHandoffProof, Instance,
     handoff::{
         HandoffEntry, ShutdownInbox,
-        boot::{BootFailure, BootWatchdog},
+        boot::{BootFailure, BootWatchdog, PhysicalAdoptDeadline},
         receipt::{BootPhase, RestartBootReceipt},
     },
 };
@@ -62,6 +62,33 @@ impl PlannedBoot {
         parent: &Path,
         entry: HandoffEntry,
     ) -> Result<(Self, InheritedHandoffProof), BootstrapError> {
+        Self::adopt_entry_inner(config, parent, entry, |config, parent, entry, _| {
+            Instance::adopt_handoff(config, parent, entry)
+        })
+    }
+    /// Feature-gated fixture seam inside the physical check, not product argv.
+    #[cfg(feature = "bootstrap-test-support")]
+    pub fn adopt_entry_with_physical_hook(
+        config: ConfigIdentity,
+        parent: &Path,
+        entry: HandoffEntry,
+        before_elf: impl FnOnce(&PhysicalAdoptDeadline) -> std::io::Result<()>,
+    ) -> Result<(Self, InheritedHandoffProof), BootstrapError> {
+        Self::adopt_entry_inner(config, parent, entry, |config, parent, entry, timer| {
+            Instance::adopt_handoff_with_physical_hook(config, parent, entry, || before_elf(timer))
+        })
+    }
+    fn adopt_entry_inner(
+        config: ConfigIdentity,
+        parent: &Path,
+        entry: HandoffEntry,
+        physical_adopt: impl FnOnce(
+            &ConfigIdentity,
+            &Path,
+            HandoffEntry,
+            &PhysicalAdoptDeadline,
+        ) -> std::io::Result<(Instance, InheritedHandoffProof)>,
+    ) -> Result<(Self, InheritedHandoffProof), BootstrapError> {
         let record = entry.record();
         let (deadline, restart_id, predecessor_epoch, successor_epoch) = (
             record.boot_deadline,
@@ -69,11 +96,13 @@ impl PlannedBoot {
             record.predecessor_epoch,
             record.successor_epoch,
         );
-        let (instance, proof) = Instance::adopt_handoff(&config, parent, entry)?;
+        let physical_deadline = PhysicalAdoptDeadline::start(deadline)?;
+        let (instance, proof) = physical_adopt(&config, parent, entry, &physical_deadline)?;
         let instance = Arc::new(instance);
         let entry_elapsed = deadline.elapsed()?;
         let started = Instant::now();
         let guard = BootWatchdog::start(instance.clone(), deadline)?;
+        physical_deadline.transfer_to(&guard)?;
         let mut receipt = RestartBootReceipt::restarting(
             &config,
             restart_id,

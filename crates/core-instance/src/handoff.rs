@@ -276,9 +276,29 @@ impl Instance {
         ipc_parent: &Path,
         entry: HandoffEntry,
     ) -> io::Result<(Self, InheritedHandoffProof)> {
+        Self::adopt_handoff_inner(config, ipc_parent, entry, || Ok(()))
+    }
+
+    /// Fixture-only blocking injection inside physical Adopt, before ELF I/O.
+    #[cfg(feature = "recovery-test-support")]
+    pub fn adopt_handoff_with_physical_hook(
+        config: &ConfigIdentity,
+        ipc_parent: &Path,
+        entry: HandoffEntry,
+        before_elf: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<(Self, InheritedHandoffProof)> {
+        Self::adopt_handoff_inner(config, ipc_parent, entry, before_elf)
+    }
+    fn adopt_handoff_inner(
+        config: &ConfigIdentity,
+        ipc_parent: &Path,
+        entry: HandoffEntry,
+        before_elf: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<(Self, InheritedHandoffProof)> {
         let HandoffEntry { lifetime, ticket } = entry;
         let record = ticket.record;
         record.validate()?;
+        before_elf()?;
         if record.config_identity != config.identity()
             || record.successor_build != running_elf_identity()?
         {

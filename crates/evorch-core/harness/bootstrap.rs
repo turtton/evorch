@@ -171,6 +171,43 @@ mod linux {
             BootMode::PlannedHandoff(handoff) => {
                 // Single-threaded process entry, before opening any other FD.
                 let inherited = unsafe { handoff.inspect()? };
+                if scenario == "physical_deadline" {
+                    let deadline = inherited.record().boot_deadline;
+                    let marker = options.config_dir.join("physical-dropped");
+                    struct DropMarker(PathBuf);
+                    impl Drop for DropMarker {
+                        fn drop(&mut self) {
+                            std::fs::write(&self.0, "dropped").unwrap();
+                        }
+                    }
+                    let _ = PlannedBoot::adopt_entry_with_physical_hook(
+                        config,
+                        &parent,
+                        inherited,
+                        |timer| {
+                            let _never_drop = DropMarker(marker);
+                            say(serde_json::json!({
+                                "status":"physical_blocked",
+                                "threads":std::fs::read_dir("/proc/self/task")?.count(),
+                                "restarting_ns":deadline.restarting_ns(),
+                                "deadline_ns":deadline.deadline_ns(),
+                            }));
+                            // This substitutes an indefinitely blocked ELF/FS
+                            // check. IPC advances injected time, not wall time.
+                            wait(false);
+                            timer.advance_clock_for_test(deadline.deadline_ns() - 1)?;
+                            say(serde_json::json!({"status":"before_deadline"}));
+                            wait(false);
+                            timer.advance_clock_for_test(deadline.deadline_ns())?;
+                            // No sender will release this read; only the real
+                            // kernel timer's async-signal-safe _exit can finish.
+                            loop {
+                                wait(false);
+                            }
+                        },
+                    )?;
+                    unreachable!("physical Adopt must not return");
+                }
                 let (mut boot, proof) = PlannedBoot::adopt_entry(config, &parent, inherited)?;
                 let inbox = signals.inbox()?;
                 say(serde_json::json!({"status":"physical", "pid":std::process::id()}));

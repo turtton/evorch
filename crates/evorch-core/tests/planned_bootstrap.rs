@@ -115,6 +115,35 @@ impl Drop for Fixture {
     }
 }
 
+#[test]
+fn physical_adopt_block_is_forced_closed_at_original_deadline_without_threads_or_drops() {
+    let mut f = Fixture::new("physical_deadline");
+    f.event("exec");
+    let blocked = f.event("physical_blocked");
+    assert_eq!(blocked["threads"], 1);
+    let start = blocked["restarting_ns"].as_u64().unwrap();
+    let end = blocked["deadline_ns"].as_u64().unwrap();
+    assert_eq!(end - start, 120_000_000_000);
+    f.excludes_second_core();
+    f.advance(); // Inject deadline - 1ns while physical Adopt stays blocked.
+    f.event("before_deadline");
+    assert!(f.child.try_wait().unwrap().is_none());
+    f.excludes_second_core();
+    f.advance(); // Inject the sealed deadline, never a reset deadline.
+    assert_eq!(f.child.wait().unwrap().code(), Some(70));
+    assert!(!f.data.path().join("config/physical-dropped").exists());
+    let launch = LaunchGuard::acquire(&f.identity()).unwrap();
+    assert!(launch.lifetime_available().unwrap());
+    assert_eq!(
+        f.database()
+            .restart_transaction("restart")
+            .unwrap()
+            .unwrap()
+            .phase,
+        RestartPhase::Armed
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_sandbox_probe_is_owned_and_only_runs_after_ready() {
     use core_instance::handoff::boot::BootFailure;

@@ -8,6 +8,10 @@ use std::{
     time::Duration,
 };
 
+#[path = "handoff_physical_deadline.rs"]
+mod physical_deadline;
+pub use physical_deadline::PhysicalAdoptDeadline;
+
 pub const BOOT_TIMEOUT_SECS: u64 = 120;
 const LIMIT_NS: u64 = BOOT_TIMEOUT_SECS * 1_000_000_000;
 
