@@ -269,6 +269,7 @@ async fn recover_case(
         .unwrap()
         .unwrap();
     restarted.adopt_restart_handoff(proof).unwrap();
+    let mut expected_wire_tools = original["tools"].clone();
     if tools_case {
         let tx = fixture_db
             .restart_transaction("routed-wire")
@@ -335,17 +336,40 @@ async fn recover_case(
         let boundary = restarted
             .consume_restart_tool_boundary(evidence.clone(), candidate.clone())
             .unwrap();
-        if changed_tool {
-            assert_eq!(boundary.unwrap().apply(&old_input).unwrap(), candidate);
+        let permitted = if changed_tool {
+            let permitted = boundary.unwrap().apply(&old_input).unwrap();
+            assert_eq!(permitted, candidate);
             assert!(
                 restarted
                     .consume_restart_tool_boundary(evidence, candidate.clone())
                     .unwrap()
                     .is_none()
             );
+            permitted
         } else {
             assert!(boundary.is_none());
-        }
+            candidate.clone()
+        };
+        // OpenAI's wire contract orders functions by name, not by the executor's
+        // registration order. Project the candidate independently of the encoder;
+        // never sort the recorded wire, so an unexpected wire order still fails.
+        let mut wire_order = permitted.request.tools.iter().collect::<Vec<_>>();
+        wire_order.sort_by(|left, right| left.name.cmp(&right.name));
+        expected_wire_tools = Value::Array(
+            wire_order
+                .into_iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        },
+                    })
+                })
+                .collect(),
+        );
         let mut changed_permissions = candidate.clone();
         changed_permissions.request.temperature = Some(0.99);
         assert!(
@@ -452,6 +476,12 @@ async fn recover_case(
         .map(|r| r.body)
         .collect::<Vec<_>>();
     assert_eq!(requests.len(), if tools_case { 4 } else { 2 });
+    for request in &requests[if tools_case { 2 } else { 1 }..] {
+        assert_eq!(
+            request["tools"], expected_wire_tools,
+            "wire tools must exactly match the permitted candidate, including order"
+        );
+    }
     let after = &requests[if tools_case { 2 } else { 1 }];
     if changed_tool {
         assert_ne!(original["tools"], after["tools"]);
@@ -477,9 +507,6 @@ async fn recover_case(
                 .iter()
                 .any(|m| m["role"] == "tool")
         );
-    }
-    if !changed_tool {
-        assert_eq!(after["tools"], original["tools"]);
     }
     for key in ["model", "temperature", "max_tokens", "tool_choice"] {
         assert_eq!(after[key], original[key], "changed {key}");
