@@ -81,6 +81,15 @@ impl LoopState {
                 // cannot pass for the user's.
                 self.begin_internal_input();
                 self.context.push_user(&question.answer_message());
+                match &question.answer_origin {
+                    Some(event_bus::AnswerOrigin::ParentAgent { answered_by_run_id }) => {
+                        self.observe_parent_input(answered_by_run_id);
+                    }
+                    Some(event_bus::AnswerOrigin::Host { .. }) if self.task.parent.is_some() => {
+                        self.budget.reset_elapsed();
+                    }
+                    _ => {}
+                }
                 received = true;
             }
         }

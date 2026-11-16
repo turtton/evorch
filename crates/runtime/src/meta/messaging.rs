@@ -243,7 +243,10 @@ pub(super) async fn wait_reply(
                 "message_id": args.message_id,
             }))
         }
-        WaitOutcome::Finished(Ok(ReplyOutcome::Reply(reply))) => serialize(&reply),
+        WaitOutcome::Finished(Ok(ReplyOutcome::Reply(reply))) => {
+            state.observe_parent_input(&reply.sender_run_id);
+            serialize(&reply)
+        }
         WaitOutcome::Finished(Ok(ReplyOutcome::AnswersReady(question_ids))) => {
             state.budget.mark_progress();
             serialize(&serde_json::json!({
@@ -272,6 +275,9 @@ pub(super) fn inbox(
     }
     match runtime.take_inbox(state.caller_run_id()) {
         Ok(messages) => {
+            for message in &messages {
+                state.observe_parent_input(&message.sender_run_id);
+            }
             // Received messages are new input, like a wait that returned them.
             if !messages.is_empty() {
                 state.budget.mark_progress();

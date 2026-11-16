@@ -508,6 +508,15 @@ impl Default for BudgetCounters {
 }
 
 impl BudgetCounters {
+    /// Start a fresh activity window when the direct parent input is consumed.
+    /// Preserve Waiting and every non-time counter, including a latched breach.
+    pub(crate) fn reset_elapsed(&mut self) {
+        let now = Instant::now();
+        self.started_at = now;
+        self.paused_at = self.paused_at.map(|_| now);
+        self.paused_total = Duration::ZERO;
+    }
+
     /// Waiting 位相 (ユーザ回答・reply・子 run 待ち) は max_elapsed に計上しない。
     /// pause は冪等で、重ねても最初の pause 時点を維持する。
     pub(crate) fn pause(&mut self) {

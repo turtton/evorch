@@ -232,7 +232,7 @@ async fn wait_with(
         // mailbox so attention and a queued notice cannot report the same ID.
         runtime.observe_questions(result.question_ids.clone());
         if deliver_messages {
-            deliver(runtime, caller, result);
+            deliver(state, runtime, caller, result);
         } else {
             result["inbox_ready"] = Value::Bool(
                 runtime
@@ -283,13 +283,16 @@ async fn wait_with(
 
 /// Moves the caller's queued agent messages into the result. Automatic child
 /// completion notices are acknowledged only when output-bearing snapshots return.
-fn deliver(runtime: &AgentRuntime, caller: RunId, result: &mut Value) {
+fn deliver(state: &mut LoopState, runtime: &AgentRuntime, caller: RunId, result: &mut Value) {
     let messages = match runtime.run_mailbox(caller) {
         Ok(mailbox) => mailbox.drain_interrupting(),
         Err(_) => Vec::new(),
     };
     if let Some(object) = result.as_object_mut() {
         object.remove("inbox_ready");
+    }
+    for message in &messages {
+        state.observe_parent_input(&message.sender_run_id);
     }
     result["messages"] = serde_json::to_value(messages).unwrap_or_else(|_| json!([]));
 }
