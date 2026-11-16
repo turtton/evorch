@@ -10,6 +10,9 @@ use tools::ToolExecutor;
 use super::*;
 use crate::{AgentInvocationContext, AgentModel, RunConfig, RuntimeError};
 
+#[path = "lane_tests.rs"]
+mod lane_tests;
+
 struct GatedModel {
     first: Notify,
     second: Notify,
@@ -1318,6 +1321,15 @@ async fn legacy_phase_only_keeps_unpresented_completion_unread() {
     assert!(dispatch.observations.completions.is_empty());
     state.context.push_tool_result("legacy", dispatch.result);
     dispatch.observations.presented(&mut state);
+    assert!(!notice.observed());
+    let repeated = wait(&mut state, &runtime, json!({"run_id":child.to_string()})).await;
+    assert_eq!(repeated.result.content, "Error");
+    assert_eq!(repeated.result.progress, Some(tools::Progress::Stalled));
+    assert!(repeated.observations.completions.is_empty());
+    state
+        .context
+        .push_tool_result("legacy-repeat", repeated.result);
+    repeated.observations.presented(&mut state);
     assert!(!notice.observed());
     let dispatch = wait(&mut state, &runtime, json!({})).await;
     assert_eq!(
