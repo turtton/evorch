@@ -266,6 +266,9 @@ impl Projection {
                 }
                 // Full scans are synchronous: do not spend the executor's entire receive
                 // budget on back-to-back scans while run startup and storage wait to run.
+                // Never retain the projection (and its runtime) across a scheduler wait:
+                // failed bootstrap must be able to drop both without another task poll.
+                drop(this);
                 tokio::task::yield_now().await;
             }
         });
