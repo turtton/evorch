@@ -479,6 +479,18 @@ fn conversation_overlay_asset() -> String {
     .expect("conversation overlay asset")
 }
 
+// C1 grows the Worker catalog. Keep fixture history space independent of that
+// catalog, instead of assuming instructions + tool definitions fit a fixed window.
+async fn window_with_history(runtime: &AgentRuntime, history_tokens: u64) -> u64 {
+    runtime
+        .preview_base_context(runtime::base_context::BaseContextRequest::new(Role::Worker))
+        .await
+        .unwrap()
+        .total_tokens()
+        .checked_add(history_tokens)
+        .unwrap()
+}
+
 fn contract_prompts() -> Arc<SystemPromptCatalog> {
     let mut prompts = SystemPromptCatalog::builder()
         .category_overlay("conversation", conversation_overlay_asset());

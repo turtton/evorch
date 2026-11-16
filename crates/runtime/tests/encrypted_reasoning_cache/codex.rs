@@ -110,6 +110,14 @@ struct Options {
     model_summaries: bool,
 }
 
+// Preserve 40K of scripted history independently of C1 catalog/instruction growth.
+// The existing one-boundary/cache assertions require the long old answer to
+// compact, and the small follow-up read to reuse that boundary without another.
+async fn smaller_window_for_history(history_tokens: u64) -> u64 {
+    let probe = Live::new(Vec::new(), FAR_FUTURE_EXP, false);
+    crate::window_with_history(&probe.runtime, history_tokens).await
+}
+
 impl Live {
     fn new(script: Vec<ScriptedResponse>, token_exp: u64, persist: bool) -> Self {
         Self::with(script, token_exp, persist, Options::default())
@@ -513,6 +521,7 @@ async fn model_round_trip_never_revives_old_reasoning_even_for_official_compacti
 // is replayed next and B's new prefix is reused in the input-derived cache
 #[tokio::test]
 async fn fallback_to_a_smaller_window_resummarizes_once_without_old_reasoning() {
+    let target_window = smaller_window_for_history(40_000).await;
     let review_storage = crate::support::ReviewStorage::new();
     let (r1, r2, r3, r4) = (
         reasoning("rs_1"),
@@ -557,7 +566,7 @@ type = "openai-codex"
 api_protocol = "openai-codex-responses"
 base_url = "{small}"
 credential = {credential}
-models = [{{ id = "{MODEL_B}", enabled = true, metadata_source = "manual", context_window = 40000 }}]
+models = [{{ id = "{MODEL_B}", enabled = true, metadata_source = "manual", context_window = {target_window} }}]
 default_model = "{MODEL_B}"
 [[routing.routes.primary]]
 profile = "primary"

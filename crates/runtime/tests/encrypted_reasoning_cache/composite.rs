@@ -51,6 +51,7 @@ fn compaction_requests(bodies: &[Value]) -> Vec<&Value> {
 // replayed next, and the new prefix is reused with positive cache usage
 #[tokio::test]
 async fn rejected_candidate_snapshot_rolls_back_then_reprepares_safely() {
+    let target_window = super::smaller_window_for_history(40_000).await;
     let (r1, r2, r3, r4) = (
         reasoning("rs_1"),
         reasoning("rs_2"),
@@ -70,7 +71,7 @@ async fn rejected_candidate_snapshot_rolls_back_then_reprepares_safely() {
         FAR_FUTURE_EXP,
         true,
         Options {
-            overrides: vec![(format!("work/{MODEL_B}"), 40_000)],
+            overrides: vec![(format!("work/{MODEL_B}"), target_window)],
             ..Options::default()
         },
     );
