@@ -281,9 +281,12 @@ fn a_checked_shutdown_reports_a_tail_write_that_failed_after_the_last_flush() {
 
     assert!(error.to_string().contains("EventSize"), "{error}");
     assert_eq!(owner.monitor().snapshot().failed_events, 1);
-    // The unchecked shutdown stays a warning, and a stopped bridge stops cleanly.
+    // An unchecked cleanup cannot erase a failed checked join on a later call.
     owner.shutdown();
-    owner.try_shutdown().unwrap();
+    assert_eq!(
+        owner.try_shutdown().unwrap_err().to_string(),
+        error.to_string()
+    );
 }
 
 #[test]

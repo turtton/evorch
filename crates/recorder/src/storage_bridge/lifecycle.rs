@@ -17,6 +17,7 @@ pub struct OwnedStorageBridge {
     flush_requests: tokio::sync::mpsc::UnboundedSender<FlushReply>,
     thread: Option<JoinHandle<Result<(), String>>>,
     monitor: StorageBridgeMonitor,
+    stopped_result: Option<Result<(), String>>,
 }
 
 impl OwnedStorageBridge {
@@ -61,6 +62,7 @@ impl OwnedStorageBridge {
             flush_requests,
             thread: Some(thread),
             monitor,
+            stopped_result: None,
         })
     }
 
@@ -111,7 +113,8 @@ impl OwnedStorageBridge {
     /// # Errors
     /// The bridge thread panicked, an event or the usage metrics failed to be
     /// written since the last [`flush`](Self::flush), the final flush could not
-    /// reach the writer, or the writer failed to join.
+    /// reach the writer. This only stops/joins the subscriber; storage and its
+    /// writer remain owned and alive for Arm/readback/FailedClosed.
     pub fn try_shutdown(&mut self) -> io::Result<()> {
         match self.stop() {
             Ok(Ok(())) => Ok(()),
@@ -125,6 +128,9 @@ impl OwnedStorageBridge {
     /// Stop and join the thread. `Err(())`: it panicked. `Ok(Err(..))`: it
     /// ended with the failure it recorded.
     fn stop(&mut self) -> Result<Result<(), String>, ()> {
+        if let Some(result) = &self.stopped_result {
+            return Ok(result.clone());
+        }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -132,8 +138,14 @@ impl OwnedStorageBridge {
             return Ok(Ok(()));
         };
         match thread.join() {
-            Ok(result) => Ok(result),
-            Err(_) => Err(()),
+            Ok(result) => {
+                self.stopped_result = Some(result.clone());
+                Ok(result)
+            }
+            Err(_) => {
+                self.stopped_result = Some(Err("storage bridge thread panicked".into()));
+                Err(())
+            }
         }
     }
 }

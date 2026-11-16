@@ -18,9 +18,15 @@ impl RestartCoordinator {
             // delivery, without cancelling/replaying the retained restart attempt.
             return delivery.deliver_for_shutdown();
         }
-        // D-2c-2 must begin capture and publish Capturing under this mutex;
-        // subsequent Commit I/O stays outside it. Delivery rejects a Stop after
-        // runtime's capture boundary, without reopening anything.
+        // The irreversible boundary is published under this very mutex.
+        // FailedClosed still admits terminal-only Stop, never cancel/replay.
+        if state.capture_started {
+            return if state.phase == RestartPhase::FailedClosed {
+                delivery.deliver()
+            } else {
+                Err(RuntimeError::RestartBusy)
+            };
+        }
         // Do not publish Cancelling before terminal admission accepts the Stop.
         let result = delivery.deliver();
         if let Some(attempt) = state.attempt.clone() {

@@ -4,7 +4,10 @@
 //! root/goal idempotency barrier. Every local bus feeds passive diagnostics;
 //! atomic database observation receipts deduplicate shared events. A short flock
 //! serializes spool intake without a lifetime-elected consumer.
-use super::{BootstrapError, services::BackgroundServices};
+use super::{
+    BootstrapError,
+    services::{BackgroundServices, StopMode},
+};
 use runtime::{AgentRuntime, ownership::OwnerHost};
 use std::{
     path::{Path, PathBuf},
@@ -92,9 +95,12 @@ pub fn start(
     }
     let Some(drafts) = draft_dir(config, &storage.db_path) else {
         let runtime = runtime.clone();
-        services.start("learning", |stop| async move {
-            let _ = stop.await;
-            runtime.drain_learning().await;
+        services.start_planned_aware("learning", |stop| async move {
+            if matches!(stop.await, Ok(StopMode::Planned)) {
+                runtime.drain_learning_for_restart().await?;
+            } else {
+                runtime.drain_learning().await;
+            }
             Ok(())
         });
         return Ok(());
@@ -112,18 +118,29 @@ pub fn start(
     let intake_db = storage.db_path.clone();
     let drain_db = intake_db.clone();
     let producers = runtime.producer_gate();
-    services.start("self-improvement", |stop| async move {
+    services.start_planned_aware("self-improvement", |stop| async move {
+        let failure = Arc::new(std::sync::Mutex::new(None));
+        let stopped_failure = failure.clone();
         // The hook outlives producers and the final writer acknowledgement.
         let _hook = hook;
         runtime::self_improvement::ImprovementCollector::new(settings)
             .run_until_gated(
                 receiver,
                 async move {
-                    let _ = stop.await;
-                    draining.drain_learning().await;
+                    let planned = matches!(stop.await, Ok(StopMode::Planned));
+                    if planned {
+                        if let Err(error) = draining.drain_learning_for_restart().await {
+                            *stopped_failure.lock().unwrap() = Some(error);
+                        }
+                    } else {
+                        draining.drain_learning().await;
+                    }
                     evaluations.wait_drained().await;
                     if let Err(error) = ingest_available(&draining, &drain_db) {
                         tracing::warn!(%error, "crash spool final intake failed");
+                        if planned {
+                            *stopped_failure.lock().unwrap() = Some(error.to_string());
+                        }
                     }
                 },
                 move |event| {
@@ -183,6 +200,9 @@ pub fn start(
                 producers,
             )
             .await?;
+        if let Some(error) = failure.lock().unwrap().take() {
+            return Err(error.into());
+        }
         Ok(())
     });
     Ok(())

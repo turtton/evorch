@@ -19,6 +19,7 @@ pub mod learning;
 mod learning_tests;
 pub mod models;
 pub mod planned;
+pub mod planned_exit;
 mod project_models;
 pub mod recovery;
 #[cfg(test)]

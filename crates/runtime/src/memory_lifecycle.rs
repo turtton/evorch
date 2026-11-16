@@ -205,16 +205,18 @@ impl AgentRuntime {
         };
         let weak = std::sync::Arc::downgrade(&self.shared);
         let finish = weak.clone();
-        let completion = pending.complete_registered(weak, run, entry);
-        let task = tokio::spawn(async move {
+        let completion = pending.complete_registered(weak, run, entry.clone());
+        let started = self.shared.learning_executions.tasks.spawn(async move {
             if let Some(entry) = completion.await
                 && let Some(shared) = finish.upgrade()
             {
                 AgentRuntime { shared }.learning_returned(&entry).await;
             }
         });
-        self.shared.learning_executions.own(task);
-        true
+        if !started {
+            self.shared.learning_executions.release(&entry);
+        }
+        started
     }
 
     pub async fn wait_learning(&self, run: RunId) -> Result<Result<(), String>, RuntimeError> {
