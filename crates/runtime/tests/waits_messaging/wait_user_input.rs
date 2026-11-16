@@ -221,14 +221,15 @@ async fn scenario(delivery: Delivery, batch: bool) {
                 assert_eq!(result["user_input_ready"], true);
                 assert_eq!(result["messages"], serde_json::json!([]));
                 assert!(result.get("timed_out").is_none(), "{result}");
-                assert_eq!(
-                    result["runs"][0]["status"],
-                    if matches!(delivery, Delivery::WithCompletion) {
-                        "completed"
-                    } else {
-                        "still_running"
-                    }
-                );
+                if matches!(delivery, Delivery::WithCompletion) {
+                    assert_eq!(result["runs"][0]["status"], "completed");
+                } else {
+                    assert_eq!(
+                        result["runs"],
+                        serde_json::json!([]),
+                        "host input must not fetch or return an unchanged child's output"
+                    );
+                }
                 wait_results += 1;
             }
         }

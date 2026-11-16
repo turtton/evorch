@@ -40,8 +40,8 @@ fn settings(h: &Harness) -> Config {
             model: None,
             auto: false,
         });
-    current.agents.orchestrator.base.generation.temperature = Some(0.25);
-    current.agents.orchestrator.base.generation.max_tokens = Some(321);
+    current.agents.orchestrator.generation.temperature = Some(0.25);
+    current.agents.orchestrator.generation.max_tokens = Some(321);
     current
 }
 

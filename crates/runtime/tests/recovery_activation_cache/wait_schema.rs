@@ -113,7 +113,9 @@ pub(super) fn wire_tools(wire: Wire, tools: &[ToolSpec]) -> Value {
             .map(|tool| match wire {
                 Wire::ChatCompletions => json!({"type":"function", "function":{
             "name":tool.name, "description":tool.description, "parameters":tool.input_schema}}),
-                Wire::Responses | Wire::Codex => json!({"type":"function", "name":tool.name,
+                Wire::Responses => json!({"type":"function", "name":tool.name,
+            "description":tool.description, "parameters":tool.input_schema, "strict":false}),
+                Wire::Codex => json!({"type":"function", "name":tool.name,
             "description":tool.description, "parameters":tool.input_schema}),
             })
             .collect(),
