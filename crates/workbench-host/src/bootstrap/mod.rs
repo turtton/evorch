@@ -810,6 +810,12 @@ impl BootstrappedHost {
         gates
     }
 
+    pub fn restart_preparing_services(&self) -> restart::PreparingServices {
+        restart::PreparingServices {
+            evaluations: self.evaluations.clone(),
+        }
+    }
+
     /// Woken when an area operation that counts as work ends, so the idle
     /// decision is taken again (ADR 0045 §2, §3).
     pub fn area_work_notify(&self) -> Arc<tokio::sync::Notify> {

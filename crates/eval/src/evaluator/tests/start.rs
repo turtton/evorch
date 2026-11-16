@@ -11,6 +11,36 @@ use crate::inspection::{GROUP_SCHEMA, GroupRecord, Member, ProcessExit, Purpose}
 
 const CANDIDATE: &str = "[agents.worker.generation]\ntemperature = 0.2\n";
 
+#[tokio::test]
+async fn restart_pause_refuses_evaluation_without_approval_or_queued_launch() {
+    let fixture = Fixture::new();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "regression").await;
+    let mut events = fixture.bus.subscribe();
+    let pause = fixture.service.producers.pause();
+    let result = fixture
+        .call_in_run(
+            "eval_start",
+            json!({"thread_id": "thread-1", "candidate": CANDIDATE}),
+        )
+        .await;
+    assert!(result.is_error && result.content.contains("busy"));
+    assert!(!fixture.user.path().join("eval").exists());
+    assert!(
+        events
+            .drain_pending_snapshot()
+            .iter()
+            .all(|event| !matches!(
+                event.kind,
+                EventKind::Tool(ToolEvent::ApprovalRequested { .. })
+            ))
+    );
+    assert!(fixture.service.producers.resume(pause));
+    fixture.service.drain_accepted().await.unwrap();
+    assert!(!fixture.service.is_busy());
+    assert!(!fixture.user.path().join("eval").exists());
+}
+
 /// A stand-in for `evorch eval run`: it records its arguments in the output
 /// directory, then fails for `fail-*` threads, keeps running for `slow-*`
 /// threads and otherwise writes a finished evaluation.

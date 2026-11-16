@@ -80,6 +80,7 @@ pub const MAX_RESTART_BLOCKERS: usize = 64;
 pub enum RestartPhase {
     Running,
     Requested,
+    PreparingDrains,
     WaitingSafePoint,
     Sealing,
     Sealed,

@@ -162,13 +162,27 @@ async fn restart_subprocess_worker() {
         while let Some(line) = lines.next_line().await.unwrap() {
             match line.as_str() {
                 "prepare" => {
+                    // PreparingDrains keeps normal work live. Hold the producer
+                    // boundary until the runtime attempt exists, then queue the
+                    // run whose provider admission cancellation must release.
+                    let producer = runtime.producer_gate().try_enter().unwrap();
+                    let mut changes = coordinator.subscribe();
+                    let id = coordinator.request().unwrap();
+                    assert_eq!(id, coordinator.request().unwrap());
+                    loop {
+                        let phase = coordinator.snapshot().phase;
+                        if phase == evorch_core::restart::RestartPhase::WaitingSafePoint {
+                            break;
+                        }
+                        assert_ne!(phase, evorch_core::restart::RestartPhase::FailedClosed);
+                        changes.changed().await.unwrap();
+                    }
                     run = Some(runtime.delegate_background(
                         runtime::Role::Worker,
                         "continue only after explicit cancellation".into(),
                         runtime::RunConfig::default(),
                     ));
-                    let id = coordinator.request().unwrap();
-                    assert_eq!(id, coordinator.request().unwrap());
+                    drop(producer);
                     coordinator.wait_sealed(id).await.unwrap();
                     attempt = Some(id);
                     assert_eq!(calls.0.load(Ordering::SeqCst), expected_calls);

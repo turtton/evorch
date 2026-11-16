@@ -108,6 +108,7 @@ mod tests {
         use crate::restart::RestartPhase::*;
         for phase in [
             Requested,
+            PreparingDrains,
             WaitingSafePoint,
             Sealing,
             Sealed,

@@ -411,7 +411,16 @@ impl AgentRuntime {
         if !self.learning_gate().resume(pause.pause) {
             return false;
         }
-        self.dispatch_pending_learning();
+        if self.shared.learning.get().is_none() {
+            return true;
+        }
+        // The coordinator calls this under its cancellation mutex. DB open/readback
+        // must not pin that mutex or a Tokio worker after the cohort deadline.
+        let runtime = self.clone();
+        let task = tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || runtime.dispatch_pending_learning()).await;
+        });
+        self.shared.learning_executions.own(task);
         true
     }
 
