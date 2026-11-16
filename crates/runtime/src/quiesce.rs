@@ -18,9 +18,11 @@ mod recovery_06b_tests;
 #[cfg(test)]
 mod recovery_cache_tests;
 mod restart;
+mod stop_boundary;
 pub use host_restart::{
     CommandAccess, HostCommandPermit, HostRestartGate, HostRestartPhase, SealedRestart,
 };
+pub use stop_boundary::{StopBoundary, StopDelivery};
 pub(crate) mod runtime;
 mod safe_point;
 mod shell;

@@ -126,6 +126,7 @@ type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(
 pub(crate) struct Shared {
     pub(crate) quiesce: crate::quiesce::Coordinator,
     pub(crate) dispatch_tails: Arc<crate::quiesce::dispatch::DispatchTails>,
+    pub(crate) stop_boundary: OnceLock<Arc<dyn crate::quiesce::StopBoundary>>,
     pub(crate) thread_goals: Mutex<crate::thread_goals::ThreadGoals>,
     /// Pull request tracking (ADR 0043), once the host started it.
     pub(crate) pull_requests: OnceLock<crate::pull_requests::PullRequestService>,
@@ -807,6 +808,7 @@ impl AgentRuntime {
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 quiesce: Default::default(),
                 dispatch_tails: Arc::new(Default::default()),
+                stop_boundary: OnceLock::new(),
                 admissions: Mutex::new(HashMap::new()),
                 lane_admissions: Default::default(),
                 #[cfg(test)]
@@ -1197,6 +1199,7 @@ impl AgentRuntime {
                 turn_version: watch::channel(0).0,
                 quiesce: Default::default(),
                 dispatch_tails: Arc::new(Default::default()),
+                stop_boundary: OnceLock::new(),
                 admissions: Mutex::new(HashMap::new()),
                 lane_admissions: Default::default(),
                 #[cfg(test)]
@@ -3086,9 +3089,19 @@ impl AgentRuntime {
     /// # Errors
     /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
     pub fn stop(&self, run_id: RunId, scope: StopScope) -> Result<(), RuntimeError> {
-        self.with_terminal_dispatch(|| self.stop_with_dispatch(run_id, scope))
+        let delivery = crate::quiesce::StopDelivery::new(self, run_id, scope);
+        if let Some(boundary) = self.shared.stop_boundary.get() {
+            // Enter the outer lifecycle lock before taking any runtime lock.
+            boundary.stop(delivery)
+        } else {
+            delivery.deliver()
+        }
     }
-    fn stop_with_dispatch(&self, run_id: RunId, scope: StopScope) -> Result<(), RuntimeError> {
+    pub(crate) fn stop_with_dispatch(
+        &self,
+        run_id: RunId,
+        scope: StopScope,
+    ) -> Result<(), RuntimeError> {
         // Collect before taking admissions: spawning locks intents before admissions.
         let mut targets = match scope {
             StopScope::SelfOnly => vec![run_id],

@@ -88,7 +88,7 @@ async fn cancellation_before_suspend_does_not_replay_or_stop_evaluation() {
 
 #[tokio::test]
 async fn stop_and_preparing_both_orders_preserve_new_generation_pause() {
-    for stop_first in [true, false] {
+    for (direct, stop_first) in [(false, true), (false, false), (true, true), (true, false)] {
         let (_dir, mut host) = boot().await;
         let mut events = host.runtime.event_bus().subscribe();
         let run = host.runtime.delegate_background(
@@ -114,15 +114,22 @@ async fn stop_and_preparing_both_orders_preserve_new_generation_pause() {
             .spawn(async { returned.await.unwrap() })
             .unwrap();
         let core = RestartCoordinator::new(&host);
+        let stop = || {
+            if direct {
+                host.runtime.stop(run, StopScope::SelfOnly)
+            } else {
+                core.stop(run, StopScope::SelfOnly)
+            }
+        };
         if stop_first {
-            core.stop(run, StopScope::SelfOnly).unwrap();
+            stop().unwrap();
         }
         let id = core.request().unwrap();
         if stop_first {
             assert_eq!(core.snapshot().phase, RestartPhase::PreparingDrains);
             core.cancel(id).unwrap();
         } else {
-            core.stop(run, StopScope::SelfOnly).unwrap();
+            stop().unwrap();
         }
         assert_eq!(core.snapshot().phase, RestartPhase::Running);
         assert!(core.0.state.lock().unwrap().attempt.is_none());
@@ -214,4 +221,52 @@ async fn health_is_rechecked_after_natural_drain_before_attempt_creation() {
     )
     .unwrap();
     assert!(host.shutdown().await.is_err());
+}
+
+#[tokio::test]
+async fn rejected_direct_stop_during_drains_does_not_release_preparation() {
+    let (_dir, mut host) = boot().await;
+    let evaluations = host.restart_preparing_services().evaluations;
+    let (release, returned) = tokio::sync::oneshot::channel();
+    evaluations
+        .spawn(async { returned.await.unwrap() })
+        .unwrap();
+    let core = RestartCoordinator::new(&host);
+    let id = core.request().unwrap();
+    assert!(matches!(
+        host.runtime.stop(RunId::new(u64::MAX), StopScope::SelfOnly),
+        Err(RuntimeError::UnknownRun { .. })
+    ));
+    assert_eq!(core.snapshot().phase, RestartPhase::PreparingDrains);
+    assert_eq!(core.snapshot().id, Some(id));
+    assert!(!evaluations.producers.is_open());
+    assert!(!host.runtime.learning_gate().is_open());
+    assert!(host.runtime.producer_gate().is_open());
+    release.send(()).unwrap();
+    core.wait_sealed(id).await.unwrap();
+    core.cancel(id).unwrap();
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stop_boundary_does_not_keep_a_released_lifecycle_owner_alive() {
+    let (_dir, mut host) = boot().await;
+    // Deliberately do not install a strong host-side handler in this fixture.
+    let core = RestartCoordinator::from_parts(
+        host.runtime.clone(),
+        HostRestartGate::default(),
+        host.restart_producers(),
+        host.restart_preparing_services(),
+    );
+    let weak = Arc::downgrade(&core.0);
+    drop(core);
+    assert!(
+        weak.upgrade().is_none(),
+        "runtime must not own the coordinator"
+    );
+    assert!(matches!(
+        host.runtime.stop(RunId::new(u64::MAX), StopScope::SelfOnly),
+        Err(RuntimeError::RestartBusy)
+    ));
+    host.shutdown().await.unwrap();
 }
