@@ -165,6 +165,39 @@ async fn inherited_learning_uses_membership_not_pid_and_cold_completed_graph_can
             .quarantine_cold_learning(&Probe(OriginLiveness::Dead))
             .is_err()
     );
+    // A later cold boot must not let an old, already-requeued membership hide
+    // a fresh Interrupted attempt from the origin-aware standalone cleanup.
+    let next_queue = successor.learning_job_queue().unwrap();
+    let fresh = next_queue
+        .start_attempt(
+            "interrupted",
+            &successor.learning_gate().try_enter().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    next_queue
+        .change(
+            &fresh,
+            LearningAttemptChange::Interrupt {
+                suspension_id: "later".into(),
+            },
+        )
+        .unwrap();
+    let bus = Arc::new(event_bus::EventBus::new(64));
+    let cold = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(::tools::ToolExecutor::new(bus)),
+        f.model.clone(),
+    )
+    .with_run_store(crate::RunStore::open(&f.config, f._storage.handle()).unwrap())
+    .with_learning_origin(origin("cold-later"));
+    cold.quarantine_cold_restarts().unwrap();
+    cold.quarantine_cold_learning(&Probe(OriginLiveness::Dead))
+        .unwrap();
+    assert_eq!(
+        queue.job("interrupted").unwrap().unwrap().state,
+        LearningJobState::Abandoned
+    );
 }
 
 #[tokio::test]
@@ -323,7 +356,11 @@ async fn cold_learning_after_graph(liveness: OriginLiveness, other_config: bool)
             f.model.clone(),
         )
         .with_run_store(crate::RunStore::open(&f.config, f._storage.handle()).unwrap());
-        let cold = learning_with_origin(cold, &f, cold_origin);
+        let cold = if matches!(path, ColdGraphPath::Completed) {
+            cold.with_learning_origin(cold_origin)
+        } else {
+            learning_with_origin(cold, &f, cold_origin)
+        };
         // Follow the startup order: graph quarantine first, then the origin-aware learning pass.
         match path {
             ColdGraphPath::Mutation => {
@@ -670,4 +707,75 @@ async fn empty_learning_inventory_requires_a_durable_row_not_an_empty_members_qu
             .is_empty()
     );
     f.runtime.commit_restart_capture(&mut session).unwrap();
+}
+
+#[tokio::test]
+async fn corrupt_cold_learning_cohort_never_blocks_a_later_valid_cohort() {
+    for corruption in ["graph", "inventory", "member"] {
+        let mut f = Fixture::new(0);
+        f.runtime = learning(f.runtime.clone(), &f, "predecessor");
+        let queue = f.runtime.learning_job_queue().unwrap();
+        admit(&queue, "valid");
+        let pause = f.runtime.pause_learning();
+        let suspension = f.runtime.suspend_learning(&pause).unwrap();
+        suspension.wait().await.unwrap();
+        let mut session = session(&f, BTreeMap::new()).await;
+        f.runtime
+            .persist_restart_capture_expected(&mut session)
+            .unwrap();
+        f.runtime
+            .persist_restart_learning_inventory(&mut session, &pause, &suspension)
+            .await
+            .unwrap();
+        f.runtime.commit_restart_capture(&mut session).unwrap();
+        // Independent earlier cohort: malformed persisted evidence is not authority.
+        let mut meta = metadata();
+        meta.restart_id = "a-corrupt".into();
+        meta.capture_id = "a-capture".into();
+        f._storage
+            .handle()
+            .mutate_restart(
+                "a-corrupt".into(),
+                None,
+                RestartMutation::Create(Box::new(meta)),
+            )
+            .unwrap();
+        let sql = rusqlite::Connection::open(&f.config.db_path).unwrap();
+        sql.execute("INSERT INTO restart_learning_inventory SELECT 'a-corrupt', inventory_json FROM restart_learning_inventory WHERE restart_id='restart'", []).unwrap();
+        if corruption == "graph" {
+            sql.execute(
+                "UPDATE restart_transactions SET metadata_json='{' WHERE restart_id='a-corrupt'",
+                [],
+            )
+            .unwrap();
+        } else if corruption == "inventory" {
+            sql.execute("UPDATE restart_learning_inventory SET inventory_json='{' WHERE restart_id='a-corrupt'", []).unwrap();
+        } else {
+            sql.execute("INSERT INTO restart_learning_members (restart_id,task_id,member_json) VALUES ('a-corrupt','valid','{')", []).unwrap();
+        }
+        let bus = Arc::new(event_bus::EventBus::new(64));
+        let cold = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(::tools::ToolExecutor::new(bus)),
+            f.model.clone(),
+        )
+        .with_run_store(crate::RunStore::open(&f.config, f._storage.handle()).unwrap())
+        .with_learning_origin(origin("cold")); // No quick profile required for cleanup.
+        cold.quarantine_cold_restarts().unwrap();
+        cold.quarantine_cold_learning(&Probe(OriginLiveness::Dead))
+            .unwrap();
+        assert_eq!(
+            queue.job("valid").unwrap().unwrap().state,
+            LearningJobState::Abandoned
+        );
+        assert!(queue.evidence("valid").unwrap().is_none());
+        assert!(cold.list_agents().is_empty());
+        assert!(
+            db(&f)
+                .restart_learning_members("restart")
+                .unwrap()
+                .iter()
+                .all(|m| m.disposition == "quarantined")
+        );
+    }
 }

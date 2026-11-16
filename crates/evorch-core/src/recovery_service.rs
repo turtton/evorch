@@ -69,6 +69,7 @@ impl CoreStartupHook for CoreGraphRecovery {
                         return Err("planned proof in cold bootstrap".into());
                     }
                     inputs.runtime.quarantine_cold_restarts()?;
+                    inputs.runtime.quarantine_cold_learning_from_proc()?;
                 }
                 workbench_host::bootstrap::core_startup::CoreBootMode::PlannedHandoff => {
                     if !inputs.runtime.has_planned_restart_handoff() {

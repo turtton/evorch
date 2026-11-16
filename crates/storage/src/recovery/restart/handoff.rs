@@ -108,6 +108,22 @@ impl Database {
     ) -> Result<LearningInventory, StorageError> {
         inventory(&self.conn, origin, suspension_id)
     }
+    /// Cold cleanup enumerates cohorts without decoding another component's graph.
+    pub fn restart_learning_candidates(&self) -> Result<Vec<String>, StorageError> {
+        let mut q = self
+            .conn
+            .prepare("SELECT restart_id FROM restart_learning_inventory ORDER BY restart_id")?;
+        Ok(q.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
+    }
+    /// Even corrupt membership remains excluded from the unbound-job janitor.
+    pub fn pending_restart_learning_task_ids(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, StorageError> {
+        let mut q = self
+            .conn
+            .prepare("SELECT task_id FROM restart_learning_members WHERE disposition='pending'")?;
+        Ok(q.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
+    }
     pub fn restart_saved_learning_inventory(
         &self,
         id: &str,
@@ -275,6 +291,12 @@ pub(super) fn resume(
 /// same config and Dead. Graph quarantine cannot authorize learning cleanup.
 /// Exact membership fences additionally prevent harming a later attempt.
 pub(super) fn quarantine_learning(conn: &Connection, id: &str) -> Result<(), StorageError> {
+    let raw: String = conn.query_row(
+        "SELECT inventory_json FROM restart_learning_inventory WHERE restart_id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    let inventory: LearningInventory = decode(&raw)?;
     let mut q=conn.prepare("SELECT task_id,member_json FROM restart_learning_members WHERE restart_id=?1 AND disposition='pending'")?;
     let rows = q
         .query_map([id], |r| {
@@ -287,6 +309,8 @@ pub(super) fn quarantine_learning(conn: &Connection, id: &str) -> Result<(), Sto
         if let Some(member) = member
             && let Some(job) = job(conn, &task)?
             && job.key() == member.key
+            && member.key.task_id == task
+            && job.origin == inventory.origin
         {
             learning_jobs::attempts::apply_in_transaction(
                 conn,
