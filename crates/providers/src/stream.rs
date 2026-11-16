@@ -54,7 +54,7 @@ pub struct StreamAccumulator {
     tool_calls: BTreeMap<usize, ToolCallFragment>,
 }
 
-/// 引数文字列が JSON として解釈できなかったツール呼び出し。
+/// 引数が JSON として解釈できない、または object ではないツール呼び出し。
 ///
 /// 診断用に識別子・長さ・ハッシュだけを持ち、引数本文は持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +67,7 @@ pub struct MalformedToolCall {
     pub arguments_len: usize,
     /// 引数文字列の SHA-256 先頭 16 桁。
     pub arguments_sha256: String,
-    /// JSON 解析エラー（位置と種別のみ）。
+    /// JSON 解析または形式のエラー（引数本文は含まない）。
     pub error: String,
 }
 
@@ -107,13 +107,19 @@ impl StreamAccumulator {
     }
 
     /// [`Self::finish`] が `null` 入力にするツール呼び出しを列挙する。
+    ///
+    /// JSON 解析に失敗した引数と、JSON として有効でも object ではない引数を含む。
     pub fn malformed_tool_calls(&self) -> Vec<MalformedToolCall> {
         use sha2::{Digest, Sha256};
         self.tool_calls
             .values()
             .filter(|fragment| !fragment.arguments.trim().is_empty())
             .filter_map(|fragment| {
-                let error = serde_json::from_str::<serde_json::Value>(&fragment.arguments).err()?;
+                let error = match serde_json::from_str::<serde_json::Value>(&fragment.arguments) {
+                    Ok(value) if value.is_object() => return None,
+                    Ok(_) => "tool arguments must be a JSON object".to_string(),
+                    Err(error) => error.to_string(),
+                };
                 let digest = Sha256::digest(fragment.arguments.as_bytes());
                 Some(MalformedToolCall {
                     id: fragment.id.clone(),
@@ -223,27 +229,42 @@ mod tests {
         }
     }
 
-    // Given: 壊れた引数・正しい引数・空の引数 / When: 列挙する / Then: 壊れたものだけが識別子・長さ・ハッシュで並ぶ
     #[test]
-    fn malformed_tool_calls_lists_only_unparsable_arguments() {
+    fn malformed_tool_calls_lists_unparsable_and_non_object_arguments() {
         let mut accumulator = StreamAccumulator::default();
         accumulator.feed(&tool_delta(0, Some("bad"), Some("read"), "{\"path\": "));
+        accumulator.feed(&tool_delta(1, Some("null"), Some("read"), "null"));
+        accumulator.feed(&tool_delta(2, Some("array"), Some("read"), "[1]"));
+        accumulator.feed(&tool_delta(3, Some("number"), Some("read"), "42"));
         accumulator.feed(&tool_delta(
-            1,
+            4,
+            Some("string"),
+            Some("read"),
+            "\"private argument\"",
+        ));
+        accumulator.feed(&tool_delta(
+            5,
             Some("good"),
             Some("read"),
             "{\"path\": \"a\"}",
         ));
-        accumulator.feed(&tool_delta(2, Some("empty"), Some("list"), ""));
+        accumulator.feed(&tool_delta(6, Some("empty"), Some("list"), ""));
 
         let malformed = accumulator.malformed_tool_calls();
 
-        assert_eq!(malformed.len(), 1);
+        assert_eq!(malformed.len(), 5);
         assert_eq!(malformed[0].id, "bad");
         assert_eq!(malformed[0].name, "read");
         assert_eq!(malformed[0].arguments_len, 9);
         assert_eq!(malformed[0].arguments_sha256.len(), 16);
         assert!(malformed[0].error.contains("EOF"), "{}", malformed[0].error);
+        for call in &malformed[1..] {
+            assert_eq!(call.error, "tool arguments must be a JSON object");
+        }
+        assert!(
+            !format!("{malformed:?}").contains("private argument"),
+            "diagnostics must not contain raw arguments"
+        );
     }
 
     // Given: 空のアキュムレータ / When: TextDelta を 2 回 feed して finish / Then: 単一 Text ブロックに結合され Assistant 応答になる

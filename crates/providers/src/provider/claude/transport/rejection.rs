@@ -27,7 +27,7 @@ const BODY_MAX_BYTES: usize = REQUEST_FAILED_DETAIL_MAX_BYTES - DISPLAY_PREFIX_R
 /// environment, so it is masked explicitly in addition to the shape-based and
 /// environment-based [`SecretRedactor`].
 pub(super) fn rejection_detail(value: &Value, secret: &str) -> String {
-    let Some(error) = value.get("error").unwrap_or(value).as_object() else {
+    let Some(error) = value.get("error").and_then(Value::as_object) else {
         return FALLBACK.into();
     };
     let field = |name: &str| error.get(name).and_then(Value::as_str);
@@ -207,6 +207,7 @@ mod tests {
             json!(null),
             json!("raw body secret"),
             json!([1, 2]),
+            json!({"type": "top_level_type", "message": "top-level sensitive detail"}),
             json!({"error": "raw string secret"}),
             json!({"error": {"type": 7, "message": {"nested": "secret"}}}),
             json!({"error": {"type": "  ", "message": "\u{0}\n"}}),

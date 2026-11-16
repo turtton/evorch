@@ -40,16 +40,7 @@ const KNOWN_LIMITS: &[(&str, u64)] = &[
 pub(super) fn default_limit(model: &str) -> u64 {
     KNOWN_LIMITS
         .iter()
-        .find_map(|(id, limit)| {
-            // The same eight ASCII-digit date suffix allowed by model_mode.
-            (model == *id
-                || model.strip_prefix(id).is_some_and(|suffix| {
-                    suffix.strip_prefix('-').is_some_and(|date| {
-                        date.len() == 8 && date.bytes().all(|digit| digit.is_ascii_digit())
-                    })
-                }))
-            .then_some(*limit)
-        })
+        .find_map(|(id, limit)| (model == *id).then_some(*limit))
         .unwrap_or(LEGACY_DEFAULT)
 }
 
@@ -58,10 +49,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_exact_known_ids_and_eight_digit_dates_are_accepted() {
+    fn only_exact_known_ids_are_accepted() {
         for (id, limit) in KNOWN_LIMITS {
             assert_eq!(default_limit(id), *limit);
-            assert_eq!(default_limit(&format!("{id}-20260101")), *limit);
+            assert_eq!(default_limit(&format!("{id}-20260101")), LEGACY_DEFAULT);
             for suffix in [
                 "-latest",
                 "-preview",
