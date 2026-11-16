@@ -312,17 +312,8 @@ pub(crate) fn probe_owned(
 /// The first executable `bwrap` on `PATH`, else the pinned Nix store path.
 /// Nothing is spawned: a lookup helper would be an unregistered child.
 pub(crate) fn locate_bwrap() -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let on_path = std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|directory| directory.join("bwrap"))
-            .find(|candidate| {
-                candidate
-                    .metadata()
-                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-            })
-    });
+    let on_path = std::env::var_os("PATH")
+        .and_then(|path| locate_bwrap_on_path(&path, &std::env::current_dir().ok()?));
     if on_path.is_some() {
         return on_path;
     }
@@ -331,10 +322,44 @@ pub(crate) fn locate_bwrap() -> Option<PathBuf> {
     fallback.exists().then_some(fallback)
 }
 
+// Freeze relative/empty PATH entries against the lookup cwd, not a later tool's cwd.
+fn locate_bwrap_on_path(path: &std::ffi::OsStr, cwd: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path).find_map(|directory| {
+        let candidate = cwd.join(directory).join("bwrap");
+        let meta = candidate.metadata().ok()?;
+        (meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .then(|| candidate.canonicalize().ok())
+            .flatten()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::boundary::{DEFAULT_RO_BINDS, LivePaths, PathAccess};
+
+    #[test]
+    fn relative_and_empty_path_entries_are_frozen_to_absolute_executables() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let bin = cwd.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let executable = bin.join("bwrap");
+        std::fs::write(&executable, "fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            locate_bwrap_on_path(std::ffi::OsStr::new("missing:bin"), &cwd),
+            Some(executable.clone())
+        );
+        assert_eq!(
+            locate_bwrap_on_path(std::ffi::OsStr::new(""), &bin),
+            Some(executable.clone())
+        );
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(locate_bwrap_on_path(std::ffi::OsStr::new("bin"), &cwd).is_none());
+    }
 
     pub(super) fn sandbox(config: BwrapConfig) -> BwrapSandbox {
         let owned = Arc::new(crate::scratch::Scratch::new().unwrap());

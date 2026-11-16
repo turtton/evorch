@@ -381,14 +381,48 @@ impl Database {
         &self,
         states: &[LearningJobState],
     ) -> Result<Vec<LearningJob>, StorageError> {
+        self.read_learning_jobs(states, false)
+    }
+
+    /// Component-isolated scan for cold cleanup. Bad rows retain their original
+    /// state/evidence and emit a diagnostic; database failures remain fatal.
+    pub fn learning_jobs_isolated(
+        &self,
+        states: &[LearningJobState],
+    ) -> Result<Vec<LearningJob>, StorageError> {
+        self.read_learning_jobs(states, true)
+    }
+
+    fn read_learning_jobs(
+        &self,
+        states: &[LearningJobState],
+        isolate: bool,
+    ) -> Result<Vec<LearningJob>, StorageError> {
+        if states.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; states.len()].join(",");
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {JOB_COLUMNS} FROM learning_jobs ORDER BY admitted_at_ns, task_id"
+            "SELECT {JOB_COLUMNS} FROM learning_jobs WHERE state IN ({placeholders})
+             ORDER BY admitted_at_ns, task_id"
+        ))?;
+        let mut rows = statement.query(rusqlite::params_from_iter(
+            states.iter().map(|s| s.as_str()),
         ))?;
         let mut jobs = Vec::new();
-        for row in statement.query_map([], job_row)? {
-            let job = row??;
-            if states.contains(&job.state) {
-                jobs.push(job);
+        // Advancing SQLite is a database operation, separate from decoding one
+        // row. Never turn an I/O failure partway through a scan into partial success.
+        while let Some(row) = rows.next()? {
+            match job_row(row).map_err(StorageError::from).and_then(|job| job) {
+                Ok(job) => jobs.push(job),
+                Err(e) if isolate && e.is_data_decode_error() => {
+                    // No payload or raw decode error: it can contain stored data.
+                    tracing::warn!(
+                        task_id = ?row.get::<_, String>(0).ok(),
+                        "corrupt learning job isolated"
+                    );
+                }
+                Err(e) => return Err(e),
             }
         }
         Ok(jobs)

@@ -8,7 +8,10 @@ use std::{future::Future, path::Path, sync::Arc};
 
 type Refresh = tokio::task::JoinHandle<Result<catalog::ModelCatalog, catalog::CatalogError>>;
 
-pub(super) async fn mcp(directory: &Path) -> Result<McpHostServices, BootstrapError> {
+pub(super) async fn mcp(
+    directory: &Path,
+    ledger: sandbox::SpawnLedger,
+) -> Result<McpHostServices, BootstrapError> {
     // MCP deliberately retains its keychain-only contract; provider file fallback
     // is not permission to persist MCP secrets in plaintext.
     let backend = tokio::task::spawn_blocking(|| match sandbox::credential::open_keychain_only() {
@@ -22,9 +25,10 @@ pub(super) async fn mcp(directory: &Path) -> Result<McpHostServices, BootstrapEr
         Err(_) => McpCredentialBackend::Unavailable(SecretUnavailableReason::Unavailable),
     })
     .await?;
-    Ok(McpHostServices::at_config_dir(
+    Ok(McpHostServices::at_config_dir_owned(
         backend,
         directory.to_path_buf(),
+        ledger,
     ))
 }
 

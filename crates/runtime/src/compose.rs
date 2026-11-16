@@ -41,6 +41,17 @@ impl WorkspaceSeam {
         Self::with_factory(project_root, Arc::new(crate::network::BwrapFactory))
     }
 
+    /// Core composition: register every per-run sandbox probe in its central ledger.
+    pub fn production_owned(
+        project_root: PathBuf,
+        ledger: sandbox::SpawnLedger,
+    ) -> Result<Self, RuntimeError> {
+        Self::with_factory(
+            project_root,
+            Arc::new(crate::network::OwnedBwrapFactory(ledger)),
+        )
+    }
+
     /// sandbox factory を明示した workspace seam を生成する。
     ///
     /// bwrap 実行環境を持たない CI でも run ごとの sandbox の結線を検証できるように

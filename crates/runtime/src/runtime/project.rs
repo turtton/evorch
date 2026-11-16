@@ -203,6 +203,11 @@ impl AgentRuntime {
         self
     }
 
+    /// Resource owner for host-side git/slug reads. Never creates a second ledger.
+    pub fn spawn_ledger(&self) -> Option<sandbox::SpawnLedger> {
+        self.shared.spawn_ledger.get().cloned()
+    }
+
     /// The name a run in `root` files its learned memory under, so the host
     /// reads lessons back from the same partition; `None` without a resolver.
     pub fn project_slug(&self, root: &std::path::Path) -> Option<String> {

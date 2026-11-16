@@ -62,6 +62,22 @@ fn detect(boundary: SandboxBoundary) -> Result<Arc<dyn Sandbox>, SandboxError> {
 
 pub(crate) struct BwrapFactory;
 
+/// Per-run probes belong to the same core as the tools they prepare.
+pub(crate) struct OwnedBwrapFactory(pub sandbox::SpawnLedger);
+impl SandboxFactory for OwnedBwrapFactory {
+    fn build(
+        &self,
+        _: &ExecutionPolicy,
+        mounts: &WorkspaceMounts,
+    ) -> Result<Arc<dyn Sandbox>, SandboxError> {
+        BwrapSandbox::detect_owned(
+            BwrapConfig::from_boundary(sandbox_boundary(mounts)?),
+            &self.0,
+        )
+        .map(|sandbox| Arc::new(sandbox) as Arc<dyn Sandbox>)
+    }
+}
+
 impl SandboxFactory for BwrapFactory {
     fn build(
         &self,

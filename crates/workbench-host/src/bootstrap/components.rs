@@ -35,6 +35,42 @@ impl ExecutionComponents {
         })
     }
 
+    /// Ordinary core startup owns the initial probe as well as all later tool children.
+    pub fn production_owned(
+        bus: Arc<EventBus>,
+        root: PathBuf,
+        config: &config::Config,
+        host_tools: Vec<Arc<dyn tools::Tool>>,
+        ledger: sandbox::SpawnLedger,
+    ) -> Result<Self, runtime::RuntimeError> {
+        let workspace = WorkspaceSeam::production_owned(root, ledger.clone())?;
+        let sandbox_error = |e: sandbox::SandboxError| runtime::RuntimeError::Sandbox {
+            detail: e.to_string(),
+        };
+        let boundary =
+            runtime::network::sandbox_boundary_for_startup(workspace.project_root().to_path_buf())
+                .map_err(sandbox_error)?;
+        let sandbox = Arc::new(
+            sandbox::BwrapSandbox::detect_owned(
+                sandbox::BwrapConfig::from_boundary(boundary),
+                &ledger,
+            )
+            .map_err(sandbox_error)?,
+        );
+        let executor = runtime::production_executor_with_prepared_sandbox_and_ledger(
+            bus,
+            workspace.project_root().to_path_buf(),
+            config,
+            host_tools,
+            sandbox,
+            Some(ledger),
+        )?;
+        Ok(Self {
+            executor,
+            workspace,
+        })
+    }
+
     /// No child is spawned while constructing a planned successor executor.
     pub fn planned(
         bus: Arc<EventBus>,
@@ -43,13 +79,15 @@ impl ExecutionComponents {
         host_tools: Vec<Arc<dyn tools::Tool>>,
         sandbox: Arc<sandbox::bwrap::PlannedBwrap>,
     ) -> Result<Self, runtime::RuntimeError> {
-        let workspace = WorkspaceSeam::production(root)?;
-        let executor = runtime::production_executor_with_prepared_sandbox(
+        let ledger = sandbox.ledger().clone();
+        let workspace = WorkspaceSeam::production_owned(root, ledger.clone())?;
+        let executor = runtime::production_executor_with_prepared_sandbox_and_ledger(
             bus,
             workspace.project_root().to_path_buf(),
             config,
             host_tools,
             sandbox,
+            Some(ledger),
         )?;
         Ok(Self {
             executor,

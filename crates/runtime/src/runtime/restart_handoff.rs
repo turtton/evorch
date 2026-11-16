@@ -314,61 +314,122 @@ impl AgentRuntime {
         if self.has_planned_restart_handoff() {
             return Err(error("planned successor is not cold"));
         }
-        let queue = self
-            .learning_job_queue()
-            .ok_or_else(|| error("no learning queue"))?;
         let store = self
             .shared
             .run_store
             .get()
             .ok_or_else(|| error("no run store"))?;
+        // Cleanup must also work after the quick learning profile is removed.
+        let queue = self.learning_job_queue().unwrap_or_else(|| {
+            crate::learning_jobs::LearningJobQueue::new(
+                store.handle.clone(),
+                storage::StorageConfig {
+                    db_path: store.db_path.clone(),
+                    ..Default::default()
+                },
+                self.learning_origin(),
+            )
+        });
+        if queue.origin().kind != storage::learning_jobs::LearningOriginKind::Core
+            || queue.origin().config_identity.is_none()
+        {
+            return Err(error("cold learning requires an identified core origin"));
+        }
         // A graph may already be Completed when a crash precedes learning requeue.
         // Its pending learning membership still has no authority on a cold boot.
-        for tx in store
-            .with_database(|db| db.restart_transactions())
+        for id in store
+            .with_database(|db| db.restart_learning_candidates())
             .map_err(error)?
         {
-            let inventory = store
-                .with_database(|db| db.restart_saved_learning_inventory(&tx.metadata.restart_id))
-                .map_err(error)?;
-            if let Some(inventory) = inventory
-                && inventory.origin.kind == storage::learning_jobs::LearningOriginKind::Core
+            let cohort = store.with_database(|db| {
+                Ok((
+                    db.restart_transaction(&id)?,
+                    db.restart_saved_learning_inventory(&id)?,
+                    db.restart_learning_members(&id)?,
+                ))
+            });
+            let (Some(tx), Some(inventory), members) = (match cohort {
+                Ok(cohort) => cohort,
+                Err(e) if e.is_data_decode_error() => {
+                    tracing::warn!(restart_id = %id, "corrupt cold learning cohort isolated");
+                    continue;
+                }
+                Err(e) => return Err(error(e)),
+            }) else {
+                continue;
+            };
+            if !matches!(
+                tx.phase,
+                RestartPhase::Invalidated
+                    | RestartPhase::Aborted
+                    | RestartPhase::Superseded
+                    | RestartPhase::Completed
+            ) {
+                return Err(error("cold learning requires graph quarantine first"));
+            }
+            if tx.metadata.config_identity
+                != inventory.origin.config_identity.as_deref().unwrap_or("")
+                || members
+                    .iter()
+                    .filter(|m| m.disposition == "pending")
+                    .any(|m| !inventory.members.contains(&m.member))
+            {
+                tracing::warn!(restart_id = %id, "cold learning origin mismatch isolated");
+                continue;
+            }
+            if inventory.origin.kind == storage::learning_jobs::LearningOriginKind::Core
                 && inventory.origin.config_identity == queue.origin().config_identity
                 && inventory.origin.instance != queue.origin().instance
                 && probe.liveness(&inventory.origin) == crate::learning_jobs::OriginLiveness::Dead
             {
-                store
-                    .handle
-                    .mutate_restart(
-                        tx.metadata.restart_id,
-                        Some(tx.revision),
-                        RestartMutation::QuarantineLearningCold,
-                    )
-                    .map_err(error)?;
+                match store.handle.mutate_restart(
+                    tx.metadata.restart_id,
+                    Some(tx.revision),
+                    RestartMutation::QuarantineLearningCold,
+                ) {
+                    Ok(_) => {}
+                    Err(e) if e.is_data_decode_error() => {
+                        tracing::warn!(restart_id = %id, "corrupt cold learning member isolated")
+                    }
+                    Err(e) => return Err(error(e)),
+                }
             }
         }
+        let bound = store
+            .with_database(|db| db.pending_restart_learning_task_ids())
+            .map_err(error)?;
         for job in store
             .with_database(|db| {
-                db.learning_jobs(&[storage::learning_jobs::LearningJobState::Interrupted])
+                db.learning_jobs_isolated(&[storage::learning_jobs::LearningJobState::Interrupted])
             })
             .map_err(error)?
         {
-            if job.origin.kind == storage::learning_jobs::LearningOriginKind::Core
+            if !bound.contains(&job.task_id)
+                && job.origin.kind == storage::learning_jobs::LearningOriginKind::Core
                 && job.origin.config_identity == queue.origin().config_identity
                 && job.origin.instance != queue.origin().instance
                 && probe.liveness(&job.origin) == crate::learning_jobs::OriginLiveness::Dead
             {
-                queue
-                    .change(
-                        &job.key(),
-                        storage::learning_jobs::LearningAttemptChange::Abandon(
-                            storage::learning_jobs::LearningEndReason::NoResumeAuthority,
-                        ),
-                    )
-                    .map_err(error)?;
+                match queue.change(
+                    &job.key(),
+                    storage::learning_jobs::LearningAttemptChange::Abandon(
+                        storage::learning_jobs::LearningEndReason::NoResumeAuthority,
+                    ),
+                ) {
+                    Ok(_) => {}
+                    Err(e) if e.is_data_decode_error() => {
+                        tracing::warn!(task_id = %job.task_id, "corrupt cold learning job isolated");
+                    }
+                    Err(e) => return Err(error(e)),
+                }
             }
         }
         Ok(())
+    }
+    /// Cold startup only; graph quarantine must have run first. This never dispatches.
+    pub fn quarantine_cold_learning_from_proc(&self) -> Result<(), RuntimeError> {
+        let probe = crate::learning_jobs::ProcOriginProbe::new(&self.learning_origin());
+        self.quarantine_cold_learning(&probe)
     }
     /// Predecessor-only: fix the exact effective schemas and non-tool authority after
     /// expected capture has been persisted, before committing/arming the restart.

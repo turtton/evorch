@@ -32,7 +32,11 @@ pub fn configure(
     writer: storage::StorageHandle,
     root: &Path,
 ) -> AgentRuntime {
-    let runtime = runtime.with_project_slugs(Arc::new(runtime::repository::derive_repo_slug));
+    let ledger = runtime.spawn_ledger();
+    let slugs = ledger.clone();
+    let runtime = runtime.with_project_slugs(Arc::new(move |root| {
+        runtime::repository::derive_repo_slug_owned(root, slugs.clone())
+    }));
     let quick = config
         .agents
         .binding_for("worker", Some("quick"))
@@ -50,7 +54,7 @@ pub fn configure(
         Some(quick) => runtime.with_learning(runtime::memory_queue::LearningSettings {
             writer: writer.clone(),
             storage: storage.clone(),
-            project: runtime::repository::derive_repo_slug(root),
+            project: runtime::repository::derive_repo_slug_owned(root, ledger.clone()),
             quick,
         }),
         None => runtime,
@@ -58,7 +62,7 @@ pub fn configure(
     if config.self_improvement.enabled {
         runtime.with_self_improvement(runtime::self_improvement::ImprovementSettings {
             writer,
-            project: runtime::repository::derive_repo_slug(root),
+            project: runtime::repository::derive_repo_slug_owned(root, ledger.clone()),
             policy: runtime::self_improvement::ImprovementPolicy::from_config(
                 &config.self_improvement,
                 storage.db_path.parent().unwrap_or(Path::new("")),
