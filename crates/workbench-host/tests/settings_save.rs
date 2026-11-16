@@ -45,6 +45,8 @@ struct Reload {
     calls: AtomicUsize,
     /// The next hooks fail, after composing part of the models.
     fail: std::sync::atomic::AtomicBool,
+    /// What the failing hook says; a default sentence when empty.
+    reason: Mutex<String>,
     entered: tokio::sync::Notify,
     /// The configuration the hook composed from: the file as the hook reads it
     /// when it gets going again after being held.
@@ -77,7 +79,12 @@ impl Fixture {
                 .unwrap()
                 .push(std::fs::read_to_string(&config_path).unwrap());
             if hook.fail.load(Ordering::SeqCst) {
-                return Err("a project did not load".into());
+                let reason = hook.reason.lock().unwrap().clone();
+                return Err(if reason.is_empty() {
+                    "a project did not load".into()
+                } else {
+                    reason
+                });
             }
             Ok(())
         });
@@ -474,6 +481,32 @@ async fn a_failed_reload_leaves_the_applied_state_unknown_until_one_succeeds() {
     assert_eq!(snapshot.applied_revision.as_ref(), Some(&first));
     assert_eq!(snapshot.apply_failure, None);
     assert!(!snapshot.pending_apply());
+}
+
+/// What a failed hook says is bounded and secret-free before any client reads
+/// it: a key-looking token is redacted, control characters become spaces and the
+/// text is cut at the limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_reason_a_reload_failed_is_redacted_and_bounded() {
+    let mut f = Fixture::new("version = 3\n");
+    let leaked = format!("sk-{}", "a".repeat(30));
+    *f.reload.reason.lock().unwrap() = format!(
+        "rejected {leaked}\nnext\tline {}",
+        "x".repeat(MAX_MESSAGE_BYTES * 2)
+    );
+    f.reload.fail.store(true, Ordering::SeqCst);
+    f.finish(
+        "reload-1",
+        SettingsCommand::ReloadModels(ReloadModels {
+            operation_id: op("reload-1"),
+        }),
+    )
+    .await;
+    let reason = f.snapshot().apply_failure.expect("a reason is kept");
+    assert!(!reason.contains(&leaked), "{reason}");
+    assert!(reason.contains("rejected "), "{reason}");
+    assert!(reason.len() <= MAX_MESSAGE_BYTES, "{}", reason.len());
+    assert!(!reason.contains(['\n', '\t']), "{reason:?}");
 }
 
 /// The newest snapshot announcement once `completed` operations have ended.

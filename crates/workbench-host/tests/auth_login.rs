@@ -852,8 +852,9 @@ async fn a_login_for_a_profile_without_a_login_fails_as_an_operation() {
 }
 
 /// Cursor also signs in with a dashboard API key: the core hands the key to the
-/// provider's own exchange and stores the result as a login is stored; the key
-/// itself is neither stored nor shown anywhere.
+/// provider's own exchange and stores the result as a login is stored (the real
+/// bundle keeps the key to renew the access token); the typed key is not shown in
+/// any result a client reads.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cursor_api_key_is_exchanged_and_stored_as_a_login() {
     let mut f = Fixture::new();

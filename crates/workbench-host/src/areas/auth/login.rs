@@ -117,7 +117,8 @@ pub trait LoginStarter: Send + Sync {
 
     /// Sign in with an API key the person typed instead of a browser login
     /// (Cursor). The key is exchanged with the provider and the result stored
-    /// under `account`; the key itself is never stored or repeated. Returns when
+    /// under `account`; the key is kept only inside the stored login (the provider re-exchanges it to
+    /// renew the access token) and is never returned to a client. Returns when
     /// the credentials expire, when the provider says so.
     ///
     /// # Errors

@@ -561,3 +561,37 @@ fn a_close_preview_is_bounded_like_every_other_reply() {
         .is_err()
     );
 }
+
+/// A reload that failed part-way leaves the applied state unknown. That is a
+/// value of its own on the wire (the field is absent, never a revision that
+/// merely looks old), and it survives a round trip with its reason.
+#[test]
+fn an_unknown_applied_state_is_absent_on_the_wire_and_round_trips() {
+    use workbench_protocol::events::UiEvent;
+    use workbench_protocol::namespaces::settings::{SettingsEvent, SettingsSnapshot};
+
+    let mut unknown = common::areas::settings::snapshot();
+    unknown.applied_revision = None;
+    unknown.apply_failure = Some("a project did not load".into());
+    let value = serde_json::to_value(&unknown).unwrap();
+    assert!(value.get("applied_revision").is_none(), "{value}");
+    assert_eq!(value["apply_failure"], "a project did not load");
+    assert_eq!(
+        serde_json::from_value::<SettingsSnapshot>(value).unwrap(),
+        unknown
+    );
+    assert!(unknown.pending_apply());
+
+    // A known state carries no failure and says what is applied.
+    let known = common::areas::settings::snapshot();
+    let value = serde_json::to_value(&known).unwrap();
+    assert!(value.get("apply_failure").is_none(), "{value}");
+    assert!(value.get("applied_revision").is_some());
+
+    let event = UiEvent::Settings(SettingsEvent::SettingsSnapshotChanged {
+        revision: unknown.revision.clone(),
+        applied_revision: None,
+    });
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(serde_json::from_value::<UiEvent>(value).unwrap(), event);
+}
