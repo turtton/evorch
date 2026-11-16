@@ -438,3 +438,98 @@ async fn ordinary_parent_send_interrupts_worker_wait_in_every_form() {
         fixture.runtime.wait(parent).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn twelve_distinct_messages_keep_identical_worker_waits_advancing() {
+    let mut script = (0..12)
+        .map(|n| Ok(tool_response(&format!("receive-{n}"), "wait", json!({}))))
+        .collect::<Vec<_>>();
+    script.push(Ok(text_response(
+        "twelve messages received",
+        FinishReason::Stop,
+    )));
+    let (fixture, gate, parent, child) = waiting_child(script).await;
+    for n in 0..12 {
+        let id = fixture
+            .runtime
+            .send_agent_message(
+                parent,
+                child,
+                AgentMessageKind::Send,
+                format!("event-{n}"),
+                None,
+            )
+            .unwrap();
+        let next = fixture.model.wait_for_request(3 + n).await;
+        let result = tool_json(&next, &format!("receive-{n}"));
+        assert_eq!(result["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(result["messages"][0]["message_id"], id);
+        assert_eq!(result["messages"][0]["content"], format!("event-{n}"));
+        gate.notify_one();
+        if n < 11 {
+            until_waiting(&fixture, child).await;
+        }
+    }
+    assert_eq!(
+        fixture.runtime.wait(child).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    assert!(fixture.runtime.take_inbox(child).unwrap().is_empty());
+    fixture.runtime.cancel(parent).unwrap();
+    fixture.runtime.wait(parent).await.unwrap();
+}
+
+#[tokio::test]
+async fn repeated_no_source_waits_still_reach_the_identical_call_guard() {
+    let script = (0..12)
+        .map(|n| Ok(tool_response(&format!("empty-{n}"), "wait", json!({}))))
+        .collect::<Vec<_>>();
+    let model = Arc::new(ScriptedModel::new(script));
+    let fixture = fixture(model);
+    let root = fixture.runtime.delegate_background(
+        Role::Orchestrator,
+        "root with no sources".into(),
+        RunConfig::default(),
+    );
+    assert_eq!(
+        fixture.runtime.wait(root).await.unwrap(),
+        AgentRunPhase::Error
+    );
+    let requests = fixture.model.observed().await;
+    assert_eq!(
+        requests.len(),
+        10,
+        "default guard limit is ten identical stalled calls"
+    );
+    for n in 0..9 {
+        let result = tool_json(&requests[n + 1], &format!("empty-{n}"));
+        assert_eq!(result["status"], "no_wait_sources");
+        assert_eq!(result["events"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn subtree_stop_cancels_the_worker_wait_instead_of_presenting_parent_termination() {
+    for input in [
+        json!({}),
+        json!({"run_id":"run-1"}),
+        json!({"run_ids":["run-1"],"mode":"all"}),
+    ] {
+        let (fixture, _gate, parent, child) =
+            waiting_child(vec![Ok(tool_response("receive", "wait", input))]).await;
+        fixture
+            .runtime
+            .stop(parent, runtime::StopScope::Subtree)
+            .unwrap();
+        assert_eq!(
+            fixture.runtime.wait(child).await.unwrap(),
+            AgentRunPhase::Stopped
+        );
+        fixture.runtime.wait(parent).await.unwrap();
+        assert_eq!(
+            fixture.model.observed().await.len(),
+            3,
+            "cancellation must not resume the provider with a parent event"
+        );
+    }
+}

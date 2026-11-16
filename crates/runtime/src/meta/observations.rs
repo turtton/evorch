@@ -20,6 +20,9 @@ impl Observations {
         let Some(runtime) = state.runtime() else {
             return;
         };
+        state
+            .reported_questions
+            .extend(self.questions.iter().cloned());
         runtime.observe_questions(self.questions);
         for notice in self.completions {
             runtime.observe_completion(&notice);

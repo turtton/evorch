@@ -256,6 +256,7 @@ async fn wait_with(
         }
         if state.has_pending_user_messages() {
             result["user_input_ready"] = Value::Bool(true);
+            result["status"] = json!("ready");
         }
         // Consume only the IDs in the returned snapshot, before draining the
         // mailbox so attention and a queued notice cannot report the same ID.
@@ -346,9 +347,6 @@ fn record_observations(
         .question_ids
         .iter()
         .any(|id| !request.reported.contains(id));
-    state
-        .reported_questions
-        .extend(result.question_ids.iter().cloned());
     let received = result["messages"].as_array().is_some_and(|m| !m.is_empty())
         || result["inbox_ready"] == true
         || result["user_input_ready"] == true
@@ -365,8 +363,11 @@ fn user_input_response(
     caller: RunId,
     request: &WaitRequest,
 ) -> Result<WaitResult, String> {
-    let (_, mut result) = events::poll(runtime, caller, request)?;
+    let (_, mut result) = events::poll_with(runtime, caller, request, true)?;
     result["user_input_ready"] = Value::Bool(true);
+    result["status"] = json!("ready");
+    result.value.as_object_mut().unwrap().remove("reasons");
+    result.value.as_object_mut().unwrap().remove("note");
     result["events"]
         .as_array_mut()
         .unwrap()
@@ -421,7 +422,7 @@ async fn observe(
             biased;
             changed = cancel.changed() => { if changed.is_err() { return Err("wait cancelled".into()); } }
             () = &mut deadline => {
-                let (_, mut result) = events::poll(runtime, caller, request)?;
+                let (_, mut result) = events::poll_with(runtime, caller, request, true)?;
                 result["timed_out"] = Value::Bool(true);
                 return Ok(result);
             }
@@ -518,11 +519,19 @@ fn response(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    // Count the wait's storage-enrichment boundary, including the exact run IDs.
+    static SNAPSHOT_READS: std::cell::RefCell<Vec<RunId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Snapshots, String> {
     let mut notices = Vec::new();
     let mut ready_turns = HashSet::new();
     let values = runs.iter()
         .map(|run| {
+            #[cfg(test)]
+            SNAPSHOT_READS.with_borrow_mut(|reads| reads.push(*run));
             let output = runtime.run_output(caller, *run).map_err(|error| {
                 json!({
                     "code": if matches!(error, crate::RuntimeError::UnknownRun { .. }) { "unknown_run" } else { "wait_denied" },

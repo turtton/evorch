@@ -986,7 +986,19 @@ async fn recording_a_wait_snapshot_does_not_consume_a_later_saved_question() {
         .request_user_question(child, "After the snapshot".into(), vec![], false)
         .unwrap();
     assert!(record_observations(&mut state, &runtime, &request, &result));
-    runtime.observe_questions(result.question_ids);
+    assert!(
+        !state.reported_questions.contains(&first.id),
+        "building a result is not presentation"
+    );
+    state.context.push_tool_result(
+        "snapshot",
+        tools::ToolResult::success(result.value.to_string()),
+    );
+    Observations {
+        questions: vec![first.id.clone()],
+        ..Default::default()
+    }
+    .presented(&mut state);
     assert!(state.reported_questions.contains(&first.id));
     assert!(!state.reported_questions.contains(&later.id));
     assert!(runtime.question_reported(&first.id));
@@ -994,5 +1006,518 @@ async fn recording_a_wait_snapshot_does_not_consume_a_later_saved_question() {
     let messages = runtime.take_inbox(parent).unwrap();
     assert_eq!(messages.len(), 1);
     assert!(messages[0].content.contains(&later.id));
+    cleanup(&runtime).await;
+}
+
+// Event-driven semantic regressions. poll! checks a concrete predicate/future,
+// never elapsed time or absence of an event over a timeout.
+fn own_request(input: Value) -> WaitRequest {
+    parse::<WaitArgs>(input).unwrap().validate().unwrap()
+}
+
+fn snapshot_reads() -> Vec<RunId> {
+    SNAPSHOT_READS.with_borrow_mut(std::mem::take)
+}
+
+#[tokio::test]
+async fn partial_all_and_unrelated_wakes_do_not_enrich_any_run_from_storage() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("query-count.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let (runtime, model) = fixture(None);
+    let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let (parent, first, second) = spawn(&runtime);
+    model.first.notify_one();
+    runtime.wait(first).await.unwrap();
+    let request =
+        own_request(json!({"run_ids":[first.to_string(), second.to_string()],"mode":"all"}));
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let waiting = observe(&runtime, parent, &request, receiver);
+    tokio::pin!(waiting);
+    snapshot_reads();
+    assert!(poll!(&mut waiting).is_pending());
+    for _ in 0..12 {
+        runtime
+            .shared
+            .turn_version
+            .send_modify(|version| *version += 1);
+        runtime
+            .shared
+            .question_version
+            .send_modify(|version| *version += 1);
+        assert!(poll!(&mut waiting).is_pending());
+    }
+    assert_eq!(
+        snapshot_reads(),
+        [],
+        "partial all is a memory-only predicate"
+    );
+    model.second.notify_one();
+    runtime.wait(second).await.unwrap();
+    let result = waiting.await.unwrap();
+    assert_eq!(snapshot_reads(), [first, second]);
+    assert_eq!(
+        result["completed_run_ids"],
+        json!([first.to_string(), second.to_string()])
+    );
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn implicit_discovery_pages_all_unread_children_without_acknowledging_peeks() {
+    let (runtime, _) = fixture(None);
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let mut children = Vec::new();
+    for _ in 0..11 {
+        let child = runtime
+            .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+            .unwrap();
+        runtime.cancel(child).unwrap();
+        runtime.wait(child).await.unwrap();
+        children.push(child);
+    }
+    assert_eq!(runtime.wait_runs(parent, &[]).unwrap().len(), 11);
+    let request = own_request(json!({}));
+    snapshot_reads();
+    let (ready, first) = events::poll(&runtime, parent, &request).unwrap();
+    assert!(ready);
+    assert_eq!(first["runs"].as_array().unwrap().len(), 8);
+    assert_eq!(snapshot_reads().len(), 8);
+    assert!(first.notices.iter().all(|notice| !notice.observed()));
+    let (_, peek) = events::poll(&runtime, parent, &request).unwrap();
+    assert_eq!(
+        peek["completed_run_ids"], first["completed_run_ids"],
+        "unpresented page is retained"
+    );
+    for notice in &first.notices {
+        runtime.observe_completion(notice);
+    }
+    assert_eq!(runtime.wait_runs(parent, &[]).unwrap().len(), 3);
+    let (_, second) = events::poll(&runtime, parent, &request).unwrap();
+    assert_eq!(second["runs"].as_array().unwrap().len(), 3);
+    let ids: HashSet<_> = first["completed_run_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["completed_run_ids"].as_array().unwrap())
+        .cloned()
+        .collect();
+    assert_eq!(ids.len(), children.len());
+    for notice in &second.notices {
+        runtime.observe_completion(notice);
+    }
+    assert!(runtime.wait_runs(parent, &[]).unwrap().is_empty());
+    snapshot_reads();
+    let (ready, empty) = events::poll(&runtime, parent, &request).unwrap();
+    assert!(ready);
+    assert_eq!(empty["status"], "no_wait_sources");
+    assert_eq!(snapshot_reads(), []);
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn unread_message_precedes_no_sources_and_is_consumed_only_after_presentation() {
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) =
+        crate::agent_loop::delegate_cleanup_tests::started_fixture(receiver).await;
+    let parent = state.caller_run_id();
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+        .unwrap();
+    let id = runtime
+        .send_agent_message(child, parent, AgentMessageKind::Send, "last message", None)
+        .unwrap();
+    runtime.cancel(child).unwrap();
+    runtime.wait(child).await.unwrap();
+    let notice = runtime
+        .run_output(parent, child)
+        .unwrap()
+        .completion_notice
+        .unwrap();
+    runtime.observe_completion(&notice);
+    state.transition(AgentRunPhase::Running, None).unwrap();
+    let dispatch = wait(&mut state, &runtime, json!({})).await;
+    assert!(!dispatch.result.is_error);
+    assert_eq!(dispatch.result.progress, Some(tools::Progress::Advanced));
+    let value: Value = serde_json::from_str(&dispatch.result.content).unwrap();
+    assert_eq!(value["status"], "ready");
+    assert_eq!(value["messages"][0]["message_id"], id);
+    assert!(
+        runtime
+            .run_mailbox(parent)
+            .unwrap()
+            .has_interrupting_message()
+    );
+    // A dropped/cancelled result is not presented and cannot consume the ID.
+    drop(dispatch);
+    let dispatch = wait(&mut state, &runtime, json!({})).await;
+    state.context.push_tool_result("receive", dispatch.result);
+    dispatch.observations.presented(&mut state);
+    assert!(
+        !runtime
+            .run_mailbox(parent)
+            .unwrap()
+            .has_interrupting_message()
+    );
+    for _ in 0..2 {
+        let dispatch = wait(&mut state, &runtime, json!({})).await;
+        assert!(!dispatch.result.is_error);
+        assert_eq!(dispatch.result.progress, Some(tools::Progress::Stalled));
+        let value: Value = serde_json::from_str(&dispatch.result.content).unwrap();
+        assert_eq!(value["status"], "no_wait_sources");
+        assert_eq!(value["reasons"].as_array().unwrap().len(), 5);
+        assert_eq!(value["runs"], json!([]));
+        assert_eq!(value["messages"], json!([]));
+    }
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn parent_terminal_interrupts_every_form_without_output_or_repeat_edges() {
+    for end in ["first", "failure", "stop"] {
+        for form in 0..4 {
+            let (runtime, model) = fixture(None);
+            let parent =
+                runtime.delegate_background(Role::Orchestrator, end.into(), RunConfig::default());
+            let caller = runtime
+                .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+                .unwrap();
+            let child = runtime
+                .delegate_background_as_child(caller, Role::Worker, "blocked", RunConfig::default())
+                .unwrap();
+            let input = match form {
+                0 => json!({}),
+                1 => json!({"run_id":parent.to_string()}),
+                2 => json!({"run_ids":[child.to_string()],"mode":"any"}),
+                _ => json!({"run_ids":[parent.to_string(), child.to_string()],"mode":"all"}),
+            };
+            let mut request = own_request(input);
+            let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+            let result = {
+                let waiting = observe(&runtime, caller, &request, receiver);
+                tokio::pin!(waiting);
+                assert!(poll!(&mut waiting).is_pending());
+                if end == "stop" {
+                    runtime.stop(parent, crate::StopScope::SelfOnly).unwrap();
+                } else {
+                    model.first.notify_one();
+                }
+                runtime.wait(parent).await.unwrap();
+                snapshot_reads();
+                waiting.await.unwrap()
+            };
+            assert_eq!(
+                snapshot_reads(),
+                [],
+                "parent projection must never load its storage/output"
+            );
+            assert_eq!(result["events"][0]["kind"], "parent_terminated");
+            assert_eq!(result["runs"].as_array().unwrap().len(), 1);
+            assert_eq!(result["runs"][0]["run_id"], parent.to_string());
+            assert!(result["runs"][0].get("output").is_none());
+            assert_eq!(result["attention_question_ids"], json!([]));
+            assert!(runtime.list_agents().iter().any(|run| run.run_id == caller
+                && !matches!(
+                    run.phase,
+                    AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+                )));
+            let key = result["events"][0]["identity"].as_str().unwrap().to_owned();
+            request.observed.insert(key);
+            let (ready, next) = events::poll(&runtime, caller, &request).unwrap();
+            if form == 1 {
+                assert!(ready);
+                assert_eq!(next["runs"][0]["phase"], result["runs"][0]["phase"]);
+                assert_eq!(next["events"], json!([]));
+            } else {
+                assert!(!ready, "an observed parent edge must not interrupt again");
+            }
+            cleanup(&runtime).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn parent_idle_and_questions_are_neither_readiness_nor_observations() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("parent.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let (runtime, model) = fixture(None);
+    let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let parent = runtime.delegate_background(
+        Role::Orchestrator,
+        "first".into(),
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+        .unwrap();
+    let question = runtime
+        .request_user_question(parent, "private parent question".into(), vec![], false)
+        .unwrap();
+    idle_turn(&runtime, &model, parent, true).await;
+    for input in [
+        json!({}),
+        json!({"run_id":parent.to_string()}),
+        json!({"run_ids":[parent.to_string()], "mode":"all"}),
+    ] {
+        let request = own_request(input);
+        snapshot_reads();
+        let (ready, result) = events::poll(&runtime, child, &request).unwrap();
+        assert!(!ready);
+        assert_eq!(snapshot_reads(), []);
+        assert_eq!(result["runs"], json!([]));
+        assert!(!runtime.question_reported(&question.id));
+        assert!(
+            runtime
+                .user_question(&question.id)
+                .unwrap()
+                .unwrap()
+                .answer
+                .is_none()
+        );
+    }
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn legacy_phase_only_keeps_unpresented_completion_unread() {
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) =
+        crate::agent_loop::delegate_cleanup_tests::started_fixture(receiver).await;
+    let parent = state.caller_run_id();
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+        .unwrap();
+    runtime.cancel(child).unwrap();
+    runtime.wait(child).await.unwrap();
+    let notice = runtime
+        .run_output(parent, child)
+        .unwrap()
+        .completion_notice
+        .unwrap();
+    state.transition(AgentRunPhase::Running, None).unwrap();
+    let dispatch = wait(&mut state, &runtime, json!({"run_id":child.to_string()})).await;
+    assert_eq!(dispatch.result.content, "Error");
+    assert!(dispatch.observations.completions.is_empty());
+    state.context.push_tool_result("legacy", dispatch.result);
+    dispatch.observations.presented(&mut state);
+    assert!(!notice.observed());
+    let dispatch = wait(&mut state, &runtime, json!({})).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&dispatch.result.content).unwrap()["completed_run_ids"],
+        json!([child.to_string()])
+    );
+    assert!(!notice.observed());
+    state
+        .context
+        .push_tool_result("structured", dispatch.result);
+    dispatch.observations.presented(&mut state);
+    assert!(notice.observed());
+    cleanup(&runtime).await;
+}
+
+fn queue_lane(
+    runtime: &AgentRuntime,
+    root: RunId,
+    id: &str,
+) -> tokio::sync::oneshot::Receiver<Result<usize, storage::lane_delivery::LaneDeliveryNack>> {
+    let (result, receiver) = tokio::sync::oneshot::channel();
+    let claim = storage::lane_delivery::LaneDeliveryClaim {
+        destination_thread_id: "destination".into(),
+        destination_epoch: 1,
+        claim_epoch: 1,
+        token: format!("token-{id}"),
+        lease_until_ns: i64::MAX,
+        owner: storage::lane_delivery::LaneDeliveryOwner {
+            root_run_id: root.to_string(),
+            generation: 1,
+            ownership_generation: 0,
+        },
+        completed_root_wake: false,
+        notifications: vec![event_bus::lane::LaneNotification {
+            notification_id: id.into(),
+            lane_id: "lane".into(),
+            management_revision: 1,
+            source_thread_id: "source".into(),
+            destination_thread_id: "destination".into(),
+            kind: event_bus::lane::LaneNotificationKind::Milestone,
+            report_seq: Some(1),
+            created_at_ns: 0,
+        }],
+    };
+    runtime
+        .shared
+        .lanes
+        .delivery
+        .pending
+        .lock()
+        .unwrap()
+        .insert(
+            root,
+            crate::lane_delivery::PendingDelivery {
+                claim: crate::lane_delivery::outbox::DeliveryClaim::Lane(claim),
+                result,
+            },
+        );
+    runtime
+        .shared
+        .lanes
+        .delivery
+        .version
+        .send_modify(|version| *version += 1);
+    receiver
+}
+
+#[tokio::test]
+async fn lane_readiness_interrupts_all_forms_without_consuming_claim_or_other_root() {
+    for preexisting in [false, true] {
+        for form in 0..3 {
+            let (runtime, _) = fixture(None);
+            let (parent, caller, other) = spawn(&runtime);
+            let child = runtime
+                .delegate_background_as_child(caller, Role::Worker, "blocked", RunConfig::default())
+                .unwrap();
+            let input = match form {
+                0 => json!({}),
+                1 => json!({"run_id":parent.to_string()}),
+                _ => json!({"run_ids":[child.to_string()],"mode":"all"}),
+            };
+            let request = own_request(input);
+            let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+            let waiting = observe(&runtime, caller, &request, receiver);
+            tokio::pin!(waiting);
+            let mut other_ack = queue_lane(&runtime, other, "other-root-notice");
+            assert!(
+                poll!(&mut waiting).is_pending(),
+                "another root's version/claim is not readiness"
+            );
+            if !preexisting {
+                assert!(poll!(&mut waiting).is_pending());
+            }
+            let mut ack = queue_lane(&runtime, caller, "own-notice");
+            // preexisting is covered by a fresh wait subscription below; otherwise
+            // the active future has already subscribed before the claim insertion.
+            let result = if preexisting {
+                let (_cancel, rx) = watch::channel(RunInterrupt::None);
+                observe(&runtime, caller, &request, rx).await.unwrap()
+            } else {
+                waiting.await.unwrap()
+            };
+            assert_eq!(
+                result["events"],
+                json!([{"kind":"lane", "notification_id":"own-notice", "identity":"lane:own-notice"}])
+            );
+            assert_eq!(result["runs"], json!([]));
+            assert!(matches!(
+                ack.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                other_ack.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            assert_eq!(runtime.wait_lane_deliveries(caller), ["own-notice"]);
+            assert_eq!(runtime.wait_lane_deliveries(other), ["other-root-notice"]);
+            cleanup(&runtime).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn managed_lane_source_disappearance_returns_no_wait_sources() {
+    let (runtime, _) = fixture(None);
+    let caller =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    runtime
+        .shared
+        .lanes
+        .delivery
+        .wait_lanes
+        .lock()
+        .unwrap()
+        .insert(caller, vec!["managed".into()]);
+    let request = own_request(json!({}));
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let waiting = observe(&runtime, caller, &request, receiver);
+    tokio::pin!(waiting);
+    assert!(poll!(&mut waiting).is_pending());
+    runtime
+        .shared
+        .lanes
+        .delivery
+        .wait_lanes
+        .lock()
+        .unwrap()
+        .remove(&caller);
+    runtime
+        .shared
+        .lanes
+        .delivery
+        .version
+        .send_modify(|version| *version += 1);
+    let result = waiting.await.unwrap();
+    assert_eq!(result["status"], "no_wait_sources");
+    assert_eq!(result["events"], json!([]));
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn subagent_question_listing_commits_receipts_only_when_presented() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("listing.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) =
+        crate::agent_loop::delegate_cleanup_tests::started_fixture(receiver).await;
+    let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let parent = state.caller_run_id();
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+        .unwrap();
+    let question = runtime
+        .request_user_question(child, "preserve cancelled listing".into(), vec![], false)
+        .unwrap();
+    let args = json!({"run_id":child.to_string()});
+    let dropped = crate::meta::questions::subagent_questions(&mut state, &runtime, args.clone());
+    assert!(!dropped.result.is_error);
+    drop(dropped);
+    assert!(!runtime.question_reported(&question.id));
+    assert!(!state.reported_questions.contains(&question.id));
+    let dispatch = crate::meta::questions::subagent_questions(&mut state, &runtime, args);
+    let listed: Value = serde_json::from_str(&dispatch.result.content).unwrap();
+    assert_eq!(listed[0]["id"], question.id);
+    state.context.push_tool_result("listed", dispatch.result);
+    dispatch.observations.presented(&mut state);
+    assert!(runtime.question_reported(&question.id));
+    assert!(state.reported_questions.contains(&question.id));
+    assert!(runtime.take_inbox(parent).unwrap().is_empty());
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn host_input_is_ready_even_after_the_last_source_disappears() {
+    let (runtime, _) = fixture(None);
+    let caller =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let request = own_request(json!({}));
+    let result = user_input_response(&runtime, caller, &request).unwrap();
+    assert_eq!(result["status"], "ready");
+    assert_eq!(result["user_input_ready"], true);
+    assert_eq!(result["events"], json!([{"kind":"user_input"}]));
+    assert!(result.get("reasons").is_none());
     cleanup(&runtime).await;
 }
