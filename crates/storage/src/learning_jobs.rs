@@ -1,6 +1,6 @@
 //! Durable immutable admission and fenced learning attempts.
 //! Attempt changes, private staging and atomic publication live in `attempts`.
-mod attempts;
+pub(crate) mod attempts;
 pub use attempts::*;
 
 use crate::{Database, StorageError};
@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 /// Who may run a job again after its origin died: only a core, and only its own config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LearningOriginKind {
     Core,
     Gui,
@@ -31,7 +31,7 @@ impl LearningOriginKind {
 }
 
 /// The process (and incarnation of it) that owns a job.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LearningOrigin {
     pub kind: LearningOriginKind,
     /// Random per incarnation. A process that `exec`s keeps its pid, so the pid alone
@@ -300,7 +300,7 @@ fn refusal(
     })
 }
 
-fn digest(prompt: &str, evidence_json: &str) -> String {
+pub(crate) fn digest(prompt: &str, evidence_json: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update((prompt.len() as u64).to_le_bytes());
     hasher.update(prompt.as_bytes());
@@ -316,12 +316,14 @@ fn corrupt(message: String) -> StorageError {
     StorageError::Serialization(message)
 }
 
-const JOB_COLUMNS: &str = "task_id, state, is_goal, project, source_run_id, origin_kind,
+pub(crate) const JOB_COLUMNS: &str = "task_id, state, is_goal, project, source_run_id, origin_kind,
     origin_instance, origin_pid, origin_start_ticks, origin_boot_id, origin_pid_ns,
     config_identity, revision, admitted_at_ns, started_at_ns, finished_at_ns, reason,
     attempt, max_attempts, generation, suspension_id, publication, extraction_run, review_run";
 
-fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<LearningJob, StorageError>> {
+pub(crate) fn job_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<LearningJob, StorageError>> {
     let kind: String = row.get(5)?;
     let state: String = row.get(1)?;
     let pid: i64 = row.get(7)?;

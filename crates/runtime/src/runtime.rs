@@ -22,6 +22,7 @@ mod recovery_activation;
 #[cfg(any(test, feature = "recovery-test-support"))]
 mod recovery_fixture;
 mod recovery_graph;
+mod restart_handoff;
 mod restart_transaction;
 pub(crate) use host_prompt::HostPrompt;
 #[cfg(feature = "recovery-test-support")]
@@ -30,6 +31,7 @@ pub use recovery_activation::{
     CurrentRecoveryAuthority, PausedRecoveryComponent, RecoveryClaimHandle, RecoveryCleanupHandle,
     RecoveryCleanupState, RecoveryModels,
 };
+pub use restart_handoff::{PlannedToolSchemaBoundary, RestartOwnershipEvidence};
 pub use restart_transaction::{RestartAdoptionError, RestartCaptureSession};
 mod nested_orchestrator;
 mod output;

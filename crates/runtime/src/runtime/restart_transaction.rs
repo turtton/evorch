@@ -262,7 +262,10 @@ impl AgentRuntime {
             expected_persisted: false,
         })
     }
-    fn validate_capture_session(&self, s: &RestartCaptureSession) -> Result<(), RuntimeError> {
+    pub(super) fn validate_capture_session(
+        &self,
+        s: &RestartCaptureSession,
+    ) -> Result<(), RuntimeError> {
         if !Weak::ptr_eq(&s.runtime, &Arc::downgrade(&self.shared))
             || !self.shared.dispatch_tails.capture_valid()
         {
