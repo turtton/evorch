@@ -12,7 +12,7 @@ impl LoopState {
         let Some(runtime) = self.runtime() else {
             return true;
         };
-        if runtime.shared.quiesce.running() {
+        if runtime.shared.quiesce.running() && self.acknowledge_restart_shell_results().is_ok() {
             return true;
         }
         let mut changes = runtime.shared.quiesce.subscribe();
@@ -23,7 +23,13 @@ impl LoopState {
                 self.finish_interrupted(kind);
                 return false;
             }
-            if runtime.shared.quiesce.resume_permitted(parked_generation) {
+            if runtime.shared.quiesce.resume_permitted(parked_generation)
+                && self.acknowledge_restart_shell_results().is_ok()
+            {
+                // Cancellation reopens dispatch, not presentation. Finish the
+                // pending ACK before post-tools notices can see this job again.
+                // A continued failure parks on changes below, without a spin or
+                // turning an ACK failure into a storage-health failure.
                 return true;
             }
             {
@@ -68,11 +74,18 @@ impl LoopState {
                             .block(self.task.run_id, &incarnation, kind);
                         return true;
                     }
-                    if let Err(error) = self
-                        .stage_restart_shell_results()
-                        .and_then(|()| self.acknowledge_restart_shell_results())
-                    {
+                    if let Err(error) = self.stage_restart_shell_results() {
                         runtime.shared.quiesce.fail(error);
+                    } else if self.acknowledge_restart_shell_results().is_err() {
+                        // Presentation is irreversible, but a failed tool ACK is
+                        // not a storage-health failure. Keep the identity and
+                        // retry on a shell/coordinator change without re-inserting
+                        // the body. Identical blockers do not notify/spin.
+                        runtime.shared.quiesce.block(
+                            self.task.run_id,
+                            &incarnation,
+                            RestartBlockerKind::ShellResultUnobserved,
+                        );
                     } else if let Some(kind) = self.restart_safety_blocker() {
                         runtime
                             .shared
@@ -84,14 +97,11 @@ impl LoopState {
                             .quiesce
                             .clear_blocker(self.task.run_id, &incarnation);
                         match self.capture_safe_point(boundary) {
-                            Ok(()) => match self.acknowledge_restart_shell_results() {
-                                Ok(()) => runtime.shared.quiesce.acknowledge(
-                                    self.task.run_id,
-                                    &self.task.publication.incarnation(),
-                                    generation,
-                                ),
-                                Err(error) => runtime.shared.quiesce.fail(error),
-                            },
+                            Ok(()) => runtime.shared.quiesce.acknowledge(
+                                self.task.run_id,
+                                &self.task.publication.incarnation(),
+                                generation,
+                            ),
                             Err(error) => runtime.shared.quiesce.fail(error),
                         }
                     }
@@ -172,7 +182,9 @@ impl LoopState {
             self.shell_checkpoint_results
                 .insert(job.identity.id().into(), job.identity);
             self.publish_message_count();
-            self.acknowledge_restart_shell_results()?;
+            // Attempt immediately after presentation. The safe-point caller
+            // classifies a remaining ACK failure as retryable, not Failed.
+            let _ = self.acknowledge_restart_shell_results();
         }
         Ok(())
     }
@@ -202,13 +214,11 @@ impl LoopState {
         if jobs.is_empty() {
             return self.shared.executor.has_unobserved_shell_jobs(&run);
         }
-        jobs.iter().any(|job| {
-            !job.teardown_confirmed
-                || (!job.observed
-                    && !self
-                        .shell_checkpoint_results
-                        .contains_key(job.identity.id()))
-        })
+        // A presented identity suppresses duplicate text, not the safety
+        // proof. Until its ACK succeeds, restart persistence must also refuse
+        // to save a context that disagrees with external-effect observation.
+        jobs.iter()
+            .any(|job| !job.teardown_confirmed || !job.observed)
     }
 
     fn restart_safety_blocker(&self) -> Option<RestartBlockerKind> {

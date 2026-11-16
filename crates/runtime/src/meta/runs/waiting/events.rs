@@ -7,6 +7,17 @@ pub(super) fn poll(
     caller: RunId,
     request: &WaitRequest,
 ) -> Result<(bool, WaitResult), String> {
+    poll_with(runtime, caller, request, false)
+}
+
+/// Only a result that will actually be returned may enrich events from storage.
+/// Host input/internal virtual deadlines force that return even when all is partial.
+pub(super) fn poll_with(
+    runtime: &AgentRuntime,
+    caller: RunId,
+    request: &WaitRequest,
+    force_return: bool,
+) -> Result<(bool, WaitResult), String> {
     let sources = runtime.wait_runs(caller, &request.runs)?;
     let child_ids: Vec<_> = sources.iter().filter(|r| !r.parent).map(|r| r.id).collect();
     let attention = new_question_runs(runtime, &child_ids, &request.reported);
@@ -21,9 +32,15 @@ pub(super) fn poll(
     let mut parents = Vec::new();
     for run in &sources {
         if run.parent {
-            if run.terminal() && !request.observed.contains(&run.parent_key()) {
-                events.push(json!({"kind":"parent_terminated","run_id":run.id.to_string(),"generation":run.notice.as_ref().map(|n| n.generation),"identity":run.parent_key()}));
-                parents.push(json!({"run_id":run.id.to_string(),"phase":run.phase,"status":parent_status(run.phase)}));
+            if run.terminal() {
+                if !request.observed.contains(&run.parent_key()) {
+                    events.push(json!({"kind":"parent_terminated","run_id":run.id.to_string(),"generation":run.notice.as_ref().map(|n| n.generation),"identity":run.parent_key()}));
+                }
+                // Explicit terminal targets remain inspectable after the lifecycle
+                // edge was presented, without replaying that edge or parent output.
+                if request.runs.contains(&run.id) || !request.observed.contains(&run.parent_key()) {
+                    parents.push(json!({"run_id":run.id.to_string(),"phase":run.phase,"status":parent_status(run.phase)}));
+                }
             }
         } else if run.ready() && (selected.len() < MAX_WAIT_RUNS || !request.runs.is_empty()) {
             let admission_key = format!("admission:{}", run.id);
@@ -49,18 +66,6 @@ pub(super) fn poll(
         }
     }
     let attention = new_question_runs(runtime, &selected, &request.reported);
-    let mut runs = snapshots(runtime, caller, &selected)?;
-    runs.values.extend(parents);
-    if request.delegate {
-        // Delegate's per-call projection needs each unfinished member's phase,
-        // but not its output or storage-backed continuation availability.
-        for run in sources
-            .iter()
-            .filter(|r| !r.parent && !selected.contains(&r.id))
-        {
-            runs.values.push(json!({"run_id":run.id.to_string(),"phase":run.phase,"status":"still_running","needs_user_input":false,"has_pending_question":false}));
-        }
-    }
     let inbox = runtime
         .run_mailbox(caller)
         .map_err(|e| e.to_string())?
@@ -138,6 +143,37 @@ pub(super) fn poll(
         && !pending_question
         && !managed_lanes
         && !shell_source;
+    // No run_output/continuation (storage-backed) read on a partial all
+    // predicate, including every unrelated global version wake.
+    if !ready && !empty && !force_return {
+        return Ok((
+            false,
+            response(
+                Snapshots {
+                    values: Vec::new(),
+                    notices: Vec::new(),
+                    ready_turns: HashSet::new(),
+                },
+                QuestionAttention {
+                    runs: Vec::new(),
+                    ids: Vec::new(),
+                },
+                false,
+                request.deadline.map(|_| false),
+            ),
+        ));
+    }
+    let mut runs = snapshots(runtime, caller, &selected)?;
+    runs.values.extend(parents);
+    if request.delegate {
+        // Delegates need unfinished member phases, never their output/storage.
+        for run in sources
+            .iter()
+            .filter(|r| !r.parent && !selected.contains(&r.id))
+        {
+            runs.values.push(json!({"run_id":run.id.to_string(),"phase":run.phase,"status":"still_running","needs_user_input":false,"has_pending_question":false}));
+        }
+    }
     let mut result = with_answers(
         response(runs, attention, inbox, request.deadline.map(|_| false)),
         answers.clone(),

@@ -29,6 +29,9 @@ mod review_skills_tests;
 mod revision_tests;
 mod run_js_accounting;
 mod run_js_host;
+#[cfg(test)]
+#[path = "quiesce/shell_wait_tests.rs"]
+mod shell_wait_tests;
 mod stop_context;
 mod team;
 mod tool_calls;

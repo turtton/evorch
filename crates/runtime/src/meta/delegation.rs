@@ -177,6 +177,10 @@ pub(super) async fn delegate(
     if result.result.is_error && state.interrupted() != Some(InterruptKind::Stop) {
         cleanup_delegates(runtime, std::iter::once(child)).await;
     }
+    project_direct_wait_result(result)
+}
+
+fn project_direct_wait_result(result: DispatchResult) -> DispatchResult {
     // Direct dispatch goes through this handler rather than wait_delegates;
     // both paths return the same output-bearing idle-turn snapshot.
     if !result.result.is_error
@@ -184,7 +188,22 @@ pub(super) async fn delegate(
         && let Some(run) = snapshot["runs"].as_array().and_then(|runs| runs.first())
         && run["status"] == "turn_completed"
     {
-        let mut dispatch = super::serialize(run);
+        let mut value = run.clone();
+        // Keep every global observation paired with the fields actually shown.
+        // A simultaneous shell/lane/question event must not be silently ACKed
+        // when the direct delegate flattens its child's idle-turn result.
+        for field in [
+            "inbox_ready",
+            "user_input_ready",
+            "answer_ready",
+            "question_ids",
+            "attention_question_ids",
+            "events",
+            "shell_jobs",
+        ] {
+            value[field] = snapshot[field].clone();
+        }
+        let mut dispatch = super::serialize(&value);
         dispatch.result.progress = result.result.progress;
         dispatch.observations = result.observations;
         return dispatch;
@@ -368,6 +387,15 @@ pub(crate) async fn wait_delegates(
                     })),
                     None => error(format!("missing child wait result for {run_id}")),
                 };
+                if !dispatch.result.is_error {
+                    dispatch.observations.child_progress = waited
+                        .observations
+                        .child_progress
+                        .iter()
+                        .filter(|progress| progress.run_id == run_id.to_string())
+                        .cloned()
+                        .collect();
+                }
                 if run.is_some_and(|r| r["status"] == "turn_completed") {
                     dispatch.observations.completions = waited
                         .observations
@@ -408,4 +436,53 @@ pub(crate) async fn cleanup_delegates(
         })
         .collect();
     futures_util::future::join_all(waits).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_idle_projection_keeps_global_payload_with_its_receipts() {
+        let snapshot = serde_json::json!({
+            "runs": [{"run_id":"child", "status":"turn_completed", "output":"child body", "turn_generation":7}],
+            "inbox_ready":true, "user_input_ready":true, "answer_ready":true,
+            "question_ids":["answer"], "attention_question_ids":["question"],
+            "events":[{"kind":"shell", "job_id":"job"}, {"kind":"lane", "notification_id":"notice"}],
+            "shell_jobs":[{"job_id":"job", "call_id":"original-shell", "content":"shell body"}]
+        });
+        let mut waited = super::super::serialize(&snapshot);
+        waited.result.progress = Some(tools::Progress::Advanced);
+        waited.observations.questions.push("question".into());
+        waited.observations.events.push("lane:notice".into());
+        waited
+            .observations
+            .child_progress
+            .push(crate::meta::observations::ChildProgress::new(
+                "child",
+                Some(7),
+            ));
+        let projected = project_direct_wait_result(waited);
+        let value: serde_json::Value = serde_json::from_str(&projected.result.content).unwrap();
+        assert_eq!(value["output"], "child body");
+        assert_eq!(value["turn_generation"], 7);
+        for field in [
+            "inbox_ready",
+            "user_input_ready",
+            "answer_ready",
+            "question_ids",
+            "attention_question_ids",
+            "events",
+            "shell_jobs",
+        ] {
+            assert_eq!(
+                value[field], snapshot[field],
+                "lost global payload: {field}"
+            );
+        }
+        assert_eq!(projected.result.progress, Some(tools::Progress::Advanced));
+        assert_eq!(projected.observations.questions, ["question"]);
+        assert_eq!(projected.observations.events, ["lane:notice"]);
+        assert_eq!(projected.observations.child_progress[0].run_id, "child");
+    }
 }

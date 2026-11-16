@@ -256,6 +256,7 @@ async fn wait_with(
         }
         if state.has_pending_user_messages() {
             result["user_input_ready"] = Value::Bool(true);
+            result["status"] = json!("ready");
         }
         // Consume only the IDs in the returned snapshot, before draining the
         // mailbox so attention and a queued notice cannot report the same ID.
@@ -279,7 +280,7 @@ async fn wait_with(
         Ok(result) => result,
         Err(message) => return error(message),
     };
-    let mut advanced = record_observations(state, runtime, &request, &result);
+    let mut advanced = record_observations(state, runtime, &request, &result, &mut observations);
     advanced |= events::observe_events(state, &result, &mut observations);
     let phase_only = request.legacy
         && result["inbox_ready"] != true
@@ -315,15 +316,15 @@ async fn wait_with(
     dispatch
 }
 
-/// Remembers the questions now reported to the caller and reports whether this
-/// wait brought anything new: a first observed completion, a new question, an
-/// agent message or user input. Only such waits reset the loop guards, so a
-/// wait that keeps returning the same finished child is still detected.
+/// Derives progress from the exact result. Lifecycle identities travel as typed
+/// receipts and are committed at presentation, independently of output ACK, so
+/// dropping a result cannot spend its progress and repeated state still stalls.
 fn record_observations(
     state: &mut LoopState,
     _runtime: &AgentRuntime,
     request: &WaitRequest,
     result: &WaitResult,
+    observations: &mut Observations,
 ) -> bool {
     let mut advanced = false;
     for run_id in result["completed_run_ids"]
@@ -336,19 +337,23 @@ fn record_observations(
             .as_array()
             .and_then(|runs| runs.iter().find(|run| run["run_id"] == run_id))
             .and_then(|run| run["turn_generation"].as_u64());
-        let key = generation.map_or_else(
-            || run_id.to_owned(),
-            |generation| format!("{run_id}:turn-{generation}"),
-        );
-        advanced |= state.budget.mark_child_completed(&key);
+        let notice = result
+            .notices
+            .iter()
+            .find(|notice| notice.child.to_string() == run_id);
+        let generation = generation.or_else(|| notice.map(|notice| notice.generation));
+        // Other presentation paths (run_output/inbox/auto injection) share the
+        // notice even when they did not pass through wait progress accounting.
+        if notice.is_none_or(|notice| !notice.observed()) {
+            let progress = crate::meta::observations::ChildProgress::new(run_id, generation);
+            advanced |= !state.budget.wait_event_observed(&progress.identity());
+            observations.child_progress.push(progress);
+        }
     }
     let asked = result
         .question_ids
         .iter()
         .any(|id| !request.reported.contains(id));
-    state
-        .reported_questions
-        .extend(result.question_ids.iter().cloned());
     let received = result["messages"].as_array().is_some_and(|m| !m.is_empty())
         || result["inbox_ready"] == true
         || result["user_input_ready"] == true
@@ -365,8 +370,11 @@ fn user_input_response(
     caller: RunId,
     request: &WaitRequest,
 ) -> Result<WaitResult, String> {
-    let (_, mut result) = events::poll(runtime, caller, request)?;
+    let (_, mut result) = events::poll_with(runtime, caller, request, true)?;
     result["user_input_ready"] = Value::Bool(true);
+    result["status"] = json!("ready");
+    result.value.as_object_mut().unwrap().remove("reasons");
+    result.value.as_object_mut().unwrap().remove("note");
     result["events"]
         .as_array_mut()
         .unwrap()
@@ -421,7 +429,7 @@ async fn observe(
             biased;
             changed = cancel.changed() => { if changed.is_err() { return Err("wait cancelled".into()); } }
             () = &mut deadline => {
-                let (_, mut result) = events::poll(runtime, caller, request)?;
+                let (_, mut result) = events::poll_with(runtime, caller, request, true)?;
                 result["timed_out"] = Value::Bool(true);
                 return Ok(result);
             }
@@ -518,11 +526,19 @@ fn response(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    // Count the wait's storage-enrichment boundary, including the exact run IDs.
+    static SNAPSHOT_READS: std::cell::RefCell<Vec<RunId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Snapshots, String> {
     let mut notices = Vec::new();
     let mut ready_turns = HashSet::new();
     let values = runs.iter()
         .map(|run| {
+            #[cfg(test)]
+            SNAPSHOT_READS.with_borrow_mut(|reads| reads.push(*run));
             let output = runtime.run_output(caller, *run).map_err(|error| {
                 json!({
                     "code": if matches!(error, crate::RuntimeError::UnknownRun { .. }) { "unknown_run" } else { "wait_denied" },
