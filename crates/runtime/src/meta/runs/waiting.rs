@@ -15,10 +15,18 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use super::super::{DispatchResult, error, parse, parse_run_id, serialize, success};
+use super::super::{DispatchResult, Observations, error, parse, parse_run_id, serialize, success};
+mod events;
 use crate::agent_loop::LoopState;
 use crate::mailbox::CompletionNotice;
 use crate::{AgentRuntime, RunId, RunInterrupt};
+
+pub(in crate::meta) fn inbox_snapshot(
+    runtime: &AgentRuntime,
+    caller: RunId,
+) -> Result<(Vec<Value>, Vec<crate::mailbox::QueuedMessage>), String> {
+    events::messages(runtime, caller, true)
+}
 
 pub(in crate::meta) const MAX_WAIT_RUNS: usize = 8;
 const OUTPUT_BYTES: usize = 4096;
@@ -86,6 +94,10 @@ impl DerefMut for WaitResult {
 struct WaitRequest {
     runs: Vec<RunId>,
     mode: WaitMode,
+    observed: HashSet<String>,
+    shown_shell: HashSet<String>,
+    executor: Option<Arc<tools::ToolExecutor>>,
+    delegate: bool,
     /// Internal bound for tests and snapshots; model and delegate waits have none.
     deadline: Option<Duration>,
     legacy: bool,
@@ -102,6 +114,8 @@ impl WaitArgs {
         let runs = match (self.run_id, self.run_ids) {
             (Some(run), None) => vec![run],
             (None, Some(runs)) if (1..=MAX_WAIT_RUNS).contains(&runs.len()) => runs,
+            (None, None) if self.mode.is_none() => Vec::new(),
+            (None, None) => return Err("mode requires run_id or run_ids".into()),
             (None, Some(_)) => return Err("run_ids must contain 1 to 8 runs".into()),
             _ => return Err("provide exactly one of run_id or run_ids".into()),
         };
@@ -114,6 +128,10 @@ impl WaitArgs {
         }
         Ok(WaitRequest {
             runs,
+            observed: HashSet::new(),
+            shown_shell: HashSet::new(),
+            executor: None,
+            delegate: false,
             mode: self.mode.unwrap_or_default(),
             deadline: None,
             legacy,
@@ -171,10 +189,20 @@ async fn wait_with(
         Err(message) => return error(message),
     };
     // Validate every target before suspending the parent or observing any output.
-    if let Err(message) = snapshots(runtime, state.caller_run_id(), &request.runs) {
+    if let Err(message) = runtime.wait_runs(state.caller_run_id(), &request.runs) {
         return error(message);
     }
     request.reported.clone_from(&state.reported_questions);
+    request.observed = state
+        .budget
+        .observed_wait_events()
+        .iter()
+        .cloned()
+        .collect();
+    request.shown_shell = state.presented_shell_results.iter().cloned().collect();
+    request.executor = Some(state.shared.executor.clone());
+    request.delegate = !deliver_messages;
+    runtime.refresh_wait_lanes(state.caller_run_id());
     request.delivered = state.delivered_answer_ids();
     if let Some(saved) = state
         .recovery_waits
@@ -199,7 +227,7 @@ async fn wait_with(
         user_input_response(runtime, caller, &request)
     } else {
         let mut quiesce = runtime.shared.quiesce.subscribe();
-        state.quiesce_tools_waiting(None).await;
+        state.quiesce_tools_waiting().await;
         let observation = observe(runtime, caller, &request, state.channels.cancel_rx.clone());
         tokio::pin!(observation);
         loop {
@@ -208,7 +236,7 @@ async fn wait_with(
                 // Keep observation alive when discarding a withdrawn input;
                 // receiving a tombstone must not interrupt the wait.
                 result = &mut observation => break result,
-                _ = quiesce.changed() => state.quiesce_tools_waiting(None).await,
+                _ = quiesce.changed() => state.quiesce_tools_waiting().await,
                 Some(message) = state.channels.inbox_rx.recv() => {
                     // Inject after ToolResults, never between ToolUse and ToolResult.
                     state.queue_user_message(message);
@@ -219,6 +247,7 @@ async fn wait_with(
             }
         }
     };
+    let mut observations = Observations::default();
     if let Ok(result) = &mut result {
         // If terminal observation won the select, preserve any concurrently
         // queued UI input for delivery after this tool batch as well.
@@ -227,12 +256,15 @@ async fn wait_with(
         }
         if state.has_pending_user_messages() {
             result["user_input_ready"] = Value::Bool(true);
+            result["status"] = json!("ready");
         }
         // Consume only the IDs in the returned snapshot, before draining the
         // mailbox so attention and a queued notice cannot report the same ID.
-        runtime.observe_questions(result.question_ids.clone());
+        observations.questions = result.question_ids.clone();
         if deliver_messages {
-            deliver(runtime, caller, result);
+            if let Err(message) = events::deliver(runtime, caller, result, &mut observations) {
+                return error(message);
+            }
         } else {
             result["inbox_ready"] = Value::Bool(
                 runtime
@@ -248,7 +280,8 @@ async fn wait_with(
         Ok(result) => result,
         Err(message) => return error(message),
     };
-    let advanced = record_observations(state, runtime, &request, &result);
+    let mut advanced = record_observations(state, runtime, &request, &result, &mut observations);
+    advanced |= events::observe_events(state, &result, &mut observations);
     let phase_only = request.legacy
         && result["inbox_ready"] != true
         && result["answer_ready"] != true
@@ -260,6 +293,9 @@ async fn wait_with(
         && result["completed_run_ids"]
             .as_array()
             .is_some_and(|runs| !runs.is_empty())
+        && result["events"]
+            .as_array()
+            .is_none_or(|events| events.iter().all(|e| e["kind"] == "run_completed"))
         && result["runs"]
             .as_array()
             .is_some_and(|runs| runs.iter().all(terminal));
@@ -268,11 +304,10 @@ async fn wait_with(
         success(result["runs"][0]["phase"].as_str().unwrap_or("Error"))
     } else {
         let dispatch = serialize(&result.value);
-        for notice in &result.notices {
-            runtime.observe_completion(notice);
-        }
+        observations.completions = result.notices;
         dispatch
     };
+    dispatch.observations = observations;
     dispatch.result.progress = Some(if advanced {
         tools::Progress::Advanced
     } else {
@@ -281,28 +316,15 @@ async fn wait_with(
     dispatch
 }
 
-/// Moves the caller's queued agent messages into the result. Automatic child
-/// completion notices are acknowledged only when output-bearing snapshots return.
-fn deliver(runtime: &AgentRuntime, caller: RunId, result: &mut Value) {
-    let messages = match runtime.run_mailbox(caller) {
-        Ok(mailbox) => mailbox.drain_interrupting(),
-        Err(_) => Vec::new(),
-    };
-    if let Some(object) = result.as_object_mut() {
-        object.remove("inbox_ready");
-    }
-    result["messages"] = serde_json::to_value(messages).unwrap_or_else(|_| json!([]));
-}
-
-/// Remembers the questions now reported to the caller and reports whether this
-/// wait brought anything new: a first observed completion, a new question, an
-/// agent message or user input. Only such waits reset the loop guards, so a
-/// wait that keeps returning the same finished child is still detected.
+/// Derives progress from the exact result. Lifecycle identities travel as typed
+/// receipts and are committed at presentation, independently of output ACK, so
+/// dropping a result cannot spend its progress and repeated state still stalls.
 fn record_observations(
     state: &mut LoopState,
     _runtime: &AgentRuntime,
     request: &WaitRequest,
     result: &WaitResult,
+    observations: &mut Observations,
 ) -> bool {
     let mut advanced = false;
     for run_id in result["completed_run_ids"]
@@ -315,19 +337,23 @@ fn record_observations(
             .as_array()
             .and_then(|runs| runs.iter().find(|run| run["run_id"] == run_id))
             .and_then(|run| run["turn_generation"].as_u64());
-        let key = generation.map_or_else(
-            || run_id.to_owned(),
-            |generation| format!("{run_id}:turn-{generation}"),
-        );
-        advanced |= state.budget.mark_child_completed(&key);
+        let notice = result
+            .notices
+            .iter()
+            .find(|notice| notice.child.to_string() == run_id);
+        let generation = generation.or_else(|| notice.map(|notice| notice.generation));
+        // Other presentation paths (run_output/inbox/auto injection) share the
+        // notice even when they did not pass through wait progress accounting.
+        if notice.is_none_or(|notice| !notice.observed()) {
+            let progress = crate::meta::observations::ChildProgress::new(run_id, generation);
+            advanced |= !state.budget.wait_event_observed(&progress.identity());
+            observations.child_progress.push(progress);
+        }
     }
     let asked = result
         .question_ids
         .iter()
         .any(|id| !request.reported.contains(id));
-    state
-        .reported_questions
-        .extend(result.question_ids.iter().cloned());
     let received = result["messages"].as_array().is_some_and(|m| !m.is_empty())
         || result["inbox_ready"] == true
         || result["user_input_ready"] == true
@@ -344,13 +370,15 @@ fn user_input_response(
     caller: RunId,
     request: &WaitRequest,
 ) -> Result<WaitResult, String> {
-    let runs = snapshots(runtime, caller, &request.runs)?;
-    let mailbox = runtime
-        .run_mailbox(caller)
-        .map_err(|error| error.to_string())?;
-    let attention = new_question_runs(runtime, &request.runs, &request.reported);
-    let mut result = response(runs, attention, mailbox.has_interrupting_message(), None);
+    let (_, mut result) = events::poll_with(runtime, caller, request, true)?;
     result["user_input_ready"] = Value::Bool(true);
+    result["status"] = json!("ready");
+    result.value.as_object_mut().unwrap().remove("reasons");
+    result.value.as_object_mut().unwrap().remove("note");
+    result["events"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"kind":"user_input"}));
     Ok(result)
 }
 
@@ -360,114 +388,57 @@ async fn observe(
     request: &WaitRequest,
     mut cancel: watch::Receiver<RunInterrupt>,
 ) -> Result<WaitResult, String> {
-    if cancel.borrow().is_interrupted() {
-        return Err("wait cancelled".into());
-    }
     runtime.observe_questions(request.reported.iter().cloned());
+    let mailbox = runtime.run_mailbox(caller).map_err(|e| e.to_string())?;
+    // All subscriptions precede the first predicate, including lane/shell.
     let mut questions = runtime.shared.question_version.subscribe();
     let mut turns = runtime.shared.turn_version.subscribe();
-    let initial = snapshots(runtime, caller, &request.runs)?;
-    let mailbox = runtime
-        .run_mailbox(caller)
-        .map_err(|error| error.to_string())?;
-    // Subscribe before checking unread messages so delivery cannot race the
-    // initial snapshot. Notifications alone are insufficient: drains and closure
-    // also change the mailbox version, and completion relays must respect mode.
-    let mut inbox_changes = mailbox.subscribe_version();
-    let inbox_ready = mailbox.has_interrupting_message();
-    let attention = new_question_runs(runtime, &request.runs, &request.reported);
-    // Every result reports answers the caller has not seen yet, whatever ended
-    // the wait.
-    let answer = |runs, attention, inbox_ready, timed_out| {
-        let answers = runtime.undelivered_answer_ids(caller, &request.delivered);
-        Ok(with_answers(
-            response(
-                runs,
-                attention,
-                inbox_ready,
-                request.deadline.map(|_| timed_out),
-            ),
-            answers,
-        ))
-    };
-    let answered = !runtime
-        .undelivered_answer_ids(caller, &request.delivered)
-        .is_empty();
-    if satisfied(&initial, request.mode)
-        || !attention.is_empty()
-        || inbox_ready
-        || answered
-        || request.deadline.is_some_and(|deadline| deadline.is_zero())
-    {
-        let timed_out =
-            !satisfied(&initial, request.mode) && attention.is_empty() && !inbox_ready && !answered;
-        return answer(initial, attention, inbox_ready, timed_out);
-    }
-    // AgentRuntime::wait subscribes to each run's existing watch channel. A
-    // completion between this snapshot and subscription is read immediately.
-    let mut pending = request
-        .runs
-        .iter()
-        .map(|run| runtime.wait(*run))
-        .collect::<FuturesUnordered<_>>();
+    let mut inbox = mailbox.subscribe_version();
+    let mut lanes = runtime.shared.lanes.delivery.version.subscribe();
+    let executor = request.executor.clone().unwrap_or_else(|| {
+        runtime
+            .shared
+            .executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    });
+    let mut shell = executor.subscribe_shell_job_changes();
     let deadline = async {
         match request.deadline {
-            Some(deadline) => tokio::time::sleep(deadline).await,
+            Some(d) => tokio::time::sleep(d).await,
             None => std::future::pending().await,
         }
     };
     tokio::pin!(deadline);
     loop {
+        if cancel.borrow().is_interrupted() {
+            return Err("wait cancelled".into());
+        }
+        let (ready, result) = events::poll(runtime, caller, request)?;
+        if ready {
+            return Ok(result);
+        }
+        let sources = runtime.wait_runs(caller, &request.runs)?;
+        let mut pending = sources
+            .iter()
+            .filter(|r| r.phase == AgentRunPhase::Pending)
+            .map(|r| runtime.wait(r.id))
+            .collect::<FuturesUnordered<_>>();
         tokio::select! {
             biased;
-            changed = cancel.changed() => {
-                if changed.is_err() || cancel.borrow().is_interrupted() {
-                    return Err("wait cancelled".into());
-                }
-            }
+            changed = cancel.changed() => { if changed.is_err() { return Err("wait cancelled".into()); } }
             () = &mut deadline => {
-                let runs = snapshots(runtime, caller, &request.runs)?;
-                let attention = new_question_runs(runtime, &request.runs, &request.reported);
-                return answer(runs, attention, mailbox.has_interrupting_message(), true);
+                let (_, mut result) = events::poll_with(runtime, caller, request, true)?;
+                result["timed_out"] = Value::Bool(true);
+                return Ok(result);
             }
-            changed = inbox_changes.changed() => {
-                if changed.is_ok() && mailbox.has_interrupting_message() {
-                    let runs = snapshots(runtime, caller, &request.runs)?;
-                    let attention = new_question_runs(runtime, &request.runs, &request.reported);
-                    return answer(runs, attention, true, false);
-                }
-            }
-            changed = questions.changed() => {
-                if changed.is_ok() {
-                    let attention = new_question_runs(runtime, &request.runs, &request.reported);
-                    let answered = !runtime
-                        .undelivered_answer_ids(caller, &request.delivered)
-                        .is_empty();
-                    if !attention.is_empty() || answered {
-                        let runs = snapshots(runtime, caller, &request.runs)?;
-                        return answer(runs, attention, mailbox.has_interrupting_message(), false);
-                    }
-                }
-            }
-            changed = turns.changed() => {
-                if changed.is_ok() {
-                    let runs = snapshots(runtime, caller, &request.runs)?;
-                    let attention = new_question_runs(runtime, &request.runs, &request.reported);
-                    if satisfied(&runs, request.mode) || !attention.is_empty() {
-                        return answer(runs, attention, mailbox.has_interrupting_message(), false);
-                    }
-                }
-            }
-            completed = pending.next() => {
-                // Admission failures also become terminal snapshots; they are
-                // outcomes of the target run rather than failures of this wait.
-                let _ = completed;
-                let runs = snapshots(runtime, caller, &request.runs)?;
-                let attention = new_question_runs(runtime, &request.runs, &request.reported);
-                if satisfied(&runs, request.mode) || !attention.is_empty() || pending.is_empty() {
-                    return answer(runs, attention, mailbox.has_interrupting_message(), false);
-                }
-            }
+            changed = inbox.changed() => { if changed.is_err() { return Err("mailbox closed".into()); } }
+            changed = questions.changed() => { if changed.is_err() { return Err("question notifications closed".into()); } }
+            changed = turns.changed() => { if changed.is_err() { return Err("run notifications closed".into()); } }
+            changed = lanes.changed() => { if changed.is_err() { return Err("lane notifications closed".into()); } }
+            changed = async { match shell.as_mut() { Some(s) => s.changed().await, None => std::future::pending().await } } => { if changed.is_err() { shell = None; } }
+            _ = pending.next(), if !pending.is_empty() => {}
         }
     }
 }
@@ -477,19 +448,6 @@ pub(in crate::meta) fn terminal(run: &Value) -> bool {
         run["status"].as_str(),
         Some("completed" | "cancelled" | "failed" | "stopped")
     )
-}
-
-fn satisfied(runs: &Snapshots, mode: WaitMode) -> bool {
-    let ready = |run: &Value| {
-        terminal(run)
-            || run["run_id"]
-                .as_str()
-                .is_some_and(|id| runs.ready_turns.contains(id))
-    };
-    match mode {
-        WaitMode::Any => runs.iter().any(ready),
-        WaitMode::All => runs.iter().all(ready),
-    }
 }
 
 /// One storage snapshot owns both attention runs and the IDs actually reported.
@@ -513,8 +471,7 @@ fn new_question_runs(
     };
     for run in runs {
         let ids: Vec<_> = runtime
-            .user_answers(*run)
-            .unwrap_or_default()
+            .wait_questions(*run)
             .into_iter()
             .filter(|q| {
                 q.answer.is_none() && !reported.contains(&q.id) && !runtime.question_reported(&q.id)
@@ -569,11 +526,19 @@ fn response(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    // Count the wait's storage-enrichment boundary, including the exact run IDs.
+    static SNAPSHOT_READS: std::cell::RefCell<Vec<RunId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Snapshots, String> {
     let mut notices = Vec::new();
     let mut ready_turns = HashSet::new();
     let values = runs.iter()
         .map(|run| {
+            #[cfg(test)]
+            SNAPSHOT_READS.with_borrow_mut(|reads| reads.push(*run));
             let output = runtime.run_output(caller, *run).map_err(|error| {
                 json!({
                     "code": if matches!(error, crate::RuntimeError::UnknownRun { .. }) { "unknown_run" } else { "wait_denied" },
@@ -589,9 +554,9 @@ fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Sn
             if ready_turn && value["status"] == "turn_completed" {
                 ready_turns.insert(run.to_string());
             }
-            value["needs_user_input"] = Value::Bool(!terminal(&value) && runtime.has_pending_user_questions(*run));
-            value["has_pending_question"] =
-                Value::Bool(runtime.has_unanswered_questions(*run));
+            let questions = runtime.wait_questions(*run);
+            value["needs_user_input"] = Value::Bool(!terminal(&value) && questions.iter().any(|q| q.blocking && q.answer.is_none()));
+            value["has_pending_question"] = Value::Bool(questions.iter().any(|q| q.answer.is_none()));
             for (field, limit) in [("output", OUTPUT_BYTES), ("reason", REASON_BYTES)] {
                 let truncated = value[field].as_str().is_some_and(|text| text.len() > limit);
                 if truncated {
@@ -600,7 +565,7 @@ fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Sn
                     while !text.is_char_boundary(end) {
                         end -= 1;
                     }
-                    value[field] = Value::String(text[..end].to_owned());
+                    value[field] = Value::String(events::bounded(text, end)?);
                 }
                 value[format!("{field}_truncated")] = Value::Bool(truncated);
             }

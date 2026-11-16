@@ -93,6 +93,7 @@ pub(super) async fn handoff_to_lane(
     }
     runtime.record_escalation_memo(source_run_id, memo.clone());
     DispatchResult {
+        observations: Default::default(),
         result: ToolResult::success(
             json!({
                 "escalated": true,

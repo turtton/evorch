@@ -28,7 +28,7 @@ async fn target_completion_while_parked_does_not_observe_or_rewind_its_generatio
     });
     let before = state.context.messages.clone();
     runtime.request_quiesce();
-    let parked = state.quiesce_tools_waiting(None);
+    let parked = state.quiesce_tools_waiting();
     tokio::pin!(parked);
     assert!(futures_util::poll!(&mut parked).is_pending());
     let intent = runtime
@@ -117,7 +117,7 @@ async fn unobserved_shell_job_prevents_tools_waiting_persistence() {
         role: MessageRole::Assistant,
         content: vec![call("wait", "wait", json!({"run_id":child.to_string()}))],
     });
-    state.recovery_waits = state.pending_waits(None).unwrap();
+    state.recovery_waits = state.pending_waits().unwrap();
     let mut executor = tools::ToolExecutor::new(state.shared.bus.clone());
     executor
         .register(std::sync::Arc::new(UnobservedShell))
@@ -176,7 +176,7 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
             reason: crate::checkpoint::SnapshotNoneReason::Skipped
         }
     ));
-    state.recovery_waits = state.pending_waits(None).unwrap();
+    state.recovery_waits = state.pending_waits().unwrap();
     assert_eq!(state.recovery_waits.len(), 2);
     crate::restore::persist_tools_waiting(&state).unwrap();
     let store = runtime.shared.run_store.get().unwrap();
@@ -285,7 +285,7 @@ async fn wait_followed_by_unstarted_external_call_is_fail_closed() {
             call("external", "shell", json!({"command":"touch external"})),
         ],
     });
-    assert!(state.pending_waits(None).is_err());
+    assert!(state.pending_waits().is_err());
     assert!(crate::restore::persist_tools_waiting(&state).is_err());
     assert!(
         runtime
@@ -333,7 +333,7 @@ async fn delegate_projection_uses_original_call_order_and_existing_child_ids() {
             .collect(),
     });
     state.delegate_wait_calls = children.clone();
-    state.recovery_waits = state.pending_waits(None).unwrap();
+    state.recovery_waits = state.pending_waits().unwrap();
     assert_eq!(state.recovery_waits.len(), 2);
     let mut mismatched = state.recovery_waits.clone();
     if let WaitKind::Delegates { calls } =
@@ -373,12 +373,12 @@ async fn delegate_projection_uses_original_call_order_and_existing_child_ids() {
 }
 
 #[tokio::test]
-async fn reply_continuation_consumes_only_the_correlated_reply_once() {
+async fn live_recovery_reply_is_retired_once_without_consuming_queued_messages() {
     reply_continuation(false).await;
 }
 
 #[tokio::test]
-async fn expired_recovery_reply_times_out_once_without_consuming_queued_reply() {
+async fn expired_recovery_reply_is_retired_once_without_consuming_queued_reply() {
     reply_continuation(true).await;
 }
 
@@ -408,10 +408,22 @@ async fn reply_continuation(expired: bool) {
             json!({"message_id":message,"timeout_ms":1000}),
         )],
     });
-    // An elapsed recovery deadline wins; live waits retain their ordinary priority.
-    state.recovery_waits = state
-        .pending_waits(Some(("reply", if expired { 1 } else { u64::MAX })))
-        .unwrap();
+    // Retirement ignores both elapsed and future deadlines; neither may consume messages.
+    state.recovery_waits = vec![legacy_reply_wait(
+        parent,
+        child,
+        "reply",
+        &message,
+        if expired { 1 } else { u64::MAX },
+        state
+            .context
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            .count()
+            - 1,
+    )];
     let saved_waits = state.recovery_waits.clone();
     crate::restore::persist_tools_waiting(&state).unwrap();
     let bundle = runtime
@@ -450,16 +462,15 @@ async fn reply_continuation(expired: bool) {
         panic!("reply result")
     };
     assert_eq!(tool_call_id, "reply");
-    assert_eq!(*is_error, expired);
+    assert!(*is_error);
     let providers::ToolResultContent::Text { text } = &content[0] else {
         panic!("reply text")
     };
-    if !expired {
-        let value: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(value["message_id"], reply);
-        assert_eq!(value["content"], "reply body");
-    }
-    assert!(runtime.check_reply_wait(parent, &message).is_err());
+    assert!(text.contains(crate::meta::RETIRED_REPLY_WAIT));
+    assert_eq!(
+        runtime.sent_message_recipient(parent, &message).unwrap(),
+        child
+    );
     assert_eq!(
         runtime
             .take_inbox(parent)
@@ -467,11 +478,7 @@ async fn reply_continuation(expired: bool) {
             .iter()
             .map(|m| &m.message_id)
             .collect::<Vec<_>>(),
-        if expired {
-            vec![&unrelated, &reply]
-        } else {
-            vec![&unrelated]
-        }
+        vec![&unrelated, &reply]
     );
     assert!(state.resume_recovery_waits().await);
     assert_eq!(state.context.messages.len(), prefix.len() + 1);
@@ -487,7 +494,21 @@ async fn reply_continuation(expired: bool) {
             json!({"message_id":expired,"timeout_ms":1000}),
         )],
     });
-    state.recovery_waits = state.pending_waits(Some(("expired", 1))).unwrap();
+    state.recovery_waits = vec![legacy_reply_wait(
+        parent,
+        child,
+        "expired",
+        &expired,
+        1,
+        state
+            .context
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            .count()
+            - 1,
+    )];
     let before_timeout = state.context.messages.len();
     assert!(state.resume_recovery_waits().await);
     assert!(matches!(&state.context.messages.last().unwrap().content[0],
@@ -512,7 +533,7 @@ async fn unstarted_reply_wait_is_temporary_and_does_not_invent_a_deadline() {
     });
     let before = state.context.messages.clone();
     let attempt = runtime.begin_restart_quiesce().unwrap();
-    state.quiesce_tools_waiting(None).await;
+    state.quiesce_tools_waiting().await;
     assert_eq!(
         runtime.restart_blockers()[0].kind,
         crate::quiesce::RestartBlockerKind::UnfinishedToolBatch
@@ -527,4 +548,37 @@ async fn unstarted_reply_wait_is_temporary_and_does_not_invent_a_deadline() {
     runtime.cancel_restart_quiesce(&attempt).unwrap();
     assert!(runtime.restart_blockers().is_empty());
     runtime.cancel(run).unwrap();
+}
+
+fn legacy_reply_wait(
+    parent: crate::RunId,
+    child: crate::RunId,
+    call: &str,
+    message: &str,
+    deadline: u64,
+    position: usize,
+) -> DurableWait {
+    DurableWait {
+        requester: parent,
+        targets: vec![child],
+        mode: DurableWaitMode::Any,
+        tool_call_id: call.into(),
+        completions: vec![],
+        questions: vec![],
+        answers: vec![],
+        continuation: WaitContinuation {
+            tool_name: "wait_reply".into(),
+            legacy_result: false,
+            consume_mailbox: true,
+            payload: Some(WaitPayload {
+                position,
+                input: json!({"message_id":message,"timeout_ms":1000}),
+                kind: WaitKind::Reply {
+                    message_id: message.into(),
+                    deadline_unix_ms: deadline,
+                    delivered_answer_ids: vec![],
+                },
+            }),
+        },
+    }
 }

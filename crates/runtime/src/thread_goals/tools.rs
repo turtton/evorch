@@ -60,6 +60,7 @@ pub(crate) fn dispatch(
     let result = handle(state, runtime, name, input);
     match result {
         Ok(value) if name == "submit_goal_review" => DispatchResult {
+            observations: Default::default(),
             result: ::tools::ToolResult::success(value.to_string()),
             terminal: Terminal::Finish("Independent goal review submitted.".into()),
         },

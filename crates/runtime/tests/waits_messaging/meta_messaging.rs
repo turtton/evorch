@@ -11,7 +11,6 @@ use runtime::{AgentRuntime, RunConfig, RunId};
 use sandbox::DirectSandbox;
 use serde_json::json;
 use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
 
 use support::{ScriptedModel, text_response, tool_response};
@@ -55,17 +54,8 @@ fn tool_result(messages: &[Message], call_id: &str) -> Option<(String, bool)> {
 }
 
 async fn wait_for_observed(model: &ScriptedModel, count: usize) -> Vec<Vec<Message>> {
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let observed = model.observed().await;
-            if observed.len() >= count {
-                return observed;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("model observation timeout")
+    model.wait_for_request(count - 1).await;
+    model.observed().await
 }
 
 async fn events_until_terminal(
@@ -75,10 +65,7 @@ async fn events_until_terminal(
     let run_id = run_id.to_string();
     let mut events = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(2), receiver.recv())
-            .await
-            .expect("event timeout")
-            .expect("event receiver remains open");
+        let event = receiver.recv().await.expect("event receiver remains open");
         let terminal = matches!(
             &event.kind,
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
@@ -109,15 +96,6 @@ fn messages_for_marker(observed: &[Vec<Message>], marker: &str) -> Vec<Vec<Messa
         .collect()
 }
 
-fn contains_agent_message(messages: &[Message], header: &str, content: &str) -> bool {
-    messages.iter().any(|message| {
-        message
-            .content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text } if text.starts_with(header) && text.contains(content)))
-    })
-}
-
 fn has_phase_transition(
     events: &[Event],
     run_id: &str,
@@ -140,7 +118,7 @@ fn has_phase_transition(
 /// gate 待ちのモデル要求が指定個数に達するのを待ってから gate を一斉に開く。
 ///
 /// notify_waiters は待機中の全要求を同時に解放するため、待ち合わせ対象外の run
-/// (子の no-op 応答など) は capability 拒否される `wait` 要求で消費を吸収し、
+/// (子の no-op 応答など) は capability 拒否される `list_agents` 要求で消費を吸収し、
 /// 再び gate で待ち戻る。
 async fn step(model: &ScriptedModel, gate: &Notify, total_requests: usize) {
     wait_for_observed(model, total_requests).await;
@@ -179,21 +157,9 @@ async fn send_message_meta_op_is_fire_and_forget_alias() {
         .add_keyed(
             "CHILD",
             [
-                Ok(tool_response(
-                    "noop-1",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
-                Ok(tool_response(
-                    "noop-2",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
-                Ok(tool_response(
-                    "noop-3",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
+                Ok(tool_response("noop-1", "list_agents", json!({}))),
+                Ok(tool_response("noop-2", "list_agents", json!({}))),
+                Ok(tool_response("noop-3", "list_agents", json!({}))),
             ],
         )
         .await;
@@ -210,10 +176,7 @@ async fn send_message_meta_op_is_fire_and_forget_alias() {
     step(&model, &gate, 1).await;
     step(&model, &gate, 3).await;
     step(&model, &gate, 5).await;
-    assert_eq!(
-        timeout(Duration::from_secs(2), runtime.wait(parent)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
 
     // Then: 親は子の終端を待たずに Done になり、send_message の結果は
     //       message_id を含む成功 ToolResult (旧実装なら子の終端待ちで block する)
@@ -233,7 +196,7 @@ async fn send_message_meta_op_is_fire_and_forget_alias() {
 
     // gate 待ちで残留する子をキャンセルして終端させる
     assert_eq!(runtime.cancel(child), Ok(()));
-    let _ = timeout(Duration::from_secs(2), runtime.wait(child)).await;
+    let _ = runtime.wait(child).await;
 }
 
 #[tokio::test]
@@ -267,21 +230,9 @@ async fn send_meta_op_returns_message_id() {
         .add_keyed(
             "CHILD",
             [
-                Ok(tool_response(
-                    "noop-1",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
-                Ok(tool_response(
-                    "noop-2",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
-                Ok(tool_response(
-                    "noop-3",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
+                Ok(tool_response("noop-1", "list_agents", json!({}))),
+                Ok(tool_response("noop-2", "list_agents", json!({}))),
+                Ok(tool_response("noop-3", "list_agents", json!({}))),
             ],
         )
         .await;
@@ -297,10 +248,7 @@ async fn send_meta_op_returns_message_id() {
     step(&model, &gate, 1).await;
     step(&model, &gate, 3).await;
     step(&model, &gate, 5).await;
-    assert_eq!(
-        timeout(Duration::from_secs(2), runtime.wait(parent)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
 
     // Then: send の ToolResult は成功で決定論的な message_id "msg-1" を含む
     let observed = model.observed().await;
@@ -312,12 +260,12 @@ async fn send_meta_op_returns_message_id() {
 
     // gate 待ちで残留する子をキャンセルして終端させる
     assert_eq!(runtime.cancel(child), Ok(()));
-    let _ = timeout(Duration::from_secs(2), runtime.wait(child)).await;
+    let _ = runtime.wait(child).await;
 }
 
 #[tokio::test]
-async fn wait_reply_meta_op_returns_reply_and_transitions_waiting() {
-    // Given: 子へ質問を送り wait_reply で返信を待つ Orchestrator と、
+async fn wait_meta_op_returns_reply_and_transitions_waiting() {
+    // Given: 子へ質問を送り wait で返信を待つ Orchestrator と、
     //        注入された [agent-message を受けて kind=reply で返信する Worker スクリプト
     let gate = Arc::new(Notify::new());
     let model = Arc::new(ScriptedModel::gated([], Arc::clone(&gate)));
@@ -330,11 +278,7 @@ async fn wait_reply_meta_op_returns_reply_and_transitions_waiting() {
                     "delegate",
                     json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD" }),
                 )),
-                Ok(tool_response(
-                    "await-reply",
-                    "wait_reply",
-                    json!({ "message_id": "msg-1", "timeout_ms": 2000 }),
-                )),
+                Ok(tool_response("await-reply", "wait", json!({}))),
                 Ok(tool_response(
                     "finish",
                     "finish",
@@ -390,46 +334,26 @@ async fn wait_reply_meta_op_returns_reply_and_transitions_waiting() {
         Ok("msg-1".to_string())
     );
     gate.notify_waiters();
-    // 子の次リクエストに注入された agent-message マーカーが現れるまで待つ
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let observed = model.observed().await;
-            let child_turns = messages_for_marker(&observed, "CHILD");
-            if child_turns.len() >= 2
-                && contains_agent_message(
-                    &child_turns[1],
-                    "[agent-message id=msg-1",
-                    "question content",
-                )
-            {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("injected agent-message marker timeout");
+    wait_for_observed(&model, 4).await;
+    let observed_child = messages_for_marker(&model.observed().await, "CHILD");
+    let (received, error) = tool_result(&observed_child[1], "noop-1").unwrap();
+    assert!(!error, "{received}");
+    assert!(received.contains("question content"));
     gate.notify_waiters();
-    // 親の wait_reply が返信を受け取り、両者の次リクエストが観測されるまで待つ
+    // 親の wait が返信を受け取り、両者の次リクエストが観測されるまで待つ
     wait_for_observed(&model, 6).await;
     gate.notify_waiters();
-    assert_eq!(
-        timeout(Duration::from_secs(2), runtime.wait(parent)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
-    assert_eq!(
-        timeout(Duration::from_secs(2), runtime.wait(child)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
+    assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
 
-    // Then: wait_reply の ToolResult は返信内容と返信メタデータを運び、
+    // Then: wait の ToolResult は返信内容と返信メタデータを運び、
     //       ライフサイクルには呼び出し元の Waiting 遷移と Running 復帰が現れる
     let observed = model.observed().await;
     let parent_turns = messages_for_marker(&observed, "PARENT");
-    let (reply_json, is_error) =
-        tool_result(&parent_turns[2], "await-reply").expect("wait_reply result");
+    let (reply_json, is_error) = tool_result(&parent_turns[2], "await-reply").expect("wait result");
     assert!(!is_error);
-    let reply: serde_json::Value = serde_json::from_str(&reply_json).expect("reply JSON");
+    let result: serde_json::Value = serde_json::from_str(&reply_json).expect("reply JSON");
+    let reply = &result["messages"][0];
     assert_eq!(reply["message_id"], json!("msg-2"));
     assert_eq!(reply["sender_run_id"], json!("run-2"));
     assert_eq!(reply["recipient_run_id"], json!("run-1"));
@@ -452,95 +376,22 @@ async fn wait_reply_meta_op_returns_reply_and_transitions_waiting() {
 }
 
 #[tokio::test]
-async fn wait_reply_meta_op_times_out_with_error_result() {
-    // Given: 返信せず gate で blocked され続ける子と、50ms の wait_reply を要求する親
-    let gate = Arc::new(Notify::new());
-    let model = Arc::new(ScriptedModel::gated([], Arc::clone(&gate)));
-    model
-        .add_keyed(
-            "PARENT",
-            [
-                Ok(tool_response(
-                    "spawn-child",
-                    "delegate",
-                    json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD" }),
-                )),
-                Ok(tool_response(
-                    "ask",
-                    "send",
-                    json!({ "run_id": "run-2", "message": "question" }),
-                )),
-                Ok(tool_response(
-                    "await-reply",
-                    "wait_reply",
-                    json!({ "message_id": "msg-1", "timeout_ms": 50 }),
-                )),
-                Ok(tool_response(
-                    "finish",
-                    "finish",
-                    json!({ "result": "gave up" }),
-                )),
-            ],
-        )
-        .await;
-    model
-        .add_keyed(
-            "CHILD",
-            [
-                Ok(tool_response(
-                    "noop-1",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
-                Ok(tool_response(
-                    "noop-2",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
-                Ok(tool_response(
-                    "noop-3",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
-                Ok(tool_response(
-                    "noop-4",
-                    "wait",
-                    json!({ "run_id": "run-1" }),
-                )),
-            ],
-        )
-        .await;
-    let (runtime, _bus) = runtime_with(Arc::clone(&model));
-    let parent = runtime.delegate_background(
-        Role::Orchestrator,
-        "PARENT".to_string(),
-        RunConfig::default(),
-    );
-    let child = RunId::new(2);
-
-    // When: gate を段階的に開いて wait_reply を実行させる
-    step(&model, &gate, 1).await;
-    step(&model, &gate, 3).await;
-    step(&model, &gate, 5).await;
-    step(&model, &gate, 7).await;
-    assert_eq!(
-        timeout(Duration::from_secs(2), runtime.wait(parent)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
-
-    // Then: wait_reply の ToolResult は timeout を示す error になり、親は Done まで復帰する
-    let observed = model.observed().await;
-    let parent_turns = messages_for_marker(&observed, "PARENT");
-    let (text, is_error) = tool_result(&parent_turns[3], "await-reply").expect("wait_reply result");
-    assert!(is_error);
-    assert!(
-        text.contains("タイムアウト") && text.contains("msg-1"),
-        "timeout を示す error 本文が必要: {text}"
-    );
-
-    // gate 待ちで残留する子をキャンセルして終端させる
-    assert_eq!(runtime.cancel(child), Ok(()));
-    let _ = timeout(Duration::from_secs(2), runtime.wait(child)).await;
+async fn retired_wait_reply_is_rejected_without_waiting_or_consuming_messages() {
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response(
+            "retired",
+            "wait_reply",
+            json!({"message_id":"msg-unrecognized","timeout_ms":600000}),
+        )),
+        Ok(text_response("continued", FinishReason::Stop)),
+    ]));
+    let (runtime, _) = runtime_with(model.clone());
+    let run = runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default());
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    let requests = model.observed().await;
+    let (text, error) = tool_result(&requests[1], "retired").unwrap();
+    assert!(error, "{text}");
+    assert!(text.contains("wait_reply"), "{text}");
 }
 
 #[tokio::test]
@@ -593,10 +444,7 @@ async fn inbox_meta_op_returns_unread_once() {
     gate.notify_waiters();
     step(&model, &gate, 4).await;
     step(&model, &gate, 6).await;
-    assert_eq!(
-        timeout(Duration::from_secs(2), runtime.wait(child)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
 
     // Then: 1回目の inbox は FIFO 全件の JSON 配列、2回目は空配列になる
     let observed = model.observed().await;
@@ -620,7 +468,7 @@ async fn inbox_meta_op_returns_unread_once() {
 
     // gate 待ちで残留する親をキャンセルして終端させる
     assert_eq!(runtime.cancel(parent), Ok(()));
-    let _ = timeout(Duration::from_secs(2), runtime.wait(parent)).await;
+    let _ = runtime.wait(parent).await;
 }
 
 #[tokio::test]
@@ -719,10 +567,7 @@ async fn send_meta_op_rejects_unrelated_recipient() {
     step(&model, &gate, 6).await;
     step(&model, &gate, 8).await;
     step(&model, &gate, 10).await;
-    assert_eq!(
-        timeout(Duration::from_secs(2), runtime.wait(parent)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
 
     // Then: send / send_message / reply / steering はすべて MessageDenied/UnknownMessage の error ToolResult になる
     let observed = model.observed().await;
@@ -745,7 +590,7 @@ async fn send_meta_op_rejects_unrelated_recipient() {
 
     // gate 待ちで残留する無関係 run をキャンセルして終端させる
     assert_eq!(runtime.cancel(unrelated), Ok(()));
-    let _ = timeout(Duration::from_secs(2), runtime.wait(unrelated)).await;
+    let _ = runtime.wait(unrelated).await;
 }
 
 #[tokio::test]
@@ -843,10 +688,7 @@ async fn send_meta_op_enforces_addressing_for_all_kinds() {
     );
 
     // When: Orchestrator が全 send ツールを実行し終わるまで待つ
-    assert_eq!(
-        timeout(Duration::from_secs(2), runtime.wait(parent)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
 
     // Then: 各 kind・宛先の成否を検証
     let observed = model.observed().await;
@@ -890,7 +732,7 @@ async fn send_meta_op_enforces_addressing_for_all_kinds() {
     let _ = runtime.cancel(child1);
     let _ = runtime.cancel(child2);
     let _ = runtime.cancel(unrelated);
-    let _ = timeout(Duration::from_secs(2), runtime.wait(child1)).await;
-    let _ = timeout(Duration::from_secs(2), runtime.wait(child2)).await;
-    let _ = timeout(Duration::from_secs(2), runtime.wait(unrelated)).await;
+    let _ = runtime.wait(child1).await;
+    let _ = runtime.wait(child2).await;
+    let _ = runtime.wait(unrelated).await;
 }

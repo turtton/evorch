@@ -140,6 +140,9 @@ impl From<&config::BudgetConfig> for BudgetSettings {
 /// Durable identity-aware credit accounting, shared by child and lane spawns.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SpawnCredits {
+    /// Presented wait identities, independent of spawn-credit accounting.
+    #[serde(default)]
+    wait_events: BTreeSet<String>,
     spawned: BTreeSet<String>,
     observed: BTreeSet<String>,
     unobserved: u32,
@@ -639,6 +642,20 @@ impl BudgetCounters {
         }
         self.mark_progress();
         true
+    }
+
+    pub(crate) fn wait_event_observed(&self, id: &str) -> bool {
+        self.spawn_credits.wait_events.contains(id)
+    }
+    pub(crate) fn observed_wait_events(&self) -> &BTreeSet<String> {
+        &self.spawn_credits.wait_events
+    }
+    pub(crate) fn observe_wait_event(&mut self, id: &str) -> bool {
+        let fresh = self.spawn_credits.wait_events.insert(id.to_owned());
+        if fresh {
+            self.mark_progress();
+        }
+        fresh
     }
 
     /// Counts the first observed terminal result of a child run as progress and

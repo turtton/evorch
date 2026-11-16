@@ -50,7 +50,8 @@ fn additional_roles_have_least_privilege_capabilities() {
                     "thread_grep",
                     "thread_read",
                     "ask_user",
-                    "user_answers"
+                    "user_answers",
+                    "wait"
                 ])
                 .map(String::from)
                 .collect()
@@ -60,7 +61,7 @@ fn additional_roles_have_least_privilege_capabilities() {
 }
 
 #[test]
-fn every_role_authorizes_scoped_memory_meta_ops() {
+fn every_role_authorizes_common_meta_ops() {
     // Given: all roles, including read-only roles.
     for role in [
         Role::Orchestrator,
@@ -74,7 +75,6 @@ fn every_role_authorizes_scoped_memory_meta_ops() {
         Role::Evaluator,
     ] {
         let capabilities = role.capabilities();
-        // When / Then: self-scoped memory, question and read-only thread operations are authorized.
         for op in [
             "working_note_write",
             "working_note_read",
@@ -84,6 +84,7 @@ fn every_role_authorizes_scoped_memory_meta_ops() {
             "thread_read",
             "ask_user",
             "user_answers",
+            "wait",
         ] {
             assert_eq!(
                 capabilities.check_tool(role.name(), op),

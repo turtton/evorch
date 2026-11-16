@@ -112,6 +112,8 @@ async fn phase_only_wait_leaves_notice_but_output_bearing_wait_acknowledges_it()
     .await;
     assert!(!result.result.is_error);
     assert_eq!(result.result.content, "Done");
+    state.context.push_tool_result("phase-only", result.result);
+    result.observations.presented(&mut state);
     assert_eq!(runtime.run_mailbox(parent).unwrap().len(), 1);
     let result = crate::meta::dispatch(
         &mut state,
@@ -120,5 +122,8 @@ async fn phase_only_wait_leaves_notice_but_output_bearing_wait_acknowledges_it()
     )
     .await;
     assert!(!result.result.is_error);
+    assert_eq!(runtime.run_mailbox(parent).unwrap().len(), 1);
+    state.context.push_tool_result("with-output", result.result);
+    result.observations.presented(&mut state);
     assert!(runtime.run_mailbox(parent).unwrap().is_empty());
 }

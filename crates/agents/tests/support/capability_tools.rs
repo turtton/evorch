@@ -3,9 +3,7 @@ pub const ORCHESTRATOR_TOOLS: &[&str] = &[
     "send_message",
     "skill_load",
     "send",
-    "wait_reply",
     "inbox",
-    "wait",
     "run_output",
     "cancel",
     "list_agents",
@@ -26,6 +24,7 @@ pub const ORCHESTRATOR_TOOLS: &[&str] = &[
     "thread_read",
     "ask_user",
     "user_answers",
+    "wait",
 ];
 
 pub const EXPLORER_TOOLS: &[&str] = &[
@@ -40,6 +39,7 @@ pub const EXPLORER_TOOLS: &[&str] = &[
     "thread_read",
     "ask_user",
     "user_answers",
+    "wait",
 ];
 
 pub const WORKER_TOOLS: &[&str] = &[
@@ -52,7 +52,6 @@ pub const WORKER_TOOLS: &[&str] = &[
     "skill_load",
     "git_diff",
     "send",
-    "wait_reply",
     "inbox",
     "handoff_to_lane",
     "run_js",
@@ -64,6 +63,7 @@ pub const WORKER_TOOLS: &[&str] = &[
     "thread_read",
     "ask_user",
     "user_answers",
+    "wait",
 ];
 
 pub const REVIEWER_TOOLS: &[&str] = &[
@@ -80,6 +80,7 @@ pub const REVIEWER_TOOLS: &[&str] = &[
     "thread_read",
     "ask_user",
     "user_answers",
+    "wait",
 ];
 
 pub const LIBRARIAN_TOOLS: &[&str] = &[
@@ -115,4 +116,5 @@ pub const LIBRARIAN_TOOLS: &[&str] = &[
     "thread_read",
     "ask_user",
     "user_answers",
+    "wait",
 ];

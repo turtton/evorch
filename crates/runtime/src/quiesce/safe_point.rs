@@ -6,10 +6,13 @@ impl LoopState {
     /// No hook exists inside a parallel wave: only the complete batch and all of
     /// its results can reach this boundary. Stop/Cancel remains a separate path.
     pub(crate) async fn quiesce_safe_point(&mut self, boundary: CheckpointBoundary) -> bool {
+        if !self.has_open_tool_batch() {
+            self.shell_result_batch_open = false;
+        }
         let Some(runtime) = self.runtime() else {
             return true;
         };
-        if runtime.shared.quiesce.running() {
+        if runtime.shared.quiesce.running() && self.acknowledge_restart_shell_results().is_ok() {
             return true;
         }
         let mut changes = runtime.shared.quiesce.subscribe();
@@ -20,7 +23,13 @@ impl LoopState {
                 self.finish_interrupted(kind);
                 return false;
             }
-            if runtime.shared.quiesce.resume_permitted(parked_generation) {
+            if runtime.shared.quiesce.resume_permitted(parked_generation)
+                && self.acknowledge_restart_shell_results().is_ok()
+            {
+                // Cancellation reopens dispatch, not presentation. Finish the
+                // pending ACK before post-tools notices can see this job again.
+                // A continued failure parks on changes below, without a spin or
+                // turning an ACK failure into a storage-health failure.
                 return true;
             }
             {
@@ -45,8 +54,38 @@ impl LoopState {
                         .acknowledged(self.task.run_id, &self.task.publication.incarnation())
                 {
                     let incarnation = self.task.publication.incarnation();
+                    // An open batch must finish through its original ToolResults.
+                    // Return to observation without releasing quiesce or dispatch.
+                    if self.has_open_tool_batch()
+                        && (self.has_unstaged_shell_results() || self.shell_result_batch_open)
+                    {
+                        let kind = if self
+                            .shared
+                            .executor
+                            .has_running_shell_jobs(&self.task.run_id.to_string())
+                        {
+                            RestartBlockerKind::ShellRunning
+                        } else {
+                            RestartBlockerKind::UnfinishedToolBatch
+                        };
+                        runtime
+                            .shared
+                            .quiesce
+                            .block(self.task.run_id, &incarnation, kind);
+                        return true;
+                    }
                     if let Err(error) = self.stage_restart_shell_results() {
                         runtime.shared.quiesce.fail(error);
+                    } else if self.acknowledge_restart_shell_results().is_err() {
+                        // Presentation is irreversible, but a failed tool ACK is
+                        // not a storage-health failure. Keep the identity and
+                        // retry on a shell/coordinator change without re-inserting
+                        // the body. Identical blockers do not notify/spin.
+                        runtime.shared.quiesce.block(
+                            self.task.run_id,
+                            &incarnation,
+                            RestartBlockerKind::ShellResultUnobserved,
+                        );
                     } else if let Some(kind) = self.restart_safety_blocker() {
                         runtime
                             .shared
@@ -58,14 +97,11 @@ impl LoopState {
                             .quiesce
                             .clear_blocker(self.task.run_id, &incarnation);
                         match self.capture_safe_point(boundary) {
-                            Ok(()) => match self.acknowledge_restart_shell_results() {
-                                Ok(()) => runtime.shared.quiesce.acknowledge(
-                                    self.task.run_id,
-                                    &self.task.publication.incarnation(),
-                                    generation,
-                                ),
-                                Err(error) => runtime.shared.quiesce.fail(error),
-                            },
+                            Ok(()) => runtime.shared.quiesce.acknowledge(
+                                self.task.run_id,
+                                &self.task.publication.incarnation(),
+                                generation,
+                            ),
                             Err(error) => runtime.shared.quiesce.fail(error),
                         }
                     }
@@ -85,7 +121,31 @@ impl LoopState {
         }
     }
 
+    pub(crate) fn has_open_tool_batch(&self) -> bool {
+        let mut pending = std::collections::HashSet::new();
+        for block in self
+            .context
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+        {
+            match block {
+                providers::ContentBlock::ToolUse { id, .. } => {
+                    pending.insert(id.as_str());
+                }
+                providers::ContentBlock::ToolResult { tool_call_id, .. } => {
+                    pending.remove(tool_call_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        !pending.is_empty()
+    }
+
     fn stage_restart_shell_results(&mut self) -> Result<(), String> {
+        if self.has_open_tool_batch() {
+            return Ok(());
+        }
         for job in self
             .shared
             .executor
@@ -96,9 +156,7 @@ impl LoopState {
             }
             if job.state != tools::ShellJobState::Terminal
                 || job.observed
-                || self
-                    .shell_checkpoint_results
-                    .contains_key(job.identity.id())
+                || self.presented_shell_results.contains(job.identity.id())
             {
                 continue;
             }
@@ -119,21 +177,41 @@ impl LoopState {
                 job.identity.id(),
                 outcome.result.content
             ));
-            self.shell_checkpoint_results
+            self.presented_shell_results
+                .insert(job.identity.id().into());
+            self.pending_shell_acks
                 .insert(job.identity.id().into(), job.identity);
             self.publish_message_count();
+            // Attempt immediately after presentation. The safe-point caller
+            // classifies a remaining ACK failure as retryable, not Failed.
+            let _ = self.acknowledge_restart_shell_results();
         }
         Ok(())
     }
 
-    fn acknowledge_restart_shell_results(&mut self) -> Result<(), String> {
-        for identity in self.shell_checkpoint_results.values() {
-            self.shared
-                .executor
-                .acknowledge_shell_job_result(identity)
-                .map_err(|error| error.to_string())?;
+    pub(crate) fn acknowledge_restart_shell_results(&mut self) -> Result<(), String> {
+        if self.pending_shell_acks.is_empty() {
+            return Ok(());
         }
-        self.shell_checkpoint_results.clear();
+        let snapshots = self
+            .shared
+            .executor
+            .shell_job_snapshots(&self.task.run_id.to_string());
+        while let Some(entry) = self.pending_shell_acks.first_entry() {
+            let identity = entry.get();
+            if !snapshots
+                .iter()
+                .any(|job| job.identity == *identity && job.observed)
+            {
+                // Missing, never-ACKed jobs must still fail; only positive ACK
+                // evidence removes an identity from the retry queue.
+                self.shared
+                    .executor
+                    .acknowledge_shell_job_result(identity)
+                    .map_err(|error| error.to_string())?;
+            }
+            entry.remove();
+        }
         Ok(())
     }
 
@@ -143,13 +221,11 @@ impl LoopState {
         if jobs.is_empty() {
             return self.shared.executor.has_unobserved_shell_jobs(&run);
         }
-        jobs.iter().any(|job| {
-            !job.teardown_confirmed
-                || (!job.observed
-                    && !self
-                        .shell_checkpoint_results
-                        .contains_key(job.identity.id()))
-        })
+        // A presented identity suppresses duplicate text, not the safety
+        // proof. Until its ACK succeeds, restart persistence must also refuse
+        // to save a context that disagrees with external-effect observation.
+        jobs.iter()
+            .any(|job| !job.teardown_confirmed || !job.observed)
     }
 
     fn restart_safety_blocker(&self) -> Option<RestartBlockerKind> {

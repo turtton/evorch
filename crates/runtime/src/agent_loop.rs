@@ -29,6 +29,9 @@ mod review_skills_tests;
 mod revision_tests;
 mod run_js_accounting;
 mod run_js_host;
+#[cfg(test)]
+#[path = "quiesce/shell_wait_tests.rs"]
+mod shell_wait_tests;
 mod stop_context;
 mod team;
 mod tool_calls;
@@ -213,9 +216,11 @@ pub(crate) struct LoopState {
     /// Reminders in a row about unobserved shell jobs, restarted when one of the jobs
     /// reminded of was dealt with.
     unobserved_job_reminders: u32,
-    /// Appended outcomes awaiting canonical checkpoint acknowledgement.
-    pub(crate) shell_checkpoint_results:
-        std::collections::BTreeMap<String, tools::ShellJobIdentity>,
+    pub(crate) shell_result_batch_open: bool,
+    /// Presented results remain deduplicated after successful ACK and job eviction.
+    pub(crate) presented_shell_results: std::collections::BTreeSet<String>,
+    /// Only identities whose canonical ACK has not succeeded are retried.
+    pub(crate) pending_shell_acks: std::collections::BTreeMap<String, tools::ShellJobIdentity>,
     /// All reminders about unobserved shell jobs this run.
     total_job_reminders: u32,
     /// The jobs the last reminder named.
@@ -309,7 +314,9 @@ impl LoopState {
             identical_calls: identical_calls::IdenticalCalls::default(),
             run_js_unconfirmed: Arc::default(),
             unobserved_job_reminders: 0,
-            shell_checkpoint_results: Default::default(),
+            shell_result_batch_open: false,
+            presented_shell_results: Default::default(),
+            pending_shell_acks: Default::default(),
             total_job_reminders: 0,
             reminded_jobs: std::collections::BTreeSet::new(),
             reported_questions: std::collections::HashSet::new(),
@@ -1025,6 +1032,9 @@ impl LoopState {
     }
 
     async fn execute(&mut self) {
+        if let Some(runtime) = self.runtime() {
+            let _ = runtime.user_answers(self.task.run_id);
+        }
         if !self.resume_recovery_waits().await {
             return;
         }

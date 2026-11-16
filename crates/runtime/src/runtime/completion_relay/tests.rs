@@ -397,7 +397,7 @@ async fn observing_old_snapshot_keeps_explicit_messages_and_same_id_new_completi
         )
         .unwrap();
     runtime.observe_completion(&old);
-    let messages = runtime.take_inbox(parent).unwrap();
+    let messages = runtime.run_mailbox(parent).unwrap().recovery_messages();
     assert_eq!(
         messages.len(),
         2,
@@ -406,17 +406,15 @@ async fn observing_old_snapshot_keeps_explicit_messages_and_same_id_new_completi
     assert!(
         messages
             .iter()
-            .all(|message| message.content == "completed without final output")
+            .all(|message| message.message.content == "completed without final output")
     );
     // Re-observing a stale snapshot cannot acknowledge the new receipt.
-    runtime
-        .run_mailbox(parent)
-        .unwrap()
-        .try_push_completion(messages[0].clone(), new.clone())
-        .unwrap();
     runtime.observe_completion(&old);
-    assert_eq!(runtime.run_mailbox(parent).unwrap().len(), 1);
+    assert_eq!(runtime.run_mailbox(parent).unwrap().len(), 2);
     runtime.observe_completion(&new);
+    let explicit = runtime.take_inbox(parent).unwrap();
+    assert_eq!(explicit.len(), 1);
+    assert_eq!(explicit[0].kind, AgentMessageKind::Send);
     assert!(runtime.run_mailbox(parent).unwrap().is_empty());
 }
 

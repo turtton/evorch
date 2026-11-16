@@ -108,6 +108,7 @@ pub(crate) async fn inspect(
 ) -> DispatchResult {
     match run(state, runtime, input).await {
         Ok(result) => DispatchResult {
+            observations: Default::default(),
             result,
             terminal: Terminal::Continue,
         },

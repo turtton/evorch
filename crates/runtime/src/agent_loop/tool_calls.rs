@@ -944,6 +944,7 @@ impl LoopState {
                             }) {
                             Ok(()) => meta::spawn_delegate(self, &runtime, call.input),
                             Err(error) => Err(meta::DispatchResult {
+                                observations: Default::default(),
                                 result: ToolResult::error(error),
                                 terminal: meta::Terminal::Continue,
                             }),
@@ -977,6 +978,7 @@ impl LoopState {
                         // Retire only this completed call, not other restored waits.
                         self.recovery_waits.retain(|wait| wait.tool_call_id != id);
                         self.context.push_tool_result(id, dispatch.result);
+                        dispatch.observations.presented(self);
                         self.publish_message_count();
                     }
                     self.delegate_wait_calls.clear();
@@ -1215,6 +1217,7 @@ impl LoopState {
                         // Retire only this completed call, not other restored waits.
                         self.recovery_waits.retain(|wait| wait.tool_call_id != id);
                         self.context.push_tool_result(id, dispatch.result);
+                        dispatch.observations.presented(self);
                         self.publish_message_count();
                         match dispatch.terminal {
                             meta::Terminal::Continue => continue,

@@ -120,6 +120,15 @@ async fn recovery_rejects_store_attached_after_a_message_was_issued() {
 
 #[tokio::test]
 async fn startup_fences_expired_message_ids_before_sends_and_delayed_components() {
+    startup_message_ids(false).await;
+}
+
+#[tokio::test]
+async fn startup_restores_consumed_message_correlation_without_reusing_ids() {
+    startup_message_ids(true).await;
+}
+
+async fn startup_message_ids(retain_correlations: bool) {
     let f = Fixture::new(0);
     let root = f.start();
     let child = f
@@ -135,7 +144,7 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
         lane: None,
         descriptor: None,
     };
-    let mut expired = Vec::new();
+    let mut issued = Vec::new();
     for _ in 0..2 {
         let id = f
             .runtime
@@ -143,33 +152,52 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
                 root,
                 child,
                 event_bus::AgentMessageKind::Send,
-                "expired request",
+                "consumed request",
                 None,
             )
             .unwrap();
         assert_eq!(f.runtime.take_inbox(child).unwrap().len(), 1);
-        // The production recovered-timeout branch removes the sent receipt.
-        assert!(matches!(
-            f.runtime.expire_recovery_reply_wait(&id),
-            crate::RuntimeError::ReplyTimeout { .. }
-        ));
-        expired.push(id);
+        // Consumption does not retire correlation records; IDs still advance.
+        assert_eq!(f.runtime.sent_message_recipient(root, &id).unwrap(), child);
+        issued.push(id);
     }
     f.runtime.request_quiesce();
     f.runtime.wait_quiesced().await.unwrap();
     let fence = f.runtime.fence_dispatch_restart().await.unwrap();
     f.runtime.drain_dispatch_tails(&fence).await.unwrap();
-    let records = f
+    let mut records = f
         .runtime
         .capture_recovery_records(
             &f.runtime.fence_dispatch_restart().await.unwrap(),
             &BTreeMap::from([(root, recipe.clone()), (other, recipe)]),
         )
         .unwrap();
-    assert!(records.iter().all(|r| r.deliveries.is_empty()));
+    let deliveries = records.iter().flat_map(|record| &record.deliveries);
+    let mut retained = Vec::new();
+    for delivery in deliveries {
+        assert_eq!(delivery.sender, root);
+        assert_eq!(delivery.recipient, child);
+        assert_eq!(delivery.state, DurableDeliveryState::Consumed);
+        assert_eq!(
+            delivery.consumed_receipt.as_ref(),
+            Some(&delivery.message_id)
+        );
+        assert!(delivery.message.is_none());
+        retained.push(delivery.message_id.clone());
+    }
+    retained.sort();
+    assert_eq!(retained, issued);
     assert!(records.iter().all(|r| r.next_message_id > 2));
+    if !retain_correlations {
+        // Exercise the high-watermark independently of delivery IDs, as in
+        // snapshots where the old reply timeout had already retired receipts.
+        // Format compatibility itself is covered by old-writer byte fixtures.
+        for record in &mut records {
+            record.deliveries.clear();
+        }
+    }
     f.runtime
-        .save_recovery_graph("expired-ids", &records)
+        .save_recovery_graph("issued-ids", &records)
         .unwrap();
 
     let runtime = new_process(&f);
@@ -187,7 +215,7 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
             None,
         )
         .unwrap();
-    assert!(!expired.contains(&first));
+    assert!(!issued.contains(&first));
     let plan = runtime.recovery_plan().unwrap();
     assert_eq!(plan.components.len(), 2);
     let ownership = f._dir.path().join("ownership");
@@ -241,7 +269,7 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
                 None,
             )
             .unwrap();
-        assert!(!expired.contains(&between));
+        assert!(!issued.contains(&between));
     }
     let current = runtime
         .send_agent_message(
@@ -252,21 +280,31 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
             None,
         )
         .unwrap();
-    assert!(!expired.contains(&current));
-    assert!(
-        runtime
-            .send_agent_message(
-                child,
-                root,
-                event_bus::AgentMessageKind::Reply,
-                "late old reply",
-                Some(expired[1].clone()),
-            )
-            .is_err()
-    );
-    runtime.check_reply_wait(root, &current).unwrap();
+    assert!(!issued.contains(&current));
+    for body in ["late old reply", "second old reply"] {
+        let reply = runtime.send_agent_message(
+            child,
+            root,
+            event_bus::AgentMessageKind::Reply,
+            body,
+            Some(issued[1].clone()),
+        );
+        if retain_correlations {
+            assert!(!issued.contains(&reply.unwrap()));
+            assert_eq!(
+                runtime.sent_message_recipient(root, &issued[1]).unwrap(),
+                child
+            );
+        } else {
+            assert!(reply.is_err());
+        }
+    }
+    runtime.sent_message_recipient(root, &current).unwrap();
     for run in [root, other, fresh] {
         runtime.cancel(run).unwrap();
+    }
+    for run in [root, other, fresh] {
+        runtime.wait(run).await.unwrap();
     }
 }
 
@@ -716,16 +754,18 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
         "recovery must reserve all delivery IDs"
     );
     assert_eq!(
-        runtime.reply_wait_target(root, &original_message).unwrap(),
+        runtime
+            .sent_message_recipient(root, &original_message)
+            .unwrap(),
         child
     );
     assert_eq!(
-        runtime.reply_wait_target(root, &new_message).unwrap(),
+        runtime.sent_message_recipient(root, &new_message).unwrap(),
         child
     );
     assert!(
         runtime
-            .check_reply_wait(child, &question_delivery.message_id)
+            .sent_message_recipient(child, &question_delivery.message_id)
             .is_err()
     );
     runtime

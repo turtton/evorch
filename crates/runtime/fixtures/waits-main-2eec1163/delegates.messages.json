@@ -1,0 +1,1 @@
+[{"content":[{"text":"delegates","type":"text"}],"role":"user"},{"content":[{"id":"delegate-a","input":{"prompt":"fixture child a","target":{"role":"worker"}},"name":"delegate","type":"tool_use"},{"id":"delegate-b","input":{"prompt":"fixture child b","target":{"role":"worker"}},"name":"delegate","type":"tool_use"}],"role":"assistant"}]

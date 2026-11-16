@@ -15,6 +15,21 @@ macro_rules! field {
     };
 }
 impl DeliveryClaim {
+    pub(crate) fn notification_ids(&self) -> Vec<String> {
+        match self {
+            Self::Lane(c) => c
+                .notifications
+                .iter()
+                .map(|n| n.notification_id.clone())
+                .collect(),
+            Self::PullRequest(c) => c
+                .notifications
+                .iter()
+                .map(|n| n.notification_id.clone())
+                .collect(),
+        }
+    }
+
     pub fn lane(&self) -> Option<&LaneDeliveryClaim> {
         if let Self::Lane(c) = self {
             Some(c)

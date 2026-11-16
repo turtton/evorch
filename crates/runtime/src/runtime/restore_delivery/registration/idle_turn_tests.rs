@@ -168,7 +168,13 @@ async fn history_only_restore_reports_saved_turn_once_from_wait_or_run_output() 
     for first_tool in ["wait", "run_output"] {
         let mut fixture = Fixture::restore(None).await;
         let input = json!({"run_id": fixture.child.to_string()});
-        let dispatch = crate::meta::dispatch(&mut fixture.parent, first_tool, input.clone()).await;
+        let mut dispatch =
+            crate::meta::dispatch(&mut fixture.parent, first_tool, input.clone()).await;
+        fixture
+            .parent
+            .context
+            .push_tool_result(first_tool, dispatch.result.clone());
+        std::mem::take(&mut dispatch.observations).presented(&mut fixture.parent);
         let first = value(dispatch);
         let turn = if first_tool == "wait" {
             assert_eq!(
