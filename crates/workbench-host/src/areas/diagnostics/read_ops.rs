@@ -375,9 +375,9 @@ pub type SlugOf = std::sync::Arc<dyn Fn(&std::path::Path) -> String + Send + Syn
 /// The slug the runtime files lessons and candidates under.
 pub fn runtime_slug(runtime: runtime::AgentRuntime) -> SlugOf {
     std::sync::Arc::new(move |root| {
-        runtime
-            .project_slug(root)
-            .unwrap_or_else(|| runtime::repository::derive_repo_slug(root))
+        runtime.project_slug(root).unwrap_or_else(|| {
+            runtime::repository::derive_repo_slug_owned(root, runtime.spawn_ledger())
+        })
     })
 }
 

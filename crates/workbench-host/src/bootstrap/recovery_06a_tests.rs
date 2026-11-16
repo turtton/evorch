@@ -228,3 +228,108 @@ async fn stale_restart_fence_cannot_capture_after_reopen_and_reseal() {
         "capture must exclude reopen, even before graph writes"
     );
 }
+
+struct GitToolModel;
+#[async_trait::async_trait]
+impl AgentModel for GitToolModel {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "owned-git-test".into()
+    }
+    async fn complete(
+        &self,
+        _: &AgentInvocationContext,
+        _: Role,
+        messages: &[providers::Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, RuntimeError> {
+        let returned = messages.iter().flat_map(|m| &m.content).any(|c| matches!(c, providers::ContentBlock::ToolResult { tool_call_id, .. } if tool_call_id == "git"));
+        Ok(providers::ChatResponse {
+            usage_reported: true,
+            message: providers::Message {
+                role: providers::Role::Assistant,
+                content: vec![if returned {
+                    providers::ContentBlock::Text {
+                        text: "done".into(),
+                    }
+                } else {
+                    providers::ContentBlock::ToolUse {
+                        id: "git".into(),
+                        name: "git_diff".into(),
+                        input: serde_json::json!({}),
+                    }
+                }],
+            },
+            usage: providers::Usage::default(),
+            finish_reason: if returned {
+                providers::FinishReason::Stop
+            } else {
+                providers::FinishReason::ToolUse
+            },
+        })
+    }
+}
+
+#[tokio::test]
+async fn core_ledger_owns_slug_reads_and_per_run_tools_and_fences_both() {
+    for fenced in [false, true] {
+        let dir = test_socket_dir::SplitDir::new();
+        let root = dir.path().canonicalize().unwrap();
+        let mut boot = BootstrappedHost::open_with_test_seams(
+            BootstrapOptions {
+                config_dir: root.clone(),
+                project_root: root.clone(),
+                ownership_root: dir.sockets().into(),
+            },
+            TestSeams {
+                model: Arc::new(GitToolModel),
+                sandbox: Arc::new(Direct),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(boot.spawn_ledger.child_stats().registered, 0);
+        if fenced {
+            boot.spawn_ledger.close_fence();
+        }
+        assert!(boot.runtime.project_slug(&root).is_some());
+        let after_slug = boot.spawn_ledger.child_stats().registered;
+        assert_eq!(after_slug, u64::from(!fenced));
+        let run = boot.runtime.delegate_background(
+            Role::Worker,
+            "read diff".into(),
+            RunConfig::default(),
+        );
+        boot.runtime.wait(run).await.unwrap();
+        let stats = boot.spawn_ledger.child_stats();
+        assert_eq!(
+            stats.registered,
+            after_slug + u64::from(!fenced),
+            "per-run executor must share the host fence"
+        );
+        assert_eq!(stats.registered, stats.reaped);
+        assert_eq!(stats.unconfirmed, 0);
+        boot.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_reports_the_final_bridge_drain_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_owners, mut boot) = open(dir.path()).await;
+    boot.bridge.as_mut().unwrap().flush().unwrap();
+    let sql = rusqlite::Connection::open(&boot.composition.storage.db_path).unwrap();
+    sql.execute_batch("CREATE TRIGGER reject_tail BEFORE INSERT ON events BEGIN SELECT RAISE(FAIL, 'reject tail'); END;").unwrap();
+    boot.runtime
+        .event_bus()
+        .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+            source: "test".into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
+            code: "final-drain".into(),
+            detail: "accepted tail event".into(),
+            run_id: None,
+            thread_id: None,
+            call_id: None,
+        }));
+    assert!(boot.shutdown().await.is_err());
+    assert!(boot.bridge.is_none());
+}

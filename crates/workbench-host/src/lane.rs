@@ -49,9 +49,9 @@ pub fn memory_boundary(
 ) -> Option<runtime::memory::MemoryBoundary> {
     let config = config?;
     let root = root?;
-    let project = runtime
-        .project_slug(root)
-        .unwrap_or_else(|| runtime::repository::derive_repo_slug(root));
+    let project = runtime.project_slug(root).unwrap_or_else(|| {
+        runtime::repository::derive_repo_slug_owned(root, runtime.spawn_ledger())
+    });
     runtime::memory::MemoryBoundary::capture(config, &project)
         .inspect_err(|error| tracing::warn!(%error, %project, "memory read failed"))
         .ok()

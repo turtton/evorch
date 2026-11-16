@@ -140,6 +140,14 @@ impl BootWatchdog {
         deadline: BootDeadline,
         now: Arc<dyn Fn() -> io::Result<u64> + Send + Sync>,
     ) -> io::Result<Self> {
+        Self::start_prepared(instance, deadline, now, None)
+    }
+    fn start_prepared(
+        instance: Arc<Instance>,
+        deadline: BootDeadline,
+        now: Arc<dyn Fn() -> io::Result<u64> + Send + Sync>,
+        previous_mask: Option<libc::sigset_t>,
+    ) -> io::Result<Self> {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 ready: false,
@@ -151,10 +159,27 @@ impl BootWatchdog {
         let child = shared.clone();
         let monitor_clock = now.clone();
         let lifetime = instance.clone();
+        let (started, setup) = std::sync::mpsc::sync_channel(0);
         let thread = std::thread::Builder::new()
             .name("restart-boot-deadline".into())
             .spawn(move || {
                 let _lifetime = lifetime;
+                if let Some(previous_mask) = previous_mask {
+                    let error = unsafe {
+                        libc::pthread_sigmask(
+                            libc::SIG_SETMASK,
+                            &previous_mask,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    if error != 0 {
+                        let _ = started.send(Err(io::Error::from_raw_os_error(error)));
+                        return;
+                    }
+                }
+                if started.send(Ok(())).is_err() {
+                    unsafe { libc::_exit(BootFailure::BeforeAdopt.exit_code()) }
+                }
                 let mut state = child
                     .state
                     .lock()
@@ -181,6 +206,15 @@ impl BootWatchdog {
                         .0;
                 }
             })?;
+        if let Err(error) = setup
+            .recv()
+            .unwrap_or_else(|_| Err(io::Error::other("boot monitor stopped before signal setup")))
+        {
+            thread
+                .join()
+                .map_err(|_| io::Error::other("boot monitor signal setup panicked"))?;
+            return Err(error);
+        }
         Ok(Self {
             shared,
             thread: Some(thread),

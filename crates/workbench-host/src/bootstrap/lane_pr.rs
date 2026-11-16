@@ -7,6 +7,7 @@
 //! Transitional only: P11 (PR20) removes ownership and replaces this partition
 //! with a single core-side service owner; do not keep it as a second core path.
 use super::{BootstrapError, services::BackgroundServices};
+use runtime::pull_requests::source::TokioProcessRunner;
 use runtime::{AgentRuntime, ownership::OwnerHost, pull_requests::*};
 use std::sync::Arc;
 
@@ -19,6 +20,17 @@ impl Default for PullRequestAdapters {
         Self {
             source: Arc::new(GhSource::new()),
             logs: Arc::new(GhLogSource::new()),
+        }
+    }
+}
+
+impl PullRequestAdapters {
+    /// Production core readers share one runner and the process-local spawn fence.
+    pub fn owned(ledger: sandbox::SpawnLedger) -> Self {
+        let runner = Arc::new(TokioProcessRunner::with_ledger(ledger));
+        Self {
+            source: Arc::new(GhSource::with_runner(runner.clone())),
+            logs: Arc::new(GhLogSource::with_runner(runner)),
         }
     }
 }

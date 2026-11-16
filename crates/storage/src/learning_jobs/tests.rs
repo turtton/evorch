@@ -1,5 +1,6 @@
 use super::*;
 mod attempts;
+mod cold_scan;
 use crate::{Database, Storage, StorageConfig};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, SystemTime};

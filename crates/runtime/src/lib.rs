@@ -135,6 +135,7 @@ pub use runtime::{
     RecoveryCleanupState, RecoveryModels, RunWait, SandboxFactory, WeakAgentRuntime,
     WorkspaceMounts, production_executor, production_executor_with_config,
     production_executor_with_host_tools, production_executor_with_prepared_sandbox,
+    production_executor_with_prepared_sandbox_and_ledger,
 };
 pub use runtime::{RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession};
 pub use skill::{
