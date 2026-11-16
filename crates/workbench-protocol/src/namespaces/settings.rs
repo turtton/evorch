@@ -205,8 +205,17 @@ pub struct SettingsSnapshot {
     /// Saved in the file now.
     pub revision: SettingsRevision,
     /// Applied to the models the runs use. Differs from `revision` after a
-    /// save until `reload_models` succeeded (or the core restarted).
-    pub applied_revision: SettingsRevision,
+    /// save until `reload_models` succeeded (or the core restarted). `None`
+    /// when it is not known: a reload that failed may have replaced some of
+    /// the models, so no file is known to be what the runs use (the reason is
+    /// `apply_failure`). Saving a file whose hash equals an older one does not
+    /// make it applied; only a reload that succeeds does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_revision: Option<SettingsRevision>,
+    /// Why the last reload failed, while `applied_revision` is unknown. A
+    /// bounded, secret-free sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply_failure: Option<String>,
     /// The text of `config.toml`. Empty when the file does not exist.
     pub document: String,
     pub providers: Vec<ProviderView>,
@@ -215,9 +224,10 @@ pub struct SettingsSnapshot {
 }
 
 impl SettingsSnapshot {
-    /// Whether a save is waiting for `reload_models`.
+    /// Whether the saved file is not known to be what the runs use: a save is
+    /// waiting for `reload_models`, or the last reload failed.
     pub fn pending_apply(&self) -> bool {
-        self.revision != self.applied_revision
+        self.applied_revision.as_ref() != Some(&self.revision)
     }
 }
 
@@ -583,7 +593,9 @@ pub enum SettingsEvent {
     /// The saved or the applied revision changed; query the snapshot.
     SettingsSnapshotChanged {
         revision: SettingsRevision,
-        applied_revision: SettingsRevision,
+        /// `None`: not known after a failed reload; see the snapshot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        applied_revision: Option<SettingsRevision>,
     },
     /// An operation ended; also readable with `get_operation`.
     SettingsOperationCompleted { operation: SettingsOperationView },

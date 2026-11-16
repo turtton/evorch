@@ -108,7 +108,7 @@ impl ConfigStore {
 
     /// What a client reads now. Never fails: a file that does not read or load
     /// is a `problem` of the snapshot.
-    pub(super) fn snapshot(&self, applied: &SettingsRevision) -> SettingsSnapshot {
+    pub(super) fn snapshot(&self, applied: Option<&SettingsRevision>) -> SettingsSnapshot {
         let (bytes, mut problem) = match std::fs::read(self.path()) {
             Ok(bytes) => (bytes, None),
             Err(error) if error.kind() == ErrorKind::NotFound => (Vec::new(), None),
@@ -133,7 +133,8 @@ impl ConfigStore {
         }
         SettingsSnapshot {
             revision,
-            applied_revision: applied.clone(),
+            applied_revision: applied.cloned(),
+            apply_failure: None,
             document,
             providers,
             problem,

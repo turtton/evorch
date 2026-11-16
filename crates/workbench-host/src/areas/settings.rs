@@ -161,7 +161,7 @@ impl SettingsArea {
     pub fn with_parts(parts: SettingsParts) -> Self {
         let store = Arc::new(ConfigStore::new(parts.config_dir, parts.startup));
         let applied = store.revision().unwrap_or_else(|_| revision_of(&[]));
-        let snapshot = store.snapshot(&applied);
+        let snapshot = store.snapshot(Some(&applied));
         Self {
             inner: Some(Arc::new(Inner {
                 store,
@@ -411,30 +411,47 @@ impl Inner {
             .await?
             .map_err(Failure::from)?;
         let reload = self.reload.clone();
-        Self::blocking(move || reload())
-            .await?
-            .map_err(|message| Failure {
+        let composed = match Self::blocking(move || reload()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(Failure {
                 code: ErrorCode::Internal,
                 message: sanitize(&message),
-            })?;
-        let announce = {
-            let mut state = lock(&self.state);
-            let changed = state.snapshot.applied_revision != revision;
-            state.snapshot.applied_revision = revision.clone();
-            changed.then(|| state.snapshot.revision.clone())
+            }),
+            Err(failure) => Err(failure),
         };
-        // Announced from the state itself: a re-read finding the applied
-        // revision already moved would see no change to tell anybody about.
-        if let Some(saved) = announce {
-            self.publish(SettingsEvent::SettingsSnapshotChanged {
-                revision: saved,
-                applied_revision: revision.clone(),
-            });
+        if let Err(failure) = composed {
+            // The hook may have replaced some of the models before it failed
+            // (the startup model, then a project that did not load), so no file
+            // is known to be what the runs use. It stays unknown, whatever is
+            // saved next, until a reload succeeds.
+            self.set_applied(None, Some(failure.message.clone()));
+            return Err(failure);
         }
+        self.set_applied(Some(revision.clone()), None);
         Ok(Done {
             revision: Some(revision),
             message: None,
         })
+    }
+
+    /// What the runs use is `applied` (`None`: not known, for `failure`);
+    /// announced from the state itself when it changed, so a re-read finding
+    /// it already moved would see no change to tell anybody about.
+    fn set_applied(&self, applied: Option<SettingsRevision>, failure: Option<String>) {
+        let announce = {
+            let mut state = lock(&self.state);
+            let changed = state.snapshot.applied_revision != applied
+                || state.snapshot.apply_failure != failure;
+            state.snapshot.applied_revision.clone_from(&applied);
+            state.snapshot.apply_failure = failure;
+            changed.then(|| state.snapshot.revision.clone())
+        };
+        if let Some(saved) = announce {
+            self.publish(SettingsEvent::SettingsSnapshotChanged {
+                revision: saved,
+                applied_revision: applied,
+            });
+        }
     }
 
     /// Read the file again into the snapshot and announce a change. Several
@@ -449,7 +466,7 @@ impl Inner {
             (state.reads_started, state.snapshot.applied_revision.clone())
         };
         let store = self.store.clone();
-        let mut fresh = Self::blocking(move || store.snapshot(&applied)).await?;
+        let mut fresh = Self::blocking(move || store.snapshot(applied.as_ref())).await?;
         let announce = {
             let mut state = lock(&self.state);
             if ticket < state.reads_published {
@@ -459,6 +476,9 @@ impl Inner {
             fresh
                 .applied_revision
                 .clone_from(&state.snapshot.applied_revision);
+            fresh
+                .apply_failure
+                .clone_from(&state.snapshot.apply_failure);
             let announce = (state.snapshot.revision != fresh.revision
                 || state.snapshot.applied_revision != fresh.applied_revision)
                 .then(|| (fresh.revision.clone(), fresh.applied_revision.clone()));

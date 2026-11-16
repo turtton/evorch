@@ -41,8 +41,8 @@ accepted at once and settle through `settings_operation_completed` /
 | R1: a login wait holds no restart permit; a planned restart or shutdown ends it as `Cancelled(Restart \| Shutdown)`; the result is written only after entering the gate again | `areas/auth.rs`, `areas/auth/login.rs` | `workbench-host/tests/auth_login.rs` (a restart requested during the wait seals without the login, and the login ends settled) |
 | A login's preparation (reading the profile, binding the callback port) runs in the tracked operation task, the handler only looks at memory, and the accepted permit is held until the login waits for a person | `areas/auth.rs`, `areas/auth/login.rs` | `auth_login.rs` (a held preparation does not block the handler and keeps the profile; a cancel during it ends the login) |
 | Whatever way a login ends, its callback listener and flow are released before the outcome is written | `areas/auth/provider_logins.rs` (`LoginFlow::release`) | `auth_login.rs`, `provider_logins.rs` unit tests (real listeners are bound again after the release) |
-| Cursor signs in with a dashboard API key through the provider's own exchange; the key is never stored | `areas/auth.rs` (`LoginStarter::exchange_api_key`) | `auth_login.rs` (`a_cursor_api_key_is_exchanged_and_stored_as_a_login`) |
-| `applied_revision` is exactly the file the reload hook composed from: a reload and the saves are serialized by one lock from the read of the revision to the end of the hook, so the hook runs once per reload and a save accepted meanwhile waits (its operation stays pending; queries and other areas go on). A revision is a content hash, so only this serialization (not a compare after the hook) tells A, B, A apart. A slow re-read never replaces a newer snapshot; every change is announced | `areas/settings.rs` | `settings_save.rs` (a save accepted during a held reload waits and the hook composed what was marked applied; a stalled reload; overlapping saves and reloads), `evorch-core/tests/core_settings_cache.rs` (the replaced model is observed at a second endpoint and the next request still extends the sent prefix) |
+| Cursor signs in with a dashboard API key through the provider's own exchange; the key itself is neither stored nor repeated, and the session the exchange returns is stored in the safe credential store under the profile's account and never leaves the core | `areas/auth.rs` (`LoginStarter::exchange_api_key`) | `auth_login.rs` (`a_cursor_api_key_is_exchanged_and_stored_as_a_login`) |
+| `applied_revision` is exactly the file the reload hook composed from: a reload and the saves are serialized by one lock from the read of the revision to the end of the hook, so the hook runs once per reload and a save accepted meanwhile waits (its operation stays pending; queries and other areas go on). A revision is a content hash, so only this serialization (not a compare after the hook) tells A, B, A apart. If the hook fails it may already have replaced some of the models (the startup one, then a project that did not load), so no file is known to be what the runs use: `applied_revision` becomes `None` with the failure in `apply_failure`, and stays so, whatever is saved next (a file put back has the hash that was applied before, and is not shown as applied), until a reload succeeds; the GUI says the state is unknown and why. A slow re-read never replaces a newer snapshot; every change is announced | `areas/settings.rs` | `settings_save.rs` (a save accepted during a held reload waits and the hook composed what was marked applied; a failed reload leaves the applied state unknown until one succeeds; a stalled reload; overlapping saves and reloads), `gui/.../settings/tests.rs` (an unknown state is shown with its reason, not as applied), `evorch-core/tests/core_settings_cache.rs` (the replaced model is observed at a second endpoint and the next request still extends the sent prefix) |
 | An operation the restarted core does not know is *unknown*, not running (a login still being prepared has no session yet: `not_found` for the session is answered by asking for the operation, and only an operation the core does not know either is lost): the screen is not busy for ever and the draft is kept; text typed while a save runs is not discarded when it ends | `gui/src/core_client/features/{settings,auth}.rs` | the feature tests of both |
 | `core.restart.targets` cannot be added, removed, repointed or omitted by a settings save, whole or partial, judged inside the revision lock | `areas/settings/store.rs` on `config::reject_restart_target_changes` | `workbench-host/tests/settings_save.rs`; through the real desktop screen and the real Web HTTP API in `core-client-e2e/tests/settings_restart_targets.rs` |
 | A save never rewrites a sent provider prefix; a reload replaces the model of the projects and the next request still extends what was sent | `bootstrap` reload hook (`SwitchableModel::replace`) | `evorch-core/tests/core_settings_cache.rs` (the replacement is observed at a second endpoint) |
@@ -85,14 +85,27 @@ are the commands where that matters most, so:
   the pasted text is checked against the `state` the login started with and is
   accepted once, whichever of the listener and the paste arrives first. The
   listener is released when the login ends, however it ends. Cursor's API-key
-  sign-in goes through `save_api_key` and the provider's exchange; the key is
-  not stored, only the session the exchange returns. Neither
+  sign-in goes through `save_api_key` and the provider's exchange; the key
+  itself is neither stored nor repeated, and the session the exchange returns
+  is stored in the safe credential store under the profile's account (the same
+  place as any other login), from which it is never sent to a client. Neither
   the callback nor the pasted text is logged or stored. Only the owner of the
   Web session's network position can finish a login, so a login started over the
   Web is as trusted as Tailscale's boundary and no more.
 - **Not a boundary:** `allowed_hosts` / `allowed_origins` stop a browser page
   from another origin; they do not tell two Tailscale users apart. Do not expose
   the Web port through a public reverse proxy.
+
+### Known constraint: the Evaluator's reload path
+
+The Evaluator's reload (`bootstrap/mod.rs`, the `evaluator.reload` closure)
+calls the same hook directly. It does not go through the settings area's writer
+lock or its snapshot, so a reload it starts is not serialized with a save and
+does not move `applied_revision` (or mark it unknown when it fails). The
+settings area's own reload, which is the one a client can start, is
+unaffected. Routing the Evaluator through the area is outside PR 10's scope
+(`bootstrap/mod.rs` is a central file); it is handed to the integration PR or
+17c.
 
 ## Who edits what after S0
 

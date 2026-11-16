@@ -400,12 +400,20 @@ impl Feature for SettingsFeature {
             ui.colored_label(ui.visuals().warn_fg_color, problem_label(problem));
         }
         let busy = self.running();
-        let unapplied = snapshot.revision != snapshot.applied_revision;
         ui.horizontal_wrapped(|ui| {
-            ui.label(if unapplied {
-                "保存済みの設定は、まだ実行中のコアに適用されていません。"
+            // Unknown (a reload failed part-way) is not "applied", whatever the
+            // saved file looks like: the models may be a mixture.
+            ui.label(if snapshot.applied_revision.is_none() {
+                match &snapshot.apply_failure {
+                    Some(reason) => format!(
+                        "適用状態が不明です（直近の再読込が失敗しました: {reason}）。モデルを再読込してください。"
+                    ),
+                    None => "適用状態が不明です。モデルを再読込してください。".to_owned(),
+                }
+            } else if snapshot.pending_apply() {
+                "保存済みの設定は、まだ実行中のコアに適用されていません。".to_owned()
             } else {
-                "保存済みの設定は適用済みです。"
+                "保存済みの設定は適用済みです。".to_owned()
             });
             if ui
                 .add_enabled(!busy, egui::Button::new("モデルを再読込"))

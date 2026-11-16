@@ -43,6 +43,8 @@ struct Reload {
     held: Mutex<bool>,
     released: Condvar,
     calls: AtomicUsize,
+    /// The next hooks fail, after composing part of the models.
+    fail: std::sync::atomic::AtomicBool,
     entered: tokio::sync::Notify,
     /// The configuration the hook composed from: the file as the hook reads it
     /// when it gets going again after being held.
@@ -74,6 +76,9 @@ impl Fixture {
                 .lock()
                 .unwrap()
                 .push(std::fs::read_to_string(&config_path).unwrap());
+            if hook.fail.load(Ordering::SeqCst) {
+                return Err("a project did not load".into());
+            }
             Ok(())
         });
         let service = CommandService::new(common::runtime(), tokio::runtime::Handle::current());
@@ -214,7 +219,7 @@ async fn two_saves_of_one_revision_end_as_one_success_and_one_stale() {
     );
     let snapshot = f.snapshot();
     assert_eq!(snapshot.providers.len(), 1);
-    assert_ne!(snapshot.revision, snapshot.applied_revision);
+    assert!(snapshot.pending_apply());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -247,7 +252,7 @@ async fn a_save_is_not_applied_until_the_models_are_reloaded() {
     assert_eq!(saved, OperationState::Ready);
     assert_eq!(f.reload.calls.load(Ordering::SeqCst), 0);
     let snapshot = f.snapshot();
-    assert_ne!(snapshot.revision, snapshot.applied_revision);
+    assert!(snapshot.pending_apply());
 
     let reloaded = f
         .finish(
@@ -260,7 +265,8 @@ async fn a_save_is_not_applied_until_the_models_are_reloaded() {
     assert_eq!(reloaded, OperationState::Ready);
     assert_eq!(f.reload.calls.load(Ordering::SeqCst), 1);
     let snapshot = f.snapshot();
-    assert_eq!(snapshot.revision, snapshot.applied_revision);
+    assert!(!snapshot.pending_apply());
+    assert_eq!(snapshot.applied_revision, Some(snapshot.revision));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -397,13 +403,86 @@ async fn a_stalled_reload_stops_no_client_but_the_saves_wait_for_it() {
     assert!(f.file().contains("[providers.one]"));
 }
 
+/// A hook that fails may already have replaced some of the models (the startup
+/// one, then a project that did not load): no file is known to be what the runs
+/// use. Putting the old file back gives the old hash, which must not be shown as
+/// applied; only a reload that succeeds is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_reload_leaves_the_applied_state_unknown_until_one_succeeds() {
+    let base = format!("version = 3\n{PROVIDER}");
+    let mut f = Fixture::new(&base);
+    let mut events = subscribe(&f);
+    let first = f.snapshot().revision;
+    assert_eq!(f.snapshot().applied_revision.as_ref(), Some(&first));
+
+    // B is saved and the reload fails part-way.
+    let changed = format!("{base}# B\n");
+    assert_eq!(
+        f.save_document("save-b", &changed).await,
+        OperationState::Ready
+    );
+    f.reload.fail.store(true, Ordering::SeqCst);
+    assert_eq!(
+        f.finish(
+            "reload-1",
+            SettingsCommand::ReloadModels(ReloadModels {
+                operation_id: op("reload-1")
+            }),
+        )
+        .await,
+        OperationState::Failed {
+            code: ErrorCode::Internal
+        }
+    );
+    let snapshot = f.snapshot();
+    assert_eq!(snapshot.applied_revision, None);
+    assert_eq!(
+        snapshot.apply_failure.as_deref(),
+        Some("a project did not load")
+    );
+    assert!(snapshot.pending_apply());
+
+    // A is put back: its hash is the one that was applied before, and is still
+    // not shown as applied, because the models are a mixture.
+    assert_eq!(
+        f.save_document("save-a", &base).await,
+        OperationState::Ready
+    );
+    let snapshot = f.snapshot();
+    assert_eq!(snapshot.revision, first);
+    assert_eq!(snapshot.applied_revision, None);
+    assert!(snapshot.pending_apply());
+    assert!(snapshot.apply_failure.is_some());
+    assert_eq!(
+        last_announced(&mut events, 3).await,
+        Some((first.clone(), None))
+    );
+
+    // The next reload that succeeds makes it applied again, and the reason goes.
+    f.reload.fail.store(false, Ordering::SeqCst);
+    assert_eq!(
+        f.finish(
+            "reload-2",
+            SettingsCommand::ReloadModels(ReloadModels {
+                operation_id: op("reload-2")
+            }),
+        )
+        .await,
+        OperationState::Ready
+    );
+    let snapshot = f.snapshot();
+    assert_eq!(snapshot.applied_revision.as_ref(), Some(&first));
+    assert_eq!(snapshot.apply_failure, None);
+    assert!(!snapshot.pending_apply());
+}
+
 /// The newest snapshot announcement once `completed` operations have ended.
 /// A snapshot is announced before the operation that caused it completes, so
 /// nothing later can follow the last completion.
 async fn last_announced(
     events: &mut workbench_host::subscriptions::Subscription,
     completed: usize,
-) -> Option<(SettingsRevision, SettingsRevision)> {
+) -> Option<(SettingsRevision, Option<SettingsRevision>)> {
     let (mut last, mut done) = (None, 0);
     while done < completed {
         match events.recv().await.expect("the subscription is open").event {
@@ -464,7 +543,11 @@ async fn what_the_hook_composed_is_what_is_marked_applied_whatever_is_saved_mean
     let snapshot = f.snapshot();
     assert_eq!(f.file(), changed);
     assert_ne!(snapshot.revision, first);
-    assert_eq!(snapshot.applied_revision, first, "B was never composed");
+    assert_eq!(
+        snapshot.applied_revision.as_ref(),
+        Some(&first),
+        "B was never composed"
+    );
 
     // Back to A: the saved file is what was composed, and is shown applied.
     assert_eq!(
@@ -473,7 +556,7 @@ async fn what_the_hook_composed_is_what_is_marked_applied_whatever_is_saved_mean
     );
     let snapshot = f.snapshot();
     assert_eq!(snapshot.revision, first);
-    assert_eq!(snapshot.applied_revision, first);
+    assert_eq!(snapshot.applied_revision.as_ref(), Some(&first));
     assert_eq!(
         last_announced(&mut events, 3).await,
         Some((snapshot.revision, snapshot.applied_revision))

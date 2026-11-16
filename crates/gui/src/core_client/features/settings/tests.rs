@@ -40,10 +40,15 @@ fn provider(name: &str) -> ProviderView {
 }
 
 fn snapshot(saved: char, applied: char) -> FeatureReply {
+    snapshot_of(saved, Some(applied), None)
+}
+
+fn snapshot_of(saved: char, applied: Option<char>, failure: Option<&str>) -> FeatureReply {
     FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::Settings(Box::new(
         SettingsSnapshot {
             revision: revision(saved),
-            applied_revision: revision(applied),
+            applied_revision: applied.map(revision),
+            apply_failure: failure.map(str::to_owned),
             document: DOCUMENT.into(),
             providers: vec![provider("local")],
             problem: None,
@@ -115,6 +120,33 @@ fn what_is_saved_and_what_is_applied_are_shown_apart() {
 
     let screen = loaded('a');
     screen.get_by_label("保存済みの設定は適用済みです。");
+}
+
+/// A reload that failed part-way leaves the models a mixture: the screen says
+/// it does not know, and the reason, even when the saved file is the one that
+/// was applied before (the hash of a file that was put back equals the old one).
+#[test]
+fn an_unknown_applied_state_is_shown_with_its_reason_not_as_applied() {
+    let mut screen = screen(Box::<SettingsFeature>::default(), None);
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        first[0].tag,
+        snapshot_of('a', None, Some("the project did not load")),
+    );
+    screen.get_by_label(
+        "適用状態が不明です（直近の再読込が失敗しました: the project did not load）。モデルを再読込してください。",
+    );
+    assert!(
+        screen
+            .query_by_label("保存済みの設定は適用済みです。")
+            .is_none()
+    );
+    assert!(
+        screen
+            .query_by_label("保存済みの設定は、まだ実行中のコアに適用されていません。")
+            .is_none()
+    );
 }
 
 #[test]

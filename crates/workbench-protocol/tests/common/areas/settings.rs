@@ -47,7 +47,8 @@ fn models() -> Vec<ModelInput> {
 pub fn snapshot() -> SettingsSnapshot {
     SettingsSnapshot {
         revision: revision(0x22),
-        applied_revision: revision(0x11),
+        applied_revision: Some(revision(0x11)),
+        apply_failure: None,
         document: "version = 3\n[core]\nidle_grace_secs = 30\n".into(),
         providers: vec![ProviderView {
             name: "work".into(),
@@ -115,7 +116,7 @@ pub fn samples() -> AreaSamples {
         ui_events: vec![
             UiEvent::Settings(SettingsEvent::SettingsSnapshotChanged {
                 revision: revision(0x22),
-                applied_revision: revision(0x11),
+                applied_revision: Some(revision(0x11)),
             }),
             UiEvent::Settings(SettingsEvent::SettingsOperationCompleted {
                 operation: operation(OperationState::Ready, SettingsOperationKind::SaveDocument),
