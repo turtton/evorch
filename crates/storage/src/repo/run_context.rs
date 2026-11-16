@@ -135,12 +135,7 @@ fn redact_anthropic_block(
     redactor: &secret_guard::SecretRedactor,
     block: &mut serde_json::Value,
 ) -> Result<usize, StorageError> {
-    let protected_fields: &[&str] = match block.get("type").and_then(serde_json::Value::as_str) {
-        Some("thinking") => &["signature"],
-        Some("redacted_thinking") => &["data"],
-        Some("compaction") => &["signature", "encrypted_content"],
-        _ => &[],
-    };
+    let protected_fields = crate::replay_secrets::opaque_fields("anthropic", block);
     let protected: Vec<_> = protected_fields
         .iter()
         .filter_map(|&field| {
@@ -171,28 +166,12 @@ fn reject_secret_bearing_responses_item(
     redactor: &secret_guard::SecretRedactor,
     block: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    let mut plaintext = match block.as_object() {
-        Some(fields) => serde_json::Value::Object(
-            fields
-                .iter()
-                .map(|(key, value)| {
-                    let value = match value.as_object() {
-                        Some(item) if key == "item" => serde_json::Value::Object(
-                            item.iter()
-                                .filter(|(field, content)| {
-                                    !(*field == "encrypted_content" && content.is_string())
-                                })
-                                .map(|(field, content)| (field.clone(), content.clone()))
-                                .collect(),
-                        ),
-                        _ => value.clone(),
-                    };
-                    (key.clone(), value)
-                })
-                .collect(),
-        ),
-        None => block.clone(),
-    };
+    let mut plaintext = block.clone();
+    if let Some(item) = plaintext.get_mut("item") {
+        for field in crate::replay_secrets::opaque_fields("responses_reasoning", item) {
+            item.as_object_mut().unwrap().remove(field);
+        }
+    }
     if redactor.redact_json(&mut plaintext) > 0 {
         return Err(StorageError::Serialization(
             "Responses reasoning item contains a secret outside its encrypted content; \

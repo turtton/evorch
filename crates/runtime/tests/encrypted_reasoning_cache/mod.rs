@@ -579,8 +579,18 @@ fn restart_responses(
 // the next request keeps the new R3
 #[tokio::test]
 async fn restart_restores_the_same_reasoning_then_reuses_the_prefix() {
+    // A random ciphertext substring can look like a credential. It must remain
+    // byte-exact through both the snapshot and the persisted provider input.
+    let ciphertext = format!("enc:rs_1:{}-{}:final", "sk", "A".repeat(32));
+    assert!(
+        secret_guard::SecretRedactor::with_known_values([])
+            .detect(&ciphertext)
+            .is_some()
+    );
     let (r1, r2, r3, r4) = (
-        reasoning("rs_1"),
+        ReasoningItem::new(0, "rs_1", &ciphertext)
+            .with_added_encrypted_content("enc:rs_1:partial")
+            .with_summary(["Summary of rs_1"]),
         reasoning("rs_2"),
         reasoning("rs_3"),
         reasoning("rs_4"),
@@ -624,6 +634,20 @@ async fn restart_restores_the_same_reasoning_then_reuses_the_prefix() {
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
     harness.runtime.wait(run).await.unwrap();
 
+    let before = storage::Database::open(&db)
+        .unwrap()
+        .resume_intent(&run.to_string())
+        .unwrap()
+        .unwrap();
+    assert!(before.payload.contains(&ciphertext));
+    storage.close();
+    let storage = storage::Storage::open(db.clone()).unwrap();
+    let reopened = storage::Database::open(&db)
+        .unwrap()
+        .resume_intent(&run.to_string())
+        .unwrap()
+        .unwrap();
+    assert!(before.payload.as_bytes() == reopened.payload.as_bytes());
     restart_responses(&mut harness, &storage, &db);
     harness
         .runtime

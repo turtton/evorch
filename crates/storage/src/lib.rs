@@ -85,6 +85,7 @@ pub mod pull_request_auto_fix;
 pub mod pull_requests;
 mod read;
 pub mod recovery;
+mod replay_secrets;
 mod repo;
 pub mod resume_intent;
 mod review;
@@ -104,7 +105,7 @@ pub use config::{HardLimits, LimitKind, StorageConfig};
 pub use db::{Database, ns_to_system_time, system_time_to_ns, watch_exclusions};
 pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, DiagnosticCleanupSummary};
 pub use entity::CatalogUpdateRecord;
-pub use error::{FailureClass, StorageError};
+pub use error::{FailureClass, ReplaySecretFinding, StorageError};
 pub use host_input::{
     HostChatSubmission, HostChatSubmissionState, HostInputOrigin, HostInputProvenance,
     HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
