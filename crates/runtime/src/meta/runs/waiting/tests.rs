@@ -985,7 +985,13 @@ async fn recording_a_wait_snapshot_does_not_consume_a_later_saved_question() {
     let later = runtime
         .request_user_question(child, "After the snapshot".into(), vec![], false)
         .unwrap();
-    assert!(record_observations(&mut state, &runtime, &request, &result));
+    assert!(record_observations(
+        &mut state,
+        &runtime,
+        &request,
+        &result,
+        &mut Observations::default()
+    ));
     assert!(
         !state.reported_questions.contains(&first.id),
         "building a result is not presentation"
@@ -1519,5 +1525,175 @@ async fn host_input_is_ready_even_after_the_last_source_disappears() {
     assert_eq!(result["user_input_ready"], true);
     assert_eq!(result["events"], json!([{"kind":"user_input"}]));
     assert!(result.get("reasons").is_none());
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn dropped_completion_result_does_not_spend_its_progress_identity() {
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) =
+        crate::agent_loop::delegate_cleanup_tests::started_fixture(receiver).await;
+    let parent = state.caller_run_id();
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+        .unwrap();
+    runtime.cancel(child).unwrap();
+    runtime.wait(child).await.unwrap();
+    let notice = runtime
+        .run_output(parent, child)
+        .unwrap()
+        .completion_notice
+        .unwrap();
+    state.transition(AgentRunPhase::Running, None).unwrap();
+    let dropped = wait(&mut state, &runtime, json!({})).await;
+    assert_eq!(dropped.result.progress, Some(tools::Progress::Advanced));
+    drop(dropped);
+    assert!(!notice.observed());
+    let shown = wait(&mut state, &runtime, json!({})).await;
+    assert_eq!(
+        shown.result.progress,
+        Some(tools::Progress::Advanced),
+        "an unpresented completion cannot spend progress"
+    );
+    state.context.push_tool_result("shown", shown.result);
+    shown.observations.presented(&mut state);
+    assert!(notice.observed());
+    let repeated = wait(&mut state, &runtime, json!({"run_ids":[child.to_string()]})).await;
+    assert_eq!(repeated.result.progress, Some(tools::Progress::Stalled));
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn distinct_lane_ids_advance_but_repeated_readiness_does_not_ack_or_advance() {
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) =
+        crate::agent_loop::delegate_cleanup_tests::started_fixture(receiver).await;
+    let root = state.caller_run_id();
+    state.transition(AgentRunPhase::Running, None).unwrap();
+    for n in 0..12 {
+        let id = format!("notice-{n}");
+        let mut ack = queue_lane(&runtime, root, &id);
+        let shown = wait(&mut state, &runtime, json!({})).await;
+        assert_eq!(shown.result.progress, Some(tools::Progress::Advanced));
+        assert!(!state.budget.wait_event_observed(&format!("lane:{id}")));
+        state
+            .context
+            .push_tool_result(format!("lane-{n}"), shown.result);
+        shown.observations.presented(&mut state);
+        assert!(state.budget.wait_event_observed(&format!("lane:{id}")));
+        let repeated = wait(&mut state, &runtime, json!({})).await;
+        assert_eq!(repeated.result.progress, Some(tools::Progress::Stalled));
+        assert!(matches!(
+            ack.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(runtime.wait_lane_deliveries(root), [id]);
+        runtime
+            .shared
+            .lanes
+            .delivery
+            .pending
+            .lock()
+            .unwrap()
+            .remove(&root);
+    }
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn host_interrupt_of_partial_all_enriches_only_the_event_child() {
+    let (runtime, model) = fixture(None);
+    let (parent, first, second) = spawn(&runtime);
+    model.first.notify_one();
+    runtime.wait(first).await.unwrap();
+    let request =
+        own_request(json!({"run_ids":[first.to_string(),second.to_string()],"mode":"all"}));
+    snapshot_reads();
+    assert!(!events::poll(&runtime, parent, &request).unwrap().0);
+    assert_eq!(snapshot_reads(), []);
+    let result = user_input_response(&runtime, parent, &request).unwrap();
+    assert_eq!(snapshot_reads(), [first]);
+    assert_eq!(result["user_input_ready"], true);
+    assert_eq!(result["completed_run_ids"], json!([first.to_string()]));
+    assert_eq!(result["runs"].as_array().unwrap().len(), 1);
+    assert!(result.notices.iter().all(|notice| !notice.observed()));
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn delegate_wave_progress_is_committed_per_presented_child() {
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) =
+        crate::agent_loop::delegate_cleanup_tests::started_fixture(receiver).await;
+    let parent = state.caller_run_id();
+    let mut children = Vec::new();
+    for _ in 0..2 {
+        let child = runtime
+            .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+            .unwrap();
+        runtime.cancel(child).unwrap();
+        runtime.wait(child).await.unwrap();
+        children.push(child);
+    }
+    state.transition(AgentRunPhase::Running, None).unwrap();
+    let mut wave = crate::meta::delegation::wait_delegates(
+        &mut state,
+        &runtime,
+        children.iter().copied().map(Ok).collect(),
+    )
+    .await;
+    assert_eq!(wave.len(), 2);
+    let identities: Vec<_> = wave
+        .iter()
+        .map(|dispatch| dispatch.observations.child_progress[0].identity())
+        .collect();
+    let first = wave.remove(0);
+    assert!(!first.result.is_error);
+    assert_eq!(first.observations.child_progress.len(), 1);
+    assert_eq!(
+        first.observations.child_progress[0].run_id,
+        children[0].to_string()
+    );
+    assert!(
+        first.observations.completions.is_empty(),
+        "phase-only must not ACK output"
+    );
+    for identity in &identities {
+        assert!(!state.budget.wait_event_observed(identity));
+    }
+    state.context.push_tool_result("first", first.result);
+    first.observations.presented(&mut state);
+    assert!(state.budget.wait_event_observed(&identities[0]));
+    assert!(!state.budget.wait_event_observed(&identities[1]));
+    drop(wave);
+    let second = wait(
+        &mut state,
+        &runtime,
+        json!({"run_ids":[children[1].to_string()]}),
+    )
+    .await;
+    assert_eq!(second.result.progress, Some(tools::Progress::Advanced));
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn completion_presented_by_run_output_does_not_mint_wait_progress() {
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) =
+        crate::agent_loop::delegate_cleanup_tests::started_fixture(receiver).await;
+    let parent = state.caller_run_id();
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+        .unwrap();
+    runtime.cancel(child).unwrap();
+    runtime.wait(child).await.unwrap();
+    state.transition(AgentRunPhase::Running, None).unwrap();
+    let output =
+        crate::meta::runs::run_output(&mut state, &runtime, json!({"run_id":child.to_string()}));
+    assert!(!output.result.is_error);
+    state.context.push_tool_result("output", output.result);
+    output.observations.presented(&mut state);
+    let repeated = wait(&mut state, &runtime, json!({"run_ids":[child.to_string()]})).await;
+    assert_eq!(repeated.result.progress, Some(tools::Progress::Stalled));
     cleanup(&runtime).await;
 }

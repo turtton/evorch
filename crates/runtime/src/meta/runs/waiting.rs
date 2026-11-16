@@ -280,7 +280,7 @@ async fn wait_with(
         Ok(result) => result,
         Err(message) => return error(message),
     };
-    let mut advanced = record_observations(state, runtime, &request, &result);
+    let mut advanced = record_observations(state, runtime, &request, &result, &mut observations);
     advanced |= events::observe_events(state, &result, &mut observations);
     let phase_only = request.legacy
         && result["inbox_ready"] != true
@@ -316,15 +316,15 @@ async fn wait_with(
     dispatch
 }
 
-/// Remembers the questions now reported to the caller and reports whether this
-/// wait brought anything new: a first observed completion, a new question, an
-/// agent message or user input. Only such waits reset the loop guards, so a
-/// wait that keeps returning the same finished child is still detected.
+/// Derives progress from the exact result. Lifecycle identities travel as typed
+/// receipts and are committed at presentation, independently of output ACK, so
+/// dropping a result cannot spend its progress and repeated state still stalls.
 fn record_observations(
     state: &mut LoopState,
     _runtime: &AgentRuntime,
     request: &WaitRequest,
     result: &WaitResult,
+    observations: &mut Observations,
 ) -> bool {
     let mut advanced = false;
     for run_id in result["completed_run_ids"]
@@ -337,11 +337,18 @@ fn record_observations(
             .as_array()
             .and_then(|runs| runs.iter().find(|run| run["run_id"] == run_id))
             .and_then(|run| run["turn_generation"].as_u64());
-        let key = generation.map_or_else(
-            || run_id.to_owned(),
-            |generation| format!("{run_id}:turn-{generation}"),
-        );
-        advanced |= state.budget.mark_child_completed(&key);
+        let notice = result
+            .notices
+            .iter()
+            .find(|notice| notice.child.to_string() == run_id);
+        let generation = generation.or_else(|| notice.map(|notice| notice.generation));
+        // Other presentation paths (run_output/inbox/auto injection) share the
+        // notice even when they did not pass through wait progress accounting.
+        if notice.is_none_or(|notice| !notice.observed()) {
+            let progress = crate::meta::observations::ChildProgress::new(run_id, generation);
+            advanced |= !state.budget.wait_event_observed(&progress.identity());
+            observations.child_progress.push(progress);
+        }
     }
     let asked = result
         .question_ids

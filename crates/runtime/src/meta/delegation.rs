@@ -387,6 +387,15 @@ pub(crate) async fn wait_delegates(
                     })),
                     None => error(format!("missing child wait result for {run_id}")),
                 };
+                if !dispatch.result.is_error {
+                    dispatch.observations.child_progress = waited
+                        .observations
+                        .child_progress
+                        .iter()
+                        .filter(|progress| progress.run_id == run_id.to_string())
+                        .cloned()
+                        .collect();
+                }
                 if run.is_some_and(|r| r["status"] == "turn_completed") {
                     dispatch.observations.completions = waited
                         .observations
@@ -446,6 +455,13 @@ mod tests {
         waited.result.progress = Some(tools::Progress::Advanced);
         waited.observations.questions.push("question".into());
         waited.observations.events.push("lane:notice".into());
+        waited
+            .observations
+            .child_progress
+            .push(crate::meta::observations::ChildProgress::new(
+                "child",
+                Some(7),
+            ));
         let projected = project_direct_wait_result(waited);
         let value: serde_json::Value = serde_json::from_str(&projected.result.content).unwrap();
         assert_eq!(value["output"], "child body");
@@ -467,5 +483,6 @@ mod tests {
         assert_eq!(projected.result.progress, Some(tools::Progress::Advanced));
         assert_eq!(projected.observations.questions, ["question"]);
         assert_eq!(projected.observations.events, ["lane:notice"]);
+        assert_eq!(projected.observations.child_progress[0].run_id, "child");
     }
 }

@@ -7,9 +7,29 @@ use crate::{
 };
 use std::sync::Arc;
 
+/// Lifecycle progress is independent of output ACK (legacy phase-only results
+/// show the lifecycle, but deliberately do not acknowledge the output).
+#[derive(Clone)]
+pub(crate) struct ChildProgress {
+    pub(crate) run_id: String,
+    key: String,
+}
+impl ChildProgress {
+    pub(crate) fn new(run_id: &str, generation: Option<u64>) -> Self {
+        Self {
+            run_id: run_id.into(),
+            key: generation.map_or_else(|| run_id.to_owned(), |g| format!("{run_id}:turn-{g}")),
+        }
+    }
+    pub(crate) fn identity(&self) -> String {
+        format!("completed:{}", self.key)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Observations {
     pub(crate) completions: Vec<Arc<CompletionNotice>>,
+    pub(crate) child_progress: Vec<ChildProgress>,
     pub(crate) questions: Vec<String>,
     pub(crate) messages: Vec<QueuedMessage>,
     pub(crate) shell: Vec<tools::ShellJobIdentity>,
@@ -48,6 +68,10 @@ impl Observations {
         }
         // Keep identity evidence on failure: retry ACK, never re-present the text.
         let _ = state.acknowledge_restart_shell_results();
+        for progress in self.child_progress {
+            state.budget.mark_child_completed(&progress.key);
+            state.budget.observe_wait_event(&progress.identity());
+        }
         for event in self.events {
             state.budget.observe_wait_event(&event);
         }
