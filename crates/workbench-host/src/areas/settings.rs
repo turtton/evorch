@@ -1,20 +1,516 @@
-//! Host service of the `settings` area (PR 10). Placeholder: the namespace is reserved,
-//! so nothing reaches this service and it starts no task, opens no file and
-//! talks to nothing. The PR that implements the area fills in this file, the
-//! adapter `ingress/namespaces/settings.rs` and the protocol module, and nothing
-//! shared.
+//! Host service of the `settings` area (PR 10): the configuration file as a
+//! client sees it, the saves that change it and the reload that makes the
+//! running core follow it.
 //!
-//! Takes from the handles: `config`, `config_dir`, `project_root`, `reload_models` (the one recomposition the Evaluator's reload tool uses too) and `credentials`.
-use super::AreaHandles;
+//! A client never writes the file or the credential store. It quotes the
+//! revision it read; the core compares that with the file inside one writer
+//! lock, together with the restart-target guard and the write, so two saves
+//! quoting the same revision end as one success and one `stale_revision`.
+//! *Saved* (the file) and *applied* (the models the runs use) are kept apart:
+//! a save does not touch what a run already sent, and
+//! `reload_models` recomposes the models the requests that follow use (the next
+//! request of a running conversation included).
+//!
+//! All file work runs on the blocking pool inside an operation task; the
+//! handlers only look at the table. The task keeps the restart permit its
+//! command was accepted with until the outcome is settled: a save is bounded
+//! I/O, it never waits for a person.
+pub(in crate::areas) mod operations;
+pub(in crate::areas) mod store;
+
+use super::{AreaHandles, ProjectionSource, ReloadModels};
 use crate::bootstrap::BootstrapError;
+use crate::bootstrap::restart::HostCommandPermit;
+use operations::{Lookup, Operations, Tracked, digest_of};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use store::{ConfigStore, SaveError, revision_of};
+use workbench_protocol::{
+    errors::{ErrorCode, RetryAdvice, WorkbenchError},
+    events::UiEvent,
+    ids::OperationId,
+    namespaces::settings::{
+        MAX_MESSAGE_BYTES, MAX_OPERATIONS, SettingsCommand, SettingsEvent, SettingsOperationView,
+        SettingsRevision, SettingsSnapshot,
+    },
+    operation::{OperationState, OperationView},
+};
+
+impl Tracked for SettingsOperationView {
+    fn operation(&self) -> &OperationView {
+        &self.operation
+    }
+
+    fn operation_mut(&mut self) -> &mut OperationView {
+        &mut self.operation
+    }
+}
 
 /// The `settings` service, reached from `ingress/namespaces/settings.rs` as
-/// `self.areas.settings`.
-#[derive(Default)]
-pub struct SettingsArea {}
+/// `self.areas.settings`. Without handles (the unwired form) every operation
+/// is refused.
+#[derive(Default, Clone)]
+pub struct SettingsArea {
+    inner: Option<Arc<Inner>>,
+}
+
+/// What a service needs, all of it from the bootstrap's handles.
+pub struct SettingsParts {
+    pub config_dir: std::path::PathBuf,
+    /// The configuration the core started with.
+    pub startup: Arc<config::Config>,
+    pub reload_models: ReloadModels,
+    pub tasks: super::AreaTasks,
+    pub source: ProjectionSource,
+}
+
+struct Inner {
+    store: Arc<ConfigStore>,
+    reload: ReloadModels,
+    tasks: super::AreaTasks,
+    source: ProjectionSource,
+    state: Mutex<State>,
+    /// One writer at a time, held across compare, check and write.
+    writer: Arc<tokio::sync::Mutex<()>>,
+}
+
+struct State {
+    operations: Operations<SettingsOperationView>,
+    snapshot: SettingsSnapshot,
+    /// Numbers the re-reads in the order they started, and the number of the
+    /// newest one whose result was published: a slower, older re-read never
+    /// replaces what a newer one already published.
+    reads_started: u64,
+    reads_published: u64,
+}
+
+/// How an accepted command stands.
+pub struct Submitted {
+    pub view: SettingsOperationView,
+    /// The same operation id and request were accepted before.
+    pub already_applied: bool,
+}
+
+struct Failure {
+    code: ErrorCode,
+    message: String,
+}
+
+struct Done {
+    revision: Option<SettingsRevision>,
+    message: Option<String>,
+}
+
+fn error(code: ErrorCode, message: &str, retry: RetryAdvice) -> WorkbenchError {
+    WorkbenchError::new(code, message, retry)
+}
+
+fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A bounded sentence without anything that looks like a credential.
+fn sanitize(text: &str) -> String {
+    let redacted = secret_guard::SecretRedactor::from_env().redact(text).text;
+    let mut end = redacted.len().min(MAX_MESSAGE_BYTES);
+    while !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    redacted[..end].replace(char::is_control, " ")
+}
+
+impl From<SaveError> for Failure {
+    fn from(error: SaveError) -> Self {
+        match error {
+            SaveError::Stale => Self {
+                code: ErrorCode::StaleRevision,
+                message: "the configuration changed since the revision quoted; read it again"
+                    .into(),
+            },
+            SaveError::Invalid(message) => Self {
+                code: ErrorCode::InvalidRequest,
+                message: sanitize(&message),
+            },
+            SaveError::RestartTargets => Self {
+                code: ErrorCode::PermissionDenied,
+                message: "restart targets may only be changed in local config files".into(),
+            },
+            SaveError::Io(message) => Self {
+                code: ErrorCode::StorageUnavailable,
+                message,
+            },
+        }
+    }
+}
 
 impl SettingsArea {
-    pub(super) fn new(_handles: &AreaHandles) -> Result<Self, BootstrapError> {
-        Ok(Self::default())
+    pub(super) fn new(handles: &AreaHandles) -> Result<Self, BootstrapError> {
+        let source = handles
+            .source("settings")
+            .map_err(|e| BootstrapError::from(e.message))?;
+        Ok(Self::with_parts(SettingsParts {
+            config_dir: handles.config_dir.clone(),
+            startup: handles.config.clone(),
+            reload_models: handles.reload_models.clone(),
+            tasks: handles.tasks.clone(),
+            source,
+        }))
+    }
+
+    /// A service over `parts`; what the bootstrap does and what a test of the
+    /// area does.
+    pub fn with_parts(parts: SettingsParts) -> Self {
+        let store = Arc::new(ConfigStore::new(parts.config_dir, parts.startup));
+        let applied = store.revision().unwrap_or_else(|_| revision_of(&[]));
+        let snapshot = store.snapshot(Some(&applied));
+        Self {
+            inner: Some(Arc::new(Inner {
+                store,
+                reload: parts.reload_models,
+                tasks: parts.tasks,
+                source: parts.source,
+                state: Mutex::new(State {
+                    operations: Operations::new(MAX_OPERATIONS),
+                    snapshot,
+                    reads_started: 0,
+                    reads_published: 0,
+                }),
+                writer: Arc::default(),
+            })),
+        }
+    }
+
+    fn inner(&self) -> Result<&Arc<Inner>, WorkbenchError> {
+        self.inner.as_ref().ok_or_else(|| {
+            error(
+                ErrorCode::UnsupportedCapability,
+                "settings are not available in this host",
+                RetryAdvice::Never,
+            )
+        })
+    }
+
+    /// Accept a command: start its operation, or answer from the table.
+    ///
+    /// # Errors
+    /// `Conflict` for an id used by a different request, `LimitExceeded` when
+    /// every retained operation is still running, `Draining` once the host is
+    /// stopping.
+    pub(crate) fn submit(
+        &self,
+        command: SettingsCommand,
+        accepted: Option<HostCommandPermit>,
+    ) -> Result<Submitted, WorkbenchError> {
+        let inner = self.inner()?;
+        let id = command.operation_id().clone();
+        let digest = digest_of(&[serde_json::to_vec(&command).unwrap_or_default().as_slice()]);
+        let view = {
+            let mut state = lock(&inner.state);
+            match state.operations.lookup(&id, &digest) {
+                Lookup::Same(view) => {
+                    return Ok(Submitted {
+                        view,
+                        already_applied: true,
+                    });
+                }
+                Lookup::Conflict => {
+                    return Err(error(
+                        ErrorCode::Conflict,
+                        "this operation id was used for a different request",
+                        RetryAdvice::Never,
+                    ));
+                }
+                Lookup::New => {}
+            }
+            let revision = state.operations.next_revision();
+            let view = SettingsOperationView {
+                operation: OperationView {
+                    operation_id: id.clone(),
+                    state: OperationState::Pending,
+                    revision,
+                    result: None,
+                },
+                kind: command.kind(),
+                revision: None,
+                message: None,
+            };
+            state.operations.insert(view.clone(), digest)?;
+            view
+        };
+        let task = inner.clone();
+        let task_id = id.clone();
+        let spawned =
+            inner
+                .tasks
+                .spawn_counted_tracked("settings-operation", accepted, move |_stop| {
+                    task.run(task_id, command)
+                });
+        if let Err(refused) = spawned {
+            lock(&inner.state).operations.forget(&id);
+            return Err(error(
+                ErrorCode::Draining,
+                &refused.to_string(),
+                RetryAdvice::AfterReconnect,
+            ));
+        }
+        Ok(Submitted {
+            view,
+            already_applied: false,
+        })
+    }
+
+    /// The snapshot the core holds.
+    ///
+    /// # Errors
+    /// Only the unwired form refuses.
+    pub fn snapshot(&self) -> Result<SettingsSnapshot, WorkbenchError> {
+        Ok(lock(&self.inner()?.state).snapshot.clone())
+    }
+
+    /// One operation, running or finished.
+    ///
+    /// # Errors
+    /// `NotFound` for an id the core does not hold.
+    pub fn operation(&self, id: &OperationId) -> Result<SettingsOperationView, WorkbenchError> {
+        lock(&self.inner()?.state)
+            .operations
+            .get(id)
+            .cloned()
+            .ok_or_else(|| error(ErrorCode::NotFound, "unknown operation", RetryAdvice::Never))
+    }
+
+    /// Wait until `id` is settled and return it.
+    ///
+    /// # Errors
+    /// `NotFound` for an id the core does not hold.
+    pub async fn wait_operation(
+        &self,
+        id: &OperationId,
+    ) -> Result<SettingsOperationView, WorkbenchError> {
+        let mut changes = lock(&self.inner()?.state).operations.subscribe();
+        loop {
+            let view = self.operation(id)?;
+            if view.operation.state.is_final() {
+                return Ok(view);
+            }
+            if changes.changed().await.is_err() {
+                return Ok(view);
+            }
+        }
+    }
+
+    /// The retained operations, newest first.
+    ///
+    /// # Errors
+    /// Only the unwired form refuses.
+    pub fn operations(&self) -> Result<Vec<SettingsOperationView>, WorkbenchError> {
+        Ok(lock(&self.inner()?.state).operations.list())
+    }
+}
+
+impl Inner {
+    fn publish(&self, event: SettingsEvent) {
+        if let Err(error) = self.source.publish(UiEvent::Settings(event)) {
+            tracing::warn!(code = ?error.code, "settings event could not be published");
+        }
+    }
+
+    async fn blocking<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, Failure> {
+        tokio::task::spawn_blocking(f).await.map_err(|_| Failure {
+            code: ErrorCode::Internal,
+            message: "the settings task did not finish".into(),
+        })
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        id: OperationId,
+        command: SettingsCommand,
+    ) -> Result<(), BootstrapError> {
+        let outcome = self.execute(command).await;
+        self.finish(&id, outcome);
+        Ok(())
+    }
+
+    async fn execute(&self, command: SettingsCommand) -> Result<Done, Failure> {
+        match command {
+            SettingsCommand::RefreshSettings(_) => {
+                self.reread().await?;
+                Ok(Done {
+                    revision: Some(lock(&self.state).snapshot.revision.clone()),
+                    message: None,
+                })
+            }
+            SettingsCommand::SaveDocument(save) => {
+                let store = self.store.clone();
+                let guard = self.writer.clone().lock_owned().await;
+                let revision = Self::blocking(move || {
+                    let _writer = guard;
+                    store.save_document(&save.expected_revision, &save.text)
+                })
+                .await?
+                .map_err(Failure::from)?;
+                self.reread().await?;
+                Ok(Done {
+                    revision: Some(revision),
+                    message: None,
+                })
+            }
+            SettingsCommand::SaveProvider(save) => {
+                let store = self.store.clone();
+                let guard = self.writer.clone().lock_owned().await;
+                let revision = Self::blocking(move || {
+                    let _writer = guard;
+                    store.save_provider(
+                        &save.expected_revision,
+                        save.original_name.as_deref(),
+                        &save.provider,
+                    )
+                })
+                .await?
+                .map_err(Failure::from)?;
+                self.reread().await?;
+                Ok(Done {
+                    revision: Some(revision),
+                    message: None,
+                })
+            }
+            SettingsCommand::DeleteProvider(delete) => {
+                let store = self.store.clone();
+                let guard = self.writer.clone().lock_owned().await;
+                let revision = Self::blocking(move || {
+                    let _writer = guard;
+                    store.delete_provider(&delete.expected_revision, &delete.name)
+                })
+                .await?
+                .map_err(Failure::from)?;
+                self.reread().await?;
+                Ok(Done {
+                    revision: Some(revision),
+                    message: None,
+                })
+            }
+            SettingsCommand::ReloadModels(_) => self.reload_models().await,
+        }
+    }
+
+    /// Recompose the models from the saved file. What a run already sent is
+    /// never rewritten: the replacement is a new `SwitchableModel` target that
+    /// the next request of every conversation goes to, and that request still
+    /// extends the prefix that was sent.
+    async fn reload_models(&self) -> Result<Done, Failure> {
+        // A save cannot land between the read of the revision and the end of the
+        // hook: the writer lock is held from the one to the other, so the hook
+        // composes from exactly the file whose revision is marked applied, and
+        // runs once. A save accepted meanwhile waits for the reload (its
+        // operation stays pending); queries and every other area go on.
+        let _writer = self.writer.lock().await;
+        let store = self.store.clone();
+        let revision = Self::blocking(move || store.revision())
+            .await?
+            .map_err(Failure::from)?;
+        let reload = self.reload.clone();
+        let composed = match Self::blocking(move || reload()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(Failure {
+                code: ErrorCode::Internal,
+                message: sanitize(&message),
+            }),
+            Err(failure) => Err(failure),
+        };
+        if let Err(failure) = composed {
+            // The hook may have replaced some of the models before it failed
+            // (the startup model, then a project that did not load), so no file
+            // is known to be what the runs use. It stays unknown, whatever is
+            // saved next, until a reload succeeds.
+            self.set_applied(None, Some(failure.message.clone()));
+            return Err(failure);
+        }
+        self.set_applied(Some(revision.clone()), None);
+        Ok(Done {
+            revision: Some(revision),
+            message: None,
+        })
+    }
+
+    /// What the runs use is `applied` (`None`: not known, for `failure`);
+    /// announced from the state itself when it changed, so a re-read finding
+    /// it already moved would see no change to tell anybody about.
+    fn set_applied(&self, applied: Option<SettingsRevision>, failure: Option<String>) {
+        let announce = {
+            let mut state = lock(&self.state);
+            let changed = state.snapshot.applied_revision != applied
+                || state.snapshot.apply_failure != failure;
+            state.snapshot.applied_revision.clone_from(&applied);
+            state.snapshot.apply_failure = failure;
+            changed.then(|| state.snapshot.revision.clone())
+        };
+        if let Some(saved) = announce {
+            self.publish(SettingsEvent::SettingsSnapshotChanged {
+                revision: saved,
+                applied_revision: applied,
+            });
+        }
+    }
+
+    /// Read the file again into the snapshot and announce a change. Several
+    /// re-reads may overlap (a save finishing while a reload does): each is
+    /// numbered when it starts, an older result is dropped once a newer one
+    /// published, and the applied revision is always the one the state holds
+    /// when the result is published, not the one seen when the read began.
+    async fn reread(&self) -> Result<(), Failure> {
+        let (ticket, applied) = {
+            let mut state = lock(&self.state);
+            state.reads_started += 1;
+            (state.reads_started, state.snapshot.applied_revision.clone())
+        };
+        let store = self.store.clone();
+        let mut fresh = Self::blocking(move || store.snapshot(applied.as_ref())).await?;
+        let announce = {
+            let mut state = lock(&self.state);
+            if ticket < state.reads_published {
+                return Ok(());
+            }
+            state.reads_published = ticket;
+            fresh
+                .applied_revision
+                .clone_from(&state.snapshot.applied_revision);
+            fresh
+                .apply_failure
+                .clone_from(&state.snapshot.apply_failure);
+            let announce = (state.snapshot.revision != fresh.revision
+                || state.snapshot.applied_revision != fresh.applied_revision)
+                .then(|| (fresh.revision.clone(), fresh.applied_revision.clone()));
+            state.snapshot = fresh;
+            announce
+        };
+        if let Some((revision, applied_revision)) = announce {
+            self.publish(SettingsEvent::SettingsSnapshotChanged {
+                revision,
+                applied_revision,
+            });
+        }
+        Ok(())
+    }
+
+    fn finish(&self, id: &OperationId, outcome: Result<Done, Failure>) {
+        let view = {
+            let mut state = lock(&self.state);
+            state.operations.update(id, |view| match outcome {
+                Ok(done) => {
+                    view.operation.state = OperationState::Ready;
+                    view.revision = done.revision;
+                    view.message = done.message;
+                }
+                Err(failure) => {
+                    view.operation.state = OperationState::Failed { code: failure.code };
+                    view.message = Some(failure.message);
+                }
+            })
+        };
+        if let Some(view) = view {
+            self.publish(SettingsEvent::SettingsOperationCompleted { operation: view });
+        }
     }
 }
