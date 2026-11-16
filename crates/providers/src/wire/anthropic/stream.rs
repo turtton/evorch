@@ -269,7 +269,8 @@ fn finish_input(state: &mut BlockState) {
         .take()
         .filter(|text| !text.trim().is_empty())
     {
-        // The runtime already rejects null tool arguments and the pump reports malformed JSON.
+        // Preserve invalid arguments for execution rejection and pump diagnostics.
+        // Runtime storage and Anthropic outbound copies normalize only the envelope.
         state.block["input"] = serde_json::from_str(&input).unwrap_or(Value::Null);
     }
 }

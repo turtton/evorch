@@ -64,7 +64,7 @@ mod anthropic_wire {
 use anthropic_wire::{WireContentBlock, WireRole};
 use message::{ChatRequest, ContentBlock, Message, Role};
 use openai_wire::WireChatResponse;
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn representative_request() -> ChatRequest {
     ChatRequest {
@@ -328,4 +328,100 @@ fn anthropic_opaque_state_is_not_sent_to_other_protocols() {
         assert!(serialized.contains("local"));
         assert!(serialized.contains("report"));
     }
+}
+
+// Replay repair is deliberately shallow and idempotent, including server/MCP envelopes.
+#[test]
+fn replay_normalization_preserves_objects_metadata_and_block_order() {
+    for kind in ["tool_use", "server_tool_use", "mcp_tool_use"] {
+        for input in [
+            None,
+            Some(json!(null)),
+            Some(json!([])),
+            Some(json!(1)),
+            Some(json!("partial")),
+            Some(json!(false)),
+            Some(json!({"nested":[null,{},42]})),
+        ] {
+            let mut raw =
+                json!({"type":kind,"id":"same-id","name":"same-name","future":{"opaque":[null,1]}});
+            if let Some(value) = &input {
+                raw["input"] = value.clone();
+            }
+            let mut blocks = vec![
+                ContentBlock::Anthropic {
+                    block: raw.clone(),
+                    prefix_hash: Some("binding".into()),
+                },
+                ContentBlock::ToolUse {
+                    id: "same-id".into(),
+                    name: "same-name".into(),
+                    input: input.clone().unwrap_or_default(),
+                },
+                ContentBlock::Anthropic {
+                    block: json!({"type":"thinking","thinking":"opaque","signature":"signed","input":null}),
+                    prefix_hash: Some("binding".into()),
+                },
+            ];
+            let untouched = blocks[2].clone();
+            for block in &mut blocks {
+                block.normalize_tool_input_for_replay();
+            }
+            let expected = input.filter(Value::is_object).unwrap_or_else(|| json!({}));
+            raw["input"] = expected.clone();
+            assert_eq!(
+                blocks[0],
+                ContentBlock::Anthropic {
+                    block: raw,
+                    prefix_hash: Some("binding".into())
+                }
+            );
+            assert_eq!(
+                blocks[1],
+                ContentBlock::ToolUse {
+                    id: "same-id".into(),
+                    name: "same-name".into(),
+                    input: expected
+                }
+            );
+            assert_eq!(blocks[2], untouched);
+            let once = serde_json::to_vec(&blocks).unwrap();
+            for block in &mut blocks {
+                block.normalize_tool_input_for_replay();
+            }
+            assert_eq!(serde_json::to_vec(&blocks).unwrap(), once);
+        }
+    }
+}
+
+#[test]
+fn anthropic_object_history_wire_bytes_are_unchanged_by_storage_normalization() {
+    let mut input = representative_request();
+    input.messages.push(Message {
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::Anthropic {
+                block: json!({
+                    "type":"tool_use","id":"raw","name":"read",
+                    "input":{"nested":[null,{},42]},"caller":{"type":"direct"}
+                }),
+                prefix_hash: None,
+            },
+            ContentBlock::ToolUse {
+                id: "raw".into(),
+                name: "read".into(),
+                input: json!({"nested":[null,{},42]}),
+            },
+        ],
+    });
+    let before = serde_json::to_vec(&anthropic_wire::to_wire_request(&input, false)).unwrap();
+    for message in &mut input.messages {
+        for block in &mut message.content {
+            block.normalize_tool_input_for_replay();
+        }
+    }
+    assert_eq!(
+        serde_json::to_vec(&anthropic_wire::to_wire_request(&input, false)).unwrap(),
+        before
+    );
 }

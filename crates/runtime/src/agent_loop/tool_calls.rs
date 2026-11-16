@@ -807,9 +807,9 @@ impl LoopState {
                     permission = permission
                         .and_then(|()| Err("run_js is not enabled for this run".to_owned()));
                 }
-                // providers::StreamAccumulator turns unparsable arguments into null; tools
-                // only take objects, so name the cause instead of a schema mismatch.
-                if input.is_null() {
+                // Unparsable streamed arguments remain null for execution. Arrays and
+                // scalars are also invalid: the replay copy's {} must not authorize them.
+                if !input.is_object() {
                     permission = Err(MALFORMED_ARGUMENTS.into());
                 }
                 // Delegate's parser preserves case-insensitive roles and structured domain errors.
@@ -1158,9 +1158,12 @@ impl LoopState {
                         self.finish_owner_error("validate", error);
                         return false;
                     }
-                    // Runtime-owned ledger calls need the same transcript lifecycle,
-                    // including calls rejected by preflight before dispatch.
-                    self.ledger_tool_started(&name, &id, &input);
+                    // Preflight rejections still report a lifecycle, except malformed
+                    // envelopes: no tool (including runtime-owned tools) was started.
+                    let malformed_arguments = !input.is_object();
+                    if !malformed_arguments {
+                        self.ledger_tool_started(&name, &id, &input);
+                    }
                     let observed = matches!(
                         &ready,
                         ReadyCall::Executed(_) | ReadyCall::Failed(_) | ReadyCall::Invalid(_)
@@ -1229,7 +1232,9 @@ impl LoopState {
                         ToolResult::error("invalid prepared local call")
                     };
                     let result = meta::bound_thread_result(&name, result);
-                    self.ledger_tool_completed(&name, &id, &result);
+                    if !malformed_arguments {
+                        self.ledger_tool_completed(&name, &id, &result);
+                    }
                     let error_class = self.record_tool_outcome(&name, &result, typed_error_class);
                     if result.idle_wait_ms > 0 {
                         self.budget

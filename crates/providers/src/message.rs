@@ -37,7 +37,8 @@ pub enum ContentBlock {
         item: serde_json::Value,
         origin: crate::responses_replay::ResponsesReplayOrigin,
     },
-    /// Anthropic response data retained verbatim for replay, including signed thinking.
+    /// Anthropic response data retained for replay, including signed thinking.
+    /// Only invalid tool input envelopes are normalized in storage/replay copies.
     Anthropic {
         block: serde_json::Value,
         /// Fingerprint of the provider input that produced this block.
@@ -114,7 +115,35 @@ impl std::fmt::Debug for ContentBlock {
     }
 }
 
+/// Replace only invalid tool argument envelopes, never repair partial arguments.
+/// This is for storage/replay copies, not for deciding whether to execute a call.
+pub fn normalize_tool_input(input: &mut serde_json::Value) {
+    if !input.is_object() {
+        *input = serde_json::Value::Object(serde_json::Map::new());
+    }
+}
+
+/// Keep the tool block kinds in sync with Anthropic's receive-side validator.
+pub fn normalize_anthropic_tool_input(block: &mut serde_json::Value) {
+    if matches!(
+        block["type"].as_str(),
+        Some("tool_use" | "server_tool_use" | "mcp_tool_use")
+    ) {
+        normalize_tool_input(&mut block["input"]);
+    }
+}
+
 impl ContentBlock {
+    /// Normalize a storage/replay copy only, after extracting execution arguments.
+    /// Object inputs and all non-input metadata (including opaque reasoning) stay intact.
+    pub fn normalize_tool_input_for_replay(&mut self) {
+        match self {
+            Self::ToolUse { input, .. } => normalize_tool_input(input),
+            Self::Anthropic { block, .. } => normalize_anthropic_tool_input(block),
+            _ => {}
+        }
+    }
+
     /// Visible text; Anthropic text metadata has a separate canonical projection.
     pub fn text(&self) -> Option<&str> {
         match self {

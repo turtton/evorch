@@ -132,7 +132,8 @@ impl StreamAccumulator {
     /// Reasoning → Text → ToolUse (index 昇順) の順で並ぶ。
     /// 引数が空のツール呼び出しは空オブジェクト入力として保持され、
     /// 引数文字列が JSON として解釈できない場合は `null` になる
-    /// （[`Self::malformed_tool_calls`] で列挙でき、runtime はこの呼び出しを実行しない）。
+    /// （[`Self::malformed_tool_calls`] で列挙でき、runtime は元の非 object 入力を拒否する）。
+    /// 保存・Anthropic 再送用コピーだけが {} に正規化され、実行には使われない。
     pub fn finish(self, usage: Usage, finish_reason: FinishReason) -> ChatResponse {
         let mut content = Vec::new();
         if !self.reasoning.is_empty() {

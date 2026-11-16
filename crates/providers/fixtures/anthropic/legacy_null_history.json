@@ -1,0 +1,42 @@
+[
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "anthropic",
+        "block": {
+          "type": "tool_use",
+          "id": "cut",
+          "name": "read",
+          "input": null,
+          "caller": {
+            "type": "direct"
+          },
+          "extra": "keep"
+        }
+      },
+      {
+        "type": "tool_use",
+        "id": "cut",
+        "name": "read",
+        "input": null
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "tool_call_id": "cut",
+        "is_error": true,
+        "content": [
+          {
+            "type": "text",
+            "text": "Malformed arguments; tool was not run."
+          }
+        ]
+      }
+    ]
+  }
+]
