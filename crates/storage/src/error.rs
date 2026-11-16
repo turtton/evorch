@@ -400,6 +400,23 @@ pub enum FailureClass {
 }
 
 impl StorageError {
+    /// A persisted value failed decoding or validation, not a database operation.
+    /// Only use at a component isolation boundary; SQLite I/O, locking, schema
+    /// and connection failures must still propagate.
+    pub fn is_data_decode_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Serialization(_)
+                | Self::OutOfRange(_)
+                | Self::Sqlite(
+                    rusqlite::Error::FromSqlConversionFailure(..)
+                        | rusqlite::Error::IntegralValueOutOfRange(..)
+                        | rusqlite::Error::Utf8Error(..)
+                        | rusqlite::Error::InvalidColumnType(..)
+                )
+        )
+    }
+
     /// The content of a learning write, not the database, made it impossible. Retrying the
     /// same write can never succeed; only the failure terminal can end the job.
     pub fn is_content_rejection(&self) -> bool {

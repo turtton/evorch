@@ -350,7 +350,7 @@ impl AgentRuntime {
             });
             let (Some(tx), Some(inventory), members) = (match cohort {
                 Ok(cohort) => cohort,
-                Err(storage::StorageError::Serialization(_)) => {
+                Err(e) if e.is_data_decode_error() => {
                     tracing::warn!(restart_id = %id, "corrupt cold learning cohort isolated");
                     continue;
                 }
@@ -388,7 +388,7 @@ impl AgentRuntime {
                     RestartMutation::QuarantineLearningCold,
                 ) {
                     Ok(_) => {}
-                    Err(storage::StorageError::Serialization(_)) => {
+                    Err(e) if e.is_data_decode_error() => {
                         tracing::warn!(restart_id = %id, "corrupt cold learning member isolated")
                     }
                     Err(e) => return Err(error(e)),
@@ -400,7 +400,7 @@ impl AgentRuntime {
             .map_err(error)?;
         for job in store
             .with_database(|db| {
-                db.learning_jobs(&[storage::learning_jobs::LearningJobState::Interrupted])
+                db.learning_jobs_isolated(&[storage::learning_jobs::LearningJobState::Interrupted])
             })
             .map_err(error)?
         {
@@ -410,14 +410,18 @@ impl AgentRuntime {
                 && job.origin.instance != queue.origin().instance
                 && probe.liveness(&job.origin) == crate::learning_jobs::OriginLiveness::Dead
             {
-                queue
-                    .change(
-                        &job.key(),
-                        storage::learning_jobs::LearningAttemptChange::Abandon(
-                            storage::learning_jobs::LearningEndReason::NoResumeAuthority,
-                        ),
-                    )
-                    .map_err(error)?;
+                match queue.change(
+                    &job.key(),
+                    storage::learning_jobs::LearningAttemptChange::Abandon(
+                        storage::learning_jobs::LearningEndReason::NoResumeAuthority,
+                    ),
+                ) {
+                    Ok(_) => {}
+                    Err(e) if e.is_data_decode_error() => {
+                        tracing::warn!(task_id = %job.task_id, "corrupt cold learning job isolated");
+                    }
+                    Err(e) => return Err(error(e)),
+                }
             }
         }
         Ok(())
