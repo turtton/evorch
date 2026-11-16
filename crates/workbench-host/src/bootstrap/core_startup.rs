@@ -4,8 +4,16 @@ use crate::projects::StaticProjects;
 use runtime::{AgentRuntime, ownership::OwnerHost};
 use std::{future::Future, pin::Pin, sync::Arc};
 
+/// Chosen by the bootstrap entry, not inferred from runtime proof registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoreBootMode {
+    Cold,
+    PlannedHandoff,
+}
+
 /// Owned current-process inputs. No recipe can manufacture this lease proof.
 pub struct CoreStartupInputs {
+    pub mode: CoreBootMode,
     pub options: BootstrapOptions,
     pub runtime: AgentRuntime,
     pub owner: Arc<OwnerHost>,

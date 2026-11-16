@@ -8,7 +8,8 @@
         "evorch-core"
       ],
       "features": [
-        "storage/test-support"
+        "storage/test-support",
+        "evorch-core/bootstrap-test-support"
       ],
       "allow_empty_suites": []
     },

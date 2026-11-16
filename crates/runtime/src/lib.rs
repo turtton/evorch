@@ -134,9 +134,9 @@ pub use runtime::{
     ProjectModelResolver, ProjectSlugResolver, RecoveryClaimHandle, RecoveryCleanupHandle,
     RecoveryCleanupState, RecoveryModels, RunWait, SandboxFactory, WeakAgentRuntime,
     WorkspaceMounts, production_executor, production_executor_with_config,
-    production_executor_with_host_tools,
+    production_executor_with_host_tools, production_executor_with_prepared_sandbox,
 };
-pub use runtime::{RestartAdoptionError, RestartCaptureSession};
+pub use runtime::{RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession};
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,
     SkillResourceError, SkillScope, SkillValidationError, default_skill_dirs, discover_skills,

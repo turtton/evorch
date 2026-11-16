@@ -32,7 +32,9 @@ pub use recovery_activation::{
     RecoveryCleanupState, RecoveryModels,
 };
 pub use restart_handoff::{PlannedToolSchemaBoundary, RestartOwnershipEvidence};
-pub use restart_transaction::{RestartAdoptionError, RestartCaptureSession};
+pub use restart_transaction::{
+    RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession,
+};
 mod nested_orchestrator;
 mod output;
 mod project;
@@ -4218,9 +4220,22 @@ pub fn production_executor_with_host_tools(
     };
     let sandbox =
         crate::network::build_sandbox(policy, workspace_root.clone()).map_err(sandbox_error)?;
+    production_executor_with_prepared_sandbox(bus, workspace_root, config, host_tools, sandbox)
+}
+
+/// Planned startup supplies a gated sandbox whose probe runs only after Ready.
+pub fn production_executor_with_prepared_sandbox(
+    bus: Arc<EventBus>,
+    workspace_root: PathBuf,
+    config: &config::Config,
+    host_tools: Vec<Arc<dyn tools::Tool>>,
+    sandbox: Arc<dyn sandbox::Sandbox>,
+) -> Result<Arc<ToolExecutor>, RuntimeError> {
     let boundary =
         crate::network::sandbox_boundary(&WorkspaceMounts::shared(workspace_root.clone()))
-            .map_err(sandbox_error)?;
+            .map_err(|e| RuntimeError::Sandbox {
+                detail: e.to_string(),
+            })?;
     configured_executor(
         bus,
         sandbox,

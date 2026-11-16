@@ -32,6 +32,7 @@ pub struct OwnerHost {
     reader: Mutex<Registry>,
     // A GUI drain keeps generation guards valid until its queued writes finish.
     release_deferred: Arc<AtomicBool>,
+    release_on_drop: AtomicBool,
     scratch: Arc<ThreadScratch>,
     /// Threads retention deleted; set once after the startup phase.
     tombstones: OnceLock<TombstoneGuard>,
@@ -50,6 +51,27 @@ impl OwnerHost {
         root: &Path,
         settings: config::OwnershipConfig,
         bus: Arc<EventBus>,
+    ) -> Result<Self, RegistryError> {
+        Self::open_mode(root, settings, bus, true)
+    }
+
+    /// A planned successor neither sweeps scratch nor releases adopted owners
+    /// on bootstrap failure. Normal shutdown is enabled only after Ready.
+    pub fn open_planned(
+        root: &Path,
+        settings: config::OwnershipConfig,
+        bus: Arc<EventBus>,
+    ) -> Result<Self, RegistryError> {
+        Self::open_mode(root, settings, bus, false)
+    }
+    pub fn enable_normal_shutdown(&self) {
+        self.release_on_drop.store(true, Ordering::SeqCst);
+    }
+    fn open_mode(
+        root: &Path,
+        settings: config::OwnershipConfig,
+        bus: Arc<EventBus>,
+        ordinary: bool,
     ) -> Result<Self, RegistryError> {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(std::io::Error::other)?;
@@ -71,7 +93,9 @@ impl OwnerHost {
         let mut registry = Registry::open(&root.join("owners.db"))?;
         let reader = Mutex::new(Registry::open_readonly(&root.join("owners.db"))?);
         let scratch = Arc::new(ThreadScratch::for_ownership_root(root)?);
-        sweep_scratch(&scratch, root, &owner_id, &mut registry);
+        if ordinary {
+            sweep_scratch(&scratch, root, &owner_id, &mut registry);
+        }
         let worker_scratch = Arc::clone(&scratch);
         let (stop, receiver) = mpsc::channel();
         let id = owner_id.clone();
@@ -102,6 +126,7 @@ impl OwnerHost {
             bus,
             reader,
             release_deferred,
+            release_on_drop: AtomicBool::new(ordinary),
             scratch,
             tombstones: OnceLock::new(),
             worker: Mutex::new(Some(WorkerControl {
@@ -517,7 +542,9 @@ pub(super) fn socket_path(root: &Path, id: &str) -> Result<PathBuf, RegistryErro
 
 impl Drop for OwnerHost {
     fn drop(&mut self) {
-        let _ = self.quiesce();
+        if self.release_on_drop.load(Ordering::SeqCst) {
+            let _ = self.quiesce();
+        }
         let _ = self.stop_worker_for_exec();
     }
 }

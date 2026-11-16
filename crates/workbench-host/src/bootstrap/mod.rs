@@ -18,6 +18,7 @@ pub mod learning;
 #[cfg(test)]
 mod learning_tests;
 pub mod models;
+pub mod planned;
 mod project_models;
 pub mod recovery;
 #[cfg(test)]
@@ -117,6 +118,8 @@ pub struct BootstrappedHost {
     pub services: services::BackgroundServices,
     pub mcp: runtime::mcp::McpHostServices,
     pub recovery_diagnostics: Option<Arc<dyn core_startup::CoreStartupDiagnostics>>,
+    deferred: Option<DeferredStartup>,
+    planned_sandbox: Option<Arc<sandbox::bwrap::PlannedBwrap>>,
     area_tasks: AreaTasks,
     pub usage_pricing: recorder::pricing::SharedUsagePricing,
     pub evaluator: Arc<evaluation::EvaluatorHost>,
@@ -136,6 +139,19 @@ pub struct CompositionInventory {
     pub storage: storage::StorageConfig,
     pub storage_writer: storage::StorageHandle,
     pub model: runtime::compose::ModelIdentity,
+}
+
+struct DeferredStartup {
+    mode: core_startup::CoreBootMode,
+    options: BootstrapOptions,
+    storage: storage::StorageConfig,
+    writer: storage::StorageHandle,
+    projects: StaticProjects,
+    startup: Option<storage::RecoveryStartupComplete>,
+    bus: Arc<EventBus>,
+    adapters: lane_pr::PullRequestAdapters,
+    observe: Option<RuntimeObserver>,
+    artifacts: Arc<runtime::artifacts::ArtifactStore>,
 }
 
 impl BootstrappedHost {
@@ -257,35 +273,89 @@ impl BootstrappedHost {
         observe: Option<RuntimeObserver>,
         recovery: Option<&dyn core_startup::CoreStartupHook>,
     ) -> Result<Self, BootstrapError> {
-        let config = config::Config::load_strict(&config::LoadOptions {
-            user_config_dir: Some(options.config_dir.clone()),
-            project_dir: Some(options.project_root.clone()),
-            read_env: false,
-            ..Default::default()
-        })?;
-        let bus = Arc::new(EventBus::new(4096));
-        let db_path = options.config_dir.join("evorch-events.db");
-        // The core confirms the deletion of expired archived threads (see
-        // `retention`): exclusive leases for the phase, then shared for its life.
-        let plan = retention::RetentionPlan {
-            db_path: db_path.clone(),
-            ownership_root: options.ownership_root.clone(),
-            sidebar_path: options.config_dir.join("sidebar.json"),
-            artifacts_dir: Some(options.config_dir.join("artifacts")),
-            policy: runtime::thread_retention::policy_from_config(&config.storage),
-        };
-        let leases = tokio::task::spawn_blocking(move || {
-            retention::acquire_leases(&plan, Duration::from_secs(30))
-        })
-        .await??;
-        let storage_config = components::storage_config(&config, db_path);
-        let storage =
-            storage::Storage::open_with_lease(storage_config.clone(), leases.db_lease()?)?;
+        Self::open_staged(options, seams, mcp, adapters, observe, recovery, None).await
+    }
+
+    pub async fn open_claimed_for_core(
+        claimed: planned::ClaimedBootstrap,
+    ) -> Result<Self, BootstrapError> {
+        let options = claimed.storage.options.clone();
+        Self::open_staged(
+            options,
+            None,
+            None,
+            lane_pr::PullRequestAdapters::default(),
+            None,
+            None,
+            Some(claimed),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn open_staged(
+        options: BootstrapOptions,
+        seams: Option<TestSeams>,
+        mcp: Option<runtime::mcp::McpHostServices>,
+        adapters: lane_pr::PullRequestAdapters,
+        observe: Option<RuntimeObserver>,
+        recovery: Option<&dyn core_startup::CoreStartupHook>,
+        claimed: Option<planned::ClaimedBootstrap>,
+    ) -> Result<Self, BootstrapError> {
+        let planned = claimed.is_some();
+        let (config, bus, storage_config, storage, leases, seed, claimed_owner) =
+            if let Some(claimed) = claimed {
+                let planned::PlannedStorage {
+                    config,
+                    bus,
+                    storage_config,
+                    storage,
+                    leases,
+                    seed,
+                    ..
+                } = claimed.storage;
+                (
+                    config,
+                    bus,
+                    storage_config,
+                    storage,
+                    leases,
+                    Some(seed),
+                    Some(claimed.owner),
+                )
+            } else {
+                let config = config::Config::load_strict(&config::LoadOptions {
+                    user_config_dir: Some(options.config_dir.clone()),
+                    project_dir: Some(options.project_root.clone()),
+                    read_env: false,
+                    ..Default::default()
+                })?;
+                let bus = Arc::new(EventBus::new(4096));
+                let db_path = options.config_dir.join("evorch-events.db");
+                // The core confirms the deletion of expired archived threads (see
+                // `retention`): exclusive leases for the phase, then shared for its life.
+                let plan = retention::RetentionPlan {
+                    db_path: db_path.clone(),
+                    ownership_root: options.ownership_root.clone(),
+                    sidebar_path: options.config_dir.join("sidebar.json"),
+                    artifacts_dir: Some(options.config_dir.join("artifacts")),
+                    policy: runtime::thread_retention::policy_from_config(&config.storage),
+                };
+                let leases = tokio::task::spawn_blocking(move || {
+                    retention::acquire_leases(&plan, Duration::from_secs(30))
+                })
+                .await??;
+                let storage_config = components::storage_config(&config, db_path);
+                let storage =
+                    storage::Storage::open_with_lease(storage_config.clone(), leases.db_lease()?)?;
+                (config, bus, storage_config, storage, leases, None, None)
+            };
         let handle = storage.handle();
         // This reload must stay AFTER acquire_leases (including any exclusive
         // maintenance/downgrade), regardless of which PR adds that phase first.
         let tombstones = storage::Database::open(&storage_config)?.tombstones()?;
-        let startup = recovery
+        let startup = (recovery.is_some() || planned)
+            .then_some(())
             .map(|_| {
                 leases.recovery_startup_complete(&storage_config.db_path, &options.ownership_root)
             })
@@ -326,6 +396,16 @@ impl BootstrappedHost {
                 host: evaluator.clone(),
                 cli: None,
             });
+        let planned_sandbox = if planned && !config.providers.is_empty() {
+            let boundary =
+                runtime::network::sandbox_boundary_for_startup(options.project_root.clone())?;
+            Some(Arc::new(sandbox::bwrap::PlannedBwrap::new(
+                sandbox::BwrapConfig::from_boundary(boundary),
+                sandbox::SpawnLedger::new(),
+            )))
+        } else {
+            None
+        };
         // Health stays available without providers, tools or a production sandbox.
         let components::ExecutionComponents {
             executor,
@@ -334,6 +414,14 @@ impl BootstrappedHost {
             components::ExecutionComponents::unconfigured(
                 bus.clone(),
                 options.project_root.clone(),
+            )?
+        } else if let Some(sandbox) = &planned_sandbox {
+            components::ExecutionComponents::planned(
+                bus.clone(),
+                options.project_root.clone(),
+                &config,
+                evaluation_tools,
+                sandbox.clone(),
             )?
         } else {
             components::ExecutionComponents::production(
@@ -396,7 +484,8 @@ impl BootstrappedHost {
                 })
                 .collect(),
             });
-        let composed = runtime::compose_runtime(RuntimeComposition {
+        let seeded = seed.is_some();
+        let composition_input = RuntimeComposition {
             config: &config,
             user_config_dir: Some(options.config_dir.clone()),
             model_catalog_dir: Some(options.config_dir.join("catalog")),
@@ -411,37 +500,78 @@ impl BootstrappedHost {
                 }
                 None => ModelSource::Fixed(live.as_ref().unwrap().clone()),
             },
-            workspace: Some(workspace),
-        })?;
+            workspace: if seeded { None } else { Some(workspace) },
+        };
+        let composed = match seed {
+            Some(seed) => seed.compose(composition_input)?,
+            None => runtime::compose_runtime(composition_input)?,
+        };
         let artifacts = Arc::new(runtime::artifacts::store_with_refs(
             options.config_dir.join("artifacts"),
             handle.clone(),
         )?);
         let (project_models, reload_projects) =
             project_models::resolver(&options, credentials.clone(), bus.clone());
-        let runtime = learning::configure(
-            composed.runtime.with_mcp_service(mcp.runs.clone()),
-            &config,
-            storage_config.clone(),
-            handle.clone(),
-            &options.project_root,
-        )
+        let initial_runtime = if planned || recovery.is_some() {
+            use std::os::unix::ffi::OsStrExt;
+            let canonical = std::fs::canonicalize(&options.config_dir)?;
+            let identity = format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()));
+            composed
+                .runtime
+                .with_learning_origin(runtime::learning_jobs::current_origin(
+                    storage::learning_jobs::LearningOriginKind::Core,
+                    Some(identity),
+                ))
+        } else {
+            composed.runtime
+        };
+        let initial_runtime = if let Some(sandbox) = &planned_sandbox {
+            initial_runtime.with_spawn_ledger(sandbox.ledger().clone())
+        } else {
+            initial_runtime
+        };
+        // Learning configuration resolves a slug with git. Planned constructors
+        // must not start even that child before Ready.
+        let runtime = initial_runtime.with_mcp_service(mcp.runs.clone());
+        let runtime = if planned {
+            runtime
+        } else {
+            learning::configure(
+                runtime,
+                &config,
+                storage_config.clone(),
+                handle.clone(),
+                &options.project_root,
+            )
+        }
         .with_project_models(project_models)
         .with_sandbox_root(options.project_root.clone())
-        .with_run_store(RunStore::open(&storage_config, handle.clone())?)
         .with_artifact_store(artifacts.clone());
+        let runtime = if seeded {
+            runtime
+        } else {
+            runtime.with_run_store(RunStore::open(&storage_config, handle.clone())?)
+        };
         let guard = runtime::thread_retention::TombstoneGuard::new(tombstones);
-        runtime
-            .set_tombstone_guard(guard.clone())
-            .map_err(|_| "runtime tombstone guard already set")?;
-        let owner = Arc::new(OwnerHost::open(
-            &options.ownership_root,
-            config.ownership.clone(),
-            bus.clone(),
-        )?);
-        owner
-            .set_tombstone_guard(guard)
-            .map_err(|_| "owner tombstone guard already set")?;
+        if !seeded {
+            runtime
+                .set_tombstone_guard(guard.clone())
+                .map_err(|_| "runtime tombstone guard already set")?;
+        }
+        let owner = if let Some(owner) = claimed_owner {
+            owner
+        } else {
+            Arc::new(OwnerHost::open(
+                &options.ownership_root,
+                config.ownership.clone(),
+                bus.clone(),
+            )?)
+        };
+        if !seeded {
+            owner
+                .set_tombstone_guard(guard)
+                .map_err(|_| "owner tombstone guard already set")?;
+        }
         runtime.set_thread_scratch(owner.thread_scratch());
         let _ = evaluator.runtime.set(runtime.downgrade());
         let reload_models: crate::areas::ReloadModels = Arc::new(move || {
@@ -512,13 +642,6 @@ impl BootstrappedHost {
             storage_writer: handle.clone(),
             model: routed_identity.unwrap_or(composed.model_identity),
         };
-        let reclaim = runtime::thread_retention::ReclaimExecutor::spawn(
-            runtime::thread_retention::ExecutorConfig::new(
-                handle.clone(),
-                storage_config.clone(),
-                Some(artifacts),
-            ),
-        )?;
         let mut bootstrap = Self {
             host,
             runtime,
@@ -528,56 +651,155 @@ impl BootstrappedHost {
             config,
             services: services::BackgroundServices::default(),
             area_tasks,
+            deferred: None,
+            planned_sandbox,
             mcp,
             recovery_diagnostics: None,
             usage_pricing: pricing,
             #[cfg(any(test, feature = "test-support"))]
             composition,
             bridge: Some(bridge),
-            reclaim: Some(reclaim),
+            reclaim: None,
             executor,
             _leases: leases,
         };
-        if let (Some(recovery), Some(startup)) = (recovery, startup) {
-            let work_changed = bootstrap
+        bootstrap.deferred = Some(DeferredStartup {
+            mode: if planned {
+                core_startup::CoreBootMode::PlannedHandoff
+            } else {
+                core_startup::CoreBootMode::Cold
+            },
+            options,
+            storage: storage_config,
+            writer: handle,
+            projects: recovery_projects,
+            startup,
+            bus,
+            adapters,
+            observe,
+            artifacts,
+        });
+        if planned {
+            bootstrap
                 .host
                 .lock()
                 .unwrap()
                 .service()
-                .background_work_notify();
+                .restart_gate()
+                .transition(0, restart::HostRestartPhase::Preparing);
+        } else {
+            bootstrap.start_deferred(recovery).await?;
+        }
+
+        Ok(bootstrap)
+    }
+
+    /// Probe is owned by the same ledger as the successor runtime. No producers
+    /// or graph activation may start until this explicit Ready-stage check passes.
+    pub async fn probe_after_ready(&self) -> Result<(), BootstrapError> {
+        if self
+            .runtime
+            .adopted_restart_transaction()?
+            .ready_at_ms
+            .is_none()
+        {
+            return Err("sandbox probe requires durable Ready".into());
+        }
+        if let Some(sandbox) = &self.planned_sandbox {
+            let sandbox = sandbox.clone();
+            tokio::task::spawn_blocking(move || sandbox.initialize()).await??;
+        }
+        Ok(())
+    }
+    pub fn planned_probe_stats(&self) -> Option<sandbox::ledger::ChildStats> {
+        self.planned_sandbox
+            .as_ref()
+            .map(|s| s.ledger().child_stats())
+    }
+
+    /// The core calls this only after its durable Ready readback and boot guard.
+    /// A pending host never scans or activates a graph, or starts a producer.
+    pub async fn activate_after_ready(
+        &mut self,
+        recovery: &dyn core_startup::CoreStartupHook,
+    ) -> Result<(), BootstrapError> {
+        if self
+            .runtime
+            .adopted_restart_transaction()?
+            .ready_at_ms
+            .is_none()
+        {
+            return Err("planned activation requires durable Ready".into());
+        }
+        self.probe_after_ready().await?;
+        self.owner.enable_normal_shutdown();
+        self.start_deferred(Some(recovery)).await?;
+        self.host
+            .lock()
+            .unwrap()
+            .service()
+            .restart_gate()
+            .transition(0, restart::HostRestartPhase::Open);
+        Ok(())
+    }
+    async fn start_deferred(
+        &mut self,
+        recovery: Option<&dyn core_startup::CoreStartupHook>,
+    ) -> Result<(), BootstrapError> {
+        let deferred = self.deferred.take().ok_or("startup already activated")?;
+        if matches!(deferred.mode, core_startup::CoreBootMode::PlannedHandoff) {
+            self.runtime = learning::configure(
+                self.runtime.clone(),
+                &self.config,
+                deferred.storage.clone(),
+                deferred.writer.clone(),
+                &deferred.options.project_root,
+            );
+        }
+        if let (Some(recovery), Some(startup)) = (recovery, deferred.startup) {
+            let work_changed = self.host.lock().unwrap().service().background_work_notify();
             let result = recovery
                 .start(
                     core_startup::CoreStartupInputs {
-                        options: options.clone(),
-                        runtime: bootstrap.runtime.clone(),
-                        owner: bootstrap.owner.clone(),
-                        storage: storage_config.clone(),
-                        writer: handle,
-                        projects: recovery_projects,
+                        mode: deferred.mode,
+                        options: deferred.options.clone(),
+                        runtime: self.runtime.clone(),
+                        owner: self.owner.clone(),
+                        storage: deferred.storage.clone(),
+                        writer: deferred.writer.clone(),
+                        projects: deferred.projects,
                         startup,
                         work_changed,
                     },
-                    &mut bootstrap.services,
+                    &mut self.services,
                 )
                 .await;
             match result {
-                Ok(diagnostics) => bootstrap.recovery_diagnostics = Some(diagnostics),
+                Ok(diagnostics) => self.recovery_diagnostics = Some(diagnostics),
                 Err(error) => {
-                    let _ = bootstrap.shutdown().await;
+                    let _ = self.shutdown().await;
                     return Err(error);
                 }
             }
         }
+
+        self.reclaim = Some(runtime::thread_retention::ReclaimExecutor::spawn(
+            runtime::thread_retention::ExecutorConfig::new(
+                deferred.writer.clone(),
+                deferred.storage.clone(),
+                Some(deferred.artifacts),
+            ),
+        )?);
         host_services::start(
-            &mut bootstrap.services,
-            &options,
-            &bootstrap.config,
-            bus,
-            bootstrap.usage_pricing.clone(),
-            bootstrap.mcp.clone(),
+            &mut self.services,
+            &deferred.options,
+            &self.config,
+            deferred.bus,
+            self.usage_pricing.clone(),
+            self.mcp.clone(),
         );
-        bootstrap.services.start("evaluation", {
-            let evaluations = evaluations.clone();
+        self.services.start("evaluation", {
+            let evaluations = self.evaluations.clone();
             |stop| async move {
                 let _ = stop.await;
                 evaluations.shutdown().await?;
@@ -585,32 +807,32 @@ impl BootstrappedHost {
             }
         });
         if let Err(error) = learning::start(
-            &mut bootstrap.services,
-            &bootstrap.runtime,
-            bootstrap.owner.clone(),
-            &bootstrap.config,
-            &storage_config,
-            evaluations,
+            &mut self.services,
+            &self.runtime,
+            self.owner.clone(),
+            &self.config,
+            &deferred.storage,
+            self.evaluations.clone(),
         ) {
-            let _ = bootstrap.shutdown().await;
+            let _ = self.shutdown().await;
             return Err(error);
         }
-        if let Some(observe) = observe {
-            observe(&bootstrap.runtime);
+        if let Some(observe) = deferred.observe {
+            observe(&self.runtime);
         }
         if let Err(error) = lane_pr::start(
-            &mut bootstrap.services,
-            &bootstrap.runtime,
-            &bootstrap.owner,
-            bootstrap.config.pull_requests,
-            adapters,
+            &mut self.services,
+            &self.runtime,
+            &self.owner,
+            self.config.pull_requests,
+            deferred.adapters,
         ) {
-            if let Err(drain) = bootstrap.shutdown().await {
+            if let Err(drain) = self.shutdown().await {
                 tracing::warn!(%drain, "lane/PR startup cleanup failed");
             }
             return Err(error);
         }
-        Ok(bootstrap)
+        Ok(())
     }
 
     pub fn restart_producers(&self) -> Vec<runtime::producer::ProducerGate> {

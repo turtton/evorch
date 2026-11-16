@@ -18,8 +18,14 @@ pub struct RestartCaptureSession {
     expected_persisted: bool,
 }
 /// Failed adoption retains the physical proof, including on readback failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartAdoptionFailure {
+    Rejected,
+    Unconfirmed,
+}
 #[derive(Debug)]
 pub struct RestartAdoptionError {
+    pub failure: RestartAdoptionFailure,
     pub error: RuntimeError,
     pub proof: core_instance::InheritedHandoffProof,
 }
@@ -448,11 +454,16 @@ impl AgentRuntime {
         &self,
         proof: core_instance::InheritedHandoffProof,
     ) -> Result<(), Box<RestartAdoptionError>> {
-        if let Err(error) = self.validate_restart_adoption(&proof) {
-            return Err(Box::new(RestartAdoptionError { error, proof }));
+        if let Err((error, failure)) = self.validate_restart_adoption(&proof) {
+            return Err(Box::new(RestartAdoptionError {
+                error,
+                proof,
+                failure,
+            }));
         }
         self.shared.planned_adoption.set(proof).map_err(|proof| {
             Box::new(RestartAdoptionError {
+                failure: RestartAdoptionFailure::Rejected,
                 error: error("handoff proof already installed"),
                 proof,
             })
@@ -461,17 +472,18 @@ impl AgentRuntime {
     fn validate_restart_adoption(
         &self,
         proof: &core_instance::InheritedHandoffProof,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<(), (RuntimeError, RestartAdoptionFailure)> {
+        use RestartAdoptionFailure::{Rejected, Unconfirmed};
         let store = self
             .shared
             .run_store
             .get()
-            .ok_or_else(|| error("no run store"))?;
+            .ok_or_else(|| (error("no run store"), Rejected))?;
         let read = || {
             store
                 .with_database(|db| db.restart_transaction(proof.restart_id()))
-                .map_err(error)?
-                .ok_or_else(|| error("missing handoff transaction"))
+                .map_err(|e| (error(e), Unconfirmed))?
+                .ok_or_else(|| (error("missing handoff transaction"), Rejected))
         };
         let matches_proof = |tx: &RestartTransaction| {
             tx.metadata.restart_id == proof.restart_id()
@@ -482,7 +494,7 @@ impl AgentRuntime {
         };
         let before = read()?;
         if !matches_proof(&before) {
-            return Err(error("handoff proof mismatch"));
+            return Err((error("handoff proof mismatch"), Rejected));
         }
         let tx = if before.phase == RestartPhase::Armed {
             let write = store.handle.mutate_restart(
@@ -503,10 +515,13 @@ impl AgentRuntime {
                 || after.expected_digest != before.expected_digest
                 || after.manifest_digest != before.manifest_digest
             {
-                return Err(write
-                    .err()
-                    .map(error)
-                    .unwrap_or_else(|| error("adoption readback mismatch")));
+                return Err((
+                    write
+                        .err()
+                        .map(error)
+                        .unwrap_or_else(|| error("adoption readback mismatch")),
+                    Unconfirmed,
+                ));
             }
             after
         } else {
@@ -516,7 +531,7 @@ impl AgentRuntime {
             || tx.phase != RestartPhase::Adopted
             || tx.adopted_epoch != Some(proof.successor_epoch())
         {
-            return Err(error("handoff is not adoptable"));
+            return Err((error("handoff is not adoptable"), Rejected));
         }
         // Adopt validates the capture atomically in storage. An already-adopted
         // successor installs only physical eligibility here: per-component graph

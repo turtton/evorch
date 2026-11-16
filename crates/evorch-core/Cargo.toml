@@ -10,6 +10,16 @@ path = "tests/support/mcp_peer.rs"
 test = false
 bench = false
 
+[features]
+bootstrap-test-support = ["core-instance/recovery-test-support", "storage/recovery-test-support"]
+
+[[bin]]
+name = "core-bootstrap-harness"
+path = "harness/bootstrap.rs"
+required-features = ["bootstrap-test-support"]
+test = false
+bench = false
+
 [dependencies]
 core-instance = { path = "../core-instance" }
 workbench-host = { path = "../workbench-host" }

@@ -2,6 +2,8 @@
 pub mod backend;
 pub mod instance;
 pub mod lifecycle;
+#[cfg(target_os = "linux")]
+pub mod planned_bootstrap;
 pub mod restart;
 // Only the core bootstrap installs graph recovery; embedded hosts remain legacy.
 pub mod recovery_service;

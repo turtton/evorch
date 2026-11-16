@@ -63,8 +63,18 @@ impl CoreStartupHook for CoreGraphRecovery {
         services: &'a mut BackgroundServices,
     ) -> CoreStartupFuture<'a> {
         Box::pin(async move {
-            if !inputs.runtime.has_planned_restart_handoff() {
-                inputs.runtime.quarantine_cold_restarts()?;
+            match inputs.mode {
+                workbench_host::bootstrap::core_startup::CoreBootMode::Cold => {
+                    if inputs.runtime.has_planned_restart_handoff() {
+                        return Err("planned proof in cold bootstrap".into());
+                    }
+                    inputs.runtime.quarantine_cold_restarts()?;
+                }
+                workbench_host::bootstrap::core_startup::CoreBootMode::PlannedHandoff => {
+                    if !inputs.runtime.has_planned_restart_handoff() {
+                        return Err("planned bootstrap requires inherited proof".into());
+                    }
+                }
             }
             let config = config::Config::load_strict(&config::LoadOptions {
                 user_config_dir: Some(inputs.options.config_dir.clone()),

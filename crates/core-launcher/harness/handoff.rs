@@ -39,6 +39,7 @@ mod linux {
         HandoffRecord {
             restart_id: format!("fixture-{epoch}"),
             config_identity: config.identity().into(),
+            predecessor_epoch: epoch - 1,
             successor_epoch: epoch,
             nonce_hash: "fixture-nonce-hash".into(),
             successor_build: running_elf_identity().unwrap(),

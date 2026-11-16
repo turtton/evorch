@@ -64,7 +64,7 @@ impl AgentRuntime {
                         F::BeforeAdopt => BootFailure::Bootstrap,
                         F::AdoptRejected => BootFailure::AdoptRejected,
                         F::AdoptAckUnknown => BootFailure::AckUnknown,
-                        F::AdoptedBeforeReady => BootFailure::BeforeReady,
+                        F::AdoptedBeforeReady | F::SandboxProbe => BootFailure::BeforeReady,
                         F::Interrupt => BootFailure::Interrupted,
                         F::Terminate => BootFailure::Terminated,
                     }),
@@ -129,6 +129,10 @@ impl AgentRuntime {
             .with_database(|db| db.validate_restart_capture_digest(proof.restart_id()))
             .map_err(error)?;
         Ok(tx)
+    }
+    /// The physical proof and canonical DB readback identify the same adopted transaction.
+    pub fn adopted_restart_transaction(&self) -> Result<RestartTransaction, RuntimeError> {
+        self.read_adopted_restart(true)
     }
     pub fn adopted_restart_ownership_evidence(
         &self,

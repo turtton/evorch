@@ -1,7 +1,9 @@
 //! bubblewrap による Linux コマンド隔離を提供します。
 
 mod home;
+mod startup;
 use home::prepare_home_aliases;
+pub use startup::PlannedBwrap;
 
 #[cfg(test)]
 mod home_tests;
@@ -114,6 +116,21 @@ impl BwrapSandbox {
 
     pub fn detect_with_program(program: &Path, config: BwrapConfig) -> Result<Self, SandboxError> {
         probe(program)?;
+        Self::from_probed_program(program, config)
+    }
+
+    pub fn detect_owned(
+        config: BwrapConfig,
+        ledger: &crate::SpawnLedger,
+    ) -> Result<Self, SandboxError> {
+        let program = locate_bwrap().ok_or_else(|| SandboxError::BwrapUnavailable {
+            detail: "bwrap 実行ファイルが見つかりません".into(),
+        })?;
+        probe_owned(&program, Some(ledger))?;
+        Self::from_probed_program(&program, config)
+    }
+
+    fn from_probed_program(program: &Path, config: BwrapConfig) -> Result<Self, SandboxError> {
         let unavailable = |error: std::io::Error| SandboxError::BwrapUnavailable {
             detail: format!("/var/tmp の作業領域を作成できません: {error}"),
         };
