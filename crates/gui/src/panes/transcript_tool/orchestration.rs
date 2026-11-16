@@ -9,9 +9,52 @@ use crate::theme::icons;
 
 const PREVIEW_CHARS: usize = 60;
 
+/// Why a finished `wait` returned: the distinct event kinds it reported, or
+/// that nothing was left to wait for. Phase-only and unparsable results have no
+/// reason to show.
+fn wait_reason(result: &str) -> Option<String> {
+    const SHOWN_KINDS: usize = 3;
+    let result: Value = serde_json::from_str(result).ok()?;
+    if result.get("status")?.as_str()? == "no_wait_sources" {
+        return Some("nothing to wait for".to_owned());
+    }
+    let mut labels: Vec<&str> = Vec::new();
+    for kind in result
+        .get("events")?
+        .as_array()?
+        .iter()
+        .filter_map(|event| event.get("kind")?.as_str())
+    {
+        let label = match kind {
+            "message" => "message",
+            "run_completed" => "run finished",
+            "turn_completed" => "turn finished",
+            "parent_terminated" => "parent ended",
+            "question" => "question",
+            "answer_ready" => "answer",
+            "lane" => "lane",
+            "shell" => "shell job",
+            _ => continue,
+        };
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    if labels.is_empty() {
+        return None;
+    }
+    let hidden = labels.len().saturating_sub(SHOWN_KINDS);
+    let mut text = labels[..labels.len() - hidden].join(", ");
+    if hidden > 0 {
+        text.push_str(&format!(" +{hidden}"));
+    }
+    Some(text)
+}
+
 pub(super) fn header(
     tool_name: &str,
     input: Option<&Value>,
+    result: Option<&str>,
     agents: &[TaskRow],
 ) -> Option<ToolHeader> {
     let str_arg = |key: &str| input.and_then(|input| input.get(key)?.as_str());
@@ -106,15 +149,28 @@ pub(super) fn header(
                     .collect(),
                 None => agent("run_id").into_iter().collect(),
             };
-            header.subject = runs.join(", ");
-            if runs.len() > 1 {
-                header.meta = Some(match str_arg("mode") {
-                    Some("all") => "all".to_owned(),
-                    _ => "any".to_owned(),
-                });
-            }
+            // Without targets `wait` takes any event addressed to this run. While the
+            // input is still streaming (`None`) the verb alone is shown.
+            let untargeted = input.is_some_and(|input| {
+                input.get("run_id").is_none() && input.get("run_ids").is_none()
+            });
+            header.subject = if untargeted {
+                "events".to_owned()
+            } else {
+                runs.join(", ")
+            };
+            let mode = (runs.len() > 1).then(|| match str_arg("mode") {
+                Some("all") => "all",
+                _ => "any",
+            });
+            header.meta = match (mode, result.and_then(wait_reason)) {
+                (Some(mode), Some(reason)) => Some(format!("{mode} · {reason}")),
+                (Some(mode), None) => Some(mode.to_owned()),
+                (None, reason) => reason,
+            };
             header
         }
+        // Retired tool; kept so transcripts recorded before `wait` replaced it still read well.
         "wait_reply" => new(icons::HOURGLASS, "Wait for reply"),
         "inbox" => new(icons::TRAY, "Read inbox"),
         "run_output" => {
@@ -244,7 +300,96 @@ mod tests {
     }
 
     fn text(tool: &str, input: Value, agents: &[TaskRow]) -> Option<String> {
-        header(tool, Some(&input), agents).map(|header| header.text())
+        header(tool, Some(&input), None, agents).map(|header| header.text())
+    }
+
+    fn wait_text(input: Value, result: &str, agents: &[TaskRow]) -> String {
+        header("wait", Some(&input), Some(result), agents)
+            .unwrap()
+            .text()
+    }
+
+    #[test]
+    fn wait_without_targets_names_the_events_it_listens_to() {
+        assert_eq!(
+            text("wait", json!({}), &[]).as_deref(),
+            Some("Wait for events")
+        );
+        // The input is still streaming: only the verb is known.
+        assert_eq!(
+            header("wait", None, None, &[])
+                .map(|header| header.text())
+                .as_deref(),
+            Some("Wait for")
+        );
+        assert_eq!(
+            text(
+                "wait",
+                json!({"run_id": "run-3"}),
+                &[row(3, "reviewer-r1", "reviewer")]
+            )
+            .as_deref(),
+            Some("Wait for reviewer-r1")
+        );
+    }
+
+    #[test]
+    fn wait_result_shows_why_it_returned() {
+        let agents = [row(3, "reviewer-r1", "reviewer")];
+        for (input, result, expected) in [
+            (
+                json!({}),
+                json!({"status": "ready", "events": [
+                    {"kind": "message", "message_id": "msg-1"},
+                    {"kind": "message", "message_id": "msg-2"},
+                    {"kind": "shell", "job_id": "job-1"}]}),
+                "Wait for events · message, shell job",
+            ),
+            (
+                json!({}),
+                json!({"status": "ready", "events": [
+                    {"kind": "parent_terminated"}, {"kind": "lane"},
+                    {"kind": "question"}, {"kind": "answer_ready"}]}),
+                "Wait for events · parent ended, lane, question +1",
+            ),
+            (
+                json!({}),
+                json!({"status": "no_wait_sources", "events": [], "reasons": ["no_live_parent"]}),
+                "Wait for events · nothing to wait for",
+            ),
+            (
+                json!({"run_id": "run-3"}),
+                json!({"status": "ready", "events": [{"kind": "run_completed"}]}),
+                "Wait for reviewer-r1 · run finished",
+            ),
+            (
+                json!({"run_ids": ["run-3", "run-9"], "mode": "all"}),
+                json!({"status": "ready", "events": [{"kind": "message"}]}),
+                "Wait for reviewer-r1, run-9 · all · message",
+            ),
+        ] {
+            assert_eq!(wait_text(input, &result.to_string(), &agents), expected);
+        }
+    }
+
+    #[test]
+    fn wait_results_without_a_reason_keep_the_plain_header() {
+        for result in [
+            r#"{"run_id":"run-3","phase":"Done"}"#,
+            r#"{"status":"ready","events":[]}"#,
+            "not json",
+            "wait failed",
+        ] {
+            assert_eq!(wait_text(json!({}), result, &[]), "Wait for events");
+        }
+    }
+
+    #[test]
+    fn retired_wait_reply_calls_in_old_transcripts_keep_their_label() {
+        assert_eq!(
+            text("wait_reply", json!({"message_id": "msg-35"}), &[]).as_deref(),
+            Some("Wait for reply")
+        );
     }
 
     #[test]
@@ -346,12 +491,12 @@ mod tests {
                 Some(verb)
             );
             assert_eq!(
-                header(tool, None, &[])
+                header(tool, None, None, &[])
                     .map(|header| header.text())
                     .as_deref(),
                 Some(verb)
             );
         }
-        assert_eq!(header("custom_tool", None, &[]), None);
+        assert_eq!(header("custom_tool", None, None, &[]), None);
     }
 }

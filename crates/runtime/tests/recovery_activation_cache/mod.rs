@@ -4,6 +4,8 @@ use runtime::quiesce::{RecoveryRecipe, ResumePolicy};
 use runtime::{AgentModel, CurrentRecoveryAuthority};
 use std::collections::BTreeMap;
 
+mod wait_schema;
+
 fn settings(h: &Harness) -> Config {
     let root = h._directory.path();
     let mut current = Config::load(&LoadOptions {
@@ -29,19 +31,18 @@ fn settings(h: &Harness) -> Config {
             auto: false,
         });
     current
-}
-
-fn process(
-    h: &Harness,
-    current: &Config,
-    storage: &storage::Storage,
-    config: &storage::StorageConfig,
-) -> (
-    AgentRuntime,
-    Arc<runtime::compose::RoutedModel>,
-    EventReceiver,
-) {
-    process_with_read(h, current, storage, config, Arc::new(BulkRead))
+        .routing
+        .routes
+        .get_mut("orchestrator")
+        .unwrap()
+        .push(config::RouteCandidateConfig {
+            profile: "fallback".into(),
+            model: None,
+            auto: false,
+        });
+    current.agents.orchestrator.base.generation.temperature = Some(0.25);
+    current.agents.orchestrator.base.generation.max_tokens = Some(321);
+    current
 }
 
 fn process_with_read(
@@ -50,30 +51,48 @@ fn process_with_read(
     storage: &storage::Storage,
     config: &storage::StorageConfig,
     read: Arc<dyn Tool>,
-) -> (
-    AgentRuntime,
-    Arc<runtime::compose::RoutedModel>,
-    EventReceiver,
-) {
+) -> (AgentRuntime, Arc<dyn AgentModel>, EventReceiver) {
+    process_with_catalog(h, current, storage, config, read, None)
+}
+
+fn process_with_catalog(
+    h: &Harness,
+    current: &Config,
+    storage: &storage::Storage,
+    config: &storage::StorageConfig,
+    read: Arc<dyn Tool>,
+    predecessor: Option<Arc<wait_schema::PredecessorCatalog>>,
+) -> (AgentRuntime, Arc<dyn AgentModel>, EventReceiver) {
     let bus = Arc::new(EventBus::new(1024));
     let receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(read).unwrap();
-    let model = runtime::compose::compose_routed_model(
-        current,
-        routing::ComposeDeps {
-            credential_store: Arc::new(
-                FileCredentialStore::open(h._directory.path().join("credentials")).unwrap(),
-            ),
-            event_bus: Some(bus.clone()),
-            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-            catalog: model::ModelCatalog::new(),
-            factory: routing::factory::FactoryOptions::default(),
-        },
-        Some(test_support::model_catalog_dir()),
-    )
-    .unwrap();
-    let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone())
+    let credentials =
+        Arc::new(FileCredentialStore::open(h._directory.path().join("credentials")).unwrap());
+    let model: Arc<dyn AgentModel> = if matches!(h.wire, Wire::Codex) {
+        codex_model(current, &credentials, &bus, &h.mock.codex_base_url())
+    } else {
+        runtime::compose::compose_routed_model(
+            current,
+            routing::ComposeDeps {
+                credential_store: credentials,
+                event_bus: Some(bus.clone()),
+                env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+                catalog: model::ModelCatalog::new(),
+                factory: routing::factory::FactoryOptions::default(),
+            },
+            Some(test_support::model_catalog_dir()),
+        )
+        .unwrap()
+    };
+    let execution: Arc<dyn AgentModel> = match predecessor {
+        Some(catalog) => Arc::new(wait_schema::PredecessorModel {
+            inner: model.clone(),
+            catalog,
+        }),
+        None => model.clone(),
+    };
+    let runtime = AgentRuntime::new(bus, Arc::new(executor), execution)
         .with_run_store(runtime::RunStore::open(config, storage.handle()).unwrap())
         .with_system_prompts(contract_prompts())
         .with_compaction(current.compaction.clone());
@@ -91,7 +110,15 @@ async fn routed_recovery_same_model_changed_temperature_blocks_before_ack_or_htt
 }
 
 async fn recover(changed_settings: bool) {
-    recover_case(changed_settings, false, false, false).await;
+    recover_case(
+        changed_settings,
+        false,
+        false,
+        false,
+        Wire::ChatCompletions,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -99,7 +126,15 @@ async fn planned_tool_schema_boundary_preserves_sent_history_and_reuses_the_new_
     for (different_build, changed_tool) in
         [(false, false), (true, false), (true, true), (false, true)]
     {
-        recover_case(false, true, different_build, changed_tool).await;
+        recover_case(
+            false,
+            true,
+            different_build,
+            changed_tool,
+            Wire::ChatCompletions,
+            false,
+        )
+        .await;
     }
 }
 
@@ -130,19 +165,43 @@ async fn recover_case(
     tools_case: bool,
     different_build: bool,
     changed_tool: bool,
+    wire: Wire,
+    wait_schema: bool,
 ) {
-    let h = harness(
-        if tools_case {
-            vec![
-                read_response(0),
-                text_response("completed"),
-                text_response("followup"),
-                text_response("reuse"),
-            ]
-        } else {
-            vec![text_response("completed"), text_response("followup")]
-        },
+    let mut script = if tools_case {
+        vec![
+            read_response(0),
+            text_response("completed"),
+            text_response("followup"),
+            text_response("reuse"),
+        ]
+    } else {
+        vec![text_response("completed"), text_response("followup")]
+    };
+    if wait_schema {
+        // The successor rejects this retired call, but its historical name, input,
+        // call ID and error result must still remain byte-for-byte in the prefix.
+        script.insert(
+            0,
+            ScriptedResponse::tool_call(
+                "legacy-response",
+                MODEL,
+                0,
+                "legacy-wait-reply",
+                "wait_reply",
+                [json!({"message_id":"msg-old", "timeout_ms":0}).to_string()],
+            ),
+        );
+    }
+    let h = harness_with_wire(
+        wire,
+        script,
         1_000_000,
+        Arc::new(BulkRead),
+        Vec::new(),
+        None,
+        0.9,
+        |_| {},
     );
     let mut current = settings(&h);
     let config = storage::StorageConfig {
@@ -150,12 +209,24 @@ async fn recover_case(
         ..Default::default()
     };
     let storage = storage::Storage::open(config.clone()).unwrap();
-    let (old, old_model, mut events) = process(&h, &current, &storage, &config);
+    let predecessor = wait_schema.then(|| Arc::new(wait_schema::PredecessorCatalog::default()));
+    let (old, old_model, mut events) = process_with_catalog(
+        &h,
+        &current,
+        &storage,
+        &config,
+        Arc::new(BulkRead),
+        predecessor.clone(),
+    );
     // Current-thread test: pin is installed before the admitted task is polled.
     let run = old
         .delegate_chat(
             "wire-recovery-thread",
-            Role::Worker,
+            if wait_schema {
+                Role::Orchestrator
+            } else {
+                Role::Worker
+            },
             "Keep original task".into(),
             RunConfig {
                 interactive: true,
@@ -165,7 +236,12 @@ async fn recover_case(
         )
         .unwrap();
     let pin = runtime::RoutePinRecord {
-        chain: "worker".into(),
+        chain: if wait_schema {
+            "orchestrator"
+        } else {
+            "worker"
+        }
+        .into(),
         position: 1,
         profile: "fallback".into(),
         model: MODEL.into(),
@@ -246,9 +322,19 @@ async fn recover_case(
         .mock
         .recorded_requests()
         .into_iter()
-        .filter(|r| r.path == "/v1/chat/completions")
+        .filter(|r| r.path == h.wire.path())
         .collect::<Vec<_>>();
-    assert_eq!(before.len(), if tools_case { 2 } else { 1 });
+    assert_eq!(
+        before.len(),
+        if wait_schema {
+            3
+        } else if tools_case {
+            2
+        } else {
+            1
+        }
+    );
+    let after_index = before.len();
     let original = before.last().unwrap().body.clone();
     if changed_settings {
         current.agents.worker.base.generation.temperature = Some(0.75);
@@ -282,6 +368,9 @@ async fn recover_case(
             .unwrap()
             .incarnation;
         let mut candidate = old_input.clone();
+        if let Some(predecessor) = &predecessor {
+            candidate.request.tools = predecessor.successor_tools.lock().unwrap().clone();
+        }
         if changed_tool {
             candidate
                 .request
@@ -298,7 +387,7 @@ async fn recover_case(
             &candidate.request.tools,
             "fixture-permissions",
         );
-        if changed_tool && !different_build {
+        if (changed_tool || wait_schema) && !different_build {
             assert!(comparison.is_err());
             assert!(restarted.list_agents().is_empty());
             assert_eq!(
@@ -312,8 +401,11 @@ async fn recover_case(
             return;
         }
         let evidence = comparison.unwrap();
-        assert_eq!(evidence.boundary, changed_tool);
-        if changed_tool {
+        assert_eq!(evidence.boundary, changed_tool || wait_schema);
+        if wait_schema {
+            wait_schema::assert_evidence(&evidence);
+        }
+        if changed_tool || wait_schema {
             assert!(
                 restarted
                     .consume_restart_tool_boundary(evidence.clone(), candidate.clone())
@@ -336,7 +428,7 @@ async fn recover_case(
         let boundary = restarted
             .consume_restart_tool_boundary(evidence.clone(), candidate.clone())
             .unwrap();
-        let permitted = if changed_tool {
+        let permitted = if changed_tool || wait_schema {
             let permitted = boundary.unwrap().apply(&old_input).unwrap();
             assert_eq!(permitted, candidate);
             assert!(
@@ -350,26 +442,18 @@ async fn recover_case(
             assert!(boundary.is_none());
             candidate.clone()
         };
-        // OpenAI's wire contract orders functions by name, not by the executor's
-        // registration order. Project the candidate independently of the encoder;
-        // never sort the recorded wire, so an unexpected wire order still fails.
-        let mut wire_order = permitted.request.tools.iter().collect::<Vec<_>>();
-        wire_order.sort_by(|left, right| left.name.cmp(&right.name));
-        expected_wire_tools = Value::Array(
-            wire_order
-                .into_iter()
-                .map(|tool| {
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.input_schema,
-                        },
-                    })
-                })
-                .collect(),
-        );
+        expected_wire_tools = wait_schema::wire_tools(h.wire, &permitted.request.tools);
+        if wait_schema {
+            let (saved, consumed) = fixture_db
+                .restart_tools_evidence("routed-wire", &run.to_string(), incarnation)
+                .unwrap()
+                .unwrap();
+            wait_schema::assert_evidence(&saved);
+            assert!(
+                consumed,
+                "schema boundary evidence must be durably consumed"
+            );
+        }
         let mut changed_permissions = candidate.clone();
         changed_permissions.request.temperature = Some(0.99);
         assert!(
@@ -447,7 +531,7 @@ async fn recover_case(
             h.mock
                 .recorded_requests()
                 .iter()
-                .filter(|r| r.path == "/v1/chat/completions")
+                .filter(|r| r.path == h.wire.path())
                 .count(),
             1
         );
@@ -472,43 +556,66 @@ async fn recover_case(
         .mock
         .recorded_requests()
         .into_iter()
-        .filter(|r| r.path == "/v1/chat/completions")
+        .filter(|r| r.path == h.wire.path())
         .map(|r| r.body)
         .collect::<Vec<_>>();
-    assert_eq!(requests.len(), if tools_case { 4 } else { 2 });
-    for request in &requests[if tools_case { 2 } else { 1 }..] {
+    assert_eq!(requests.len(), after_index + if tools_case { 2 } else { 1 });
+    for request in &requests[after_index..] {
         assert_eq!(
             request["tools"], expected_wire_tools,
             "wire tools must exactly match the permitted candidate, including order"
         );
     }
-    let after = &requests[if tools_case { 2 } else { 1 }];
-    if changed_tool {
+    let after = &requests[after_index];
+    if changed_tool || wait_schema {
         assert_ne!(original["tools"], after["tools"]);
     } else {
-        assert_append_only(CacheProtocol::OpenAi, &original, after).unwrap();
+        assert_append_only(h.wire.protocol(), &original, after).unwrap();
     }
     if tools_case {
-        assert_append_only(CacheProtocol::OpenAi, after, &requests[3]).unwrap();
+        assert_append_only(h.wire.protocol(), after, &requests[after_index + 1]).unwrap();
     }
     // Independent assertions, not the mock cache's comparison algorithm.
-    let prefix = original["messages"].as_array().unwrap();
+    let history_key = if matches!(h.wire, Wire::ChatCompletions) {
+        "messages"
+    } else {
+        "input"
+    };
+    let prefix = original[history_key].as_array().unwrap();
     assert_eq!(
-        &after["messages"].as_array().unwrap()[..prefix.len()],
+        &after[history_key].as_array().unwrap()[..prefix.len()],
         prefix
     );
     // Affinity and already-sent ToolResults are independent wire assertions.
     assert_eq!(after["prompt_cache_key"], original["prompt_cache_key"]);
     if tools_case {
         assert!(
-            original["messages"]
+            original[history_key]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|m| m["role"] == "tool")
+                .any(|m| m["role"] == "tool" || m["type"] == "function_call_output")
         );
     }
-    for key in ["model", "temperature", "max_tokens", "tool_choice"] {
+    if wait_schema {
+        wait_schema::assert_transition(
+            h.wire,
+            &requests,
+            after_index,
+            &old_input.request.tools,
+            &predecessor.unwrap().successor_tools.lock().unwrap(),
+        );
+    }
+    for key in [
+        "model",
+        "temperature",
+        "max_tokens",
+        "max_output_tokens",
+        "tool_choice",
+        "instructions",
+        "reasoning",
+        "service_tier",
+    ] {
         assert_eq!(after[key], original[key], "changed {key}");
     }
     let usage: Vec<_> = all_events
@@ -522,15 +629,17 @@ async fn recover_case(
             _ => None,
         })
         .collect();
-    assert_eq!(usage.len(), if tools_case { 4 } else { 2 });
+    assert_eq!(usage.len(), requests.len());
     assert!(usage[0].0 > 0);
-    assert_eq!(usage[1].1, usage[0].0);
+    for pair in usage[..after_index].windows(2) {
+        assert_eq!(pair[1].1, pair[0].0);
+    }
+    if changed_tool || wait_schema {
+        assert!(usage[after_index].1 < usage[after_index - 1].0);
+    } else {
+        assert_eq!(usage[after_index].1, usage[after_index - 1].0);
+    }
     if tools_case {
-        if changed_tool {
-            assert!(usage[2].1 < usage[1].0);
-        } else {
-            assert_eq!(usage[2].1, usage[1].0);
-        }
-        assert_eq!(usage[3].1, usage[2].0);
+        assert_eq!(usage[after_index + 1].1, usage[after_index].0);
     }
 }
