@@ -106,6 +106,10 @@ fn table() -> BTreeMap<&'static str, Guard> {
             Guarded { via: &[] },
         ),
         (
+            "runtime/restart_handoff.rs::persist_restart_tool_snapshot",
+            Guarded { via: &[] },
+        ),
+        (
             "runtime/questions.rs::answer_subagent_question",
             Guarded {
                 via: &["persist_subagent_answer"],

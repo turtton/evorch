@@ -375,6 +375,7 @@ impl AgentRuntime {
         catalog: &[providers::ToolSpec],
         permissions_fingerprint: &str,
     ) -> Result<(), RuntimeError> {
+        self.deny_deleted_run(&run.to_string()).map_err(error)?;
         self.validate_capture_session(session)?;
         let id = session.restart_id.as_str();
         if self.shared.active_restart_capture.get().map(String::as_str) != Some(id) {
