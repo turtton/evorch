@@ -19,23 +19,40 @@ impl McpHostServices {
     /// The caller has already selected a keychain-only backend (or unavailable).
     /// No server is started, discovered, or contacted by this composition step.
     pub fn for_user(backend: McpCredentialBackend) -> Self {
-        Self::compose(backend, ApprovalLedger::open_user())
+        Self::compose(backend, ApprovalLedger::open_user(), None)
     }
     /// Explicit core configuration directory; shares the legacy GUI's consent
     /// ledger when both hosts use the same user directory. Construction is inert.
     pub fn at_config_dir(backend: McpCredentialBackend, directory: std::path::PathBuf) -> Self {
-        Self::compose(backend, ApprovalLedger::at_user_config_dir(directory))
+        Self::compose(backend, ApprovalLedger::at_user_config_dir(directory), None)
+    }
+    /// Core composition; the stdio servers and their supervisors use its central ledger.
+    pub fn at_config_dir_owned(
+        backend: McpCredentialBackend,
+        directory: std::path::PathBuf,
+        ledger: sandbox::SpawnLedger,
+    ) -> Self {
+        Self::compose(
+            backend,
+            ApprovalLedger::at_user_config_dir(directory),
+            Some(ledger),
+        )
     }
     fn compose(
         backend: McpCredentialBackend,
         approvals: Result<ApprovalLedger, McpErrorKind>,
+        ledger: Option<sandbox::SpawnLedger>,
     ) -> Self {
         match NetworkGuard::new() {
             Ok(guard) => {
                 let approvals: Arc<dyn McpApprovalStore> = approvals
                     .map(|ledger| Arc::new(ledger) as Arc<dyn McpApprovalStore>)
                     .unwrap_or_else(|_| Arc::new(UnavailableApprovals));
-                Self::from_service(ProjectMcpService::new(backend, approvals, Arc::new(guard)))
+                let service = ProjectMcpService::new(backend, approvals, Arc::new(guard));
+                Self::from_service(match ledger {
+                    Some(ledger) => service.with_spawn_ledger(ledger),
+                    None => service,
+                })
             }
             Err(_) => {
                 let service = Arc::new(UnavailableMcpService::new(backend));

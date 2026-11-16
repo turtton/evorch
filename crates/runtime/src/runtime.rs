@@ -4231,12 +4231,31 @@ pub fn production_executor_with_prepared_sandbox(
     host_tools: Vec<Arc<dyn tools::Tool>>,
     sandbox: Arc<dyn sandbox::Sandbox>,
 ) -> Result<Arc<ToolExecutor>, RuntimeError> {
+    production_executor_with_prepared_sandbox_and_ledger(
+        bus,
+        workspace_root,
+        config,
+        host_tools,
+        sandbox,
+        None,
+    )
+}
+
+/// Core-only resource composition; executor tools, hooks and run forks share this ledger.
+pub fn production_executor_with_prepared_sandbox_and_ledger(
+    bus: Arc<EventBus>,
+    workspace_root: PathBuf,
+    config: &config::Config,
+    host_tools: Vec<Arc<dyn tools::Tool>>,
+    sandbox: Arc<dyn sandbox::Sandbox>,
+    ledger: Option<sandbox::SpawnLedger>,
+) -> Result<Arc<ToolExecutor>, RuntimeError> {
     let boundary =
         crate::network::sandbox_boundary(&WorkspaceMounts::shared(workspace_root.clone()))
             .map_err(|e| RuntimeError::Sandbox {
                 detail: e.to_string(),
             })?;
-    configured_executor(
+    let executor = configured_executor(
         bus,
         sandbox,
         &boundary,
@@ -4245,9 +4264,11 @@ pub fn production_executor_with_prepared_sandbox(
         sandbox::ApprovalPolicy::allow_all(),
         BrowserTools::Configure(&config.tools.browser),
     )?
-    .with_host_tools(host_tools)
-    .map(Arc::new)
-    .map_err(RuntimeError::from)
+    .with_host_tools(host_tools)?;
+    Ok(Arc::new(match ledger {
+        Some(ledger) => executor.with_spawn_ledger(ledger),
+        None => executor,
+    }))
 }
 
 /// Production executor composition, also used after a run builds its own sandbox.

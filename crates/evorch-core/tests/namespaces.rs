@@ -210,3 +210,25 @@ async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_off
     .unwrap();
     assert!(child.wait().await.unwrap().success());
 }
+
+/// D-2a supplies resource plumbing, not a product handoff entry. Invalid or
+/// incomplete inherited arguments must fail before even creating config/locks.
+#[test]
+fn unpublished_planned_entry_is_rejected_without_cold_boot_fallback() {
+    let executable = std::env::var_os("CARGO_BIN_EXE_evorch-core").unwrap();
+    for flag in ["--handoff-lifetime-fd", "--handoff-ticket-fd"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("not-created");
+        let output = std::process::Command::new(&executable)
+            .arg("--config-dir")
+            .arg(&config)
+            .args([flag, "-1"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            !config.exists(),
+            "unpublished handoff must not enter cold bootstrap"
+        );
+    }
+}

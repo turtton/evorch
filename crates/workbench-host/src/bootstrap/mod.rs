@@ -113,6 +113,8 @@ type RuntimeObserver = Box<dyn FnOnce(&AgentRuntime) + Send>;
 pub struct BootstrappedHost {
     pub host: Arc<Mutex<CommandHost>>,
     pub runtime: AgentRuntime,
+    /// Central owner of core children and auxiliary workers (not GUI-owned children).
+    pub spawn_ledger: sandbox::SpawnLedger,
     pub owner: Arc<OwnerHost>,
     pub config: config::Config,
     pub services: services::BackgroundServices,
@@ -156,15 +158,7 @@ struct DeferredStartup {
 
 impl BootstrappedHost {
     pub async fn open(options: BootstrapOptions) -> Result<Self, BootstrapError> {
-        Self::open_composed(
-            options,
-            None,
-            None,
-            lane_pr::PullRequestAdapters::default(),
-            None,
-            None,
-        )
-        .await
+        Self::open_composed(options, None, None, None, None, None).await
     }
 
     /// The production composition with the model and the per-run sandbox replaced, so a test
@@ -175,15 +169,7 @@ impl BootstrappedHost {
         options: BootstrapOptions,
         seams: TestSeams,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(
-            options,
-            Some(seams),
-            None,
-            lane_pr::PullRequestAdapters::default(),
-            None,
-            None,
-        )
-        .await
+        Self::open_composed(options, Some(seams), None, None, None, None).await
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -192,15 +178,7 @@ impl BootstrappedHost {
         seams: TestSeams,
         mcp: runtime::mcp::McpHostServices,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(
-            options,
-            Some(seams),
-            Some(mcp),
-            lane_pr::PullRequestAdapters::default(),
-            None,
-            None,
-        )
-        .await
+        Self::open_composed(options, Some(seams), Some(mcp), None, None, None).await
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -209,7 +187,7 @@ impl BootstrappedHost {
         seams: TestSeams,
         adapters: lane_pr::PullRequestAdapters,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(options, Some(seams), None, adapters, None, None).await
+        Self::open_composed(options, Some(seams), None, Some(adapters), None, None).await
     }
 
     /// Observe resources before recovery so failed-startup tests can audit cleanup.
@@ -224,7 +202,7 @@ impl BootstrappedHost {
             options,
             Some(seams),
             None,
-            adapters,
+            Some(adapters),
             Some(Box::new(observe)),
             None,
         )
@@ -237,15 +215,7 @@ impl BootstrappedHost {
         options: BootstrapOptions,
         recovery: &dyn core_startup::CoreStartupHook,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(
-            options,
-            None,
-            None,
-            lane_pr::PullRequestAdapters::default(),
-            None,
-            Some(recovery),
-        )
-        .await
+        Self::open_composed(options, None, None, None, None, Some(recovery)).await
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -254,22 +224,14 @@ impl BootstrappedHost {
         seams: TestSeams,
         recovery: &dyn core_startup::CoreStartupHook,
     ) -> Result<Self, BootstrapError> {
-        Self::open_composed(
-            options,
-            Some(seams),
-            None,
-            lane_pr::PullRequestAdapters::default(),
-            None,
-            Some(recovery),
-        )
-        .await
+        Self::open_composed(options, Some(seams), None, None, None, Some(recovery)).await
     }
 
     async fn open_composed(
         options: BootstrapOptions,
         seams: Option<TestSeams>,
         mcp: Option<runtime::mcp::McpHostServices>,
-        adapters: lane_pr::PullRequestAdapters,
+        adapters: Option<lane_pr::PullRequestAdapters>,
         observe: Option<RuntimeObserver>,
         recovery: Option<&dyn core_startup::CoreStartupHook>,
     ) -> Result<Self, BootstrapError> {
@@ -280,16 +242,7 @@ impl BootstrappedHost {
         claimed: planned::ClaimedBootstrap,
     ) -> Result<Self, BootstrapError> {
         let options = claimed.storage.options.clone();
-        Self::open_staged(
-            options,
-            None,
-            None,
-            lane_pr::PullRequestAdapters::default(),
-            None,
-            None,
-            Some(claimed),
-        )
-        .await
+        Self::open_staged(options, None, None, None, None, None, Some(claimed)).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -297,12 +250,15 @@ impl BootstrappedHost {
         options: BootstrapOptions,
         seams: Option<TestSeams>,
         mcp: Option<runtime::mcp::McpHostServices>,
-        adapters: lane_pr::PullRequestAdapters,
+        adapters: Option<lane_pr::PullRequestAdapters>,
         observe: Option<RuntimeObserver>,
         recovery: Option<&dyn core_startup::CoreStartupHook>,
         claimed: Option<planned::ClaimedBootstrap>,
     ) -> Result<Self, BootstrapError> {
         let planned = claimed.is_some();
+        let spawn_ledger = sandbox::SpawnLedger::new();
+        let adapters =
+            adapters.unwrap_or_else(|| lane_pr::PullRequestAdapters::owned(spawn_ledger.clone()));
         let (config, bus, storage_config, storage, leases, seed, claimed_owner) =
             if let Some(claimed) = claimed {
                 let planned::PlannedStorage {
@@ -383,7 +339,7 @@ impl BootstrappedHost {
                 .await??;
         let mcp = match mcp {
             Some(mcp) => mcp,
-            None => host_services::mcp(&options.config_dir).await?,
+            None => host_services::mcp(&options.config_dir, spawn_ledger.clone()).await?,
         };
         let evaluator = Arc::new(evaluation::EvaluatorHost::default());
         let (evaluation_tools, _, evaluations) =
@@ -396,12 +352,13 @@ impl BootstrappedHost {
                 host: evaluator.clone(),
                 cli: None,
             });
+        let evaluations = evaluations.with_spawn_ledger(spawn_ledger.clone());
         let planned_sandbox = if planned && !config.providers.is_empty() {
             let boundary =
                 runtime::network::sandbox_boundary_for_startup(options.project_root.clone())?;
             Some(Arc::new(sandbox::bwrap::PlannedBwrap::new(
                 sandbox::BwrapConfig::from_boundary(boundary),
-                sandbox::SpawnLedger::new(),
+                spawn_ledger.clone(),
             )))
         } else {
             None
@@ -424,12 +381,21 @@ impl BootstrappedHost {
                 sandbox.clone(),
             )?
         } else {
-            components::ExecutionComponents::production(
+            components::ExecutionComponents::production_owned(
                 bus.clone(),
                 options.project_root.clone(),
                 &config,
                 evaluation_tools,
+                spawn_ledger.clone(),
             )?
+        };
+        let workspace = if config.providers.is_empty() {
+            runtime::WorkspaceSeam::production_owned(
+                options.project_root.clone(),
+                spawn_ledger.clone(),
+            )?
+        } else {
+            workspace
         };
         let (fixed_model, workspace) = match seams {
             Some(seams) => (
@@ -525,11 +491,7 @@ impl BootstrappedHost {
         } else {
             composed.runtime
         };
-        let initial_runtime = if let Some(sandbox) = &planned_sandbox {
-            initial_runtime.with_spawn_ledger(sandbox.ledger().clone())
-        } else {
-            initial_runtime
-        };
+        let initial_runtime = initial_runtime.with_spawn_ledger(spawn_ledger.clone());
         // Learning configuration resolves a slug with git. Planned constructors
         // must not start even that child before Ready.
         let runtime = initial_runtime.with_mcp_service(mcp.runs.clone());
@@ -653,6 +615,7 @@ impl BootstrappedHost {
             area_tasks,
             deferred: None,
             planned_sandbox,
+            spawn_ledger,
             mcp,
             recovery_diagnostics: None,
             usage_pricing: pricing,
@@ -923,7 +886,7 @@ impl BootstrappedHost {
         let drained = failure.is_none();
         lane_pr::remember(&mut failure, self.area_tasks.shutdown().await);
         if let Some(reclaim) = self.reclaim.take() {
-            reclaim.shutdown();
+            lane_pr::remember(&mut failure, reclaim.try_shutdown());
         }
         // Events published before a drain failure still need their bridge ack.
         if let Some(bridge) = &mut self.bridge {
@@ -941,7 +904,7 @@ impl BootstrappedHost {
             }
         }
         if let Some(mut bridge) = self.bridge.take() {
-            bridge.shutdown();
+            lane_pr::remember(&mut failure, bridge.try_shutdown());
         }
         failure.map_or(Ok(()), Err)
     }

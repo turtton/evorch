@@ -661,6 +661,17 @@ pub(crate) async fn run_agent(
                             state.shared.executor.approval_policy(),
                             crate::runtime::BrowserTools::Inherit(&state.shared.executor),
                         )
+                        .map(|executor| {
+                            match state
+                                .shared
+                                .runtime
+                                .upgrade()
+                                .and_then(|runtime| runtime.spawn_ledger.get().cloned())
+                            {
+                                Some(ledger) => executor.with_spawn_ledger(ledger),
+                                None => executor,
+                            }
+                        })
                         .map(Arc::new)
                     })
             };
