@@ -107,6 +107,7 @@ async fn consuming_a_reply_preserves_correlation_for_a_second_reply() {
         assert_eq!(inbox[0].content, content);
         assert!(runtime.take_inbox(parent).unwrap().is_empty());
     }
+    runtime.cancel(child).unwrap();
     runtime.cancel(parent).unwrap();
     runtime.wait(child).await.unwrap();
     runtime.wait(parent).await.unwrap();

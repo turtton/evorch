@@ -1,6 +1,4 @@
-//! A run blocked in `wait_reply` or `wait` returns as soon as one of its own
-//! questions is answered, instead of lingering until the reply, a target event
-//! or a timeout. The answer text still reaches the model exactly once, through
+//! Own-event waits return when a question is answered or host input arrives. The answer text still reaches the model exactly once, through
 //! the agent loop's own flush after the tool result.
 
 use crate::support;
@@ -86,7 +84,7 @@ fn tool_json(messages: &[Message], call_id: &str) -> Value {
 
 /// The parent (run-1) never answers on its own; the child (run-2) sends it a
 /// message, asks a nonblocking question and waits for a reply to the message.
-async fn wait_reply_scenario(answer_before_wait_starts: bool) {
+async fn own_event_wait_scenario(answer_before_wait_starts: bool) {
     let gate = Arc::new(Notify::new());
     let model = Arc::new(ScriptedModel::new([]));
     model.gate_key("PARENT", Arc::new(Notify::new())).await;
@@ -105,16 +103,8 @@ async fn wait_reply_scenario(answer_before_wait_starts: bool) {
                     "ask_user",
                     json!({"title": "Which implementation?", "blocking": false}),
                 )),
-                Ok(tool_response(
-                    "first-wait",
-                    "wait_reply",
-                    json!({"message_id": "msg-1", "timeout_ms": 600_000}),
-                )),
-                Ok(tool_response(
-                    "second-wait",
-                    "wait_reply",
-                    json!({"message_id": "msg-1", "timeout_ms": 600_000}),
-                )),
+                Ok(tool_response("first-wait", "wait", json!({}))),
+                Ok(tool_response("second-wait", "wait", json!({}))),
                 Ok(text_response("child done", FinishReason::Stop)),
             ],
         )
@@ -131,7 +121,7 @@ async fn wait_reply_scenario(answer_before_wait_starts: bool) {
         .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
         .unwrap();
     // Requests 1 and 2 of the child run to completion; the third is the one
-    // that issues the first wait_reply.
+    // that issues the first own_event_wait.
     for index in 1..=2 {
         fixture.model.wait_for_request(index).await;
         gate.notify_one();
@@ -157,13 +147,12 @@ async fn wait_reply_scenario(answer_before_wait_starts: bool) {
             .unwrap();
     }
 
-    // The answer ends the first wait_reply without a timeout error, and the
+    // The answer ends the first own_event_wait without a timeout error, and the
     // answer is injected once, after the tool result.
     let after_answer = fixture.model.wait_for_request(4).await;
     let first = tool_json(&after_answer, "first-wait");
-    assert_eq!(first["status"], "answer_ready");
+    assert_eq!(first["answer_ready"], true);
     assert_eq!(first["question_ids"], json!([question.id]));
-    assert_eq!(first["message_id"], "msg-1");
     assert_eq!(occurrences(&after_answer, "[parent-answer id="), 1);
     assert!(!first.to_string().contains("Use A"));
 
@@ -183,9 +172,9 @@ async fn wait_reply_scenario(answer_before_wait_starts: bool) {
         .unwrap();
     let after_reply = fixture.model.wait_for_request(5).await;
     let second = tool_json(&after_reply, "second-wait");
-    assert_eq!(second["kind"], "reply");
-    assert_eq!(second["content"], "late reply");
-    assert_eq!(second["reply_to"], "msg-1");
+    assert_eq!(second["messages"][0]["kind"], "reply");
+    assert_eq!(second["messages"][0]["content"], "late reply");
+    assert_eq!(second["messages"][0]["reply_to"], "msg-1");
     assert_eq!(occurrences(&after_reply, "[parent-answer id="), 1);
 
     gate.notify_one();
@@ -198,13 +187,13 @@ async fn wait_reply_scenario(answer_before_wait_starts: bool) {
 }
 
 #[tokio::test]
-async fn wait_reply_returns_when_its_own_question_is_answered_mid_wait() {
-    wait_reply_scenario(false).await;
+async fn own_event_wait_returns_when_its_own_question_is_answered_mid_wait() {
+    own_event_wait_scenario(false).await;
 }
 
 #[tokio::test]
-async fn wait_reply_does_not_start_idle_when_an_answer_is_already_pending() {
-    wait_reply_scenario(true).await;
+async fn own_event_wait_does_not_start_idle_when_an_answer_is_already_pending() {
+    own_event_wait_scenario(true).await;
 }
 
 #[tokio::test]
@@ -310,13 +299,9 @@ async fn waiting_child(
 }
 
 #[tokio::test]
-async fn cancel_ends_wait_reply_without_waiting_for_the_timeout() {
-    let (fixture, _gate, parent, child) = waiting_child(vec![Ok(tool_response(
-        "wait",
-        "wait_reply",
-        json!({"message_id": "msg-1", "timeout_ms": 600_000}),
-    ))])
-    .await;
+async fn cancel_interrupts_own_event_wait() {
+    let (fixture, _gate, parent, child) =
+        waiting_child(vec![Ok(tool_response("wait", "wait", json!({})))]).await;
     fixture.runtime.cancel(child).unwrap();
     assert_eq!(
         fixture.runtime.wait(child).await.unwrap(),
@@ -329,18 +314,10 @@ async fn cancel_ends_wait_reply_without_waiting_for_the_timeout() {
 }
 
 #[tokio::test]
-async fn host_input_ends_wait_reply_and_is_injected_once() {
+async fn host_input_ends_own_event_wait_and_is_injected_once() {
     let (fixture, gate, parent, child) = waiting_child(vec![
-        Ok(tool_response(
-            "first-wait",
-            "wait_reply",
-            json!({"message_id": "msg-1", "timeout_ms": 600_000}),
-        )),
-        Ok(tool_response(
-            "second-wait",
-            "wait_reply",
-            json!({"message_id": "msg-1", "timeout_ms": 600_000}),
-        )),
+        Ok(tool_response("first-wait", "wait", json!({}))),
+        Ok(tool_response("second-wait", "wait", json!({}))),
         Ok(text_response("child done", FinishReason::Stop)),
     ])
     .await;
@@ -350,8 +327,7 @@ async fn host_input_ends_wait_reply_and_is_injected_once() {
         .unwrap();
     let after_input = fixture.model.wait_for_request(3).await;
     let first = tool_json(&after_input, "first-wait");
-    assert_eq!(first["status"], "user_input_ready");
-    assert_eq!(first["message_id"], "msg-1");
+    assert_eq!(first["user_input_ready"], true);
     assert_eq!(occurrences(&after_input, "host says hi"), 1);
 
     // The message_id is still waitable and the input is not injected again.
@@ -369,7 +345,7 @@ async fn host_input_ends_wait_reply_and_is_injected_once() {
         .unwrap();
     let after_reply = fixture.model.wait_for_request(4).await;
     assert_eq!(
-        tool_json(&after_reply, "second-wait")["content"],
+        tool_json(&after_reply, "second-wait")["messages"][0]["content"],
         "late reply"
     );
     assert_eq!(occurrences(&after_reply, "host says hi"), 1);
@@ -383,19 +359,11 @@ async fn host_input_ends_wait_reply_and_is_injected_once() {
 }
 
 #[tokio::test]
-async fn pending_host_input_does_not_hide_an_unknown_message_id_in_the_same_batch() {
+async fn pending_host_input_does_not_hide_an_invalid_wait_target_in_the_same_batch() {
     let (fixture, gate, parent, child) = waiting_child(vec![
         Ok(tool_responses([
-            (
-                "first-wait",
-                "wait_reply",
-                json!({"message_id": "msg-1", "timeout_ms": 600_000}),
-            ),
-            (
-                "bad-wait",
-                "wait_reply",
-                json!({"message_id": "msg-999", "timeout_ms": 600_000}),
-            ),
+            ("first-wait", "wait", json!({})),
+            ("bad-wait", "wait", json!({"run_id":"run-999"})),
         ])),
         Ok(text_response("child done", FinishReason::Stop)),
     ])
@@ -406,12 +374,12 @@ async fn pending_host_input_does_not_hide_an_unknown_message_id_in_the_same_batc
         .unwrap();
     let after_batch = fixture.model.wait_for_request(3).await;
     assert_eq!(
-        tool_json(&after_batch, "first-wait")["status"],
-        "user_input_ready"
+        tool_json(&after_batch, "first-wait")["user_input_ready"],
+        true
     );
     let (text, is_error) = tool_result(&after_batch, "bad-wait").expect("second result");
     assert!(is_error, "{text}");
-    assert!(text.contains("msg-999"), "{text}");
+    assert!(text.contains("run-999"), "{text}");
     assert_eq!(occurrences(&after_batch, "host says hi"), 1);
     gate.notify_one();
     assert_eq!(
@@ -420,4 +388,53 @@ async fn pending_host_input_does_not_hide_an_unknown_message_id_in_the_same_batc
     );
     fixture.runtime.cancel(parent).unwrap();
     fixture.runtime.wait(parent).await.unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_parent_send_interrupts_worker_wait_in_every_form() {
+    // The role is a real Worker: wait is authorized, and no reply correlation is required.
+    for input in [
+        json!({}),
+        json!({"run_id":"run-1"}),
+        json!({"run_ids":["run-1"],"mode":"all"}),
+    ] {
+        let (fixture, gate, parent, child) = waiting_child(vec![
+            Ok(tool_response("receive", "wait", input)),
+            Ok(tool_response("receive-again", "wait", json!({}))),
+            Ok(text_response("done", FinishReason::Stop)),
+        ])
+        .await;
+        let first_id = fixture
+            .runtime
+            .send_agent_message(
+                parent,
+                child,
+                AgentMessageKind::Send,
+                "ordinary parent message",
+                None,
+            )
+            .unwrap();
+        let after_first = fixture.model.wait_for_request(3).await;
+        let first = tool_json(&after_first, "receive");
+        assert_eq!(first["messages"][0]["message_id"], first_id);
+        assert_eq!(first["messages"][0]["kind"], "send");
+        assert_eq!(first["messages"][0]["content"], "ordinary parent message");
+        assert!(first["messages"][0]["reply_to"].is_null());
+        assert!(fixture.runtime.take_inbox(child).unwrap().is_empty());
+        gate.notify_one();
+        until_waiting(&fixture, child).await;
+        fixture
+            .runtime
+            .send_agent_message(parent, child, AgentMessageKind::Send, "next message", None)
+            .unwrap();
+        let after_second = fixture.model.wait_for_request(4).await;
+        let second = tool_json(&after_second, "receive-again");
+        assert_eq!(second["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(second["messages"][0]["content"], "next message");
+        assert_eq!(occurrences(&after_second, "ordinary parent message"), 1);
+        gate.notify_one();
+        fixture.runtime.wait(child).await.unwrap();
+        fixture.runtime.cancel(parent).unwrap();
+        fixture.runtime.wait(parent).await.unwrap();
+    }
 }

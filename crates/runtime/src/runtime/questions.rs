@@ -277,7 +277,6 @@ impl AgentRuntime {
         drop(guard);
         self.cache_wait_question(&question);
         self.queue_subagent_question(&question);
-        self.cache_wait_question(&question);
         self.shared
             .bus
             .emit(Event::new(ToolEvent::UserQuestionUpdated {
@@ -669,6 +668,7 @@ impl AgentRuntime {
             .user_question(id)
             .map_err(|e| e.to_string())?
             .ok_or("answered question disappeared")?;
+        self.cache_wait_question(&question);
         if trusted_user
             && let Some(route) = store
                 .handle

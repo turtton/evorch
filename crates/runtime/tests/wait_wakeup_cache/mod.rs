@@ -130,22 +130,14 @@ async fn answer_and_host_input_wakeups_of_waits_preserve_the_wire_prefix() {
                 "ask_user",
                 json!({"title":"Which scope?","blocking":false}),
             ),
-            call(
-                "reply-wait",
-                "wait_reply",
-                json!({"message_id":"msg-1","timeout_ms":600_000}),
-            ),
+            call("reply-wait", "wait", json!({})),
             call(
                 "ask-2",
                 "ask_user",
                 json!({"title":"Which risk?","blocking":false}),
             ),
             call("child-wait", "wait", json!({"run_ids":[child.to_string()]})),
-            call(
-                "reply-wait-again",
-                "wait_reply",
-                json!({"message_id":"msg-1","timeout_ms":600_000}),
-            ),
+            call("reply-wait-again", "wait", json!({})),
             text_response("applied everything"),
         ]);
         read.release.notify_one();

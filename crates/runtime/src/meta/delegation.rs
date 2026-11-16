@@ -336,7 +336,23 @@ pub(crate) async fn wait_delegates(
                     {
                         success(run["phase"].as_str().unwrap_or("Error"))
                     }
-                    Some(run) if run["status"] == "turn_completed" => super::serialize(run),
+                    Some(run) if run["status"] == "turn_completed" => {
+                        let mut value = run.clone();
+                        if interrupted {
+                            for field in [
+                                "inbox_ready",
+                                "user_input_ready",
+                                "answer_ready",
+                                "question_ids",
+                                "attention_question_ids",
+                                "events",
+                                "shell_jobs",
+                            ] {
+                                value[field] = snapshot[field].clone();
+                            }
+                        }
+                        super::serialize(&value)
+                    }
                     Some(run) => super::serialize(&serde_json::json!({
                         "run_id": run_id.to_string(),
                         "phase": run["phase"],

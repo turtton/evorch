@@ -3918,10 +3918,12 @@ impl AgentRuntime {
     /// # Errors
     /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
     pub fn take_inbox(&self, run_id: RunId) -> Result<Vec<AgentMessage>, RuntimeError> {
-        let runs = lock_runs(&self.shared.runs);
-        let run_entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
-        let mailbox = Arc::clone(&run_entry.mailbox);
-        Ok(mailbox.drain_all())
+        let mailbox = self.run_mailbox(run_id)?;
+        let queued = mailbox.drain_queued_where(|_| true);
+        for message in &queued {
+            self.observe_queued_message(message);
+        }
+        Ok(queued.into_iter().map(|queued| queued.message).collect())
     }
 
     #[cfg(test)]
