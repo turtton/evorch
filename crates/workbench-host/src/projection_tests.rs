@@ -182,6 +182,92 @@ async fn lag_on_the_host_bus_invalidates_the_epoch_instead_of_silently_continuin
         sub.started.high_water.core_epoch
     );
 }
+fn wakeup(n: usize) -> Event {
+    Event::new(LifecycleEvent::BackgroundTaskCompleted {
+        task_id: n.to_string(),
+    })
+}
+
+#[tokio::test]
+async fn refresh_wakeups_coalesce_a_ready_burst_but_leave_a_bounded_suffix() {
+    let bus = EventBus::new(MAX_REFRESH_WAKEUPS * 2);
+    let mut events = bus.subscribe();
+    for n in 0..=MAX_REFRESH_WAKEUPS {
+        bus.emit(wakeup(n));
+    }
+    let first = events.recv().await;
+    let batch = RefreshWakeups::drain(&mut events, first).await;
+    assert_eq!(
+        batch,
+        RefreshWakeups {
+            dirty: true,
+            ..Default::default()
+        }
+    );
+    // Do not consume the next batch's first event, or wait to fill a partial batch.
+    let last = events.recv().await.unwrap();
+    assert_eq!(last.kind, wakeup(MAX_REFRESH_WAKEUPS).kind);
+    assert_eq!(RefreshWakeups::drain(&mut events, Ok(last)).await, batch);
+}
+
+#[tokio::test]
+async fn fragments_do_not_hide_a_state_change_or_lag_in_the_same_refresh_batch() {
+    use event_bus::MessageEvent;
+    let bus = EventBus::new(8);
+    let mut events = bus.subscribe();
+    let fragments = [
+        MessageEvent::MessageDelta {
+            run_id: None,
+            delta: "draft".into(),
+        },
+        MessageEvent::ReasoningDelta {
+            run_id: None,
+            delta: "draft".into(),
+        },
+        MessageEvent::ToolCallDelta {
+            run_id: None,
+            index: 0,
+            call_id: None,
+            tool_name: None,
+            arguments_delta: "draft".into(),
+        },
+    ];
+    for fragment in &fragments {
+        bus.emit(Event::new(fragment.clone()));
+    }
+    let first = events.recv().await;
+    assert_eq!(
+        RefreshWakeups::drain(&mut events, first).await,
+        RefreshWakeups::default()
+    );
+    for fragment in fragments {
+        bus.emit(Event::new(fragment));
+    }
+    bus.emit(wakeup(0));
+    let first = events.recv().await;
+    assert_eq!(
+        RefreshWakeups::drain(&mut events, first).await,
+        RefreshWakeups {
+            dirty: true,
+            ..Default::default()
+        }
+    );
+
+    // Loss discovered while draining (not just the initial recv) must invalidate cursors.
+    let first = Ok(wakeup(1));
+    for n in 0..16 {
+        bus.emit(wakeup(n));
+    }
+    assert_eq!(
+        RefreshWakeups::drain(&mut events, first).await,
+        RefreshWakeups {
+            dirty: true,
+            lagged: true,
+            closed: false
+        }
+    );
+}
+
 #[test]
 fn update_during_snapshot_cannot_cross_registration_or_high_water() {
     let rt = tokio::runtime::Runtime::new().unwrap();

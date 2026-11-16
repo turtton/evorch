@@ -145,6 +145,59 @@ pub struct Projection {
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     _commit_observer: Arc<dyn Fn() + Send + Sync>,
 }
+// Bound work per wakeup, not time: a continuously busy producer must still let runs advance.
+const MAX_REFRESH_WAKEUPS: usize = 64;
+
+#[derive(Default, Debug, PartialEq, Eq)]
+struct RefreshWakeups {
+    dirty: bool,
+    lagged: bool,
+    closed: bool,
+}
+
+impl RefreshWakeups {
+    async fn drain(
+        events: &mut event_bus::EventReceiver,
+        mut event: Result<event_bus::Event, RecvError>,
+    ) -> Self {
+        let mut wakeups = Self::default();
+        for index in 0..MAX_REFRESH_WAKEUPS {
+            match event {
+                Ok(event) => {
+                    // Fragments are neither projected nor replayed.
+                    wakeups.dirty |= !matches!(
+                        event.kind,
+                        EventKind::Message(
+                            event_bus::MessageEvent::MessageDelta { .. }
+                                | event_bus::MessageEvent::ReasoningDelta { .. }
+                                | event_bus::MessageEvent::ToolCallDelta { .. }
+                        )
+                    );
+                }
+                Err(RecvError::Lagged(_)) => {
+                    wakeups.lagged = true;
+                    wakeups.dirty = true;
+                }
+                Err(RecvError::Closed) => {
+                    wakeups.closed = true;
+                    break;
+                }
+            }
+            if index + 1 == MAX_REFRESH_WAKEUPS {
+                break;
+            }
+            // recv is cancellation-safe. Never wait for another event to form a batch;
+            // also stop if recv yields cooperatively with more events still queued.
+            event = tokio::select! {
+                biased;
+                event = events.recv() => event,
+                () = std::future::ready(()) => break,
+            };
+        }
+        wakeups
+    }
+}
+
 impl Projection {
     pub fn new(
         runtime: AgentRuntime,
@@ -193,20 +246,27 @@ impl Projection {
                 let change = tokio::select! { e = events.recv() => Change::Event(e), a = approvals.recv() => Change::Approval(a), _ = commits.notified() => Change::Commit };
                 let Some(this) = weak.upgrade() else { break };
                 match change {
-                    Change::Event(Ok(event)) => {
-                        // Token fragments are intentionally not projected or replayed.
-                        if matches!(event.kind, EventKind::Message(event_bus::MessageEvent::MessageDelta { .. } | event_bus::MessageEvent::ReasoningDelta { .. } | event_bus::MessageEvent::ToolCallDelta { .. })) { continue; }
-                        if this.refresh().is_err() { this.invalidate(); }
+                    Change::Event(event) => {
+                        // Bus events only wake a canonical read. Coalesce queued wakeups:
+                        // the ledger supplies current state and the commit scanner retains
+                        // every durable message, even when its bus notification was skipped.
+                        let wakeups = RefreshWakeups::drain(&mut events, event).await;
+                        if wakeups.lagged { this.invalidate(); }
+                        if wakeups.dirty && this.refresh().is_err() { this.invalidate(); }
+                        if wakeups.closed { break; }
                     }
                     Change::Commit => { if this.refresh().is_err() { this.invalidate(); } }
                     Change::Approval(Ok(approval)) => { if this.approval_changed(&approval.id).is_err() { this.invalidate(); } }
-                    Change::Event(Err(RecvError::Lagged(_))) | Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                         // Lost input means the projection cannot vouch for ANY old cursor.
                         this.invalidate();
                         let _ = this.refresh();
                     }
-                    Change::Event(Err(RecvError::Closed)) | Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                    Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
                 }
+                // Full scans are synchronous: do not spend the executor's entire receive
+                // budget on back-to-back scans while run startup and storage wait to run.
+                tokio::task::yield_now().await;
             }
         });
         *this.task.lock().unwrap() = Some(task);

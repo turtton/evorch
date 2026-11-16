@@ -338,6 +338,88 @@ fn durable_commits_wake_subscribers_and_use_the_history_index_not_bus_deltas() {
 }
 
 #[test]
+fn a_bus_burst_preserves_every_committed_message_and_its_replay_index() {
+    let f = Fixture::with_runtime(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+    let mut sub = f.subscribe();
+    let after = sub.started.high_water;
+    // The projection cannot run until next_message awaits: all commits and wakeups are
+    // queued first. Non-durable payloads must not leak into the committed stream.
+    let expected = ["first", "second", "third"];
+    for (index, text) in expected.iter().enumerate() {
+        saved_event(
+            &f,
+            index as u64 + 1,
+            MessageEvent::MessageCompleted {
+                run_id: "run-1".into(),
+                text: (*text).into(),
+            },
+        );
+        for n in 0..24 {
+            f.runtime.event_bus().emit(Event::new(
+                event_bus::LifecycleEvent::BackgroundTaskCompleted {
+                    task_id: n.to_string(),
+                },
+            ));
+        }
+    }
+    f.runtime
+        .event_bus()
+        .emit(Event::new(MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: "not durable".into(),
+        }));
+    let committed: Vec<_> = expected
+        .iter()
+        .map(|_| next_message(&f, &mut sub))
+        .collect();
+    for (index, (message, text)) in committed.iter().zip(expected).enumerate() {
+        assert_eq!(message.index, Sequence(index as u64));
+        assert_eq!(
+            message.content,
+            MessageContent::Inline { text: text.into() }
+        );
+    }
+    assert_eq!(messages(&f), committed);
+    let mut replay = f
+        .host
+        .projection()
+        .subscribe_with_snapshot(&Subscribe {
+            scope: SubscriptionScope::All,
+            after: Some(after),
+        })
+        .unwrap();
+    assert!(replay.started.snapshot_id.is_none());
+    for message in &committed {
+        assert_eq!(&next_message(&f, &mut replay), message);
+    }
+    for sub in [&mut sub, &mut replay] {
+        f.host
+            .projection()
+            .unsubscribe(&sub.started.subscription_id);
+        f.rt.block_on(async {
+            loop {
+                let event = sub.recv().await.unwrap().event;
+                assert!(
+                    !matches!(
+                        event,
+                        UiEvent::Conversation(ConversationEvent::MessageCommitted { .. })
+                    ),
+                    "no duplicate committed messages"
+                );
+                if event.ends_subscription() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+#[test]
 fn approval_decision_uses_registry_cas_and_emits_changed_with_ingress_provenance() {
     let mut f = Fixture::new();
     let mut sub = f.subscribe();
