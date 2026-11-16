@@ -200,7 +200,7 @@ async fn window_compaction_immediately_after_d3_never_reveals_old_calls() {
     );
     let run = begin(&mut fixture).await;
     let (phase, events) = next_boundary(&mut fixture, run).await;
-    assert_eq!(phase, AgentRunPhase::Waiting);
+    assert_eq!(phase, AgentRunPhase::Waiting, "{events:?}");
     let reasons: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -239,8 +239,8 @@ async fn oversized_d3_summary_is_recompacted_to_fit_the_target_window() {
         16_000,
     );
     let run = begin(&mut fixture).await;
-    let (phase, _) = next_boundary(&mut fixture, run).await;
-    assert_eq!(phase, AgentRunPhase::Waiting);
+    let (phase, events) = next_boundary(&mut fixture, run).await;
+    assert_eq!(phase, AgentRunPhase::Waiting, "{events:?}");
     let requests = requests(&fixture.next);
     assert_eq!(requests.len(), 3);
     for request in &requests {

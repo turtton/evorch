@@ -27,17 +27,32 @@ pub(super) fn run_output(
     };
     match runtime.run_output(state.caller_run_id(), run_id) {
         Ok(output) => {
-            // Only the first terminal result of a child is progress; repeated
-            // polling of the same finished child must remain detectable.
-            if serde_json::to_value(&output).is_ok_and(|value| waiting::terminal(&value)) {
-                state.budget.mark_child_completed(&run_id.to_string());
-            }
-            if let Some(notice) = &output.completion_notice
-                && !notice.observed()
-            {
-                state.budget.mark_progress();
-            }
             let mut dispatch = serialize(&output);
+            let terminal =
+                serde_json::to_value(&output).is_ok_and(|value| waiting::terminal(&value));
+            if terminal || output.completion_notice.is_some() {
+                let mut advanced = false;
+                if output
+                    .completion_notice
+                    .as_ref()
+                    .is_none_or(|notice| !notice.observed())
+                {
+                    let progress = super::observations::ChildProgress::new(
+                        &run_id.to_string(),
+                        output
+                            .completion_notice
+                            .as_ref()
+                            .map(|notice| notice.generation),
+                    );
+                    advanced = !state.budget.wait_event_observed(&progress.identity());
+                    dispatch.observations.child_progress.push(progress);
+                }
+                dispatch.result.progress = Some(if advanced {
+                    tools::Progress::Advanced
+                } else {
+                    tools::Progress::Stalled
+                });
+            }
             dispatch
                 .observations
                 .completions

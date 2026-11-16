@@ -3604,7 +3604,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
     let result: Value =
         serde_json::from_str(messages[input_index - 1]["content"].as_str().unwrap()).unwrap();
     assert_eq!(result["user_input_ready"], true);
-    assert_eq!(result["runs"][0]["status"], "still_running");
+    assert_eq!(result["runs"], json!([]));
 }
 
 #[tokio::test]

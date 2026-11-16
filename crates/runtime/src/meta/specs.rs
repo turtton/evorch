@@ -44,7 +44,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
 pub(super) fn run_output(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Read a direct child's or parent's phase/status, terminal or idle-turn output, or failure/cancellation/stop reason without waiting or restoring terminal runs. An interactive turn that successfully ends without unanswered questions has phase=Waiting, status=turn_completed, output and turn_generation. Returning a direct child's idle-turn output acknowledges that generation, so wait will not wake again for it; snapshots remain readable. Ordinary Waiting (nested waits, questions or reviews) is not a completed turn. Returning a terminal child's result acknowledges that completion and removes its still-queued automatic notice; explicit agent messages and other completion generations are not consumed. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use has_pending_question from wait and subagent_questions to identify unanswered questions.".into(),
+        description: "Read direct parent/child phase, terminal or idle-turn output and stop/failure reason, without waiting/restoring. Only status=turn_completed marks a completed interactive turn. Presenting output ACKs that child completion/generation and its automatic notice, not explicit messages; phase-only reads do not ACK. Snapshots remain readable. continuable/continuation_blocked explain whether a finished child can resume via send. Use subagent_questions for unanswered questions.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {"run_id": run_id()},
@@ -56,11 +56,11 @@ pub(super) fn run_output(name: &str) -> ToolSpec {
 pub(super) fn wait(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Wait for messages and events relevant to this run. With no arguments, sources are your direct parent, direct children (including reviews/admissions), pending questions, managed attached/summary lanes, and your background shell jobs. Any incoming message (including replies), your own answer, host input, your lane delivery, parent termination or shell completion interrupts every form, including mode=all. Messages are consumed and returned with sender, kind and reply_to; no inbox call is needed. Optional run_id/run_ids select direct parent/child completion targets only (at most 8, unique); mode=any/all applies only to their completion. No timeout. Returns status, events, messages, runs (only event runs), completed_run_ids, attention_run_ids and readiness. Child terminal output or an unobserved interactive turn includes bounded output/reason and continuation availability; returning output acknowledges only that generation. A parent's questions, idle turns and output are never returned or acknowledged. Lane readiness includes notification IDs; its body, own answers and host input follow at the normal post-tools input boundary. Shell results include job ID, original call ID and bounded output; they never duplicate the original shell ToolResult. With no unread events or remaining sources returns non-error no_wait_sources with reasons; report completion instead of repeating it. A running long-lived shell job remains a source. Single run_id retains the legacy phase-only terminal response when there is nothing else to report; that response does not acknowledge child output. Waiting does not cancel or restart targets; caller cancellation interrupts it.",
+        "Wait without a deadline. With no targets, discovers parent/children, reviews/admissions, questions, lanes and own shells. any/all applies only to run completion; messages/replies, questions/answers, host input, lanes, parent termination and shell teardown interrupt either. Returns event runs and bounded correlated messages; presentation ACKs returned child output/messages only. Parent questions/idle/output excluded. Lane bodies/answers/input follow tools. Running shells stay sources; completion cites original call ID, no duplicate ToolResult. Non-error no_wait_sources explains absence: report status, don't poll. Lone run_id may return phase-only status with no output ACK.",
         json!({
             "run_id": run_id(),
             "run_ids": {"type":"array", "items":run_id(), "minItems":1, "maxItems":super::runs::waiting::MAX_WAIT_RUNS, "uniqueItems":true},
-            "mode":{"type":"string", "enum":["any","all"], "default":"any", "description":"any returns when one target terminates; all waits for every target. Both return early for new questions, agent messages and user input."}
+            "mode":{"type":"string", "enum":["any","all"], "default":"any"}
         }),
         &[],
         true,
@@ -98,7 +98,7 @@ pub(super) fn send(name: &str) -> ToolSpec {
 pub(super) fn inbox(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Consume this run's queued agent messages, including unobserved automatic child completion notices, and return a JSON array with IDs, sender, kind, content and reply correlation. Only automatic notices already acknowledged by output-bearing wait or terminal run_output are omitted; up to 8 other queued messages are consumed and returned in FIFO order with bounded content and artifact references. Automatic notifications become observed only when presented. Returns an empty array if none are queued.",
+        "Consume up to 8 queued agent messages FIFO, with bounded bodies/artifact refs and reply correlation. Unobserved automatic child completions are included and acknowledged only on presentation; only already observed automatic notices are skipped. Returns [] when empty.",
         json!({}),
         &[],
         true,
