@@ -99,6 +99,8 @@ pub enum ModelSource {
 pub enum CompositionError {
     #[error("no providers configured")]
     NoProvidersConfigured,
+    #[error("invalid startup runtime promotion")]
+    InvalidStartup,
     #[error(transparent)]
     Routing(#[from] RoutingError),
 }
@@ -124,18 +126,83 @@ pub struct ComposedRuntime {
 /// # Errors
 /// configured source の provider 構成が失敗した場合に返す。
 pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime, CompositionError> {
+    compose_runtime_inner(input, None)
+}
+
+/// Producer-free seed for DB Adopt and owner claims. Promotion retains the same
+/// RunStore, physical proof and runtime identity; it never opens another writer.
+/// The model is deliberately unconfigured until the host finishes claiming.
+pub struct StartupRuntime {
+    runtime: AgentRuntime,
+    model: Arc<SwitchableModel>,
+    root: PathBuf,
+}
+impl StartupRuntime {
+    pub fn new(bus: Arc<EventBus>, workspace: WorkspaceSeam, store: crate::RunStore) -> Self {
+        let model = Arc::new(SwitchableModel::new(Arc::new(UnconfiguredModel)));
+        let root = workspace.project_root().to_path_buf();
+        let runtime = AgentRuntime::with_sandbox_factory(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            model.clone(),
+            workspace.into_factory(),
+        )
+        .with_run_store(store);
+        Self {
+            runtime,
+            model,
+            root,
+        }
+    }
+    pub fn runtime(&self) -> &AgentRuntime {
+        &self.runtime
+    }
+    /// Only a fresh startup seed may be promoted. This is not a live reload or
+    /// a cache boundary, and must not replace any sent provider prefix.
+    pub fn compose(
+        self,
+        input: RuntimeComposition<'_>,
+    ) -> Result<ComposedRuntime, CompositionError> {
+        if !self.runtime.list_agents().is_empty()
+            || input.workspace.is_some()
+            || !Arc::ptr_eq(&self.runtime.shared.bus, &input.bus)
+        {
+            return Err(CompositionError::InvalidStartup);
+        }
+        compose_runtime_inner(input, Some(self))
+    }
+}
+fn compose_runtime_inner(
+    input: RuntimeComposition<'_>,
+    mut seed: Option<StartupRuntime>,
+) -> Result<ComposedRuntime, CompositionError> {
     let repo_root = input
         .workspace
         .as_ref()
-        .map(|seam| seam.project_root().to_path_buf());
+        .map(|seam| seam.project_root().to_path_buf())
+        .or_else(|| seed.as_ref().map(|seed| seed.root.clone()));
     let user_dir = input
         .user_config_dir
         .clone()
         .or_else(config::user_config_dir);
     let bus = Arc::clone(&input.bus);
+    let mut build = |bus, executor, model, workspace| {
+        if let Some(seed) = seed.take() {
+            *seed
+                .runtime
+                .shared
+                .executor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = executor;
+            seed.model.replace(model);
+            seed.runtime
+        } else {
+            compose_agent_runtime(bus, executor, model, workspace)
+        }
+    };
     let composed = match input.model_source {
         ModelSource::Fixed(model) => ComposedRuntime {
-            runtime: compose_agent_runtime(input.bus, input.executor, model, input.workspace),
+            runtime: build(input.bus, input.executor, model, input.workspace),
             model_identity: ModelIdentity::Fixed,
         },
         ModelSource::Configured => {
@@ -172,7 +239,7 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
                 .map(|role| (role_key(role).to_string(), model.selected_model(role, None)))
                 .collect();
             ComposedRuntime {
-                runtime: compose_agent_runtime(input.bus, input.executor, model, input.workspace),
+                runtime: build(input.bus, input.executor, model, input.workspace),
                 model_identity: ModelIdentity::Routed { profiles, selected },
             }
         }

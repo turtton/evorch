@@ -35,6 +35,7 @@ const TICKET_LIMIT: u64 = 8192;
 pub struct HandoffRecord {
     pub restart_id: String,
     pub config_identity: String,
+    pub predecessor_epoch: u64,
     pub successor_epoch: u64,
     pub nonce_hash: String,
     pub successor_build: String,
@@ -43,7 +44,7 @@ pub struct HandoffRecord {
 impl HandoffRecord {
     fn validate(&self) -> io::Result<()> {
         self.boot_deadline.validate()?;
-        if self.successor_epoch == 0
+        if self.successor_epoch <= self.predecessor_epoch
             || [
                 &self.restart_id,
                 &self.config_identity,
@@ -275,9 +276,29 @@ impl Instance {
         ipc_parent: &Path,
         entry: HandoffEntry,
     ) -> io::Result<(Self, InheritedHandoffProof)> {
+        Self::adopt_handoff_inner(config, ipc_parent, entry, || Ok(()))
+    }
+
+    /// Fixture-only blocking injection inside physical Adopt, before ELF I/O.
+    #[cfg(feature = "recovery-test-support")]
+    pub fn adopt_handoff_with_physical_hook(
+        config: &ConfigIdentity,
+        ipc_parent: &Path,
+        entry: HandoffEntry,
+        before_elf: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<(Self, InheritedHandoffProof)> {
+        Self::adopt_handoff_inner(config, ipc_parent, entry, before_elf)
+    }
+    fn adopt_handoff_inner(
+        config: &ConfigIdentity,
+        ipc_parent: &Path,
+        entry: HandoffEntry,
+        before_elf: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<(Self, InheritedHandoffProof)> {
         let HandoffEntry { lifetime, ticket } = entry;
         let record = ticket.record;
         record.validate()?;
+        before_elf()?;
         if record.config_identity != config.identity()
             || record.successor_build != running_elf_identity()?
         {
@@ -706,6 +727,7 @@ mod tests {
             record: HandoffRecord {
                 restart_id: "r".into(),
                 config_identity: "c".into(),
+                predecessor_epoch: 0,
                 successor_epoch: 1,
                 nonce_hash: "n".into(),
                 successor_build: "b".into(),
@@ -743,6 +765,7 @@ mod tests {
             let record = HandoffRecord {
                 restart_id: "r".into(),
                 config_identity: config.identity().into(),
+                predecessor_epoch: 0,
                 successor_epoch: 1,
                 nonce_hash: "n".into(),
                 successor_build: running_elf_identity().unwrap(),

@@ -8,6 +8,10 @@ use std::{
     time::Duration,
 };
 
+#[path = "handoff_physical_deadline.rs"]
+mod physical_deadline;
+pub use physical_deadline::PhysicalAdoptDeadline;
+
 pub const BOOT_TIMEOUT_SECS: u64 = 120;
 const LIMIT_NS: u64 = BOOT_TIMEOUT_SECS * 1_000_000_000;
 
@@ -25,6 +29,13 @@ impl BootDeadline {
             restarting_ns,
             deadline_ns: restarting_ns.checked_add(LIMIT_NS).ok_or_else(invalid)?,
         })
+    }
+    /// Diagnostic elapsed time from the sealed Restarting boundary.
+    pub fn elapsed(&self) -> io::Result<Duration> {
+        monotonic_ns()?
+            .checked_sub(self.restarting_ns)
+            .map(Duration::from_nanos)
+            .ok_or_else(invalid)
     }
     pub fn restarting_ns(&self) -> u64 {
         self.restarting_ns
@@ -66,6 +77,8 @@ pub enum BootFailure {
     AdoptAckUnknown,
     /// Includes claim, recovery preparation, endpoint bind and Ready ACK loss.
     AdoptedBeforeReady,
+    /// Control Ready was durable, but no activation is allowed after this failure.
+    SandboxProbe,
     Interrupt,
     Terminate,
 }
@@ -75,7 +88,7 @@ impl BootFailure {
             Self::BeforeAdopt => 70,
             Self::AdoptRejected => 71,
             Self::AdoptAckUnknown => 72,
-            Self::AdoptedBeforeReady => 73,
+            Self::AdoptedBeforeReady | Self::SandboxProbe => 73,
             Self::Interrupt => 130,
             Self::Terminate => 143,
         }
@@ -112,6 +125,7 @@ struct Shared {
 pub struct BootWatchdog {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    signal_reader: Option<(std::os::unix::net::UnixStream, JoinHandle<()>)>,
     deadline: BootDeadline,
     now: Arc<dyn Fn() -> io::Result<u64> + Send + Sync>,
     instance: Arc<Instance>,
@@ -170,10 +184,77 @@ impl BootWatchdog {
         Ok(Self {
             shared,
             thread: Some(thread),
+            signal_reader: None,
             deadline,
             now,
             instance,
         })
+    }
+    /// An independent signalfd reader covers blocking lease/migration/writer IO.
+    /// Ready and signal consumption share the state lock, so a signal arriving
+    /// after Ready remains available to the ordinary lifecycle reader.
+    pub fn watch_shutdown(&mut self, inbox: &super::ShutdownInbox) -> io::Result<()> {
+        use std::os::fd::{AsFd, AsRawFd};
+        if self.signal_reader.is_some() {
+            return Err(io::Error::other("boot signal reader already installed"));
+        }
+        let inbox = super::ShutdownInbox(inbox.0.try_clone()?);
+        let (wake, stop) = std::os::unix::net::UnixStream::pair()?;
+        let shared = self.shared.clone();
+        let thread = std::thread::Builder::new()
+            .name("restart-boot-signals".into())
+            .spawn(move || {
+                let mut fds = [
+                    libc::pollfd {
+                        fd: inbox.as_fd().as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: stop.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                loop {
+                    let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
+                    if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    let mut state = shared.state.lock().unwrap();
+                    if state.ready || fds[1].revents != 0 {
+                        return;
+                    }
+                    let signals = if n < 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        inbox.read_pending()
+                    };
+                    if !state.terminating {
+                        let failure = match signals {
+                            Ok(signals) => signals.first().map(|signal| match signal {
+                                super::ShutdownSignal::Interrupt => BootFailure::Interrupt,
+                                super::ShutdownSignal::Terminate => BootFailure::Terminate,
+                            }),
+                            Err(_) => Some(state.failure),
+                        };
+                        if let Some(failure) = failure {
+                            state.failure = failure;
+                            state.terminating = true;
+                            shared.wake.notify_one();
+                            return;
+                        }
+                    } else {
+                        return;
+                    }
+                }
+            })?;
+        self.signal_reader = Some((wake, thread));
+        Ok(())
+    }
+    pub fn terminal_failure(&self) -> Option<BootFailure> {
+        let state = self.shared.state.lock().unwrap();
+        state.terminating.then_some(state.failure)
     }
     /// After DB Adopt readback, before claim/endpoint work.
     pub fn adopted(&self) {
@@ -236,7 +317,16 @@ impl BootWatchdog {
         if let Some(thread) = self.thread.take() {
             thread.join().expect("boot monitor panicked");
         }
+        if let Some((mut wake, thread)) = self.signal_reader.take() {
+            use std::io::Write;
+            let _ = wake.write_all(&[1]);
+            thread.join().expect("boot signal reader panicked");
+        }
         Ok(self.instance.clone())
+    }
+    /// The selected cause, including a signal which won the Ready/failure race.
+    pub fn selected_failure(&self) -> BootFailure {
+        self.shared.state.lock().unwrap().failure
     }
     /// After best-effort receipt/existing-writer diagnostics. Diagnostic IO is
     /// outside this monitor and cannot postpone its deadline.

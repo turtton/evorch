@@ -248,12 +248,18 @@ struct ProbeHook(String);
 impl workbench_host::bootstrap::core_startup::CoreStartupHook for ProbeHook {
     fn start<'a>(
         &'a self,
-        inputs: workbench_host::bootstrap::core_startup::CoreStartupInputs,
+        mut inputs: workbench_host::bootstrap::core_startup::CoreStartupInputs,
         services: &'a mut workbench_host::bootstrap::services::BackgroundServices,
     ) -> workbench_host::bootstrap::core_startup::CoreStartupFuture<'a> {
         use runtime::RecoveryActivationBoundary as Boundary;
         if !self.0.starts_with("cold") && self.0 != "observe" {
             inputs.runtime.install_planned_recovery_fixture().unwrap();
+            // This fixture exercises post-Ready graph recovery, not physical
+            // bootstrap. Its explicit mode must agree with its injected proof;
+            // planned_bootstrap.rs covers the real pre-Adopt/claim pipeline.
+            if inputs.runtime.has_planned_restart_handoff() {
+                inputs.mode = workbench_host::bootstrap::core_startup::CoreBootMode::PlannedHandoff;
+            }
         }
         let target = match self.0.as_str() {
             "prepared" => Some(Boundary::Prepared),

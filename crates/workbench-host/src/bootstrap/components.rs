@@ -35,6 +35,28 @@ impl ExecutionComponents {
         })
     }
 
+    /// No child is spawned while constructing a planned successor executor.
+    pub fn planned(
+        bus: Arc<EventBus>,
+        root: PathBuf,
+        config: &config::Config,
+        host_tools: Vec<Arc<dyn tools::Tool>>,
+        sandbox: Arc<sandbox::bwrap::PlannedBwrap>,
+    ) -> Result<Self, runtime::RuntimeError> {
+        let workspace = WorkspaceSeam::production(root)?;
+        let executor = runtime::production_executor_with_prepared_sandbox(
+            bus,
+            workspace.project_root().to_path_buf(),
+            config,
+            host_tools,
+            sandbox,
+        )?;
+        Ok(Self {
+            executor,
+            workspace,
+        })
+    }
+
     /// An unconfigured core can serve health without requiring bwrap or exposing tools.
     /// The legacy GUI deliberately keeps production tools, including in demo mode.
     pub fn unconfigured(bus: Arc<EventBus>, root: PathBuf) -> Result<Self, runtime::RuntimeError> {

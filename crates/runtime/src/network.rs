@@ -50,6 +50,11 @@ pub(crate) fn sandbox_boundary(mounts: &WorkspaceMounts) -> Result<SandboxBounda
     Ok(boundary)
 }
 
+/// Assemble the identical production boundary without probing or spawning.
+pub fn sandbox_boundary_for_startup(root: PathBuf) -> Result<SandboxBoundary, SandboxError> {
+    sandbox_boundary(&WorkspaceMounts::shared(root))
+}
+
 fn detect(boundary: SandboxBoundary) -> Result<Arc<dyn Sandbox>, SandboxError> {
     BwrapSandbox::detect(BwrapConfig::from_boundary(boundary).allow_network(false))
         .map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
