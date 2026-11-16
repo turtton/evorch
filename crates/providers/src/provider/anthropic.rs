@@ -369,7 +369,7 @@ impl ProviderClient for AnthropicClient {
             };
             let response = prepared.execute().await?;
             if !response.is_success() {
-                return Err(response.error().await);
+                return Err(response.error(auth).await);
             }
             let body = response.bounded_json().await?;
             let data = body["data"]
@@ -448,7 +448,7 @@ impl ProviderClient for AnthropicClient {
             observer.emit_failed(error);
         })?;
         if !response.is_success() {
-            let error = response.error().await;
+            let error = response.error(auth).await;
             observer.emit_failed(&error);
             return Err(error);
         }
@@ -503,7 +503,7 @@ impl ProviderClient for AnthropicClient {
             observer.emit_failed(error);
         })?;
         if !response.is_success() {
-            let error = response.error().await;
+            let error = response.error(auth).await;
             observer.emit_failed(&error);
             return Err(error);
         }
