@@ -267,6 +267,7 @@ async fn parent_answers_reset_once_on_injection_not_when_stored() {
     tokio::time::advance(Duration::from_secs(10)).await;
     runtime
         .answer_subagent_question(state.task.parent.unwrap(), &question.id, "narrow scope")
+        .await
         .unwrap();
     assert_eq!(elapsed_ms(&mut state, 50), 10_000);
     assert!(state.flush_user_answers().unwrap());
