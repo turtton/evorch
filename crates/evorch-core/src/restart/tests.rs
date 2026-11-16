@@ -3,7 +3,10 @@ mod learning;
 mod preparing;
 use workbench_host::bootstrap::{BootstrapOptions, TestSeams};
 #[derive(Default)]
-struct Model(std::sync::atomic::AtomicUsize);
+struct Model(
+    std::sync::atomic::AtomicUsize,
+    Mutex<std::collections::BTreeMap<String, runtime::quiesce::ProviderInput>>,
+);
 #[async_trait::async_trait]
 impl runtime::AgentModel for Model {
     fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
@@ -11,6 +14,9 @@ impl runtime::AgentModel for Model {
     }
     fn requires_admission(&self) -> bool {
         false
+    }
+    fn checkpoint_provider_input(&self, run: &str) -> Option<runtime::quiesce::ProviderInput> {
+        self.1.lock().unwrap().get(run).cloned()
     }
     async fn admit(
         &self,
@@ -21,12 +27,37 @@ impl runtime::AgentModel for Model {
     }
     async fn complete(
         &self,
-        _: &runtime::AgentInvocationContext,
+        invocation: &runtime::AgentInvocationContext,
         _: runtime::Role,
-        _: &[providers::Message],
-        _: &[providers::ToolSpec],
+        messages: &[providers::Message],
+        tools: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, RuntimeError> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Live idle fixtures checkpoint the actual input seen by this model,
+        // including run affinity; never fabricate a fresh request at capture.
+        self.1.lock().unwrap().insert(
+            invocation.run_id.clone(),
+            runtime::quiesce::ProviderInput {
+                profile: "restart-fixture".into(),
+                protocol: model::ApiProtocol::OpenAiCompletions,
+                edit_tool: config::EditToolConfig::Edit,
+                affinity_key: invocation.run_id.clone(),
+                replay: None,
+                request: providers::ChatRequest {
+                    model: "restart-fixture".into(),
+                    messages: messages.to_vec(),
+                    tools: tools.to_vec(),
+                    tool_choice: None,
+                    temperature: None,
+                    max_tokens: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                    output_schema: None,
+                    observation: None,
+                    responses_replay: None,
+                },
+            },
+        );
         Ok(providers::ChatResponse {
             message: providers::Message {
                 role: providers::Role::Assistant,
@@ -139,9 +170,16 @@ fn assert_owner_socket_paths(root: &std::path::Path) {
 async fn phase(core: &RestartCoordinator, expected: RestartPhase) {
     let mut changes = core.subscribe();
     loop {
-        if core.snapshot().phase == expected {
+        let snapshot = core.snapshot();
+        if snapshot.phase == expected {
             return;
         }
+        assert_ne!(
+            snapshot.phase,
+            RestartPhase::FailedClosed,
+            "waiting for {expected:?}: {:?}",
+            core.0.runtime.quiesce_state()
+        );
         changes.changed().await.unwrap();
     }
 }
@@ -712,7 +750,11 @@ async fn direct_runtime_stop_reconciles(sealing: bool) {
         phase(&core, RestartPhase::Sealing).await;
         None
     } else {
-        Some(core.wait_sealed(id).await.unwrap())
+        Some(
+            core.wait_sealed(id)
+                .await
+                .unwrap_or_else(|error| panic!("{error:?}: {:?}", host.runtime.quiesce_state())),
+        )
     };
     let attempt = core.0.state.lock().unwrap().attempt.clone().unwrap();
     assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);

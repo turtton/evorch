@@ -1462,7 +1462,13 @@ impl LoopState {
             {
                 btw.settle(response.message.clone());
             }
-            self.context.push_assistant(response.message);
+            // Execution keeps the original arguments extracted above. Only the new
+            // history entry gets a valid replay envelope; {} never authorizes a call.
+            let mut saved_message = response.message;
+            for block in &mut saved_message.content {
+                block.normalize_tool_input_for_replay();
+            }
+            self.context.push_assistant(saved_message);
             self.completed_turn_end = (!has_tool_uses && finish_reason == FinishReason::Stop)
                 .then_some(self.context.messages.len());
             if self.completed_turn_end.is_some()

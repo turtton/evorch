@@ -12,6 +12,15 @@ use tokio::sync::OnceCell;
 
 use super::RoutedModel;
 
+#[path = "anthropic_output_limits.rs"]
+mod anthropic;
+
+pub(super) fn checkpoint_limit(protocol: model::ApiProtocol, saved: Option<u64>) -> Option<u64> {
+    saved.or_else(|| {
+        (protocol == model::ApiProtocol::AnthropicMessages).then_some(anthropic::LEGACY_DEFAULT)
+    })
+}
+
 /// One loaded (or lazily loadable) view of the models.dev data.
 struct Generation {
     /// `None` inside means the catalog was unavailable when this generation loaded.
@@ -188,14 +197,26 @@ impl RoutedModel {
             })
             .cloned()
             .unwrap_or_else(|| config::ModelEntryConfig::enabled(base_model));
-        crate::model_resolve::resolve_model_metadata(
+        crate::model_resolve::resolve_model_output_limit(
             &entry,
             &self.model_presets,
             catalog,
             Some(&route.profile),
-            Some(profile.provider_type),
+            profile.provider_type,
         )
-        .max_output_tokens
+    }
+
+    fn anthropic_default(&self, route: &routing::ResolvedRoute) -> Option<u64> {
+        self.providers
+            .get(&route.profile)
+            .filter(|provider| {
+                provider.profile.api_protocol == model::ApiProtocol::AnthropicMessages
+            })
+            .map(|_| {
+                anthropic::default_limit(
+                    config::types::provider::parse_model_speed(&route.model_id).0,
+                )
+            })
     }
 
     fn uses_output_limit_catalog(&self, route: &routing::ResolvedRoute) -> bool {
@@ -216,9 +237,18 @@ impl RoutedModel {
         run_id: &str,
         route: &routing::ResolvedRoute,
         explicit: Option<u32>,
+        saved: Option<u64>,
     ) -> Result<Option<u64>, crate::RuntimeError> {
         if let Some(value) = explicit {
             return Ok(Some(u64::from(value)));
+        }
+        if self.anthropic_default(route).is_some() {
+            // Catalog/docs defaults are frozen in the checkpoint, not recomputed
+            // from today's catalog. None in legacy Anthropic checkpoints meant 4096.
+            return Ok(self
+                .configured_output_metadata(route, None)
+                .or(saved)
+                .or(Some(anthropic::LEGACY_DEFAULT)));
         }
         if !self.uses_output_limit_catalog(route) {
             return Ok(None);
@@ -260,7 +290,7 @@ impl RoutedModel {
             return Some(u64::from(value));
         }
         if !self.uses_output_limit_catalog(route) {
-            return None;
+            return self.anthropic_default(route);
         }
         if let Some(limit) = self.configured_output_metadata(route, None) {
             return Some(limit);
@@ -269,6 +299,7 @@ impl RoutedModel {
             .catalog(async { self.metadata_catalog().await.cloned() })
             .await;
         self.configured_output_metadata(route, catalog.as_deref())
+            .or_else(|| self.anthropic_default(route))
     }
 }
 

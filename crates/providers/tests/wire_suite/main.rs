@@ -12,6 +12,7 @@ mod anthropic_reasoning;
 mod claude_extra_usage;
 mod image_blocks;
 mod images;
+mod malformed_tool_replay;
 mod observation_contract;
 mod service_tier;
 mod streaming_completion;

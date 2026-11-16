@@ -171,8 +171,10 @@ fn to_wire_block(block: &ContentBlock, role: WireRole) -> Option<WireContentBloc
             if role != WireRole::Assistant {
                 return None;
             }
+            let mut block = block.clone();
+            crate::message::normalize_anthropic_tool_input(&mut block);
             WireContentBlock::Raw {
-                block: block.clone(),
+                block,
                 prefix_hash: prefix_hash.clone(),
             }
         }
@@ -201,12 +203,16 @@ fn to_wire_block(block: &ContentBlock, role: WireRole) -> Option<WireContentBloc
                 thinking: text.clone(),
             },
         },
-        ContentBlock::ToolUse { id, name, input } => WireContentBlock::ToolUse {
-            cache_control: None,
-            id: id.clone(),
-            name: name.clone(),
-            input: input.clone(),
-        },
+        ContentBlock::ToolUse { id, name, input } => {
+            let mut input = input.clone();
+            crate::message::normalize_tool_input(&mut input);
+            WireContentBlock::ToolUse {
+                cache_control: None,
+                id: id.clone(),
+                name: name.clone(),
+                input,
+            }
+        }
         ContentBlock::ToolResult {
             tool_call_id,
             content,
@@ -279,6 +285,8 @@ fn to_wire_content(content: &[ContentBlock], role: WireRole) -> Vec<WireContentB
         if let Some(wire) = to_wire_block(block, role) {
             result.push(wire);
         }
+        // Deduplicate against the original raw projection, before normalization.
+        // Otherwise a legacy null raw/projection pair would become two tool calls.
         if role == WireRole::Assistant
             && let ContentBlock::Anthropic { block, .. } = block
             && let Some(projection) = raw_projection(block)
