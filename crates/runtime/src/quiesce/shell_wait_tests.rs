@@ -89,11 +89,21 @@ async fn partially_presented_shell_batch_never_inserts_notifications_or_safety_a
         tools::ToolResult::success(outcome.result.content),
     );
     crate::meta::Observations {
-        shell: vec![outcome.snapshot.identity],
+        shell: vec![outcome.snapshot.identity.clone()],
         ..Default::default()
     }
     .presented(&mut state);
     assert!(shell.shell_job_snapshots(&run.to_string())[0].observed);
+    // A duplicate receipt in an open batch must not re-enqueue a successful ACK
+    // after its real registry entry has been released (M1/C12).
+    shell.release_shell_jobs(&run.to_string()).unwrap();
+    assert!(shell.shell_job_snapshots(&run.to_string()).is_empty());
+    crate::meta::Observations {
+        shell: vec![outcome.snapshot.identity],
+        ..Default::default()
+    }
+    .presented(&mut state);
+    state.acknowledge_restart_shell_results().unwrap();
     let partial = state.context.messages.clone();
     assert!(
         state

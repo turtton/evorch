@@ -1,5 +1,5 @@
 //! Old wait catalog -> unified wait is a tool-only, one-request cache boundary.
-//! The two old ToolSpecs are copied without semantic changes from mixed.intent.json,
+//! All five affected old ToolSpecs are copied unchanged from mixed.intent.json,
 //! produced by main 2eec1163e225272b2722f4796d1522fce758bfa0 (wait-fixtures/README).
 //! Only catalog selection is emulated: request encoding, HTTP, input-derived cache,
 //! checkpoint capture, handoff evidence and recovery activation remain production paths.
@@ -22,8 +22,11 @@ impl PredecessorCatalog {
             .join("tests/recovery_activation_cache/predecessor-wait-tools.json");
         let old: Vec<ToolSpec> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let mut tools = successor.to_vec();
-        let wait = tools.iter_mut().find(|tool| tool.name == "wait").unwrap();
-        *wait = old.iter().find(|tool| tool.name == "wait").unwrap().clone();
+        for tool in &mut tools {
+            if let Some(predecessor) = old.iter().find(|old| old.name == tool.name) {
+                *tool = predecessor.clone();
+            }
+        }
         tools.push(
             old.into_iter()
                 .find(|tool| tool.name == "wait_reply")
@@ -138,12 +141,28 @@ pub(super) fn assert_transition(
     assert_ne!(old_wait.input_schema, new_wait.input_schema);
     assert!(old.iter().any(|tool| tool.name == "wait_reply"));
     assert!(!new.iter().any(|tool| tool.name == "wait_reply"));
-    // Only these wait tools change. All unrelated definitions and their relative
-    // order must survive; this is stronger than checking tool-name membership.
+    // Reproduce the complete old -> new catalog delta, including descriptions.
+    for name in ["run_output", "inbox"] {
+        let before = old.iter().find(|tool| tool.name == name).unwrap();
+        let after = new.iter().find(|tool| tool.name == name).unwrap();
+        assert_ne!(before.description, after.description);
+        assert_eq!(before.input_schema, after.input_schema);
+    }
+    let before_send = old.iter().find(|tool| tool.name == "send").unwrap();
+    let after_send = new.iter().find(|tool| tool.name == "send").unwrap();
+    assert_ne!(before_send.input_schema, after_send.input_schema);
+    let mut normalized_send = after_send.clone();
+    normalized_send.input_schema["properties"]["reply_to"]["description"] =
+        before_send.input_schema["properties"]["reply_to"]["description"].clone();
+    assert_eq!(&normalized_send, before_send);
+    // All unrelated definitions and their relative order must survive; this is
+    // stronger than checking tool-name membership.
     let unrelated = |tools: &[ToolSpec]| {
         tools
             .iter()
-            .filter(|tool| tool.name != "wait" && tool.name != "wait_reply")
+            .filter(|tool| {
+                !["wait", "wait_reply", "run_output", "inbox", "send"].contains(&tool.name.as_str())
+            })
             .cloned()
             .collect::<Vec<_>>()
     };

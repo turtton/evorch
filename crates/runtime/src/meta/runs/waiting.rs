@@ -199,7 +199,7 @@ async fn wait_with(
         .iter()
         .cloned()
         .collect();
-    request.shown_shell = state.shell_checkpoint_results.keys().cloned().collect();
+    request.shown_shell = state.presented_shell_results.iter().cloned().collect();
     request.executor = Some(state.shared.executor.clone());
     request.delegate = !deliver_messages;
     runtime.refresh_wait_lanes(state.caller_run_id());

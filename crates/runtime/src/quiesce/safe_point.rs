@@ -156,9 +156,7 @@ impl LoopState {
             }
             if job.state != tools::ShellJobState::Terminal
                 || job.observed
-                || self
-                    .shell_checkpoint_results
-                    .contains_key(job.identity.id())
+                || self.presented_shell_results.contains(job.identity.id())
             {
                 continue;
             }
@@ -179,7 +177,9 @@ impl LoopState {
                 job.identity.id(),
                 outcome.result.content
             ));
-            self.shell_checkpoint_results
+            self.presented_shell_results
+                .insert(job.identity.id().into());
+            self.pending_shell_acks
                 .insert(job.identity.id().into(), job.identity);
             self.publish_message_count();
             // Attempt immediately after presentation. The safe-point caller
@@ -190,20 +190,27 @@ impl LoopState {
     }
 
     pub(crate) fn acknowledge_restart_shell_results(&mut self) -> Result<(), String> {
-        for identity in self.shell_checkpoint_results.values() {
-            if self
-                .shared
-                .executor
-                .shell_job_snapshots(&self.task.run_id.to_string())
+        if self.pending_shell_acks.is_empty() {
+            return Ok(());
+        }
+        let snapshots = self
+            .shared
+            .executor
+            .shell_job_snapshots(&self.task.run_id.to_string());
+        while let Some(entry) = self.pending_shell_acks.first_entry() {
+            let identity = entry.get();
+            if !snapshots
                 .iter()
-                .any(|j| j.identity == *identity && j.observed)
+                .any(|job| job.identity == *identity && job.observed)
             {
-                continue;
+                // Missing, never-ACKed jobs must still fail; only positive ACK
+                // evidence removes an identity from the retry queue.
+                self.shared
+                    .executor
+                    .acknowledge_shell_job_result(identity)
+                    .map_err(|error| error.to_string())?;
             }
-            self.shared
-                .executor
-                .acknowledge_shell_job_result(identity)
-                .map_err(|error| error.to_string())?;
+            entry.remove();
         }
         Ok(())
     }

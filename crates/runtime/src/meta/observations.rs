@@ -62,9 +62,11 @@ impl Observations {
             state.shell_result_batch_open = state.has_open_tool_batch();
         }
         for identity in self.shell {
-            state
-                .shell_checkpoint_results
-                .insert(identity.id().into(), identity);
+            if state.presented_shell_results.insert(identity.id().into()) {
+                state
+                    .pending_shell_acks
+                    .insert(identity.id().into(), identity);
+            }
         }
         // Keep identity evidence on failure: retry ACK, never re-present the text.
         let _ = state.acknowledge_restart_shell_results();

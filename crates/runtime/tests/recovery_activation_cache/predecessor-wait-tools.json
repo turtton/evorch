@@ -79,5 +79,87 @@
       ],
       "type": "object"
     }
+  },
+  {
+    "name": "run_output",
+    "description": "Read a direct child's or parent's phase/status, terminal or idle-turn output, or failure/cancellation/stop reason without waiting or restoring terminal runs. An interactive turn that successfully ends without unanswered questions has phase=Waiting, status=turn_completed, output and turn_generation. Returning a direct child's idle-turn output acknowledges that generation, so wait will not wake again for it; snapshots remain readable. Ordinary Waiting (nested waits, questions or reviews) is not a completed turn. Returning a terminal child's result acknowledges that completion and removes its still-queued automatic notice; explicit agent messages and other completion generations are not consumed. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use has_pending_question from wait and subagent_questions to identify unanswered questions.",
+    "input_schema": {
+      "properties": {
+        "run_id": {
+          "description": "Runtime run ID exactly as reported, such as run-01k6z3x2q4w8e9r0t1y2u3i4o5.",
+          "pattern": "^run-([0-9]+|[0-9a-hjkmnp-tv-z]{26})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "inbox",
+    "description": "Consume this run's queued agent messages, including unobserved automatic child completion notices, and return a JSON array with IDs, sender, kind, content and reply correlation. Only automatic notices already acknowledged by output-bearing wait or terminal run_output are omitted; all other queued messages are consumed and returned. Returns an empty array if none are queued.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "send",
+    "description": "Deliver a message to a direct child or parent and return message_id without waiting for a reply. A finished direct child resumes with its saved context under your current authority; a child's message to a finished parent is held until the parent continues. Runs the user stopped or that were cancelled are not resumed; other refusals return the restore error. Self, sibling and unrelated recipients are denied.",
+    "input_schema": {
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "reply"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "reply_to"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "kind": {
+          "default": "send",
+          "description": "send delivers a message; reply correlates via required reply_to; steering supplies a parent instruction at the recipient's next safe boundary.",
+          "enum": [
+            "send",
+            "reply",
+            "steering"
+          ],
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "reply_to": {
+          "description": "Original message_id, required for kind=reply.",
+          "type": "string"
+        },
+        "run_id": {
+          "description": "Runtime run ID exactly as reported, such as run-01k6z3x2q4w8e9r0t1y2u3i4o5.",
+          "pattern": "^run-([0-9]+|[0-9a-hjkmnp-tv-z]{26})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "message"
+      ],
+      "type": "object"
+    }
   }
 ]

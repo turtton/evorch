@@ -88,7 +88,11 @@ impl Tool for GatedShell {
                 detail: "injected ACK failure".into(),
             });
         }
-        self.shell.acknowledge_shell_job_result(identity)
+        let result = self.shell.acknowledge_shell_job_result(identity);
+        if result.is_err() {
+            self.ack_attempted.notify_one();
+        }
+        result
     }
     fn shell_job_snapshots(&self, run: &str) -> Vec<ShellJobSnapshot> {
         let mut jobs = self.shell.shell_job_snapshots(run);

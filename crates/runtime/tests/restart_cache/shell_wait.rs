@@ -150,6 +150,10 @@ async fn blocker(h: &Harness, run: RunId, kind: RestartBlockerKind) {
 }
 
 async fn release_job(f: &WaitingShell) {
+    release_job_for_call(f, "shell-start").await;
+}
+
+async fn release_job_for_call(f: &WaitingShell, call: &str) {
     use std::io::Write;
     let fifo = f.fifo.clone();
     let writer = tokio::task::spawn_blocking(move || {
@@ -164,7 +168,7 @@ async fn release_job(f: &WaitingShell) {
         .shell
         .shell_job_snapshots(&f.run.to_string())
         .into_iter()
-        .find(|j| j.call_id.as_deref() == Some("shell-start"))
+        .find(|j| j.call_id.as_deref() == Some(call))
         .unwrap()
         .identity;
     f.shell.wait_shell_job_terminal(&identity).await.unwrap();
@@ -445,6 +449,101 @@ async fn running_shell_wait_quiesces_only_after_its_tool_result_on_every_wire() 
                 restore_and_wait_again(&mut f).await;
             }
         }
+    }
+}
+
+// M1/C12: successful ACK cannot depend on the process-local registry retaining
+// its identity. Exercise the real 32-job limit, not a fake snapshot or result.
+#[tokio::test]
+async fn acknowledged_shell_eviction_allows_provider_progress_and_restart_on_every_wire() {
+    for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
+        let mut f = waiting_shell(wire, 0).await;
+        let mut presented = std::collections::BTreeSet::new();
+        for index in 0..33 {
+            let call = if index == 0 {
+                "shell-start".to_owned()
+            } else {
+                let call = format!("shell-start-{index}");
+                let command = json!({
+                    "command": format!("IFS= read -r line < '{}'; printf 'normal:%s' \"$line\"", f.fifo.display()),
+                    "yield_ms": 0,
+                });
+                f.h.mock.enqueue([
+                    ScriptedResponse::tool_call(
+                        &format!("start-response-{index}"),
+                        MODEL,
+                        0,
+                        &call,
+                        "shell",
+                        [command.to_string()],
+                    ),
+                    wait_call(&format!("shell-wait-{index}"), json!({})),
+                ]);
+                f.h.runtime
+                    .send_message(f.run, format!("start job {index}"))
+                    .unwrap();
+                f.shell.started.notified().await;
+                let jobs = f.shell.shell_job_snapshots(&f.run.to_string());
+                if index == 32 {
+                    assert_eq!(presented.len(), 32);
+                    assert_eq!(jobs.len(), 32);
+                    assert!(
+                        presented
+                            .iter()
+                            .any(|id| { !jobs.iter().any(|job| job.identity.id() == id) }),
+                        "the 33rd real launch must evict an ACKed identity"
+                    );
+                }
+                f.shell.release.add_permits(1);
+                // An erroneous retry emits a failure signal: no test timeout is
+                // needed to distinguish it from reaching the next provider call.
+                let events = tokio::select! {
+                    events = through_phase(&mut f.h.receiver, f.run, AgentRunPhase::Waiting) => events,
+                    _ = f.shell.ack_attempted.notified() => panic!("retried an already ACKed, evicted shell job"),
+                };
+                f.events.extend(events);
+                call
+            };
+            let (gate, arrived) = mock_openai::ResponseGate::new();
+            f.h.mock
+                .enqueue([text_response("job observed").with_gate(gate.clone())]);
+            release_job_for_call(&f, &call).await;
+            tokio::select! {
+                result = tokio::task::spawn_blocking(move || arrived.recv().unwrap()) => result.unwrap(),
+                _ = f.shell.ack_attempted.notified() => panic!("shell ACK failed after presentation"),
+            }
+            let jobs = f.shell.shell_job_snapshots(&f.run.to_string());
+            let current = jobs
+                .iter()
+                .find(|job| job.call_id.as_deref() == Some(call.as_str()))
+                .unwrap();
+            assert!(current.observed);
+            assert_eq!(current.state, tools::ShellJobState::Terminal);
+            assert!(current.teardown_confirmed);
+            assert!(presented.insert(current.identity.id().to_owned()));
+            assert_eq!(f.shell.ack_attempts.load(Ordering::SeqCst), index + 1);
+            gate.release();
+            f.events
+                .extend(through_phase(&mut f.h.receiver, f.run, AgentRunPhase::Waiting).await);
+        }
+        let attempt = f.h.runtime.begin_restart_quiesce().unwrap();
+        f.h.runtime.wait_quiesced().await.unwrap();
+        assert_eq!(
+            snapshot(&f)
+                .messages_json
+                .matches("normal:released")
+                .count(),
+            33
+        );
+        assert_eq!(f.shell.ack_attempts.load(Ordering::SeqCst), 33);
+        f.h.runtime.cancel_restart_quiesce(&attempt).unwrap();
+        f.h.runtime
+            .stop(f.run, runtime::StopScope::SelfOnly)
+            .unwrap();
+        f.h.runtime.wait(f.run).await.unwrap();
+        // The restored registry is empty: persisted history, not another ACK or
+        // command launch, must retain all 33 outcomes exactly once.
+        restore_and_wait_again_with_count(&mut f, 33).await;
     }
 }
 
@@ -830,6 +929,10 @@ async fn checkpoint_first_presentation_with_another_blocker_leaves_other_results
 }
 
 async fn restore_and_wait_again(f: &mut WaitingShell) {
+    restore_and_wait_again_with_count(f, 1).await;
+}
+
+async fn restore_and_wait_again_with_count(f: &mut WaitingShell, presented: usize) {
     let root = f.h._directory.path();
     let current = Config::load(&LoadOptions {
         project_dir: Some(root.into()),
@@ -913,7 +1016,10 @@ async fn restore_and_wait_again(f: &mut WaitingShell) {
     .unwrap();
     let result: Value = serde_json::from_str(output).unwrap();
     assert!(result["shell_jobs"].as_array().unwrap().is_empty());
-    assert_eq!(last.to_string().matches("normal:released").count(), 1);
+    assert_eq!(
+        last.to_string().matches("normal:released").count(),
+        presented
+    );
     f.h.runtime
         .stop(f.run, runtime::StopScope::SelfOnly)
         .unwrap();
