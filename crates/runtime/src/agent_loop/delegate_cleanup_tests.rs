@@ -170,6 +170,7 @@ fn fixture_with_model(
         identical_calls: identical_calls::IdenticalCalls::default(),
         run_js_unconfirmed: Arc::default(),
         unobserved_job_reminders: 0,
+        shell_result_batch_open: false,
         shell_checkpoint_results: Default::default(),
         total_job_reminders: 0,
         reminded_jobs: std::collections::BTreeSet::new(),
@@ -259,6 +260,7 @@ async fn rejected_waiting_transition_drains_all_spawned_children() {
         vec![
             first,
             Err(crate::meta::DispatchResult {
+                observations: Default::default(),
                 result: tools::ToolResult::error("invalid child"),
                 terminal: crate::meta::Terminal::Continue,
             }),

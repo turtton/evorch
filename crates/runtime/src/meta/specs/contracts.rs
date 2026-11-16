@@ -75,10 +75,6 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
         "send",
         json!({"run_id":"run-2","message":"answer","kind":"reply","reply_to":"msg-1"}),
     );
-    contract::<meta::messaging::WaitReplyArgs>(
-        "wait_reply",
-        json!({"message_id":"msg-1","timeout_ms":10000}),
-    );
     contract::<meta::skills::SkillLoadArgs>(
         "skill_load",
         json!({"name":"rust","resource":"references/guide.md"}),

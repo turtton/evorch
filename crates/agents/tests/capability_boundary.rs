@@ -112,7 +112,7 @@ fn explorer_allows_exactly_adr_0002_tools() {
 #[test]
 fn explorer_denies_mutation_delegation_and_messaging_tools() {
     // Given: Explorer ロール (read / search のみ、write / edit / delegate / messaging は拒否)
-    // When: edit / shell / delegate / send / wait_reply / inbox の使用可否を問い合わせる
+    // When: edit / shell / delegate / send / inbox の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Explorer.capabilities();
     for tool in [
@@ -122,7 +122,6 @@ fn explorer_denies_mutation_delegation_and_messaging_tools() {
         "shell",
         "delegate",
         "send",
-        "wait_reply",
         "inbox",
     ] {
         assert_denied(caps.check_tool("Explorer", tool), "Explorer", tool);
@@ -247,17 +246,10 @@ fn reviewer_allows_shell_for_diff_and_targeted_test_runs() {
 #[test]
 fn reviewer_denies_direct_edit_tools_and_messaging() {
     // Given: Reviewer ロール (write / edit / apply_patch は持たず、メッセージ交換もしない)
-    // When: write / edit / apply_patch / send / wait_reply / inbox の使用可否を問い合わせる
+    // When: write / edit / apply_patch / send / inbox の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Reviewer.capabilities();
-    for tool in [
-        "write",
-        "edit",
-        "apply_patch",
-        "send",
-        "wait_reply",
-        "inbox",
-    ] {
+    for tool in ["write", "edit", "apply_patch", "send", "inbox"] {
         assert_denied(caps.check_tool("Reviewer", tool), "Reviewer", tool);
     }
 }

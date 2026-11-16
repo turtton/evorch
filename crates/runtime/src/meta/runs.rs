@@ -37,10 +37,11 @@ pub(super) fn run_output(
             {
                 state.budget.mark_progress();
             }
-            let dispatch = serialize(&output);
-            if let Some(notice) = &output.completion_notice {
-                runtime.observe_completion(notice);
-            }
+            let mut dispatch = serialize(&output);
+            dispatch
+                .observations
+                .completions
+                .extend(output.completion_notice);
             dispatch
         }
         Err(runtime_error) => {

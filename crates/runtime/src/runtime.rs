@@ -40,6 +40,7 @@ mod output;
 mod project;
 pub(crate) mod questions;
 mod saved_compaction;
+mod wait_sources;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
 pub use questions::{AnswerOutcome, AnswerQuestionError, RunWait};
 #[cfg(test)]
@@ -55,6 +56,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+#[cfg(test)]
 use std::time::Duration;
 
 use agents::Role;
@@ -64,7 +66,6 @@ use event_bus::{
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep_until};
 use tools::ToolExecutor;
 
 use crate::agent_loop::{LoopChannels, LoopShared, RunHandoff, RunTask, run_agent};
@@ -297,20 +298,6 @@ pub trait SandboxFactory: Send + Sync {
 pub(crate) enum HostProvenance {
     FreshHostSubmission,
     PersistedHostSubmission { run_id: RunId },
-}
-
-/// The waiter's mailbox, the replier's phase and the waiter's mailbox version.
-type ReplyWaitParts = (
-    Arc<RunMailbox>,
-    watch::Receiver<AgentRunPhase>,
-    watch::Receiver<u64>,
-);
-
-/// How a reply wait that also watches the caller's own answers ended.
-#[derive(Debug)]
-pub(crate) enum ReplyOutcome {
-    Reply(AgentMessage),
-    AnswersReady(Vec<String>),
 }
 
 pub(crate) struct ReviewSeed {
@@ -3937,42 +3924,8 @@ impl AgentRuntime {
         Ok(mailbox.drain_all())
     }
 
-    /// `message_id` に対応する返信を最大 `timeout` まで待つ。
-    ///
-    /// 返信が到着すると返信メッセージを返す。相手 run が返信せずに終端した場合は
-    /// [`RuntimeError::RunTerminated`]、制限時間を超えた場合は
-    /// [`RuntimeError::ReplyTimeout`] を返す。タイムアウトした場合、遅延返信は
-    /// 未読のまま inbox / 注入経路で後から観測される。
-    ///
-    /// # Errors
-    /// - `message_id` が `run_id` が送信したものでない: [`RuntimeError::UnknownMessage`]
-    /// - 返信元 run が終端: [`RuntimeError::RunTerminated`]
-    /// - 待機時間超過: [`RuntimeError::ReplyTimeout`]
-    pub async fn wait_reply(
-        &self,
-        run_id: RunId,
-        message_id: &str,
-        timeout: Duration,
-    ) -> Result<AgentMessage, RuntimeError> {
-        match self
-            .wait_reply_or_answers(run_id, message_id, timeout, None)
-            .await?
-        {
-            ReplyOutcome::Reply(reply) => Ok(reply),
-            ReplyOutcome::AnswersReady(_) => {
-                unreachable!("answers are watched only when the caller passes a delivered set")
-            }
-        }
-    }
-
-    /// Checks that `run_id` sent `message_id` and that its recipient is still
-    /// registered, as a reply wait requires.
-    ///
-    /// # Errors
-    /// [`RuntimeError::UnknownMessage`] for an unknown or foreign message,
-    /// [`RuntimeError::RunTerminated`] once the recipient is gone.
-    /// Validated identity for a durable reply continuation, without consuming it.
-    pub(crate) fn reply_wait_target(
+    #[cfg(test)]
+    pub(crate) fn sent_message_recipient(
         &self,
         requester: RunId,
         message_id: &str,
@@ -3989,170 +3942,6 @@ impl AgentRuntime {
             })
     }
 
-    pub(crate) fn check_reply_wait(
-        &self,
-        run_id: RunId,
-        message_id: &str,
-    ) -> Result<(), RuntimeError> {
-        self.reply_wait_parts(run_id, message_id).map(|_| ())
-    }
-
-    fn reply_wait_parts(
-        &self,
-        run_id: RunId,
-        message_id: &str,
-    ) -> Result<ReplyWaitParts, RuntimeError> {
-        let runs = lock_runs(&self.shared.runs);
-        let waiter_entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
-        let sent = self
-            .shared
-            .sent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let record = sent
-            .get(message_id)
-            .ok_or_else(|| RuntimeError::UnknownMessage {
-                message_id: message_id.to_string(),
-            })?;
-        if record.sender != run_id {
-            return Err(RuntimeError::UnknownMessage {
-                message_id: message_id.to_string(),
-            });
-        }
-        let replier_entry =
-            runs.get(&record.recipient)
-                .ok_or_else(|| RuntimeError::RunTerminated {
-                    run_id: record.recipient.to_string(),
-                })?;
-        let waiter_mailbox = Arc::clone(&waiter_entry.mailbox);
-        let replier_phase_rx = replier_entry.phase_rx.clone();
-        let version_rx = waiter_entry.mailbox.subscribe_version();
-        Ok((waiter_mailbox, replier_phase_rx, version_rx))
-    }
-
-    /// [`Self::wait_reply`] that also ends when a question of `run_id` gets an
-    /// answer outside `delivered` (the answers already in its history).
-    ///
-    /// The answer wake-up leaves the sent record in place, so the caller can
-    /// wait on the same `message_id` again. A reply that is already queued wins
-    /// over an answer; the answer text reaches the model through the loop's own
-    /// answer flush, never through this result.
-    pub(crate) async fn wait_reply_or_answers(
-        &self,
-        run_id: RunId,
-        message_id: &str,
-        timeout: Duration,
-        delivered: Option<&HashSet<String>>,
-    ) -> Result<ReplyOutcome, RuntimeError> {
-        let (waiter_mailbox, mut replier_phase_rx, version_rx) =
-            self.reply_wait_parts(run_id, message_id)?;
-
-        let mut version_rx = version_rx;
-        // Subscribe before the first answer check so an answer cannot slip
-        // between that check and the wait below.
-        let mut question_changes = self.shared.question_version.subscribe();
-        let deadline = Instant::now() + timeout;
-
-        let current_phase = *self.entry(run_id)?.phase_rx.borrow();
-        if current_phase == AgentRunPhase::Running {
-            let _ = self.transition_phase(run_id, AgentRunPhase::Waiting).await;
-        }
-
-        let result = loop {
-            if let Some(reply) = waiter_mailbox.remove_first_where(|message| {
-                message.kind == AgentMessageKind::Reply
-                    && message.reply_to.as_deref() == Some(message_id)
-            }) {
-                self.remove_sent_record(message_id);
-                break Ok(ReplyOutcome::Reply(reply));
-            }
-
-            if let Some(delivered) = delivered {
-                let ids = self.undelivered_answer_ids(run_id, delivered);
-                if !ids.is_empty() {
-                    break Ok(ReplyOutcome::AnswersReady(ids));
-                }
-            }
-
-            let current_replier_phase = *replier_phase_rx.borrow();
-            if matches!(
-                current_replier_phase,
-                AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error
-            ) {
-                let replier_run_id = {
-                    let _runs = lock_runs(&self.shared.runs);
-                    self.shared
-                        .sent
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .get(message_id)
-                        .map(|record| record.recipient.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                };
-                self.remove_sent_record(message_id);
-                break Err(RuntimeError::RunTerminated {
-                    run_id: replier_run_id,
-                });
-            }
-
-            tokio::select! {
-                changed = version_rx.changed() => {
-                    if changed.is_err() {
-                        break Err(RuntimeError::RunTerminated {
-                            run_id: "unknown".to_string(),
-                        });
-                    }
-                }
-                _ = question_changes.changed(), if delivered.is_some() => {}
-                changed = replier_phase_rx.changed() => {
-                    if changed.is_err() {
-                        self.remove_sent_record(message_id);
-                        break Err(RuntimeError::RunTerminated {
-                            run_id: run_id.to_string(),
-                        });
-                    }
-                }
-                _ = sleep_until(deadline) => {
-                    self.remove_sent_record(message_id);
-                    break Err(RuntimeError::ReplyTimeout {
-                        message_id: message_id.to_string(),
-                    });
-                }
-            }
-        };
-
-        let _ = self.transition_phase(run_id, AgentRunPhase::Running).await;
-        result
-    }
-
-    async fn transition_phase(&self, run_id: RunId, to: AgentRunPhase) -> Result<(), RuntimeError> {
-        let from = *self.entry(run_id)?.phase_rx.borrow();
-        if from == to {
-            return Ok(());
-        }
-        if !crate::state::is_valid_transition(from, to) {
-            return Err(RuntimeError::InvalidTransition { from, to });
-        }
-        // issue #98: LoopState::transition (agent_loop.rs) と同じく、位相 commit を
-        // イベント発行に happens-before させる。逆順だと emit 直後の観測者が
-        // phase_rx から旧位相を読みうる (chat_sink_runtime flake の根本原因)。
-        let phase_tx = {
-            let runs = lock_runs(&self.shared.runs);
-            let entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
-            entry.phase_tx.clone()
-        };
-        phase_tx.send_replace(to);
-        self.shared
-            .bus
-            .emit(Event::new(LifecycleEvent::AgentRunStateChanged {
-                run_id: run_id.to_string(),
-                from,
-                to,
-                reason: None,
-            }));
-        Ok(())
-    }
-
     fn allocate_message_id(&self) -> Result<String, RuntimeError> {
         self.shared
             .next_message_id
@@ -4161,23 +3950,6 @@ impl AgentRuntime {
             .map_err(|_| RuntimeError::Model {
                 reason: "message ID allocator exhausted".into(),
             })
-    }
-
-    /// Recovery alone commits an elapsed deadline before looking at queued input.
-    pub(crate) fn expire_recovery_reply_wait(&self, message_id: &str) -> RuntimeError {
-        self.remove_sent_record(message_id);
-        RuntimeError::ReplyTimeout {
-            message_id: message_id.to_owned(),
-        }
-    }
-
-    fn remove_sent_record(&self, message_id: &str) {
-        let mut sent = self
-            .shared
-            .sent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        sent.remove(message_id);
     }
 }
 

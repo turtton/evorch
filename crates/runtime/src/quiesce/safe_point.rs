@@ -6,6 +6,9 @@ impl LoopState {
     /// No hook exists inside a parallel wave: only the complete batch and all of
     /// its results can reach this boundary. Stop/Cancel remains a separate path.
     pub(crate) async fn quiesce_safe_point(&mut self, boundary: CheckpointBoundary) -> bool {
+        if !self.has_open_tool_batch() {
+            self.shell_result_batch_open = false;
+        }
         let Some(runtime) = self.runtime() else {
             return true;
         };
@@ -45,7 +48,30 @@ impl LoopState {
                         .acknowledged(self.task.run_id, &self.task.publication.incarnation())
                 {
                     let incarnation = self.task.publication.incarnation();
-                    if let Err(error) = self.stage_restart_shell_results() {
+                    // An open batch must finish through its original ToolResults.
+                    // Return to observation without releasing quiesce or dispatch.
+                    if self.has_open_tool_batch()
+                        && (self.has_unstaged_shell_results() || self.shell_result_batch_open)
+                    {
+                        let kind = if self
+                            .shared
+                            .executor
+                            .has_running_shell_jobs(&self.task.run_id.to_string())
+                        {
+                            RestartBlockerKind::ShellRunning
+                        } else {
+                            RestartBlockerKind::UnfinishedToolBatch
+                        };
+                        runtime
+                            .shared
+                            .quiesce
+                            .block(self.task.run_id, &incarnation, kind);
+                        return true;
+                    }
+                    if let Err(error) = self
+                        .stage_restart_shell_results()
+                        .and_then(|()| self.acknowledge_restart_shell_results())
+                    {
                         runtime.shared.quiesce.fail(error);
                     } else if let Some(kind) = self.restart_safety_blocker() {
                         runtime
@@ -85,7 +111,31 @@ impl LoopState {
         }
     }
 
+    pub(crate) fn has_open_tool_batch(&self) -> bool {
+        let mut pending = std::collections::HashSet::new();
+        for block in self
+            .context
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+        {
+            match block {
+                providers::ContentBlock::ToolUse { id, .. } => {
+                    pending.insert(id.as_str());
+                }
+                providers::ContentBlock::ToolResult { tool_call_id, .. } => {
+                    pending.remove(tool_call_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        !pending.is_empty()
+    }
+
     fn stage_restart_shell_results(&mut self) -> Result<(), String> {
+        if self.has_open_tool_batch() {
+            return Ok(());
+        }
         for job in self
             .shared
             .executor
@@ -122,18 +172,27 @@ impl LoopState {
             self.shell_checkpoint_results
                 .insert(job.identity.id().into(), job.identity);
             self.publish_message_count();
+            self.acknowledge_restart_shell_results()?;
         }
         Ok(())
     }
 
-    fn acknowledge_restart_shell_results(&mut self) -> Result<(), String> {
+    pub(crate) fn acknowledge_restart_shell_results(&mut self) -> Result<(), String> {
         for identity in self.shell_checkpoint_results.values() {
+            if self
+                .shared
+                .executor
+                .shell_job_snapshots(&self.task.run_id.to_string())
+                .iter()
+                .any(|j| j.identity == *identity && j.observed)
+            {
+                continue;
+            }
             self.shared
                 .executor
                 .acknowledge_shell_job_result(identity)
                 .map_err(|error| error.to_string())?;
         }
-        self.shell_checkpoint_results.clear();
         Ok(())
     }
 

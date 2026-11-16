@@ -186,6 +186,7 @@ pub(super) async fn delegate(
     {
         let mut dispatch = super::serialize(run);
         dispatch.result.progress = result.result.progress;
+        dispatch.observations = result.observations;
         return dispatch;
     }
     result
@@ -275,7 +276,7 @@ pub(crate) async fn wait_delegates(
     }
     // One wait covers the whole wave and returns when any child needs a
     // decision, while preserving each delegate call's own tool result.
-    let waited = super::runs::waiting::wait_for_delegates(
+    let mut waited = super::runs::waiting::wait_for_delegates(
         state,
         runtime,
         serde_json::json!({"run_ids":run_ids, "mode":"all"}),
@@ -310,6 +311,7 @@ pub(crate) async fn wait_delegates(
                 .collect();
         }
     };
+    let mut first = true;
     children
         .into_iter()
         .map(|child| match child {
@@ -318,12 +320,19 @@ pub(crate) async fn wait_delegates(
                 let run = snapshot["runs"]
                     .as_array()
                     .and_then(|runs| runs.iter().find(|run| run["run_id"] == run_id.to_string()));
-                match run {
+                let interrupted = snapshot["events"].as_array().is_some_and(|events| {
+                    events
+                        .iter()
+                        .any(|e| e["kind"] != "run_completed" && e["kind"] != "turn_completed")
+                }) || snapshot["inbox_ready"] == true
+                    || snapshot["user_input_ready"] == true;
+                let mut dispatch = match run {
                     Some(run)
                         if matches!(
                             run["status"].as_str(),
                             Some("completed" | "cancelled" | "stopped" | "failed")
-                        ) && run["has_pending_question"] != true =>
+                        ) && run["has_pending_question"] != true
+                            && !interrupted =>
                     {
                         success(run["phase"].as_str().unwrap_or("Error"))
                     }
@@ -335,9 +344,31 @@ pub(crate) async fn wait_delegates(
                         "has_pending_question": run["has_pending_question"],
                         "inbox_ready": snapshot["inbox_ready"],
                         "user_input_ready": snapshot["user_input_ready"],
+                        "answer_ready": snapshot["answer_ready"],
+                        "question_ids": snapshot["question_ids"],
+                        "attention_question_ids": snapshot["attention_question_ids"],
+                        "events": snapshot["events"],
+                        "shell_jobs": snapshot["shell_jobs"],
                     })),
                     None => error(format!("missing child wait result for {run_id}")),
+                };
+                if run.is_some_and(|r| r["status"] == "turn_completed") {
+                    dispatch.observations.completions = waited
+                        .observations
+                        .completions
+                        .iter()
+                        .filter(|n| n.child == run_id)
+                        .cloned()
+                        .collect();
                 }
+                if first && interrupted && !dispatch.result.is_error {
+                    dispatch.observations.questions =
+                        std::mem::take(&mut waited.observations.questions);
+                    dispatch.observations.events = std::mem::take(&mut waited.observations.events);
+                    dispatch.observations.shell = std::mem::take(&mut waited.observations.shell);
+                    first = false;
+                }
+                dispatch
             }
         })
         .collect()

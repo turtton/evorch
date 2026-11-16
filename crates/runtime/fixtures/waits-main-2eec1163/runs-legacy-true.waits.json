@@ -1,0 +1,1 @@
+[{"answers":[],"completions":[],"continuation":{"consume_mailbox":true,"legacy_result":true,"payload":{"input":{"run_id":"run-01m7hzdmebmns63sevyh9bndyr"},"kind":{"kind":"runs"},"position":0},"tool_name":"wait"},"mode":"any","questions":[],"requester":"run-01m7hzdmdxx0bj2vxm6en2a2n4","targets":["run-01m7hzdmebmns63sevyh9bndyr"],"tool_call_id":"wait-legacy"}]

@@ -148,11 +148,8 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
             )
             .unwrap();
         assert_eq!(f.runtime.take_inbox(child).unwrap().len(), 1);
-        // The production recovered-timeout branch removes the sent receipt.
-        assert!(matches!(
-            f.runtime.expire_recovery_reply_wait(&id),
-            crate::RuntimeError::ReplyTimeout { .. }
-        ));
+        // Consumption does not retire correlation records; IDs still advance.
+        assert_eq!(f.runtime.sent_message_recipient(root, &id).unwrap(), child);
         expired.push(id);
     }
     f.runtime.request_quiesce();
@@ -264,7 +261,7 @@ async fn startup_fences_expired_message_ids_before_sends_and_delayed_components(
             )
             .is_err()
     );
-    runtime.check_reply_wait(root, &current).unwrap();
+    runtime.sent_message_recipient(root, &current).unwrap();
     for run in [root, other, fresh] {
         runtime.cancel(run).unwrap();
     }
@@ -716,16 +713,18 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
         "recovery must reserve all delivery IDs"
     );
     assert_eq!(
-        runtime.reply_wait_target(root, &original_message).unwrap(),
+        runtime
+            .sent_message_recipient(root, &original_message)
+            .unwrap(),
         child
     );
     assert_eq!(
-        runtime.reply_wait_target(root, &new_message).unwrap(),
+        runtime.sent_message_recipient(root, &new_message).unwrap(),
         child
     );
     assert!(
         runtime
-            .check_reply_wait(child, &question_delivery.message_id)
+            .sent_message_recipient(child, &question_delivery.message_id)
             .is_err()
     );
     runtime

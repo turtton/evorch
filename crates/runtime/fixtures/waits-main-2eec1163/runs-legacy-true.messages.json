@@ -1,0 +1,1 @@
+[{"content":[{"text":"runs-legacy-true","type":"text"}],"role":"user"},{"content":[{"id":"wait-legacy","input":{"run_id":"run-01m7hzdmebmns63sevyh9bndyr"},"name":"wait","type":"tool_use"}],"role":"assistant"}]

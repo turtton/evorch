@@ -105,6 +105,10 @@ fn request(runs: Vec<RunId>, mode: WaitMode, timeout_ms: u64) -> WaitRequest {
     WaitRequest {
         runs,
         mode,
+        observed: HashSet::new(),
+        shown_shell: HashSet::new(),
+        executor: None,
+        delegate: false,
         deadline: Some(Duration::from_millis(timeout_ms)),
         legacy: false,
         reported: HashSet::new(),
@@ -128,6 +132,7 @@ fn wait_schema_and_argument_validation_agree() {
     let validator =
         jsonschema::validator_for(&crate::meta::tool_spec("wait").input_schema).unwrap();
     for input in [
+        json!({}),
         json!({"run_id":"run-1"}),
         json!({"run_ids":["run-1","run-2"],"mode":"all"}),
         json!({"run_ids":["run-1"],"mode":"any"}),
@@ -136,7 +141,7 @@ fn wait_schema_and_argument_validation_agree() {
         assert!(parse::<WaitArgs>(input).unwrap().validate().is_ok());
     }
     for input in [
-        json!({}),
+        json!({"mode":"all"}),
         json!({"run_id":"run-1","run_ids":["run-2"]}),
         json!({"run_ids":[]}),
         json!({"run_ids":["run-1","run-1"]}),
@@ -171,7 +176,7 @@ async fn any_wakes_on_one_completion_and_returns_bounded_utf8_output() {
     let result = wait.await.unwrap();
     assert_eq!(result["timed_out"], false);
     assert_eq!(result["completed_run_ids"], json!([first.to_string()]));
-    assert_eq!(result["runs"][1]["status"], "still_running");
+    assert_eq!(result["runs"].as_array().unwrap().len(), 1);
     assert_eq!(result["runs"][0]["output_truncated"], true);
     assert!(result["runs"][0]["output"].as_str().unwrap().len() <= OUTPUT_BYTES);
     // Observing completion must not consume the parent's completion relay.
@@ -338,15 +343,17 @@ async fn child_admission_can_be_observed_before_registration_without_weakening_a
     let unrelated =
         runtime.delegate_background(Role::Worker, "unrelated".into(), RunConfig::default());
     let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let pending = observe(
+        &runtime,
+        parent,
+        &request(vec![child], WaitMode::Any, 0),
+        receiver.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(pending["runs"], json!([]));
     assert_eq!(
-        observe(
-            &runtime,
-            parent,
-            &request(vec![child], WaitMode::Any, 0),
-            receiver.clone()
-        )
-        .await
-        .unwrap()["runs"][0]["phase"],
+        serde_json::to_value(runtime.run_output(parent, child).unwrap()).unwrap()["phase"],
         "Pending"
     );
     assert!(
@@ -450,8 +457,8 @@ async fn optional_child_question_wakes_parent_wait_for_orchestrator_resolution()
         .unwrap();
     let result = wait.await.unwrap();
     assert_eq!(result["attention_run_ids"], json!([second.to_string()]));
-    assert_eq!(result["runs"][1]["needs_user_input"], false);
-    assert_eq!(result["runs"][1]["has_pending_question"], true);
+    assert_eq!(result["runs"][0]["needs_user_input"], false);
+    assert_eq!(result["runs"][0]["has_pending_question"], true);
     assert_eq!(
         runtime.subagent_questions(parent, second).unwrap(),
         vec![question.clone()]
@@ -662,7 +669,7 @@ async fn messages_from_children_outside_wait_targets_interrupt_wait() {
     let result = wait.await.unwrap();
     assert_eq!(result["inbox_ready"], true);
     assert_eq!(result["timed_out"], false);
-    assert_eq!(result["runs"][0]["status"], "still_running");
+    assert_eq!(result["runs"], json!([]));
     cleanup(&runtime).await;
 }
 
@@ -893,7 +900,14 @@ async fn question_attention_consumes_notice_for_wait_and_synchronous_delegate() 
             !synchronous,
         )
         .await;
-        let result: Value = serde_json::from_str(&result.result.content).unwrap();
+        let value: Value = serde_json::from_str(&result.result.content).unwrap();
+        assert!(
+            !runtime.question_reported(&q.id),
+            "peeking is not presentation"
+        );
+        state.context.push_tool_result("test-wait", result.result);
+        result.observations.presented(&mut state);
+        let result = value;
         assert_eq!(result["attention_question_ids"], json!([q.id.clone()]));
         assert!(state.reported_questions.contains(&q.id));
         assert!(runtime.question_reported(&q.id));

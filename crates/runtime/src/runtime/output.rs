@@ -42,6 +42,15 @@ pub(super) struct IdleTurn {
 }
 
 impl AgentRuntime {
+    pub(crate) fn observe_queued_message(&self, queued: &crate::mailbox::QueuedMessage) {
+        use crate::mailbox::completion::MessageOrigin;
+        match &queued.origin {
+            MessageOrigin::Explicit => {}
+            MessageOrigin::CompletionNotice(notice) => self.observe_completion(notice),
+            MessageOrigin::QuestionNotice(notice) => self.observe_questions([notice.id.clone()]),
+        }
+    }
+
     /// Publish a nonterminal phase and its optional idle output atomically.
     /// Only successful interactive turn boundaries supply a completed turn;
     /// question waits, nested waits and escalation waits must not synthesize one.
@@ -75,6 +84,9 @@ impl AgentRuntime {
         }
         let became_running = *to == AgentRunPhase::Running;
         phase_tx.send_replace(*to);
+        self.shared
+            .turn_version
+            .send_modify(|v| *v = v.wrapping_add(1));
         self.shared.bus.emit(event_bus::Event::new(event));
         drop(runs);
         if became_running {

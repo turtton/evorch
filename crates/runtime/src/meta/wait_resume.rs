@@ -6,27 +6,25 @@ use crate::{
     quiesce::{DurableWait, WaitKind},
 };
 
+pub(crate) const RETIRED_REPLY_WAIT: &str = "wait_reply has been retired. Use wait for messages and other events. The old tool was not replayed; unread messages remain available.";
+
 pub(crate) async fn resume_wait(
     state: &mut LoopState,
     runtime: &AgentRuntime,
     wait: &DurableWait,
-) -> Vec<(String, tools::ToolResult)> {
+) -> Vec<(String, DispatchResult)> {
     let Some(payload) = &wait.continuation.payload else {
-        return vec![(
-            wait.tool_call_id.clone(),
-            tools::ToolResult::error("missing wait payload"),
-        )];
+        return vec![(wait.tool_call_id.clone(), error("missing wait payload"))];
     };
     match &payload.kind {
-        WaitKind::Runs => {
+        WaitKind::Runs | WaitKind::Events => {
             let mut input = payload.input.clone();
             super::drop_ignored_arguments("wait", &mut input);
             let result = super::runs::waiting::wait(state, runtime, input).await;
-            vec![(wait.tool_call_id.clone(), result.result)]
+            vec![(wait.tool_call_id.clone(), result)]
         }
         WaitKind::Reply { .. } => {
-            let result = super::messaging::wait_reply(state, runtime, payload.input.clone()).await;
-            vec![(wait.tool_call_id.clone(), result.result)]
+            vec![(wait.tool_call_id.clone(), error(RETIRED_REPLY_WAIT))]
         }
         WaitKind::Delegates { calls } => {
             state.delegate_wait_calls = calls.clone();
@@ -39,13 +37,13 @@ pub(crate) async fn resume_wait(
             if results.len() != calls.len() {
                 return vec![(
                     wait.tool_call_id.clone(),
-                    error("incomplete delegate continuation").result,
+                    error("incomplete delegate continuation"),
                 )];
             }
             calls
                 .iter()
                 .zip(results)
-                .map(|(call, result)| (call.tool_call_id.clone(), result.result))
+                .map(|(call, result)| (call.tool_call_id.clone(), result))
                 .collect()
         }
     }

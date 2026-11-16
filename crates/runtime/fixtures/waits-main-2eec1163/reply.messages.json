@@ -1,0 +1,1 @@
+[{"content":[{"text":"fixture reply waiter","type":"text"}],"role":"user"},{"content":[{"id":"wait-reply","input":{"message_id":"msg-1","timeout_ms":600000},"name":"wait_reply","type":"tool_use"}],"role":"assistant"}]

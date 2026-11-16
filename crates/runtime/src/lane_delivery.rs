@@ -89,6 +89,7 @@ pub(crate) struct WorkerStep {
     pub completed: oneshot::Receiver<()>,
 }
 pub(crate) struct DeliveryRuntime {
+    pub(crate) wait_lanes: Mutex<HashMap<RunId, Vec<String>>>,
     #[cfg(test)]
     pub worker_steps: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WorkerStep>>>,
     pub(crate) monitor: Mutex<crate::lane_monitor::LaneMonitor>,
@@ -101,6 +102,7 @@ pub(crate) struct DeliveryRuntime {
 impl Default for DeliveryRuntime {
     fn default() -> Self {
         Self {
+            wait_lanes: Default::default(),
             monitor: Mutex::new(Default::default()),
             #[cfg(test)]
             worker_steps: Mutex::new(None),
@@ -1102,6 +1104,24 @@ impl AgentRuntime {
         code: &str,
         detail: &str,
     ) {
+        let callers: Vec<_> = self
+            .shared
+            .lanes
+            .delivery
+            .wait_lanes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect();
+        for caller in callers {
+            self.refresh_wait_lanes(caller);
+        }
+        self.shared
+            .lanes
+            .delivery
+            .version
+            .send_modify(|v| *v = v.wrapping_add(1));
         // A thread with no lane on either side has no lane view to refresh.
         let involved = self.shared.run_store.get().is_some_and(|store| {
             store

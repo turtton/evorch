@@ -156,6 +156,7 @@ impl AgentRuntime {
             .map_err(question_error)?;
         drop(_guard);
         drop(_completion);
+        self.cache_wait_question(&question);
         self.shared
             .bus
             .emit(Event::new(ToolEvent::UserQuestionUpdated {

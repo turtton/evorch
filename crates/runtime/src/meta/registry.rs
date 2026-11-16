@@ -117,9 +117,6 @@ define_meta_ops! {
     Send => "send" => specs::send => |state, runtime, input| {
         messaging::send(state, runtime, input)
     },
-    WaitReply => "wait_reply" => specs::wait_reply => |state, runtime, input| {
-        messaging::wait_reply(state, runtime, input).await
-    },
     Inbox => "inbox" => specs::inbox => |state, runtime, input| {
         messaging::inbox(state, runtime, input)
     },

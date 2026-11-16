@@ -147,13 +147,6 @@ pub enum RuntimeError {
         message_id: String,
     },
 
-    /// 返信待ちがタイムアウトした。
-    #[error("返信待ちがタイムアウトしました: {message_id}")]
-    ReplyTimeout {
-        /// 待機していた元メッセージ ID。
-        message_id: String,
-    },
-
     /// 受信者 run の mailbox が一杯である。
     #[error("AgentRun {run_id} の mailbox が一杯です")]
     MailboxFull {

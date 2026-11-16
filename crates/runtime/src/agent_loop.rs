@@ -214,6 +214,7 @@ pub(crate) struct LoopState {
     /// reminded of was dealt with.
     unobserved_job_reminders: u32,
     /// Appended outcomes awaiting canonical checkpoint acknowledgement.
+    pub(crate) shell_result_batch_open: bool,
     pub(crate) shell_checkpoint_results:
         std::collections::BTreeMap<String, tools::ShellJobIdentity>,
     /// All reminders about unobserved shell jobs this run.
@@ -309,6 +310,7 @@ impl LoopState {
             identical_calls: identical_calls::IdenticalCalls::default(),
             run_js_unconfirmed: Arc::default(),
             unobserved_job_reminders: 0,
+            shell_result_batch_open: false,
             shell_checkpoint_results: Default::default(),
             total_job_reminders: 0,
             reminded_jobs: std::collections::BTreeSet::new(),
@@ -1014,6 +1016,9 @@ impl LoopState {
     }
 
     async fn execute(&mut self) {
+        if let Some(runtime) = self.runtime() {
+            let _ = runtime.user_answers(self.task.run_id);
+        }
         if !self.resume_recovery_waits().await {
             return;
         }
