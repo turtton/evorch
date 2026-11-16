@@ -1,7 +1,10 @@
 //! Resume the unchanged writer's SQLite bundles, not reconstructed old-shaped waits.
 use crate::{
     AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RunId, RuntimeError,
-    quiesce::{DurableWait, ProviderInput},
+    quiesce::{
+        DurableWait, DurableWaitMode, ProviderInput, RunRecoveryRecord, WaitContinuation, WaitKind,
+        WaitPayload,
+    },
     restore::{RestoredState, RunRestoreDescriptor},
     run_store::RunStore,
 };
@@ -69,6 +72,123 @@ impl Fixture {
             std::fs::read(source().join(format!("{name}.messages.json"))).unwrap()
         );
         bundle
+    }
+
+    /// Extend only the unsent batch, retaining every old call and wait verbatim.
+    /// The old writer cannot produce Events; the extra entry uses the current
+    /// variant and the storage writer's real receipt/revision/manifest APIs.
+    fn add_events_to_mixed_manifest(
+        &self,
+    ) -> (storage::thread_index::SnapshotBundle, Vec<DurableWait>) {
+        let bundle = self.bundle("mixed");
+        let mut waits = self.waits("mixed");
+        let old_waits = waits.clone();
+        let mut messages: Vec<Message> =
+            serde_json::from_str(&bundle.record.messages_json).unwrap();
+        let old_messages = messages.clone();
+        let position = messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            .count();
+        waits.push(DurableWait {
+            requester: waits[0].requester,
+            targets: vec![],
+            mode: DurableWaitMode::Any,
+            tool_call_id: "current-events".into(),
+            completions: vec![],
+            questions: vec![],
+            answers: vec![],
+            continuation: WaitContinuation {
+                tool_name: "wait".into(),
+                legacy_result: false,
+                consume_mailbox: true,
+                payload: Some(WaitPayload {
+                    position,
+                    input: serde_json::json!({}),
+                    kind: WaitKind::Events,
+                }),
+            },
+        });
+        let batch = messages.last_mut().unwrap();
+        assert_eq!(batch.role, providers::Role::Assistant);
+        batch.content.push(ContentBlock::ToolUse {
+            id: "current-events".into(),
+            name: "wait".into(),
+            input: serde_json::json!({}),
+        });
+        assert_eq!(&waits[..old_waits.len()], old_waits);
+        assert_eq!(
+            &messages.last().unwrap().content[..old_messages.last().unwrap().content.len()],
+            old_messages.last().unwrap().content
+        );
+        let mut record = bundle.record.clone();
+        let mut descriptor: RunRestoreDescriptor =
+            serde_json::from_str(&record.config_json).unwrap();
+        descriptor.recovery_waits = waits.clone();
+        record.config_json = serde_json::to_string(&descriptor).unwrap();
+        record.messages_json = serde_json::to_string(&messages).unwrap();
+        record.updated_at_ns += 1;
+        crate::restore::validate_recovery_waits(&record, &waits).unwrap();
+        let db = storage::Database::open(&self.config).unwrap();
+        let mut manifest = db
+            .recovery_manifests()
+            .unwrap()
+            .into_iter()
+            .filter_map(|load| load.record.ok())
+            .find(|manifest| manifest.members.iter().any(|m| m.run_id == record.run_id))
+            .unwrap();
+        let write = crate::restore::provenance::ConversationProvenance::from_bundle(&bundle)
+            .write(record.clone(), bundle.snapshot_revision)
+            .unwrap();
+        let receipt = self.storage.handle().save_snapshot_bundle(&write).unwrap();
+        let row = db.resume_intent(&record.run_id).unwrap().unwrap();
+        let mut intent = crate::quiesce::ResumeIntent::decode(row).unwrap();
+        let reference = crate::checkpoint::SnapshotReference::RunContext {
+            receipt: receipt.run_context_receipt.clone(),
+        };
+        intent.snapshot = Some(reference.clone());
+        intent.checkpoint.as_mut().unwrap().snapshot = reference;
+        self.storage
+            .handle()
+            .save_resume_intent(
+                storage::resume_intent::ResumeIntentRecord {
+                    run_id: record.run_id.clone(),
+                    incarnation: intent.incarnation.clone(),
+                    payload: serde_json::to_string(&intent).unwrap(),
+                },
+                Some(intent.incarnation.clone()),
+            )
+            .unwrap();
+        let member = manifest
+            .members
+            .iter_mut()
+            .find(|m| m.run_id == record.run_id)
+            .unwrap();
+        member.snapshot = Some(receipt.run_context_receipt);
+        member.intent_revision = db.resume_intent_revision(&record.run_id).unwrap().unwrap();
+        let mut recovery: RunRecoveryRecord = serde_json::from_str(&member.record_json).unwrap();
+        recovery.intent_revision = member.intent_revision;
+        recovery.waits = waits.clone();
+        recovery.recipe.descriptor = Some(descriptor);
+        member.record_json = serde_json::to_string(&recovery).unwrap();
+        manifest.manifest_id = "legacy-with-current-events".into();
+        manifest.committed = false;
+        self.storage
+            .handle()
+            .prepare_recovery_manifest(manifest.clone())
+            .unwrap();
+        self.storage
+            .handle()
+            .commit_recovery_manifest(manifest.manifest_id)
+            .unwrap();
+        (
+            self.store
+                .restore_bundle(waits[0].requester)
+                .unwrap()
+                .unwrap(),
+            waits,
+        )
     }
 }
 
@@ -293,11 +413,23 @@ impl AgentModel for ResumeModel {
 
 #[tokio::test]
 async fn old_runs_delegates_and_reply_activate_and_resume_without_replay_or_duplicate_results() {
+    resume_legacy_manifests(false).await;
+}
+
+#[tokio::test]
+async fn old_waits_and_current_events_in_one_manifest_resume_without_duplicate_results() {
+    resume_legacy_manifests(true).await;
+}
+
+async fn resume_legacy_manifests(include_events: bool) {
     let f = Fixture::new();
-    let saved: BTreeMap<_, _> = NAMES
+    let mut saved: BTreeMap<_, _> = NAMES
         .iter()
         .map(|name| (*name, (f.bundle(name), f.waits(name))))
         .collect();
+    if include_events {
+        saved.insert("mixed", f.add_events_to_mixed_manifest());
+    }
     let (entered, mut requests) = mpsc::unbounded_channel();
     let bus = Arc::new(EventBus::new(256));
     let runtime = AgentRuntime::new(
