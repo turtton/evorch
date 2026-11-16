@@ -182,6 +182,174 @@ async fn lag_on_the_host_bus_invalidates_the_epoch_instead_of_silently_continuin
         sub.started.high_water.core_epoch
     );
 }
+fn wakeup(n: usize) -> Event {
+    Event::new(LifecycleEvent::BackgroundTaskCompleted {
+        task_id: n.to_string(),
+    })
+}
+
+#[tokio::test]
+async fn refresh_wakeups_coalesce_a_ready_burst_but_leave_a_bounded_suffix() {
+    let bus = EventBus::new(MAX_REFRESH_WAKEUPS * 2);
+    let mut events = bus.subscribe();
+    for n in 0..=MAX_REFRESH_WAKEUPS {
+        bus.emit(wakeup(n));
+    }
+    let first = events.recv().await;
+    let batch = RefreshWakeups::drain(&mut events, first).await;
+    assert_eq!(
+        batch,
+        RefreshWakeups {
+            dirty: true,
+            ..Default::default()
+        }
+    );
+    // Do not consume the next batch's first event, or wait to fill a partial batch.
+    let last = events.recv().await.unwrap();
+    assert_eq!(last.kind, wakeup(MAX_REFRESH_WAKEUPS).kind);
+    assert_eq!(RefreshWakeups::drain(&mut events, Ok(last)).await, batch);
+}
+
+#[tokio::test]
+async fn fragments_do_not_hide_a_state_change_or_lag_in_the_same_refresh_batch() {
+    use event_bus::MessageEvent;
+    let bus = EventBus::new(8);
+    let mut events = bus.subscribe();
+    let fragments = [
+        MessageEvent::MessageDelta {
+            run_id: None,
+            delta: "draft".into(),
+        },
+        MessageEvent::ReasoningDelta {
+            run_id: None,
+            delta: "draft".into(),
+        },
+        MessageEvent::ToolCallDelta {
+            run_id: None,
+            index: 0,
+            call_id: None,
+            tool_name: None,
+            arguments_delta: "draft".into(),
+        },
+    ];
+    for fragment in &fragments {
+        bus.emit(Event::new(fragment.clone()));
+    }
+    let first = events.recv().await;
+    assert_eq!(
+        RefreshWakeups::drain(&mut events, first).await,
+        RefreshWakeups::default()
+    );
+    for fragment in fragments {
+        bus.emit(Event::new(fragment));
+    }
+    bus.emit(wakeup(0));
+    let first = events.recv().await;
+    assert_eq!(
+        RefreshWakeups::drain(&mut events, first).await,
+        RefreshWakeups {
+            dirty: true,
+            ..Default::default()
+        }
+    );
+
+    // Loss discovered while draining (not just the initial recv) must invalidate cursors.
+    let first = Ok(wakeup(1));
+    for n in 0..16 {
+        bus.emit(wakeup(n));
+    }
+    assert_eq!(
+        RefreshWakeups::drain(&mut events, first).await,
+        RefreshWakeups {
+            dirty: true,
+            lagged: true,
+            closed: false
+        }
+    );
+}
+
+#[test]
+fn a_change_during_refresh_reaches_the_subscriber_without_an_extra_wakeup() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("host.db"),
+        ..Default::default()
+    };
+    let store = storage::Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(128));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus.clone())),
+        Arc::new(NoModel),
+    )
+    .with_run_store(runtime::RunStore::open(&config, store.handle()).unwrap());
+    let project = ProjectId::new("project").unwrap();
+    let title = |value: &str| {
+        store
+            .handle()
+            .upsert_threads_host(&[storage::threads::ThreadUpsert {
+                thread_id: "thread".into(),
+                project_id: Some(project.as_str().into()),
+                project_root: Some(dir.path().to_string_lossy().into_owned()),
+                title: Some(value.into()),
+                ..Default::default()
+            }])
+            .unwrap();
+    };
+    title("before");
+    let p = Projection::new(runtime, rt.handle(), Default::default());
+    p.configure_projects(
+        vec![(project.clone(), dir.path().to_path_buf())],
+        Default::default(),
+    )
+    .unwrap();
+    let mut sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    assert!(
+        sub.started
+            .initial_page
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| matches!(item, SnapshotItem::Thread(thread) if thread.title == "before"))
+    );
+
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    p.state.lock().unwrap().refresh_hook = Some({
+        let entered = entered.clone();
+        let release = release.clone();
+        Arc::new(move || {
+            entered.wait();
+            release.wait();
+        })
+    });
+    bus.emit(wakeup(0));
+    entered.wait(); // The in-flight refresh has already read the "before" state.
+    title("after");
+    bus.emit(wakeup(1)); // The change's own notification; no subsequent tick or refresh.
+    release.wait();
+
+    let changed = rt.block_on(async {
+        loop {
+            let event = sub.recv().await.expect("open subscription").event;
+            match event {
+                UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread })
+                    if thread.title == "after" =>
+                {
+                    break thread;
+                }
+                UiEvent::Projection(ProjectionEvent::ResyncRequired { reason }) => {
+                    panic!("unexpected resync: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+    });
+    assert_eq!(changed.id.as_str(), "thread");
+}
+
 #[test]
 fn update_during_snapshot_cannot_cross_registration_or_high_water() {
     let rt = tokio::runtime::Runtime::new().unwrap();

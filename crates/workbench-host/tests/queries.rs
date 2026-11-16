@@ -27,8 +27,11 @@ impl Fixture {
         Self::with_runtime(tokio::runtime::Runtime::new().unwrap())
     }
     fn with_runtime(rt: tokio::runtime::Runtime) -> Self {
+        Self::with_runtime_and_bus_capacity(rt, 64)
+    }
+    fn with_runtime_and_bus_capacity(rt: tokio::runtime::Runtime, capacity: usize) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let (runtime, store) = common::runtime_with_store(dir.path());
+        let (runtime, store) = common::runtime_with_store_and_bus_capacity(dir.path(), capacity);
         let host = common::host_with_project(&rt, runtime.clone(), dir.path());
         let f = Self {
             rt,
@@ -335,6 +338,90 @@ fn durable_commits_wake_subscribers_and_use_the_history_index_not_bus_deltas() {
         }
     });
     assert_eq!(replayed.cursor, envelope.cursor);
+}
+
+#[test]
+fn a_bus_burst_preserves_every_committed_message_and_its_replay_index() {
+    let f = Fixture::with_runtime_and_bus_capacity(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+        // 73 queued wakeups cross the 64-event batch boundary without overflowing the bus.
+        128,
+    );
+    let mut sub = f.subscribe();
+    let after = sub.started.high_water;
+    // The projection cannot run until next_message awaits: all commits and wakeups are
+    // queued first. Non-durable payloads must not leak into the committed stream.
+    let expected = ["first", "second", "third"];
+    for (index, text) in expected.iter().enumerate() {
+        saved_event(
+            &f,
+            index as u64 + 1,
+            MessageEvent::MessageCompleted {
+                run_id: "run-1".into(),
+                text: (*text).into(),
+            },
+        );
+        for n in 0..24 {
+            f.runtime.event_bus().emit(Event::new(
+                event_bus::LifecycleEvent::BackgroundTaskCompleted {
+                    task_id: n.to_string(),
+                },
+            ));
+        }
+    }
+    f.runtime
+        .event_bus()
+        .emit(Event::new(MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: "not durable".into(),
+        }));
+    let committed: Vec<_> = expected
+        .iter()
+        .map(|_| next_message(&f, &mut sub))
+        .collect();
+    for (index, (message, text)) in committed.iter().zip(expected).enumerate() {
+        assert_eq!(message.index, Sequence(index as u64));
+        assert_eq!(
+            message.content,
+            MessageContent::Inline { text: text.into() }
+        );
+    }
+    assert_eq!(messages(&f), committed);
+    let mut replay = f
+        .host
+        .projection()
+        .subscribe_with_snapshot(&Subscribe {
+            scope: SubscriptionScope::All,
+            after: Some(after),
+        })
+        .unwrap();
+    assert!(replay.started.snapshot_id.is_none());
+    for message in &committed {
+        assert_eq!(&next_message(&f, &mut replay), message);
+    }
+    for sub in [&mut sub, &mut replay] {
+        f.host
+            .projection()
+            .unsubscribe(&sub.started.subscription_id);
+        f.rt.block_on(async {
+            loop {
+                let event = sub.recv().await.unwrap().event;
+                assert!(
+                    !matches!(
+                        event,
+                        UiEvent::Conversation(ConversationEvent::MessageCommitted { .. })
+                    ),
+                    "no duplicate committed messages"
+                );
+                if event.ends_subscription() {
+                    break;
+                }
+            }
+        });
+    }
 }
 
 #[test]

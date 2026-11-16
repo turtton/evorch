@@ -44,7 +44,11 @@ impl AgentModel for HeldModel {
 }
 
 pub fn runtime() -> AgentRuntime {
-    let bus = Arc::new(EventBus::new(64));
+    runtime_with_bus_capacity(64)
+}
+
+pub fn runtime_with_bus_capacity(capacity: usize) -> AgentRuntime {
+    let bus = Arc::new(EventBus::new(capacity));
     AgentRuntime::new(
         bus.clone(),
         Arc::new(ToolExecutor::new(bus)),
@@ -92,13 +96,20 @@ pub fn send(thread: &str, submission: &str, text: &str) -> SendChat {
 /// A runtime with a run store in `dir`; follow-ups and question lookups need one.
 /// Keep the returned storage alive as long as the runtime is used.
 pub fn runtime_with_store(dir: &Path) -> (AgentRuntime, storage::Storage) {
+    runtime_with_store_and_bus_capacity(dir, 64)
+}
+
+pub fn runtime_with_store_and_bus_capacity(
+    dir: &Path,
+    capacity: usize,
+) -> (AgentRuntime, storage::Storage) {
     let config = storage::StorageConfig {
         db_path: dir.join("host.db"),
         ..Default::default()
     };
     let storage = storage::Storage::open(config.clone()).unwrap();
-    let runtime =
-        runtime().with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let runtime = runtime_with_bus_capacity(capacity)
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
     (runtime, storage)
 }
 
