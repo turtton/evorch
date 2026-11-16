@@ -1,6 +1,7 @@
 use super::*;
 mod learning;
 mod preparing;
+mod shutdown;
 use workbench_host::bootstrap::{BootstrapOptions, TestSeams};
 #[derive(Default)]
 struct Model(
@@ -213,22 +214,6 @@ async fn shared_request_survives_waiter_drop_and_stale_cancel_cannot_reopen() {
     core.wait_sealed(second).await.unwrap();
     assert!(producer.try_enter().is_none());
     core.cancel(second).unwrap();
-    host.shutdown().await.unwrap();
-}
-#[tokio::test]
-async fn shutdown_closes_pending_producers_without_resuming_restart() {
-    let (_dir, mut host) = boot().await;
-    let core = RestartCoordinator::new(&host);
-    let producer = host.runtime.producer_gate();
-    let accepted = producer.try_enter().unwrap();
-    let id = core.request().unwrap();
-    phase(&core, RestartPhase::WaitingSafePoint).await;
-    core.transition_to_shutdown();
-    drop(accepted);
-    assert!(core.wait_sealed(id).await.is_err());
-    assert!(core.cancel(id).is_err());
-    assert!(producer.enter().await.is_none());
-    assert_eq!(core.snapshot().phase, RestartPhase::ShuttingDown);
     host.shutdown().await.unwrap();
 }
 #[tokio::test]
@@ -605,30 +590,6 @@ async fn host_seal_failure_after_marker_keeps_stop_terminal_only() {
     assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     core.transition_to_shutdown();
     assert!(host.shutdown().await.is_err());
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn shutdown_during_host_permit_drain_never_reopens_or_calls_provider() {
-    let model = Arc::new(Model::default());
-    let (_dir, mut host) = boot_with_model(model.clone()).await;
-    let core = RestartCoordinator::new(&host);
-    let gate = host.host.lock().unwrap().service().restart_gate();
-    let accepted = gate
-        .enter(workbench_host::bootstrap::restart::CommandAccess::ExistingInput)
-        .unwrap();
-    let run = idle_run(&host.runtime, runtime::Role::Worker, "parked").await;
-    let id = core.request().unwrap();
-    phase(&core, RestartPhase::Sealing).await;
-    core.transition_to_shutdown();
-    assert_eq!(gate.phase(), HostRestartPhase::ShuttingDown);
-    drop(accepted);
-    assert!(core.wait_sealed(id).await.is_err());
-    host.shutdown().await.unwrap();
-    assert_eq!(
-        host.runtime.wait(run).await.unwrap(),
-        event_bus::AgentRunPhase::Stopped
-    );
     assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 

@@ -23,6 +23,12 @@ impl<'a> StopDelivery<'a> {
             scope,
         }
     }
+    /// After the lifecycle owner chooses shutdown, commit terminal-only runtime
+    /// admission before Stop. This cannot cancel/replay the pending restart.
+    pub fn deliver_for_shutdown(self) -> Result<(), RuntimeError> {
+        self.runtime.begin_dispatch_shutdown()?;
+        self.deliver()
+    }
     pub fn deliver(self) -> Result<(), RuntimeError> {
         self.runtime
             .with_terminal_dispatch(|| self.runtime.stop_with_dispatch(self.run, self.scope))

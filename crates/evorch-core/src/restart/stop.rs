@@ -13,6 +13,11 @@ impl StopBoundary for CoreStopBoundary {
 impl RestartCoordinator {
     fn stop_at_boundary(&self, delivery: StopDelivery<'_>) -> Result<(), RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
+        if state.phase == RestartPhase::ShuttingDown {
+            // Host shutdown also uses Stop. Commit terminal-only admission before
+            // delivery, without cancelling/replaying the retained restart attempt.
+            return delivery.deliver_for_shutdown();
+        }
         // D-2c-2 must begin capture and publish Capturing under this mutex;
         // subsequent Commit I/O stays outside it. Delivery rejects a Stop after
         // runtime's capture boundary, without reopening anything.
