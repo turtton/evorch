@@ -118,6 +118,8 @@ pub struct BootstrappedHost {
     pub spawn_ledger: sandbox::SpawnLedger,
     pub owner: Arc<OwnerHost>,
     pub config: config::Config,
+    // The exact production DB configuration; composition inventory is test-only.
+    restart_storage: storage::StorageConfig,
     pub services: services::BackgroundServices,
     pub mcp: runtime::mcp::McpHostServices,
     pub recovery_diagnostics: Option<Arc<dyn core_startup::CoreStartupDiagnostics>>,
@@ -610,6 +612,7 @@ impl BootstrappedHost {
             host,
             runtime,
             owner,
+            restart_storage: storage_config.clone(),
             evaluator,
             evaluations: evaluations.clone(),
             config,

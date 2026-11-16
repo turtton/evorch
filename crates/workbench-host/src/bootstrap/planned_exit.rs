@@ -100,15 +100,15 @@ impl BootstrappedHost {
             fence: None,
             bridge: Some(bridge),
             flushing: None,
-            writer,
+            writer: writer.clone(),
             completed: None,
             failure: None,
             workers_result: None,
             cleanup_result: None,
             holds: Arc::new(RestartHolds::new(
                 self.owner.clone(),
-                self.composition.storage.clone(),
-                self.composition.storage_writer.clone(),
+                self.restart_storage.clone(),
+                writer,
             )),
         }));
         self.planned_exit = Some(resources.clone());
