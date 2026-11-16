@@ -653,6 +653,51 @@ mod tests {
         }
     }
 
+    /// A reload that failed part-way leaves the applied state unknown: a value of
+    /// its own on the wire (the field is absent, never an old-looking revision),
+    /// which survives a round trip with its reason.
+    #[test]
+    fn an_unknown_applied_state_is_absent_on_the_wire_and_round_trips() {
+        let revision = SettingsRevision::from_bytes(&[0x22; 32]);
+        let unknown = SettingsSnapshot {
+            revision: revision.clone(),
+            applied_revision: None,
+            apply_failure: Some("a project did not load".into()),
+            document: String::new(),
+            providers: vec![],
+            problem: None,
+        };
+        let wire = serde_json::to_value(&unknown).unwrap();
+        assert!(wire.get("applied_revision").is_none(), "{wire}");
+        assert_eq!(wire["apply_failure"], "a project did not load");
+        assert_eq!(
+            serde_json::from_value::<SettingsSnapshot>(wire).unwrap(),
+            unknown
+        );
+        assert!(unknown.pending_apply());
+
+        let known = SettingsSnapshot {
+            applied_revision: Some(revision.clone()),
+            apply_failure: None,
+            ..unknown
+        };
+        let wire = serde_json::to_value(&known).unwrap();
+        assert!(wire.get("apply_failure").is_none(), "{wire}");
+        assert_eq!(wire["applied_revision"], wire["revision"]);
+        assert!(!known.pending_apply());
+
+        let event = SettingsEvent::SettingsSnapshotChanged {
+            revision,
+            applied_revision: None,
+        };
+        let wire = serde_json::to_value(&event).unwrap();
+        assert!(wire["payload"].get("applied_revision").is_none(), "{wire}");
+        assert_eq!(
+            serde_json::from_value::<SettingsEvent>(wire).unwrap(),
+            event
+        );
+    }
+
     #[test]
     fn a_revision_is_fixed_lowercase_hex_and_a_document_is_bounded() {
         assert!(SettingsRevision::new("AB".repeat(32)).is_err());
