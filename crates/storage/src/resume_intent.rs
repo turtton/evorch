@@ -77,14 +77,10 @@ pub(crate) fn save_with_revision(
 }
 
 fn validate_payload(record: &ResumeIntentRecord) -> Result<serde_json::Value, StorageError> {
-    let mut value: serde_json::Value = serde_json::from_str(&record.payload)
+    let value: serde_json::Value = serde_json::from_str(&record.payload)
         .map_err(|e| StorageError::Serialization(e.to_string()))?;
     // Observational snapshots may redact; an exact replay prefix cannot.
-    if secret_guard::SecretRedactor::from_env().redact_json(&mut value) != 0 {
-        return Err(StorageError::Serialization(
-            "resume intent contains credentials; exact replay cannot be persisted".into(),
-        ));
-    }
+    crate::replay_secrets::validate_intent(&value, &secret_guard::SecretRedactor::from_env())?;
     Ok(value)
 }
 

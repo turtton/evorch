@@ -19,6 +19,15 @@ impl std::error::Error for IoSource {}
 
 static IO_SOURCE: IoSource = IoSource;
 
+/// Value-free diagnostics for exact replay rejection. Paths redact credential
+/// spans in object keys as well as escaping them; no payload bytes are retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaySecretFinding {
+    pub rule: SecretRule,
+    pub path: String,
+    pub count: usize,
+}
+
 /// Why a body could not be resolved or stored. No variant carries body text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BodyUnresolvedReason {
@@ -150,6 +159,10 @@ pub enum StorageError {
     RawUsageEventNotPersisted,
     /// シリアライズまたはデシリアライズが失敗しました。
     Serialization(String),
+    /// Exact replay contains plaintext credentials and cannot be rewritten.
+    ReplaySecretDetected {
+        findings: Vec<ReplaySecretFinding>,
+    },
     /// 値が許容範囲外でした。
     OutOfRange(&'static str),
     /// Run note revisions must contain at most 8192 UTF-8 bytes.
@@ -269,6 +282,20 @@ impl fmt::Display for StorageError {
                 "raw usage events are not persisted; submit downsampled usage through UsageSink (ADR 0012)"
             ),
             Self::Serialization(message) => write!(formatter, "serialization failed: {message}"),
+            Self::ReplaySecretDetected { findings } => {
+                write!(
+                    formatter,
+                    "secret guard rejected resume intent; exact replay cannot be persisted"
+                )?;
+                for finding in findings {
+                    write!(
+                        formatter,
+                        "; rule={} path={} count={}",
+                        finding.rule, finding.path, finding.count
+                    )?;
+                }
+                Ok(())
+            }
             Self::OutOfRange(name) => write!(formatter, "value out of range: {name}"),
             Self::InvalidRunLedgerBody { bytes } => write!(
                 formatter,
@@ -378,7 +405,10 @@ impl StorageError {
     pub fn is_content_rejection(&self) -> bool {
         matches!(
             self,
-            Self::SecretDetected { .. } | Self::Serialization(_) | Self::LessonFavorite { .. }
+            Self::SecretDetected { .. }
+                | Self::ReplaySecretDetected { .. }
+                | Self::Serialization(_)
+                | Self::LessonFavorite { .. }
         )
     }
 
@@ -443,6 +473,7 @@ impl std::error::Error for StorageError {
             | Self::LaneCursor(_)
             | Self::PrAutoFix(_)
             | Self::PullRequest(_)
+            | Self::ReplaySecretDetected { .. }
             | Self::SecretDetected { .. } => None,
         }
     }

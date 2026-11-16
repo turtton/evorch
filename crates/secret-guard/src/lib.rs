@@ -118,6 +118,21 @@ impl SecretRedactor {
         render(text, &merged, 0).0
     }
 
+    /// Counts the same disjoint spans as redaction, grouped by rule. Neither the
+    /// credential bytes nor their surrounding text are returned.
+    #[must_use]
+    pub fn redaction_counts(&self, text: &str) -> Vec<(SecretRule, usize)> {
+        let mut counts: Vec<(SecretRule, usize)> = Vec::new();
+        for (_, _, rule) in self.merged_spans(text) {
+            if let Some((_, count)) = counts.iter_mut().find(|(found, _)| *found == rule) {
+                *count += 1;
+            } else {
+                counts.push((rule, 1));
+            }
+        }
+        counts
+    }
+
     /// The disjoint, ordered byte ranges of `text` that hold a credential.
     fn merged_spans(&self, text: &str) -> Vec<(usize, usize, SecretRule)> {
         let mut spans = Vec::new();
