@@ -1316,6 +1316,14 @@ impl StorageHandle {
         self.request(Command::FlushUsage)
     }
 
+    /// FIFO durability barrier: flush buffered usage and FULL-sync the WAL,
+    /// without retention/vacuum maintenance. An incomplete/busy checkpoint is an
+    /// error. Stop/join business producers first so no command remains behind
+    /// the ACK. The existing writer stays alive for Arm/readback/FailedClosed.
+    pub fn barrier(&self) -> Result<(), StorageError> {
+        self.request(Command::FlushResumeIntents)
+    }
+
     /// Run one maintenance tick: bounded 30-day diagnostic retention, thread start
     /// retention and incremental vacuum, WAL checkpoint, size reevaluation and temp checks.
     ///

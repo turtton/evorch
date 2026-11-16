@@ -57,7 +57,11 @@ impl RestartCoordinator {
         }
         // Cancellation, the final health check, attempt creation and host Preparing
         // share this mutex. No await leaves a reservation/attempt gap.
-        let attempt = self.0.runtime.begin_restart_quiesce()?;
+        let attempt = if let Some(recipes) = &state.recipes {
+            self.0.runtime.begin_planned_restart_quiesce(recipes)?
+        } else {
+            self.0.runtime.begin_restart_quiesce()?
+        };
         state.attempt = Some(attempt.clone());
         state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();
         self.0

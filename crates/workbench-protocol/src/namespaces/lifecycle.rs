@@ -84,6 +84,8 @@ pub enum RestartPhase {
     WaitingSafePoint,
     Sealing,
     Sealed,
+    Capturing,
+    Finalizing,
     Cancelling,
     FailedClosed,
     ShuttingDown,

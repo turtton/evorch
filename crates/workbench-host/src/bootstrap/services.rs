@@ -14,9 +14,30 @@ pub(super) enum ServicePhase {
     Completed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopMode {
+    Operator,
+    Planned,
+}
+enum StopSender {
+    Plain(oneshot::Sender<()>),
+    Aware(oneshot::Sender<StopMode>),
+}
+impl StopSender {
+    fn send(self, mode: StopMode) {
+        match self {
+            Self::Plain(sender) => {
+                let _ = sender.send(());
+            }
+            Self::Aware(sender) => {
+                let _ = sender.send(mode);
+            }
+        }
+    }
+}
 struct Service {
     name: &'static str,
-    stop: Option<oneshot::Sender<()>>,
+    stop: Option<StopSender>,
     task: JoinHandle<Result<(), BootstrapError>>,
     #[cfg(test)]
     phase: tokio::sync::watch::Sender<ServicePhase>,
@@ -26,7 +47,7 @@ impl Drop for Service {
     fn drop(&mut self) {
         // Emergency teardown only; normal shutdown always awaits completion.
         if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
+            stop.send(StopMode::Operator);
         }
         self.task.abort();
     }
@@ -46,7 +67,25 @@ impl BackgroundServices {
         Fut: Future<Output = Result<(), BootstrapError>> + Send + 'static,
     {
         let (stop, stopped) = oneshot::channel();
-        let future = factory(stopped);
+        self.register(name, StopSender::Plain(stop), factory(stopped));
+    }
+
+    /// Services whose operator drain waits for terminal runs need a distinct
+    /// planned stop: parked continuations must never be terminated or awaited.
+    pub fn start_planned_aware<F, Fut>(&mut self, name: &'static str, factory: F)
+    where
+        F: FnOnce(oneshot::Receiver<StopMode>) -> Fut,
+        Fut: Future<Output = Result<(), BootstrapError>> + Send + 'static,
+    {
+        let (stop, stopped) = oneshot::channel();
+        self.register(name, StopSender::Aware(stop), factory(stopped));
+    }
+    fn register(
+        &mut self,
+        name: &'static str,
+        stop: StopSender,
+        future: impl Future<Output = Result<(), BootstrapError>> + Send + 'static,
+    ) {
         #[cfg(test)]
         let (phase, _) = tokio::sync::watch::channel(ServicePhase::Running);
         #[cfg(test)]
@@ -86,6 +125,14 @@ impl BackgroundServices {
     /// Stop producers before draining runtime runs, without waiting for services
     /// that themselves need those runs to reach a terminal state.
     pub fn request_stop(&mut self) {
+        self.request_stop_mode(StopMode::Operator);
+    }
+
+    pub fn request_planned_stop(&mut self) {
+        self.request_stop_mode(StopMode::Planned);
+    }
+
+    fn request_stop_mode(&mut self, mode: StopMode) {
         for service in &mut self.services {
             if let Some(stop) = service.stop.take() {
                 #[cfg(test)]
@@ -94,7 +141,7 @@ impl BackgroundServices {
                         *phase = ServicePhase::StopRequested;
                     }
                 });
-                let _ = stop.send(());
+                stop.send(mode);
             }
         }
     }
@@ -140,6 +187,19 @@ impl BackgroundServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn planned_stop_is_not_replaced_by_operator_mode_while_joining() {
+        let mut services = BackgroundServices::default();
+        services.start_planned_aware("parked-learning", |stop| async move {
+            assert_eq!(stop.await?, StopMode::Planned);
+            Ok(())
+        });
+        services.request_planned_stop();
+        services.request_stop();
+        services.shutdown().await.unwrap();
+        services.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn shutdown_signals_every_service_before_joining_and_is_repeatable() {
