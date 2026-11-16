@@ -109,6 +109,7 @@ async fn background_join_panic_blocks_bridge_flush() {
 #[tokio::test(start_paused = true)]
 async fn bridge_flush_failure_never_completes_stage_five_or_releases_writer() {
     let (_dir, mut host) = boot().await;
+    let witness = cleanup_service(&mut host);
     let core = RestartCoordinator::new(&host);
     let sql = rusqlite::Connection::open(&host.composition.storage.db_path).unwrap();
     sql.execute_batch(
@@ -123,6 +124,9 @@ async fn bridge_flush_failure_never_completes_stage_five_or_releases_writer() {
         },
     ));
     let id = start(&mut host, &core).await;
+    witness.stopped.await.unwrap();
+    witness.release.send(()).unwrap();
+    witness.returned.await.unwrap();
     assert!(core.wait_finalization(id).await.is_err());
     assert_eq!(
         core.0.state.lock().unwrap().completed_stage,
@@ -138,6 +142,14 @@ async fn bridge_flush_failure_never_completes_stage_five_or_releases_writer() {
         .unwrap();
     core.transition_to_shutdown();
     assert!(host.shutdown().await.is_err());
+    let resources = core.0.state.lock().unwrap().finalization.clone().unwrap();
+    // The same cleanup owner completed after joining the normally returned service.
+    let first = resources.lock().await.cleanup().await;
+    assert_eq!(resources.lock().await.cleanup().await, first);
+    assert_eq!(
+        core.0.state.lock().unwrap().completed_stage,
+        Some(ExitStage::WorkersJoined)
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -169,15 +181,15 @@ async fn join_deadline_retains_cleanup_and_late_return_cannot_advance_stage_five
             .unwrap()
             .contains("join deadline")
     );
-    // A timed-out waiter must not drop or abort the owned cleanup future.
-    release.send(()).unwrap();
-    return_seen.await.unwrap();
+    // Shutdown must observe the same retained cleanup, not merely an Err latch.
+    core.transition_to_shutdown();
+    shutdown_joins_return(&mut host, release, return_seen).await;
     assert_eq!(
         core.0.state.lock().unwrap().completed_stage,
         Some(ExitStage::ChildrenReaped)
     );
-    core.transition_to_shutdown();
-    assert!(host.shutdown().await.is_err());
+    let resources = core.0.state.lock().unwrap().finalization.clone().unwrap();
+    assert!(resources.lock().await.cleanup().await.is_ok());
 }
 
 #[tokio::test(start_paused = true)]
@@ -410,4 +422,38 @@ async fn atomic_boundary_does_not_take_the_host_stop_mutex_and_shutdown_cannot_s
         storage::recovery::restart::RestartPhase::Invalidated
     );
     assert!(host.shutdown().await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn cleanup_reports_late_join_failure_and_still_joins_remaining_services() {
+    let (_dir, mut host) = boot().await;
+    let core = RestartCoordinator::new(&host);
+    let (stopped, stop_seen) = oneshot::channel();
+    let (release, held) = oneshot::channel();
+    let (returned, return_seen) = oneshot::channel();
+    host.services.start("late-error", |stop| async move {
+        stop.await?;
+        stopped.send(()).unwrap();
+        held.await?;
+        Err("late service failure".into())
+    });
+    host.services.start("after-late-error", |stop| async move {
+        stop.await?;
+        returned.send(()).unwrap();
+        Ok(())
+    });
+    let id = start(&mut host, &core).await;
+    stop_seen.await.unwrap();
+    completed(&core, ExitStage::ChildrenReaped).await;
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(core.wait_finalization(id).await.is_err());
+    core.transition_to_shutdown();
+    shutdown_joins_return(&mut host, release, return_seen).await;
+    let resources = core.0.state.lock().unwrap().finalization.clone().unwrap();
+    let error = resources.lock().await.cleanup().await.unwrap_err();
+    assert!(error.contains("late service failure"), "{error}");
+    assert_eq!(
+        core.0.state.lock().unwrap().completed_stage,
+        Some(ExitStage::ChildrenReaped)
+    );
 }

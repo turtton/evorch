@@ -130,6 +130,7 @@ pub struct BootstrappedHost {
     #[cfg(any(test, feature = "test-support"))]
     pub composition: CompositionInventory,
     bridge: Option<OwnedStorageBridge>,
+    planned_exit: Option<Arc<tokio::sync::Mutex<planned_exit::PlannedExit>>>,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
     executor: Arc<tools::ToolExecutor>,
     _leases: storage::SharedLeases,
@@ -623,6 +624,7 @@ impl BootstrappedHost {
             #[cfg(any(test, feature = "test-support"))]
             composition,
             bridge: Some(bridge),
+            planned_exit: None,
             reclaim: None,
             executor,
             _leases: leases,
@@ -912,6 +914,9 @@ impl BootstrappedHost {
         }
         if let Some(mut bridge) = self.bridge.take() {
             lane_pr::remember(&mut failure, bridge.try_shutdown());
+        }
+        if let Some(resources) = &self.planned_exit {
+            lane_pr::remember(&mut failure, resources.lock().await.cleanup().await);
         }
         failure.map_or(Ok(()), Err)
     }

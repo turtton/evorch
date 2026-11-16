@@ -79,10 +79,9 @@ impl RestartCoordinator {
     ) {
         // This synchronous transfer cannot be cancelled. Shutdown after capture
         // still transfers resources and starts the owned invalidation/cleanup.
-        let resources = Arc::new(tokio::sync::Mutex::new(
-            host.take_planned_exit(&self.0.gate)
-                .expect("exclusive host ownership checked before capture"),
-        ));
+        let resources = host
+            .take_planned_exit(&self.0.gate)
+            .expect("exclusive host ownership checked before capture");
         let mut state = self.0.state.lock().unwrap();
         state.finalization = Some(resources.clone());
         let core = self.clone();
@@ -210,14 +209,22 @@ impl RestartCoordinator {
         if !matches!(invalidated, Ok(Ok(()))) {
             tracing::error!("planned exit invalidation unconfirmed; exec remains prohibited");
         }
-        let mut state = self.0.state.lock().unwrap();
-        state.finalization_done = true;
-        state.worker = None;
-        let phase = state.phase;
-        self.publish(&mut state, phase);
+        {
+            let mut state = self.0.state.lock().unwrap();
+            state.finalization_done = true;
+            let phase = state.phase;
+            self.publish(&mut state, phase);
+        }
+        // M2 has ended, but reclamation remains owned independently. In particular
+        // capture/Commit errors and shutdown before stage 1 must still stop/join.
+        if let Err(error) = resources.cleanup().await {
+            tracing::error!(%error, "planned exit cleanup failed; resources remain owned");
+        }
+        self.0.state.lock().unwrap().worker = None;
     }
-    /// Completion observer only; never an execution capability. Dropping it has
-    /// no effect on cleanup ownership. Success is forbidden until D-2c-2b/D-3.
+    /// M2 completion observer only; cleanup may still be joining its owned tails.
+    /// Operator shutdown awaits that same cleanup owner. Dropping this observer
+    /// has no effect on cleanup. Success is forbidden until D-2c-2b/D-3.
     pub async fn wait_finalization(&self, id: RestartId) -> Result<(), RuntimeError> {
         let mut changed = self.subscribe();
         loop {

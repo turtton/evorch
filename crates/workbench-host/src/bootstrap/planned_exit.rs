@@ -35,6 +35,8 @@ pub struct PlannedExit {
     writer: storage::StorageHandle,
     completed: Option<ExitStage>,
     failure: Option<String>,
+    workers_result: Option<Result<(), String>>,
+    cleanup_result: Option<Result<(), String>>,
 }
 impl BootstrappedHost {
     /// Validate before the coordinator mutex: host Stop takes host -> coordinator,
@@ -54,7 +56,7 @@ impl BootstrappedHost {
     pub fn take_planned_exit(
         &mut self,
         gate: &restart::HostRestartGate,
-    ) -> Result<PlannedExit, String> {
+    ) -> Result<Arc<tokio::sync::Mutex<PlannedExit>>, String> {
         let command = self.host.lock().unwrap();
         let own = command.service().restart_gate();
         if !gate.same_instance(&own)
@@ -79,7 +81,7 @@ impl BootstrappedHost {
             .unwrap()
             .service_mut()
             .take_background_tasks();
-        Ok(PlannedExit {
+        let resources = Arc::new(tokio::sync::Mutex::new(PlannedExit {
             ledger: self.spawn_ledger.clone(),
             runtime: self.runtime.clone(),
             area_tasks: self.area_tasks.clone(),
@@ -95,7 +97,11 @@ impl BootstrappedHost {
             writer,
             completed: None,
             failure: None,
-        })
+            workers_result: None,
+            cleanup_result: None,
+        }));
+        self.planned_exit = Some(resources.clone());
+        Ok(resources)
     }
 }
 impl PlannedExit {
@@ -121,6 +127,177 @@ impl PlannedExit {
         }
         result
     }
+    /// Independent resource reclamation, never an M2 progress/exec receipt.
+    /// No business resume. A timed-out M2 join is awaited to actual completion.
+    /// The host and coordinator share this owner, including its sticky result.
+    pub async fn cleanup(&mut self) -> Result<(), String> {
+        if let Some(result) = &self.cleanup_result {
+            return result.clone();
+        }
+        self.failure
+            .get_or_insert_with(|| "resource cleanup has begun; M2 prohibited".into());
+        let mut failure = None;
+        // Stop producers first even when capture failed before stage 1.
+        remember(
+            &mut failure,
+            self.run_stage(ExitStage::StopRequested, false).await,
+        );
+        for stage in [
+            ExitStage::SpawnFenceClosed,
+            ExitStage::ChildrenReaped,
+            ExitStage::WorkersJoined,
+            ExitStage::StorageDrained,
+        ] {
+            if self.completed.is_some_and(|done| done >= stage) {
+                continue;
+            }
+            remember(&mut failure, self.run_stage(stage, false).await);
+        }
+        let result = failure.map_or(Ok(()), Err);
+        self.cleanup_result = Some(result.clone());
+        result
+    }
+    async fn run_stage(&mut self, stage: ExitStage, bounded: bool) -> Result<(), String> {
+        match stage {
+            ExitStage::SpawnFenceClosed => {
+                let ledger = self.ledger.clone();
+                let task = self.fence.get_or_insert_with(|| {
+                    tokio::task::spawn_blocking(move || ledger.close_fence())
+                });
+                let result = (&mut *task).await;
+                self.fence = None;
+                result.map_err(|_| "spawn fence worker panicked")?;
+            }
+            ExitStage::StopRequested => {
+                if let Some(workers) = self.workers.as_mut() {
+                    workers.services.request_planned_stop();
+                    if let Some(reclaim) = &workers.reclaim {
+                        reclaim.request_stop();
+                    }
+                }
+                self.area_tasks.request_stop();
+                // Stops the separately owned scheduler; finite cleanup was
+                // drained and synchronously sealed before capture.
+                self.runtime.learning_gate().close();
+                if let Some(pr) = self.runtime.pull_requests() {
+                    pr.shutdown();
+                }
+            }
+            ExitStage::ChildrenReaped => {
+                self.ledger.stop_all_children();
+                if bounded {
+                    tokio::time::timeout(REAP_LIMIT, self.ledger.reap_all_children())
+                        .await
+                        .map_err(|_| "owned child reap deadline exceeded")?
+                        .map_err(|_| "owned child reap unconfirmed")?;
+                } else {
+                    self.ledger
+                        .reap_all_children()
+                        .await
+                        .map_err(|_| "owned child reap unconfirmed")?;
+                }
+            }
+            ExitStage::WorkersJoined => {
+                if let Some(result) = &self.workers_result {
+                    return result.clone();
+                }
+                if self.joining.is_none() {
+                    let mut workers = self.workers.take().ok_or("planned workers missing")?;
+                    let area = self.area_tasks.clone();
+                    let runtime = self.runtime.clone();
+                    let ledger = self.ledger.clone();
+                    self.joining = Some(tokio::spawn(async move {
+                        let mut failure = None;
+                        remember(
+                            &mut failure,
+                            ledger.join_workers().await.map_err(|e| e.to_string()),
+                        );
+                        if ledger.worker_stats().panicked != 0 {
+                            failure.get_or_insert_with(|| "owned ledger worker panicked".into());
+                        }
+                        remember(
+                            &mut failure,
+                            workers.services.shutdown().await.map_err(|e| e.to_string()),
+                        );
+                        for task in workers.tasks.drain(..) {
+                            remember(
+                                &mut failure,
+                                task.await
+                                    .map_err(|_| "host background task panicked".into()),
+                            );
+                        }
+                        remember(
+                            &mut failure,
+                            area.shutdown().await.map_err(|e| e.to_string()),
+                        );
+                        remember(&mut failure, runtime.join_learning_for_planned_exit().await);
+                        if let Some(reclaim) = workers.reclaim.take() {
+                            remember(
+                                &mut failure,
+                                tokio::task::spawn_blocking(move || reclaim.try_shutdown())
+                                    .await
+                                    .map_err(|_| "reclaim join worker panicked".into())
+                                    .and_then(|r| r.map_err(|_| "reclaim worker panicked".into())),
+                            );
+                        }
+                        (workers, failure.map_or(Ok(()), Err))
+                    }));
+                }
+                let joined = if bounded {
+                    tokio::time::timeout(JOIN_LIMIT, self.joining.as_mut().unwrap())
+                        .await
+                        .map_err(|_| "owned worker join deadline exceeded")?
+                } else {
+                    self.joining.as_mut().unwrap().await
+                };
+                self.joining = None;
+                let result = match joined {
+                    Ok((workers, result)) => {
+                        self.workers = Some(workers);
+                        result
+                    }
+                    Err(_) => Err("planned join worker panicked".into()),
+                };
+                self.workers_result = Some(result.clone());
+                result?;
+            }
+            ExitStage::StorageDrained => {
+                if self.flushing.is_none() {
+                    let mut bridge = self.bridge.take().ok_or("planned bridge missing")?;
+                    self.flushing = Some(tokio::task::spawn_blocking(move || {
+                        let result = if bounded {
+                            bridge
+                                .flush()
+                                .map_err(|e| e.to_string())
+                                .and_then(|()| bridge.try_shutdown().map_err(|e| e.to_string()))
+                                .and_then(|()| bridge.handle().barrier().map_err(|e| e.to_string()))
+                        } else {
+                            // Cleanup must join the subscriber even when its final flush failed.
+                            let mut failure = None;
+                            remember(&mut failure, bridge.flush().map_err(|e| e.to_string()));
+                            remember(
+                                &mut failure,
+                                bridge.try_shutdown().map_err(|e| e.to_string()),
+                            );
+                            remember(
+                                &mut failure,
+                                bridge.handle().barrier().map_err(|e| e.to_string()),
+                            );
+                            failure.map_or(Ok(()), Err)
+                        };
+                        (bridge, result)
+                    }));
+                }
+                // No new bridge deadline: D-2c-3 must measure it first.
+                let joined = self.flushing.as_mut().unwrap().await;
+                self.flushing = None;
+                let (bridge, result) = joined.map_err(|_| "planned bridge worker panicked")?;
+                self.bridge = Some(bridge);
+                result?;
+            }
+        }
+        Ok(())
+    }
     async fn run(
         &mut self,
         checkpoint: &mut impl FnMut(Option<ExitStage>) -> Result<(), String>,
@@ -136,121 +313,7 @@ impl PlannedExit {
                 continue;
             }
             checkpoint(self.completed)?;
-            match stage {
-                ExitStage::SpawnFenceClosed => {
-                    let ledger = self.ledger.clone();
-                    let task = self.fence.get_or_insert_with(|| {
-                        tokio::task::spawn_blocking(move || ledger.close_fence())
-                    });
-                    (&mut *task)
-                        .await
-                        .map_err(|_| "spawn fence worker panicked")?;
-                    self.fence = None;
-                }
-                ExitStage::StopRequested => {
-                    let workers = self.workers.as_mut().ok_or("planned workers missing")?;
-                    workers.services.request_planned_stop();
-                    self.area_tasks.request_stop();
-                    if let Some(reclaim) = &workers.reclaim {
-                        reclaim.request_stop();
-                    }
-                    // Stops the separately owned scheduler; finite cleanup was
-                    // drained and synchronously sealed before capture.
-                    self.runtime.learning_gate().close();
-                    if let Some(pr) = self.runtime.pull_requests() {
-                        pr.shutdown();
-                    }
-                }
-                ExitStage::ChildrenReaped => {
-                    self.ledger.stop_all_children();
-                    tokio::time::timeout(REAP_LIMIT, self.ledger.reap_all_children())
-                        .await
-                        .map_err(|_| "owned child reap deadline exceeded")?
-                        .map_err(|_| "owned child reap unconfirmed")?;
-                }
-                ExitStage::WorkersJoined => {
-                    if self.joining.is_none() {
-                        let mut workers = self.workers.take().ok_or("planned workers missing")?;
-                        let area = self.area_tasks.clone();
-                        let runtime = self.runtime.clone();
-                        let ledger = self.ledger.clone();
-                        self.joining = Some(tokio::spawn(async move {
-                            let mut failure = None;
-                            remember(
-                                &mut failure,
-                                ledger.join_workers().await.map_err(|e| e.to_string()),
-                            );
-                            if ledger.worker_stats().panicked != 0 {
-                                failure
-                                    .get_or_insert_with(|| "owned ledger worker panicked".into());
-                            }
-                            remember(
-                                &mut failure,
-                                workers.services.shutdown().await.map_err(|e| e.to_string()),
-                            );
-                            for task in workers.tasks.drain(..) {
-                                remember(
-                                    &mut failure,
-                                    task.await
-                                        .map_err(|_| "host background task panicked".into()),
-                                );
-                            }
-                            remember(
-                                &mut failure,
-                                area.shutdown().await.map_err(|e| e.to_string()),
-                            );
-                            remember(&mut failure, runtime.join_learning_for_planned_exit().await);
-                            if let Some(reclaim) = workers.reclaim.take() {
-                                remember(
-                                    &mut failure,
-                                    tokio::task::spawn_blocking(move || reclaim.try_shutdown())
-                                        .await
-                                        .map_err(|_| "reclaim join worker panicked".into())
-                                        .and_then(|r| {
-                                            r.map_err(|_| "reclaim worker panicked".into())
-                                        }),
-                                );
-                            }
-                            (workers, failure.map_or(Ok(()), Err))
-                        }));
-                    }
-                    let (workers, result) =
-                        tokio::time::timeout(JOIN_LIMIT, self.joining.as_mut().unwrap())
-                            .await
-                            .map_err(|_| "owned worker join deadline exceeded")?
-                            .map_err(|_| "planned join worker panicked")?;
-                    self.joining = None;
-                    self.workers = Some(workers);
-                    result?;
-                }
-                ExitStage::StorageDrained => {
-                    if self.flushing.is_none() {
-                        let mut bridge = self.bridge.take().ok_or("planned bridge missing")?;
-                        self.flushing = Some(tokio::task::spawn_blocking(move || {
-                            // ACK of the last business event + usage, then finite
-                            // subscriber stop/join; the writer itself stays alive.
-                            let result = bridge
-                                .flush()
-                                .map_err(|e| e.to_string())
-                                .and_then(|()| bridge.try_shutdown().map_err(|e| e.to_string()))
-                                .and_then(|()| {
-                                    bridge.handle().barrier().map_err(|e| e.to_string())
-                                });
-                            (bridge, result)
-                        }));
-                    }
-                    // No new bridge deadline: D-2c-3 must measure it first.
-                    let (bridge, result) = self
-                        .flushing
-                        .as_mut()
-                        .unwrap()
-                        .await
-                        .map_err(|_| "planned bridge worker panicked")?;
-                    self.flushing = None;
-                    self.bridge = Some(bridge);
-                    result?;
-                }
-            }
+            self.run_stage(stage, true).await?;
             self.completed = Some(stage);
             checkpoint(self.completed)?;
         }
