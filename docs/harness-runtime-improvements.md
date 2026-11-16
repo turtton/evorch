@@ -120,20 +120,34 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
 - Secret filtering buffers incomplete output lines. A PTY prompt without a newline
   may not become visible until the line completes or the process exits. PTY output
   capture is bounded and cursor-based; this does not promise terminal emulation.
-- `wait` accepts at most 8 related runs and `any`/`all`, and has **no deadline**
+- `wait` is exposed to all general-purpose roles and has **no deadline**
   (the agent loop drops a `timeout_ms` copied from older transcripts before
-  validation; `run_output` is the non-waiting snapshot). See ADR 0042. It returns when targets finish per mode, a target
-  asks a question this caller has not been told about (a wait or
-  `subagent_questions` reports it), an agent message or user input arrives, or
-  the caller is cancelled. Agent messages that end a model `wait` are returned
-  in its `messages` field and consumed, so no `inbox` call follows; automatic
-  completion notices stay queued. A `delegate` wait leaves messages queued and
-  sets `inbox_ready`. The ten-minute deadline it replaces cost a turn per wake
-  and stopped Orchestrators after nine identical waits on a long child; and an
-  unanswered nonblocking question turned every wait into an immediate return.
-  New messages, new questions and newly observed completions are progress for
-  `max_no_progress_rounds`. Provider admission retains parent identity before
-  registration.
+  validation; `run_output` is the non-waiting snapshot). It retires `wait_reply`
+  (historical transcripts remain readable, and legacy stored reply waits return
+  an error without consuming messages or releasing correlations). Explicit
+  targets (`run_id` or up to 8 `run_ids`, with `mode: "any" | "all"`) are
+  restricted to direct parent and direct children only; terminal targets return
+  immediately. With no targets (`wait()`), it discovers active wait sources:
+  direct parent and children (including reviews and in-flight admissions),
+  unanswered child questions, managed lanes, and the caller's own running
+  background shell jobs. When no sources exist and no unread events are ready,
+  it returns a non-error `no_wait_sources` result immediately without advancing
+  progress; report status rather than polling. `any`/`all` applies only to run
+  completion; ordinary messages and replies, questions and answers, host input,
+  managed lanes, direct-parent termination, and shell teardown interrupt either
+  mode. Parent questions, idle turns, and output are not observed. A waking
+  message is returned in `messages` and consumed, and presenting child output
+  acknowledges that completion/generation and its automatic notice (phase-only
+  reads do not acknowledge); only unobserved automatic notices remain queued
+  for `inbox`. A synchronous `delegate` wait leaves messages queued and sets
+  `inbox_ready`. Running shell jobs stay wait sources; terminal completion cites
+  the original call ID without duplicate ToolResults, and is acknowledged only
+  upon presentation into context. New events (new messages, new questions or
+  answers, newly observed completions, host input, lane readiness, parent
+  termination, or shell completion) are progress for `max_no_progress_rounds`;
+  repeated `no_wait_sources` or identical unadvancing waits count toward
+  `max_identical_tool_call_repeats`. Provider admission retains parent identity
+  before registration.
 - `ask_user` persists a question and immediately returns its ID; options are
   suggestions and free text is supported. The model can continue independent work.
   A required unanswered question blocks completion; answer delivery wakes the loop.
