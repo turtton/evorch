@@ -8,9 +8,9 @@ use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::ProviderError;
 use crate::http::{map_request_error, map_response_error};
 use crate::provider::claude::{oauth, transport as claude};
+use crate::{ProviderAuth, ProviderError};
 
 pub(super) enum PreparedRequest {
     Api(reqwest::Client, reqwest::Request),
@@ -90,10 +90,12 @@ impl HttpResponse {
         }
     }
 
-    pub async fn error(self) -> ProviderError {
+    /// The API-key path keeps the raw body (structured-output and context-window
+    /// classification parse it); the Claude path surfaces a sanitized detail.
+    pub async fn error(self, auth: &ProviderAuth) -> ProviderError {
         match self {
             Self::Api(response) => map_response_error(response).await,
-            Self::Claude(response) => claude::response_error(response).await,
+            Self::Claude(response) => claude::response_error(response, auth).await,
         }
     }
 
