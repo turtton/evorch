@@ -26,19 +26,21 @@ fn validate_parked_checkpoint(
             Err(OwnershipError::PlannedMismatch.into())
         };
     };
-    let checkpoint =
-        super::OwnerCheckpoint::decode(&payload).ok_or(OwnershipError::PlannedMismatch)?;
+    // Check the row generation BEFORE decoding: release/claim can leave a
+    // previous generation's legacy [] marker, which says nothing about idle.
     // The owner row and checkpoint are read in the SAME write transaction.
-    // A claim advances the generation, so another owner cannot lend provenance.
-    if generation != owner.lease.generation.to_string()
-        || checkpoint.generation != owner.lease.generation
-    {
+    if generation != owner.lease.generation.to_string() {
         // A previous generation is not evidence for any current parked member.
         return if parked.is_empty() {
             Ok(())
         } else {
             Err(OwnershipError::PlannedMismatch.into())
         };
+    }
+    let checkpoint =
+        super::OwnerCheckpoint::decode(&payload).ok_or(OwnershipError::PlannedMismatch)?;
+    if checkpoint.generation != owner.lease.generation {
+        return Err(OwnershipError::PlannedMismatch.into());
     }
     if checkpoint.runs.iter().any(|(run, saved)| {
         saved.boundary != super::CheckpointBoundary::Terminal && !captured.contains(run)

@@ -134,6 +134,65 @@ fn captured_hold_separates_live_and_checkpointed_parked_membership_and_claims_bo
 }
 
 #[test]
+fn reclaimed_idle_owner_holds_despite_previous_generation_release_marker() {
+    let f = Fixture::new();
+    let old = f.host.start("idle").unwrap();
+    assert!(!f.host.quiesce().unwrap());
+    assert_eq!(f.host.attach("idle").unwrap().state, OwnerState::Released);
+    let next = f.successor();
+    let current = next.claim(&next.attach("idle").unwrap()).unwrap();
+    assert!(current.lease.generation > old.lease.generation);
+    assert_ne!(current.lease.owner_id, old.lease.owner_id);
+    let holds = next
+        .hold_captured_for_restart("tx", "capture", &Default::default())
+        .unwrap();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0].owner_id, current.lease.owner_id);
+    assert_eq!(holds[0].generation, current.lease.generation);
+    assert!(holds[0].active_runs.is_empty());
+    assert!(holds[0].parked_runs.is_empty());
+    assert_eq!(
+        next.restart_inventory().unwrap()[0].handoff_hold.as_deref(),
+        Some(&holds[0])
+    );
+    next.clear_planned_hold(&holds[0]).unwrap();
+}
+
+#[test]
+fn previous_generation_run_checkpoint_is_not_parked_provenance_for_a_new_owner() {
+    use crate::ownership::{CapturedThreadRuns, ExpectedCapturedRuns};
+    let f = Fixture::new();
+    let old = checkpointed(&f, "thread", "parked", false);
+    assert!(!f.host.quiesce().unwrap());
+    assert_eq!(f.host.attach("thread").unwrap().state, OwnerState::Released);
+    let next = f.successor();
+    let current = next.claim(&next.attach("thread").unwrap()).unwrap();
+    assert!(current.lease.generation > old.lease.generation);
+    assert_ne!(current.lease.owner_id, old.lease.owner_id);
+    let expected = ExpectedCapturedRuns::from([(
+        "thread".into(),
+        CapturedThreadRuns {
+            generation: current.lease.generation,
+            captured_runs: BTreeSet::from(["parked".into()]),
+        },
+    )]);
+    assert!(matches!(
+        next.hold_captured_for_restart("tx", "capture", &expected),
+        Err(RegistryError::Ownership(OwnershipError::PlannedMismatch))
+    ));
+    assert!(next.attach("thread").unwrap().handoff_hold.is_none());
+    // The old run is not a current member. With no parked evidence requested,
+    // that stale checkpoint also must not prevent holding this idle owner.
+    let holds = next
+        .hold_captured_for_restart("idle-tx", "capture", &Default::default())
+        .unwrap();
+    assert_eq!(holds.len(), 1);
+    assert!(holds[0].active_runs.is_empty());
+    assert!(holds[0].parked_runs.is_empty());
+    next.clear_planned_hold(&holds[0]).unwrap();
+}
+
+#[test]
 fn captured_hold_rejects_missing_foreign_stale_terminal_and_one_sided_membership() {
     use crate::ownership::{CapturedThreadRuns, ExpectedCapturedRuns};
     for case in [
