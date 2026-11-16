@@ -27,8 +27,11 @@ impl Fixture {
         Self::with_runtime(tokio::runtime::Runtime::new().unwrap())
     }
     fn with_runtime(rt: tokio::runtime::Runtime) -> Self {
+        Self::with_runtime_and_bus_capacity(rt, 64)
+    }
+    fn with_runtime_and_bus_capacity(rt: tokio::runtime::Runtime, capacity: usize) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let (runtime, store) = common::runtime_with_store(dir.path());
+        let (runtime, store) = common::runtime_with_store_and_bus_capacity(dir.path(), capacity);
         let host = common::host_with_project(&rt, runtime.clone(), dir.path());
         let f = Self {
             rt,
@@ -339,11 +342,13 @@ fn durable_commits_wake_subscribers_and_use_the_history_index_not_bus_deltas() {
 
 #[test]
 fn a_bus_burst_preserves_every_committed_message_and_its_replay_index() {
-    let f = Fixture::with_runtime(
+    let f = Fixture::with_runtime_and_bus_capacity(
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap(),
+        // 73 queued wakeups cross the 64-event batch boundary without overflowing the bus.
+        128,
     );
     let mut sub = f.subscribe();
     let after = sub.started.high_water;

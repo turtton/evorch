@@ -45,6 +45,8 @@ struct Frozen {
 struct State {
     #[cfg(test)]
     snapshot_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    refresh_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     epoch: u64,
     sequence: u64,
     next_subscription: u64,
@@ -222,6 +224,8 @@ impl Projection {
             state: Mutex::new(State {
                 #[cfg(test)]
                 snapshot_hook: None,
+                #[cfg(test)]
+                refresh_hook: None,
                 epoch: u64::from_be_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap())
                     >> 1,
                 sequence: 0,
@@ -343,6 +347,10 @@ impl Projection {
     ) -> Result<(), WorkbenchError> {
         let mut next = queries::collect(&self.runtime, &state.projects, &state.project_names)
             .map_err(queries::storage_error)?;
+        #[cfg(test)]
+        if let Some(hook) = state.refresh_hook.take() {
+            hook();
+        }
         for (id, provenance) in &state.answer_provenance {
             if let Some(answer) = next.questions.get_mut(id).and_then(|q| q.answer.as_mut()) {
                 answer.answered_by = Some(provenance.clone());

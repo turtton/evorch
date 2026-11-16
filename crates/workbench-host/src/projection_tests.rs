@@ -269,6 +269,88 @@ async fn fragments_do_not_hide_a_state_change_or_lag_in_the_same_refresh_batch()
 }
 
 #[test]
+fn a_change_during_refresh_reaches_the_subscriber_without_an_extra_wakeup() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("host.db"),
+        ..Default::default()
+    };
+    let store = storage::Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(128));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus.clone())),
+        Arc::new(NoModel),
+    )
+    .with_run_store(runtime::RunStore::open(&config, store.handle()).unwrap());
+    let project = ProjectId::new("project").unwrap();
+    let title = |value: &str| {
+        store
+            .handle()
+            .upsert_threads_host(&[storage::threads::ThreadUpsert {
+                thread_id: "thread".into(),
+                project_id: Some(project.as_str().into()),
+                project_root: Some(dir.path().to_string_lossy().into_owned()),
+                title: Some(value.into()),
+                ..Default::default()
+            }])
+            .unwrap();
+    };
+    title("before");
+    let p = Projection::new(runtime, rt.handle(), Default::default());
+    p.configure_projects(
+        vec![(project.clone(), dir.path().to_path_buf())],
+        Default::default(),
+    )
+    .unwrap();
+    let mut sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    assert!(
+        sub.started
+            .initial_page
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| matches!(item, SnapshotItem::Thread(thread) if thread.title == "before"))
+    );
+
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    p.state.lock().unwrap().refresh_hook = Some({
+        let entered = entered.clone();
+        let release = release.clone();
+        Arc::new(move || {
+            entered.wait();
+            release.wait();
+        })
+    });
+    bus.emit(wakeup(0));
+    entered.wait(); // The in-flight refresh has already read the "before" state.
+    title("after");
+    bus.emit(wakeup(1)); // The change's own notification; no subsequent tick or refresh.
+    release.wait();
+
+    let changed = rt.block_on(async {
+        loop {
+            let event = sub.recv().await.expect("open subscription").event;
+            match event {
+                UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread })
+                    if thread.title == "after" =>
+                {
+                    break thread;
+                }
+                UiEvent::Projection(ProjectionEvent::ResyncRequired { reason }) => {
+                    panic!("unexpected resync: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+    });
+    assert_eq!(changed.id.as_str(), "thread");
+}
+
+#[test]
 fn update_during_snapshot_cannot_cross_registration_or_high_water() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (p, _) = make(rt.handle(), 64, Default::default());
