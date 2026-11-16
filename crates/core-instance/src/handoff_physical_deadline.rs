@@ -1,6 +1,6 @@
 //! Kernel deadline for the single-threaded physical-Adopt interval.
 use super::{BootDeadline, BootFailure, BootWatchdog, invalid};
-use std::{io, marker::PhantomData, rc::Rc};
+use std::{io, marker::PhantomData, rc::Rc, sync::Arc};
 
 /// No thread, filesystem access, allocation in the handler, or Rust unwinding.
 /// SIGALRM is directed only to the entry thread, including during watchdog
@@ -116,8 +116,23 @@ impl PhysicalAdoptDeadline {
         Ok(guard)
     }
 
-    /// The independent monitor already owns the lifetime FD when this returns.
-    pub fn transfer_to(self, watchdog: &BootWatchdog) -> io::Result<()> {
+    /// Keep the entry timer armed until the monitor has restored the inherited
+    /// signal mask and acknowledged startup. Only then restore the process-wide
+    /// disposition and entry mask. Thread creation never blocks entry's SIGALRM.
+    pub fn into_watchdog(self, instance: Arc<crate::Instance>) -> io::Result<BootWatchdog> {
+        self.into_watchdog_with_clock(instance, Arc::new(super::monotonic_ns))
+    }
+    fn into_watchdog_with_clock(
+        self,
+        instance: Arc<crate::Instance>,
+        now: Arc<dyn Fn() -> io::Result<u64> + Send + Sync>,
+    ) -> io::Result<BootWatchdog> {
+        let watchdog =
+            BootWatchdog::start_prepared(instance, self.deadline, now, Some(self.previous_mask))?;
+        self.transfer_to(&watchdog)?;
+        Ok(watchdog)
+    }
+    fn transfer_to(self, watchdog: &BootWatchdog) -> io::Result<()> {
         if self.deadline != watchdog.deadline {
             return Err(invalid());
         }
@@ -197,7 +212,8 @@ mod tests {
     #[test]
     fn transfer_restores_signal_policy_and_keeps_lifetime_until_ready() {
         const CHILD: &str = "EVORCH_UNIT_PHYSICAL_TRANSFER";
-        if std::env::var_os(CHILD).is_some() {
+        if let Some(policy) = std::env::var_os(CHILD) {
+            let blocked = policy == "blocked";
             let set = alarm_set();
             let mut ignored: libc::sigaction = unsafe { std::mem::zeroed() };
             ignored.sa_sigaction = libc::SIG_IGN;
@@ -206,7 +222,16 @@ mod tests {
                 unsafe { libc::sigaction(libc::SIGALRM, &ignored, std::ptr::null_mut()) },
                 0
             );
-            mask(libc::SIG_BLOCK, &set, std::ptr::null_mut()).unwrap();
+            mask(
+                if blocked {
+                    libc::SIG_BLOCK
+                } else {
+                    libc::SIG_UNBLOCK
+                },
+                &set,
+                std::ptr::null_mut(),
+            )
+            .unwrap();
             let dir = tempfile::tempdir().unwrap();
             let config = crate::ConfigIdentity::new(dir.path()).unwrap();
             let instance = std::sync::Arc::new(crate::Instance {
@@ -222,8 +247,24 @@ mod tests {
             mask(libc::SIG_BLOCK, &empty, &mut current).unwrap();
             assert_eq!(unsafe { libc::sigismember(&current, libc::SIGALRM) }, 0);
             let kernel_timer = timer.timer;
-            let watchdog = BootWatchdog::start(instance, deadline).unwrap();
-            timer.transfer_to(&watchdog).unwrap();
+            let (observed, mask_ready) = std::sync::mpsc::channel();
+            let watchdog = timer
+                .into_watchdog_with_clock(
+                    instance,
+                    Arc::new(move || {
+                        let mut current = unsafe { std::mem::zeroed() };
+                        let empty = unsafe { std::mem::zeroed() };
+                        mask(libc::SIG_BLOCK, &empty, &mut current)?;
+                        observed
+                            .send(unsafe { libc::sigismember(&current, libc::SIGALRM) })
+                            .unwrap();
+                        super::super::monotonic_ns()
+                    }),
+                )
+                .unwrap();
+            // This observation is made by the monitor itself, not the entry
+            // thread. A temporarily unblocked SIGALRM must not survive there.
+            assert_eq!(mask_ready.recv().unwrap(), i32::from(blocked));
             let mut remaining = unsafe { std::mem::zeroed() };
             assert_eq!(
                 unsafe { libc::timer_gettime(kernel_timer, &mut remaining) },
@@ -234,7 +275,10 @@ mod tests {
                 Some(libc::EINVAL)
             );
             mask(libc::SIG_BLOCK, &empty, &mut current).unwrap();
-            assert_eq!(unsafe { libc::sigismember(&current, libc::SIGALRM) }, 1);
+            assert_eq!(
+                unsafe { libc::sigismember(&current, libc::SIGALRM) },
+                i32::from(blocked)
+            );
             let mut restored: libc::sigaction = unsafe { std::mem::zeroed() };
             assert_eq!(
                 unsafe { libc::sigaction(libc::SIGALRM, std::ptr::null(), &mut restored) },
@@ -255,14 +299,16 @@ mod tests {
             return;
         }
         // Process-wide signal dispositions must not affect parallel unit tests.
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "handoff::boot::physical_deadline::tests::transfer_restores_signal_policy_and_keeps_lifetime_until_ready", "--nocapture"])
-            .env(CHILD, "1").output().unwrap();
-        assert!(output.status.success(), "{:?}", output);
-        assert!(
-            String::from_utf8(output.stdout)
-                .unwrap()
-                .contains("transferred")
-        );
+        for policy in ["blocked", "unblocked"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "handoff::boot::physical_deadline::tests::transfer_restores_signal_policy_and_keeps_lifetime_until_ready", "--nocapture"])
+                .env(CHILD, policy).output().unwrap();
+            assert!(output.status.success(), "{policy}: {output:?}");
+            assert!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .contains("transferred")
+            );
+        }
     }
 }

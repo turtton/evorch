@@ -101,8 +101,7 @@ impl PlannedBoot {
         let instance = Arc::new(instance);
         let entry_elapsed = deadline.elapsed()?;
         let started = Instant::now();
-        let guard = BootWatchdog::start(instance.clone(), deadline)?;
-        physical_deadline.transfer_to(&guard)?;
+        let guard = physical_deadline.into_watchdog(instance.clone())?;
         let mut receipt = RestartBootReceipt::restarting(
             &config,
             restart_id,
