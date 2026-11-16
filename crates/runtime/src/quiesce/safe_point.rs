@@ -12,7 +12,7 @@ impl LoopState {
         let Some(runtime) = self.runtime() else {
             return true;
         };
-        if runtime.shared.quiesce.running() {
+        if runtime.shared.quiesce.running() && self.acknowledge_restart_shell_results().is_ok() {
             return true;
         }
         let mut changes = runtime.shared.quiesce.subscribe();
@@ -23,7 +23,13 @@ impl LoopState {
                 self.finish_interrupted(kind);
                 return false;
             }
-            if runtime.shared.quiesce.resume_permitted(parked_generation) {
+            if runtime.shared.quiesce.resume_permitted(parked_generation)
+                && self.acknowledge_restart_shell_results().is_ok()
+            {
+                // Cancellation reopens dispatch, not presentation. Finish the
+                // pending ACK before post-tools notices can see this job again.
+                // A continued failure parks on changes below, without a spin or
+                // turning an ACK failure into a storage-health failure.
                 return true;
             }
             {
@@ -209,7 +215,7 @@ impl LoopState {
             return self.shared.executor.has_unobserved_shell_jobs(&run);
         }
         // A presented identity suppresses duplicate text, not the safety
-        // proof. Until its ACK succeeds, ordinary persistence must also refuse
+        // proof. Until its ACK succeeds, restart persistence must also refuse
         // to save a context that disagrees with external-effect observation.
         jobs.iter()
             .any(|job| !job.teardown_confirmed || !job.observed)

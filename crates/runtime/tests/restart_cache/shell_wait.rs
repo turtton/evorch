@@ -160,9 +160,13 @@ async fn release_job(f: &WaitingShell) {
             .write_all(b"released\n")
             .unwrap();
     });
-    let identity = f.shell.shell_job_snapshots(&f.run.to_string())[0]
-        .identity
-        .clone();
+    let identity = f
+        .shell
+        .shell_job_snapshots(&f.run.to_string())
+        .into_iter()
+        .find(|j| j.call_id.as_deref() == Some("shell-start"))
+        .unwrap()
+        .identity;
     f.shell.wait_shell_job_terminal(&identity).await.unwrap();
     writer.await.unwrap();
 }
@@ -214,7 +218,7 @@ fn assert_wire(f: &WaitingShell) {
 }
 
 fn assert_wire_at(f: &WaitingShell, shell_call: &str) {
-    let requests: Vec<_> =
+    let all_requests: Vec<_> =
         f.h.mock
             .recorded_requests()
             .into_iter()
@@ -222,11 +226,79 @@ fn assert_wire_at(f: &WaitingShell, shell_call: &str) {
             .map(|r| r.body)
             .collect();
     let requests = if f.parent.is_some() {
-        &requests[1..]
+        &all_requests[1..]
     } else {
-        &requests[..]
+        &all_requests[..]
     };
-    verify_trace_of(&f.h, f.run, &f.events, 0, requests);
+    if f.parent.is_none() {
+        verify_trace_of(&f.h, f.run, &f.events, 0, requests);
+    } else {
+        // The parent has warmed a common static prefix, so the child's first
+        // request may legitimately be warm. Every later child request must
+        // still reuse its own entire preceding input, not merely that prefix.
+        let mut starts = Vec::new();
+        let mut completed = std::collections::HashMap::new();
+        for event in &f.events {
+            match &event.kind {
+                EventKind::Provider(ProviderEvent::RequestStarted {
+                    request_id,
+                    run_id: Some(id),
+                    ..
+                }) if id == &f.run.to_string() => starts.push(request_id),
+                EventKind::Provider(ProviderEvent::RequestCompleted {
+                    request_id,
+                    run_id: Some(id),
+                    input_tokens,
+                    cache_read_tokens,
+                    ..
+                }) if id == &f.run.to_string() => {
+                    completed.insert(request_id, (*input_tokens, *cache_read_tokens));
+                }
+                EventKind::Diagnostic(d) => assert_ne!(d.code, "CacheRegression", "{d:?}"),
+                EventKind::Compaction(CompactionEvent::Compacted { .. }) => {
+                    panic!("unexpected history boundary")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(starts.len(), requests.len());
+        assert_eq!(completed.len(), requests.len());
+        assert!(requests.len() >= 3);
+        let parent = &all_requests[0];
+        let child = &requests[0];
+        let parent_settings = wire_settings_bytes(parent);
+        let child_settings = wire_settings_bytes(child);
+        assert_ne!(
+            parent_settings, child_settings,
+            "different role tool scopes"
+        );
+        let shared = parent_settings
+            .iter()
+            .zip(&child_settings)
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(shared > 0);
+        assert_eq!(&parent_settings[..shared], &child_settings[..shared]);
+        assert_ne!(parent_settings.get(shared), child_settings.get(shared));
+        let same_affinity = parent["prompt_cache_key"] == child["prompt_cache_key"]
+            && parent["model"] == child["model"];
+        assert_eq!(
+            completed[starts[0]].1,
+            if same_affinity { shared as u64 } else { 0 },
+            "first child hit must come from the independently checked parent wire prefix"
+        );
+        for (i, request) in requests.iter().enumerate() {
+            let (input, cached) = completed[starts[i]];
+            assert!(input > 0 && cached <= input);
+            if i > 0 {
+                assert_append_only(f.h.wire.protocol(), &requests[i - 1], request).unwrap();
+                assert!(
+                    cached >= completed[starts[i - 1]].0,
+                    "child must reuse its full preceding input"
+                );
+            }
+        }
+    }
     assert_eq!(f.h.mock.remaining_scripts(), 0);
     let last = requests.last().unwrap();
     wire_result(f.h.wire, last, "shell-start");
@@ -369,6 +441,9 @@ async fn running_shell_wait_quiesces_only_after_its_tool_result_on_every_wire() 
             followups(&f);
             f.h.runtime.cancel_restart_quiesce(&attempt).unwrap();
             finish(&mut f).await;
+            if form == 0 {
+                restore_and_wait_again(&mut f).await;
+            }
         }
     }
 }
@@ -421,6 +496,7 @@ async fn presented_shell_ack_failure_is_retryable_without_safety_ack_on_every_wi
 
 #[tokio::test]
 async fn cancelling_after_shell_presentation_before_save_retains_receipt_on_every_wire() {
+    use futures_util::FutureExt;
     for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
         let mut f = waiting_shell(wire, 0).await;
         let attempt = f.h.runtime.begin_restart_quiesce().unwrap();
@@ -432,8 +508,19 @@ async fn cancelling_after_shell_presentation_before_save_retains_receipt_on_ever
         assert_no_safety_ack(&f, &attempt).await;
         assert_eq!(snapshot(&f), before);
         followups(&f);
-        f.shell.allow_ack();
+        let _ = f.shell.ack_attempted.notified().now_or_never();
         f.h.runtime.cancel_restart_quiesce(&attempt).unwrap();
+        f.shell.ack_attempted.notified().await;
+        assert_eq!(
+            f.h.mock
+                .recorded_requests()
+                .iter()
+                .filter(|r| r.path == wire.path())
+                .count(),
+            3,
+            "resuming while ACK still fails must not send a duplicate notice"
+        );
+        f.shell.allow_ack();
         finish(&mut f).await;
     }
 }
@@ -538,4 +625,320 @@ async fn terminal_without_teardown_cannot_wake_or_ack_until_confirmed_on_every_w
             .unwrap();
         f.h.runtime.wait(f.run).await.unwrap();
     }
+}
+
+// Checkpoint presentation happens at a closed ToolsApplied boundary in this
+// fixture, unlike the open-wait cases above. Both use the same receipt map.
+async fn checkpoint_first(wire: Wire, another_running: bool) {
+    use futures_util::FutureExt;
+    use std::io::Write;
+    let ShellFixture {
+        _directory,
+        _storage,
+        config,
+        h,
+        shell,
+        fifo,
+        run,
+        attempt,
+    } = started_shell(wire, false).await;
+    let mut f = WaitingShell {
+        _directory,
+        _storage,
+        config,
+        h,
+        shell,
+        fifo,
+        run,
+        parent: None,
+        events: Vec::new(),
+    };
+    let before = snapshot(&f);
+    let pending = if another_running {
+        let fifo = f._directory.path().join("other-release");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let ctx = tools::ToolExecutionContext {
+            run_id: run.to_string(),
+            call_id: Some("not-presented-yet".into()),
+            ..Default::default()
+        };
+        f.shell.shell.execute_with_context(&ctx, json!({"command":format!("IFS= read -r line < '{}'; printf 'other:%s' \"$line\"", fifo.display()),"yield_ms":0})).await.unwrap();
+        let job = f
+            .shell
+            .shell
+            .shell_job_snapshots(&run.to_string())
+            .into_iter()
+            .find(|j| j.call_id.as_deref() == Some("not-presented-yet"))
+            .unwrap();
+        Some((fifo, job.identity))
+    } else {
+        f.shell.ack_blocked.store(true, Ordering::SeqCst);
+        None
+    };
+    let original = f
+        .shell
+        .shell
+        .shell_job_snapshots(&run.to_string())
+        .into_iter()
+        .find(|j| j.call_id.as_deref() == Some("shell-start"))
+        .unwrap()
+        .identity;
+    release_job(&f).await;
+    if another_running {
+        let mut changes = f.shell.shell.subscribe_shell_job_changes().unwrap();
+        loop {
+            if f.shell
+                .shell
+                .shell_job_snapshots(&run.to_string())
+                .iter()
+                .any(|j| j.identity == original && j.observed)
+            {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+        blocker(&f.h, run, RestartBlockerKind::ShellRunning).await;
+        assert!(
+            !f.shell
+                .shell
+                .shell_job_snapshots(&run.to_string())
+                .iter()
+                .find(|j| j.call_id.as_deref() == Some("not-presented-yet"))
+                .unwrap()
+                .observed
+        );
+    } else {
+        blocker(&f.h, run, RestartBlockerKind::ShellResultUnobserved).await;
+    }
+    assert_no_safety_ack(&f, &attempt).await;
+    assert_eq!(
+        snapshot(&f),
+        before,
+        "another blocker or failed ACK still forbids storage"
+    );
+    f.h.mock.enqueue([
+        wait_call("checkpoint-wait", json!({})),
+        text_response("complete after checkpoint presentation"),
+    ]);
+    let _ = f.shell.ack_attempted.notified().now_or_never();
+    f.h.runtime.cancel_restart_quiesce(&attempt).unwrap();
+    if !another_running {
+        f.shell.ack_attempted.notified().await;
+        assert_eq!(
+            f.h.mock
+                .recorded_requests()
+                .iter()
+                .filter(|r| r.path == wire.path())
+                .count(),
+            2,
+            "checkpoint-presented text must not be re-notified while ACK is failing"
+        );
+    }
+    f.shell.allow_ack();
+    f.events
+        .extend(through_phase(&mut f.h.receiver, run, AgentRunPhase::Waiting).await);
+    if let Some((fifo, identity)) = pending {
+        // The old completion is already presented; only this unpresented job
+        // can complete the new wait. Cancellation did not acknowledge it.
+        assert!(
+            !f.shell
+                .shell
+                .shell_job_snapshots(&run.to_string())
+                .iter()
+                .find(|j| j.identity == identity)
+                .unwrap()
+                .observed
+        );
+        let writer = tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(fifo)
+                .unwrap()
+                .write_all(b"released\n")
+                .unwrap();
+        });
+        f.shell
+            .shell
+            .wait_shell_job_terminal(&identity)
+            .await
+            .unwrap();
+        writer.await.unwrap();
+    }
+    f.events
+        .extend(through_phase(&mut f.h.receiver, run, AgentRunPhase::Waiting).await);
+    verify_trace(&f.h, run, &f.events, 0);
+    let requests = f.h.mock.recorded_requests();
+    let last = &requests
+        .iter()
+        .rev()
+        .find(|r| r.path == wire.path())
+        .unwrap()
+        .body;
+    wire_result(wire, last, "shell-start");
+    let result = wire_result(wire, last, "checkpoint-wait");
+    let output = match wire {
+        Wire::ChatCompletions => &result["content"],
+        _ => &result["output"],
+    }
+    .as_str()
+    .unwrap();
+    let result: Value = serde_json::from_str(output).unwrap();
+    let jobs = result["shell_jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), usize::from(another_running));
+    if another_running {
+        assert_eq!(jobs[0]["call_id"], "not-presented-yet");
+    }
+    assert!(jobs.iter().all(|job| job["job_id"] != original.id()));
+    assert_eq!(
+        last.to_string()
+            .matches("Shell job terminal result (original call:")
+            .count(),
+        1
+    );
+    assert_eq!(last.to_string().matches("normal:released").count(), 1);
+    assert!(!last.to_string().contains("Shell job completed:"));
+    assert!(
+        f.shell
+            .shell
+            .shell_job_snapshots(&run.to_string())
+            .iter()
+            .all(|j| j.observed)
+    );
+    f.h.runtime.stop(run, runtime::StopScope::SelfOnly).unwrap();
+    f.h.runtime.wait(run).await.unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_first_presentation_survives_cancellation_before_save_on_every_wire() {
+    for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
+        checkpoint_first(wire, false).await;
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_first_presentation_with_another_blocker_leaves_other_results_unread_on_every_wire()
+ {
+    for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
+        checkpoint_first(wire, true).await;
+    }
+}
+
+async fn restore_and_wait_again(f: &mut WaitingShell) {
+    let root = f.h._directory.path();
+    let current = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    f.h.receiver = bus.subscribe();
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(BulkRead)).unwrap();
+    // A new process-local shell registry has no old jobs. The saved context,
+    // not replaying commands, is the evidence for already-presented results.
+    executor.register(Arc::new(GatedShell::new())).unwrap();
+    let credentials = Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap());
+    let source = match f.h.wire {
+        Wire::Codex => ModelSource::Fixed(codex_model(
+            &current,
+            &credentials,
+            &bus,
+            &f.h.mock.codex_base_url(),
+        )),
+        _ => ModelSource::Configured,
+    };
+    f.h.runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
+        user_config_dir: Some(root.join("empty-user-config")),
+        config: &current,
+        bus,
+        executor: Arc::new(executor),
+        credential_store: credentials,
+        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+        model_source: source,
+        workspace: None,
+    })
+    .unwrap()
+    .runtime
+    .with_system_prompts(contract_prompts())
+    .with_compaction(current.compaction.clone())
+    .with_run_store(runtime::RunStore::open(&f.config, f._storage.handle()).unwrap());
+    f.h.mock.enqueue([
+        wait_call("restored-wait", json!({})),
+        text_response("restored complete"),
+    ]);
+    f.h.runtime
+        .resume_chat(
+            f.run,
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    f.events
+        .extend(through_phase(&mut f.h.receiver, f.run, AgentRunPhase::Waiting).await);
+    f.h.runtime
+        .send_message(f.run, "wait after restoring the closed batch".into())
+        .unwrap();
+    for _ in 0..2 {
+        f.events
+            .extend(through_phase(&mut f.h.receiver, f.run, AgentRunPhase::Waiting).await);
+    }
+    verify_trace(&f.h, f.run, &f.events, 0);
+    let requests = f.h.mock.recorded_requests();
+    let last = &requests
+        .iter()
+        .rev()
+        .find(|r| r.path == f.h.wire.path())
+        .unwrap()
+        .body;
+    wire_result(f.h.wire, last, "shell-start");
+    wire_result(f.h.wire, last, "shell-wait");
+    let result = wire_result(f.h.wire, last, "restored-wait");
+    let output = match f.h.wire {
+        Wire::ChatCompletions => &result["content"],
+        _ => &result["output"],
+    }
+    .as_str()
+    .unwrap();
+    let result: Value = serde_json::from_str(output).unwrap();
+    assert!(result["shell_jobs"].as_array().unwrap().is_empty());
+    assert_eq!(last.to_string().matches("normal:released").count(), 1);
+    f.h.runtime
+        .stop(f.run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    f.h.runtime.wait(f.run).await.unwrap();
+}
+
+// Inspect canonical wire settings only, independently of provider encoders and
+// the mock cache. Different role tool sets diverge here, before either history.
+fn wire_settings_bytes(request: &Value) -> Vec<u8> {
+    fn ordered(value: &Value) -> Value {
+        match value {
+            Value::Object(fields) => serde_json::to_value(
+                fields
+                    .iter()
+                    .map(|(k, v)| (k, ordered(v)))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )
+            .unwrap(),
+            Value::Array(items) => Value::Array(items.iter().map(ordered).collect()),
+            _ => value.clone(),
+        }
+    }
+    let mut settings = request.clone();
+    for field in ["messages", "input", "stream", "stream_options"] {
+        settings.as_object_mut().unwrap().remove(field);
+    }
+    serde_json::to_vec(&ordered(&settings)).unwrap()
 }

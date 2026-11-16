@@ -425,7 +425,7 @@ async fn shell_terminal_snapshot_failure_keeps_observation_but_refuses_safety_ac
             _directory,
             _storage,
             config,
-            h,
+            mut h,
             shell,
             run,
             attempt,
@@ -456,13 +456,32 @@ async fn shell_terminal_snapshot_failure_keeps_observation_but_refuses_safety_ac
             .unwrap()
             .unwrap();
         assert_eq!(after, before);
-        assert_eq!(
-            h.mock
-                .recorded_requests()
-                .iter()
-                .filter(|request| request.path == h.wire.path())
-                .count(),
-            2
+        let requests: Vec<_> = h
+            .mock
+            .recorded_requests()
+            .into_iter()
+            .filter(|request| request.path == h.wire.path())
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert_append_only(wire.protocol(), &requests[0].body, &requests[1].body).unwrap();
+        let mut usage = Vec::new();
+        while usage.len() < 2 {
+            if let EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(id),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) = h.receiver.recv().await.unwrap().kind
+                && id == run.to_string()
+            {
+                usage.push((input_tokens, cache_read_tokens));
+            }
+        }
+        assert!(usage[0].0 > 0);
+        assert_eq!(usage[0].1, 0);
+        assert!(
+            usage[1].1 >= usage[0].0,
+            "input-derived mock cache must reuse the sent prefix"
         );
         connection
             .execute_batch("DROP TRIGGER reject_shell_checkpoint;")
