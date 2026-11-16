@@ -155,3 +155,89 @@ async fn manual_and_preset_still_take_priority_over_auto_catalog() {
         assert_eq!(result.max_output_tokens, Some(4000));
     }
 }
+
+#[tokio::test]
+async fn anthropic_output_only_lookup_disambiguates_without_changing_other_metadata() {
+    let id = "claude-opus-4-6";
+    let catalog = limits_catalog(serde_json::json!({
+        "anthropic": {"models": {id: {"id": id,
+            "limit": {"context": 200_000, "output": 128_000},
+            "modalities": {"input": ["text", "image"], "output": ["text"]},
+            "cost": {"input": 5, "output": 25}}}},
+        "reseller": {"models": {id: {"id": id,
+            "limit": {"context": 100_000, "output": 8_000},
+            "modalities": {"input": ["text"], "output": ["text"]},
+            "cost": {"input": 1, "output": 2}}}}
+    }))
+    .await;
+    for provider_type in [
+        config::ProviderTypeConfig::Anthropic,
+        config::ProviderTypeConfig::AnthropicSubscription,
+    ] {
+        let mut entry = ModelEntryConfig::enabled(id);
+        assert_eq!(
+            resolve_model_output_limit(
+                &entry,
+                &presets(),
+                Some(&catalog),
+                Some("custom"),
+                provider_type
+            ),
+            Some(128_000)
+        );
+        // Context, prices, image capabilities and grouping still use the original
+        // ambiguous lookup, not the output-only Anthropic provider hint.
+        assert!(
+            resolve_catalog_match(&entry, &catalog, Some("custom"), Some(provider_type)).is_none()
+        );
+        let metadata = resolve_model_metadata(
+            &entry,
+            &presets(),
+            Some(&catalog),
+            Some("custom"),
+            Some(provider_type),
+        );
+        assert_eq!(metadata.context_window, None);
+        assert_eq!(metadata.max_output_tokens, None);
+        let profiles = BTreeMap::from([(
+            "custom".into(),
+            config::ProviderProfileConfig {
+                provider_type,
+                models: vec![entry.clone()],
+                ..Default::default()
+            },
+        )]);
+        assert!(image_input_models(&profiles, &catalog).is_empty());
+        // Explicit references continue to outrank canonical-provider inference.
+        entry.metadata_ref = Some(format!("reseller/{id}"));
+        assert_eq!(
+            resolve_model_output_limit(
+                &entry,
+                &presets(),
+                Some(&catalog),
+                Some("custom"),
+                provider_type
+            ),
+            Some(8_000)
+        );
+    }
+}
+
+#[tokio::test]
+async fn output_only_lookup_refuses_ambiguous_noncanonical_catalog_entries() {
+    let catalog = limits_catalog(serde_json::json!({
+        "first": {"models": {"shared": {"id":"shared", "limit":{"context":64000,"output":8000}}}},
+        "second": {"models": {"shared": {"id":"shared", "limit":{"context":128000,"output":16000}}}}
+    }))
+    .await;
+    assert_eq!(
+        resolve_model_output_limit(
+            &ModelEntryConfig::enabled("shared"),
+            &presets(),
+            Some(&catalog),
+            Some("custom"),
+            config::ProviderTypeConfig::Anthropic
+        ),
+        None
+    );
+}

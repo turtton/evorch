@@ -1171,7 +1171,10 @@ impl AgentModel for RoutedModel {
                     checkpoint::RecoveryOutputLimit {
                         profile: input.profile.clone(),
                         model: input.request.model.clone(),
-                        limit: input.request.max_tokens,
+                        limit: output_limits::checkpoint_limit(
+                            input.protocol,
+                            input.request.max_tokens,
+                        ),
                     },
                 );
         }
@@ -1291,11 +1294,7 @@ impl AgentModel for RoutedModel {
         let protocol = self.providers[&route.profile].profile.api_protocol;
         let max_tokens = self
             .output_limit(&invocation.run_id, &route, generation.max_tokens)
-            .await
-            .or_else(|| {
-                (protocol == model::ApiProtocol::AnthropicMessages)
-                    .then_some(providers::wire::anthropic::DEFAULT_MAX_TOKENS)
-            });
+            .await;
         generation.max_tokens = max_tokens.map(u32::try_from).transpose().map_err(|_| {
             crate::benchmark::unsupported("effective max_tokens exceeds benchmark generation range")
         })?;
