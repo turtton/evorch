@@ -196,6 +196,14 @@ fn cold_learning_is_terminal_and_attempt_limit_cannot_be_reset_by_handoff() {
                 },
             )
             .unwrap();
+            assert_eq!(
+                db.learning_job("job").unwrap().unwrap().state,
+                LearningJobState::Interrupted
+            );
+            assert!(db.learning_job_evidence("job").unwrap().is_some());
+            // Liveness/config checks belong to the caller of the separate learning write.
+            let t = db.restart_transaction("restart").unwrap().unwrap();
+            step(&db, t, RestartMutation::QuarantineLearningCold);
         } else {
             let t = step(&db, t, adopt());
             let t = step(&db, t, RestartMutation::Ready { at_ms: 1 });
@@ -294,16 +302,27 @@ fn cold_graph_quarantine_does_not_decode_corrupt_learning_members_or_mutate_unkn
         db.learning_job("job").unwrap().unwrap().state,
         LearningJobState::Interrupted
     );
-    // The origin janitor/cold Interrupted pass handles jobs whose saved membership is unreadable.
-    let disposition: String = db
-        .conn
-        .query_row(
-            "SELECT disposition FROM restart_learning_members",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(disposition, "quarantined");
+    assert!(db.learning_job_evidence("job").unwrap().is_some());
+    let disposition = || {
+        db.conn
+            .query_row(
+                "SELECT disposition FROM restart_learning_members",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(disposition(), "pending");
+    let t = db.restart_transaction("restart").unwrap().unwrap();
+    step(&db, t, RestartMutation::QuarantineLearningCold);
+    assert_eq!(disposition(), "quarantined");
+    // Invalid membership cannot authorize an Abandon; the origin-aware Interrupted pass
+    // decides separately whether the unidentifiable job can be cleaned up.
+    assert_eq!(
+        db.learning_job("job").unwrap().unwrap().state,
+        LearningJobState::Interrupted
+    );
+    assert!(db.learning_job_evidence("job").unwrap().is_some());
 }
 
 #[test]

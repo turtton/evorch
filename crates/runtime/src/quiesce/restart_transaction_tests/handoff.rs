@@ -10,8 +10,15 @@ fn origin(instance: &str) -> LearningOrigin {
     origin
 }
 fn learning(runtime: AgentRuntime, f: &Fixture, instance: &str) -> AgentRuntime {
+    learning_with_origin(runtime, f, origin(instance))
+}
+fn learning_with_origin(
+    runtime: AgentRuntime,
+    f: &Fixture,
+    origin: LearningOrigin,
+) -> AgentRuntime {
     runtime
-        .with_learning_origin(origin(instance))
+        .with_learning_origin(origin)
         .with_learning(crate::memory_queue::LearningSettings {
             writer: f._storage.handle(),
             storage: f.config.clone(),
@@ -235,59 +242,171 @@ async fn planned_learning_dispatch_opens_only_after_ready_and_starts_a_fresh_att
     assert!(queue.job("fresh").unwrap().unwrap().state.is_terminal());
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ColdGraphPath {
+    Minimal,
+    Mutation,
+    Completed,
+}
+
+async fn cold_learning_after_graph(liveness: OriginLiveness, other_config: bool) {
+    for path in [
+        ColdGraphPath::Minimal,
+        ColdGraphPath::Mutation,
+        ColdGraphPath::Completed,
+    ] {
+        let mut f = Fixture::new(0);
+        f.runtime = learning(f.runtime.clone(), &f, "predecessor");
+        let queue = f.runtime.learning_job_queue().unwrap();
+        admit(&queue, "pending");
+        admit(&queue, "interrupted");
+        let started = queue
+            .start_attempt(
+                "interrupted",
+                &f.runtime.learning_gate().try_enter().unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        let pause = f.runtime.pause_learning();
+        let suspension = f.runtime.suspend_learning(&pause).unwrap();
+        suspension.wait().await.unwrap();
+        // This manually started job has no running tail; persist its normal interruption.
+        queue
+            .change(
+                &started,
+                LearningAttemptChange::Interrupt {
+                    suspension_id: suspension.id().into(),
+                },
+            )
+            .unwrap();
+        let mut session = session(&f, BTreeMap::new()).await;
+        f.runtime
+            .persist_restart_capture_expected(&mut session)
+            .unwrap();
+        f.runtime
+            .persist_restart_learning_inventory(&mut session, &pause, &suspension)
+            .await
+            .unwrap();
+        f.runtime.commit_restart_capture(&mut session).unwrap();
+        step(
+            &f,
+            RestartMutation::Arm {
+                nonce_hash: "nonce".into(),
+            },
+        );
+        if matches!(path, ColdGraphPath::Completed) {
+            let planned = successor(&f);
+            adopt(&f, &planned);
+            step(&f, RestartMutation::Ready { at_ms: 1 });
+            assert_eq!(tx(&f).phase, RestartPhase::Completed); // Crash before learning requeue.
+        }
+        let foreign = LearningJobQueue::new(
+            f._storage.handle(),
+            f.config.clone(),
+            current_origin(LearningOriginKind::Gui, None),
+        );
+        admit(&foreign, "foreign");
+        let before = ["pending", "interrupted", "foreign"].map(|id| {
+            (
+                queue.job(id).unwrap().unwrap(),
+                queue.evidence(id).unwrap().unwrap(),
+            )
+        });
+        let mut cold_origin = origin("cold");
+        if other_config {
+            cold_origin.config_identity = Some("other-config".into());
+        }
+        let bus = Arc::new(event_bus::EventBus::new(64));
+        let cold = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(::tools::ToolExecutor::new(bus)),
+            f.model.clone(),
+        )
+        .with_run_store(crate::RunStore::open(&f.config, f._storage.handle()).unwrap());
+        let cold = learning_with_origin(cold, &f, cold_origin);
+        // Follow the startup order: graph quarantine first, then the origin-aware learning pass.
+        match path {
+            ColdGraphPath::Mutation => {
+                step(&f, RestartMutation::QuarantineCold);
+            }
+            ColdGraphPath::Minimal | ColdGraphPath::Completed => {
+                cold.quarantine_cold_restarts().unwrap();
+            }
+        }
+        assert_eq!(
+            tx(&f).phase,
+            if matches!(path, ColdGraphPath::Completed) {
+                RestartPhase::Completed
+            } else {
+                RestartPhase::Invalidated
+            }
+        );
+        for (job, evidence) in &before {
+            assert_eq!(
+                queue.job(&job.task_id).unwrap().as_ref(),
+                Some(job),
+                "{path:?}: graph changed learning"
+            );
+            assert_eq!(
+                queue.evidence(&job.task_id).unwrap().as_ref(),
+                Some(evidence),
+                "{path:?}: graph removed evidence"
+            );
+        }
+        // Graph isolation has no liveness evidence and must not consume learning membership.
+        assert!(
+            db(&f)
+                .restart_learning_members("restart")
+                .unwrap()
+                .iter()
+                .all(|member| member.disposition == "pending")
+        );
+        cold.quarantine_cold_learning(&Probe(liveness)).unwrap();
+        for (job, evidence) in before {
+            if job.origin.kind == LearningOriginKind::Core
+                && !other_config
+                && matches!(liveness, OriginLiveness::Dead)
+            {
+                assert_eq!(
+                    queue.job(&job.task_id).unwrap().unwrap().state,
+                    LearningJobState::Abandoned,
+                    "{path:?}"
+                );
+                assert!(queue.evidence(&job.task_id).unwrap().is_none(), "{path:?}");
+            } else {
+                assert_eq!(
+                    queue.job(&job.task_id).unwrap().as_ref(),
+                    Some(&job),
+                    "{path:?}: protected origin changed"
+                );
+                assert_eq!(
+                    queue.evidence(&job.task_id).unwrap().as_ref(),
+                    Some(&evidence),
+                    "{path:?}: protected evidence removed"
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
-async fn cold_learning_preserves_live_unknown_and_foreign_origins_but_ends_dead_members() {
-    let mut f = Fixture::new(0);
-    f.runtime = learning(f.runtime.clone(), &f, "predecessor");
-    let queue = f.runtime.learning_job_queue().unwrap();
-    admit(&queue, "pending");
-    let pause = f.runtime.pause_learning();
-    let suspension = f.runtime.suspend_learning(&pause).unwrap();
-    let mut session = session(&f, BTreeMap::new()).await;
-    f.runtime
-        .persist_restart_capture_expected(&mut session)
-        .unwrap();
-    f.runtime
-        .persist_restart_learning_inventory(&mut session, &pause, &suspension)
-        .await
-        .unwrap();
-    f.runtime.commit_restart_capture(&mut session).unwrap();
-    step(
-        &f,
-        RestartMutation::Arm {
-            nonce_hash: "nonce".into(),
-        },
-    );
-    let planned = successor(&f);
-    adopt(&f, &planned);
-    step(&f, RestartMutation::Ready { at_ms: 1 });
-    assert_eq!(tx(&f).phase, RestartPhase::Completed); // Crash before learning requeue.
-    let cold = successor(&f);
-    cold.quarantine_cold_learning(&Probe(OriginLiveness::Alive))
-        .unwrap();
-    cold.quarantine_cold_learning(&Probe(OriginLiveness::Unknown))
-        .unwrap();
-    assert_eq!(
-        queue.job("pending").unwrap().unwrap().state,
-        LearningJobState::Pending
-    );
-    let foreign = LearningJobQueue::new(
-        f._storage.handle(),
-        f.config.clone(),
-        current_origin(LearningOriginKind::Gui, None),
-    );
-    admit(&foreign, "foreign");
-    cold.quarantine_cold_learning(&Probe(OriginLiveness::Dead))
-        .unwrap();
-    assert_eq!(
-        queue.job("pending").unwrap().unwrap().state,
-        LearningJobState::Abandoned
-    );
-    assert!(queue.evidence("pending").unwrap().is_none());
-    assert_eq!(
-        foreign.job("foreign").unwrap().unwrap().state,
-        LearningJobState::Pending
-    );
+async fn cold_graph_then_learning_preserves_alive_origins_and_evidence() {
+    cold_learning_after_graph(OriginLiveness::Alive, false).await;
+}
+
+#[tokio::test]
+async fn cold_graph_then_learning_preserves_unknown_origins_and_evidence() {
+    cold_learning_after_graph(OriginLiveness::Unknown, false).await;
+}
+
+#[tokio::test]
+async fn cold_graph_then_learning_preserves_other_config_and_evidence() {
+    cold_learning_after_graph(OriginLiveness::Dead, true).await;
+}
+
+#[tokio::test]
+async fn cold_graph_then_learning_ends_only_dead_same_config_core_jobs() {
+    cold_learning_after_graph(OriginLiveness::Dead, false).await;
 }
 
 #[tokio::test]

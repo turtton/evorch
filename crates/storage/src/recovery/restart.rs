@@ -123,7 +123,8 @@ pub enum RestartMutation {
         manifest_id: String,
     },
     LearningInventory(handoff::LearningInventory),
-    /// Cold-only disposition, including learning left pending after graph completion.
+    /// Caller must confirm a dead Core origin of the same config. Graph isolation
+    /// alone grants no learning cleanup authority, even after graph completion.
     QuarantineLearningCold,
     ResumeLearning {
         task_id: String,
@@ -681,7 +682,6 @@ pub(super) fn mutate(
             fail(conn, id, &reason)?;
         }
         RestartMutation::QuarantineCold => {
-            handoff::quarantine_learning(conn, id)?;
             if tx.phase == RestartPhase::Completed {
                 return Ok(tx);
             }
@@ -826,13 +826,13 @@ pub(super) fn invalidate(
     Ok(())
 }
 
-/// Minimal cold disposition is independent of payload parsing, just like invalidation.
+/// Minimal graph disposition is independent of payload parsing, just like invalidation.
+/// Learning cleanup requires the separate origin-aware cold-learning pass.
 pub(super) fn quarantine_cold(
     conn: &Connection,
     id: &str,
     revision: u64,
 ) -> Result<(), StorageError> {
-    handoff::quarantine_learning(conn, id)?;
     let changed=conn.execute("UPDATE restart_transactions SET phase=CASE WHEN phase='preparing' THEN 'aborted' ELSE 'invalidated' END,revision=revision+1,failure_reason='cold boot has no inherited proof' WHERE restart_id=?1 AND revision=?2 AND phase != 'completed'",params![id,revision])?;
     if changed != 1 {
         return Err(invalid("restart cold quarantine revision conflict"));

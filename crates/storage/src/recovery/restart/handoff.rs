@@ -271,7 +271,9 @@ pub(super) fn resume(
     conn.execute("UPDATE restart_learning_members SET disposition=?3,result_key_json=?4 WHERE restart_id=?1 AND task_id=?2",params![tx.metadata.restart_id,id,disposition,encode(&result)?])?;
     Ok(())
 }
-/// Cold boot never requeues Interrupted. Exact membership fences prevent harming a later origin.
+/// Only the origin-aware cold-learning pass calls this, after checking Core,
+/// same config and Dead. Graph quarantine cannot authorize learning cleanup.
+/// Exact membership fences additionally prevent harming a later attempt.
 pub(super) fn quarantine_learning(conn: &Connection, id: &str) -> Result<(), StorageError> {
     let mut q=conn.prepare("SELECT task_id,member_json FROM restart_learning_members WHERE restart_id=?1 AND disposition='pending'")?;
     let rows = q
