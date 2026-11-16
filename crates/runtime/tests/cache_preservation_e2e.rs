@@ -13,6 +13,8 @@ mod encrypted_reasoning_cache;
 mod hosted_search_cache;
 mod image_generation_cache;
 mod lane_cache;
+#[path = "cache_preservation_e2e/malformed_arguments.rs"]
+mod malformed_arguments_cache;
 mod procedure_boundary_cache;
 #[path = "read_alias_cache/mod.rs"]
 mod read_alias_cache;
@@ -715,6 +717,69 @@ fn verify_trace_of(
         total_cached
     );
     assert!(total_cached > 0);
+}
+
+#[tokio::test]
+async fn malformed_tool_arguments_preserve_openai_prefix_and_affinity() {
+    for wire in [Wire::ChatCompletions, Wire::Responses] {
+        let broken = ScriptedResponse::tool_call("cut", MODEL, 0, "cut", "read", ["{\"index\":"]);
+        let mut harness = harness_with_wire(
+            wire,
+            vec![
+                read_response(0),
+                broken,
+                read_response(2),
+                text_response("done"),
+            ],
+            1_000_000,
+            Arc::new(BulkRead),
+            Vec::new(),
+            None,
+            0.99,
+            |_| {},
+        );
+        let run = harness.runtime.delegate_background(
+            Role::Worker,
+            "recover malformed arguments".into(),
+            RunConfig::default(),
+        );
+        let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+        assert_eq!(
+            harness.runtime.wait(run).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        verify_trace(&harness, run, &events, 0);
+        let requests = harness
+            .mock
+            .recorded_requests()
+            .into_iter()
+            .filter(|request| request.path == wire.path())
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 4);
+        for request in &requests {
+            assert_eq!(
+                request.body.get("prompt_cache_key"),
+                requests[0].body.get("prompt_cache_key")
+            );
+        }
+        if matches!(wire, Wire::Responses) {
+            assert_eq!(requests[0].body["prompt_cache_key"], run.to_string());
+            let calls = requests[2].body["input"].as_array().unwrap();
+            assert!(calls.iter().any(|call| call["type"] == "function_call"
+                && call["call_id"] == "cut"
+                && call["arguments"] == "{}"));
+        } else {
+            let messages = requests[2].body["messages"].as_array().unwrap();
+            assert!(
+                messages
+                    .iter()
+                    .filter_map(|m| m["tool_calls"].as_array())
+                    .flatten()
+                    .any(|call| call["id"] == "cut" && call["function"]["arguments"] == "{}")
+            );
+        }
+        assert!(!events.iter().any(|event|matches!(&event.kind, EventKind::Tool(event_bus::ToolEvent::ToolStarted {call_id,..}) if call_id == "cut")));
+    }
 }
 
 #[tokio::test]

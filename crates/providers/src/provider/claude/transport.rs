@@ -183,7 +183,11 @@ fn invalid_json() -> ProviderError {
     }
 }
 
-pub(crate) async fn response_error(response: wreq::Response) -> ProviderError {
+/// Convert a non-success response into a [`ProviderError`].
+///
+/// `auth` is the credential used for the request; it is masked out of the
+/// surfaced detail even when it is not present in the environment.
+pub(crate) async fn response_error(response: wreq::Response, auth: &ProviderAuth) -> ProviderError {
     let status = response.status().as_u16();
     if status == 429 {
         let retry_after = response
@@ -194,14 +198,16 @@ pub(crate) async fn response_error(response: wreq::Response) -> ProviderError {
             .map(Duration::from_secs);
         ProviderError::RateLimited { retry_after }
     } else {
-        let body = bounded_json(response)
-            .await
-            .ok()
-            .and_then(|value| super::required_version_error(&value))
-            .unwrap_or_else(|| "Claude request rejected".into());
+        let body = match bounded_json(response).await {
+            Ok(value) => super::required_version_error(&value)
+                .unwrap_or_else(|| rejection::rejection_detail(&value, &auth.api_key)),
+            Err(_) => rejection::FALLBACK.into(),
+        };
         ProviderError::Http { status, body }
     }
 }
+
+mod rejection;
 
 #[cfg(test)]
 mod tests;

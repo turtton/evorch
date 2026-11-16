@@ -414,8 +414,8 @@ async fn empty_text_does_not_trigger_but_tool_delta_triggers_once() {
 }
 
 // Given: 引数が JSON として壊れたツール呼び出し / When: 完了する / Then: 本文を含まない診断を 1 件だけ発行し、入力は null になる
-#[tokio::test]
-async fn malformed_tool_arguments_emit_one_diagnostic_without_the_arguments() {
+#[test]
+fn malformed_tool_arguments_emit_one_diagnostic_without_the_arguments() {
     let bus = Arc::new(EventBus::new(16));
     let mut rx = bus.subscribe();
     let mut pump = SsePump::new(
@@ -428,12 +428,14 @@ async fn malformed_tool_arguments_emit_one_diagnostic_without_the_arguments() {
     pump.push_chunk(b"data: {\"tool\":true,\"args\":\"{\\\"secret\\\": \"}\n\n");
     pump.push_chunk(b"data: [DONE]\n\n");
 
-    let mut diagnostics = Vec::new();
-    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {
-        if let EventKind::Diagnostic(diagnostic) = event.kind {
-            diagnostics.push(diagnostic);
-        }
-    }
+    let diagnostics: Vec<_> = rx
+        .drain_pending_snapshot()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Diagnostic(diagnostic) => Some(diagnostic),
+            _ => None,
+        })
+        .collect();
     assert_eq!(diagnostics.len(), 1);
     let diagnostic = &diagnostics[0];
     assert_eq!(diagnostic.code, "ToolArgumentsMalformed");
@@ -467,6 +469,43 @@ async fn malformed_tool_arguments_emit_one_diagnostic_without_the_arguments() {
             ..
         }]
     ));
+}
+
+#[test]
+fn non_object_tool_arguments_emit_one_diagnostic_without_the_arguments() {
+    for arguments in ["null", "[1]", "42", "\"sensitive argument\""] {
+        let bus = Arc::new(EventBus::new(16));
+        let mut rx = bus.subscribe();
+        let mut pump = SsePump::new(
+            FakeInterpreter::new(),
+            UsageEmitter::new(None, "test"),
+            "model-a".to_string(),
+            observer(Some(bus)),
+        );
+        let chunk = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"tool":true,"args":arguments})
+        );
+
+        pump.push_chunk(chunk.as_bytes());
+
+        let diagnostics: Vec<_> = rx
+            .drain_pending_snapshot()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Diagnostic(diagnostic) => Some(diagnostic),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(diagnostics.len(), 1, "arguments={arguments}");
+        assert_eq!(diagnostics[0].code, "ToolArgumentsMalformed");
+        assert_eq!(diagnostics[0].call_id.as_deref(), Some("call-1"));
+        assert!(
+            !diagnostics[0].detail.contains("sensitive argument"),
+            "{}",
+            diagnostics[0].detail
+        );
+    }
 }
 
 // Given: pump の各失敗入口 / When: エラーを発生させる / Then: 対応する failure の RequestFailed をちょうど1回発行する

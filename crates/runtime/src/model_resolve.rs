@@ -126,6 +126,41 @@ pub fn resolve_catalog_entry<'a>(
     resolve_catalog_match(entry, catalog, provider_id, provider_type).map(|(metadata, _)| metadata)
 }
 
+/// Output-only lookup: native Anthropic profiles use the Anthropic catalog even when
+/// another provider lists the same ID with conflicting limits. Do not reuse this for
+/// context windows, prices, image capabilities or route grouping.
+pub(crate) fn resolve_model_output_limit(
+    entry: &ModelEntryConfig,
+    presets: &BTreeMap<String, ModelPresetConfig>,
+    catalog: Option<&ModelCatalog>,
+    provider_id: Option<&str>,
+    provider_type: config::ProviderTypeConfig,
+) -> Option<u64> {
+    entry
+        .preset
+        .as_ref()
+        .and_then(|name| presets.get(name))
+        .and_then(|preset| preset.max_output_tokens)
+        .filter(|limit| *limit > 0)
+        .or_else(|| {
+            let catalog = catalog?;
+            let (model_id, _) = config::types::provider::parse_model_speed(&entry.id);
+            explicit_entry(entry, catalog)
+                .or_else(|| {
+                    matches!(
+                        provider_type,
+                        config::ProviderTypeConfig::Anthropic
+                            | config::ProviderTypeConfig::AnthropicSubscription
+                    )
+                    .then(|| catalog.find("anthropic", model_id))
+                    .flatten()
+                })
+                .or_else(|| resolve_catalog_entry(entry, catalog, provider_id, Some(provider_type)))
+                .and_then(|model| model.max_output_tokens)
+                .filter(|limit| *limit > 0)
+        })
+}
+
 /// Cursor's own docs prices for `entry`, unless the entry names a catalog model.
 pub fn cursor_docs_pricing(
     entry: &ModelEntryConfig,

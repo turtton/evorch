@@ -18,7 +18,13 @@ fn apply_patch_history_keeps_anthropic_tool_use_and_result_pair() {
         if !tools_present {
             request.tools.clear();
         }
-        for input in [json!({"input": "patch\n日本語"}), serde_json::Value::Null] {
+        for (input, expected) in [
+            (
+                json!({"input": "patch\n日本語"}),
+                json!({"input": "patch\n日本語"}),
+            ),
+            (serde_json::Value::Null, json!({})),
+        ] {
             let ContentBlock::ToolUse {
                 input: tool_input, ..
             } = &mut request.messages[0].content[0]
@@ -37,7 +43,7 @@ fn apply_patch_history_keeps_anthropic_tool_use_and_result_pair() {
             assert_eq!(
                 wire["messages"][0]["content"][0],
                 json!({
-                    "type": "tool_use", "id": "patch", "name": "apply_patch", "input": input
+                    "type": "tool_use", "id": "patch", "name": "apply_patch", "input": expected
                 })
             );
             let result = &wire["messages"][1]["content"][0];

@@ -120,8 +120,12 @@ impl RoutedModel {
             || generation.temperature != input.request.temperature
             || reasoning != input.request.reasoning_effort
             || replay_service_tier(speed) != input.request.service_tier
-            || self.checkpoint_output_limit(&invocation.run_id, &route, generation.max_tokens)?
-                != input.request.max_tokens
+            || self.checkpoint_output_limit(
+                &invocation.run_id,
+                &route,
+                generation.max_tokens,
+                input.request.max_tokens,
+            )? != output_limits::checkpoint_limit(input.protocol, input.request.max_tokens)
         {
             return Err(incompatible());
         }

@@ -2,6 +2,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -697,5 +698,42 @@ async fn stream_consumer_drop_before_completion_emits_no_usage() {
     assert!(
         usage_events(&bus_events).is_empty(),
         "完了前に破棄された場合は usage は発行されないはずです: {bus_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn legacy_null_tool_input_keeps_the_chat_wire_argument_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(json_response(200, &fixture("openai", "send_text.json")))
+        .mount(&server)
+        .await;
+    let mut input = request();
+    input.messages.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "legacy".into(),
+            name: "read".into(),
+            input: json!(null),
+        }],
+    });
+    OpenAiCompatibleClient::new(
+        server.uri(),
+        "test-compatible",
+        Duration::from_secs(30),
+        None,
+    )
+    .unwrap()
+    .send(&ProviderAuth::new("test"), &input)
+    .await
+    .unwrap();
+    let captured = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&captured[0].body).unwrap();
+    assert_eq!(
+        body["messages"][1]["tool_calls"],
+        json!([{"id":"legacy","type":"function","function":{"name":"read","arguments":"null"}}])
+    );
+    assert!(
+        matches!(&input.messages.last().unwrap().content[0],ContentBlock::ToolUse {input,..} if input.is_null())
     );
 }

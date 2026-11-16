@@ -549,6 +549,36 @@ mod tests {
         assert!(detail.len() <= REQUEST_FAILED_DETAIL_MAX_BYTES);
     }
 
+    // Given: Claude 経路の type・message 付き拒否 / When: attempt 失敗を発行 / Then: detail に原因が載り、使用中 credential は二重防御で伏せられる
+    #[tokio::test]
+    async fn failure_detail_keeps_claude_rejection_cause() {
+        let secret = "oauth-in-use-0123";
+        let bus = Arc::new(EventBus::new(4));
+        let mut rx = bus.subscribe();
+        let mut observer = observer(Some(bus), false).with_known_secret(secret);
+        observer.emit_started();
+        let _ = next_provider_event(&mut rx).await;
+
+        observer.emit_failed(&ProviderError::Http {
+            status: 400,
+            body: format!(
+                "Claude request rejected: invalid_request_error: tool_use.input: Input should be an object {secret}"
+            ),
+        });
+
+        let ProviderEvent::RequestFailed {
+            detail: Some(detail),
+            ..
+        } = next_provider_event(&mut rx).await
+        else {
+            panic!("RequestFailed に detail が載る");
+        };
+        assert!(
+            detail.contains("invalid_request_error: tool_use.input: Input should be an object ***")
+        );
+        assert!(!detail.contains(secret));
+    }
+
     // Given: paused time 上の streaming attempt / When: reasoning・空 text・有効 text を時間を進めながら記録 / Then: 有効 text 到達時だけ累積時間で TTFT を発行する
     #[tokio::test(start_paused = true)]
     async fn first_token_uses_tokio_elapsed_and_ignores_non_visible_deltas() {

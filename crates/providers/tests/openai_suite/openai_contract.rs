@@ -658,3 +658,41 @@ async fn error_event_yields_http_error_item() {
             if body.starts_with("context_length_exceeded: ")
     ));
 }
+
+#[tokio::test]
+async fn legacy_null_tool_input_keeps_the_responses_wire_argument_bytes() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        sse_response(&fixture("openai", "responses_text.sse")),
+    )
+    .await;
+    let mut input = request();
+    input.messages.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "legacy".into(),
+            name: "read".into(),
+            input: json!(null),
+        }],
+    });
+    client(&server, Duration::from_secs(30), None)
+        .send(&ProviderAuth::new("sk-contract"), &input)
+        .await
+        .unwrap();
+    let captured = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&captured[0].body).unwrap();
+    let call = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap();
+    assert_eq!(
+        call,
+        &json!({"type":"function_call","call_id":"legacy","name":"read","arguments":"null"})
+    );
+    assert!(
+        matches!(&input.messages.last().unwrap().content[0],ContentBlock::ToolUse {input,..} if input.is_null())
+    );
+}
