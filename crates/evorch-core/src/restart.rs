@@ -1,5 +1,6 @@
 //! One process-local lifecycle owner. There is deliberately no wire/production request handler.
-//! Lock order: coordinator -> host gate / runtime. Runtime never calls back into this owner.
+//! Lock order: coordinator -> host gate / runtime. Direct runtime Stop enters the
+//! installed boundary before taking any runtime lock; runtime never calls back while locked.
 use runtime::{
     AgentRuntime, RunId, RuntimeError, StopScope,
     producer::{ProducerGate, ProducerPause},
@@ -13,6 +14,7 @@ use workbench_host::bootstrap::{
 };
 
 mod preparing;
+mod stop;
 const PREPARATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +106,7 @@ impl RestartCoordinator {
         producers: Vec<ProducerGate>,
         preparing: workbench_host::bootstrap::restart::PreparingServices,
     ) -> Self {
-        Self(Arc::new(Inner {
+        let coordinator = Self(Arc::new(Inner {
             owner: uuid::Uuid::new_v4(),
             runtime,
             gate,
@@ -125,7 +127,15 @@ impl RestartCoordinator {
                 preparation_deadline: None,
             }),
             changed: watch::channel(0).0,
-        }))
+        }));
+        coordinator
+            .0
+            .runtime
+            .install_stop_boundary(Arc::new(stop::CoreStopBoundary(Arc::downgrade(
+                &coordinator.0,
+            ))))
+            .expect("runtime already has another lifecycle owner");
+        coordinator
     }
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.changed.subscribe()
@@ -473,17 +483,8 @@ impl RestartCoordinator {
 }
 impl RestartStopHandler for RestartCoordinator {
     fn stop(&self, run: RunId, scope: StopScope) -> Result<(), RuntimeError> {
-        let mut state = self.0.state.lock().unwrap();
-        // Do not publish Cancelling before runtime terminal admission accepts.
-        // Runtime prepares dispatch, delivers Stop, then durably resumes others.
-        let result = self.0.runtime.stop(run, scope);
-        if let Some(attempt) = state.attempt.clone() {
-            self.synchronize_attempt(&mut state, &attempt);
-        } else if result.is_ok() && state.phase == RestartPhase::PreparingDrains {
-            Self::abort_worker(&mut state);
-            self.reopened(&mut state);
-        }
-        result
+        // Direct and host Stop share the runtime-installed outer boundary.
+        self.0.runtime.stop(run, scope)
     }
 }
 

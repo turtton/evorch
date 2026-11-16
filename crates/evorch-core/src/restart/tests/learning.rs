@@ -24,6 +24,15 @@ impl runtime::AgentModel for PendingLesson {
 
 #[tokio::test(start_paused = true)]
 async fn cohort_timeout_reopens_chat_but_retains_cleanup_and_requeues_same_evidence() {
+    cancelled_learning_preparation(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_stop_during_suspension_retains_cleanup_and_requeues_same_evidence() {
+    cancelled_learning_preparation(true).await;
+}
+
+async fn cancelled_learning_preparation(direct_stop: bool) {
     let dir = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
         db_path: dir.path().join("learning.db"),
@@ -52,7 +61,7 @@ async fn cohort_timeout_reopens_chat_but_retains_cleanup_and_requeues_same_evide
                 reasoning_effort: None,
             },
         });
-    runtime.delegate_background(
+    let source = runtime.delegate_background(
         runtime::Role::Worker,
         "source evidence".into(),
         Default::default(),
@@ -93,7 +102,13 @@ async fn cohort_timeout_reopens_chat_but_retains_cleanup_and_requeues_same_evide
     assert_eq!(gate.phase(), HostRestartPhase::Open);
     assert_eq!(core.request().unwrap(), id);
     let tail = tails.recv().await.unwrap();
-    tokio::time::advance(super::super::preparing::LEARNING_COHORT_LIMIT).await;
+    if direct_stop {
+        runtime.stop(source, StopScope::SelfOnly).unwrap();
+        // The synchronous boundary must have cancelled before Stop returns.
+        assert_eq!(core.snapshot().phase, RestartPhase::Running);
+    } else {
+        tokio::time::advance(super::super::preparing::LEARNING_COHORT_LIMIT).await;
+    }
     phase(&core, RestartPhase::Running).await;
     assert!(runtime.learning_gate().is_open());
     assert_eq!(
