@@ -1,4 +1,7 @@
 // Captured by the unchanged main writer; see fixtures/waits-main-2eec1163/README.md.
+#[path = "legacy_resume_tests.rs"]
+mod legacy_resume_tests;
+
 use crate::quiesce::RunRecoveryRecord;
 use crate::run_store::RunStore;
 

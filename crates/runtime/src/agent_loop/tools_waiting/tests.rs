@@ -373,7 +373,7 @@ async fn delegate_projection_uses_original_call_order_and_existing_child_ids() {
 }
 
 #[tokio::test]
-async fn reply_continuation_consumes_only_the_correlated_reply_once() {
+async fn live_recovery_reply_is_retired_once_without_consuming_queued_messages() {
     reply_continuation(false).await;
 }
 
@@ -408,7 +408,7 @@ async fn reply_continuation(expired: bool) {
             json!({"message_id":message,"timeout_ms":1000}),
         )],
     });
-    // An elapsed recovery deadline wins; live waits retain their ordinary priority.
+    // Retirement ignores both elapsed and future deadlines; neither may consume messages.
     state.recovery_waits = vec![legacy_reply_wait(
         parent,
         child,
