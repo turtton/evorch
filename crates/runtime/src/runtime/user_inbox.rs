@@ -1,4 +1,6 @@
 //! Delivery observation for the user inbox, separate from command acceptance.
+mod adoption;
+pub(crate) use adoption::InputAdoption;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -112,6 +114,9 @@ struct InboxState {
 }
 
 pub(crate) struct UserInbox {
+    adoptions: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(any(test, feature = "idle-test-support"))]
+    adoption_gate: Mutex<Option<adoption::Gate>>,
     state: Mutex<InboxState>,
     wake: tokio::sync::watch::Sender<bool>,
     // Separate from observation: host preparation can access the run map, whose
@@ -134,6 +139,9 @@ pub(crate) struct UserInbox {
 impl Default for UserInbox {
     fn default() -> Self {
         Self {
+            adoptions: Arc::default(),
+            #[cfg(any(test, feature = "idle-test-support"))]
+            adoption_gate: Mutex::default(),
             state: Mutex::new(InboxState::default()),
             wake: tokio::sync::watch::channel(false).0,
             trusted_send: Mutex::new(()),
@@ -269,9 +277,12 @@ impl UserInbox {
 
     /// Claim immediately before context adoption, not when taking a request cut
     /// or draining the mpsc channel. A withdrawn input can never be adopted.
-    pub(crate) fn claim(&self, seq: u64) -> bool {
+    pub(crate) fn claim_for_adoption(&self, seq: u64) -> Option<InputAdoption> {
         if seq == 0 {
-            return true; // internal notification / initial input
+            let adoption = self.begin_adoption();
+            #[cfg(any(test, feature = "idle-test-support"))]
+            self.hold_adoption_gate();
+            return Some(adoption); // internal notification / initial input
         }
         #[cfg(test)]
         if let Some(reached) = self.claim_gate_contended.lock().unwrap().take() {
@@ -290,9 +301,25 @@ impl UserInbox {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let claimed = state.pending.remove(&seq);
+        // Publish adoption before removing the last pending input. A reader
+        // that observes pending == 0 must see work until phase publication.
+        let adoption = state.pending.contains(&seq).then(|| self.begin_adoption());
+        if adoption.is_some() {
+            state.pending.remove(&seq);
+        }
         self.refresh(&mut state);
-        claimed
+        drop(state);
+        drop(_guard);
+        #[cfg(any(test, feature = "idle-test-support"))]
+        if adoption.is_some() {
+            self.hold_adoption_gate();
+        }
+        adoption
+    }
+
+    #[cfg(test)]
+    fn claim(&self, seq: u64) -> bool {
+        self.claim_for_adoption(seq).is_some()
     }
 
     pub(crate) fn is_pending(&self, seq: u64) -> bool {

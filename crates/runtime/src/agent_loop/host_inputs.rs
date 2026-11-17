@@ -84,9 +84,10 @@ impl LoopState {
             self.queue_user_message(input);
             return false;
         }
-        if !self.channels.user_inbox.claim(input.3) {
+        let Some(adoption) = self.channels.user_inbox.claim_for_adoption(input.3) else {
             return false;
-        }
+        };
+        self.input_adoptions.push(adoption);
         if let Some(id) = &input.2 {
             self.consumed_intent_inputs.push(id.clone());
         }
