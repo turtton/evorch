@@ -220,6 +220,7 @@ async fn preflight_checks_candidate_child_roles_before_starting_any_baseline() {
         && warning.message.contains("missing")));
     let markdown = std::fs::read_to_string(output.join(output::REPORT_MARKDOWN_FILE)).unwrap();
     assert!(markdown.contains("no samples compared"), "{markdown}");
+    assert!(!output.join("preflight-workspace").exists());
 }
 
 #[tokio::test]
@@ -578,7 +579,9 @@ async fn baseline_and_candidate_replays_each_leave_their_results() {
     for (prompt, nonce) in prompts.iter().zip(&nonces) {
         assert!(prompt.contains(&format!("Run identifier: {nonce}")));
     }
+    assert!(!evaluation.dir.join("preflight-workspace").exists());
     for report in &evaluation.runs {
+        assert!(!report.dir.join("workspace").exists());
         assert_eq!(
             report.outcome.status,
             Status::Completed,
@@ -695,6 +698,8 @@ async fn unpreparable_workspace_is_recorded_as_prepare_failed() {
     );
     assert!(!report.dir.join(output::DATABASE_FILE).exists());
     assert!(fixture.agents.lock().unwrap().is_empty());
+    assert!(!evaluation.dir.join("preflight-workspace").exists());
+    assert!(!report.dir.join("workspace").exists());
 }
 
 #[tokio::test]
@@ -744,4 +749,155 @@ fn simulator_uses_its_binding_or_reports_the_worker_fallback() {
         Some("simulator")
     );
     assert_eq!(summary.source, "eval.user_simulator");
+}
+
+#[tokio::test]
+async fn live_preflight_and_replay_cleanup_preserve_report_inputs_or_keep_clones() {
+    use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
+    for keep_workspace in [false, true] {
+        let fixture = Fixture::new().await;
+        let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(
+            vec![
+                ScriptedResponse::text_stream("agent", "gpt-4o", ["done"]),
+                ScriptedResponse::text_stream(
+                    "simulator",
+                    "gpt-4o",
+                    [r#"{"action":"finish","text":"","reason":"done"}"#],
+                ),
+            ],
+            vec!["gpt-4o".into()],
+        );
+        preflight_config(&fixture, mock.base_url());
+        let mut deps = fixture.deps(vec![], vec![]);
+        deps.models = None;
+        deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+        let mut args = fixture.args(None);
+        args.keep_workspace = keep_workspace;
+        let evaluation = run(args, deps, |report| {
+            assert!(
+                report.dir.join("workspace").is_dir(),
+                "still in use until all callbacks finish"
+            );
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            evaluation.runs[0].outcome.status,
+            Status::Completed,
+            "{:?}",
+            evaluation.runs[0].outcome
+        );
+        assert_eq!(
+            evaluation.dir.join("preflight-workspace").is_dir(),
+            keep_workspace
+        );
+        assert_eq!(
+            evaluation.runs[0].dir.join("workspace").is_dir(),
+            keep_workspace
+        );
+        let reports = crate::report(
+            crate::ReportArgs {
+                dirs: vec![evaluation.dir.clone()],
+                user_config_dir: Some(fixture.user.path().into()),
+                ..Default::default()
+            },
+            &crate::ReportDeps {
+                env: Arc::new(routing::MapEnv::default()),
+                judge: Some(Arc::new(|_| panic!("baseline only: no comparison"))),
+                credentials: None,
+                catalog: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reports.len(), 1);
+        for name in [
+            output::MANIFEST_FILE,
+            preflight::REPORT_FILE,
+            output::REPORT_JSON_FILE,
+            output::REPORT_MARKDOWN_FILE,
+        ] {
+            assert!(evaluation.dir.join(name).is_file(), "{name}");
+        }
+        for name in [
+            output::DATABASE_FILE,
+            output::DIFF_FILE,
+            output::CONVERSATION_FILE,
+            output::OUTCOME_FILE,
+        ] {
+            assert!(evaluation.runs[0].dir.join(name).is_file(), "{name}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn write_failure_also_reaches_cleanup_without_hiding_the_error() {
+    let fixture = Fixture::new().await;
+    let args = fixture.args(None);
+    let dir = args.output.clone().unwrap();
+    let error = run(
+        args,
+        fixture.deps(vec![text("done")], vec![decision("finish", "")]),
+        |_| {
+            // Force the final manifest write to fail after a real replay.
+            std::fs::remove_file(dir.join(output::MANIFEST_FILE)).unwrap();
+            std::fs::create_dir(dir.join(output::MANIFEST_FILE)).unwrap();
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, EvalError::Io(_)), "{error}");
+    assert!(!dir.join("runs/baseline-1/workspace").exists());
+    assert!(dir.join("runs/baseline-1/outcome.json").is_file());
+}
+
+#[tokio::test]
+async fn cleanup_failure_does_not_change_success_and_keep_applies_to_failure() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new().await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("sentinel"), "safe").unwrap();
+    let mut cleanup_failed = false;
+    let evaluation = run_with_cleanup(
+        fixture.args(None),
+        fixture.deps(vec![text("done")], vec![decision("finish", "")]),
+        |report| {
+            // Swap after cleanup opens the descriptor: removal must fail rather
+            // than unlink the replacement, without changing evaluation success.
+            let target = outside.path().to_owned();
+            crate::cleanup::on_workspace_opened(move |workspace| {
+                std::fs::rename(workspace, workspace.with_file_name("moved")).unwrap();
+                symlink(target, workspace).unwrap();
+            });
+            let busy = crate::cleanup::clean(&[report.dir.parent().unwrap().parent().unwrap().to_owned()], None, Default::default());
+            assert!(matches!(&busy.entries[0].action, crate::cleanup::Action::Skip(reason) if reason == "busy"));
+        },
+        |_, report| cleanup_failed = report.has_failures(),
+    )
+    .await
+    .unwrap();
+    assert!(cleanup_failed);
+    assert_eq!(evaluation.runs[0].outcome.status, Status::Completed);
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("sentinel")).unwrap(),
+        "safe"
+    );
+    // A replay failure after prepare still keeps a real clone when requested.
+    for keep_workspace in [false, true] {
+        let mut args = fixture.args(None);
+        args.output = Some(fixture.user.path().join(if keep_workspace {
+            "kept-failure"
+        } else {
+            "cleaned-failure"
+        }));
+        args.keep_workspace = keep_workspace;
+        // All structured retries receive invalid simulator JSON.
+        let deps = fixture.deps(vec![text("done")], vec![text("invalid"); 3]);
+        let evaluation = run(args, deps, |_| {}).await.unwrap();
+        assert_eq!(evaluation.runs[0].outcome.status, Status::Failed);
+        assert_eq!(
+            evaluation.runs[0].dir.join("workspace").is_dir(),
+            keep_workspace
+        );
+    }
 }
