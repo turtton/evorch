@@ -95,7 +95,6 @@ fn harness(telemetry: TelemetryOverlay) -> Harness<'static> {
                 ui,
                 &tasks,
                 &telemetry,
-                &Default::default(),
                 &["run-1".into(), "run-2".into()],
             );
         })

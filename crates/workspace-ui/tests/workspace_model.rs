@@ -29,13 +29,13 @@ fn workspace_with(root: LayoutNode, panels: BTreeMap<PanelId, Panel>) -> Workspa
 }
 
 #[test]
-fn default_v01_places_three_panels_in_nested_binary_splits() {
+fn default_v01_places_two_panels_in_a_vertical_split() {
     // Given: the public v0.1 default workspace constructor.
     // When: the framework-independent workspace is built.
     let workspace = Workspace::default_v01();
 
-    // Then: all three pane kinds exist and the nested layout is valid.
-    assert_eq!(workspace.panels.len(), 3);
+    // Then: both pane kinds exist and the layout is valid.
+    assert_eq!(workspace.panels.len(), 2);
     assert_eq!(workspace.version, 1);
     assert_eq!(
         workspace.panels[&PanelId::new("agent-main")].kind,
@@ -45,21 +45,12 @@ fn default_v01_places_three_panels_in_nested_binary_splits() {
         workspace.panels[&PanelId::new("terminal-main")].kind,
         PanelKind::Terminal
     );
-    assert_eq!(
-        workspace.panels[&PanelId::new("tasks-main")].kind,
-        PanelKind::Tasks
-    );
     let json = serde_json::to_string(&workspace).expect("v1 fixture serialization must succeed");
     let migrated = workspace_ui::from_json(&json).expect("v1 fixture must migrate");
     assert_eq!(validate(&migrated), Ok(()));
 
-    let LayoutNode::Split(horizontal) = &workspace.main.root else {
-        panic!("default root must be a horizontal split");
-    };
-    assert_eq!(horizontal.direction, SplitDirection::Horizontal);
-    assert_eq!(horizontal.fraction, 0.2);
-    let LayoutNode::Split(vertical) = horizontal.second.as_ref() else {
-        panic!("default right side must be a vertical split");
+    let LayoutNode::Split(vertical) = &workspace.main.root else {
+        panic!("default root must be a vertical split");
     };
     assert_eq!(vertical.direction, SplitDirection::Vertical);
     assert_eq!(vertical.fraction, 0.7);
@@ -176,8 +167,8 @@ fn recursive_layout_serialization_roundtrip_remains_a_tree() {
     let LayoutNode::Split(root) = &mut workspace.main.root else {
         panic!("root split");
     };
-    let LayoutNode::Tabs(tabs) = root.first.as_mut() else {
-        panic!("tasks tabs");
+    let LayoutNode::Tabs(tabs) = root.second.as_mut() else {
+        panic!("terminal tabs");
     };
     let id = PanelId::new("notifications-main");
     tabs.panels.push(id.clone());
@@ -206,7 +197,7 @@ fn public_event_and_insert_position_types_roundtrip_through_serde() {
         InsertPosition::First,
         InsertPosition::Last,
         InsertPosition::Before(PanelId::new("agent-main")),
-        InsertPosition::After(PanelId::new("tasks-main")),
+        InsertPosition::After(PanelId::new("terminal-main")),
     ];
 
     // When: the public boundary types round-trip through serde JSON.

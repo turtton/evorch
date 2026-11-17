@@ -5,8 +5,6 @@
 mod approval_input_priority;
 #[path = "headless_activity/background_notifications_headless.rs"]
 mod background_notifications_headless;
-#[path = "headless_activity/durable_tasks_model.rs"]
-mod durable_tasks_model;
 #[path = "headless_activity/legacy_notifications_headless.rs"]
 mod legacy_notifications_headless;
 #[path = "headless_activity/loop_ui_headless.rs"]
@@ -19,8 +17,6 @@ mod scoped_approval_notifications;
 mod subagents_metrics_headless;
 #[path = "headless_activity/tasks_concurrent_runs_headless.rs"]
 mod tasks_concurrent_runs_headless;
-#[path = "headless_activity/tasks_work_headless.rs"]
-mod tasks_work_headless;
 #[path = "headless_activity/thread_metrics_isolation.rs"]
 mod thread_metrics_isolation;
 #[path = "headless_activity/transcript_lag.rs"]

@@ -142,7 +142,6 @@ fn demo_state_has_no_duplicate_interactive_labels() {
         "subagents-home",
         "diff-main",
         "terminal-main",
-        "tasks-main",
         "notifications-main",
     ];
 

@@ -21,7 +21,6 @@ pub fn panel_keybinds(
         let action = match name.as_str() {
             "focus_agent_pane" => KeyAction::FocusAgentPane,
             "focus_terminal_pane" => KeyAction::FocusTerminalPane,
-            "focus_tasks_pane" => KeyAction::FocusTasksPane,
             "save_layout" => KeyAction::SaveLayout,
             "reset_layout" => KeyAction::ResetLayout,
             "cycle_agent_role" => KeyAction::CycleAgentRole,
@@ -158,7 +157,11 @@ mod tests {
     #[test]
     fn panel_rejects_unknown_actions_and_keys() {
         // Given: invalid action or key names.
-        for (action, key) in [("unknown", "Ctrl+S"), ("save_layout", "Ctrl+Unknown")] {
+        for (action, key) in [
+            ("unknown", "Ctrl+S"),
+            ("focus_tasks_pane", "Ctrl+3"),
+            ("save_layout", "Ctrl+Unknown"),
+        ] {
             let panel = config::PanelConfig {
                 keybinds: [(action.into(), key.into())].into(),
                 ..Default::default()
@@ -202,12 +205,6 @@ mod tests {
         assert_eq!(
             keymap.action_for_input(&ctx.input(|i| i.clone())),
             Some(KeyAction::FocusTerminalPane)
-        );
-
-        let ctx = run_with_key(Key::Num3, Modifiers::COMMAND);
-        assert_eq!(
-            keymap.action_for_input(&ctx.input(|i| i.clone())),
-            Some(KeyAction::FocusTasksPane)
         );
     }
 

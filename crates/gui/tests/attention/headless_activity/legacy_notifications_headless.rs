@@ -44,9 +44,9 @@ fn saved_legacy_layout_exposes_notification_row_and_opens_run_transcript() {
 }
 
 #[test]
-fn notification_opens_transcript_when_saved_layout_has_only_tasks_and_terminal() {
+fn notification_opens_transcript_when_saved_layout_has_only_terminal() {
     // Given: a valid saved layout without either fixed transcript anchor.
-    let legacy = tasks_and_terminal();
+    let legacy = terminal_only();
     assert_notification_opens_transcript(legacy);
 }
 
@@ -54,7 +54,7 @@ fn notification_opens_transcript_when_saved_layout_has_only_tasks_and_terminal()
 fn transcript_opens_beside_subagents_added_to_minimal_layout() {
     // Given: a layout with no Agents, Agent, or Notifications tab.
     let mut settings = UiSettings::default();
-    settings.layout.workspace = Some(tasks_and_terminal());
+    settings.layout.workspace = Some(terminal_only());
     let mut state = WorkbenchState::new(DemoSource(Vec::new()), &settings).unwrap();
     // When: a transcript is opened directly.
     state.open_agent_pane("fallback-run");
@@ -68,7 +68,6 @@ fn transcript_opens_beside_subagents_added_to_minimal_layout() {
     assert_eq!(
         leaf.tabs,
         vec![
-            PanelId::new("tasks-main"),
             PanelId::new("terminal-main"),
             PanelId::new("subagents-home"),
             PanelId::new("agent-fallback-run")
@@ -76,13 +75,13 @@ fn transcript_opens_beside_subagents_added_to_minimal_layout() {
     );
 }
 
-fn tasks_and_terminal() -> Workspace {
+fn terminal_only() -> Workspace {
     let mut workspace = Workspace::default_v01();
     workspace.version = workspace_ui::WORKSPACE_SCHEMA_VERSION;
     workspace.panels.remove(&PanelId::new("agent-main"));
     workspace.main.root = LayoutNode::Tabs(workspace_ui::Tabs {
-        panels: vec![PanelId::new("tasks-main"), PanelId::new("terminal-main")],
-        active: 1,
+        panels: vec![PanelId::new("terminal-main")],
+        active: 0,
     });
     workspace
 }

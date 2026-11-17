@@ -49,9 +49,9 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
   -  ignored テスト一括: `cargo test -p gui --tests -- --ignored --nocapture`
   -  証跡マトリクス: `scripts/gui-evidence-matrix.sh [OUT]`
      (デフォルト出力 `target/gui-evidence`。3 テーマそれぞれで 6 状態 x 4 サイズ、
-     demo / edit-profile x 2 DPI、既定の 7 パネルと Memory パネル、
+     demo / edit-profile x 2 DPI、既定の 6 パネルと Memory パネル、
      追加の 4 設定画面を撮影し、
-     テーマごとに 40 枚、合計 120 PNG の枚数を検査する)
+     テーマごとに 39 枚、合計 117 PNG の枚数を検査する)
 - 環境変数: `EVORCH_REQUIRE_ADAPTER=1` (CI で必須化)、
   `EVORCH_METADATA_EVIDENCE` (model_metadata 証跡の出力先)、
   `WGPU_BACKEND=vulkan` (lavapipe 利用時の推奨指定)
@@ -82,7 +82,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 
 - 役割: 専用 Xvfb と Openbox 内で GUI 本体と同じ `WorkbenchApp` を使う
   `native_qa_window` を起動し、実際のウィンドウへキーボードとマウスを入力する。
-  Ctrl+1/2/3 のタブ移動、レイアウト保存・リセット、最小サイズの強制、
+  Ctrl+1/2 のタブ移動、レイアウト保存・リセット、最小サイズの強制、
   正常終了を検証する。各操作の PNG、保存レイアウト、ログを証跡として残す。
   この fixture はランタイムとサンドボックスを起動しない。
 - コマンド: `cargo build -p gui --bin native_qa_window` の後に
@@ -101,8 +101,8 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 
 ### PR の代表画面プレビュー
 
-`pull_request` の CI が成功すると、L4 の画面証跡から全体画面、Conversation、Tasks、
-Provider 設定、承認待ち、高コントラストの 6 枚を `gui-pr-preview` artifact に保存する。
+`pull_request` の CI が成功すると、L4 の画面証跡から全体画面、Conversation、
+Provider 設定、承認待ち、高コントラストの 5 枚を `gui-pr-preview` artifact に保存する。
 既定ブランチの `GUI PR evidence` workflow がその artifact と PR の head SHA を検証し、
 `gh pr comment --attach` で PR に画像を投稿する。証跡は 2 つの artifact に分かれて残る。
 `gui-evidence` (`gui-evidence` job) は証跡マトリクス全件と native / Wayland 検査の証跡、
@@ -159,7 +159,7 @@ secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画
    確認する (`with_min_inner_size` の実機での効果)。
 
 5. 終了する。`crates/gui/src/keymap.rs` の `KeyAction` は
-   `FocusAgentPane` / `FocusTerminalPane` / `FocusTasksPane` / `SaveLayout` /
+   `FocusAgentPane` / `FocusTerminalPane` / `SaveLayout` /
    `ResetLayout` のみで、終了用のキーバインドは存在しない。アプリの閉じる
    ボタンを使うか、X11 では `xdotool windowclose <id>` で閉じる。
 
@@ -192,7 +192,7 @@ secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画
 | エージェントグリッド | L2 | `runtime_threads/agents_grid_headless.rs::agents_grid_fits_nine_columns_without_horizontal_scroll`, `runtime_threads/agents_grid_headless.rs::agents_grid_respects_clip_rect_when_parent_scrolls_horizontally` |
 | Diff | L2 | `workbench_shell/diff_headless.rs::diff_pane_shows_loading_then_ready_from_fixture`, `workbench_shell/diff_headless.rs::empty_diff_shows_explicit_empty_state`, `workbench_shell/diff_headless.rs::git_error_is_shown_and_ui_keeps_rendering` |
 | Terminal | L2 | `workbench_shell/terminal_headless.rs::terminal_pane_renders_buffer_lines`, `workbench_shell/terminal_headless.rs::terminal_pane_renders_cjk_lines`, `workbench_shell/terminal_headless.rs::terminal_pane_renders_empty_buffer`, `workbench_shell/terminal_headless.rs::terminal_content_labels_within_viewport`, `workbench_shell/layout_v02.rs::undock_to_floating_and_reload_preserves_v02_panels` (terminal タブのドック操作) |
-| Tasks / Memory / Team ペイン | L2 | `workbench_shell/workbench.rs::tasks_row_updates_after_state_change_event`, `workbench_shell/memory_pane.rs::memory_pane_search_and_filter_use_persisted_projection`, `workbench_shell/team_pane.rs::team_pane_shows_claim_owner_and_ready_tasks` |
+| Run 行モデル / Memory / Team ペイン | L2 | `workbench_shell/workbench.rs::tasks_row_updates_after_state_change_event`, `workbench_shell/memory_pane.rs::memory_pane_search_and_filter_use_persisted_projection`, `workbench_shell/team_pane.rs::team_pane_shows_claim_owner_and_ready_tasks` |
 | Agent browser タブ | L1, L5, L6 | `crates/gui/src/app/agent_browser_tests.rs`, `workbench_shell/browser.rs::agent_pane_screencasts_the_selected_run_with_its_activity_overlaid`, `workbench_shell/browser.rs::a_closed_page_keeps_its_last_frame_and_says_so`, `workbench_shell/agent_browser_workbench.rs::a_page_opens_the_browser_tab_and_view_reopens_it_after_closing`, `transcript_cards/transcript_tool.rs::browser_tool_card_view_asks_to_show_its_runs_page`, `crates/browser/tests/agent_chromium.rs` |
 | Loop ステータス | L2 | `loop_status_headless.rs::loop_state_tracks_stage_and_rejections_from_bus_events`, `loop_status_headless.rs::state_controls_issue_pause_and_resume_goal_commands_once` |
 | テーマ | L2 | `theme_headless.rs::install_applies_dark_design_tokens`, `theme_headless.rs::workbench_installs_theme_on_first_frame`, `theme_headless.rs::dock_style_distinguishes_tab_states` |
@@ -212,7 +212,7 @@ secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画
 | `CHROME` | 環境変数 | chromiumoxide の実行ファイル検出が参照する Chromium パス。browser-e2e で設定 | L6 |
 | `WGPU_BACKEND` | 環境変数 | wgpu のバックエンド指定。lavapipe 環境では `vulkan` を推奨 | L4 |
 | `cargo test -p gui --tests -- --ignored --nocapture` | コマンド | ignored オフスクリーンレンダテストの一括スイープ | L4 |
-| `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 3 テーマ x 40 PNG のサイズ・DPI・パネル・設定画面の証跡を生成し枚数を検査 | L4 |
+| `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 3 テーマ x 39 PNG のサイズ・DPI・パネル・設定画面の証跡を生成し枚数を検査 | L4 |
 | `cargo test -j 1 -p gui --test workbench_shell -- browser:: agent_browser_workbench:: --test-threads=1` | コマンド | Agent browser タブのフェイクビューテスト | L5 |
 | `cargo test -p browser --test agent_chromium -- --ignored --nocapture` | コマンド | 実 Chromium E2E | L6 |
 | `scripts/check-gui-native.sh [OUT]` | コマンド | 専用 Xvfb 内の実ウィンドウを自動操作し、PNG・レイアウト・ログを残す | L7 |

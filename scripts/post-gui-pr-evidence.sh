@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Upload six fixed GUI screenshots from a completed PR CI run. This script is
+# Upload five fixed GUI screenshots from a completed PR CI run. This script is
 # executed from the default branch by gui-pr-evidence.yml, never from PR code.
 set -Eeuo pipefail
 
@@ -44,8 +44,8 @@ if ! jq -e --arg repo "$repo" --arg sha "$head_sha" --arg source "$head_repo" \
     exit 0
 fi
 
-names=(01-workbench.png 02-conversation.png 03-tasks.png 04-provider-settings.png
-    05-approvals.png 06-high-contrast.png)
+names=(01-workbench.png 02-conversation.png 03-provider-settings.png
+    04-approvals.png 05-high-contrast.png)
 for name in "${names[@]}"; do
     path=$preview_dir/$name
     [[ -f "$path" && ! -L "$path" ]] || fail "Missing regular screenshot: $name"
@@ -61,7 +61,7 @@ cat > "$body" <<EOF
 <!-- evorch-gui-qa-run:$run_id -->
 ### GUI QA screenshots
 
-Six representative screens from [CI run $run_id](https://github.com/$repo/actions/runs/$run_id). The run's **gui-evidence** artifact contains the full screen matrix and native input evidence.
+Five representative screens from [CI run $run_id](https://github.com/$repo/actions/runs/$run_id). The run's **gui-evidence** artifact contains the full screen matrix and native input evidence.
 
 <details><summary>Show screenshots</summary>
 
@@ -73,26 +73,22 @@ Six representative screens from [CI run $run_id](https://github.com/$repo/action
 
 ![Conversation](./02-conversation.png)
 
-**Tasks**
-
-![Tasks](./03-tasks.png)
-
 **Provider settings**
 
-![Provider settings](./04-provider-settings.png)
+![Provider settings](./03-provider-settings.png)
 
 **Pending approvals**
 
-![Pending approvals](./05-approvals.png)
+![Pending approvals](./04-approvals.png)
 
 **High contrast**
 
-![High contrast](./06-high-contrast.png)
+![High contrast](./05-high-contrast.png)
 
 </details>
 EOF
 cd -- "$preview_dir"
 gh pr comment "$pr" -R "$repo" --body-file "$body" \
     --attach ./01-workbench.png --attach ./02-conversation.png \
-    --attach ./03-tasks.png --attach ./04-provider-settings.png \
-    --attach ./05-approvals.png --attach ./06-high-contrast.png
+    --attach ./03-provider-settings.png \
+    --attach ./04-approvals.png --attach ./05-high-contrast.png

@@ -97,7 +97,6 @@ pub struct LayoutSettings {
 pub enum KeyAction {
     FocusAgentPane,
     FocusTerminalPane,
-    FocusTasksPane,
     SaveLayout,
     ResetLayout,
     CycleAgentRole,
@@ -205,15 +204,6 @@ impl Default for KeybindSettings {
                     shift: false,
                     alt: false,
                     key: "2".to_owned(),
-                },
-            ),
-            (
-                KeyAction::FocusTasksPane,
-                KeyChord {
-                    ctrl: true,
-                    shift: false,
-                    alt: false,
-                    key: "3".to_owned(),
                 },
             ),
             (

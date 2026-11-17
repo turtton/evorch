@@ -78,7 +78,6 @@ fn persisted_old_right_group_reconciles_global_tabs_and_keeps_terminal_selection
     let LayoutNode::Tabs(globals) = left.second.as_ref() else {
         panic!("global tabs")
     };
-    assert!(globals.panels.contains(&PanelId::new("tasks-main")));
     assert!(globals.panels.contains(&PanelId::new("notifications-main")));
     assert!(globals.panels.contains(&PanelId::new("diff-main")));
     assert!(dock.find_tab(&PanelId::new("agents-main")).is_none());

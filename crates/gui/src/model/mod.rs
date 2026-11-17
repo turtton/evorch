@@ -8,7 +8,6 @@ pub mod commands;
 pub mod composer;
 pub mod context_inspector;
 pub mod demo;
-pub mod durable_tasks;
 pub mod effort;
 pub mod evaluations;
 pub mod failure_text;

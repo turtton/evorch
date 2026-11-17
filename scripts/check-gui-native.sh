@@ -129,7 +129,7 @@ for ((attempt=0; attempt<100; attempt++)); do
 done
 run xdotool get_desktop >/dev/null || fail 'Openbox did not become ready.'
 
-# Put the three shortcut targets in the same deck: focusing them must change the
+# Put the two shortcut targets in the same deck: focusing them must change the
 # selected tab, giving both a semantic saved-layout assertion and a visible one.
 cat > "$out/input-layout.json" <<'JSON'
 {
@@ -137,13 +137,12 @@ cat > "$out/input-layout.json" <<'JSON'
   "panels": {
     "agent-main": {"id":"agent-main","kind":"agent","title":"Conversation"},
     "terminal-main": {"id":"terminal-main","kind":"terminal","title":"Terminal"},
-    "tasks-main": {"id":"tasks-main","kind":"tasks","title":"Tasks"},
     "notifications-main": {"id":"notifications-main","kind":"notifications","title":"Notifications"},
     "sidebar-main": {"id":"sidebar-main","kind":"sidebar","title":"Projects"},
     "subagents-home": {"id":"subagents-home","kind":"subagent_region","title":"Subagents"},
     "diff-main": {"id":"diff-main","kind":"diff","title":"Diff"}
   },
-  "main": {"root":{"type":"tabs","panels":["agent-main","terminal-main","tasks-main","notifications-main","sidebar-main","subagents-home","diff-main"],"active":0},"floating":[]},
+  "main": {"root":{"type":"tabs","panels":["agent-main","terminal-main","notifications-main","sidebar-main","subagents-home","diff-main"],"active":0},"floating":[]},
   "extra_windows": []
 }
 JSON
@@ -208,7 +207,7 @@ assert_changed() {
     printf '%s -> %s: %s changed pixels\n' "$before" "$after" "$changed" >> "$out/assertions.log"
 }
 
-# Ctrl+1/2/3 must reach real GUI input dispatch, and Ctrl+S must persist the result.
+# Ctrl+1/2 must reach real GUI input dispatch, and Ctrl+S must persist the result.
 run xdotool key --clearmodifiers ctrl+1
 save_and_assert_active agent-main 01-conversation ctrl+1
 capture 01-conversation
@@ -216,30 +215,26 @@ run xdotool key --clearmodifiers ctrl+2
 save_and_assert_active terminal-main 02-terminal ctrl+2
 capture 02-terminal
 assert_changed 01-conversation 02-terminal
-run xdotool key --clearmodifiers ctrl+3
-save_and_assert_active tasks-main 03-tasks ctrl+3
-capture 03-tasks
-assert_changed 02-terminal 03-tasks
 run xdotool key --clearmodifiers ctrl+1
-save_and_assert_active agent-main 04-conversation ctrl+1
-capture 04-conversation
-assert_changed 03-tasks 04-conversation
+save_and_assert_active agent-main 03-conversation ctrl+1
+capture 03-conversation
+assert_changed 02-terminal 03-conversation
 
 # At 96 DPI the first tab is below the diagnostics button; click its neighbour.
 # Saved layout makes a misplaced click fail instead of accepting any changed pixel.
 run xdotool mousemove --window "$window" 170 38 click 1
 run xdotool mousemove 1590 990
-save_and_assert_active terminal-main 05-mouse-terminal
-capture 05-mouse-terminal
-assert_changed 04-conversation 05-mouse-terminal
+save_and_assert_active terminal-main 04-mouse-terminal
+capture 04-mouse-terminal
+assert_changed 03-conversation 04-mouse-terminal
 
 run xdotool key --clearmodifiers ctrl+shift+r
 sleep 0.5
-save_and_assert_active agent-main 06-default-workbench ctrl+shift+r
-jq -e '.main.root.type == "split"' "$out/06-default-workbench.json" >/dev/null \
+save_and_assert_active agent-main 05-default-workbench ctrl+shift+r
+jq -e '.main.root.type == "split"' "$out/05-default-workbench.json" >/dev/null \
     || fail 'Ctrl+Shift+R did not restore the default split layout.'
-capture 06-default-workbench
-assert_changed 05-mouse-terminal 06-default-workbench
+capture 05-default-workbench
+assert_changed 04-mouse-terminal 05-default-workbench
 
 # Request a size below the supported floor; the WM must clamp the client area.
 run xdotool windowsize "$window" 640 480

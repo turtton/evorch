@@ -44,7 +44,6 @@ fn agents_pane_lists_multiple_concurrent_run_states() {
                     ui,
                     tasks,
                     &gui::model::telemetry::TelemetryOverlay::default(),
-                    &gui::model::durable_tasks::DurableTasksModel::default(),
                 );
             },
             tasks,

@@ -1,6 +1,5 @@
 mod approvals_panel_headless;
 mod attention_ack;
-mod durable_tasks_headless;
 mod headless_activity;
 mod notifications;
 mod pending_approvals;

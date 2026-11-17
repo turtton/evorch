@@ -68,7 +68,7 @@ for theme in graphite tokyo-night high-contrast; do
 
     # One focused capture per default dock panel. A missing tab fails in
     # headless_capture instead of silently dropping its evidence.
-    for panel in sidebar-main agent-main subagents-home tasks-main notifications-main diff-main terminal-main; do
+    for panel in sidebar-main agent-main subagents-home notifications-main diff-main terminal-main; do
         path="$theme_out/panel-$panel-1280x720@1.0.png"
         capture --theme "$theme" --demo --activate "$panel" --out "$path"
     done
@@ -112,8 +112,8 @@ fi
 shopt -s nullglob dotglob
 for theme in graphite tokyo-night high-contrast; do
     pngs=("$OUT/$theme"/*.png)
-    if [[ ${#pngs[@]} -ne 40 ]]; then
-        printf 'Expected 40 matrix PNGs in %s, found %s\n' "$OUT/$theme" "${#pngs[@]}" >&2
+    if [[ ${#pngs[@]} -ne 39 ]]; then
+        printf 'Expected 39 matrix PNGs in %s, found %s\n' "$OUT/$theme" "${#pngs[@]}" >&2
         exit 1
     fi
     printf '%s\n' "${pngs[@]}"

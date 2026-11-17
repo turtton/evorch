@@ -59,6 +59,8 @@ fn run_done_event_surfaces_unread_notification_and_read_after_display() {
     };
     let mut state = WorkbenchState::new(DemoSource(vec![run]), &UiSettings::default()).unwrap();
     activate(&mut state, "subagents-home");
+    // Keep Notifications hidden behind Diff in the shared global leaf.
+    activate(&mut state, "diff-main");
     let mut harness = harness(state);
     harness
         .input_mut()
@@ -168,12 +170,7 @@ fn multiple_concurrent_runs_display_states() {
         .with_size(egui::vec2(800.0, 480.0))
         .build_ui_state(
             |ui, state| {
-                gui::panes::agents::agents_pane(
-                    ui,
-                    state.tasks(),
-                    state.telemetry(),
-                    &Default::default(),
-                );
+                gui::panes::agents::agents_pane(ui, state.tasks(), state.telemetry());
             },
             state,
         );

@@ -122,7 +122,7 @@ covers the main agent only and says so on hover. Wall time uses format::duration
 Memory uses labeled search and status controls, result count, expandable evidence,
 explicit empty/error states and refresh. The status filter opens on promoted
 lessons, the ones task prompts receive. Reject asks for an inline confirmation,
-because a rejected lesson cannot return. Tasks retains its existing grid.
+because a rejected lesson cannot return.
 Browser reuses pane_root, labeled inputs, wrapping toolbars and aspect-preserving
 textures. States are stopped, starting, streaming and error. Stop remains available.
 

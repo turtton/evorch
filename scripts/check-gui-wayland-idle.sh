@@ -124,13 +124,12 @@ cat > "$out/input-layout.json" <<'JSON'
   "panels": {
     "agent-main": {"id":"agent-main","kind":"agent","title":"Conversation"},
     "terminal-main": {"id":"terminal-main","kind":"terminal","title":"Terminal"},
-    "tasks-main": {"id":"tasks-main","kind":"tasks","title":"Tasks"},
     "notifications-main": {"id":"notifications-main","kind":"notifications","title":"Notifications"},
     "sidebar-main": {"id":"sidebar-main","kind":"sidebar","title":"Projects"},
     "subagents-home": {"id":"subagents-home","kind":"subagent_region","title":"Subagents"},
     "diff-main": {"id":"diff-main","kind":"diff","title":"Diff"}
   },
-  "main": {"root":{"type":"tabs","panels":["agent-main","terminal-main","tasks-main","notifications-main","sidebar-main","subagents-home","diff-main"],"active":0},"floating":[]},
+  "main": {"root":{"type":"tabs","panels":["agent-main","terminal-main","notifications-main","sidebar-main","subagents-home","diff-main"],"active":0},"floating":[]},
   "extra_windows": []
 }
 JSON

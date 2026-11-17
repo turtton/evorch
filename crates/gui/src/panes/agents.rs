@@ -1,4 +1,3 @@
-use crate::model::durable_tasks::DurableTasksModel;
 use crate::model::tasks::{AgentRunSource, TaskRow, TasksModel};
 use crate::model::telemetry::pricing::{PARTIAL_COST_HINT, partial_marker};
 use crate::model::telemetry::{TelemetryOverlay, TelemetryRow, ThreadMetrics};
@@ -23,7 +22,6 @@ pub enum AgentsAction {
     ReturnToThread,
     OpenPane(String),
     OpenDefaultPanes,
-    OpenTask(String),
     StopRun(String),
 }
 
@@ -43,7 +41,6 @@ pub fn agents_pane<S: AgentRunSource>(
     ui: &mut egui::Ui,
     tasks: &TasksModel<S>,
     telemetry: &TelemetryOverlay,
-    durable_tasks: &DurableTasksModel,
 ) -> Option<AgentsAction> {
     pane_root(ui, "Agents", |ui| {
         let mut action = ui
@@ -73,7 +70,7 @@ pub fn agents_pane<S: AgentRunSource>(
                 render_data_row(ui, &widths, row, row_telemetry, &mut action);
                 ui.push_id(&run_id, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        task_links(ui, durable_tasks, &teams, &run_id, &mut action);
+                        team_task_labels(ui, &teams, &run_id);
                     });
                 });
                 if let Some(value) = row_telemetry {
@@ -254,7 +251,6 @@ pub fn subagents_pane<S: AgentRunSource>(
     ui: &mut egui::Ui,
     tasks: &TasksModel<S>,
     telemetry: &TelemetryOverlay,
-    durable_tasks: &DurableTasksModel,
     run_ids: &[String],
 ) -> Option<AgentsAction> {
     pane_root(ui, "Subagents", |ui| {
@@ -340,7 +336,7 @@ pub fn subagents_pane<S: AgentRunSource>(
                                 if open.clicked() {
                                     action = Some(AgentsAction::OpenPane(run_id.clone()));
                                 }
-                                task_links(ui, durable_tasks, &teams, &run_id, &mut action);
+                                team_task_labels(ui, &teams, &run_id);
                                 if stop_run_button(ui, &run_id, row.status) {
                                     action = Some(AgentsAction::StopRun(run_id.clone()));
                                 }
@@ -410,34 +406,18 @@ fn stop_run_button(ui: &mut egui::Ui, run_id: &str, phase: event_bus::AgentRunPh
     false
 }
 
-/// Tasks read by name: durable tasks by title (seeded with the orchestrator's
-/// short task slug), team tasks by their author-chosen ID.
-fn task_links(
+/// Team tasks claimed by this run, shown by their author-chosen ID.
+fn team_task_labels(
     ui: &mut egui::Ui,
-    durable_tasks: &DurableTasksModel,
     teams: &[(runtime::RunId, Vec<runtime::team::TeamTask>)],
     run_id: &str,
-    action: &mut Option<AgentsAction>,
 ) {
-    for task in durable_tasks.tasks_for_run(run_id) {
-        if ui
-            .link(format!("Task: {}", task.title))
-            .on_hover_text("Open in Tasks")
-            .clicked()
-        {
-            *action = Some(AgentsAction::OpenTask(task.id.clone()));
-        }
-    }
-    for (coordinator, team_tasks) in teams {
+    for (_, team_tasks) in teams {
         for task in team_tasks {
             if matches!(&task.state, runtime::team::ClaimState::Claimed(lease)
                 if lease.owner_id == run_id)
-                && ui.link(format!("Team task: {}", task.spec.id)).clicked()
             {
-                *action = Some(AgentsAction::OpenTask(format!(
-                    "team:{coordinator}:{}",
-                    task.spec.id
-                )));
+                ui.label(format!("Team task: {}", task.spec.id));
             }
         }
     }
@@ -590,13 +570,7 @@ mod stop_tests {
             .with_size(egui::vec2(1000.0, 1400.0))
             .build_ui_state(
                 move |ui, (tasks, actions)| {
-                    if let Some(action) = subagents_pane(
-                        ui,
-                        tasks,
-                        &Default::default(),
-                        &Default::default(),
-                        &run_ids,
-                    ) {
+                    if let Some(action) = subagents_pane(ui, tasks, &Default::default(), &run_ids) {
                         actions.push(action);
                     }
                 },
@@ -715,5 +689,84 @@ mod stop_tests {
         frame_at(&mut h, 1.0);
         h.get_by_label("worker · Cancelled");
         h.get_by_label("worker · Failed");
+    }
+}
+
+#[cfg(test)]
+mod team_task_label_tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+    use runtime::{
+        AgentSummary, RunId,
+        team::{TaskSpec, TeamBoard, TeamTask},
+    };
+
+    struct TeamSource {
+        runs: Vec<AgentSummary>,
+        teams: Vec<(RunId, Vec<TeamTask>)>,
+    }
+    impl AgentRunSource for TeamSource {
+        fn teams(&self) -> Vec<(RunId, Vec<TeamTask>)> {
+            self.teams.clone()
+        }
+        fn list(&self) -> Vec<AgentSummary> {
+            self.runs.clone()
+        }
+    }
+
+    #[test]
+    fn claimed_team_task_is_a_plain_label_that_does_not_navigate() {
+        // Given: a run that owns a claimed team task and one that owns nothing.
+        let run = |id: u64| AgentSummary {
+            run_id: RunId::new(id),
+            parent_run_id: Some(RunId::new(1)),
+            name: format!("Agent {id}"),
+            role_name: "worker".into(),
+            phase: event_bus::AgentRunPhase::Running,
+            model: "test".into(),
+            category: None,
+        };
+        let board = TeamBoard::default();
+        board
+            .enqueue(TaskSpec {
+                id: "build-index".into(),
+                paths: vec![],
+            })
+            .unwrap();
+        board
+            .claim("build-index", &RunId::new(2).to_string(), 0)
+            .unwrap();
+        let mut tasks = TasksModel::new(TeamSource {
+            runs: vec![run(2), run(3)],
+            teams: vec![(RunId::new(1), board.snapshot().unwrap())],
+        });
+        tasks.refresh();
+        let run_ids: Vec<_> = tasks
+            .rows()
+            .iter()
+            .map(|row| row.run_id.to_string())
+            .collect();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 600.0))
+            .build_ui_state(
+                move |ui, (tasks, actions): &mut (TasksModel<TeamSource>, Vec<AgentsAction>)| {
+                    if let Some(action) = subagents_pane(ui, tasks, &Default::default(), &run_ids) {
+                        actions.push(action);
+                    }
+                },
+                (tasks, Vec::new()),
+            );
+        harness.run();
+
+        // When: the label is clicked.
+        assert_eq!(
+            harness.query_all_by_label("Team task: build-index").count(),
+            1
+        );
+        harness.get_by_label("Team task: build-index").click();
+        harness.run();
+
+        // Then: it only labels the owning run and emits no navigation action.
+        assert!(harness.state().1.is_empty());
     }
 }

@@ -262,13 +262,7 @@ fn telemetry_usage_renders_in_thread_subagents_pane() {
     overlay.apply_event(&unpriced_review());
     overlay.refresh_costs(&settings());
     let mut harness = Harness::new_ui(move |ui| {
-        gui::panes::agents::subagents_pane(
-            ui,
-            &tasks,
-            &overlay,
-            &Default::default(),
-            &["run-1".into()],
-        );
+        gui::panes::agents::subagents_pane(ui, &tasks, &overlay, &["run-1".into()]);
     });
     harness.run();
     // The review adds its tokens, and its missing price leaves a lower-bound cost.

@@ -240,8 +240,8 @@ fn panel_stays_unread_without_outer_focus() {
 
 #[test]
 fn hidden_notifications_tab_stays_unread() {
-    // Given: Notifications hidden behind Tasks in the left global leaf.
-    let mut harness = panel_harness("tasks-main");
+    // Given: Notifications hidden behind Diff in the left global leaf.
+    let mut harness = panel_harness("diff-main");
     // When: only the active tab is displayed in a focused viewport.
     harness
         .input_mut()

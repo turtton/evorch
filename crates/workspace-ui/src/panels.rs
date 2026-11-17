@@ -41,7 +41,6 @@ pub enum PanelKind {
     Diff,
     FileViewer,
     Terminal,
-    Tasks,
     Notifications,
     Memory,
     Arena,
@@ -71,7 +70,6 @@ impl PanelKind {
             Self::Diff => "Diff",
             Self::FileViewer => "File",
             Self::Terminal => "Terminal",
-            Self::Tasks => "Tasks",
             Self::Notifications => "Notifications",
             Self::Memory => "Memory",
             Self::Arena => "Arena",
@@ -94,12 +92,11 @@ pub struct Panel {
     pub target: Option<String>,
 }
 
-/// v0.1 の Agent・Terminal・Tasks パネルレジストリを返します。
+/// v0.1 の Agent・Terminal パネルレジストリを返します。
 pub fn default_panels() -> BTreeMap<PanelId, Panel> {
     [
         ("agent-main", PanelKind::Agent),
         ("terminal-main", PanelKind::Terminal),
-        ("tasks-main", PanelKind::Tasks),
     ]
     .into_iter()
     .map(|(id, kind)| {
@@ -123,7 +120,6 @@ pub fn default_panels_v02() -> BTreeMap<PanelId, Panel> {
         ("sidebar-main", PanelKind::Sidebar, "Projects"),
         ("agent-main", PanelKind::Agent, "Conversation"),
         ("subagents-home", PanelKind::SubagentRegion, "Subagents"),
-        ("tasks-main", PanelKind::Tasks, "Tasks"),
         (
             "notifications-main",
             PanelKind::Notifications,
