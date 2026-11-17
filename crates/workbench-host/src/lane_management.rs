@@ -337,6 +337,9 @@ impl CommandHost {
     }
     pub fn with_lane_sidebar_path(mut self, path: PathBuf) -> Self {
         self.lane_sidebar_path = Some(path);
+        if let Err(error) = self.reconcile_attachments() {
+            tracing::warn!(code = ?error.code, "attachment startup cleanup incomplete; retry on next startup");
+        }
         self
     }
     pub(crate) fn manage_lane_command(

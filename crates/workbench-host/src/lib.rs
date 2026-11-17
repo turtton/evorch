@@ -12,6 +12,7 @@
 //! out of its dependency graph.
 
 pub mod areas;
+pub mod attachments;
 pub mod bootstrap;
 pub mod commands;
 pub mod ingress;

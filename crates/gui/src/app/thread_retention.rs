@@ -594,7 +594,7 @@ mod tests {
             thread_id: thread.to_owned(),
             text: "text".into(),
             origin: "o".into(),
-            images_needed: 0,
+            attachments_needed: 0,
         }
     }
 

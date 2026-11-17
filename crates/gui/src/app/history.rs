@@ -18,7 +18,7 @@ pub(super) struct UserMessage {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub origin_unverified: bool,
     #[serde(default)]
-    pub image_count: usize,
+    pub attachment_count: usize,
     #[serde(default)]
     pub resent_from: Option<String>,
     pub at: std::time::SystemTime,
@@ -118,7 +118,7 @@ pub(super) struct ComposerDraft {
     pub thread_id: String,
     pub text: String,
     pub origin: String,
-    pub images_needed: usize,
+    pub attachments_needed: usize,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

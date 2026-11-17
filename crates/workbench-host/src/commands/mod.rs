@@ -578,7 +578,7 @@ impl CommandService {
                         thread_id: continuation.thread_id,
                         composer_role: continuation.composer_role,
                         model_preference: continuation.model_preference,
-                        images: Vec::new(),
+                        attachments: Vec::new(),
                         // The resume_only path never submits this placeholder as input.
                         text: String::new(),
                         skills: Vec::new(),

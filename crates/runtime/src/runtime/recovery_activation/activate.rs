@@ -173,12 +173,11 @@ impl AgentRuntime {
                     after_stop: None,
                 }
             } else {
-                let input = source
+                source
                     .intent
                     .initial_input
                     .as_ref()
                     .ok_or_else(|| error("missing admission input"))?;
-                config.images.clone_from(&input.images);
                 RunContinuation::Fresh
             };
             let prompt = source
@@ -363,7 +362,6 @@ impl AgentRuntime {
             || config.prompt_origin.is_some()
             || config.initial_thread_goal.is_some()
             || !config.skill_mentions.is_empty()
-            || !config.images.is_empty()
         {
             return Err(error("current recovery authority identity mismatch"));
         }

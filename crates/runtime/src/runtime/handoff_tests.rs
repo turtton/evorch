@@ -951,7 +951,6 @@ async fn handoff_copies_authentic_question_answers_without_sharing_review_author
                     run_id: source.to_string(),
                     root_run_id: source.to_string(),
                     text: row.text.clone(),
-                    image_count: 0,
                     status: storage::host_input::HostInputStatus::Delivered,
                     reason: None,
                     accepted_at_ns: created,

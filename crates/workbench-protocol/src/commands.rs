@@ -7,12 +7,10 @@
 //! host-only inputs such as an `automatic` continuation flag or a provenance.
 
 use crate::handshake::Capability;
-use crate::ids::{
-    ApprovalId, AttachmentId, GoalId, ProjectId, QuestionId, RunId, SubmissionId, ThreadId,
-};
+use crate::ids::{ApprovalId, GoalId, ProjectId, QuestionId, RunId, SubmissionId, ThreadId};
 use crate::limits::{
-    MAX_CONSTRAINT_BYTES, MAX_CONSTRAINTS, MAX_IMAGES, MAX_MIME_BYTES, MAX_NAME_BYTES,
-    MAX_OBJECTIVE_BYTES, MAX_REFERENCE_BYTES, MAX_REFERENCES, MAX_SKILLS, MAX_TEXT_BYTES,
+    MAX_CONSTRAINT_BYTES, MAX_CONSTRAINTS, MAX_NAME_BYTES, MAX_OBJECTIVE_BYTES,
+    MAX_REFERENCE_BYTES, MAX_REFERENCES, MAX_SKILLS, MAX_TEXT_BYTES,
 };
 use crate::namespaces::{
     approvals::{ApprovalsCommand, ApprovalsResult},
@@ -52,9 +50,12 @@ pub enum ComposerRole {
 /// An uploaded image a message refers to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImageRef {
-    pub attachment_id: AttachmentId,
-    pub mime_type: String,
+pub struct AttachmentRef {
+    pub id: crate::ids::AttachmentId,
+    pub filename: String,
+    pub media_type: String,
+    pub byte_length: u64,
+    pub sha256: String,
 }
 
 /// Explicit provider selection for one chat; `model: None` uses the profile default.
@@ -92,7 +93,7 @@ pub struct SendChat {
     #[serde(default)]
     pub skills: Vec<String>,
     #[serde(default)]
-    pub images: Vec<ImageRef>,
+    pub attachments: Vec<crate::ids::AttachmentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_preference: Option<ModelPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,22 +347,17 @@ impl ModelPreference {
 impl SendChat {
     pub fn validate(&self) -> Result<(), ValidationError> {
         // A message may be only images, so text can be empty then.
-        check_text("text", &self.text, MAX_TEXT_BYTES, !self.images.is_empty())?;
+        check_text(
+            "text",
+            &self.text,
+            MAX_TEXT_BYTES,
+            !self.attachments.is_empty(),
+        )?;
         check_count("skills", self.skills.len(), MAX_SKILLS)?;
         check_all(&self.skills, |s| {
             check_line("skills", s, MAX_NAME_BYTES, false)
         })?;
-        check_count("images", self.images.len(), MAX_IMAGES)?;
-        check_all(&self.images, |i| {
-            check_line("images.mime_type", &i.mime_type, MAX_MIME_BYTES, false)?;
-            if !i.mime_type.starts_with("image/") {
-                return Err(ValidationError::OutOfRange {
-                    field: "images.mime_type",
-                    reason: "must be an image/* media type",
-                });
-            }
-            Ok(())
-        })?;
+        check_count("attachments", self.attachments.len(), 32)?;
         self.model_preference
             .as_ref()
             .map_or(Ok(()), ModelPreference::validate)

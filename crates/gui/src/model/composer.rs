@@ -119,26 +119,36 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImageAttachment {
-    pub media_type: String,
-    pub data: String,
+pub enum AttachmentUploadState {
+    Pending,
+    Uploading,
+    Ready(workbench_protocol::commands::AttachmentRef),
+    Failed(String),
 }
 
-impl ImageAttachment {
-    pub fn from_data_url(value: &str) -> Option<Self> {
-        let (header, data) = value.strip_prefix("data:")?.split_once(',')?;
-        let (media_type, encoding) = header.split_once(';').unwrap_or((header, ""));
-        if !media_type.starts_with("image/") || encoding != "base64" || data.is_empty() {
-            return None;
-        }
-        Some(Self {
-            media_type: media_type.to_owned(),
-            data: data.to_owned(),
-        })
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttachmentDraft {
+    pub file: crate::attachments::AttachmentFile,
+    pub upload: AttachmentUploadState,
+}
 
-    pub fn data_url(&self) -> String {
-        format!("data:{};base64,{}", self.media_type, self.data)
+impl AttachmentDraft {
+    pub fn new(file: crate::attachments::AttachmentFile) -> Self {
+        Self {
+            file,
+            upload: AttachmentUploadState::Pending,
+        }
+    }
+    /// A withdrawn follow-up is a fresh upload; committed paths never change.
+    pub fn reupload(&mut self) {
+        self.file.draft_id = uuid::Uuid::new_v4().to_string();
+        self.upload = AttachmentUploadState::Pending;
+    }
+    pub fn reference(&self) -> Option<&workbench_protocol::commands::AttachmentRef> {
+        match &self.upload {
+            AttachmentUploadState::Ready(reference) => Some(reference),
+            _ => None,
+        }
     }
 }
 
@@ -240,7 +250,7 @@ pub struct ComposerModel {
     /// Live descendants of the active conversation root, refreshed before rendering.
     pub running_children: usize,
     /// Images from a durable resend draft must be attached again.
-    pub images_needed: usize,
+    pub attachments_needed: usize,
     /// Refreshed from runtime receipt state for the active conversation only.
     pub follow_ups: runtime::FollowUpStatus,
     /// The active conversation's queued follow-ups, oldest (next to send) first.
@@ -264,8 +274,9 @@ pub struct ComposerModel {
     /// Tab presses (`true` with Shift) captured before egui focus navigation.
     pub tab_presses: Vec<bool>,
     pub mentions: MentionIndex,
-    pub attachments: Vec<ImageAttachment>,
-    pub image_input_supported: bool,
+    pub attachments: Vec<AttachmentDraft>,
+    pub attachment_imports: usize,
+    pub pick_attachments: bool,
 }
 
 impl ComposerModel {
@@ -351,12 +362,32 @@ impl ComposerModel {
         self.completions_dismissed_for = Some(self.input.clone());
     }
 
-    pub fn add_pasted_image(&mut self, value: &str) -> bool {
-        let Some(image) = ImageAttachment::from_data_url(value) else {
-            return false;
-        };
-        self.attachments.push(image);
-        true
+    pub fn attachments_ready(&self) -> bool {
+        self.attachment_imports == 0
+            && self
+                .attachments
+                .iter()
+                .all(|draft| draft.reference().is_some())
+    }
+
+    pub fn add_attachment(&mut self, draft: AttachmentDraft) -> Result<(), &'static str> {
+        use workbench_host::attachments::{FILE_BYTES, THREAD_PENDING_BYTES, THREAD_PENDING_COUNT};
+        if draft.file.bytes.len() as u64 > FILE_BYTES {
+            return Err("Attachment exceeds 8 MiB");
+        }
+        if self.attachments.len() >= THREAD_PENDING_COUNT
+            || self
+                .attachments
+                .iter()
+                .map(|d| d.file.bytes.len() as u64)
+                .sum::<u64>()
+                + draft.file.bytes.len() as u64
+                > THREAD_PENDING_BYTES
+        {
+            return Err("Pending attachments exceed 32 files or 64 MiB");
+        }
+        self.attachments.push(draft);
+        Ok(())
     }
 
     pub fn remove_attachment(&mut self, index: usize) -> bool {
@@ -365,11 +396,6 @@ impl ComposerModel {
         }
         self.attachments.remove(index);
         true
-    }
-
-    pub fn image_warning(&self) -> Option<&'static str> {
-        (!self.attachments.is_empty() && !self.image_input_supported)
-            .then_some("This model does not accept images")
     }
 }
 

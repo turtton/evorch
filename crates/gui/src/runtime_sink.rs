@@ -76,6 +76,13 @@ type SearchJob = (
 );
 
 impl RuntimeCommandSink {
+    pub fn with_sidebar_path(mut self, path: Option<PathBuf>) -> Self {
+        if let Some(path) = path {
+            self.host = self.host.with_lane_sidebar_path(path);
+        }
+        self
+    }
+
     pub fn start_background_run(&self, text: String) -> RunId {
         self.host.service().start_background_run(text)
     }
@@ -127,6 +134,61 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn upload_attachment(
+        &self,
+        project: &std::path::Path,
+        thread: &str,
+        file: crate::attachments::AttachmentFile,
+    ) -> Result<crate::model::commands::AttachmentUploadReceiver, String> {
+        let writer = self
+            .host
+            .attachment_writer(project, thread)
+            .map_err(|e| e.to_string())?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("attachment-upload".into())
+            .spawn(move || {
+                let file = workbench_host::attachments::NativeAttachment {
+                    draft_id: file.draft_id,
+                    filename: file.filename,
+                    media_type: file.media_type,
+                    bytes: file.bytes,
+                };
+                let _ = tx.send(writer.upload(file).map_err(|e| e.to_string()));
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(rx)
+    }
+
+    fn discard_attachment(
+        &self,
+        project: &std::path::Path,
+        thread: &str,
+        attachment: &workbench_protocol::ids::AttachmentId,
+    ) {
+        if let Ok(writer) = self.host.attachment_writer(project, thread) {
+            let attachment = attachment.clone();
+            let _ = std::thread::Builder::new()
+                .name("attachment-discard".into())
+                .spawn(move || writer.discard(&attachment));
+        }
+    }
+
+    fn attachment_archive_guard(
+        &self,
+        threads: &[String],
+    ) -> Result<Option<runtime::attachments::AttachmentArchive>, String> {
+        let root = self
+            .host
+            .service()
+            .runtime()
+            .attachment_root()
+            .map_err(|e| e.to_string())?;
+        runtime::attachments::AttachmentArchive::lock(root, threads.iter().cloned())
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+
     fn poll(&mut self) -> Vec<LoopEvent> {
         let mut events: Vec<LoopEvent> = self
             .host

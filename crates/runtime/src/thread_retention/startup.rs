@@ -623,6 +623,18 @@ fn confirm_families(
             root_bound = true;
             notify(StartupProgress::RootBound);
         }
+        // Attachments should already be absent after archive. Retry a failed archive
+        // cleanup before confirming retention, never report deletion while they remain.
+        let scratch = ThreadScratch::for_ownership_root(&paths.ownership_root)?;
+        let attachment_root = sandbox::attachments::AttachmentRoot::for_scope(scratch.parent());
+        let _attachments = if attachment_root.path().try_exists()? {
+            let guard =
+                crate::attachments::AttachmentArchive::lock(attachment_root, threads.clone())?;
+            guard.remove()?;
+            Some(guard)
+        } else {
+            None
+        };
         let settled = finalize_with_doubling(first, budget.finalize_rounds, |attempt| {
             database.retention_finalize(&key, input, policy, &family_blocks, &binding, attempt)
         })?;
@@ -707,9 +719,22 @@ fn remove_scratch(paths: &StartupPaths, threads: &[String], budget: &StartupBudg
             return;
         }
     };
+    let attachment_root = sandbox::attachments::AttachmentRoot::for_scope(scratch.parent());
     let mut dirs = 0;
     let mut entries_left = budget.scratch_entries;
     for thread in threads {
+        if attachment_root.path().try_exists().unwrap_or(true) {
+            let removal = crate::attachments::AttachmentArchive::lock(
+                attachment_root.clone(),
+                [thread.clone()],
+            )
+            .and_then(|guard| guard.remove());
+            if let Err(error) = removal {
+                ran.errors.push(format!(
+                    "attachments: removal incomplete; retry startup: {error}"
+                ));
+            }
+        }
         match scratch.thread_dir_exists(thread) {
             Ok(true) => {}
             Ok(false) => continue,

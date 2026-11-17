@@ -1,142 +1,25 @@
 //! Conversation bootstrap and bounded, validated image ingress. The host owns
 //! both the bytes and the authority; clients cannot nominate a file to read.
-use std::{collections::BTreeMap, io::Cursor, path::PathBuf};
+use std::path::PathBuf;
 
-use base64::{Engine, engine::general_purpose::STANDARD};
 use workbench_protocol::{
-    commands::{CommandReply, CommandResult, ContinueChat, ImageRef, SendChat},
-    conversation::{ConversationCommand, ConversationResult},
+    commands::{CommandReply, CommandResult, ContinueChat},
+    conversation::{AttachmentLimits, ConversationCommand, ConversationResult},
     envelope::Provenance,
     errors::{ErrorCode, RetryAdvice, WorkbenchError},
-    ids::{AttachmentId, ProjectId, ThreadId},
+    ids::{ProjectId, ThreadId},
 };
 
 use crate::commands::{ContinueInput, HostCommand};
 use crate::ingress::{CommandHost, composer_role, model_preference};
 use workbench_protocol::namespaces::ExecutionCommand;
 
-const MAX_ATTACHMENTS: usize = 32;
-const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
-
-struct Attachment {
-    project: ProjectId,
-    thread: ThreadId,
-    image: runtime::DelegateImage,
-}
-
 #[derive(Default)]
 pub(in crate::ingress) struct ConversationState {
-    attachments: BTreeMap<String, Attachment>,
-    /// Only the composition root supplies these paths, never a wire request.
     legacy_import: Option<(PathBuf, PathBuf)>,
 }
-
 fn error(code: ErrorCode, message: &str) -> WorkbenchError {
     WorkbenchError::new(code, message, RetryAdvice::Never)
-}
-
-impl ConversationState {
-    pub(in crate::ingress) fn images(
-        &self,
-        send: &SendChat,
-    ) -> Result<Vec<runtime::DelegateImage>, WorkbenchError> {
-        send.images
-            .iter()
-            .map(|reference| {
-                let attachment = self
-                    .attachments
-                    .get(reference.attachment_id.as_str())
-                    .ok_or_else(|| {
-                        error(
-                            ErrorCode::NotFound,
-                            "attachment is unknown in this core epoch",
-                        )
-                    })?;
-                if attachment.project != send.project
-                    || attachment.thread != send.thread
-                    || attachment.image.media_type != reference.mime_type
-                {
-                    return Err(error(
-                        ErrorCode::PermissionDenied,
-                        "attachment scope or media type mismatch",
-                    ));
-                }
-                Ok(attachment.image.clone())
-            })
-            .collect()
-    }
-
-    fn upload(
-        &mut self,
-        project: ProjectId,
-        thread: ThreadId,
-        mime: String,
-        data: String,
-    ) -> Result<ImageRef, WorkbenchError> {
-        let size: usize = self.attachments.values().map(|a| a.image.data.len()).sum();
-        if self.attachments.len() >= MAX_ATTACHMENTS || size + data.len() > MAX_ATTACHMENT_BYTES {
-            return Err(error(
-                ErrorCode::LimitExceeded,
-                "pending attachment capacity reached; discard unused attachments",
-            ));
-        }
-        let bytes = STANDARD.decode(&data).map_err(|_| {
-            error(
-                ErrorCode::InvalidRequest,
-                "image data must be canonical base64",
-            )
-        })?;
-        if STANDARD.encode(&bytes) != data {
-            return Err(error(
-                ErrorCode::InvalidRequest,
-                "image data must be canonical base64",
-            ));
-        }
-        let format = image::guess_format(&bytes)
-            .map_err(|_| error(ErrorCode::InvalidRequest, "unrecognised image format"))?;
-        if !matches!(
-            format,
-            image::ImageFormat::Png
-                | image::ImageFormat::Jpeg
-                | image::ImageFormat::Gif
-                | image::ImageFormat::WebP
-        ) || format.to_mime_type() != mime
-        {
-            return Err(error(
-                ErrorCode::InvalidRequest,
-                "image content and supported media type must match",
-            ));
-        }
-        let mut reader = image::ImageReader::with_format(Cursor::new(&bytes), format);
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(4096);
-        limits.max_image_height = Some(4096);
-        limits.max_alloc = Some(64 * 1024 * 1024);
-        reader.limits(limits);
-        reader.decode().map_err(|_| {
-            error(
-                ErrorCode::InvalidRequest,
-                "image is corrupt or exceeds decoding limits",
-            )
-        })?;
-        let attachment_id =
-            AttachmentId::new(uuid::Uuid::new_v4().to_string()).expect("uuid is a valid id");
-        self.attachments.insert(
-            attachment_id.as_str().into(),
-            Attachment {
-                project,
-                thread,
-                image: runtime::DelegateImage {
-                    media_type: mime.clone(),
-                    data,
-                },
-            },
-        );
-        Ok(ImageRef {
-            attachment_id,
-            mime_type: mime,
-        })
-    }
 }
 
 impl CommandHost {
@@ -222,9 +105,6 @@ impl CommandHost {
                 ConversationResult::ProjectResolved { project }
             }
             ConversationCommand::CreateExecution(chat) => {
-                // Validate attachments before creating even an owner row.
-                self.chat_input(&chat)?;
-                self.reserve_chat_after_gate(&chat)?;
                 return self.send_chat(&chat, provenance);
             }
             ConversationCommand::CreateGoal(goal) => {
@@ -241,20 +121,63 @@ impl CommandHost {
                 self.prepare_existing(&project, &thread)?;
                 ConversationResult::ExistingThreadPrepared { thread }
             }
-            ConversationCommand::UploadImage {
+            ConversationCommand::BeginAttachment {
                 project,
                 thread,
-                mime_type,
-                data,
+                client_upload_id,
+                filename,
+                media_type_hint,
+                byte_length,
             } => {
                 self.project_root(&project)?;
                 self.check_thread_not_deleted(&thread)?;
-                ConversationResult::ImageUploaded(
-                    self.conversation.upload(project, thread, mime_type, data)?,
-                )
+                self.check_attachment_thread_active(thread.as_str())?;
+                let upload_id = self.with_attachment_service(|service, host| {
+                    service.begin_checked(
+                        project,
+                        thread,
+                        client_upload_id,
+                        filename,
+                        media_type_hint,
+                        byte_length,
+                        |thread| host.check_attachment_thread_active(thread),
+                    )
+                })?;
+                ConversationResult::AttachmentBegun {
+                    upload_id,
+                    limits: AttachmentLimits {
+                        file_bytes: crate::attachments::FILE_BYTES,
+                        chunk_bytes: crate::attachments::CHUNK_BYTES as u64,
+                        thread_pending_count: crate::attachments::THREAD_PENDING_COUNT as u32,
+                        thread_pending_bytes: crate::attachments::THREAD_PENDING_BYTES,
+                        store_pending_count: crate::attachments::STORE_PENDING_COUNT as u32,
+                        store_pending_bytes: crate::attachments::STORE_PENDING_BYTES,
+                        thread_sent_bytes: crate::attachments::THREAD_SENT_BYTES,
+                    },
+                }
+            }
+            ConversationCommand::AppendAttachment {
+                upload_id,
+                offset,
+                data_base64,
+            } => ConversationResult::AttachmentAppended {
+                next_offset: self.with_attachment_service(|service, host| {
+                    service.append_base64_checked(&upload_id, offset, &data_base64, |thread| {
+                        host.check_attachment_thread_active(thread)
+                    })
+                })?,
+            },
+            ConversationCommand::FinishAttachment { upload_id } => {
+                ConversationResult::AttachmentFinished(self.with_attachment_service(
+                    |service, host| {
+                        service.finish_checked(&upload_id, |thread| {
+                            host.check_attachment_thread_active(thread)
+                        })
+                    },
+                )?)
             }
             ConversationCommand::DiscardAttachment { attachment_id } => {
-                self.conversation.attachments.remove(attachment_id.as_str());
+                self.attachment_service()?.discard(&attachment_id)?;
                 ConversationResult::AttachmentDiscarded
             }
         };

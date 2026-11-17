@@ -487,7 +487,8 @@ impl TranscriptModel {
                 // The words the user typed; skill bodies appear as chips, not text.
                 let shown = user_text.as_ref().unwrap_or(prompt);
                 let first_instruction = self.entries.iter().find_map(|entry| match entry {
-                    TranscriptEntry::UserMessage { text, .. } => Some(text),
+                    TranscriptEntry::UserMessage {
+            text, .. } => Some(text),
                     _ => None,
                 });
                 if first_instruction != Some(shown) {

@@ -39,6 +39,7 @@ use crate::receipts::{Receipts, SubmissionRecord};
 pub struct CommandHost {
     service: CommandService,
     conversation: namespaces::conversation::ConversationState,
+    attachments: Option<crate::attachments::AttachmentService>,
     pub(crate) lane_sidebar_path: Option<std::path::PathBuf>,
     receipts: Receipts,
     projects: Box<dyn ProjectDirectory>,
@@ -73,6 +74,214 @@ enum Executed {
 }
 
 impl CommandHost {
+    /// Startup reconciliation is also safe beside another live core: upload fds and
+    /// per-thread archive locks are shared across processes.
+    pub fn reconcile_attachments(&mut self) -> Result<(), WorkbenchError> {
+        let root =
+            self.service.runtime().attachment_root().map_err(|_| {
+                reject_error(RejectKind::Unavailable, "attachment root unavailable")
+            })?;
+        if !root
+            .path()
+            .try_exists()
+            .map_err(|_| reject_error(RejectKind::Unavailable, "attachment root unavailable"))?
+        {
+            return Ok(());
+        }
+        let mut removed = self
+            .service
+            .runtime()
+            .with_storage_reader(|db| Ok(db.tombstones()?.threads.into_iter().collect::<Vec<_>>()))
+            .map_err(|_| {
+                reject_error(RejectKind::Unavailable, "cannot read attachment tombstones")
+            })?
+            .unwrap_or_default();
+        if let Some(path) = &self.lane_sidebar_path {
+            let store = workspace_state::SidebarStore::new(path.clone());
+            let lock = store
+                .lock()
+                .map_err(|_| reject_error(RejectKind::Unavailable, "attachment sidebar is busy"))?;
+            let document = store.read(&lock).map_err(|_| {
+                reject_error(RejectKind::Unavailable, "attachment sidebar unavailable")
+            })?;
+            removed.extend(
+                document
+                    .sidebar
+                    .resolve_states()
+                    .into_iter()
+                    .filter(|(_, state)| state.archived)
+                    .map(|(id, _)| id.to_string()),
+            );
+        }
+        let guard = runtime::attachments::AttachmentArchive::lock(root, removed).map_err(|_| {
+            reject_error(
+                RejectKind::Unavailable,
+                "attachment archive cleanup is busy; retry",
+            )
+        })?;
+        guard.remove().map_err(|_| {
+            reject_error(
+                RejectKind::Unavailable,
+                "attachment archive cleanup incomplete; retry",
+            )
+        })?;
+        drop(guard);
+        self.attachment_service()?.recover_dead_uploads()
+    }
+
+    pub fn attachment_writer(
+        &self,
+        project_root: &std::path::Path,
+        thread: &str,
+    ) -> Result<crate::attachments::AttachmentWriter, WorkbenchError> {
+        let project = self
+            .projects
+            .entries()
+            .into_iter()
+            .find(|(_, path)| path == project_root)
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| {
+                workbench_protocol::ids::ProjectId::new(format!(
+                    "native-{:x}",
+                    <sha2::Sha256 as sha2::Digest>::digest(
+                        project_root.as_os_str().as_encoded_bytes()
+                    )
+                ))
+                .expect("digest id")
+            });
+        Ok(crate::attachments::AttachmentWriter {
+            root: self.service.runtime().attachment_root().map_err(|_| {
+                reject_error(RejectKind::Unavailable, "attachment root unavailable")
+            })?,
+            project,
+            thread: workbench_protocol::ids::ThreadId::new(thread.to_owned())
+                .map_err(|_| reject_error(RejectKind::Invalid, "invalid attachment thread"))?,
+            authorizer: crate::attachments::AttachmentAuthorizer {
+                runtime: self.service.runtime().clone(),
+                sidebar: self.lane_sidebar_path.clone(),
+            },
+        })
+    }
+
+    pub(crate) fn attachment_service(
+        &mut self,
+    ) -> Result<&mut crate::attachments::AttachmentService, WorkbenchError> {
+        if self.attachments.is_none() {
+            let root = self.service.runtime().attachment_root().map_err(|_| {
+                reject_error(RejectKind::Unavailable, "attachment root unavailable")
+            })?;
+            self.attachments = Some(crate::attachments::AttachmentService::new(root));
+        }
+        Ok(self.attachments.as_mut().expect("initialized"))
+    }
+
+    pub(crate) fn with_attachment_service<T>(
+        &mut self,
+        action: impl FnOnce(
+            &mut crate::attachments::AttachmentService,
+            &Self,
+        ) -> Result<T, WorkbenchError>,
+    ) -> Result<T, WorkbenchError> {
+        self.attachment_service()?;
+        let mut service = self.attachments.take().expect("initialized");
+        let result = action(&mut service, self);
+        self.attachments = Some(service);
+        result
+    }
+
+    pub(crate) fn check_attachment_thread_active(
+        &self,
+        thread: &str,
+    ) -> Result<(), WorkbenchError> {
+        crate::attachments::AttachmentAuthorizer {
+            runtime: self.service.runtime().clone(),
+            sidebar: self.lane_sidebar_path.clone(),
+        }
+        .check(thread)?;
+        if self.areas.workspace.thread_archived(thread)? {
+            return Err(reject_error(
+                RejectKind::Conflict,
+                "thread is archived; restore it before attaching files",
+            ));
+        }
+        Ok(())
+    }
+
+    fn finalize_chat_attachments(
+        &mut self,
+        chat: &mut ChatInput,
+    ) -> Result<Option<std::fs::File>, WorkbenchError> {
+        use crate::attachments::ChatAttachment;
+        if chat.attachments.is_empty() {
+            return Ok(None);
+        }
+        let root = self.attachment_service()?.root().clone();
+        self.check_attachment_thread_active(&chat.thread_id)?;
+        let thread = workbench_protocol::ids::ThreadId::new(chat.thread_id.clone())
+            .map_err(|_| reject_error(RejectKind::Invalid, "invalid attachment thread"))?;
+        let project_root = chat
+            .project_root
+            .as_ref()
+            .ok_or_else(|| reject_error(RejectKind::Invalid, "attachment project is missing"))?;
+        let project = self
+            .projects
+            .entries()
+            .into_iter()
+            .find(|(_, path)| path == project_root)
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| {
+                workbench_protocol::ids::ProjectId::new(format!(
+                    "native-{:x}",
+                    <sha2::Sha256 as sha2::Digest>::digest(
+                        project_root.as_os_str().as_encoded_bytes()
+                    )
+                ))
+                .expect("digest id")
+            });
+        let mut ids = Vec::new();
+        for attachment in &chat.attachments {
+            let reference = match attachment {
+                ChatAttachment::Uploaded(reference) => reference.clone(),
+                ChatAttachment::Native(draft) => {
+                    self.with_attachment_service(|service, host| {
+                        service.upload_bytes_checked(
+                            project.clone(),
+                            thread.clone(),
+                            draft.draft_id.clone(),
+                            draft.filename.clone(),
+                            draft.media_type.clone(),
+                            &draft.bytes,
+                            |thread| host.check_attachment_thread_active(thread),
+                        )
+                    })?
+                }
+            };
+            ids.push(reference.id);
+        }
+        let lock = root
+            .lock_thread(&chat.thread_id)
+            .map_err(|_| reject_error(RejectKind::Unavailable, "attachment lock unavailable"))?;
+        self.check_attachment_thread_active(&chat.thread_id)?;
+        let committed = self
+            .attachment_service()?
+            .commit_locked(&project, &thread, &ids)?;
+        if committed.iter().zip(&chat.attachments).any(|((r, _), a)| {
+            a.immutable_metadata() != ChatAttachment::Uploaded(r.clone()).immutable_metadata()
+        }) {
+            return Err(reject_error(
+                RejectKind::Conflict,
+                "attachment metadata changed",
+            ));
+        }
+        let paths = committed
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect::<Vec<_>>();
+        chat.text = crate::attachments::message_with_paths(&chat.text, &paths);
+        chat.attachments.clear();
+        Ok(Some(lock))
+    }
+
     /// Reserve an absent thread for a new chat, after resolving its project.
     /// This never claims or hands off an existing owner row, even a released one.
     pub fn reserve_new_chat_thread(&self, send: &SendChat) -> Result<(), WorkbenchError> {
@@ -146,6 +355,7 @@ impl CommandHost {
         Self {
             service,
             conversation: Default::default(),
+            attachments: None,
             lane_sidebar_path: None,
             projection,
             areas: Default::default(),
@@ -603,7 +813,7 @@ impl CommandHost {
     /// Deduplicate, run and record. The caller has authorised `permit`.
     fn execute(
         &mut self,
-        command: HostCommand,
+        mut command: HostCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
         provenance: &Provenance,
         restart: Option<crate::bootstrap::restart::HostCommandPermit>,
@@ -630,6 +840,20 @@ impl CommandHost {
                 }
             }
         }
+        let _attachment_lock = if let HostCommand::SendChat(chat) = &mut command {
+            match self.finalize_chat_attachments(chat) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    return Executed::Events(vec![HostEvent::chat_rejected(
+                        chat.thread_id.clone(),
+                        RejectKind::Unavailable,
+                        error.message,
+                    )]);
+                }
+            }
+        } else {
+            None
+        };
         let events = self
             .service
             .submit_authorized_tracked(command, permit, restart);
@@ -785,6 +1009,67 @@ impl CommandHost {
         send: &SendChat,
         provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
+        // Resolve an identical receipt before reading files: archive deliberately
+        // removes attachment metadata, but does not undo an accepted submission.
+        if let Seen::Known {
+            fingerprint,
+            run_id,
+            ..
+        } = self
+            .submission_status(send.submission_id.as_str())
+            .map_err(|e| {
+                WorkbenchError::new(
+                    ErrorCode::StorageUnavailable,
+                    format!("could not read earlier submissions: {e}"),
+                    RetryAdvice::SameRequest,
+                )
+            })?
+        {
+            let mut raw = ChatInput {
+                submission_id: send.submission_id.to_string(),
+                project_root: Some(self.project_root(&send.project)?),
+                composer_role: composer_role(send.composer_role),
+                attachments: send
+                    .attachments
+                    .iter()
+                    .map(|id| {
+                        crate::attachments::ChatAttachment::Uploaded(
+                            workbench_protocol::commands::AttachmentRef {
+                                id: id.clone(),
+                                filename: String::new(),
+                                media_type: String::new(),
+                                byte_length: 0,
+                                sha256: String::new(),
+                            },
+                        )
+                    })
+                    .collect(),
+                thread_id: send.thread.to_string(),
+                text: send.text.clone(),
+                skills: send.skills.clone(),
+                model_preference: send.model_preference.as_ref().map(model_preference),
+                fork_seed: send.fork_seed.as_ref().map(|seed| runtime::ChatForkSeed {
+                    source_run_id: seed.source_run_id.to_string(),
+                    context_len: seed.context_len.get(),
+                }),
+            };
+            let raw_fingerprint = chat_fingerprint(&raw);
+            raw.attachments.clear();
+            if fingerprint.rsplit_once(':').map(|(wire, _)| wire)
+                == raw_fingerprint.rsplit_once(':').map(|(wire, _)| wire)
+            {
+                return Ok(CommandReply {
+                    disposition: CommandDisposition::AlreadyApplied,
+                    submission_id: Some(send.submission_id.clone()),
+                    run_id: run_id.and_then(|id| workbench_protocol::ids::RunId::new(id).ok()),
+                    ..CommandReply::accepted()
+                });
+            }
+            return Err(reject_error(
+                RejectKind::Conflict,
+                "submission was already used for a different message",
+            ));
+        }
         // Validate attachments before creating even an owner row; the common
         // host gate has already accepted this command.
         let command = HostCommand::SendChat(self.chat_input(send)?);
@@ -811,13 +1096,21 @@ impl CommandHost {
         })
     }
 
-    fn chat_input(&self, send: &SendChat) -> Result<ChatInput, WorkbenchError> {
-        let images = self.conversation.images(send)?;
+    fn chat_input(&mut self, send: &SendChat) -> Result<ChatInput, WorkbenchError> {
+        let attachments = if send.attachments.is_empty() {
+            Vec::new()
+        } else {
+            self.attachment_service()?
+                .references(&send.project, &send.thread, &send.attachments)?
+                .into_iter()
+                .map(crate::attachments::ChatAttachment::Uploaded)
+                .collect()
+        };
         Ok(ChatInput {
             submission_id: send.submission_id.as_str().to_owned(),
             project_root: Some(self.project_root(&send.project)?),
             composer_role: composer_role(send.composer_role),
-            images,
+            attachments,
             thread_id: send.thread.as_str().to_owned(),
             text: send.text.clone(),
             skills: send.skills.clone(),

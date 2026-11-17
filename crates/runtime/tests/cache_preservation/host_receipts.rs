@@ -101,12 +101,7 @@ async fn done_resume_records_new_prompt_without_changing_the_wire_prefix() {
         );
         harness
             .runtime
-            .send_message_with_images(
-                run,
-                "verify cache reuse".into(),
-                vec![],
-                Some("third".into()),
-            )
+            .send_user_input(run, "verify cache reuse".into(), Some("third".into()))
             .unwrap();
         events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
         harness
@@ -147,12 +142,7 @@ async fn stopped_unread_input_is_dropped_then_only_the_resent_input_is_appended(
     gated.started.notified().await;
     harness
         .runtime
-        .send_message_with_images(
-            run,
-            "edit and resend".into(),
-            vec![],
-            Some("dropped".into()),
-        )
+        .send_user_input(run, "edit and resend".into(), Some("dropped".into()))
         .unwrap();
     harness
         .runtime
@@ -179,12 +169,7 @@ async fn stopped_unread_input_is_dropped_then_only_the_resent_input_is_appended(
     assert_eq!(record.messages_json.matches("edit and resend").count(), 1);
     harness
         .runtime
-        .send_message_with_images(
-            run,
-            "verify cache reuse".into(),
-            vec![],
-            Some("third".into()),
-        )
+        .send_user_input(run, "verify cache reuse".into(), Some("third".into()))
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
     harness
@@ -220,12 +205,7 @@ async fn failed_snapshot_unknown_then_resend_preserves_the_wire_prefix() {
     conn.execute_batch("CREATE TRIGGER fail_snapshot BEFORE UPDATE ON run_contexts BEGIN SELECT RAISE(FAIL, 'injected snapshot failure'); END;").unwrap();
     harness
         .runtime
-        .send_message_with_images(
-            run,
-            "uncertain input".into(),
-            vec![],
-            Some("unknown".into()),
-        )
+        .send_user_input(run, "uncertain input".into(), Some("unknown".into()))
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Error).await);
     assert_eq!(
@@ -252,12 +232,7 @@ async fn failed_snapshot_unknown_then_resend_preserves_the_wire_prefix() {
     );
     harness
         .runtime
-        .send_message_with_images(
-            run,
-            "verify cache reuse".into(),
-            vec![],
-            Some("third".into()),
-        )
+        .send_user_input(run, "verify cache reuse".into(), Some("third".into()))
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
     harness
@@ -325,10 +300,9 @@ async fn shell_host_input_handoff_is_once_only_and_preserves_the_wire_prefix() {
         }
         harness
             .runtime
-            .send_message_with_images(
+            .send_user_input(
                 run,
                 "unique shell handoff input".into(),
-                vec![],
                 Some("handoff".into()),
             )
             .unwrap();

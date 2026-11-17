@@ -107,7 +107,7 @@ impl CommandService {
                 project_root: None,
                 thread_id,
                 text,
-                images: Vec::new(),
+                attachments: Vec::new(),
                 model_preference: None,
                 composer_role: if chat_role == Some(Role::Worker) {
                     ComposerRole::Worker

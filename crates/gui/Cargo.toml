@@ -23,6 +23,10 @@ browser = ["dep:browser"]
 cef = ["browser", "dep:browser-cef", "browser-cef/cef"]
 
 [dependencies]
+sha2 = { workspace = true }
+arboard = "3.6"
+raw-window-handle = "0.6"
+rustix = { version = "1", features = ["event", "pipe"] }
 browser = { path = "../browser", optional = true }
 browser-cef = { path = "../browser-cef", optional = true }
 base64 = { workspace = true }
@@ -75,6 +79,9 @@ workbench-protocol = { path = "../workbench-protocol" }
 workbench-client = { path = "../workbench-client" }
 core-instance = { path = "../core-instance" }
 core-launcher = { path = "../core-launcher" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notify-rust = "4"

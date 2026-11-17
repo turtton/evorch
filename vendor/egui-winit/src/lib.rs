@@ -1025,12 +1025,10 @@ impl State {
                     self.egui_input.events.push(egui::Event::Copy);
                     return;
                 } else if is_paste_command(self.modifiers, active_key) {
-                    if let Some(contents) = self.clipboard.get() {
-                        let contents = contents.replace("\r\n", "\n");
-                        if !contents.is_empty() {
-                            self.egui_input.events.push(egui::Event::Paste(contents));
-                        }
-                    }
+                    let contents = self.clipboard.get().unwrap_or_default();
+                    let contents = contents.replace("\r\n", "\n");
+                    // An empty paste lets the application try a non-text clipboard format.
+                    self.egui_input.events.push(egui::Event::Paste(contents));
                     return;
                 }
             }

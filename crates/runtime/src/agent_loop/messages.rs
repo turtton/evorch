@@ -37,11 +37,11 @@ impl LoopState {
     pub(crate) fn has_pending_user_messages(&self) -> bool {
         self.pending_user_messages
             .iter()
-            .any(|message| self.channels.user_inbox.is_pending(message.4))
+            .any(|message| self.channels.user_inbox.is_pending(message.3))
     }
 
     pub(crate) fn queue_user_message(&mut self, message: crate::runtime::user_inbox::UserInput) {
-        if self.channels.user_inbox.is_pending(message.4) {
+        if self.channels.user_inbox.is_pending(message.3) {
             self.pending_user_messages.push(message);
         }
     }
@@ -66,7 +66,7 @@ impl LoopState {
         }
         let mut later = Vec::new();
         messages.retain(|message| {
-            if message.2 && message.4 > cut {
+            if message.1 && message.3 > cut {
                 later.push(message.clone());
                 false
             } else {
@@ -76,7 +76,7 @@ impl LoopState {
         self.pending_user_messages = later;
         // A trusted goal wake is a scheduling signal, not a new human request.
         // When already running, the normal Stop boundary will perform the check.
-        messages.retain(|(text, _, trusted_user, _, _)| {
+        messages.retain(|(text, trusted_user, _, _)| {
             if !trusted_user && text == crate::thread_goals::CHECKS_WAKE {
                 self.goal_wake_pending = true;
                 false

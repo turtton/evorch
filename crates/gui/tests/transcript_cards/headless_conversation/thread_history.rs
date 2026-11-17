@@ -261,7 +261,13 @@ fn restored_thread_includes_assistant_events_from_storage() {
         .unwrap();
     // Then: the transcript retains both participants, not just the sidebar's user text.
     let entries = reopened.transcript().entries();
-    assert!(entries.iter().any(|entry| matches!(entry, TranscriptEntry::UserMessage { text, .. } if text == "remember this")), "restored user message missing: {entries:?}");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::UserMessage {
+            text, .. } if text == "remember this")),
+        "restored user message missing: {entries:?}"
+    );
     assert!(entries.iter().any(|entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "remembered reply")), "restored assistant message missing: {entries:?}");
 }
 
@@ -323,9 +329,10 @@ fn events_appended_before_gui_close_survive_restart() {
     // Then: both sides survive a complete writer close and database reopen.
     let entries = reopened.transcript().entries();
     assert!(
-        entries.iter().any(
-            |entry| matches!(entry, TranscriptEntry::UserMessage { text, .. } if text == "new question")
-        ),
+        entries
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::UserMessage {
+            text, .. } if text == "new question")),
         "restarted user message missing: {entries:?}"
     );
     assert!(

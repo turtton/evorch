@@ -127,15 +127,7 @@ async fn scenario(delivery: Delivery, batch: bool) {
     }
     review_storage.attach(&runtime);
     runtime
-        .send_message_with_images(
-            parent,
-            "Please inspect this image".into(),
-            vec![DelegateImage {
-                media_type: "image/png".into(),
-                data: "aW1hZ2U=".into(),
-            }],
-            None,
-        )
+        .send_user_input(parent, "Please inspect this image".into(), None)
         .unwrap();
     review_storage.attach(&runtime);
     runtime

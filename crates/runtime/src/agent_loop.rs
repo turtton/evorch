@@ -479,16 +479,6 @@ pub(crate) async fn run_agent(
                     None if !history_only => {
                         context.push_user(&task.prompt);
                         restored_prompt_index = Some(context.messages.len() - 1);
-                        if let Some(message) = context.messages.last_mut() {
-                            message
-                                .content
-                                .extend(task.config.images.iter().map(|image| {
-                                    ContentBlock::Image {
-                                        media_type: image.media_type.clone(),
-                                        data: image.data.clone(),
-                                    }
-                                }));
-                        }
                     }
                     None => {}
                 }
@@ -606,8 +596,20 @@ pub(crate) async fn run_agent(
                             access: state.policy.allowed_access(),
                         });
                 state.thread_read_dirs = state.thread_read_dirs_to_mount(&root);
+                let attachment_directories = match state
+                    .runtime()
+                    .map(|runtime| runtime.attachment_read_directories_for_run(state.task.run_id))
+                    .transpose()
+                {
+                    Ok(directories) => directories.unwrap_or_default(),
+                    Err(error) => {
+                        state.finish_error(format!("attachment sandbox setup failed: {error}"));
+                        return;
+                    }
+                };
                 // A Worker it delegates gets the same base, sharing the thread's scratch.
                 state.worker_base = crate::network::sandbox_boundary(&crate::WorkspaceMounts {
+                    attachment_directories: attachment_directories.clone(),
                     scratch: state.scratch_dir().map(std::path::Path::to_path_buf),
                     ..crate::WorkspaceMounts::shared(root.clone())
                 })
@@ -637,6 +639,7 @@ pub(crate) async fn run_agent(
                     workspace_root: root.clone(),
                     ro_binds: state.thread_read_dirs.clone(),
                     thread_ro_identities,
+                    attachment_directories,
                     rw_binds: Vec::new(),
                     scratch: state.scratch_dir().map(std::path::Path::to_path_buf),
                     allowed: state.allowed_directories.clone(),
@@ -836,9 +839,8 @@ pub(crate) async fn run_agent(
                 state.append_benchmark_instructions();
             }
             let prompt = state.task.prompt.clone();
-            let images = state.task.config.images.clone();
             let tracked = state.initial_prompt_pending.clone();
-            state.append_user_message(&prompt, images, tracked);
+            state.append_user_message(&prompt, tracked);
         }
         if state.task.handoff.is_some() && !is_restored {
             match state
@@ -1793,7 +1795,7 @@ impl LoopState {
                         self.finish_error("interactive inbox closed".to_string());
                         return false;
                     };
-                    if !message.2 && message.0 == crate::thread_goals::CHECKS_WAKE {
+                    if !message.1 && message.0 == crate::thread_goals::CHECKS_WAKE {
                         if self.user_question_completion_check().is_ok() && self.thread_goal_boundary().await {
                             return self.transition(AgentRunPhase::Running, None).is_ok();
                         }

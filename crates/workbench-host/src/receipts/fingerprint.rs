@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use crate::commands::{ChatInput, ComposerRole};
 
 /// Bump when the encoding changes, so digests of the old encoding never match.
-const VERSION: &str = "chat-v1";
+const VERSION: &str = "chat-v2-attachments";
 
 fn field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update((bytes.len() as u64).to_be_bytes());
@@ -50,11 +50,6 @@ pub fn chat_fingerprint(chat: &ChatInput) -> String {
     for skill in &chat.skills {
         field(&mut hasher, skill.as_bytes());
     }
-    hasher.update((chat.images.len() as u64).to_be_bytes());
-    for image in &chat.images {
-        field(&mut hasher, image.media_type.as_bytes());
-        field(&mut hasher, image.data.as_bytes());
-    }
     match &chat.model_preference {
         Some(preference) => {
             hasher.update([1]);
@@ -75,14 +70,22 @@ pub fn chat_fingerprint(chat: &ChatInput) -> String {
         }
         None => hasher.update([0]),
     }
-    let digest = hasher.finalize();
-    let mut text = String::with_capacity(VERSION.len() + 1 + digest.len() * 2);
-    text.push_str(VERSION);
-    text.push(':');
-    for byte in digest {
-        text.push_str(&format!("{byte:02x}"));
+    let mut wire = hasher.clone();
+    hasher.update((chat.attachments.len() as u64).to_be_bytes());
+    wire.update((chat.attachments.len() as u64).to_be_bytes());
+    for attachment in &chat.attachments {
+        let (filename, media_type, byte_length, sha256) = attachment.immutable_metadata();
+        field(&mut hasher, filename.as_bytes());
+        field(&mut hasher, media_type.as_bytes());
+        hasher.update(byte_length.to_be_bytes());
+        field(&mut hasher, sha256.as_bytes());
+        let id = match attachment {
+            crate::attachments::ChatAttachment::Uploaded(r) => r.id.as_str(),
+            crate::attachments::ChatAttachment::Native(d) => &d.draft_id,
+        };
+        field(&mut wire, id.as_bytes());
     }
-    text
+    format!("{VERSION}:{:x}:{:x}", wire.finalize(), hasher.finalize())
 }
 
 #[cfg(test)]

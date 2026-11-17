@@ -471,7 +471,8 @@ fn escalation_summary_stays_in_child_and_source_is_unchanged_on_start_done_or_er
                 .switch_thread(ThreadId::new("escalation-run-2"))
                 .unwrap();
             assert!(matches!(state.transcript().entries().first(),
-                Some(TranscriptEntry::UserMessage { text, .. }) if text == "Coordinate the implementation"));
+                Some(TranscriptEntry::UserMessage {
+            text, .. }) if text == "Coordinate the implementation"));
             assert_eq!(state.transcript().entries().iter().filter(|entry| matches!(entry,
                 TranscriptEntry::Notice { text } if text == "Escalated from Worker task: Coordination required\nImplement the feature"
             )).count(), 1);

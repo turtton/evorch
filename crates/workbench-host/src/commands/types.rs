@@ -25,7 +25,7 @@ pub struct ChatInput {
     /// Root of the project the thread belongs to; its runs work there.
     pub project_root: Option<PathBuf>,
     pub composer_role: ComposerRole,
-    pub images: Vec<runtime::DelegateImage>,
+    pub attachments: Vec<crate::attachments::ChatAttachment>,
     pub thread_id: String,
     /// What the user typed. The runtime expands `skills` into the prompt the
     /// agent sees; the words stay as typed everywhere else.

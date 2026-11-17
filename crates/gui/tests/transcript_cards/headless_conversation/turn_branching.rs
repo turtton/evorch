@@ -142,9 +142,10 @@ fn user_message(gui: &WorkbenchState<DemoSource>, text: &str) -> usize {
     gui.transcript()
         .entries()
         .iter()
-        .position(
-            |entry| matches!(entry, TranscriptEntry::UserMessage { text: t, .. } if t == text),
-        )
+        .position(|entry| {
+            matches!(entry, TranscriptEntry::UserMessage {
+            text: t, .. } if t == text)
+        })
         .unwrap()
 }
 

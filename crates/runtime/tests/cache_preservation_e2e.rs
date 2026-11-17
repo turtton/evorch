@@ -3601,15 +3601,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
     review_storage.attach(&harness.runtime);
     harness
         .runtime
-        .send_message_with_images(
-            run,
-            "Inspect the attached image".into(),
-            vec![DelegateImage {
-                media_type: "image/png".into(),
-                data: "aW1hZ2U=".into(),
-            }],
-            None,
-        )
+        .send_user_input(run, "Inspect the attached image".into(), None)
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
     assert_eq!(
@@ -3712,13 +3704,9 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
         review_storage.attach(&harness.runtime);
         harness
             .runtime
-            .send_message_with_images(
+            .send_user_input(
                 run,
                 "first queued follow-up".into(),
-                vec![DelegateImage {
-                    media_type: "image/png".into(),
-                    data: "aW1hZ2U=".into(),
-                }],
                 Some(format!("delivered-{expedite}")),
             )
             .unwrap();
@@ -3754,15 +3742,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
         for id in &withdrawn_ids {
             harness
                 .runtime
-                .send_message_with_images(
-                    run,
-                    format!("never deliver {id}"),
-                    vec![DelegateImage {
-                        media_type: "image/png".into(),
-                        data: "d2l0aGRyYXdu".into(),
-                    }],
-                    Some(id.clone()),
-                )
+                .send_user_input(run, format!("never deliver {id}"), Some(id.clone()))
                 .unwrap();
         }
         assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 4);

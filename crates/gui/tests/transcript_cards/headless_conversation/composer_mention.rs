@@ -263,10 +263,18 @@ fn the_bubble_shows_the_skills_the_runtime_recorded_for_the_accepted_message() {
         "{} skill: git-best-practices",
         gui::theme::icons::SPARKLE
     )));
-    assert!(harness.state().transcript().entries().iter().any(|entry| matches!(
-        entry,
-        TranscriptEntry::UserMessage { skills, .. } if skills == &["git-best-practices".to_owned()]
-    )));
+    assert!(
+        harness
+            .state()
+            .transcript()
+            .entries()
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                TranscriptEntry::UserMessage {
+                    skills, .. } if skills == &["git-best-practices".to_owned()]
+            ))
+    );
 }
 
 #[test]

@@ -185,6 +185,20 @@ fn check_expected(expected: Revision, actual: Revision) -> Result<(), WorkspaceR
 }
 
 impl WorkspaceArea {
+    pub(crate) fn thread_archived(&self, thread: &str) -> Result<bool, WorkbenchError> {
+        let Some(service) = &self.inner else {
+            return Ok(false);
+        };
+        let document = service.read()?;
+        Ok(document
+            .sidebar
+            .threads
+            .iter()
+            .find(|r| r.id.to_string() == thread)
+            .and_then(|r| document.sidebar.resolve_states().get(&r.id).cloned())
+            .is_some_and(|state| state.archived))
+    }
+
     pub(super) fn new(handles: &AreaHandles) -> Result<Self, BootstrapError> {
         let runtime = handles.runtime.clone();
         let reader = runtime.clone();
@@ -581,6 +595,46 @@ impl Service {
                 reason: "only a human actor may change trust or reachable directories".into(),
             });
         }
+        // Attachment locks precede the save lock; deletion never holds that lock.
+        // An unarchive first retries any incomplete archive removal.
+        let mut attachment_members = Vec::new();
+        let attachment_guard = if let (WorkspaceCommand::SetFamilyArchived(c), Some(runtime)) =
+            (command, self.runtime.as_ref())
+        {
+            let document = self.read().map_err(|e| WorkspaceRejection::StorageFailed {
+                reason: e.to_string(),
+            })?;
+            let id = ThreadId::new(c.thread.as_str());
+            let key = document.sidebar.family_key(&id).map_err(thread_rejection)?;
+            attachment_members = document
+                .sidebar
+                .family_members(&key)
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>();
+            attachment_members.sort();
+            let root =
+                runtime
+                    .attachment_root()
+                    .map_err(|e| WorkspaceRejection::StorageFailed {
+                        reason: e.to_string(),
+                    })?;
+            let guard =
+                runtime::attachments::AttachmentArchive::lock(root, attachment_members.clone())
+                    .map_err(|e| WorkspaceRejection::StorageFailed {
+                        reason: format!("attachment archive is busy or unavailable; retry: {e}"),
+                    })?;
+            if !c.archived {
+                guard
+                    .remove()
+                    .map_err(|e| WorkspaceRejection::StorageFailed {
+                        reason: e.to_string(),
+                    })?;
+            }
+            Some(guard)
+        } else {
+            None
+        };
         let deleted = self.deleted()?;
         let lock = self.store.lock().map_err(store_rejection)?;
         let mut document = self.store.read(&lock).map_err(store_rejection)?;
@@ -589,6 +643,26 @@ impl Service {
         let snapshot = self
             .repair_membership(&mut document.sidebar)
             .map_err(|reason| WorkspaceRejection::StorageFailed { reason })?;
+        if let WorkspaceCommand::SetFamilyArchived(c) = command
+            && attachment_guard.is_some()
+        {
+            let key = document
+                .sidebar
+                .family_key(&ThreadId::new(c.thread.as_str()))
+                .map_err(thread_rejection)?;
+            let mut members = document
+                .sidebar
+                .family_members(&key)
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>();
+            members.sort();
+            if members != attachment_members {
+                return Err(WorkspaceRejection::FamilyChanged {
+                    reason: "the attachment family changed; retry".into(),
+                });
+            }
+        }
         let done = self.apply(command, &mut document, &*deleted)?;
         if document.sidebar != before {
             self.store
@@ -597,6 +671,15 @@ impl Service {
         }
         self.project_saved(&lock, &mut document, snapshot);
         drop(lock);
+        if let Some(guard) = attachment_guard
+            && matches!(command, WorkspaceCommand::SetFamilyArchived(c) if c.archived)
+        {
+            guard
+                .remove()
+                .map_err(|e| WorkspaceRejection::StorageFailed {
+                    reason: format!("attachments were not fully removed; retry archive: {e}"),
+                })?;
+        }
         if done.access {
             self.declare(&document);
         }

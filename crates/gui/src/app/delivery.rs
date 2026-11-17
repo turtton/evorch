@@ -171,7 +171,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 && ids.contains(&message.id)
             {
                 message.status = DeliveryStatus::Delivered;
-                self.queued_images.remove(&message.id);
+                self.queued_attachments.remove(&message.id);
                 changed = true;
             }
         }
@@ -373,7 +373,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .filter(|message| message.status == DeliveryStatus::Queued || message.awaits_user())
             .map(|message| message.id.as_str())
             .collect();
-        self.queued_images
+        self.queued_attachments
             .retain(|id, _| pending.contains(id.as_str()));
         self.follow_up_queues.clear();
         for message in &self.history {
@@ -425,7 +425,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let drafts = self.composer_drafts.clone();
         let sidebar = self.sidebar.clone();
         let images = if withdrawn {
-            self.queued_images.get(id).cloned().unwrap_or_default()
+            self.queued_attachments
+                .get(id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut draft| {
+                    draft.reupload();
+                    draft
+                })
+                .collect::<Vec<_>>()
         } else {
             Vec::new()
         };
@@ -488,7 +497,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // recovered editor contents in memory even when saving its draft fails.
         }
         if withdrawn {
-            self.queued_images.remove(id);
+            self.queued_attachments.remove(id);
+        }
+        if !active
+            && !images.is_empty()
+            && let Some(record) = self
+                .sidebar
+                .threads
+                .iter()
+                .find(|record| record.id.to_string() == thread)
+        {
+            self.composer_attachments
+                .entry(record.id.clone())
+                .or_default()
+                .extend(images.clone());
         }
         if active {
             self.composer.attachments.extend(images);

@@ -65,10 +65,9 @@ async fn restored_delivery_panic_seals_followup_before_error() {
         .unwrap();
     fixture.entered.notified().await;
     runtime
-        .send_message_with_images(
+        .send_user_input(
             fixture.run,
             "followup".into(),
-            Vec::new(),
             Some("restored-followup".into()),
         )
         .unwrap();

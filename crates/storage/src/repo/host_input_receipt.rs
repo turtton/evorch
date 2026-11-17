@@ -24,7 +24,6 @@ pub(crate) fn parse_ids(json: &str) -> Result<Vec<String>, StorageError> {
 
 pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<(), StorageError> {
     receipt.validate()?;
-    let image_count = i64::from(receipt.image_count);
     conn.execute(
         &format!(
             "INSERT INTO host_input_receipts ({COLUMNS}, acceptance_seq) VALUES \
@@ -36,7 +35,7 @@ pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<()
             receipt.run_id,
             receipt.root_run_id,
             receipt.text,
-            image_count,
+            0_i64, // Retired image column; attachments have no receipt-side state.
             receipt.status.as_str(),
             receipt.reason,
             receipt.accepted_at_ns,
@@ -193,7 +192,6 @@ pub(crate) fn for_run(
 
 fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostInputReceipt> {
     let status: String = row.get(5)?;
-    let image_count: i64 = row.get(4)?;
     Ok(HostInputReceipt {
         provenance: serde_json::from_str(&row.get::<_, String>(10)?).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e))
@@ -202,7 +200,6 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostInputReceipt> {
         run_id: row.get(1)?,
         root_run_id: row.get(2)?,
         text: row.get(3)?,
-        image_count: u32::try_from(image_count).unwrap_or(u32::MAX),
         status: HostInputStatus::parse(&status).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
                 5,

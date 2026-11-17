@@ -2,6 +2,7 @@
 
 | Crate | Upstream | Local change |
 |---|---|---|
+| `egui-winit` 0.36.2 | <https://github.com/emilk/egui> | Emit an empty keyboard-paste signal when no text is available, so a focused composer can read an OS clipboard image; nonempty text and RequestPaste are unchanged |
 | `egui_commonmark` 0.25.0 | <https://github.com/lampsitter/egui_commonmark> | `CommonMarkViewer::link_menu_fn` builder |
 | `egui_commonmark_backend` 0.25.0 | same | `RenderLinkMenuFn`, `CommonMarkOptions::link_menu_fn`, attach it to hyperlinks in `Link::end` |
 

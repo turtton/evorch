@@ -20,7 +20,11 @@ pub(super) fn chat_input(chat: ChatSubmission) -> ChatInput {
         submission_id: chat.submission_id,
         project_root: chat.project_root,
         composer_role: composer_role(chat.composer_role),
-        images: chat.images,
+        attachments: chat
+            .attachments
+            .into_iter()
+            .map(workbench_host::attachments::ChatAttachment::Uploaded)
+            .collect(),
         thread_id: chat.thread_id,
         text: chat.text,
         skills: chat.skills,

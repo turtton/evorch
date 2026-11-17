@@ -157,10 +157,9 @@ fn task_prompt_reordering_invalidates_both_slots_without_unsorting_ids() {
     assert!(ids[0] < ids[1], "ID lookup remains sorted after reordering");
     assert_eq!(model.entry_revision(ids[0]), Some(notice_revision + 1));
     assert_eq!(model.entry_revision(ids[1]), Some(1));
-    assert!(
-        matches!(&model.entries()[0], TranscriptEntry::UserMessage { text, .. }
-        if text == "delegated instruction")
-    );
+    assert!(matches!(&model.entries()[0], TranscriptEntry::UserMessage {
+            text, .. }
+        if text == "delegated instruction"));
     assert!(
         matches!(&model.entries()[1], TranscriptEntry::Notice { text }
         if text == "subagent worker started")

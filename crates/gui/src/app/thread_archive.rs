@@ -31,6 +31,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .sidebar
             .lane_family_revision(&thread_id)
             .map_err(|_| ThreadError::UnknownThread)?;
+        let key = self.sidebar.family_key(&thread_id)?;
+        let attachment_members = self
+            .sidebar
+            .family_members(&key)
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        let attachment_guard = self
+            .sink
+            .attachment_archive_guard(&attachment_members)
+            .map_err(WorkbenchError::SidebarBusy)?;
+        if !archived && let Some(guard) = &attachment_guard {
+            guard.remove().map_err(|e| {
+                WorkbenchError::SidebarBusy(format!("attachment removal incomplete; retry: {e}"))
+            })?;
+        }
         let phases = self.phases.clone();
         let now = now_unix_seconds();
         // The same guards run again on the newest state: a family is archived from
@@ -72,6 +88,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(ArchiveChange { archived, family }) = change else {
             return Ok(());
         };
+        self.forget_family_attachment_drafts(&family);
+        if archived && let Some(guard) = attachment_guard {
+            guard.remove().map_err(|e| {
+                WorkbenchError::SidebarBusy(format!("attachment removal incomplete; retry: {e}"))
+            })?;
+        }
         self.refresh_retention();
         if archived
             && self

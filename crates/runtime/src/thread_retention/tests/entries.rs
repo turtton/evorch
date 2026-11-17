@@ -143,7 +143,7 @@ fn table() -> BTreeMap<&'static str, Guard> {
         ),
         ("runtime.rs::send_agent_message", Exempt(RESTORE_PATH)),
         ("runtime.rs::send_message", Exempt(RESTORE_PATH)),
-        ("runtime.rs::send_message_with_images", Exempt(RESTORE_PATH)),
+        ("runtime.rs::send_user_input", Exempt(RESTORE_PATH)),
         ("runtime.rs::deliver_notice", Exempt(LIVE_ONLY)),
         (
             "runtime.rs::deliver_follow_ups_next_turn",

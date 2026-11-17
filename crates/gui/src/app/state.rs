@@ -123,8 +123,9 @@ pub struct WorkbenchState<S> {
     pub(super) diff_source: Arc<dyn DiffSource>,
     pub(super) goal_form: GoalFormModel,
     pub(super) composer: ComposerModel,
+    pub(super) attachment_work: super::attachments::AttachmentWork,
     pub(super) composer_attachments:
-        BTreeMap<workspace_ui::ThreadId, Vec<crate::model::composer::ImageAttachment>>,
+        BTreeMap<workspace_ui::ThreadId, Vec<crate::model::composer::AttachmentDraft>>,
     pub(super) model_picker: crate::model::model_picker::ModelPickerState,
     pub(super) provider_status: ProviderStatus,
     pub(super) provider_settings: ProviderSettingsModel,
@@ -164,7 +165,7 @@ pub struct WorkbenchState<S> {
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) running_children: BTreeMap<String, usize>,
     /// Live image payloads retained by submission ID for queued edits.
-    pub(super) queued_images: BTreeMap<String, Vec<crate::model::composer::ImageAttachment>>,
+    pub(super) queued_attachments: BTreeMap<String, Vec<crate::model::composer::AttachmentDraft>>,
     /// Follow-ups each thread queued while its run was busy, oldest first.
     pub(super) follow_up_queues: BTreeMap<String, Vec<crate::model::composer::QueuedFollowUp>>,
     /// Display state each thread had last frame, to notice finished work.
@@ -282,6 +283,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             diff_source: Arc::new(GitCliDiffSource),
             goal_form: GoalFormModel::default(),
             composer: ComposerModel::default(),
+            attachment_work: super::attachments::AttachmentWork::default(),
             composer_attachments: BTreeMap::new(),
             model_picker: crate::model::model_picker::ModelPickerState::default(),
             provider_status: ProviderStatus::default(),
@@ -312,7 +314,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             issued: Vec::new(),
             phases: BTreeMap::new(),
             running_children: BTreeMap::new(),
-            queued_images: BTreeMap::new(),
+            queued_attachments: BTreeMap::new(),
             follow_up_queues: BTreeMap::new(),
             thread_states: BTreeMap::new(),
             unread_threads: std::collections::BTreeSet::new(),

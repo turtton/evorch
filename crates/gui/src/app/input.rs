@@ -26,6 +26,36 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     ///
     /// Only a focused composer claims it, so other panes keep Tab.
     pub fn raw_input_hook(&mut self, raw_input: &mut egui::RawInput) {
+        // Empty keyboard paste is an integration signal, never terminal data or
+        // a paste into another editor. Consume it before every routing branch.
+        let empty_paste = raw_input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Paste(text) if text.is_empty()));
+        raw_input
+            .events
+            .retain(|event| !matches!(event, egui::Event::Paste(text) if text.is_empty()));
+        let composer = self.composer.focused
+            && !self.terminals.focused
+            && !self.settings_owns_input()
+            && !self.picker_owns_input()
+            && !self.search_owns_input();
+        if composer && let Some(thread) = self.sidebar.active_thread.clone() {
+            if empty_paste {
+                self.attachment_work
+                    .queued
+                    .push((thread.clone(), crate::attachments::Intake::Clipboard));
+            }
+            if !raw_input.dropped_files.is_empty() {
+                let files = std::mem::take(&mut raw_input.dropped_files)
+                    .into_iter()
+                    .map(|file| file.path().to_path_buf())
+                    .collect();
+                self.attachment_work
+                    .queued
+                    .push((thread, crate::attachments::Intake::Files(files)));
+            }
+        }
         if self.settings_owns_input() || self.picker_owns_input() || self.search_owns_input() {
             return;
         }

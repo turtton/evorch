@@ -49,10 +49,9 @@ async fn two_restart_cancellations_keep_wire_prefix_and_parked_input_once() {
             h.runtime.wait_quiesced().await.unwrap();
             if index == 0 {
                 h.runtime
-                    .send_message_with_images(
+                    .send_user_input(
                         run,
                         "parked human suffix".into(),
-                        Vec::new(),
                         Some("parked-once".into()),
                     )
                     .unwrap();

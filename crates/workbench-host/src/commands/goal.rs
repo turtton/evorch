@@ -50,7 +50,7 @@ impl CommandService {
                 thread_id: thread_id.clone(),
                 text: prompt,
                 composer_role: ComposerRole::Orchestrator,
-                images: Vec::new(),
+                attachments: Vec::new(),
                 model_preference: None,
                 fork_seed: None,
                 skills: Vec::new(),

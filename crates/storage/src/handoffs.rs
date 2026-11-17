@@ -167,11 +167,11 @@ impl StorageHandle {
             }
             crate::repo::review_evidence::insert(&tx, &rows)?;
             let receipts = {
-                let mut query = tx.prepare("SELECT prompt_id,evidence_id,text,image_count,status,reason,accepted_at_ns,status_at_ns,provenance_json FROM host_input_receipts WHERE evidence_id IN (SELECT value FROM json_each(?1)) ORDER BY acceptance_seq")?;
+                let mut query = tx.prepare("SELECT prompt_id,evidence_id,text,0,status,reason,accepted_at_ns,status_at_ns,provenance_json FROM host_input_receipts WHERE evidence_id IN (SELECT value FROM json_each(?1)) ORDER BY acceptance_seq")?;
                 query.query_map([ids], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,i64>(6)?,r.get::<_,i64>(7)?,r.get::<_,String>(8)?)))?.collect::<Result<Vec<_>,_>>()?
             };
-            for (prompt,evidence,text,images,status,reason,accepted,updated,provenance) in receipts {
-                tx.execute("INSERT OR IGNORE INTO host_input_receipts(prompt_id,run_id,root_run_id,text,image_count,status,reason,accepted_at_ns,status_at_ns,evidence_id,provenance_json,acceptance_seq) VALUES(?1,?2,?2,?3,?4,?5,?6,?7,?8,?9,?10,(SELECT COALESCE(MAX(acceptance_seq),0)+1 FROM host_input_receipts))",params![format!("handoff-acceptance-{target}-{prompt}"),target,text,images,status,reason,accepted,updated,format!("handoff-evidence-{target}-{evidence}"),provenance])?;
+            for (prompt,evidence,text,_retired_images,status,reason,accepted,updated,provenance) in receipts {
+                tx.execute("INSERT OR IGNORE INTO host_input_receipts(prompt_id,run_id,root_run_id,text,image_count,status,reason,accepted_at_ns,status_at_ns,evidence_id,provenance_json,acceptance_seq) VALUES(?1,?2,?2,?3,?4,?5,?6,?7,?8,?9,?10,(SELECT COALESCE(MAX(acceptance_seq),0)+1 FROM host_input_receipts))",params![format!("handoff-acceptance-{target}-{prompt}"),target,text,0_i64,status,reason,accepted,updated,format!("handoff-evidence-{target}-{evidence}"),provenance])?;
             }
             tx.commit()?;
             Ok(!rows.is_empty())

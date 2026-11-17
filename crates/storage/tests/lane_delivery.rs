@@ -207,7 +207,6 @@ fn user_receipt() -> storage::HostInputReceipt {
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
         text: "private user instructions".into(),
-        image_count: 0,
         status: storage::HostInputStatus::Accepted,
         reason: None,
         accepted_at_ns: 3,

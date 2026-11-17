@@ -175,7 +175,6 @@ async fn shell_then_finish_preserves_simultaneous_and_post_receiver_input_once()
                     run_id: run.to_string(),
                     root_run_id: run.to_string(),
                     text: "reserved followup".into(),
-                    image_count: 0,
                     status: storage::HostInputStatus::Accepted,
                     reason: None,
                     accepted_at_ns: 1,

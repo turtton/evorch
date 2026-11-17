@@ -274,7 +274,6 @@ pub(crate) fn accept_delivery<N: OutboxNotice>(
             run_id: record.run_id.clone(),
             root_run_id: record.run_id.clone(),
             text: String::new(),
-            image_count: 0,
             status: crate::HostInputStatus::Delivered,
             reason: None,
             accepted_at_ns: now_ns,

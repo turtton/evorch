@@ -35,7 +35,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.composer.focused = false;
         self.refresh_mention_index(ui.ctx());
         self.poll_role_save();
-        self.refresh_image_capability();
         self.composer.running_children = self
             .sidebar
             .active_thread

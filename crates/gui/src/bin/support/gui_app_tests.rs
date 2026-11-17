@@ -57,7 +57,6 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
         text: "repair me".into(),
-        image_count: 0,
         status: storage::HostInputStatus::Unknown,
         reason: None,
         accepted_at_ns: 1,
@@ -139,9 +138,18 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
     receipts.lock().unwrap()[0].status = storage::HostInputStatus::Delivered;
     std::thread::sleep(Duration::from_millis(2250));
     tick(&mut app);
-    assert!(app.workbench.0.transcripts().thread().entries().iter().any(|entry| {
-        matches!(entry, gui::model::transcript::TranscriptEntry::UserMessage { text, .. } if text == "repair me")
-    }));
+    assert!(
+        app.workbench
+            .0
+            .transcripts()
+            .thread()
+            .entries()
+            .iter()
+            .any(|entry| {
+                matches!(entry, gui::model::transcript::TranscriptEntry::UserMessage {
+            text, .. } if text == "repair me")
+            })
+    );
 }
 
 #[test]

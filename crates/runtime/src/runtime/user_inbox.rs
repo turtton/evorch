@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 /// internal team notification). Only host input contributes to the GUI queue.
 /// The fourth field is its durable prompt UUID; the fifth is an incarnation-local
 /// enqueue sequence (zero for internal notices), never a durable identity.
-pub(crate) type UserInput = (String, Vec<crate::DelegateImage>, bool, Option<String>, u64);
+pub(crate) type UserInput = (String, bool, Option<String>, u64);
 
 /// Receiving/draining is not adoption. Keep a removable staging buffer so a
 /// withdrawal releases its bounded channel slot even during an in-flight tool.
@@ -79,7 +79,7 @@ impl InboxReceiver {
 /// The prompt ID whose delivery receipt this input carries: host input with an
 /// ID. Internal notices, goal wakes and agent messages are never tracked.
 pub(crate) fn tracked_prompt_id(input: &UserInput) -> Option<&str> {
-    input.3.as_deref().filter(|_| input.2)
+    input.2.as_deref().filter(|_| input.1)
 }
 
 /// Why a queued input cannot be withdrawn from this incarnation.
@@ -354,7 +354,7 @@ impl UserInbox {
                 while let Ok(input) = receiver.channel.try_recv() {
                     receiver.staged.push_back(input);
                 }
-                receiver.staged.retain(|input| input.4 != seq);
+                receiver.staged.retain(|input| input.3 != seq);
             }
             Ok(())
         })

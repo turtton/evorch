@@ -1320,6 +1320,7 @@ fn build_workbench(
         .with_ownership(Arc::clone(&ownership))
         .with_command_sink(Box::new(
             RuntimeCommandSink::new(runtime.clone(), handle.clone())
+                .with_sidebar_path(state_path.clone())
                 .with_web_tools_enabled(composition_config.sandbox.web_tools_enabled)
                 .with_event_bus(Arc::clone(&bus))
                 .with_ownership(ownership.clone())

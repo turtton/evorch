@@ -234,7 +234,7 @@ fn live_queue_edit_and_delete_are_distinct_and_preserve_the_other_rows() {
     gui.run();
     assert_eq!(gui.state().composer().input, "current draft\n\nedit queued");
     assert_eq!(gui.state().composer().attachments, [image]);
-    assert_eq!(gui.state().composer().images_needed, 0);
+    assert_eq!(gui.state().composer().attachments_needed, 0);
     assert!(!gui.has_label("Queued: edit queued"));
     assert!(!gui.has_label("Not delivered: edit queued"));
     assert!(gui.has_label("Queued: keep queued"));
