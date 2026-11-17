@@ -510,6 +510,9 @@ pub mod diagnostic_codes {
     /// items as interrupted. The list stays as it was; nothing continues.
     pub const THREAD_TODO_RECONCILE_FAILED: &str = "ThreadTodoReconcileFailed";
 
+    /// Plan interruption reconciliation could not be confirmed; the run outcome is unchanged.
+    pub const CONVERSATION_PLAN_RECONCILE_FAILED: &str = "conversation_plan_reconcile_failed";
+
     /// A committed lane stall observation changed; re-query the ledger.
     pub const LANE_STALL_CHANGED: &str = "lane_stall_changed";
     /// A nudge input receipt committed; re-query the lane state.
@@ -577,6 +580,7 @@ pub mod diagnostic_codes {
         EVALUATION_FINISHED,
         NESTED_ORCHESTRATOR_REJECTED,
         THREAD_TODO_RECONCILE_FAILED,
+        CONVERSATION_PLAN_RECONCILE_FAILED,
     ];
 }
 

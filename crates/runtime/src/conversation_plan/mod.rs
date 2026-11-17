@@ -140,7 +140,9 @@ impl AgentRuntime {
                     .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
                         source: "conversation_plan".into(),
                         severity: event_bus::DiagnosticSeverity::Warning,
-                        code: "conversation_plan_reconcile_failed".into(),
+                        code:
+                            event_bus::event::diagnostic_codes::CONVERSATION_PLAN_RECONCILE_FAILED
+                                .into(),
                         detail: reason,
                         run_id: Some(caller.run.to_string()),
                         thread_id: None,

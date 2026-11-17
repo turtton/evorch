@@ -148,6 +148,9 @@ pub struct PlanSummary {
     pub plan_id: Option<String>,
     pub revision: Revision,
     pub progress: PlanProgress,
+    /// Last committed change's Unix milliseconds; absent for an unplanned thread.
+    /// Display metadata only: order changes by revision, never by wall clock.
+    pub updated_at_unix_ms: Option<i64>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanTreePage {
@@ -175,6 +178,8 @@ pub struct PlanHistoryEntry {
     pub revision: Revision,
     pub event_id: Sequence,
     pub change: Option<PlanHistoryChange>,
+    /// Saved change event's Unix milliseconds; absent if its event was reclaimed.
+    pub updated_at_unix_ms: Option<i64>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanHistoryPage {

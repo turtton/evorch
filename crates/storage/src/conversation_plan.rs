@@ -328,6 +328,9 @@ pub struct PlanSummary {
     /// 0 until the first change; kept after `clear`.
     pub revision: u64,
     pub progress: PlanProgress,
+    /// Saved change event's Unix milliseconds, not a fresh read-time clock.
+    /// `None` until the first change; preserved across rebind and no-op updates.
+    pub updated_at_unix_ms: Option<i64>,
 }
 
 /// One task as a tree page lists it.
@@ -389,6 +392,8 @@ pub struct PlanHistoryEntry {
     pub event_id: i64,
     /// `None` when retention reclaimed the event while the index row stayed.
     pub event: Option<event_bus::ConversationPlanEvent>,
+    /// Saved event's Unix milliseconds; `None` if retention reclaimed the event.
+    pub updated_at_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

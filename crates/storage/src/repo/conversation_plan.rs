@@ -43,6 +43,7 @@ struct PlanRow {
     plan_id: String,
     revision: u64,
     next_seq: u64,
+    updated_ns: i64,
 }
 
 fn reject(rejection: PlanRejection) -> StorageError {
@@ -75,22 +76,24 @@ fn ensure_live_thread(conn: &Connection, thread_id: &str) -> Result<(), StorageE
 fn plan_row(conn: &Connection, thread_id: &str) -> Result<Option<PlanRow>, StorageError> {
     let row = conn
         .query_row(
-            "SELECT plan_id, revision, next_task_seq FROM conversation_plans WHERE thread_id = ?1",
+            "SELECT plan_id, revision, next_task_seq, updated_ns FROM conversation_plans WHERE thread_id = ?1",
             [thread_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             },
         )
         .optional()?;
-    row.map(|(plan_id, revision, next_seq)| {
+    row.map(|(plan_id, revision, next_seq, updated_ns)| {
         Ok(PlanRow {
             plan_id,
             revision: to_u64(revision, "plan revision")?,
             next_seq: to_u64(next_seq, "plan task sequence")?,
+            updated_ns,
         })
     })
     .transpose()
@@ -450,12 +453,14 @@ pub(crate) fn summary(conn: &Connection, thread_id: &str) -> Result<PlanSummary,
             plan_id: None,
             revision: 0,
             progress: PlanProgress::default(),
+            updated_at_unix_ms: None,
         },
         Some(row) => PlanSummary {
             thread_id: thread_id.to_owned(),
             progress: progress_of(&tx, &row.plan_id)?,
             plan_id: Some(row.plan_id),
             revision: row.revision,
+            updated_at_unix_ms: Some(row.updated_ns.div_euclid(1_000_000)),
         },
     })
 }
@@ -672,17 +677,21 @@ pub(crate) fn history(
              body_format FROM events WHERE id = ?1",
         )?;
         let mut found = statement.query([event_id])?;
-        let event = match found.next()? {
+        let (event, updated_at_unix_ms) = match found.next()? {
             Some(event_row) => match row_to_event(&tx, event_row)?.event.kind {
-                EventKind::ConversationPlan(event) => Some(event),
-                _ => None,
+                EventKind::ConversationPlan(event) => (
+                    Some(event),
+                    Some(event_row.get::<_, i64>(4)?.div_euclid(1_000_000)),
+                ),
+                _ => (None, None),
             },
-            None => None,
+            None => (None, None),
         };
         entries.push(PlanHistoryEntry {
             revision: to_u64(revision, "plan revision")?,
             event_id,
             event,
+            updated_at_unix_ms,
         });
     }
     let next_after_revision = more

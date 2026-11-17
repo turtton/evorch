@@ -91,7 +91,7 @@ pub fn samples() -> AreaSamples {
         ],
         query_replies: vec![
             de::<QueryReply>(
-                json!({"type":"execution","payload":{"type":"conversation_plan","payload":json!({"thread":"thread-1","plan_id":"plan-1","revision":"1","progress":plan_progress()})}}),
+                json!({"type":"execution","payload":{"type":"conversation_plan","payload":json!({"thread":"thread-1","plan_id":"plan-1","revision":"1","updated_at_unix_ms":1_700_000_000_123i64,"progress":plan_progress()})}}),
             ),
             de::<QueryReply>(
                 json!({"type":"execution","payload":{"type":"conversation_plan_tree","payload":json!({"thread":"thread-1","plan_id":"plan-1","revision":"1","progress":plan_progress(),"nodes":[plan_node()],"next_cursor":null})}}),
@@ -100,7 +100,7 @@ pub fn samples() -> AreaSamples {
                 json!({"type":"execution","payload":{"type":"conversation_plan_task","payload":json!({"thread":"thread-1","plan_id":"plan-1","revision":"1","node":{"task_id":"task-1","parent_id":null,"position":0,"depth":1,"title":"test","description":"detail","result":"","blocker":"","weight":1,"status":"pending","child_ids":[],"progress_ppm":plan_progress()["weighted_ppm"]}})}}),
             ),
             de::<QueryReply>(
-                json!({"type":"execution","payload":{"type":"conversation_plan_history","payload":json!({"thread":"thread-1","plan_id":"plan-1","revision":"1","entries":[{"event_id":"7","revision":"1","change":{"cause":"model_update","source_run_id":"run-1","changes":[{"change":"cleared","removed":0}],"progress":plan_progress()}}],"next_after_revision":null})}}),
+                json!({"type":"execution","payload":{"type":"conversation_plan_history","payload":json!({"thread":"thread-1","plan_id":"plan-1","revision":"1","entries":[{"event_id":"7","revision":"1","updated_at_unix_ms":1_700_000_000_123i64,"change":{"cause":"model_update","source_run_id":"run-1","changes":[{"change":"cleared","removed":0}],"progress":plan_progress()}}],"next_after_revision":null})}}),
             ),
             de::<QueryReply>(
                 json!({"type": "execution", "payload": {"type": "run_details", "payload": page(vec![run_detail()])}}),

@@ -139,6 +139,9 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         // thread_todos: end-of-work marking was skipped (fenced owner, exhausted revision);
         // the list is left as it was and no run behaves differently.
         THREAD_TODO_RECONCILE_FAILED => Ignored,
+        // conversation_plan: fenced ownership or failed optional reconciliation is
+        // diagnostic only; it does not establish a model/harness improvement.
+        CONVERSATION_PLAN_RECONCILE_FAILED => Ignored,
         // Explicit Continue refusal includes valid cancellation/fencing; not
         // evidence that the model or harness needs an improvement candidate.
         CHAT_RESUME_FAILED => Ignored,

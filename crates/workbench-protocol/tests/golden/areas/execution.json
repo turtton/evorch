@@ -97,7 +97,8 @@
           }
         },
         "revision": "1",
-        "thread": "thread-1"
+        "thread": "thread-1",
+        "updated_at_unix_ms": 1700000000123
       },
       "type": "conversation_plan"
     },
@@ -137,7 +138,8 @@
               "source_run_id": "run-1"
             },
             "event_id": "7",
-            "revision": "1"
+            "revision": "1",
+            "updated_at_unix_ms": 1700000000123
           }
         ],
         "next_after_revision": null,

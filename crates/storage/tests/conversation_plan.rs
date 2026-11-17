@@ -19,6 +19,132 @@ use storage::{HardLimits, Storage, StorageConfig, StorageError, StorageHandle};
 
 const THREAD: &str = "thread-a";
 
+#[test]
+fn update_times_follow_saved_events_not_reads_noops_or_wall_clock_order() {
+    let f = Fixture::new();
+    let h = f.handle();
+    assert_eq!(
+        h.conversation_plan_summary(THREAD)
+            .unwrap()
+            .updated_at_unix_ms,
+        None
+    );
+    let first = h
+        .update_conversation_plan(update(THREAD, 0, vec![add("a", None, "task")]))
+        .unwrap();
+    let first_event = first.event.as_ref().unwrap();
+    // The writer's timestamp is event data, not a freshness or elapsed-time assertion.
+    let event_ms = i64::try_from(
+        first_event
+            .event
+            .meta
+            .wall_clock
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    assert_eq!(
+        h.conversation_plan_summary(THREAD)
+            .unwrap()
+            .updated_at_unix_ms,
+        Some(event_ms)
+    );
+    assert_eq!(
+        h.conversation_plan_history(THREAD, None, None)
+            .unwrap()
+            .entries[0]
+            .updated_at_unix_ms,
+        Some(event_ms)
+    );
+
+    // Fixed fixture clocks prove sub-millisecond conversion and reversed wall clocks
+    // without sleeping or making execution speed a correctness condition.
+    let first_ns: i64 = 1_700_000_000_123_456_789;
+    f.sql()
+        .execute(
+            "UPDATE events SET wall_clock_ns = ?1 WHERE id = ?2",
+            rusqlite::params![first_ns, first_event.id],
+        )
+        .unwrap();
+    f.sql()
+        .execute(
+            "UPDATE conversation_plans SET updated_ns = ?1 WHERE thread_id = ?2",
+            rusqlite::params![first_ns, THREAD],
+        )
+        .unwrap();
+    let noop = h
+        .update_conversation_plan(update(
+            THREAD,
+            1,
+            vec![PlanOperation::Update {
+                task: TaskRef::Id(first.created[0].1.clone()),
+                title: Some("task".into()),
+                description: None,
+                result: None,
+                blocker: None,
+                weight: None,
+                status: None,
+            }],
+        ))
+        .unwrap();
+    assert!(!noop.changed);
+    assert_eq!(
+        h.conversation_plan_summary(THREAD)
+            .unwrap()
+            .updated_at_unix_ms,
+        Some(1_700_000_000_123)
+    );
+
+    let cleared = h
+        .update_conversation_plan(update(THREAD, 1, vec![PlanOperation::Clear]))
+        .unwrap();
+    let second_ns = first_ns - 10_000_000;
+    f.sql()
+        .execute(
+            "UPDATE events SET wall_clock_ns = ?1 WHERE id = ?2",
+            rusqlite::params![second_ns, cleared.event.as_ref().unwrap().id],
+        )
+        .unwrap();
+    f.sql()
+        .execute(
+            "UPDATE conversation_plans SET updated_ns = ?1 WHERE thread_id = ?2",
+            rusqlite::params![second_ns, THREAD],
+        )
+        .unwrap();
+    assert!(h.rebind_conversation_plan(THREAD, "moved").unwrap());
+    let summary = h.conversation_plan_summary("moved").unwrap();
+    assert_eq!(summary.revision, 2);
+    assert_eq!(summary.progress.node_count, 0);
+    assert_eq!(summary.updated_at_unix_ms, Some(1_700_000_000_113));
+    let history = h.conversation_plan_history("moved", None, None).unwrap();
+    assert_eq!(
+        history
+            .entries
+            .iter()
+            .map(|e| (e.revision, e.updated_at_unix_ms))
+            .collect::<Vec<_>>(),
+        vec![(1, Some(1_700_000_000_123)), (2, Some(1_700_000_000_113))]
+    );
+
+    f.sql()
+        .execute("DELETE FROM events WHERE id = ?1", [first_event.id])
+        .unwrap();
+    let history = h.conversation_plan_history("moved", None, None).unwrap();
+    assert!(history.entries[0].event.is_none());
+    assert_eq!(history.entries[0].updated_at_unix_ms, None);
+    drop(h);
+    drop(f.storage);
+    let restored = Storage::open(f.config).unwrap();
+    assert_eq!(
+        restored
+            .handle()
+            .conversation_plan_summary("moved")
+            .unwrap(),
+        summary
+    );
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     config: StorageConfig,

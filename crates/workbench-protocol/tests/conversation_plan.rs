@@ -71,6 +71,38 @@ fn queries_bound_pages_and_keep_revision_cursors_lossless() {
     );
 }
 #[test]
+fn update_times_round_trip_as_optional_unix_milliseconds() {
+    for time in [None, Some(0), Some(-1), Some(1_700_000_000_123)] {
+        let summary = PlanSummary {
+            thread: workbench_protocol::ids::ThreadId::new("thread").unwrap(),
+            plan_id: Some("plan".into()),
+            revision: Revision(1),
+            progress: progress(),
+            updated_at_unix_ms: time,
+        };
+        summary.validate().unwrap();
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["updated_at_unix_ms"], json!(time));
+        assert_eq!(
+            serde_json::from_value::<PlanSummary>(value).unwrap(),
+            summary
+        );
+        let entry = PlanHistoryEntry {
+            revision: Revision(1),
+            event_id: Sequence(7),
+            change: None,
+            updated_at_unix_ms: time,
+        };
+        let value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(value["updated_at_unix_ms"], json!(time));
+        assert_eq!(
+            serde_json::from_value::<PlanHistoryEntry>(value).unwrap(),
+            entry
+        );
+    }
+}
+
+#[test]
 fn replies_enforce_plan_shapes_and_serialized_bounds() {
     let mut page = PlanTreePage {
         plan_id: Some("plan-1".into()),
@@ -100,6 +132,7 @@ fn replies_enforce_plan_shapes_and_serialized_bounds() {
         revision: Revision(1),
         event_id: Sequence(7),
         change: None,
+        updated_at_unix_ms: None,
     };
     let mut history = PlanHistoryPage {
         plan_id: Some("plan-1".into()),

@@ -45,6 +45,7 @@ pub(super) fn query(
                 plan_id: p.plan_id,
                 revision: Revision(p.revision),
                 progress: wire(p.progress)?,
+                updated_at_unix_ms: p.updated_at_unix_ms,
             }))
         }
         ExecutionQuery::ReadConversationPlanTree(q) => {
@@ -105,6 +106,7 @@ pub(super) fn query(
                             error(ErrorCode::StorageUnavailable, "invalid saved plan event id")
                         })?),
                         change,
+                        updated_at_unix_ms: e.updated_at_unix_ms,
                     })
                 })
                 .collect::<Result<Vec<_>, WorkbenchError>>()?;

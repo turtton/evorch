@@ -93,6 +93,42 @@ fn summary(f: &Fixture) -> PlanSummary {
     *p
 }
 #[test]
+fn summary_and_history_forward_the_committed_event_time() {
+    let f = Fixture::new();
+    assert_eq!(summary(&f).updated_at_unix_ms, None);
+    let applied = f.update(0, vec![add("a")]);
+    // Compare persisted timestamp data, never elapsed time or freshness.
+    let expected = i64::try_from(
+        applied
+            .event
+            .unwrap()
+            .event
+            .meta
+            .wall_clock
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    assert_eq!(summary(&f).updated_at_unix_ms, Some(expected));
+    let ExecutionReply::ConversationPlanHistory(page) = f
+        .query(ExecutionQuery::ReadConversationPlanHistory(
+            PlanHistoryQuery {
+                thread: target().thread,
+                after_revision: None,
+                limit: Some(1),
+            },
+        ))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].updated_at_unix_ms, Some(expected));
+    assert_eq!(page.entries[0].revision, Revision(applied.revision));
+}
+
+#[test]
 fn reads_page_at_one_revision_and_reject_stale_or_foreign_cursors() {
     let f = Fixture::new();
     assert_eq!(summary(&f).revision, Revision(0));
