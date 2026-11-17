@@ -442,6 +442,32 @@ fn nothing_else_is_accepted_while_a_save_is_running() {
 }
 
 #[test]
+fn other_settings_dialogs_cannot_take_over_while_a_save_is_running() {
+    // Given: a routing save that has started but not been received.
+    let temp = tempfile::tempdir().expect("temp");
+    let mut harness = wide(temp.path());
+    harness.state_mut().open_routing_settings();
+    harness
+        .state_mut()
+        .routing_settings_mut()
+        .add_route("draft")
+        .expect("draft route");
+    harness.state_mut().submit_routing_settings();
+    assert!(harness.state().routing_settings().is_saving());
+    // When: every other settings entry is used.
+    harness.state_mut().open_storage_settings();
+    harness.state_mut().open_agent_features();
+    harness.state_mut().open_sandbox_settings();
+    harness.state_mut().open_self_improvement_settings();
+    harness.state_mut().open_theme_settings();
+    // Then: the session and its draft are kept.
+    assert_eq!(harness.state().settings_tab(), Some(SettingsTab::Routing));
+    assert!(harness.state().routing_settings().is_saving());
+    settle(&mut harness);
+    assert!(saved(temp.path()).routing.routes.contains_key("draft"));
+}
+
+#[test]
 fn profile_changes_are_disabled_while_edits_are_unsaved() {
     // Given: an unsaved role edit.
     let temp = tempfile::tempdir().expect("temp");

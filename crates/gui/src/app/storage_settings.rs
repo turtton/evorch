@@ -151,6 +151,9 @@ fn format_size(bytes: u64) -> String {
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn open_storage_settings(&mut self) {
+        if self.settings_save_in_progress() {
+            return;
+        }
         self.dismiss_settings_modal();
         self.sandbox_settings.open = false;
         self.agent_features.open = false;

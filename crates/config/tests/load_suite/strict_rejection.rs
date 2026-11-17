@@ -497,6 +497,9 @@ fn retired_generation_top_p_is_rejected_for_roles_and_categories() {
         "agents.roles.planner.generation",
         "agents.worker.categories.quick.generation",
         "agents.reviewer.categories.plan-review.generation",
+        "role_profiles.night.agents.worker.generation",
+        "role_profiles.night.agents.roles.planner.generation",
+        "role_profiles.night.agents.worker.categories.quick.generation",
     ] {
         assert_error_contains(
             load_project(&tmp, &format!("[{table}]\ntop_p = 0.9\n")),
