@@ -1,1 +1,350 @@
-{}
+{
+  "command/pull_requests/change_auto_fix_destination": {
+    "payload": {
+      "payload": {
+        "link_revision": "2",
+        "operation_id": "op-destination",
+        "policy_revision": "5",
+        "thread": "thread-1"
+      },
+      "type": "change_auto_fix_destination"
+    },
+    "type": "pull_requests"
+  },
+  "command/pull_requests/confirm_pull_request_candidate": {
+    "payload": {
+      "payload": {
+        "candidate_id": "9",
+        "expected_revision": "7",
+        "operation_id": "op-confirm",
+        "thread": "thread-1"
+      },
+      "type": "confirm_pull_request_candidate"
+    },
+    "type": "pull_requests"
+  },
+  "command/pull_requests/dismiss_pull_request_candidate": {
+    "payload": {
+      "payload": {
+        "candidate_id": "9",
+        "operation_id": "op-dismiss",
+        "thread": "thread-1"
+      },
+      "type": "dismiss_pull_request_candidate"
+    },
+    "type": "pull_requests"
+  },
+  "command/pull_requests/link_pull_request": {
+    "payload": {
+      "payload": {
+        "expected_revision": "7",
+        "locator": "turtton/evorch#42",
+        "operation_id": "op-link",
+        "thread": "thread-1"
+      },
+      "type": "link_pull_request"
+    },
+    "type": "pull_requests"
+  },
+  "command/pull_requests/refresh_pull_request": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-refresh",
+        "thread": "thread-1"
+      },
+      "type": "refresh_pull_request"
+    },
+    "type": "pull_requests"
+  },
+  "command/pull_requests/request_manual_notice": {
+    "payload": {
+      "payload": {
+        "expected_head": "0123456789abcdef",
+        "link_revision": "2",
+        "operation_id": "op-notice",
+        "thread": "thread-1"
+      },
+      "type": "request_manual_notice"
+    },
+    "type": "pull_requests"
+  },
+  "command/pull_requests/reset_auto_fix_budget": {
+    "payload": {
+      "payload": {
+        "confirmed_previous": "thread-0",
+        "link_revision": "2",
+        "operation_id": "op-reset",
+        "policy_revision": "5",
+        "thread": "thread-1"
+      },
+      "type": "reset_auto_fix_budget"
+    },
+    "type": "pull_requests"
+  },
+  "command/pull_requests/set_auto_fix": {
+    "payload": {
+      "payload": {
+        "enabled": true,
+        "link_revision": "2",
+        "operation_id": "op-auto-fix",
+        "policy_revision": "5",
+        "thread": "thread-1"
+      },
+      "type": "set_auto_fix"
+    },
+    "type": "pull_requests"
+  },
+  "command/pull_requests/unlink_pull_request": {
+    "payload": {
+      "payload": {
+        "expected_revision": "8",
+        "operation_id": "op-unlink",
+        "thread": "thread-1"
+      },
+      "type": "unlink_pull_request"
+    },
+    "type": "pull_requests"
+  },
+  "query/pull_requests/get_pull_request_notice": {
+    "payload": {
+      "payload": {
+        "notice_id": "notice-1"
+      },
+      "type": "get_pull_request_notice"
+    },
+    "type": "pull_requests"
+  },
+  "query/pull_requests/get_pull_request_operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_pull_request_operation"
+    },
+    "type": "pull_requests"
+  },
+  "query/pull_requests/get_thread_pull_request": {
+    "payload": {
+      "payload": {
+        "thread": "thread-1"
+      },
+      "type": "get_thread_pull_request"
+    },
+    "type": "pull_requests"
+  },
+  "query/pull_requests/list_pull_request_operations": {
+    "payload": {
+      "payload": {},
+      "type": "list_pull_request_operations"
+    },
+    "type": "pull_requests"
+  },
+  "query_reply/pull_requests/notice": {
+    "payload": {
+      "payload": {
+        "destination": "thread-1",
+        "head_sha": "0123456789abcdef",
+        "link_revision": "2",
+        "mode": "auto",
+        "notice_id": "notice-1",
+        "payload": "checks failed",
+        "phase": "ready",
+        "policy_revision": "5",
+        "pull_request": {
+          "host": "github.com",
+          "number": "42",
+          "provider": "github",
+          "repository": "turtton/evorch"
+        }
+      },
+      "type": "notice"
+    },
+    "type": "pull_requests"
+  },
+  "query_reply/pull_requests/operation": {
+    "payload": {
+      "payload": {
+        "kind": "refresh",
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "4",
+          "state": {
+            "type": "pending"
+          }
+        },
+        "thread": "thread-1"
+      },
+      "type": "operation"
+    },
+    "type": "pull_requests"
+  },
+  "query_reply/pull_requests/operations": {
+    "payload": {
+      "payload": {
+        "operations": [
+          {
+            "kind": "unlink",
+            "message": "the thread's pull request changed since it was read",
+            "operation": {
+              "operation_id": "op-1",
+              "revision": "4",
+              "state": {
+                "code": "stale_revision",
+                "type": "failed"
+              }
+            },
+            "thread": "thread-1"
+          },
+          {
+            "kind": "link",
+            "operation": {
+              "operation_id": "op-1",
+              "revision": "4",
+              "state": {
+                "reason": "shutdown",
+                "type": "cancelled"
+              }
+            },
+            "thread": "thread-1"
+          }
+        ]
+      },
+      "type": "operations"
+    },
+    "type": "pull_requests"
+  },
+  "query_reply/pull_requests/thread": {
+    "payload": {
+      "payload": {
+        "auto_fix": {
+          "destination": "thread-1",
+          "enabled": true,
+          "globally_enabled": true,
+          "limit": 3,
+          "limit_reached": true,
+          "link_revision": "2",
+          "policy_revision": "5",
+          "reserved": 0,
+          "stop_reason": "limit_reached",
+          "used": 3
+        },
+        "candidates": [
+          {
+            "candidate_id": "9",
+            "pull_request": {
+              "host": "github.com",
+              "number": "42",
+              "provider": "github",
+              "repository": "turtton/evorch"
+            },
+            "state": "presented"
+          }
+        ],
+        "head_attribution": "agent",
+        "lifecycle_revision": "7",
+        "link": {
+          "link_revision": "2",
+          "linked_at": "1700000000000",
+          "origin": "explicit",
+          "pull_request": {
+            "host": "github.com",
+            "number": "42",
+            "provider": "github",
+            "repository": "turtton/evorch"
+          }
+        },
+        "local_head": "0123456789abcdef",
+        "owned_here": true,
+        "snapshot": {
+          "consecutive_failures": 1,
+          "facts": {
+            "base_branch": "main",
+            "checks": [
+              {
+                "conclusion": "failure",
+                "kind": "check_run",
+                "name": "ci / test",
+                "status": "completed"
+              }
+            ],
+            "checks_complete": true,
+            "head_branch": "feat/x",
+            "head_sha": "0123456789abcdef",
+            "review_decision": "review_required",
+            "state": "open"
+          },
+          "fetched_at": "1700000001000",
+          "last_failure": {
+            "kind": "rate_limited",
+            "message": "rate limited"
+          },
+          "title": "Add the thing"
+        },
+        "thread": "thread-1",
+        "tracking_enabled": true,
+        "transition_seq": "3"
+      },
+      "type": "thread"
+    },
+    "type": "pull_requests"
+  },
+  "ui_event/pull_requests/auto_fix_limit_reached": {
+    "payload": {
+      "payload": {
+        "budget_epoch": "1",
+        "limit": 3,
+        "link_revision": "2",
+        "pull_request": {
+          "host": "github.com",
+          "number": "42",
+          "provider": "github",
+          "repository": "turtton/evorch"
+        },
+        "thread": "thread-1"
+      },
+      "type": "auto_fix_limit_reached"
+    },
+    "type": "pull_requests"
+  },
+  "ui_event/pull_requests/pull_request_changed": {
+    "payload": {
+      "payload": {
+        "change": "facts_changed",
+        "link_revision": "2",
+        "notifications": [
+          "checks_failed"
+        ],
+        "pull_request": {
+          "host": "github.com",
+          "number": "42",
+          "provider": "github",
+          "repository": "turtton/evorch"
+        },
+        "thread": "thread-1",
+        "transition_seq": "3"
+      },
+      "type": "pull_request_changed"
+    },
+    "type": "pull_requests"
+  },
+  "ui_event/pull_requests/pull_request_operation_completed": {
+    "payload": {
+      "payload": {
+        "operation": {
+          "kind": "link",
+          "lifecycle_revision": "7",
+          "operation": {
+            "operation_id": "op-1",
+            "revision": "4",
+            "state": {
+              "type": "ready"
+            }
+          },
+          "thread": "thread-1"
+        }
+      },
+      "type": "pull_request_operation_completed"
+    },
+    "type": "pull_requests"
+  }
+}
