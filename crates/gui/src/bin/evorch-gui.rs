@@ -1291,6 +1291,11 @@ fn build_workbench(
                 ))),
             None => gui::model::evaluations::EvaluationsModel::default(),
         })
+        .with_conversation_plan(
+            gui::model::conversation_plan::ConversationPlanModel::default().with_reader(Arc::new(
+                gui::model::conversation_plan::HostPlanReader::new(runtime.clone()),
+            )),
+        )
         .with_pump(pump)
         .with_terminal_spawner(Arc::new(ShellSpawner::from_env()))
         .with_ownership(Arc::clone(&ownership))

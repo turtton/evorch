@@ -55,6 +55,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) context_inspector: &'a mut crate::panes::context_inspector::ContextInspectorPane,
     pub(super) shell_jobs: &'a mut crate::panes::shell_jobs::ShellJobsPane,
     pub(super) evaluations: &'a mut crate::model::evaluations::EvaluationsModel,
+    pub(super) conversation_plan: &'a mut super::conversation_plan::ConversationPlanPane,
     pub(super) agent_browser: &'a mut super::agent_browser::AgentBrowserTabs,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) self_improvement: &'a mut crate::panes::self_improvement::SelfImprovementPane,
@@ -178,6 +179,7 @@ fn panel_icon(kind: PanelKind) -> &'static str {
         PanelKind::ShellJobs => icons::TERMINAL,
         PanelKind::AgentBrowser => icons::BROWSER,
         PanelKind::Evaluations => icons::FLASK,
+        PanelKind::ConversationPlan => icons::LIST_CHECKS,
     }
 }
 
@@ -257,6 +259,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                         | PanelKind::ShellJobs
                         | PanelKind::AgentBrowser
                         | PanelKind::Evaluations
+                        | PanelKind::ConversationPlan
                 )
             })
     }
@@ -473,6 +476,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             PanelKind::Evaluations => {
                 crate::panes::evaluations::evaluations_pane(ui, self.evaluations);
             }
+            PanelKind::ConversationPlan => self.conversation_plan.render(ui),
             PanelKind::AgentBrowser => {
                 let thread = self.sidebar.active_thread.as_ref().map(ToString::to_string);
                 let (rows, threads, transcripts) =

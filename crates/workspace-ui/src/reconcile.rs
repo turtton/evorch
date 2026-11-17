@@ -127,6 +127,7 @@ fn retire_agents(workspace: &mut Workspace) {
                     | PanelKind::ShellJobs
                     | PanelKind::AgentBrowser
                     | PanelKind::Evaluations
+                    | PanelKind::ConversationPlan
             )
         })
         .map(|panel| panel.id.clone())

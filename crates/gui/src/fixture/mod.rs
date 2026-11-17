@@ -1,6 +1,7 @@
 //! Deterministic populated workbench state for headless capture and tests.
 
 mod codex_auth;
+mod conversation_plan;
 mod events;
 mod provider;
 mod sidebar;
@@ -16,6 +17,7 @@ use crate::diff::{DiffMode, FixtureDiffSource};
 use crate::model::tasks::AgentRunSource;
 
 pub use codex_auth::ScriptedCodexAuthBackend;
+pub use conversation_plan::{FixturePlanReader, PlanScenario};
 pub use events::{demo_error_events, demo_events};
 pub use provider::demo_provider_config;
 pub use sidebar::{FixtureError, demo_sidebar};

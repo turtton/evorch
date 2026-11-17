@@ -544,6 +544,7 @@ fn pane(model: TranscriptModel) -> Harness<'static, PaneState> {
                         branch: None,
                         pull_request: None,
                         pull_request_chips: None,
+                        plan: None,
                     },
                     &mut state.composer,
                     &mut state.picker,

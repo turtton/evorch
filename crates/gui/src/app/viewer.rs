@@ -181,6 +181,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 shell_jobs: &mut self.shell_jobs,
                 evaluations: &mut self.evaluations,
                 agent_browser: &mut self.agent_browser,
+                conversation_plan: &mut self.conversation_plan,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
                 telemetry: &self.telemetry,
@@ -238,7 +239,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.restore_status = None;
         }
         if let Some(id) = focus_request {
-            self.focus_panel(id);
+            if id == super::conversation_plan::PANEL {
+                self.open_conversation_plan_tab();
+            } else {
+                self.focus_panel(id);
+            }
         }
         if let Some(action) = goal_action {
             self.submit_command(action.into_command());

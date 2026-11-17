@@ -7,6 +7,7 @@ pub mod codex_auth_backend;
 pub mod commands;
 pub mod composer;
 pub mod context_inspector;
+pub mod conversation_plan;
 pub mod demo;
 pub mod effort;
 pub mod evaluations;

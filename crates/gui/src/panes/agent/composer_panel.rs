@@ -59,13 +59,13 @@ pub(super) fn composer_panel(
             let strip = ui.scope(|ui| {
                 let vertical_spacing = ui.spacing().item_spacing.y;
                 let mut band = goal::BandOutput::default();
-                if ctx.goal.is_some() || !composer.queued.is_empty() {
+                if ctx.goal.is_some() || ctx.plan.is_some() || !composer.queued.is_empty() {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let queue = super::queue::QueueBand {
                         items: &composer.queued,
                         next_turn_requested: composer.follow_ups.next_turn_requested,
                     };
-                    band = goal::progress_strip(ui, ctx.goal, queue, details);
+                    band = goal::progress_strip(ui, ctx.goal, queue, details, ctx.plan);
                 }
                 let strip = ui
                     .push_id("composer-strip", |ui| {
@@ -98,6 +98,11 @@ pub(super) fn composer_panel(
             }
             if let Some(goal_action) = band.action {
                 *action = Some(AgentPaneAction::Goal(goal_action));
+            }
+            if band.open_plan {
+                *action = Some(AgentPaneAction::FocusPanel(
+                    crate::panes::conversation_plan::PANEL_ID,
+                ));
             }
             if let Some(queue_action) = band.queue_action {
                 *action = Some(AgentPaneAction::Composer(queue_action));

@@ -101,6 +101,8 @@ pub struct ConversationContext<'a> {
     pub pull_request: Option<PullRequestBarContext<'a>>,
     /// Candidate chips by the tool call that produced them, drawn under its card.
     pub pull_request_chips: Option<(&'a str, &'a crate::panes::pull_request_chip::ChipsByCall)>,
+    /// The thread's plan progress band; `None` hides it (no plan reader).
+    pub plan: Option<crate::panes::conversation_plan::PlanBand<'a>>,
 }
 
 /// Agent 会話ペインから発生するアクションです。
@@ -1308,6 +1310,7 @@ mod tests {
                         branch: None,
                         pull_request: None,
                         pull_request_chips: None,
+                        plan: None,
                     };
                     header_strip(ui, &None, &ctx, &mut None);
                 });
@@ -1414,6 +1417,7 @@ mod tests {
                     branch: None,
                     pull_request: None,
                     pull_request_chips: None,
+                    plan: None,
                 };
                 header_strip(ui, &None, &ctx, &mut None);
             });
@@ -1478,6 +1482,7 @@ mod tests {
                     branch: None,
                     pull_request: None,
                     pull_request_chips: None,
+                    plan: None,
                 };
                 let mut action = None;
                 header_strip(ui, &None, &ctx, &mut action);

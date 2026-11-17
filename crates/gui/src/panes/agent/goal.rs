@@ -61,6 +61,8 @@ pub(super) struct BandOutput {
     pub details_viewport: f32,
     /// Height the details want, capped at [`DETAILS_MAX_HEIGHT`].
     pub details_wanted: f32,
+    /// The plan band's open button was pressed this frame.
+    pub open_plan: bool,
 }
 
 /// Queued follow-ups, then goal controls, share one inset composer band. Expanded details scroll within
@@ -70,11 +72,12 @@ pub(super) fn progress_strip(
     goal: Option<&ThreadGoalSnapshot>,
     queue: super::queue::QueueBand<'_>,
     details_max: f32,
+    plan: Option<crate::panes::conversation_plan::PlanBand<'_>>,
 ) -> BandOutput {
     let mut output = BandOutput::default();
     let thread = goal.map(|goal| goal.thread_id.as_str()).unwrap_or_default();
     let expanded_id = ui.id().with(("progress-details", thread));
-    if goal.is_none() && queue.items.is_empty() {
+    if goal.is_none() && queue.items.is_empty() && plan.is_none() {
         ui.data_mut(|data| data.remove::<Detail>(expanded_id));
         return output;
     }
@@ -98,12 +101,15 @@ pub(super) fn progress_strip(
                 ui.vertical(|ui| {
                     if !queue.items.is_empty() {
                         output.queue_action = super::queue::rows(ui, queue);
-                        if goal.is_some() {
+                        if goal.is_some() || plan.is_some() {
                             ui.separator();
                         }
                     }
                     if let Some(goal) = goal {
                         output.action = goal_row(ui, goal, &mut expanded);
+                    }
+                    if let Some(plan) = plan {
+                        output.open_plan = crate::panes::conversation_plan::band_row(ui, plan);
                     }
                     if let Some(detail) = expanded {
                         ui.separator();

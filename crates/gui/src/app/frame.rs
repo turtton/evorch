@@ -66,6 +66,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let sink_time = sink_started.elapsed();
         self.diff.poll();
         self.poll_evaluations(&ctx);
+        self.poll_conversation_plan(&ctx);
         if self.poll_lanes(&ctx) {
             self.save_sidebar();
         }
@@ -280,6 +281,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.bind_goal_event(event);
         self.fold_agent_browser_event(event);
+        self.fold_conversation_plan_event(event);
         self.sink.observe_lifecycle(event);
         self.apply_runtime_event(event, receipts);
         self.pending_approvals.apply_event(
