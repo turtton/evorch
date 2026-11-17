@@ -516,31 +516,43 @@ fn a_running_maintenance_holds_the_restart_gate_and_a_cancel_is_still_admitted()
 }
 
 #[test]
-fn a_full_table_refuses_a_new_id_and_never_runs_an_old_one_again() {
+fn a_full_table_refuses_only_unknown_ids_and_keeps_answering_known_ones() {
     let mut w = setup(None);
     let mut events = subscribe(&w);
+    // The table fills with the 64th operation, which is still accepted.
     for n in 0..64 {
         let id = format!("op-{n}");
-        start(&mut w, web(), &id, backfill(2, None)).unwrap();
+        let accepted = start(&mut w, web(), &id, backfill(2, None)).unwrap();
+        assert_eq!(accepted.disposition, CommandDisposition::Accepted, "{id}");
         events_until_settled(&w.rt, &mut events, &id);
     }
+
+    // Right after it filled, the newest id is known and an unknown one is refused.
+    let newest = start(&mut w, web(), "op-63", backfill(2, None)).unwrap();
+    assert_eq!(newest.disposition, CommandDisposition::AlreadyApplied);
     let refused = start(&mut w, web(), "op-64", backfill(2, None)).unwrap_err();
     assert_eq!(refused.code, ErrorCode::LimitExceeded);
     assert_eq!(get(&w, "op-64").unwrap_err().code, ErrorCode::NotFound);
 
-    // The first id is still known: it is answered, not run again.
+    // The oldest id is still known: resent, it is answered and never runs again.
     seed_legacy(&w, 4);
-    let first = start(&mut w, web(), "op-0", backfill(2, None)).unwrap();
-    assert_eq!(first.disposition, CommandDisposition::AlreadyApplied);
+    let oldest = start(&mut w, web(), "op-0", backfill(2, None)).unwrap();
+    assert_eq!(oldest.disposition, CommandDisposition::AlreadyApplied);
     assert_eq!(unconverted(&w), 4);
-    assert_eq!(
-        get(&w, "op-0").unwrap().operation.state,
-        OperationState::Ready
-    );
-    assert_eq!(
-        get(&w, "op-63").unwrap().operation.state,
-        OperationState::Ready
-    );
+
+    // A known id with another request is a conflict, not a new operation.
+    let reused = start(&mut w, web(), "op-0", backfill(3, None)).unwrap_err();
+    assert_eq!(reused.code, ErrorCode::Conflict);
+    assert_eq!(unconverted(&w), 4);
+
+    // Queries of known ids keep working while the table is full.
+    for id in ["op-0", "op-63"] {
+        assert_eq!(get(&w, id).unwrap().operation.state, OperationState::Ready);
+    }
+    // Refusals did not make room for anything.
+    let refused_again = start(&mut w, web(), "op-65", backfill(2, None)).unwrap_err();
+    assert_eq!(refused_again.code, ErrorCode::LimitExceeded);
+    assert_eq!(unconverted(&w), 4);
 }
 
 #[test]
