@@ -16,6 +16,8 @@ async-trait = { workspace = true }
 agents = { path = "../agents" }
 catalog = { path = "../catalog" }
 config = { path = "../config" }
+core-instance = { path = "../core-instance" }
+core-launcher = { path = "../core-launcher" }
 eval = { path = "../eval" }
 event-bus = { path = "../event-bus" }
 js-engine = { path = "../js-engine" }
@@ -31,6 +33,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread", "time"] }
 tools = { path = "../tools" }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+workbench-client = { path = "../workbench-client" }
+workbench-protocol = { path = "../workbench-protocol" }
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
