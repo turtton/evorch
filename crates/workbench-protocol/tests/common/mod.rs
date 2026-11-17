@@ -129,10 +129,7 @@ pub fn send_chat() -> SendChat {
         composer_role: ComposerRole::Orchestrator,
         text: "hello\nworld".into(),
         skills: vec!["git".into()],
-        images: vec![ImageRef {
-            attachment_id: AttachmentId::new("att-1").unwrap(),
-            mime_type: "image/png".into(),
-        }],
+        attachments: vec![AttachmentId::new("att-1").unwrap()],
         model_preference: Some(pref()),
         fork_seed: Some(ForkSeed {
             source_run_id: RunId::new("run-0").unwrap(),
@@ -221,11 +218,21 @@ pub fn commands() -> Vec<Command> {
             project: project(),
             thread: thread(),
         }),
-        Command::Conversation(ConversationCommand::UploadImage {
+        Command::Conversation(ConversationCommand::BeginAttachment {
             project: project(),
             thread: thread(),
-            mime_type: "image/png".into(),
-            data: "AA==".into(),
+            client_upload_id: "draft-1".into(),
+            filename: "picture.png".into(),
+            media_type_hint: "image/png".into(),
+            byte_length: 1,
+        }),
+        Command::Conversation(ConversationCommand::AppendAttachment {
+            upload_id: AttachmentId::new("att-1").unwrap(),
+            offset: 0,
+            data_base64: "AA==".into(),
+        }),
+        Command::Conversation(ConversationCommand::FinishAttachment {
+            upload_id: AttachmentId::new("att-1").unwrap(),
         }),
         Command::Conversation(ConversationCommand::DiscardAttachment {
             attachment_id: AttachmentId::new("att-1").unwrap(),

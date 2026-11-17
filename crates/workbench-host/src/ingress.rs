@@ -245,8 +245,7 @@ impl CommandHost {
                 ChatAttachment::Native(draft) => {
                     self.with_attachment_service(|service, host| {
                         service.upload_bytes_checked(
-                            project.clone(),
-                            thread.clone(),
+                            (project.clone(), thread.clone()),
                             draft.draft_id.clone(),
                             draft.filename.clone(),
                             draft.media_type.clone(),

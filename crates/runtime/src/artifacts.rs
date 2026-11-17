@@ -602,13 +602,10 @@ pub(crate) fn render(state: &LoopState, runtime: &AgentRuntime, input: Value) ->
             .default_cwd()
             .ok_or("this run has no workspace to capture from")?;
         let root = runtime.run_root(caller)?;
-        let attachment_directories = runtime
-            .attachment_read_directories_for_run(caller)
-            .map_err(|e| e.to_string())?;
         let record = store.capture_with_attachments(
             &workspace,
             state.scratch_dir(),
-            &attachment_directories,
+            &state.attachment_directories,
             Path::new(&args.path),
             CaptureRequest {
                 title: &args.title,

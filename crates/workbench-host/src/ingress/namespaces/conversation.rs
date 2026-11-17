@@ -134,8 +134,7 @@ impl CommandHost {
                 self.check_attachment_thread_active(thread.as_str())?;
                 let upload_id = self.with_attachment_service(|service, host| {
                     service.begin_checked(
-                        project,
-                        thread,
+                        (project, thread),
                         client_upload_id,
                         filename,
                         media_type_hint,

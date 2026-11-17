@@ -706,7 +706,7 @@ mod channel_withdrawal_tests {
         for id in ["first", "withdraw"] {
             inbox
                 .enqueue(Some(id), |seq| {
-                    sender.try_send((id.into(), vec![], true, Some(id.into()), seq))
+                    sender.try_send((id.into(), true, Some(id.into()), seq))
                 })
                 .unwrap();
         }
@@ -716,15 +716,15 @@ mod channel_withdrawal_tests {
         inbox.withdraw("withdraw", || Ok(())).unwrap();
         inbox
             .enqueue(Some("new"), |seq| {
-                sender.try_send(("new".into(), vec![], true, Some("new".into()), seq))
+                sender.try_send(("new".into(), true, Some("new".into()), seq))
             })
             .unwrap();
         let first = receiver.recv().await.unwrap();
         let newer = receiver.recv().await.unwrap();
         assert_eq!((first.0.as_str(), newer.0.as_str()), ("first", "new"));
-        assert!(first.4 <= cut && newer.4 > cut);
-        assert!(inbox.claim(first.4));
-        assert!(inbox.claim(newer.4));
+        assert!(first.3 <= cut && newer.3 > cut);
+        assert!(inbox.claim(first.3));
+        assert!(inbox.claim(newer.3));
         assert_eq!(inbox.status().pending, 0);
         assert!(receiver.try_recv().is_err());
         drop(receiver);

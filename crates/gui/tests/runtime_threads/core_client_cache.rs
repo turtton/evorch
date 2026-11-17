@@ -205,31 +205,37 @@ fn epoch_replacement_keeps_human_input_and_deduplicates_thread_events() {
             revision: 5,
         },
     );
-    shared.image_drafts.insert(
+    shared.attachment_drafts.insert(
         "t".into(),
-        vec![gui::core_client::ImageDraft {
-            id: uuid::Uuid::new_v4(),
+        vec![gui::core_client::ClientAttachmentDraft {
+            id: "draft".into(),
+            project: ProjectId::new("p").unwrap(),
+            file: gui::attachments::AttachmentFile {
+                bytes: b"retained bytes".to_vec(),
+                ..gui::fixture::attachment_draft().file
+            },
             uploading: false,
-            mime: "image/png".into(),
-            data: "retained bytes".into(),
-            reference: Some(workbench_protocol::commands::ImageRef {
-                attachment_id: AttachmentId::new("validated").unwrap(),
-                mime_type: "image/png".into(),
-            }),
+            uncertain: false,
+            upload_id: None,
+            next_offset: 0,
+            reference: gui::fixture::attachment_draft().reference().cloned(),
         }],
     );
     shared.outcome_unknown.insert("pending-request".into());
     shared.cache.at(cursor(7, 40));
     shared.replace_projection(shared.cache.clone());
-    assert!(shared.image_drafts["t"][0].reference.is_some());
+    assert!(shared.attachment_drafts["t"][0].reference.is_some());
     assert!(!shared.cache.event(event(8, 1, "other epoch", 0)));
     let mut fresh = Cache::default();
     fresh.at(cursor(8, 0));
     fresh.snapshot(SnapshotItem::Thread(thread("fresh", 1)));
     shared.replace_projection(fresh);
     assert_eq!(shared.drafts["t"].text, "unsent");
-    assert_eq!(shared.image_drafts["t"][0].data, "retained bytes");
-    assert!(shared.image_drafts["t"][0].reference.is_none());
+    assert_eq!(
+        shared.attachment_drafts["t"][0].file.bytes,
+        b"retained bytes"
+    );
+    assert!(shared.attachment_drafts["t"][0].reference.is_none());
     assert!(shared.outcome_unknown.contains("pending-request"));
     assert!(shared.cache.event(event(8, 1, "new", 0)));
     assert!(shared.cache.event(event(8, 1, "duplicate", 100)));

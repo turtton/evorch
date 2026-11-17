@@ -3,6 +3,8 @@
 //! that still saves the file, a failed save and a thread that must not come
 //! back. The entry is `WorkspaceArea::with_store`, over an explicit file.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -1282,4 +1284,67 @@ fn a_legacy_save_and_delayed_mirror_cannot_ack_old_membership_or_roll_back_core_
     let detail = f.detail("lane-thread");
     assert!(detail.archived && !detail.pinned);
     storage.close();
+}
+
+#[test]
+fn archive_removal_failure_is_retryable_and_restore_never_erases_active_attachments() {
+    use rustix::fs::OFlags;
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+    let mut f = fixture(vec![thread("root")]);
+    let runtime = common::runtime();
+    runtime.set_thread_scratch(Arc::new(runtime::scratch::ThreadScratch::at(
+        f._base.path().join("scratch"),
+    )));
+    let root = runtime.attachment_root().unwrap();
+    let files = root.files("root").unwrap();
+    files
+        .file("old.txt", OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY)
+        .unwrap()
+        .write_all(b"old")
+        .unwrap();
+    f.area = WorkspaceArea::with_store(
+        SidebarStore::new(f.config.join("sidebar.json")),
+        Some(runtime.clone()),
+        vec![f.config.clone()],
+        None,
+        |_| false,
+    );
+    let archive = |f: &Fixture, archived| {
+        let family = f
+            .families()
+            .into_iter()
+            .find(|family| family.key == wire_thread("root"))
+            .unwrap();
+        f.send(WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
+            thread: wire_thread("root"),
+            archived,
+            expected_family: identity_of(&family),
+            expected_revision: family.archive_revision,
+        }))
+    };
+    std::fs::set_permissions(files.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(matches!(
+        rejected(archive(&f, true)),
+        WorkspaceRejection::StorageFailed { .. }
+    ));
+    assert!(f.detail("root").archived);
+    std::fs::set_permissions(files.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    applied(archive(&f, true));
+    assert!(!files.path().exists());
+    applied(archive(&f, false));
+    assert!(
+        !files.path().exists(),
+        "restore does not resurrect deleted bytes"
+    );
+    let fresh = root.files("root").unwrap();
+    let path = fresh.path().join("new.txt");
+    fresh
+        .file("new.txt", OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY)
+        .unwrap()
+        .write_all(b"new")
+        .unwrap();
+    // An idempotent or stale restore must not delete the newly sent file.
+    applied(archive(&f, false));
+    assert_eq!(std::fs::read(path).unwrap(), b"new");
+    runtime.remove_thread_attachments("root").unwrap();
 }

@@ -132,7 +132,7 @@ async fn two_turns_around_the_reload_hook_keep_the_sent_prefix_on_the_production
                 composer_role: ComposerRole::Worker,
                 text: cache::GOAL.into(),
                 skills: vec![],
-                images: vec![],
+                attachments: vec![],
                 model_preference: None,
                 fork_seed: None,
             };
@@ -347,7 +347,7 @@ async fn saved_provider_replaces_the_model_and_the_next_request_still_extends_th
             composer_role: ComposerRole::Worker,
             text: cache::GOAL.into(),
             skills: vec![],
-            images: vec![],
+            attachments: vec![],
             model_preference: None,
             fork_seed: None,
         };

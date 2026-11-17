@@ -55,7 +55,7 @@ fn send_button_round_trip_issues_send_chat() {
             fork_seed: None,
             project_root: Some(project_root),
             composer_role: gui::model::composer::ComposerRole::Worker,
-            images: Vec::new(),
+            attachments: Vec::new(),
             thread_id: "thread-1".into(),
             text: "hello agent".into(),
             model_preference: None,

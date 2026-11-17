@@ -31,7 +31,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let empty_paste = raw_input
             .events
             .iter()
-            .any(|event| matches!(event, egui::Event::Paste(text) if text.is_empty()));
+            .any(|event| matches!(event, egui::Event::Paste(text) if text.is_empty()))
+            && !raw_input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Paste(text) if !text.is_empty()));
         raw_input
             .events
             .retain(|event| !matches!(event, egui::Event::Paste(text) if text.is_empty()));
@@ -151,6 +155,28 @@ mod tests {
             Pos2::new(300.0, 300.0),
         ));
         state
+    }
+
+    #[test]
+    fn image_only_paste_signal_never_reaches_a_focused_terminal() {
+        let mut state = focused_terminal();
+        assert!(route(&mut state, vec![Event::Paste(String::new())]).is_empty());
+        assert!(state.terminals.pending_events.is_empty());
+        assert!(state.attachment_work.queued.is_empty());
+    }
+
+    #[test]
+    fn nonempty_text_paste_suppresses_a_batched_image_fallback() {
+        let mut state = focused_terminal();
+        state.terminals.focused = false;
+        state.composer.focused = true;
+        state.sidebar.active_thread = Some(workspace_ui::ThreadId::new("thread"));
+        let text = Event::Paste("ordinary text".into());
+        assert_eq!(
+            route(&mut state, vec![Event::Paste(String::new()), text.clone()]),
+            [text]
+        );
+        assert!(state.attachment_work.queued.is_empty());
     }
 
     fn press(pos: Pos2) -> Event {

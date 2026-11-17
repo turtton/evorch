@@ -137,7 +137,6 @@ impl tools::Tool for CompletedShellHandoff {
             .enqueue(None, |seq| {
                 self.sender.try_send((
                     "reserved followup".into(),
-                    vec![],
                     true,
                     Some("followup".into()),
                     seq,

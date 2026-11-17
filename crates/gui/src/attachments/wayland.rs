@@ -19,7 +19,7 @@ struct State {
     manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     seats: Vec<wl_seat::WlSeat>,
     offers: HashMap<ObjectId, (wl_data_offer::WlDataOffer, Vec<String>)>,
-    selection: Option<wl_data_offer::WlDataOffer>,
+    selections: HashMap<ObjectId, wl_data_offer::WlDataOffer>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -51,7 +51,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
 impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
     fn event(
         state: &mut Self,
-        _: &wl_data_device::WlDataDevice,
+        device: &wl_data_device::WlDataDevice,
         event: wl_data_device::Event,
         _: &(),
         _: &Connection,
@@ -62,18 +62,28 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                 state.offers.insert(id.id(), (id, Vec::new()));
             }
             wl_data_device::Event::Selection { id } => {
-                if let Some(old) = state.selection.take()
-                    && id.as_ref().is_none_or(|new| old.id() != new.id())
+                let old = if let Some(offer) = id {
+                    state.selections.insert(device.id(), offer)
+                } else {
+                    state.selections.remove(&device.id())
+                };
+                if let Some(old) = old
+                    && !state
+                        .selections
+                        .values()
+                        .any(|selected| selected.id() == old.id())
                     && let Some((offer, _)) = state.offers.remove(&old.id())
                 {
                     offer.destroy();
                 }
-                state.selection = id;
             }
             wl_data_device::Event::Leave => {
-                let selection = state.selection.as_ref().map(Proxy::id);
                 state.offers.retain(|id, (offer, _)| {
-                    if selection.as_ref() == Some(id) {
+                    if state
+                        .selections
+                        .values()
+                        .any(|selected| selected.id() == *id)
+                    {
                         true
                     } else {
                         offer.destroy();
@@ -158,10 +168,7 @@ impl CoreClipboard {
         self.queue
             .roundtrip(&mut self.state)
             .map_err(|e| format!("Wayland clipboard: {e}"))?;
-        let offer = self
-            .state
-            .selection
-            .as_ref()
+        let offer = unique_selection(self.state.selections.values().cloned())?
             .ok_or("Clipboard contains no image selection (focus the composer)")?;
         let (_, mimes) = self
             .state
@@ -253,5 +260,31 @@ impl Drop for CoreClipboard {
             seat.release();
         }
         let _ = self.connection.flush();
+    }
+}
+
+// A foreign display does not tell us which of several seats eframe focused.
+// Conflicting selections must not paste another seat's clipboard.
+fn unique_selection<T: Eq>(offers: impl IntoIterator<Item = T>) -> Result<Option<T>, String> {
+    let mut selected = None;
+    for offer in offers {
+        if selected.as_ref().is_some_and(|previous| previous != &offer) {
+            return Err(
+                "Multiple Wayland seats have different clipboard selections; use Attach file"
+                    .into(),
+            );
+        }
+        selected = Some(offer);
+    }
+    Ok(selected)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn multiple_seat_selections_are_never_chosen_arbitrarily() {
+        assert_eq!(super::unique_selection([7, 7]).unwrap(), Some(7));
+        assert_eq!(super::unique_selection::<u8>([]).unwrap(), None);
+        assert!(super::unique_selection([7, 8]).is_err());
     }
 }

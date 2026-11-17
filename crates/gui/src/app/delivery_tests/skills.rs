@@ -126,7 +126,6 @@ fn a_restored_bubble_shows_what_the_runtime_recorded_not_the_saved_copy() {
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
         text: "run @review please".into(),
-        image_count: 0,
         status: storage::HostInputStatus::Delivered,
         reason: None,
         accepted_at_ns: 1,

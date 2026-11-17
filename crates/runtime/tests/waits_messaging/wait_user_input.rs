@@ -7,9 +7,7 @@ use std::time::Duration;
 use agents::Role;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolResultContent, ToolSpec};
-use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, DelegateImage, RunConfig, RunId, RuntimeError,
-};
+use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, RunConfig, RunId, RuntimeError};
 use serde_json::{Value, json};
 use support::{text_response, tool_response, tool_responses};
 use tokio::sync::{Mutex, Notify};

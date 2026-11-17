@@ -160,6 +160,24 @@ impl PrivateDirectory {
         target.validate_current()
     }
 
+    /// Publish without replacing a previously committed directory entry.
+    pub fn promote_to(&self, name: &str, target: &Self, new_name: &str) -> io::Result<()> {
+        component(name)?;
+        component(new_name)?;
+        self.validate_current()?;
+        target.validate_current()?;
+        rustix::fs::renameat_with(
+            &self.file,
+            name,
+            &target.file,
+            new_name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )?;
+        target.file.sync_all()?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+
     /// Enumerate through the pinned descriptor, not through a replaceable path.
     pub fn names(&self) -> io::Result<Vec<String>> {
         self.validate_current()?;
@@ -181,14 +199,14 @@ impl PrivateDirectory {
 
     pub fn read_identity(&self) -> io::Result<ThreadReadDirectory> {
         self.validate_current()?;
-        let identity = ThreadReadDirectory::capture(&self.path)?;
+        let identity = ThreadReadDirectory::capture_private(&self.path)?;
         self.validate_current()?;
         Ok(identity)
     }
 }
 
-/// The scope is the ownership-derived scratch *parent*, never scratch contents.
-/// Hashing that stable parent gives host and runtime the same path after restart.
+/// The scope is the canonical ownership root, never scratch contents or its
+/// shortened directory name. Host and runtime share the full identity.
 #[derive(Debug, Clone)]
 pub struct AttachmentRoot {
     path: PathBuf,
@@ -301,6 +319,22 @@ mod tests {
         io::Write,
         os::unix::fs::{PermissionsExt, symlink},
     };
+
+    #[test]
+    fn attachment_mount_identity_rejects_privacy_changes_and_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = AttachmentRoot::at(temp.path().join("attachments"));
+        let files = root.files("thread").unwrap();
+        let identity = files.read_identity().unwrap();
+        assert!(identity.is_current());
+        std::fs::set_permissions(files.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!identity.is_current());
+        std::fs::set_permissions(files.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(identity.is_current());
+        std::fs::rename(files.path(), files.path().with_file_name("previous")).unwrap();
+        root.files("thread").unwrap();
+        assert!(!identity.is_current());
+    }
 
     #[test]
     fn independent_handles_keep_stable_paths_and_private_modes() {

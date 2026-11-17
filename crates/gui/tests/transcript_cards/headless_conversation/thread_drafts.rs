@@ -1,6 +1,6 @@
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
-use gui::model::composer::{ImageAttachment, ProviderStatus};
+use gui::model::composer::ProviderStatus;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 fn state(root: &std::path::Path, path: &std::path::Path) -> WorkbenchState<DemoSource> {
@@ -27,10 +27,10 @@ fn switching_threads_restores_text_and_attachments_and_persists_text() {
     let path = temp.path().join("sidebar.json");
     let mut state = state(temp.path(), &path);
     state.composer_mut().input = "unfinished alpha".into();
-    state.composer_mut().attachments.push(ImageAttachment {
-        media_type: "image/png".into(),
-        data: "aGVsbG8=".into(),
-    });
+    state
+        .composer_mut()
+        .attachments
+        .push(gui::fixture::attachment_draft());
 
     state.switch_thread(ThreadId::new("beta")).unwrap();
     assert!(state.composer().input.is_empty());

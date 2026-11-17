@@ -188,7 +188,7 @@ mod shell_handoff_tests {
         let parallel = inbox.begin_wait();
         inbox
             .enqueue(None, |seq| {
-                sender.try_send(("before cut".into(), vec![], true, Some("one".into()), seq))
+                sender.try_send(("before cut".into(), true, Some("one".into()), seq))
             })
             .unwrap();
         assert!(*first.borrow() && *parallel.borrow());
@@ -199,7 +199,7 @@ mod shell_handoff_tests {
         let _new_wait = inbox.begin_wait();
         inbox
             .enqueue(None, |seq| {
-                sender.try_send(("after cut".into(), vec![], true, Some("two".into()), seq))
+                sender.try_send(("after cut".into(), true, Some("two".into()), seq))
             })
             .unwrap();
         assert!(state.flush_user_messages_through(cut));
@@ -228,7 +228,7 @@ mod shell_handoff_tests {
         for id in ["from-wait", "from-channel", "keep"] {
             inbox
                 .enqueue(Some(id), |seq| {
-                    sender.try_send((id.into(), vec![], true, Some(id.into()), seq))
+                    sender.try_send((id.into(), true, Some(id.into()), seq))
                 })
                 .unwrap();
         }
@@ -282,13 +282,7 @@ mod waiting_cut_tests {
         let inbox = state.channels.user_inbox.clone();
         inbox
             .enqueue(Some("withdraw"), |seq| {
-                sender.try_send((
-                    "never inject".into(),
-                    vec![],
-                    true,
-                    Some("withdraw".into()),
-                    seq,
-                ))
+                sender.try_send(("never inject".into(), true, Some("withdraw".into()), seq))
             })
             .unwrap();
         inbox.withdraw("withdraw", || Ok(())).unwrap();
@@ -327,13 +321,7 @@ mod waiting_cut_tests {
             pause.reached.recv().unwrap();
             inbox
                 .enqueue(None, |seq| {
-                    sender.try_send((
-                        "after last cut".into(),
-                        vec![],
-                        true,
-                        Some("late".into()),
-                        seq,
-                    ))
+                    sender.try_send(("after last cut".into(), true, Some("late".into()), seq))
                 })
                 .unwrap();
             pause.resume.send(()).unwrap();

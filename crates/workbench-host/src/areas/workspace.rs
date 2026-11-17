@@ -624,13 +624,6 @@ impl Service {
                     .map_err(|e| WorkspaceRejection::StorageFailed {
                         reason: format!("attachment archive is busy or unavailable; retry: {e}"),
                     })?;
-            if !c.archived {
-                guard
-                    .remove()
-                    .map_err(|e| WorkspaceRejection::StorageFailed {
-                        reason: e.to_string(),
-                    })?;
-            }
             Some(guard)
         } else {
             None
@@ -662,6 +655,21 @@ impl Service {
                     reason: "the attachment family changed; retry".into(),
                 });
             }
+        }
+        if let WorkspaceCommand::SetFamilyArchived(c) = command
+            && !c.archived
+            && document
+                .sidebar
+                .resolve_states()
+                .get(&ThreadId::new(c.thread.as_str()))
+                .is_some_and(|state| state.archived)
+            && let Some(guard) = &attachment_guard
+        {
+            guard
+                .remove()
+                .map_err(|e| WorkspaceRejection::StorageFailed {
+                    reason: e.to_string(),
+                })?;
         }
         let done = self.apply(command, &mut document, &*deleted)?;
         if document.sidebar != before {

@@ -7,7 +7,7 @@ use crate::{AgentRuntime, RunId};
 
 impl AgentRuntime {
     pub fn attachment_root(&self) -> io::Result<AttachmentRoot> {
-        Ok(AttachmentRoot::for_scope(self.thread_scratch()?.parent()))
+        Ok(self.thread_scratch()?.attachment_root())
     }
 
     pub(crate) fn attachment_read_directories_for_run(
@@ -49,9 +49,12 @@ impl AgentRuntime {
             if !visited.insert(parent.clone()) {
                 return Err(io::Error::other("attachment lineage contains a cycle"));
             }
-            let path = root.path().join(AttachmentRoot::thread_name(&parent));
-            match path.symlink_metadata() {
-                Ok(_) => result.push(root.files(&parent)?.read_identity()?),
+            let existing = root
+                .prepare()?
+                .existing_directory(&AttachmentRoot::thread_name(&parent))
+                .and_then(|directory| directory.existing_directory("files"));
+            match existing {
+                Ok(files) => result.push(files.read_identity()?),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }

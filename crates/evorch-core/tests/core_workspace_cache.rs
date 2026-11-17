@@ -184,7 +184,7 @@ async fn wire_workflow(restart: bool) {
                 composer_role: ComposerRole::Worker,
                 text: cache::GOAL.into(),
                 skills: vec![],
-                images: vec![],
+                attachments: vec![],
                 model_preference: None,
                 fork_seed: None,
             };
@@ -231,7 +231,7 @@ async fn wire_workflow(restart: bool) {
                 composer_role: ComposerRole::Worker,
                 text: "must never be replayed".into(),
                 skills: vec![],
-                images: vec![],
+                attachments: vec![],
                 model_preference: None,
                 fork_seed: None,
             };

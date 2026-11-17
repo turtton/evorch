@@ -261,7 +261,7 @@ fn start_lead(sink: &mut RuntimeCommandSink) -> RunId {
         submission_id: String::new(),
         project_root: None,
         composer_role: ComposerRole::Orchestrator,
-        images: Vec::new(),
+        attachments: Vec::new(),
         thread_id: LEAD.into(),
         text: "coordinate".into(),
         skills: Vec::new(),

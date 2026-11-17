@@ -137,7 +137,7 @@ mod tests {
             composer_role: ComposerRole::Worker,
             text: "hello".into(),
             skills: vec![],
-            images: vec![],
+            attachments: vec![],
             model_preference: None,
             fork_seed: None,
         }))

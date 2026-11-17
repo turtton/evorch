@@ -272,7 +272,7 @@ fn save_valid_settings_writes_project_config_and_flips_status() {
             project_root: Some(harness.state().sidebar().projects[0].repo_root.clone()),
             fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
-            images: Vec::new(),
+            attachments: Vec::new(),
             thread_id: "thread-1".into(),
             text: "hello".into(),
             model_preference: None,

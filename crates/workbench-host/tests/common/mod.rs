@@ -87,7 +87,7 @@ pub fn send(thread: &str, submission: &str, text: &str) -> SendChat {
         composer_role: ComposerRole::Worker,
         text: text.into(),
         skills: Vec::new(),
-        images: Vec::new(),
+        attachments: Vec::new(),
         model_preference: None,
         fork_seed: None,
     }

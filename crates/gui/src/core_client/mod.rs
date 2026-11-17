@@ -3,7 +3,7 @@
 pub mod attachments;
 pub mod cache;
 use crate::attachments::{AttachmentFile, AttachmentIo, Intake};
-use attachments::ClientAttachmentDraft;
+pub use attachments::ClientAttachmentDraft;
 pub mod connection;
 pub mod features;
 use features::{FeatureFrame, FeatureView, Navigation, Selection};
@@ -638,8 +638,10 @@ mod upload_regressions {
         Action::Upload {
             project: ProjectId::new("p").unwrap(),
             thread: ThreadId::new("t").unwrap(),
-            mime: "image/png".into(),
-            data: "local bytes".into(),
+            file: crate::attachments::AttachmentFile {
+                bytes: b"local bytes".to_vec(),
+                ..crate::fixture::attachment_draft().file
+            },
         }
     }
     fn send() -> Action {
@@ -673,7 +675,7 @@ mod upload_regressions {
         tx.try_send(Action::Reconnect).ok().unwrap();
         let mut state = Shared::default();
         enqueue(&tx, &mut state, upload());
-        assert_eq!(state.attachment_drafts["t"][0].data, "local bytes");
+        assert_eq!(state.attachment_drafts["t"][0].file.bytes, b"local bytes");
         assert!(state.attachment_drafts["t"][0].reference.is_none());
     }
     #[tokio::test]
@@ -681,23 +683,9 @@ mod upload_regressions {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let mut state = Shared::default();
         enqueue(&tx, &mut state, upload());
-        let Action::Upload { mime, data, .. } = rx.recv().await.unwrap() else {
+        let Action::Upload { .. } = rx.recv().await.unwrap() else {
             panic!()
         };
-        // Model the old actor registration before its network await. The reply
-        // cannot arrive until the test explicitly releases this oneshot.
-        state
-            .attachment_drafts
-            .entry("t".into())
-            .or_insert_with(|| {
-                vec![ClientAttachmentDraft {
-                    id: uuid::Uuid::new_v4(),
-                    uploading: true,
-                    mime,
-                    data,
-                    reference: None,
-                }]
-            });
         let (release, held) = tokio::sync::oneshot::channel();
         let reply = tokio::spawn(async move {
             held.await.unwrap();

@@ -13,7 +13,7 @@ use common::{cli, host_with_project, runtime, runtime_on_store, runtime_with_sto
 use event_bus::EventBus;
 use workbench_protocol::commands::{
     AnswerUserQuestion, ApprovalDecision, Command, CommandDisposition, DecideToolApproval,
-    Delegation, ImageRef, SetAgentWebToolsEnabled, StopRun, SubmitGoal, ThreadTarget,
+    Delegation, SetAgentWebToolsEnabled, StopRun, SubmitGoal, ThreadTarget,
 };
 use workbench_protocol::envelope::{Actor, Provenance, Surface};
 use workbench_protocol::errors::ErrorCode;
@@ -156,10 +156,7 @@ fn a_rejected_send_is_not_remembered_and_may_be_retried() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = host_with_project(&rt, runtime(), dir.path());
     let mut with_image = send("thread-1", "sub-1", "look");
-    with_image.images = vec![ImageRef {
-        attachment_id: AttachmentId::new("att-1").unwrap(),
-        mime_type: "image/png".into(),
-    }];
+    with_image.attachments = vec![AttachmentId::new("missing-attachment").unwrap()];
 
     let error = host
         .handle_command(

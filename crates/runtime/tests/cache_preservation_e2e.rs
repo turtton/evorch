@@ -44,8 +44,8 @@ use mock_openai::cache_contract::{
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use routing::MapEnv;
 use runtime::{
-    AgentRuntime, DelegateImage, ModelSource, Role, RunConfig, RunId, RuntimeComposition,
-    SystemPromptCatalog, compose_runtime,
+    AgentRuntime, ModelSource, Role, RunConfig, RunId, RuntimeComposition, SystemPromptCatalog,
+    compose_runtime,
 };
 use sandbox::credential::FileCredentialStore;
 use serde_json::{Value, json};
@@ -103,6 +103,15 @@ impl Tool for GatedRead {
         } else if input["index"] == 1 {
             self.child_started.notify_one();
             std::future::pending::<()>().await;
+        }
+        if input["index"] == 3 {
+            return Ok(
+                ToolResult::success("attachment opened").with_image(tools::ToolImage {
+                    media_type: "image/png".into(),
+                    data: "aW1hZ2U=".into(),
+                    path: None,
+                }),
+            );
         }
         BulkRead.execute(input).await
     }
@@ -3553,7 +3562,7 @@ async fn procedure_and_note_handoff_present_current_state_then_reuse_each_roots_
 }
 
 #[tokio::test]
-async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
+async fn wait_interrupted_by_attachment_path_and_read_image_reuses_the_wire_prefix() {
     let review_storage = support::ReviewStorage::new();
     let read = Arc::new(GatedRead {
         started: Notify::new(),
@@ -3572,6 +3581,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
                 "wait",
                 [json!({"run_id":"run-2"}).to_string()],
             ),
+            read_response(3),
             ScriptedResponse::tool_call(
                 "finish",
                 MODEL,
@@ -3601,7 +3611,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
     review_storage.attach(&harness.runtime);
     harness
         .runtime
-        .send_user_input(run, "Inspect the attached image".into(), None)
+        .send_user_input(run, "Inspect the attached image\n\n[Attached files (read-only; open with read or shell)]\n\"/var/tmp/attachments/files/picture.png\"".into(), None)
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
     assert_eq!(
@@ -3625,7 +3635,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
         })
         .map(|request| request.body)
         .collect::<Vec<_>>();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     let usage = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -3650,25 +3660,22 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
             "previous wire input must remain cached"
         );
     }
-    let messages = requests[2]["messages"].as_array().unwrap();
+    let messages = requests[3]["messages"].as_array().unwrap();
     let input_index = messages
         .iter()
         .position(|message| {
-            message["content"].as_array().is_some_and(|blocks| {
-                blocks
-                    .iter()
-                    .any(|block| block["text"] == "Inspect the attached image")
-            })
+            message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("/var/tmp/attachments/files/picture.png"))
         })
         .expect("next wire request includes user input");
     assert_eq!(messages[input_index]["role"], "user");
-    assert!(
-        messages[input_index]["content"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|block| block["image_url"]["url"] == "data:image/png;base64,aW1hZ2U=")
-    );
+    assert!(!messages[input_index].to_string().contains("image_url"));
+    assert!(messages.iter().any(|message| {
+        message
+            .to_string()
+            .contains("data:image/png;base64,aW1hZ2U=")
+    }));
     assert_eq!(messages[input_index - 1]["role"], "tool");
     let result: Value =
         serde_json::from_str(messages[input_index - 1]["content"].as_str().unwrap()).unwrap();
@@ -3677,7 +3684,8 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
 }
 
 #[tokio::test]
-async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() {
+async fn queued_and_expedited_follow_ups_preserve_fifo_attachment_paths_and_read_images_and_wire_prefix()
+ {
     for expedite in [false, true] {
         // Each iteration runs "run-1" in a new runtime, so it needs an empty database.
         let review_storage = support::ReviewStorage::new();
@@ -3686,14 +3694,12 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             release: Notify::new(),
             child_started: Notify::new(),
         });
-        let mut script = vec![
-            read_response(0),
-            read_response(2),
-            text_response("original answer"),
-        ];
+        let mut script = vec![read_response(0), read_response(2)];
         if !expedite {
-            script.push(text_response("follow-up answer"));
+            script.push(text_response("original answer"));
         }
+        script.push(read_response(3));
+        script.push(text_response("follow-up answer"));
         let mut harness = harness_with_read(script, 1_000_000, read.clone());
         let run = harness.runtime.delegate_background(
             Role::Worker,
@@ -3706,7 +3712,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             .runtime
             .send_user_input(
                 run,
-                "first queued follow-up".into(),
+                "first queued follow-up\n\n[Attached files (read-only; open with read or shell)]\n\"/var/tmp/attachments/files/picture.png\"".into(),
                 Some(format!("delivered-{expedite}")),
             )
             .unwrap();
@@ -3790,7 +3796,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             .filter(|r| r.path == "/v1/chat/completions")
             .map(|r| &r.body)
             .collect::<Vec<_>>();
-        assert_eq!(bodies.len(), if expedite { 3 } else { 4 });
+        assert_eq!(bodies.len(), if expedite { 4 } else { 5 });
         assert!(
             bodies
                 .iter()
@@ -3819,8 +3825,14 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
         assert!(
             messages[first]
                 .to_string()
-                .contains("data:image/png;base64,aW1hZ2U=")
+                .contains("/var/tmp/attachments/files/picture.png")
         );
+        assert!(!messages[first].to_string().contains("image_url"));
+        assert!(messages.iter().any(|message| {
+            message
+                .to_string()
+                .contains("data:image/png;base64,aW1hZ2U=")
+        }));
         assert_eq!(
             messages
                 .iter()

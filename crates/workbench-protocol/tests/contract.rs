@@ -310,35 +310,26 @@ fn command_collections_and_strings_are_bounded() {
         })
     ));
 
-    let too_many_images = SendChat {
-        images: vec![send_chat().images.remove(0); MAX_IMAGES + 1],
+    let too_many_attachments = SendChat {
+        attachments: vec![AttachmentId::new("att").unwrap(); 33],
         ..send_chat()
     };
-    assert!(too_many_images.validate().is_err());
-
-    let not_an_image = SendChat {
-        images: vec![ImageRef {
-            attachment_id: AttachmentId::new("a").unwrap(),
-            mime_type: "text/html".into(),
-        }],
-        ..send_chat()
-    };
-    assert!(not_an_image.validate().is_err());
+    assert!(too_many_attachments.validate().is_err());
 
     let empty = SendChat {
         text: String::new(),
-        images: vec![],
+        attachments: vec![],
         ..send_chat()
     };
     assert!(matches!(
         empty.validate(),
         Err(ValidationError::Empty { .. })
     ));
-    let images_only = SendChat {
+    let attachments_only = SendChat {
         text: String::new(),
         ..send_chat()
     };
-    images_only.validate().unwrap();
+    attachments_only.validate().unwrap();
 
     let goal = |objective: String, constraints: Vec<String>| SubmitGoal {
         project: project(),
@@ -389,13 +380,7 @@ fn the_largest_valid_command_fits_the_default_frame() {
     let chat = SendChat {
         text: worst.clone(),
         skills: vec!["\"".repeat(MAX_NAME_BYTES); MAX_SKILLS],
-        images: vec![
-            ImageRef {
-                attachment_id: AttachmentId::new("a".repeat(MAX_ID_BYTES)).unwrap(),
-                mime_type: format!("image/{}", "\"".repeat(MAX_MIME_BYTES - 6)),
-            };
-            MAX_IMAGES
-        ],
+        attachments: vec![AttachmentId::new("a".repeat(MAX_ID_BYTES)).unwrap(); 32],
         ..send_chat()
     };
     chat.validate().unwrap();

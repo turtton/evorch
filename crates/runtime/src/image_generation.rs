@@ -164,12 +164,9 @@ async fn execute(
         .executor
         .default_cwd()
         .ok_or("this run has no workspace")?;
-    let attachment_directories = runtime
-        .attachment_read_directories_for_run(state.caller_run_id())
-        .map_err(|e| e.to_string())?;
     let roots = std::sync::Arc::new(
         crate::artifacts::SourceRoots::new(&workspace, state.scratch_dir())?
-            .with_attachments(&attachment_directories)?,
+            .with_attachments(&state.attachment_directories)?,
     );
     let (path, directory) = roots.destination(&args.output_path)?;
     let variant_path = args.variant_path(&path);

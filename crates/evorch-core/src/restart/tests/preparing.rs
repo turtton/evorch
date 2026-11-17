@@ -10,7 +10,7 @@ fn send_chat(host: &BootstrappedHost) -> runtime::RunId {
         composer_role: ComposerRole::Worker,
         text: "accepted during evaluation drain".into(),
         skills: vec![],
-        images: vec![],
+        attachments: vec![],
         model_preference: None,
         fork_seed: None,
     };

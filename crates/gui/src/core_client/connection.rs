@@ -696,8 +696,10 @@ mod tests {
         tx.send(Action::Upload {
             project: ProjectId::new("p").unwrap(),
             thread: ThreadId::new("t").unwrap(),
-            mime: "image/png".into(),
-            data: "retained local bytes".into(),
+            file: crate::attachments::AttachmentFile {
+                bytes: b"retained local bytes".to_vec(),
+                ..crate::fixture::attachment_draft().file
+            },
         })
         .await
         .unwrap();
@@ -706,7 +708,10 @@ mod tests {
         let state = shared.lock().unwrap();
         assert_eq!(state.drafts["t"].text, "not written");
         assert!(!state.sending.contains("t"));
-        assert_eq!(state.attachment_drafts["t"][0].data, "retained local bytes");
+        assert_eq!(
+            state.attachment_drafts["t"][0].file.bytes,
+            b"retained local bytes"
+        );
         assert!(state.attachment_drafts["t"][0].reference.is_none());
     }
 

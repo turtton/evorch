@@ -443,3 +443,50 @@ fn choose_files() -> Result<Vec<PathBuf>, String> {
                 .collect()
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn four_k_clipboard_image_fits_the_read_image_contract() {
+        let (width, height) = (3840, 2160);
+        let mut seed = 0x1234abcd_u32;
+        let bytes = (0..width * height * 4)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as u8
+            })
+            .collect();
+        let attachment = clipboard_png(ClipboardRgba {
+            width,
+            height,
+            bytes,
+        })
+        .unwrap();
+        assert!(attachment.bytes.len() <= READ_IMAGE_BYTES);
+        let decoded = image::load_from_memory(&attachment.bytes).unwrap();
+        assert!(decoded.width().max(decoded.height()) <= READ_IMAGE_EDGE);
+        assert!(
+            decoded.width() < width as u32,
+            "high entropy 4K pixels require downscaling"
+        );
+    }
+
+    #[test]
+    fn clipboard_rgba_rejects_zero_overflow_and_mismatched_lengths() {
+        for (width, height, bytes) in [(0, 1, vec![]), (usize::MAX, 2, vec![]), (2, 2, vec![0; 15])]
+        {
+            assert!(
+                clipboard_png(ClipboardRgba {
+                    width,
+                    height,
+                    bytes
+                })
+                .is_err()
+            );
+        }
+    }
+}

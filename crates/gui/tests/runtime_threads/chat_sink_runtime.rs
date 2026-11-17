@@ -179,7 +179,7 @@ impl Fixture {
             project_root: None,
             fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
-            images: Vec::new(),
+            attachments: Vec::new(),
             thread_id: thread.into(),
             text: text.into(),
             model_preference: None,
@@ -202,7 +202,7 @@ impl Fixture {
             project_root: None,
             fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
-            images: Vec::new(),
+            attachments: Vec::new(),
             thread_id: thread.into(),
             text: text.into(),
             model_preference,
@@ -296,7 +296,7 @@ fn composer_chats_offer_procedures_with_worker_only_conversation_category() {
                     project_root: None,
                     fork_seed: None,
                     composer_role,
-                    images: Vec::new(),
+                    attachments: Vec::new(),
                     thread_id: "conversation".into(),
                     text: text.into(),
                     model_preference: None,
@@ -384,7 +384,7 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
                     project_root: None,
                     fork_seed: None,
                     composer_role: saved_composer,
-                    images: Vec::new(),
+                    attachments: Vec::new(),
                     thread_id: "conversation".into(),
                     text: "turn-1".into(),
                     model_preference: None,
@@ -432,7 +432,7 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
                     project_root: None,
                     fork_seed: None,
                     composer_role: next_composer,
-                    images: Vec::new(),
+                    attachments: Vec::new(),
                     thread_id: "conversation".into(),
                     text: "turn-2".into(),
                     model_preference: None,
@@ -541,14 +541,13 @@ fn gui_paste_send_reaches_model_on_first_and_followup_turns() {
         .create_thread(thread.clone(), project, "chat")
         .expect("thread");
     sidebar.switch_thread(&thread).expect("switch");
-    let mut state = gui::app::WorkbenchState::new(
+    let state = gui::app::WorkbenchState::new(
         gui::fixture::DemoSource(Vec::new()),
         &workspace_ui::UiSettings::default(),
     )
     .expect("state")
     .with_sidebar(sidebar)
     .with_provider_status(gui::model::composer::ProviderStatus::Configured);
-    state.composer_mut().image_input_supported = true;
     let mut harness = egui_kittest::Harness::builder().build_ui_state(
         |ui, state: &mut gui::app::WorkbenchState<gui::fixture::DemoSource>| {
             state.ui(ui, &mut eframe::Frame::_new_kittest());
@@ -791,7 +790,7 @@ fn an_unavailable_mention_is_rejected_and_nothing_reaches_the_model() {
             project_root: None,
             fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
-            images: Vec::new(),
+            attachments: Vec::new(),
             thread_id: "mentions".into(),
             text: "use @missing-skill".into(),
             model_preference: None,

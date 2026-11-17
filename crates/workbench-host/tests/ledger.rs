@@ -68,7 +68,7 @@ fn local_chat(root: &std::path::Path, submission: &str, text: &str) -> ChatInput
         submission_id: submission.into(),
         project_root: Some(root.to_path_buf()),
         composer_role: ComposerRole::Worker,
-        images: Vec::new(),
+        attachments: Vec::new(),
         thread_id: "thread-1".into(),
         text: text.into(),
         skills: Vec::new(),

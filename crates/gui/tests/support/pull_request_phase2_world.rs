@@ -132,7 +132,7 @@ fn chat(text: &str) -> ChatSubmission {
         project_root: None,
         fork_seed: None,
         composer_role: ComposerRole::Worker,
-        images: Vec::new(),
+        attachments: Vec::new(),
         thread_id: THREAD.into(),
         text: text.into(),
         model_preference: None,

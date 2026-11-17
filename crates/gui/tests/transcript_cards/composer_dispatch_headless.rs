@@ -44,7 +44,8 @@ fn compaction_dispatches_without_a_message_and_preserves_attachments() {
     harness
         .state_mut()
         .composer_mut()
-        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+        .add_attachment(gui::fixture::attachment_draft())
+        .unwrap();
     submit(&mut harness, " /compaction \n");
     assert_eq!(
         harness.state().issued(),
@@ -106,7 +107,8 @@ fn continue_dispatches_without_a_user_message_and_preserves_attachments() {
     harness
         .state_mut()
         .composer_mut()
-        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+        .add_attachment(gui::fixture::attachment_draft())
+        .unwrap();
     harness
         .state_mut()
         .set_thread_model_preference(Some(workspace_ui::ModelPreference {
@@ -224,15 +226,18 @@ fn image_only_send_button_carries_attachment() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);
     let composer = harness.state_mut().composer_mut();
-    composer.image_input_supported = true;
-    assert!(composer.add_pasted_image("data:image/png;base64,aGVsbG8="));
+    assert!(
+        composer
+            .add_attachment(gui::fixture::attachment_draft())
+            .is_ok()
+    );
     harness.run();
     harness.click_label("Send");
     harness.run();
     let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
         panic!("image-only chat must dispatch");
     };
-    assert_eq!(chat.images[0].data, "aGVsbG8=");
+    assert_eq!(chat.attachments[0].filename, "notes.txt");
     assert!(chat.text.is_empty());
 }
 
@@ -299,19 +304,21 @@ fn external_review_completion_and_help_are_available() {
 }
 
 #[test]
-fn unsupported_image_preserves_draft_and_does_not_dispatch() {
+fn unfinished_attachment_preserves_draft_and_does_not_dispatch() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);
     harness
         .state_mut()
         .composer_mut()
-        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+        .add_attachment(gui::fixture::attachment_draft())
+        .unwrap();
+    harness.state_mut().composer_mut().attachments[0].reupload();
     harness.run();
     harness.click_label("Send");
     harness.run();
     assert!(harness.state().issued().is_empty());
     assert_eq!(harness.state().composer().attachments.len(), 1);
-    assert!(harness.state().composer().image_warning().is_some());
+    assert!(!harness.state().composer().attachments_ready());
 }
 
 #[test]
@@ -456,7 +463,7 @@ fn chat_send_issues_send_chat_and_shows_user_line() {
             fork_seed: None,
             project_root: Some(project_root),
             composer_role: gui::model::composer::ComposerRole::Worker,
-            images: Vec::new(),
+            attachments: Vec::new(),
             thread_id: "thread-1".into(),
             text: "hello agent".into(),
             model_preference: None,

@@ -103,8 +103,7 @@ impl AttachmentWriter {
     pub fn upload(self, draft: NativeAttachment) -> Result<AttachmentRef, WorkbenchError> {
         let mut service = AttachmentService::new(self.root);
         let result = service.upload_bytes_checked(
-            self.project,
-            self.thread,
+            (self.project, self.thread),
             draft.draft_id,
             draft.filename,
             draft.media_type,
@@ -133,10 +132,7 @@ impl AttachmentWriter {
                 Err(e) => return Err(io(e)),
             };
         let meta = directory.existing_directory("meta").map_err(io)?;
-        let m = match metadata(&meta, &format!("{id}.json")) {
-            Ok(m) => m,
-            Err(e) => return Err(e),
-        };
+        let m = metadata(&meta, &format!("{id}.json"))?;
         if m.project != self.project || m.thread != self.thread {
             return Err(error(
                 ErrorCode::PermissionDenied,
@@ -247,8 +243,21 @@ fn extension(filename: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn reference_io(cause: std::io::Error) -> WorkbenchError {
+    match cause.kind() {
+        std::io::ErrorKind::NotFound => error(
+            ErrorCode::NotFound,
+            "attachment is unavailable in this thread",
+        ),
+        std::io::ErrorKind::InvalidInput => {
+            error(ErrorCode::InvalidRequest, "invalid attachment reference")
+        }
+        _ => io(cause),
+    }
+}
+
 fn metadata(directory: &PrivateDirectory, name: &str) -> Result<Metadata, WorkbenchError> {
-    let file = directory.file(name, OFlags::RDONLY).map_err(io)?;
+    let file = directory.file(name, OFlags::RDONLY).map_err(reference_io)?;
     serde_json::from_reader(file.take(16 * 1024))
         .map_err(|_| error(ErrorCode::InvalidRequest, "invalid attachment metadata"))
 }
@@ -267,6 +276,24 @@ fn write_metadata(directory: &PrivateDirectory, value: &Metadata) -> Result<(), 
     })?;
     file.sync_all().map_err(io)?;
     directory.rename_to(&temp, directory, &name).map_err(io)
+}
+
+// Runtime mounts may create only files/. Such a thread has no reservations.
+fn pending_directories(
+    directory: &PrivateDirectory,
+) -> Result<Option<(PrivateDirectory, PrivateDirectory)>, WorkbenchError> {
+    let staging = match directory.existing_directory("staging") {
+        Ok(staging) => staging,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io(error)),
+    };
+    if staging.names().map_err(io)?.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((
+        staging,
+        directory.existing_directory("meta").map_err(io)?,
+    )))
 }
 
 impl AttachmentService {
@@ -297,10 +324,11 @@ impl AttachmentService {
     ) -> Result<Vec<AttachmentRef>, WorkbenchError> {
         let meta = self
             .root
-            .thread(thread.as_str())
+            .prepare()
             .map_err(io)?
-            .directory("meta")
-            .map_err(io)?;
+            .existing_directory(&AttachmentRoot::thread_name(thread.as_str()))
+            .and_then(|directory| directory.existing_directory("meta"))
+            .map_err(reference_io)?;
         ids.iter()
             .map(|id| {
                 let m = metadata(&meta, &format!("{id}.json"))?;
@@ -331,8 +359,7 @@ impl AttachmentService {
         byte_length: u64,
     ) -> Result<AttachmentId, WorkbenchError> {
         self.begin_checked(
-            project,
-            thread,
+            (project, thread),
             client_upload_id,
             filename,
             media_type_hint,
@@ -344,14 +371,14 @@ impl AttachmentService {
     /// Recheck authorization after acquiring the cross-process thread lock.
     pub fn begin_checked(
         &mut self,
-        project: ProjectId,
-        thread: ThreadId,
+        target: (ProjectId, ThreadId),
         client_upload_id: String,
         filename: String,
         media_type_hint: String,
         byte_length: u64,
         check: impl Fn(&str) -> Result<(), WorkbenchError>,
     ) -> Result<AttachmentId, WorkbenchError> {
+        let (project, thread) = target;
         validate_filename(&filename)?;
         let media_type_hint = if media_type_hint.is_empty() {
             "application/octet-stream".to_owned()
@@ -400,8 +427,9 @@ impl AttachmentService {
             .filter(|n| n.starts_with("t."))
         {
             let directory = root.existing_directory(&name).map_err(io)?;
-            let staging = directory.existing_directory("staging").map_err(io)?;
-            let meta = directory.existing_directory("meta").map_err(io)?;
+            let Some((staging, meta)) = pending_directories(&directory)? else {
+                continue;
+            };
             for item in staging
                 .names()
                 .map_err(io)?
@@ -625,16 +653,20 @@ impl AttachmentService {
         media_type: String,
         bytes: &[u8],
     ) -> Result<AttachmentRef, WorkbenchError> {
-        self.upload_bytes_checked(project, thread, draft, filename, media_type, bytes, |_| {
-            Ok(())
-        })
+        self.upload_bytes_checked(
+            (project, thread),
+            draft,
+            filename,
+            media_type,
+            bytes,
+            |_| Ok(()),
+        )
     }
 
     /// Native clients use bytes directly; base64 is exclusively an IPC transport.
     pub fn upload_bytes_checked(
         &mut self,
-        project: ProjectId,
-        thread: ThreadId,
+        target: (ProjectId, ThreadId),
         draft: String,
         filename: String,
         media_type: String,
@@ -642,8 +674,7 @@ impl AttachmentService {
         check: impl Fn(&str) -> Result<(), WorkbenchError>,
     ) -> Result<AttachmentRef, WorkbenchError> {
         let id = self.begin_checked(
-            project,
-            thread,
+            target,
             draft,
             filename,
             media_type,
@@ -693,6 +724,7 @@ impl AttachmentService {
             );
         }
         let mut result = Vec::new();
+        let mut verified = Vec::new();
         for id in ids {
             let m = metadata(&meta, &format!("{id}.json"))?;
             if &m.project != project || &m.thread != thread {
@@ -708,6 +740,37 @@ impl AttachmentService {
                 ));
             }
             let already_sent = files.names().map_err(io)?.contains(&m.disk_name);
+            let mut source = if already_sent {
+                files.file(&m.disk_name, OFlags::RDONLY)
+            } else {
+                staging.file(&format!("{id}.ready"), OFlags::RDONLY)
+            }
+            .map_err(io)?;
+            // Finish is not authority for a directory entry replaced afterwards.
+            if source.metadata().map_err(io)?.len() != m.reference.byte_length
+                || m.reference.id != *id
+            {
+                return Err(error(
+                    ErrorCode::Conflict,
+                    "finished attachment metadata changed",
+                ));
+            }
+            let mut hasher = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = source.read(&mut buffer).map_err(io)?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+            }
+            if format!("{:x}", hasher.finalize()) != m.reference.sha256 {
+                return Err(error(
+                    ErrorCode::Conflict,
+                    "finished attachment bytes changed",
+                ));
+            }
+            verified.push(source);
             if !already_sent {
                 retained = retained.saturating_add(m.reference.byte_length);
             }
@@ -719,12 +782,24 @@ impl AttachmentService {
             }
             result.push((m.reference.clone(), files.path().join(&m.disk_name)));
         }
-        for (reference, path) in &result {
+        for ((reference, path), source) in result.iter().zip(verified) {
             let name = path.file_name().unwrap().to_str().unwrap();
             if !files.names().map_err(io)?.iter().any(|n| n == name) {
                 staging
-                    .rename_to(&format!("{}.ready", reference.id), &files, name)
+                    .promote_to(&format!("{}.ready", reference.id), &files, name)
                     .map_err(io)?;
+            }
+            let published = files
+                .file(name, OFlags::RDONLY)
+                .map_err(io)?
+                .metadata()
+                .map_err(io)?;
+            let original = source.metadata().map_err(io)?;
+            if (published.dev(), published.ino()) != (original.dev(), original.ino()) {
+                return Err(error(
+                    ErrorCode::Conflict,
+                    "attachment changed during publication",
+                ));
             }
             self.uploads.remove(reference.id.as_str());
         }
@@ -777,8 +852,9 @@ impl AttachmentService {
             .filter(|n| n.starts_with("t."))
         {
             let directory = root.existing_directory(&name).map_err(io)?;
-            let staging = directory.existing_directory("staging").map_err(io)?;
-            let meta = directory.existing_directory("meta").map_err(io)?;
+            let Some((staging, meta)) = pending_directories(&directory)? else {
+                continue;
+            };
             for name in staging.names().map_err(io)? {
                 let Some((id, ext)) = name.rsplit_once('.') else {
                     continue;
@@ -855,6 +931,52 @@ mod tests {
     }
 
     #[test]
+    fn commit_rechecks_finished_file_symlinks_modes_and_digest() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        for replacement in ["symlink", "mode", "content"] {
+            let (_temp, mut s) = service();
+            let r = s
+                .upload_bytes(
+                    project(),
+                    thread(),
+                    "draft".into(),
+                    "notes.txt".into(),
+                    "text/plain".into(),
+                    b"hello",
+                )
+                .unwrap();
+            let ready = s
+                .root
+                .path()
+                .join(AttachmentRoot::thread_name(thread().as_str()))
+                .join("staging")
+                .join(format!("{}.ready", r.id));
+            match replacement {
+                "symlink" => {
+                    std::fs::remove_file(&ready).unwrap();
+                    symlink("/etc/passwd", &ready).unwrap();
+                }
+                "mode" => std::fs::set_permissions(&ready, std::fs::Permissions::from_mode(0o644))
+                    .unwrap(),
+                _ => std::fs::write(&ready, b"other").unwrap(),
+            }
+            let root = s.root.clone();
+            let _lock = root.lock_thread(thread().as_str()).unwrap();
+            assert!(
+                s.commit_locked(&project(), &thread(), &[r.id]).is_err(),
+                "{replacement}"
+            );
+            assert!(
+                root.files(thread().as_str())
+                    .unwrap()
+                    .names()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn arbitrary_bytes_commit_once_and_restart_keeps_the_exact_path() {
         let (_temp, mut s) = service();
         let bytes = b"\0not an image\xff";
@@ -872,7 +994,7 @@ mod tests {
         let root = s.root.clone();
         let _lock = root.lock_thread(thread().as_str()).unwrap();
         let committed = s
-            .commit_locked(&project(), &thread(), &[r.id.clone()])
+            .commit_locked(&project(), &thread(), std::slice::from_ref(&r.id))
             .unwrap();
         assert_eq!(std::fs::read(&committed[0].1).unwrap(), bytes);
         assert_eq!(committed[0].1.extension().unwrap(), "pdf");
@@ -888,6 +1010,49 @@ mod tests {
                 .unwrap(),
             committed
         );
+    }
+
+    #[test]
+    #[ignore = "subprocess entry point; invoked by live_upload_survives_another_process_recovery"]
+    fn attachment_recovery_process() {
+        let path =
+            std::env::var_os("EVORCH_ATTACHMENT_RECOVERY_ROOT").expect("parent supplied root");
+        AttachmentService::new(AttachmentRoot::at(path.into()))
+            .recover_dead_uploads()
+            .unwrap();
+    }
+
+    #[test]
+    fn live_upload_survives_another_process_recovery() {
+        let (_temp, mut service) = service();
+        let id = begin(&mut service, 2).unwrap();
+        service.append(&id, 0, b"a").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "attachments::tests::attachment_recovery_process",
+                "--include-ignored",
+                "--nocapture",
+            ])
+            .env("EVORCH_ATTACHMENT_RECOVERY_ROOT", service.root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        service.append(&id, 1, b"b").unwrap();
+        assert_eq!(service.finish(&id).unwrap().byte_length, 2);
+    }
+
+    #[test]
+    fn runtime_mount_before_first_upload_is_not_a_broken_reservation() {
+        let (_temp, mut s) = service();
+        s.root.files("another-thread-with-no-uploads").unwrap();
+        s.root.files(thread().as_str()).unwrap();
+        s.recover_dead_uploads().unwrap();
+        begin(&mut s, 0).unwrap();
     }
 
     #[test]

@@ -187,7 +187,7 @@ impl World {
             composer_role: ComposerRole::Worker,
             text: text.into(),
             skills: vec![],
-            images: vec![],
+            attachments: vec![],
             model_preference: None,
             fork_seed: None,
         };

@@ -70,7 +70,7 @@ fn send(id: &str, text: &str) -> SendChat {
         composer_role: ComposerRole::Worker,
         text: text.into(),
         skills: vec![],
-        images: vec![],
+        attachments: vec![],
         model_preference: None,
         fork_seed: None,
     }
@@ -142,7 +142,7 @@ async fn proxy(
                         (&request.body, lose_reply),
                         (
                             RequestBody::Command(Command::Conversation(
-                                ConversationCommand::UploadImage { .. }
+                                ConversationCommand::BeginAttachment { .. }
                             )),
                             Some(LostReply::Upload)
                         ) | (
@@ -203,7 +203,6 @@ async fn proxy(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive_desktop() {
-    use base64::Engine;
     let dir = test_socket_dir::SplitDir::new();
     let bus = Arc::new(event_bus::EventBus::new(1024));
     let (requests, mut provider) = tokio::sync::mpsc::unbounded_channel();
@@ -330,13 +329,15 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     image::DynamicImage::new_rgba8(1, 1)
         .write_to(&mut png, image::ImageFormat::Png)
         .unwrap();
-    let png_data = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+    let png_data = png.into_inner();
     actions
         .send(Action::Upload {
             project: ProjectId::new("p").unwrap(),
             thread: ThreadId::new("t").unwrap(),
-            mime: "image/png".into(),
-            data: png_data.clone(),
+            file: gui::attachments::AttachmentFile {
+                bytes: png_data.clone(),
+                ..gui::fixture::attachment_draft().file
+            },
         })
         .await
         .unwrap();
@@ -344,7 +345,7 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     {
         let mut state = shared.lock().unwrap();
         assert!(
-            state.take_image_drafts("t").is_none(),
+            state.take_attachment_drafts("t").is_none(),
             "the actual delayed upload must prohibit GUI discard"
         );
         assert!(!state.can_send("t"));
@@ -368,24 +369,23 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     {
         let mut state = shared.lock().unwrap();
         assert!(state.outcome_unknown.contains(&upload_request));
-        assert!(state.image_drafts["t"][0].reference.is_none());
-        assert!(!state.can_discard_images("t"));
-        let image = state.image_drafts["t"][0].clone();
+        assert!(state.attachment_drafts["t"][0].reference.is_none());
+        assert!(!state.can_discard_attachments("t"));
+        let image = state.attachment_drafts["t"][0].clone();
         gui::core_client::enqueue(
             &actions,
             &mut state,
             Action::Upload {
                 project: ProjectId::new("p").unwrap(),
                 thread: ThreadId::new("t").unwrap(),
-                mime: image.mime,
-                data: image.data,
+                file: image.file,
             },
         );
     }
     actions.send(Action::Reconnect).await.unwrap();
     changed(&shared, |s| s.connected && s.outcome_unknown.is_empty()).await;
     assert!(
-        shared.lock().unwrap().image_drafts["t"][0]
+        shared.lock().unwrap().attachment_drafts["t"][0]
             .reference
             .is_some(),
         "Applied ImageUploaded receipt must update its original draft"
@@ -399,7 +399,7 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
                 matches!(
                     r.body,
                     RequestBody::Command(Command::Conversation(
-                        ConversationCommand::UploadImage { .. }
+                        ConversationCommand::BeginAttachment { .. }
                     ))
                 )
             })
@@ -407,12 +407,12 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         assert_eq!(uploads.len(), 1, "upload must never be replayed");
         assert!(trace.iter().any(|r| matches!(&r.body, RequestBody::Query(Query::Projection(ProjectionQuery::GetCommandReceipt { request_id })) if request_id.as_str() == upload_request) && r.session_id == uploads[0].session_id));
     }
-    let image = shared.lock().unwrap().image_drafts["t"][0]
+    let image = shared.lock().unwrap().attachment_drafts["t"][0]
         .reference
         .clone()
         .unwrap();
     let mut initial = send("initial", "desktop initial");
-    initial.images.push(image);
+    initial.attachments.push(image.id);
     {
         let mut state = shared.lock().unwrap();
         state.drafts.insert(
@@ -615,22 +615,24 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         .send(Action::Upload {
             project: ProjectId::new("p").unwrap(),
             thread: ThreadId::new("unused").unwrap(),
-            mime: "image/png".into(),
-            data: png_data,
+            file: gui::attachments::AttachmentFile {
+                bytes: png_data,
+                ..gui::fixture::attachment_draft().file
+            },
         })
         .await
         .unwrap();
     changed(&shared, |s| {
-        s.image_drafts
+        s.attachment_drafts
             .get("unused")
             .is_some_and(|i| i[0].reference.is_some())
     })
     .await;
-    let unused = shared.lock().unwrap().image_drafts["unused"][0]
+    let unused = shared.lock().unwrap().attachment_drafts["unused"][0]
         .reference
         .as_ref()
         .unwrap()
-        .attachment_id
+        .id
         .clone();
     actions.send(Action::Shutdown).await.unwrap();
     drop(actions);

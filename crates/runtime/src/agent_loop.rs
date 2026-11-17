@@ -242,6 +242,7 @@ pub(crate) struct LoopState {
     /// The thread's read-only directories this run mounted when its sandbox was built
     /// (ADR 0037); fixed for the run's lifetime.
     pub(crate) thread_read_dirs: Vec<std::path::PathBuf>,
+    pub(crate) attachment_directories: Vec<sandbox::ThreadReadDirectory>,
     /// What a delegated Worker's sandbox gives besides allowed and thread directories:
     /// system paths, caches, tool output, the thread's scratch and the project root that
     /// thread directories are mounted under. None for runs without their own sandbox.
@@ -329,6 +330,7 @@ impl LoopState {
             scratch: None,
             allowed_directories: None,
             thread_read_dirs: Vec::new(),
+            attachment_directories: Vec::new(),
             worker_base: None,
             delegated_thread_dirs: Default::default(),
             told_directories: Default::default(),
@@ -607,6 +609,7 @@ pub(crate) async fn run_agent(
                         return;
                     }
                 };
+                state.attachment_directories = attachment_directories.clone();
                 // A Worker it delegates gets the same base, sharing the thread's scratch.
                 state.worker_base = crate::network::sandbox_boundary(&crate::WorkspaceMounts {
                     attachment_directories: attachment_directories.clone(),

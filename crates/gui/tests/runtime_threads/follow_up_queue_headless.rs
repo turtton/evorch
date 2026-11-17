@@ -214,15 +214,11 @@ fn live_queue_edit_and_delete_are_distinct_and_preserve_the_other_rows() {
     let mut gui = workbench(temp.path(), sink.clone());
     send(&mut gui, "start");
     send(&mut gui, "keep queued");
-    let image = gui::model::composer::ImageAttachment {
-        media_type: "image/png".into(),
-        data: "aW1hZ2U=".into(),
-    };
+    let image = gui::fixture::attachment_draft();
     gui.state_mut()
         .composer_mut()
         .attachments
         .push(image.clone());
-    gui.state_mut().composer_mut().image_input_supported = true;
     send(&mut gui, "edit queued");
     send(&mut gui, "delete queued");
     assert!(gui.has_label("Edit: keep queued"));
@@ -233,7 +229,11 @@ fn live_queue_edit_and_delete_are_distinct_and_preserve_the_other_rows() {
     gui.click_label("Edit: edit queued");
     gui.run();
     assert_eq!(gui.state().composer().input, "current draft\n\nedit queued");
-    assert_eq!(gui.state().composer().attachments, [image]);
+    assert_eq!(
+        gui.state().composer().attachments[0].file.bytes,
+        image.file.bytes
+    );
+    assert!(gui.state().composer().attachments[0].reference().is_none());
     assert_eq!(gui.state().composer().attachments_needed, 0);
     assert!(!gui.has_label("Queued: edit queued"));
     assert!(!gui.has_label("Not delivered: edit queued"));

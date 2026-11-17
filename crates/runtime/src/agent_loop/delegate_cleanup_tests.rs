@@ -184,6 +184,7 @@ fn fixture_with_model(
         scratch: None,
         allowed_directories: None,
         thread_read_dirs: Vec::new(),
+        attachment_directories: Vec::new(),
         worker_base: None,
         delegated_thread_dirs: Default::default(),
         told_directories: Default::default(),
@@ -395,13 +396,7 @@ async fn goal_resume_after_paused_boundary_survives_post_boundary_inbox_drain() 
     runtime
         .set_goal_checks_paused("resume-race", &goal.goal_id, false)
         .unwrap();
-    state.queue_user_message((
-        crate::thread_goals::CHECKS_WAKE.into(),
-        Vec::new(),
-        false,
-        None,
-        0,
-    ));
+    state.queue_user_message((crate::thread_goals::CHECKS_WAKE.into(), false, None, 0));
     assert!(!state.flush_aside());
     assert!(state.goal_wake_pending);
     assert_eq!(state.turn, human_turn, "a wake alone is not input");

@@ -98,7 +98,7 @@ mod tests {
             submission_id: "sub-1".into(),
             project_root: Some(PathBuf::from("/work/a")),
             composer_role: ComposerRole::Worker,
-            images: Vec::new(),
+            attachments: Vec::new(),
             thread_id: "thread-1".into(),
             text: "hello".into(),
             skills: vec!["review".into()],
@@ -126,11 +126,16 @@ mod tests {
             ("role", |c| c.composer_role = ComposerRole::Orchestrator),
             ("text", |c| c.text = "bye".into()),
             ("skills", |c| c.skills.clear()),
-            ("image", |c| {
-                c.images.push(runtime::DelegateImage {
-                    media_type: "image/png".into(),
-                    data: "AA==".into(),
-                });
+            ("attachment", |c| {
+                c.attachments
+                    .push(crate::attachments::ChatAttachment::Native(
+                        crate::attachments::NativeAttachment {
+                            draft_id: "draft".into(),
+                            filename: "a.png".into(),
+                            media_type: "image/png".into(),
+                            bytes: vec![0],
+                        },
+                    ));
             }),
             ("model", |c| {
                 c.model_preference = Some(runtime::ModelPreference {

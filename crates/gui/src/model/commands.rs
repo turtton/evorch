@@ -588,7 +588,7 @@ mod tests {
                 project_root: None,
                 fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Worker,
-                images: Vec::new(),
+                attachments: Vec::new(),
                 thread_id: thread_id.into(),
                 text: "hi".into(),
                 model_preference: None,
