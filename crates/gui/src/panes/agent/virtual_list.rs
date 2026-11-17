@@ -3,6 +3,17 @@
 
 use std::collections::{HashMap, HashSet};
 
+use egui::emath::GuiRounding as _;
+
+/// What a virtual row stands for. An entry row keeps the egui ID
+/// `scope.with(entry_id)` it always had; a group header is named by the stable
+/// entry ID of its first tool call and gets an ID of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum RowKey {
+    Entry(usize),
+    GroupHeader(usize),
+}
+
 #[derive(Clone, Copy)]
 struct MeasuredRow {
     revision: u64,
@@ -15,11 +26,23 @@ struct MeasuredRow {
 
 #[derive(Clone, Default)]
 pub(super) struct VirtualList {
-    heights: HashMap<usize, MeasuredRow>,
+    heights: HashMap<RowKey, MeasuredRow>,
     width: f32,
     enabled: bool,
     scope_id: Option<egui::Id>,
     async_generation: u64,
+    /// Off-screen rows skipped since the last drawn row, laid out as one spacer
+    /// when the next row is drawn or the list ends.
+    pending_skip: PendingSkip,
+    /// Work counted this pass; only filled while the counters are enabled.
+    pub(super) perf: super::perf::TranscriptPerf,
+    perf_on: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PendingSkip {
+    rows: u32,
+    height: f32,
 }
 
 fn override_id() -> egui::Id {
@@ -67,6 +90,11 @@ pub(super) fn record_layout(ui: &egui::Ui, content: egui::Vec2, offset: egui::Ve
 }
 
 impl VirtualList {
+    /// Drops the cache stored under `id`.
+    pub(super) fn forget(data: &mut egui::util::IdTypeMap, id: egui::Id) {
+        data.remove_temp::<Self>(id);
+    }
+
     pub(super) fn load(ui: &egui::Ui, id: egui::Id, entries: impl Iterator<Item = usize>) -> Self {
         let enabled = ui
             .data(|data| data.get_temp::<bool>(override_id()))
@@ -77,16 +105,53 @@ impl VirtualList {
             .data_mut(|data| data.remove_temp::<Self>(id))
             .unwrap_or_default();
         let width = ui.available_width();
+        cache.perf = super::perf::TranscriptPerf::default();
+        cache.perf_on = super::perf::enabled();
         if cache.width != width {
+            cache.perf.height_cache_clears += u64::from(!cache.heights.is_empty());
             cache.heights.clear();
             cache.width = width;
         }
         cache.enabled = enabled;
+        cache.pending_skip = PendingSkip::default();
         cache.async_generation = super::async_layout::poll(ui.ctx());
         cache.scope_id = Some(id);
         let retained: HashSet<_> = entries.collect();
-        cache.heights.retain(|entry, _| retained.contains(entry));
+        cache.perf.entries_enumerated += retained.len() as u64;
+        cache.heights.retain(|key, _| match key {
+            RowKey::Entry(id) | RowKey::GroupHeader(id) => retained.contains(id),
+        });
         cache
+    }
+
+    /// Where the next row starts, counting the skipped rows not yet laid out.
+    pub(super) fn cursor_top(&self, ui: &egui::Ui) -> f32 {
+        ui.cursor().top()
+            + self.pending_skip.height
+            + self.pending_skip.rows as f32 * ui.spacing().item_spacing.y
+    }
+
+    /// Lays out the pending skipped rows as one spacer. Their extent is each
+    /// row's height plus the item spacing that follows every row, which the
+    /// spacer's own trailing spacing supplies once.
+    pub(super) fn flush(&mut self, ui: &mut egui::Ui) {
+        let PendingSkip { rows, height } = std::mem::take(&mut self.pending_skip);
+        if rows > 0 {
+            ui.allocate_space(egui::vec2(
+                0.0,
+                height + (rows - 1) as f32 * ui.spacing().item_spacing.y,
+            ));
+        }
+    }
+
+    pub(super) fn perf_on(&self) -> bool {
+        self.perf_on
+    }
+
+    pub(super) fn publish_perf(&self) {
+        if self.perf_on {
+            super::perf::publish(&self.perf);
+        }
     }
 
     pub(super) fn store(self, ui: &egui::Ui, id: egui::Id) {
@@ -101,9 +166,20 @@ impl VirtualList {
         revision: u64,
         draw: impl FnOnce(&mut egui::Ui),
     ) {
-        let previous = self.heights.get(&entry_id).copied();
+        self.keyed_row(ui, viewport, RowKey::Entry(entry_id), revision, draw);
+    }
+
+    pub(super) fn keyed_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport: egui::Rect,
+        key: RowKey,
+        revision: u64,
+        draw: impl FnOnce(&mut egui::Ui),
+    ) {
+        let previous = self.heights.get(&key).copied();
         let height = previous.map(|row| row.height);
-        let top = ui.cursor().top();
+        let top = self.cursor_top(ui);
         let skip = self.enabled
             && previous.is_some_and(|row| {
                 row.revision == revision
@@ -114,29 +190,51 @@ impl VirtualList {
                 .is_some_and(|height| top + height < viewport.top() || top > viewport.bottom());
         // An explicit ID also severs egui's parent auto-ID counter dependency:
         // eviction or consolidation of earlier rows must not lose selection.
-        let scope = self.scope_id.expect("list loaded").with(entry_id);
-        let mut contains_async = false;
-        let response = ui.scope_builder(egui::UiBuilder::new().id(scope), |ui| {
-            if skip {
-                ui.add_space(height.unwrap_or_default());
-            } else {
-                let measurement = measurement_id(ui.ctx());
-                let outer = ui.data_mut(|data| {
-                    let outer = data.get_temp::<bool>(measurement);
-                    data.insert_temp(measurement, false);
-                    outer
-                });
-                draw(ui);
-                contains_async = ui.data_mut(|data| {
-                    let contains_async = data.remove_temp::<bool>(measurement).unwrap_or(false);
-                    if let Some(outer) = outer {
-                        data.insert_temp(measurement, outer || contains_async);
-                    }
-                    contains_async
-                });
+        let scope_base = self.scope_id.expect("list loaded");
+        let scope = match key {
+            RowKey::Entry(id) => scope_base.with(id),
+            RowKey::GroupHeader(id) => scope_base.with(("tool-group-header", id)),
+        };
+        if skip {
+            // Nothing is drawn for a skipped row, so a run of them costs one
+            // spacer rather than one scope each.
+            self.pending_skip.rows += 1;
+            // Each skipped row used to add its height rounded to a pixel.
+            self.pending_skip.height += height.unwrap_or_default().round_ui();
+            if self.perf_on {
+                self.perf.rows_listed += 1;
+                self.perf.rows_skipped += 1;
             }
+            return;
+        }
+        self.flush(ui);
+        let mut contains_async = false;
+        let draw_clock = super::perf::Clock::start(self.perf_on);
+        let response = ui.scope_builder(egui::UiBuilder::new().id(scope), |ui| {
+            let measurement = measurement_id(ui.ctx());
+            let outer = ui.data_mut(|data| {
+                let outer = data.get_temp::<bool>(measurement);
+                data.insert_temp(measurement, false);
+                outer
+            });
+            draw(ui);
+            contains_async = ui.data_mut(|data| {
+                let contains_async = data.remove_temp::<bool>(measurement).unwrap_or(false);
+                if let Some(outer) = outer {
+                    data.insert_temp(measurement, outer || contains_async);
+                }
+                contains_async
+            });
         });
-        if !skip {
+        if self.perf_on {
+            self.perf.rows_listed += 1;
+            self.perf.rows_drawn += 1;
+            self.perf.draw_ns += draw_clock.elapsed_ns();
+            let rect = response.response.rect;
+            self.perf.rows_drawn_far +=
+                u64::from(rect.bottom() < viewport.top() || rect.top() > viewport.bottom());
+        }
+        {
             // The scope's rect excludes its parent's trailing item spacing.
             // add_space reproduces precisely that rect on a skipped pass.
             let measured = response.response.rect.height();
@@ -153,7 +251,7 @@ impl VirtualList {
             let stable =
                 unchanged && previous.is_some_and(|row| row.settled || row.frame_nr != frame_nr);
             self.heights.insert(
-                entry_id,
+                key,
                 MeasuredRow {
                     revision,
                     height: measured,
@@ -164,6 +262,7 @@ impl VirtualList {
                 },
             );
             if !stable {
+                self.perf.rows_unsettled += u64::from(self.perf_on);
                 // Keep measuring changing geometry (including animations),
                 // even offscreen. Pending data can settle too; its completion
                 // invalidates dependent rows via the external generation.
@@ -206,6 +305,7 @@ mod tests {
                         }
                     });
                 }
+                list.flush(ui);
                 extent = ui.cursor().top();
                 list.store(ui, id);
             },
@@ -223,7 +323,8 @@ mod tests {
         let (settling, actual) = layout(&ctx, 640.0, 0..20);
         assert_eq!(settling, 20);
         assert_eq!(actual, expected);
-        assert_eq!(layout(&ctx, 640.0, 0..20).0, 0);
+        // Skipped rows lay out as one spacer with the extent they had drawn.
+        assert_eq!(layout(&ctx, 640.0, 0..20), (0, expected));
 
         // Appended offscreen rows must still be measured, not estimated.
         assert_eq!(layout(&ctx, 640.0, 0..21).0, 1);

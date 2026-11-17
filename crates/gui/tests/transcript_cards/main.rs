@@ -19,6 +19,7 @@ mod runless_delta_drop;
 mod shell_job_cards;
 mod streaming_transcript;
 mod tool_arguments_headless;
+mod tool_groups;
 mod transcript;
 mod transcript_apply_patch;
 mod transcript_tool;

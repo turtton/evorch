@@ -276,6 +276,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // or a failure held for it, and a read finishing later is dropped.
             let bound = self.transcripts.drop_thread(thread);
             let gone: Vec<&String> = runs.iter().chain(&bound).collect();
+            // The panes keep heights and open toggles for what they showed.
+            for owner in std::iter::once(thread).chain(gone.iter().copied()) {
+                if !self.retired_view_owners.contains(owner) {
+                    self.retired_view_owners.push(owner.clone());
+                }
+            }
             let held_for_gone =
                 |run: &Option<String>| run.as_ref().is_some_and(|run| gone.contains(&run));
             self.shared_feed
@@ -297,6 +303,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.save_sidebar();
         }
         removed
+    }
+
+    /// Drops what the panes kept (measured heights, open tool groups, scroll
+    /// anchors) for the threads and runs deleted since the last frame, whether
+    /// or not any pane shows them.
+    pub(super) fn drop_retired_view_state(&mut self, ctx: &egui::Context) {
+        crate::panes::agent::forget_transcript_view_state(
+            ctx,
+            &std::mem::take(&mut self.retired_view_owners),
+        );
     }
 
     /// Posts the notice about the start-up maintenance, if there is something to say.

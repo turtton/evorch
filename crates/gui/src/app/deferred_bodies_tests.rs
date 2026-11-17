@@ -309,6 +309,10 @@ fn deleting_a_thread_drops_its_transcript_and_whatever_was_held_for_it() {
     assert!(state.transcripts.run("run-1").is_none());
     assert!(resolver.peek(&body).is_none(), "its cached text is gone");
     assert_eq!(resolver.cached_bytes(), 0);
+    // The panes hear of it at the next frame, and only once.
+    assert_eq!(state.retired_view_owners, ["t1", "run-1"]);
+    state.drop_retired_view_state(&egui::Context::default());
+    assert!(state.retired_view_owners.is_empty());
 }
 
 #[test]

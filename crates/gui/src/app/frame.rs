@@ -51,6 +51,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.theme_installed = true;
         }
         self.bodies_begin_frame(&ctx);
+        self.drop_retired_view_state(&ctx);
         let (event_count, drain_time, fold_time) = self.drain_pump(&ctx, false);
         self.dispatch_system_notifications(&ctx);
         self.poll_external();

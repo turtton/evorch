@@ -29,11 +29,15 @@ pub use pull_request_bar::{
 mod lane;
 use header::header_strip;
 pub(crate) mod async_layout;
+mod perf;
 mod queue;
 mod sandbox_review;
 mod thinking;
+mod tool_group;
 mod unreadable;
 mod virtual_list;
+#[doc(hidden)]
+pub use perf::{TranscriptPerf, set_transcript_perf_enabled, take_transcript_perf};
 pub(crate) use virtual_list::mark_async_layout;
 #[doc(hidden)]
 pub use virtual_list::{set_transcript_virtualization_for_tests, transcript_layout_for_tests};
@@ -162,6 +166,9 @@ pub fn agent_pane_with_repo_root(
                         .is_none_or(|requests| requests.is_empty())
                     && identity.is_none_or(|identity| identity.ledger.is_empty())
                 {
+                    // Nothing is drawn for a transcript now: what the pane kept
+                    // for the one it showed before goes with it.
+                    retire_pane_scope(ui, ui.id());
                     empty_state_body(ui, &ctx, &mut action);
                 } else {
                     let mut branch_action = None;
@@ -245,6 +252,28 @@ fn latest_shell_job_entries(
         .collect()
 }
 
+/// A group header's row revision: its membership and each member's change
+/// counter, never any text. Closed members are not drawn, so their own
+/// layout inputs need no part in it.
+fn group_revision(
+    model: &TranscriptModel,
+    group: &tool_group::ToolGroup,
+    key: usize,
+    open: bool,
+    layout_revision: u64,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut revision = std::hash::DefaultHasher::new();
+    layout_revision.hash(&mut revision);
+    (key, open, group.calls, group.failed).hash(&mut revision);
+    for index in group.start..group.end {
+        let id = model.visible_entry_id(index);
+        id.hash(&mut revision);
+        model.entry_revision(id).hash(&mut revision);
+    }
+    revision.finish()
+}
+
 /// Only hash mutation counters, not large markdown/tool-output strings. A
 /// parent's layout also depends on its nested children and live shell state.
 fn row_revision(
@@ -293,6 +322,25 @@ pub fn transcript_body_with_repo_root(
     transcript_body_with_agents(ui, model, repo_root, &[]);
 }
 
+/// A transcript that also draws pull request candidate chips under their tool
+/// calls, for tests of what stays visible while a tool group is closed.
+#[doc(hidden)]
+pub fn transcript_body_with_chips_for_tests(
+    ui: &mut egui::Ui,
+    model: &TranscriptModel,
+    chips: &mut crate::panes::pull_request_chip::PullRequestChips<'_>,
+) {
+    run_detail_body(
+        ui,
+        model,
+        (None, &[]),
+        None,
+        None,
+        (None, &mut None),
+        Some(chips),
+    );
+}
+
 /// A run transcript whose run IDs resolve to the names in `agents`.
 pub fn transcript_body_with_agents(
     ui: &mut egui::Ui,
@@ -322,10 +370,16 @@ fn run_detail_body(
 ) -> Option<super::requests::RequestAction> {
     let (identity, task_rows) = context;
     let pane_id = ui.id();
-    let model_id = if let Some(branch) = branch {
-        pane_id.with(("thread", &branch.thread.id))
+    let (model_id, owner) = if let Some(branch) = branch {
+        (
+            pane_id.with(("thread", &branch.thread.id)),
+            Some(branch.thread.id.to_string()),
+        )
     } else if let Some(identity) = identity {
-        pane_id.with(("run", identity.run_id))
+        (
+            pane_id.with(("run", identity.run_id)),
+            Some(identity.run_id.to_string()),
+        )
     } else if let Some(run_id) = model.entries().iter().find_map(|entry| match entry {
         TranscriptEntry::Message { run_id, .. }
         | TranscriptEntry::Reasoning { run_id, .. }
@@ -334,12 +388,13 @@ fn run_detail_body(
         TranscriptEntry::TurnEnd { run_id, .. } => Some(run_id.as_str()),
         _ => None,
     }) {
-        pane_id.with(("run", run_id))
+        (pane_id.with(("run", run_id)), Some(run_id.to_owned()))
     } else {
         // Standalone transcripts may have no thread or run identity.
-        pane_id.with(("transcript", model.cache_identity()))
+        (pane_id.with(("transcript", model.cache_identity())), None)
     };
     let cache_key = model_id.with("entry-heights");
+    retire_previous_scope(ui, pane_id, model_id, owner);
     let passive_artifacts = super::artifact_card::is_passive(ui.ctx());
     for entry in model.visible_entries() {
         if passive_artifacts {
@@ -362,8 +417,9 @@ fn run_detail_body(
     // looking at must not move because of it, even when the pane follows the
     // end of the conversation, so a move caused by that is undone.
     let anchor_key = model_id.with("body-anchor");
+    let open_groups_key = model_id.with("tool-groups-open");
     let previous_anchor: Option<ScrollAnchor> = ui.data(|data| data.get_temp(anchor_key));
-    let mut first_visible: Option<(usize, f32)> = None;
+    let mut first_visible: Option<(usize, bool, f32)> = None;
     // Where the entry the reader was looking at stands now, whether or not it
     // is still the first in view: a row above it that changed height can put
     // another entry first.
@@ -384,6 +440,7 @@ fn run_detail_body(
                 branch::start_versions(ui, model, branch, branch_action);
             }
             let entries = model.visible_entries();
+            let prep_clock = perf::Clock::start(perf::enabled());
             let mut list =
                 virtual_list::VirtualList::load(ui, cache_key, model.visible_entry_ids());
             use std::hash::{Hash, Hasher};
@@ -402,8 +459,84 @@ fn run_detail_body(
             let layout_revision = layout_revision.finish();
             let latest_job_entry = latest_shell_job_entries(entries, model.shell_jobs());
             let nesting = crate::panes::transcript_tool::RunJsNesting::new(entries);
+            let groups = tool_group::project(entries, &nesting);
+            let mut open_groups: tool_group::OpenGroups = ui
+                .data(|data| data.get_temp(open_groups_key))
+                .unwrap_or_default();
+            if !open_groups.is_empty()
+                && open_groups.retain(|id| model.visible_index_of(id).is_some())
+            {
+                ui.data_mut(|data| data.insert_temp(open_groups_key, open_groups.clone()));
+            }
+            let mut toggled_group: Option<usize> = None;
+            let mut next_group = 0;
+            let mut hidden_until = 0;
+            let mut header_top = 0.0_f32;
+            list.perf.group_headers += groups.len() as u64;
+            // Full scans of the entries this pass: the artifact poll (unless the
+            // pane is passive), the shell-job map, the two of run_js nesting, the
+            // grouping and the row loop. The height-cache prune in
+            // `VirtualList::load` counts its own.
+            list.perf.passes += 1;
+            list.perf.projection_rebuilds += 1;
+            list.perf.entries_enumerated +=
+                (5 + u64::from(!passive_artifacts)) * entries.len() as u64;
+            list.perf.prep_ns += prep_clock.elapsed_ns();
+            let loop_clock = perf::Clock::start(list.perf_on());
             let mut folded_until = 0;
             for (entry_idx, entry) in entries.iter().enumerate() {
+                if let Some(group) = groups.get(next_group)
+                    && group.start == entry_idx
+                {
+                    next_group += 1;
+                    let key = model.visible_entry_id(group.first_tool);
+                    let open = open_groups.is_open(key);
+                    let revision = group_revision(model, group, key, open, layout_revision);
+                    let row_top = list.cursor_top(ui);
+                    if previous_anchor.is_some_and(|anchor| anchor.header && anchor.entry == key) {
+                        anchored_entry_y = Some(row_top - content_top);
+                    }
+                    list.keyed_row(
+                        ui,
+                        viewport,
+                        virtual_list::RowKey::GroupHeader(key),
+                        revision,
+                        |ui| {
+                            ui.add_space(SP_1);
+                            if tool_group::header(ui, group, open) {
+                                toggled_group = Some(key);
+                            }
+                            if !open && let Some(chips) = chips.as_deref_mut() {
+                                for index in group.start..group.end {
+                                    crate::panes::pull_request_chip::show(
+                                        ui,
+                                        chips,
+                                        &entries[index..=index],
+                                    );
+                                }
+                            }
+                        },
+                    );
+                    if first_visible.is_none() && list.cursor_top(ui) > screen_viewport.top() {
+                        first_visible = Some((key, true, row_top - content_top));
+                    }
+                    header_top = row_top - content_top;
+                    if !open {
+                        hidden_until = group.end;
+                    }
+                }
+                if entry_idx < hidden_until {
+                    // An anchor hidden by a collapse follows its group header.
+                    if anchored_entry_y.is_none()
+                        && previous_anchor.is_some_and(|anchor| {
+                            !anchor.header && anchor.entry == model.visible_entry_id(entry_idx)
+                        })
+                    {
+                        anchored_entry_y = Some(header_top);
+                    }
+                    list.perf.rows_hidden_by_groups += u64::from(list.perf_on());
+                    continue;
+                }
                 if entry_idx < folded_until || nesting.is_nested(entry_idx) {
                     continue;
                 }
@@ -422,6 +555,7 @@ fn run_detail_body(
                             model.shell_jobs(),
                         );
                 }
+                let revision_clock = perf::Clock::start(list.perf_on());
                 let revision = row_revision(
                     model,
                     (entry_idx..folded_until.max(entry_idx + 1))
@@ -429,8 +563,11 @@ fn run_detail_body(
                     &latest_job_entry,
                     layout_revision,
                 );
-                let row_top = ui.cursor().top();
-                if previous_anchor.is_some_and(|anchor| anchor.entry == entry_id) {
+                list.perf.revisions += u64::from(list.perf_on());
+                list.perf.revision_ns += revision_clock.elapsed_ns();
+                let row_top = list.cursor_top(ui);
+                if previous_anchor.is_some_and(|anchor| !anchor.header && anchor.entry == entry_id)
+                {
                     anchored_entry_y = Some(row_top - content_top);
                 }
                 list.row(ui, viewport, entry_id, revision, |ui| {
@@ -647,10 +784,18 @@ fn run_detail_body(
                         }
                     });
                 });
-                if first_visible.is_none() && ui.cursor().top() > screen_viewport.top() {
-                    first_visible = Some((entry_id, row_top - content_top));
+                if first_visible.is_none() && list.cursor_top(ui) > screen_viewport.top() {
+                    first_visible = Some((entry_id, false, row_top - content_top));
                 }
             }
+            list.flush(ui);
+            list.perf.loop_ns += loop_clock.elapsed_ns();
+            if let Some(key) = toggled_group {
+                open_groups.toggle(key);
+                ui.data_mut(|data| data.insert_temp(open_groups_key, open_groups));
+                ui.ctx().request_repaint();
+            }
+            list.publish_perf();
             list.store(ui, cache_key);
             corrected_offset = anchor_correction(
                 ui,
@@ -665,13 +810,14 @@ fn run_detail_body(
             requests.and_then(|requests| requests.show(ui))
         });
     virtual_list::record_layout(ui, output.content_size, output.state.offset);
-    if let Some((entry, content_y)) = first_visible {
+    if let Some((entry, header, content_y)) = first_visible {
         let offset_y = corrected_offset.unwrap_or(output.state.offset.y);
         ui.data_mut(|data| {
             data.insert_temp(
                 anchor_key,
                 ScrollAnchor {
                     entry,
+                    header,
                     content_y,
                     offset_y,
                 },
@@ -685,6 +831,110 @@ fn run_detail_body(
     output.inner
 }
 
+/// What a pane keeps for a transcript it shows, keyed by the transcript's scope
+/// and nothing else would ever collect it: the measured heights, the reader's
+/// open groups and the scroll anchor.
+fn forget_scope(data: &mut egui::util::IdTypeMap, scope: egui::Id) {
+    virtual_list::VirtualList::forget(data, scope.with("entry-heights"));
+    data.remove_temp::<tool_group::OpenGroups>(scope.with("tool-groups-open"));
+    data.remove_temp::<ScrollAnchor>(scope.with("body-anchor"));
+}
+
+fn scope_registry_id() -> egui::Id {
+    egui::Id::new("transcript-scope-registry")
+}
+
+/// Scopes that hold state, with the thread or run each shows (a standalone
+/// transcript has none). It lets a deletion find state of panes it cannot see.
+type ScopeRegistry = Vec<(egui::Id, String)>;
+
+/// A pane that shows another transcript than it did drops what it kept for the
+/// old one. Two scopes drawn in one pass share the pane ID; they are left
+/// alone rather than made to evict each other.
+fn retire_previous_scope(ui: &egui::Ui, pane_id: egui::Id, scope: egui::Id, owner: Option<String>) {
+    let key = pane_id.with("transcript-scope");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let previous: Option<(egui::Id, u64)> = ui
+        .data(|data| data.get_temp::<(Option<egui::Id>, u64)>(key))
+        .and_then(|(scope, pass)| scope.map(|scope| (scope, pass)));
+    match previous {
+        Some((old, _)) if old == scope => return,
+        Some((_, seen)) if seen == pass => {}
+        Some((old, _)) => ui.data_mut(|data| {
+            forget_scope(data, old);
+            unregister_scope(data, old);
+        }),
+        None => {}
+    }
+    ui.data_mut(|data| {
+        if previous.is_none_or(|(_, seen)| seen != pass) {
+            data.insert_temp(key, (Some(scope), pass));
+        }
+        if let Some(owner) = owner {
+            let mut registry: ScopeRegistry =
+                data.get_temp(scope_registry_id()).unwrap_or_default();
+            if !registry.iter().any(|(id, _)| *id == scope) {
+                registry.push((scope, owner));
+                data.insert_temp(scope_registry_id(), registry);
+            }
+        }
+    });
+}
+
+/// A pane that draws no transcript (an empty thread, none selected) drops what
+/// it kept for the one it drew before.
+fn retire_pane_scope(ui: &egui::Ui, pane_id: egui::Id) {
+    let key = pane_id.with("transcript-scope");
+    let previous: Option<(egui::Id, u64)> = ui
+        .data(|data| data.get_temp::<(Option<egui::Id>, u64)>(key))
+        .and_then(|(scope, pass)| scope.map(|scope| (scope, pass)));
+    if let Some((old, _)) = previous {
+        ui.data_mut(|data| {
+            forget_scope(data, old);
+            unregister_scope(data, old);
+            data.insert_temp(key, (None::<egui::Id>, 0_u64));
+        });
+    }
+}
+
+fn unregister_scope(data: &mut egui::util::IdTypeMap, scope: egui::Id) {
+    if let Some(mut registry) = data.get_temp::<ScopeRegistry>(scope_registry_id()) {
+        registry.retain(|(id, _)| *id != scope);
+        data.insert_temp(scope_registry_id(), registry);
+    }
+}
+
+/// Drops the pane state kept for deleted threads and runs, whichever pane
+/// showed them, whether or not any pane shows them now.
+pub fn forget_transcript_view_state(ctx: &egui::Context, owners: &[String]) {
+    if owners.is_empty() {
+        return;
+    }
+    ctx.data_mut(|data| {
+        let Some(registry) = data.get_temp::<ScopeRegistry>(scope_registry_id()) else {
+            return;
+        };
+        let (gone, kept): (ScopeRegistry, ScopeRegistry) = registry
+            .into_iter()
+            .partition(|(_, owner)| owners.contains(owner));
+        for (scope, _) in &gone {
+            forget_scope(data, *scope);
+        }
+        data.insert_temp(scope_registry_id(), kept);
+    });
+}
+
+/// Whether the pane still holds state for a scope of this thread or run
+/// (for tests).
+#[doc(hidden)]
+#[must_use]
+pub fn holds_transcript_view_state_for_tests(ctx: &egui::Context, owner: &str) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<ScopeRegistry>(scope_registry_id())
+            .is_some_and(|registry| registry.iter().any(|(_, o)| o == owner))
+    })
+}
+
 const LATEST_ANCHOR_ID: &str = "transcript-latest-anchor";
 
 /// The entry the reader is looking at (the first in view) and where it is on
@@ -693,14 +943,18 @@ const LATEST_ANCHOR_ID: &str = "transcript-latest-anchor";
 #[doc(hidden)]
 #[must_use]
 pub fn first_visible_entry_for_tests(ctx: &egui::Context) -> Option<(usize, f32)> {
+    // A group header reports the entry ID of its first tool, as it is named.
     ctx.data(|data| data.get_temp(egui::Id::new(LATEST_ANCHOR_ID)))
 }
 
 /// The first entry in view, and where it was: its place in the content and
 /// the scroll offset that put it on screen.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct ScrollAnchor {
     entry: usize,
+    /// Whether it is the header of the tool group whose first tool is `entry`
+    /// (a group header and that tool share the entry ID but are distinct rows).
+    header: bool,
     content_y: f32,
     offset_y: f32,
 }
@@ -713,15 +967,20 @@ fn anchor_correction(
     ui: &egui::Ui,
     previous: Option<ScrollAnchor>,
     anchored_entry_y: Option<f32>,
-    first_visible: Option<(usize, f32)>,
+    first_visible: Option<(usize, bool, f32)>,
     (used_offset, viewport_height): (f32, f32),
 ) -> Option<f32> {
     let transitioned = crate::body::ui::take_transition(ui.ctx());
-    let (entry, content_y) = match (previous, anchored_entry_y) {
-        (Some(previous), Some(y)) => (previous.entry, y),
-        _ => first_visible?,
+    let (previous, content_y) = match (previous, anchored_entry_y) {
+        (Some(previous), Some(y)) => (previous, y),
+        _ => {
+            let (entry, header, y) = first_visible?;
+            (
+                previous.filter(|p| p.entry == entry && p.header == header)?,
+                y,
+            )
+        }
     };
-    let previous = previous.filter(|previous| previous.entry == entry)?;
     let scrolled = ui.input(|input| input.is_scrolling() || input.pointer.any_down());
     if !transitioned || scrolled {
         return None;
