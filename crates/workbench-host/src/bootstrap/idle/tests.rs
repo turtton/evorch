@@ -1,9 +1,10 @@
-//! Characterize the pre-18a policy through the real host, not a second predicate.
+//! Exercise process retention through live runtime boundaries and authorities.
 use super::*;
 use crate::bootstrap::{BootstrapOptions, TestSeams, core_startup::CoreStartupDiagnostics};
+use event_bus::AgentRunPhase;
 use runtime::{AgentModel, Role, RunConfig, StopScope};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::Notify;
@@ -12,29 +13,36 @@ use tokio::sync::Notify;
 struct Model {
     entered: Notify,
     release: Notify,
+    script: Mutex<std::collections::HashMap<String, providers::ContentBlock>>,
 }
 
 #[async_trait::async_trait]
 impl AgentModel for Model {
     async fn complete(
         &self,
-        _: &runtime::AgentInvocationContext,
+        invocation: &runtime::AgentInvocationContext,
         _: Role,
         _: &[providers::Message],
         _: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
         self.entered.notify_one();
         self.release.notified().await;
+        let scripted = self.script.lock().unwrap().remove(&invocation.run_id);
+        let tool = scripted.is_some();
         Ok(providers::ChatResponse {
             message: providers::Message {
                 role: providers::Role::Assistant,
-                content: vec![providers::ContentBlock::Text {
+                content: vec![scripted.unwrap_or(providers::ContentBlock::Text {
                     text: "turn complete".into(),
-                }],
+                })],
             },
             usage: Default::default(),
             usage_reported: true,
-            finish_reason: providers::FinishReason::Stop,
+            finish_reason: if tool {
+                providers::FinishReason::ToolUse
+            } else {
+                providers::FinishReason::Stop
+            },
         })
     }
 
@@ -71,7 +79,7 @@ async fn open(dir: &test_socket_dir::SplitDir, model: Arc<Model>) -> Bootstrappe
 }
 
 #[tokio::test]
-async fn conservative_policy_retains_running_and_ordinary_input_waiting_runs() {
+async fn active_turns_retain_but_completed_chat_input_waits_do_not() {
     let dir = test_socket_dir::SplitDir::new();
     let model = Arc::new(Model::default());
     let mut host = open(&dir, model.clone()).await;
@@ -101,14 +109,146 @@ async fn conservative_policy_retains_running_and_ordinary_input_waiting_runs() {
             break;
         }
     }
-    // Deliberately unchanged here; the feature PR will relax ONLY this case.
-    assert!(host.busy(), "ordinary input wait still retains before 18a");
+    assert!(host.runtime.is_between_chat_turns(run));
+    assert!(
+        !host.busy(),
+        "a completed chat waiting for its next input is idle"
+    );
     host.runtime.stop(run, StopScope::SelfOnly).unwrap();
     assert_eq!(
         host.runtime.wait(run).await.unwrap(),
         AgentRunPhase::Stopped
     );
     assert!(!host.busy(), "a stopped run alone is not work");
+    host.shutdown().await.unwrap();
+}
+
+async fn waiting(
+    runtime: &runtime::AgentRuntime,
+    run: runtime::RunId,
+    events: &mut event_bus::EventReceiver,
+) {
+    loop {
+        if matches!(
+            events.recv().await.unwrap().kind,
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id, to: AgentRunPhase::Waiting, ..
+            }) if run_id == run.to_string()
+        ) {
+            assert_eq!(
+                runtime
+                    .list_agents()
+                    .into_iter()
+                    .find(|agent| agent.run_id == run)
+                    .unwrap()
+                    .phase,
+                AgentRunPhase::Waiting
+            );
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn unanswered_questions_retain_even_after_the_requester_stops() {
+    for blocking in [false, true] {
+        let dir = test_socket_dir::SplitDir::new();
+        let model = Arc::new(Model::default());
+        let mut host = open(&dir, model.clone()).await;
+        let mut events = host.runtime.event_bus().subscribe();
+        let run = host.runtime.delegate_background(
+            Role::Worker,
+            "chat".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        );
+        model.entered.notified().await;
+        model.release.notify_one();
+        waiting(&host.runtime, run, &mut events).await;
+        assert!(!host.busy());
+        let question = host
+            .runtime
+            .request_user_question(run, "retain until answered".into(), vec![], blocking)
+            .unwrap();
+        assert!(
+            host.busy(),
+            "pending questions are not ordinary input waits"
+        );
+        host.runtime.stop(run, StopScope::SelfOnly).unwrap();
+        host.runtime.wait(run).await.unwrap();
+        assert!(
+            host.busy(),
+            "unloaded/terminal requesters do not make a question recoverable"
+        );
+        host.runtime
+            .answer_user_question(&question.id, "answer")
+            .unwrap();
+        assert!(!host.busy(), "an answered question alone does not retain");
+        host.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn approval_authority_retains_without_any_live_run() {
+    let dir = test_socket_dir::SplitDir::new();
+    let mut host = open(&dir, Arc::new(Model::default())).await;
+    tokio::time::pause();
+    let registry = sandbox::approval::ApprovalRegistry::for_bus(&host.runtime.event_bus());
+    let pending = registry.register(
+        sandbox::approval::ApprovalRequest {
+            run_id: "not-loaded",
+            thread_id: None,
+            tool_name: "shell",
+            call_id: "needs-confirmation",
+            input: None,
+        },
+        std::time::Duration::from_secs(60),
+    );
+    assert!(host.busy());
+    drop(pending);
+    assert!(
+        !host.busy(),
+        "cancelled approval authority no longer retains"
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_live_child_wait_is_not_an_idle_chat_boundary() {
+    let dir = test_socket_dir::SplitDir::new();
+    let model = Arc::new(Model::default());
+    let mut host = open(&dir, model.clone()).await;
+    let mut events = host.runtime.event_bus().subscribe();
+    let parent = host.runtime.delegate_background(
+        Role::Orchestrator,
+        "wait for child".into(),
+        RunConfig::default(),
+    );
+    model.entered.notified().await;
+    let child = host
+        .runtime
+        .delegate_background_as_child(parent, Role::Worker, "working", RunConfig::default())
+        .unwrap();
+    model.entered.notified().await;
+    model.script.lock().unwrap().insert(
+        parent.to_string(),
+        providers::ContentBlock::ToolUse {
+            id: "active-wait".into(),
+            name: "wait".into(),
+            input: serde_json::json!({"run_id": child.to_string()}),
+        },
+    );
+    model.release.notify_one();
+    waiting(&host.runtime, parent, &mut events).await;
+    assert!(!host.runtime.is_between_chat_turns(parent));
+    assert!(host.busy());
+    host.runtime.stop(parent, StopScope::Subtree).unwrap();
+    host.runtime.wait(parent).await.unwrap();
+    host.runtime.wait(child).await.unwrap();
+    assert!(!host.busy());
     host.shutdown().await.unwrap();
 }
 

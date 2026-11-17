@@ -1,6 +1,8 @@
-//! Idle time is measured only while all three retention conditions are false.
+//! Idle grace applies only with no admitted clients and no retained work.
 use std::time::Duration;
 use tokio::time::Instant;
+#[path = "lifecycle/idle/activity.rs"]
+mod idle_activity;
 
 pub struct IdleGrace {
     grace: Duration,
@@ -11,13 +13,24 @@ impl IdleGrace {
         Self { grace, since: None }
     }
     pub fn update(&mut self, web_enabled: bool, clients: usize, busy: bool) -> Option<Instant> {
-        if web_enabled || clients != 0 || busy {
-            self.since = None;
+        self.update_at(Instant::now(), web_enabled, clients, busy)
+    }
+    /// The caller supplies time so policy tests need no wall clock or timer.
+    pub fn update_at(
+        &mut self,
+        now: Instant,
+        untracked_web: bool,
+        clients: usize,
+        busy: bool,
+    ) -> Option<Instant> {
+        if untracked_web || clients != 0 || busy {
+            self.reset();
             return None;
         }
-        self.since
-            .get_or_insert_with(Instant::now)
-            .checked_add(self.grace)
+        self.since.get_or_insert(now).checked_add(self.grace)
+    }
+    fn reset(&mut self) {
+        self.since = None;
     }
 }
 
@@ -97,6 +110,7 @@ impl LifecycleDriver {
         mut signals: OperatorSignals,
     ) -> std::io::Result<()> {
         let (shutdown, _) = tokio::sync::watch::channel(false);
+        let mut web_activity = idle_activity::WebActivity::new(web.as_ref(), &backend);
         let mut listener = Some(listener);
         let mut clients = tokio::task::JoinSet::new();
         let mut client_failure = None;
@@ -106,10 +120,13 @@ impl LifecycleDriver {
         let mut restart = self.restart.subscribe();
         let outcome = loop {
             host.host.lock().unwrap().service_mut().poll();
+            let (web_count, web_busy) = web_activity.observe(&mut self.idle);
             let deadline = self.idle.update(
-                web_enabled,
-                clients.len(),
-                host.busy() || self.restart.busy(),
+                // The legacy entry point cannot prove an externally owned web
+                // listener empty. Production always transfers the actual owner.
+                web_enabled && web.is_none(),
+                clients.len() + web_count,
+                host.busy() || self.restart.busy() || web_busy,
             );
             let expired = async {
                 match deadline {
@@ -158,11 +175,26 @@ impl LifecycleDriver {
                     let _ = request.reply.send(result.map(|()| control::ControlDrained { backend: backend.clone() }));
                     if operator_shutdown { break Ok(()); }
                 },
-                _ = background.notified() => (),
-                _ = area_work.notified() => (),
-                _ = restart.changed() => (),
-                _ = expired => { if !web_enabled && clients.is_empty() && !host.busy() && !self.restart.busy() { break Ok(()); } },
-                event = events.recv() => { if let Ok(event) = event { host.host.lock().unwrap().service_mut().observe_lifecycle(&event); } },
+                _ = background.notified() => self.idle.reset(),
+                _ = area_work.notified() => self.idle.reset(),
+                _ = restart.changed() => self.idle.reset(),
+                _ = web_activity.changed() => self.idle.reset(),
+                _ = expired => {
+                    if web_activity.has_changed() {
+                        self.idle.reset();
+                        continue;
+                    }
+                    if !(web_enabled && web.is_none()) {
+                        let idle_now = || clients.is_empty() && !host.busy()
+                            && !self.restart.busy() && !backend.web_delivery_busy() && !web_activity.has_changed();
+                        let stop = match web.as_ref() {
+                            Some(web) => web.try_begin_idle_shutdown_if(idle_now),
+                            None => idle_now(),
+                        };
+                        if stop { break Ok(()); }
+                    }
+                },
+                event = events.recv() => { if let Ok(event) = event { self.idle.reset(); host.host.lock().unwrap().service_mut().observe_lifecycle(&event); } },
                 joined = clients.join_next(), if !clients.is_empty() => {
                     if let Some(Err(error)) = joined { client_failure = Some(error.to_string()); }
                 },
@@ -183,6 +215,8 @@ impl LifecycleDriver {
         outcome
     }
 }
+#[cfg(test)]
+mod idle;
 #[cfg(test)]
 mod tests {
     use super::*;

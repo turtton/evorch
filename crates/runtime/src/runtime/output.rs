@@ -1,3 +1,4 @@
+mod idle;
 #[path = "output/idle/adoption.rs"]
 mod input_adoption;
 

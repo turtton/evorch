@@ -161,9 +161,11 @@ async fn rejects_input_reflection(
 async fn foreground_web_health_handshake_rejection_and_sigterm_release_the_lock() {
     let dir = test_socket_dir::SplitDir::new();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    // This test exercises SIGTERM, not idle expiry. Web enabled alone no longer
+    // retains the core, so allow admission independently of scheduler latency.
     std::fs::write(
         dir.path().join("config.toml"),
-        "[web]\nport = 0\n[core]\nidle_grace_secs = 0\n",
+        "[web]\nport = 0\n[core]\nidle_grace_secs = 3600\n",
     )
     .unwrap();
     let executable = std::env::var_os("CARGO_BIN_EXE_evorch-core").unwrap();
@@ -198,9 +200,14 @@ async fn foreground_web_health_handshake_rejection_and_sigterm_release_the_lock(
     assert!(health.status().is_success());
     let health: serde_json::Value = health.json().await.unwrap();
     let status: CoreStatus = serde_json::from_value(health["hello"]["status"].clone()).unwrap();
-    assert_eq!(status.running.clients, 0);
+    assert_eq!(status.running.clients, 1);
     assert!(
         status
+            .retention_reasons
+            .contains(&RetentionReason::ConnectedClients)
+    );
+    assert!(
+        !status
             .retention_reasons
             .contains(&RetentionReason::WebServing)
     );
@@ -243,7 +250,7 @@ async fn foreground_web_health_handshake_rejection_and_sigterm_release_the_lock(
             .contains(&RetentionReason::ConnectedClients)
     );
     assert!(
-        status
+        !status
             .retention_reasons
             .contains(&RetentionReason::WebServing)
     );

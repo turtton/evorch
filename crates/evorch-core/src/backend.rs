@@ -21,6 +21,7 @@ pub struct HostBackend {
     closing: AtomicBool,
     unix_clients: AtomicU32,
     web_enabled: AtomicBool,
+    web_clients: Mutex<Option<workbench_web::ActivityObserver>>,
     web_deliveries: workbench_web::RestartTasks,
 }
 
@@ -65,6 +66,13 @@ fn protect<T: Serialize + DeserializeOwned>(
 }
 
 impl HostBackend {
+    pub(crate) fn web_delivery_activity(&self) -> workbench_web::ActivityObserver {
+        self.web_deliveries.activity()
+    }
+    pub(crate) fn web_delivery_busy(&self) -> bool {
+        let (active, unconfirmed, _) = self.web_deliveries.activity().snapshot();
+        active != 0 || unconfirmed
+    }
     pub fn new(host: Arc<Mutex<CommandHost>>, identity: String) -> Self {
         let (projection, connections) = {
             let host = host.lock().unwrap();
@@ -78,6 +86,7 @@ impl HostBackend {
             closing: AtomicBool::new(false),
             unix_clients: AtomicU32::new(0),
             web_enabled: AtomicBool::new(false),
+            web_clients: Mutex::new(None),
             web_deliveries: Default::default(),
             hello: ServerHello {
                 protocol_version: ProtocolVersion::CURRENT,
@@ -104,6 +113,9 @@ impl HostBackend {
     pub fn set_web_enabled(&self, enabled: bool) {
         self.web_enabled.store(enabled, Ordering::SeqCst);
     }
+    pub(crate) fn track_web_clients(&self, clients: workbench_web::ActivityObserver) {
+        *self.web_clients.lock().unwrap() = Some(clients);
+    }
     pub(crate) fn connected(&self) -> ConnectedClient<'_> {
         self.unix_clients.fetch_add(1, Ordering::SeqCst);
         ConnectedClient(self)
@@ -118,14 +130,23 @@ impl HostBackend {
         self.connections.open(client)
     }
     fn transport_status(&self, mut status: CoreStatus) -> CoreStatus {
-        status.running.clients = self.unix_clients.load(Ordering::SeqCst);
+        let web = self.web_clients.lock().unwrap();
+        let web_count = web.as_ref().map_or(0, |clients| {
+            u32::try_from(clients.snapshot().0).unwrap_or(u32::MAX)
+        });
+        status.running.clients = self
+            .unix_clients
+            .load(Ordering::SeqCst)
+            .saturating_add(web_count);
         for (retain, reason) in [
             (
                 status.running.clients > 0,
                 RetentionReason::ConnectedClients,
             ),
             (
-                self.web_enabled.load(Ordering::SeqCst),
+                // Only legacy callers without a live connection census retain
+                // an enabled listener. Production counts actual Web clients.
+                web.is_none() && self.web_enabled.load(Ordering::SeqCst),
                 RetentionReason::WebServing,
             ),
             (status.running.turns > 0, RetentionReason::ActiveTurn),
