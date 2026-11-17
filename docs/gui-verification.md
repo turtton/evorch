@@ -49,7 +49,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
   -  ignored テスト一括: `cargo test -p gui --tests -- --ignored --nocapture`
   -  証跡マトリクス: `scripts/gui-evidence-matrix.sh [OUT]`
      (デフォルト出力 `target/gui-evidence`。3 テーマそれぞれで 6 状態 x 4 サイズ、
-     demo / edit-profile x 2 DPI、既定の 7 パネルと Memory パネル、
+     demo / edit-profile x 2 DPI、既定の 6 パネルと Memory パネル、
      追加の 4 設定画面を撮影し、
      テーマごとに 39 枚、合計 117 PNG の枚数を検査する)
 - 環境変数: `EVORCH_REQUIRE_ADAPTER=1` (CI で必須化)、
