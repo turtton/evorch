@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Upload six fixed GUI screenshots from a completed PR CI run. This script is
+# Upload five fixed GUI screenshots from a completed PR CI run. This script is
 # executed from the default branch by gui-pr-evidence.yml, never from PR code.
 set -Eeuo pipefail
 
