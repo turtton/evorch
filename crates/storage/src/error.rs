@@ -218,6 +218,9 @@ pub enum StorageError {
     /// The pull request request was refused (ADR 0043): malformed input or a state the
     /// call cannot apply to. A stale revision is [`Self::StaleRevision`].
     PullRequest(crate::pull_requests::PullRequestRejection),
+    /// The conversation plan request was refused (nothing was stored). A stale revision
+    /// is [`Self::StaleRevision`] with kind `conversation_plan`.
+    ConversationPlan(crate::conversation_plan::PlanRejection),
     /// Durable PR notice/policy transition was refused.
     PrAutoFix(crate::pull_request_auto_fix::PrAutoFixRejection),
     /// 入出力操作が失敗しました。
@@ -365,6 +368,7 @@ impl fmt::Display for StorageError {
                 LaneCursorError::Malformed => write!(formatter, "the cursor is not valid"),
             },
             Self::PullRequest(reason) => write!(formatter, "{reason}"),
+            Self::ConversationPlan(reason) => write!(formatter, "{reason}"),
             Self::PrAutoFix(reason) => write!(formatter, "{reason}"),
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::SecretDetected {
@@ -490,6 +494,7 @@ impl std::error::Error for StorageError {
             | Self::LaneCursor(_)
             | Self::PrAutoFix(_)
             | Self::PullRequest(_)
+            | Self::ConversationPlan(_)
             | Self::ReplaySecretDetected { .. }
             | Self::SecretDetected { .. } => None,
         }

@@ -58,6 +58,7 @@ mod body_ref;
 mod body_store;
 mod codec;
 pub mod config;
+pub mod conversation_plan;
 mod db;
 mod diagnostic;
 pub mod durable_tasks;
@@ -133,6 +134,10 @@ pub use writer::{
     Storage, StorageHandle, StorageStatistics, THREAD_INDEX_LEASE_NS, ThreadIndexCounters,
     ThreadIndexJobStatus, WalWaitStatus,
 };
+
+/// A pause point in the conversation plan write, for tests of a stop around the commit.
+#[cfg(feature = "plan-write-gate")]
+pub mod plan_write_gate;
 
 /// Full-body read instrumentation, available only to test consumers.
 #[cfg(feature = "test-support")]

@@ -237,6 +237,38 @@ pub(super) fn run_writer_with_index(
                 record_event_failure(&mut state, &result);
                 let _ = reply.send(result);
             }
+            Ok(Command::ConversationPlan(request, reply)) => {
+                let started = Instant::now();
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "conversation plan writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::conversation_plan::write(
+                        &state.conn,
+                        request,
+                        &state.config.hard_limits,
+                        &mut state.accounting,
+                    )
+                };
+                let result = result.map(|(applied, count, bytes)| {
+                    if count > 0 {
+                        let elapsed =
+                            u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                        state.statistics.append_total_micros =
+                            state.statistics.append_total_micros.saturating_add(elapsed);
+                        state.statistics.max_append_micros =
+                            state.statistics.max_append_micros.max(elapsed);
+                    }
+                    state.statistics.events_written =
+                        state.statistics.events_written.saturating_add(count);
+                    state.statistics.event_payload_bytes =
+                        state.statistics.event_payload_bytes.saturating_add(bytes);
+                    applied
+                });
+                record_event_failure(&mut state, &result);
+                let _ = reply.send(result);
+            }
             Ok(Command::AdvanceHandoff(change, reply)) => {
                 let started = Instant::now();
                 let result = if state.writes_suspended {

@@ -717,6 +717,7 @@ impl TranscriptModel {
             | event_bus::EventKind::Diagnostic(_)
             | event_bus::EventKind::Ownership(_)
             // Pull request changes never enter a transcript (ADR 0043).
+            | event_bus::EventKind::ConversationPlan(_)
             | event_bus::EventKind::PullRequest(_) => {}
         }
     }

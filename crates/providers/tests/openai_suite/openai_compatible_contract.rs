@@ -92,6 +92,7 @@ fn usage_events(events: &[Event]) -> Vec<&UsageEvent> {
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
+            | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => None,
         })
         .collect()

@@ -173,6 +173,7 @@ impl NotificationsModel {
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
+            | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => return,
         };
         let phase = match &kind {

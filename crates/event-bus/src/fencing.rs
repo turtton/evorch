@@ -408,7 +408,8 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
         | EventKind::Fault(_)
         | EventKind::Orchestrator(_)
         | EventKind::Ownership(_)
-        | EventKind::PullRequest(_) => true,
+        | EventKind::PullRequest(_)
+        | EventKind::ConversationPlan(_) => true,
     }
 }
 

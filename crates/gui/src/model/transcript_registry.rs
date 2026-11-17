@@ -212,6 +212,7 @@ impl TranscriptRegistry {
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
             // A pull request change is not a transcript entry: no transcript receives it.
             EventKind::PullRequest(_) => Vec::new(),
+            EventKind::ConversationPlan(_) => Vec::new(),
             EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
                 vec![TranscriptKey::Run(run_id.clone())]
             }
@@ -398,6 +399,7 @@ impl TranscriptRegistry {
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
+            | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => {}
         }
 
@@ -453,6 +455,7 @@ impl TranscriptRegistry {
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
+            | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_)
             | EventKind::Orchestrator(_) => None,
         };

@@ -256,6 +256,21 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "lifecycle revision, notification keys and local HEAD of a deleted thread",
     ),
     (
+        "conversation_plans",
+        ReclaimThread,
+        "the plan of a deleted thread; the last row of its reclaim, after its nodes and history",
+    ),
+    (
+        "conversation_plan_nodes",
+        ReclaimThread,
+        "found through the plan of the deleted thread, in bounded batches",
+    ),
+    (
+        "conversation_plan_history",
+        ReclaimThread,
+        "found through the plan of the deleted thread, in bounded batches",
+    ),
+    (
         "pull_request_snapshots",
         Keep,
         "shared by pull request, not by thread: the facts of a key no thread references are \

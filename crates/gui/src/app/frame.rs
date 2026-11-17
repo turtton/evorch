@@ -371,6 +371,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // A change this process's own runtime published: read it again and raise the
             // notifications it claimed (a window of another process never does).
             EventKind::PullRequest(_) => self.apply_local_pull_request_event(event),
+            // The conversation plan has no GUI yet (a later change adds its view).
+            EventKind::ConversationPlan(_) => {}
             EventKind::Lifecycle(LifecycleEvent::RootWakeRequested { run_id }) => {
                 self.wake_conversation_root(run_id);
             }

@@ -14,6 +14,7 @@ use crate::{
 };
 
 mod cleanup;
+mod conversation_plan;
 mod index;
 mod lane_control;
 mod lane_delivery;
@@ -48,6 +49,10 @@ type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 // 増やすためサイズを許容する。
 #[allow(clippy::large_enum_variant)]
 enum Command {
+    ConversationPlan(
+        crate::repo::conversation_plan::WriteRequest,
+        ReplyTx<crate::conversation_plan::PlanApplied>,
+    ),
     AdvanceHandoff(
         crate::handoffs::HandoffTransition,
         ReplyTx<crate::handoffs::HandoffReceipt>,

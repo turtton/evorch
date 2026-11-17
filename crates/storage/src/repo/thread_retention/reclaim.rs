@@ -366,11 +366,17 @@ fn events_run(
 
 /// The (kind, subkind) pairs whose rows name a thread but no run.
 fn thread_event_kinds() -> impl Iterator<Item = (&'static str, &'static str)> {
-    std::iter::once(("Orchestrator", "ThreadTodoUpdated")).chain(
-        event_bus::PullRequestEvent::SUBKINDS
-            .iter()
-            .map(|subkind| ("PullRequest", *subkind)),
-    )
+    std::iter::once(("Orchestrator", "ThreadTodoUpdated"))
+        .chain(
+            event_bus::PullRequestEvent::SUBKINDS
+                .iter()
+                .map(|subkind| ("PullRequest", *subkind)),
+        )
+        .chain(
+            event_bus::ConversationPlanEvent::SUBKINDS
+                .iter()
+                .map(|subkind| ("ConversationPlan", *subkind)),
+        )
 }
 
 /// Thread todo snapshots and pull request changes carry no run: find them by the thread
@@ -961,8 +967,8 @@ fn advance_thread(
 }
 
 /// The tables keyed by thread, one table per `table_idx`: 0 the lane ledger rows, 1 the
-/// pull request rows, 2 the captured untracked files, 3 the start state. The lane and pull
-/// request rows come first, so a capture above the step budget (left to the exclusive
+/// pull request rows, 2 the conversation plan rows, 3 the captured untracked files, 4 the
+/// start state. The lane, pull request and plan rows come first, so a capture above the step budget (left to the exclusive
 /// phase) never makes a thread skip them.
 fn thread_tables(
     tx: &Transaction<'_>,
@@ -1007,7 +1013,21 @@ fn thread_tables(
                 cursor.table_idx = 2;
             }
         }
-        2 => match take_untracked(tx, &thread, false)? {
+        2 => {
+            let plans: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'conversation_plans')",
+                [],
+                |row| row.get(0),
+            )?;
+            if plans {
+                work = take_plan_rows(tx, &thread)?;
+            }
+            if work.rows == 0 {
+                cursor.table_idx = 3;
+            }
+        }
+        3 => match take_untracked(tx, &thread, false)? {
             Untracked::Taken(taken) => work = taken,
             // A captured file above the step's budget cannot be deleted by a bounded
             // step. The state row owns the untracked rows (ON DELETE CASCADE), so the
@@ -1017,7 +1037,7 @@ fn thread_tables(
                 register_oversized(tx, family, "thread_start_states", &thread, size)?;
                 advance_thread(tx, family, cursor, &thread)?;
             }
-            Untracked::None => cursor.table_idx = 3,
+            Untracked::None => cursor.table_idx = 4,
         },
         _ => {
             let stored: Option<u64> = tx
@@ -1048,6 +1068,32 @@ fn thread_tables(
         }
     }
     Ok(work)
+}
+
+/// Works off the conversation plan of `thread`, at most [`RECLAIM_ROWS`] per call: the
+/// history index first, then the task rows, then the plan row. The plan's change events
+/// are reclaimed with the thread's other events. Returns no rows when nothing is left.
+fn take_plan_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
+    let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+    for sql in [
+        // Both tables are WITHOUT ROWID: delete by primary key.
+        "DELETE FROM conversation_plan_history WHERE (plan_id, revision) IN \
+         (SELECT plan_id, revision FROM conversation_plan_history WHERE plan_id IN \
+          (SELECT plan_id FROM conversation_plans WHERE thread_id = ?1) LIMIT ?2)",
+        "DELETE FROM conversation_plan_nodes WHERE (plan_id, task_id) IN \
+         (SELECT plan_id, task_id FROM conversation_plan_nodes WHERE plan_id IN \
+          (SELECT plan_id FROM conversation_plans WHERE thread_id = ?1) LIMIT ?2)",
+        "DELETE FROM conversation_plans WHERE thread_id = ?1 AND ?2 > 0",
+    ] {
+        let deleted = tx.execute(sql, params![thread, limit])?;
+        if deleted > 0 {
+            return Ok(Work {
+                rows: deleted as u64,
+                ..Work::default()
+            });
+        }
+    }
+    Ok(Work::default())
 }
 
 /// Works off the pull request rows of `thread`, at most [`RECLAIM_ROWS`] per call and in

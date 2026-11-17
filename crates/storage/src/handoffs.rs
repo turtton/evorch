@@ -318,6 +318,27 @@ pub(crate) fn advance(
                 event_payload_bytes.saturating_add(next_accounting.last_event_bytes);
         }
     }
+    if next == HandoffState::Committed {
+        // The plan follows the conversation into the escalation thread: same plan ID,
+        // revision and history, no event.
+        let target_thread = event_bus::escalation_thread_id(&result.target_run_id);
+        let source_threads: Vec<String> = {
+            let mut statement = tx.prepare(
+                "SELECT thread_id FROM thread_runs WHERE run_id = ?1 \
+                 UNION SELECT json_extract(config_json, '$.thread_id') FROM run_contexts \
+                 WHERE run_id = ?1",
+            )?;
+            statement
+                .query_map([&source], |row| row.get::<_, Option<String>>(0))?
+                .filter_map(Result::transpose)
+                .collect::<Result<_, _>>()?
+        };
+        for thread in source_threads {
+            if crate::repo::conversation_plan::rebind_thread(&tx, &thread, &target_thread)? {
+                break;
+            }
+        }
+    }
     tx.commit()?;
     *accounting = next_accounting;
     Ok((result, events_written, event_payload_bytes))

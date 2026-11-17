@@ -956,3 +956,72 @@ async fn a_switch_turned_off_and_on_again_between_two_looks_is_announced_once() 
     let events = p.quiet_events().await;
     assert_eq!(announced_threads(&events), ["t", "u"], "{events:?}");
 }
+
+fn stop_at_limit(w: &World, destination: &str) {
+    let sql = rusqlite::Connection::open(w.dir.path().join("evorch.db")).unwrap();
+    sql.execute(
+        "UPDATE pr_auto_fix_state SET enabled=0, used=3, stop_reason='limit_reached', \
+         limit_reached_epoch=budget_epoch, destination_thread_id=?1, link_revision=1",
+        [destination],
+    )
+    .unwrap();
+    sql.execute_batch(
+        "INSERT INTO pr_auto_fix_limit_events(pr_key,budget_epoch,notice_id,at_ns) \
+         SELECT pr_key,budget_epoch,'third',1 FROM pr_auto_fix_state;",
+    )
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_limit_stop_is_claimed_once_however_many_callers_ask() {
+    let w = World::new();
+    let p = w.process(enabled());
+    p.link_directly("t", 1);
+    let t = target(&p);
+    enable(&p, &t).await;
+    assert_eq!(
+        p.service.take_limit_notification("t").unwrap(),
+        None,
+        "no stop, nothing to tell"
+    );
+    stop_at_limit(&w, "t");
+
+    let callers = 8;
+    let barrier = Arc::new(std::sync::Barrier::new(callers));
+    let handles: Vec<_> = (0..callers)
+        .map(|_| {
+            let (service, barrier) = (p.service.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                service.take_limit_notification("t").unwrap()
+            })
+        })
+        .collect();
+    let claimed: Vec<_> = handles
+        .into_iter()
+        .filter_map(|handle| handle.join().unwrap())
+        .collect();
+    assert_eq!(
+        claimed.len(),
+        1,
+        "exactly one caller takes the notification"
+    );
+    assert_eq!(claimed[0].key, key(1));
+    assert_eq!(claimed[0].link_revision, 1);
+    assert_eq!(
+        p.service.take_limit_notification("t").unwrap(),
+        None,
+        "the stop is told once"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_limit_stop_is_not_told_in_a_thread_that_is_not_the_destination() {
+    let w = World::new();
+    let p = w.process(enabled());
+    p.link_directly("t", 1);
+    let t = target(&p);
+    enable(&p, &t).await;
+    stop_at_limit(&w, "other");
+    assert_eq!(p.service.take_limit_notification("t").unwrap(), None);
+}
