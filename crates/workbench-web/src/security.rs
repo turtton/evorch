@@ -52,6 +52,7 @@ pub(crate) struct Shared {
     pub(crate) sse_slots: Arc<Semaphore>,
     pub(crate) shutdown: ShutdownSignal,
     pub(crate) tasks: crate::RestartTasks,
+    pub(crate) observer: crate::restart_observer::Observer,
 }
 
 fn deny(message: &'static str) -> Response {

@@ -8,6 +8,9 @@ description = "Web adapter (HTTP + SSE) for the evorch workbench protocol (ADR 0
 # Core-side adapter, but deliberately not dependent on the core: it speaks
 # workbench-protocol types to a `WorkbenchBackend` the core binary implements.
 # scripts/check-workbench-boundaries.sh enforces the allowed dependencies.
+[features]
+test-support = []
+
 [dependencies]
 workbench-protocol = { path = "../workbench-protocol" }
 axum = { workspace = true }

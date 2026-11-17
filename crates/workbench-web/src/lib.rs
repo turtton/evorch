@@ -39,6 +39,7 @@ pub mod backend;
 pub mod config;
 pub mod http_error;
 mod output;
+mod restart_observer;
 mod restart_tasks;
 mod security;
 mod server;

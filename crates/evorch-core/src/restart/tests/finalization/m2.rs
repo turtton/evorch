@@ -267,7 +267,7 @@ async fn shutdown_during_worker_join_prevents_storage_stage_and_never_resumes() 
 #[tokio::test(start_paused = true)]
 async fn final_business_event_and_usage_are_durable_without_periodic_flush() {
     use event_bus::{Event, MessageEvent, ProviderEvent};
-    let (_dir, mut host) = boot().await;
+    let (_dir, mut host) = boot_composition(Arc::new(Model::default()), true).await;
     let core = RestartCoordinator::new(&host);
     let event = Event::new(MessageEvent::ReasoningDelta {
         run_id: None,

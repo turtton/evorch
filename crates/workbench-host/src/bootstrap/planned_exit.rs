@@ -302,7 +302,12 @@ impl PlannedExit {
                                 .flush()
                                 .map_err(|e| e.to_string())
                                 .and_then(|()| bridge.try_shutdown().map_err(|e| e.to_string()))
-                                .and_then(|()| bridge.handle().barrier().map_err(|e| e.to_string()))
+                                .and_then(|()| {
+                                    tracing::debug!(target: "restart_drain", phase = "writer_barrier_begin");
+                                    let result = bridge.handle().barrier().map_err(|e| e.to_string());
+                                    tracing::debug!(target: "restart_drain", phase = "writer_barrier_end", ok = result.is_ok());
+                                    result
+                                })
                         } else {
                             // Cleanup must join the subscriber even when its final flush failed.
                             let mut failure = None;

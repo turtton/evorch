@@ -12,6 +12,7 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 const WORKER: &str = "restart::tests::finalization::later::last::final_three_process_worker";
+mod composition;
 mod web;
 
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +52,14 @@ async fn final_signal_restore_and_web_drain_matrix() {
     matrix("boundaries", 10, 6).await;
 }
 async fn matrix(group: &str, expected_cells: usize, expected_signals: usize) {
+    let repeats = if group.starts_with("composition:") {
+        std::env::var("EVORCH_M2_SAMPLES")
+            .ok()
+            .map(|n| n.parse::<usize>().unwrap())
+            .unwrap_or(1)
+    } else {
+        1
+    };
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", WORKER, "--nocapture"])
         .env("EVORCH_MASKED_TEST_CHILD", "1")
@@ -91,13 +100,21 @@ async fn matrix(group: &str, expected_cells: usize, expected_signals: usize) {
     }
     drop(child.stdin.take());
     assert!(child.wait().await.unwrap().success());
-    assert_eq!(cells, expected_cells);
+    assert_eq!(cells, expected_cells * repeats);
     assert_eq!(signals, expected_signals);
 }
 #[tokio::test]
 #[ignore = "single-threaded-entry subprocess, invoked by the matrix parent"]
 async fn final_three_process_worker() {
     let group = std::env::var("EVORCH_M2_MATRIX_GROUP").unwrap();
+    if group == "composition_faults" {
+        composition::faults().await;
+        return;
+    }
+    if group.starts_with("composition") {
+        composition::run().await;
+        return;
+    }
     if group != "boundaries" {
         let stage = match group.as_str() {
             "9" => ExitStage::ExecPrepared,
@@ -131,8 +148,16 @@ async fn final_three_process_worker() {
     }
 }
 async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
+    cell_loaded(stage, action, after_owner, None).await;
+}
+async fn cell_loaded(
+    stage: ExitStage,
+    action: Action,
+    after_owner: bool,
+    load: Option<&composition::Load>,
+) {
     let model = Arc::new(Model::default());
-    let (dir, mut host) = boot_with_model(model.clone()).await;
+    let (dir, mut host) = boot_composition(model.clone(), true).await;
     let config = ConfigIdentity::new(dir.path()).unwrap();
     let launch = LaunchGuard::acquire(&config).unwrap();
     let instance = Arc::new(Instance::acquire(&launch, Path::new("/tmp")).unwrap());
@@ -157,6 +182,10 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
     } else {
         None
     };
+    #[cfg(feature = "bootstrap-test-support")]
+    if let (Some(load), Some(web)) = (load, web.as_ref()) {
+        load.observe_web(web);
+    }
     let web_address = web.as_ref().map(|s| s.local_addr());
     let listener = instance.bind().unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -173,7 +202,17 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
         driver.control_drain(),
         vec!["--config-dir".into(), dir.path().as_os_str().to_owned()],
     ));
-    let (run, id) = owned_chat(&host, &core).await;
+    let web_clients = if let Some(load) = load {
+        Some(load.open_web(web_address.unwrap()).await)
+    } else {
+        None
+    };
+    let runs = owner_runs(&host, if load.is_some() { 3 } else { 1 }).await;
+    if let Some(load) = load {
+        load.prepare(&host).await;
+    }
+    let id = seal_runs(&core, &runs).await;
+    let run = runs[0];
     let (arrived, ready) = tokio::sync::oneshot::channel();
     let (release, receive) = std::sync::mpsc::channel();
     let barrier = Mutex::new(Some((arrived, receive)));
@@ -221,6 +260,9 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
     }));
     core.start_finalization(id, &mut host, tx, target).unwrap();
     let check = async {
+        if let Some(load) = load {
+            load.release(&core, &host).await;
+        }
         let mut control_client = if let Some((mut stream, ready, release)) = control_client {
             use workbench_protocol::{handshake::*, ids::ClientId};
             ready.await.unwrap();
@@ -258,7 +300,7 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
             "{stage:?}/{action:?}/{after_owner}: {:?}",
             saved(&host)
         );
-        assert_eq!(model.0.load(Ordering::SeqCst), 1);
+        assert_eq!(model.0.load(Ordering::SeqCst), runs.len());
         assert!(
             !LaunchGuard::acquire(&config)
                 .unwrap()
@@ -326,6 +368,9 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
             core.snapshot().phase,
             RestartPhase::FailedClosed | RestartPhase::ShuttingDown
         ));
+        if let Some(load) = load {
+            load.verify(&host, &runs);
+        }
         reclaimed(&host, &core, true).await;
         let completed = core.0.state.lock().unwrap().completed_stage.unwrap();
         let interrupted =
@@ -420,7 +465,7 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
         } else if completed < ExitStage::OwnerStopped {
             heartbeat(&host).await;
         }
-        assert_eq!(model.0.load(Ordering::SeqCst), 1);
+        assert_eq!(model.0.load(Ordering::SeqCst), runs.len());
         assert!(host.restart_producers().iter().all(|gate| !gate.is_open()));
         assert!(
             !LaunchGuard::acquire(&config)
@@ -439,6 +484,9 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
         check
     );
     outcome.unwrap();
+    if let Some(client) = web_clients {
+        client.await.unwrap();
+    }
     assert_eq!(core.snapshot().phase, RestartPhase::ShuttingDown);
     assert!(host.shutdown().await.is_err());
     drop(instance);

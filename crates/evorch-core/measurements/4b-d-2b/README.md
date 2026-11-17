@@ -46,7 +46,10 @@ may differ from original console output by less than 0.001ms.
   work is not a sample, and the full 100-round command is not claimed to have
   completed. For n=57 the nearest-rank p99 equals the observed maximum.
 - Bridge: normal has 100 samples per 8 cells (800 total): 0/100/1000/10000
-  accepted events, either flush barrier or checked final drain/writer+thread join.
+  accepted events, either flush barrier or checked subscriber thread drain/join
+  and final flush.
+  The SQLite writer remains alive for Arm, readback and FailedClosed; neither
+  measurement is a writer stop/join.
   The CPU+I/O experiment hit its shell 5-minute limit after the four completed
   0/100-event cells (100 each, 400 total). Larger loaded queues are **unmeasured**;
   partial in-memory cells were not written and are not claimed as samples.
