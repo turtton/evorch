@@ -74,6 +74,18 @@ enum Command {
     ),
     SetImprovementStatus(String, crate::improvement::ImprovementStatus, ReplyTx<bool>),
     AttachImprovementDraft(String, String, ReplyTx<bool>),
+    UpdateMemory(
+        String,
+        u64,
+        crate::management::MemoryOp,
+        ReplyTx<crate::management::CasOutcome>,
+    ),
+    UpdateImprovement(
+        String,
+        u64,
+        crate::management::ImprovementUpdate,
+        ReplyTx<crate::management::CasOutcome>,
+    ),
     TaskQueue(crate::task_queue::Mutation, ReplyTx),
     AppendRunLedger(String, String, mpsc::Sender<Result<u64, StorageError>>),
     LatestRunLedger(String, ReplyTx<Option<crate::RunLedgerEntry>>),
@@ -1042,6 +1054,30 @@ impl StorageHandle {
         draft_path: &str,
     ) -> Result<bool, StorageError> {
         self.request(|reply| Command::AttachImprovementDraft(id.into(), draft_path.into(), reply))
+    }
+
+    /// Do `op` to a lesson only if its revision is still `expected_revision` and its
+    /// state allows `op`; check and write are one transaction on the writer.
+    pub fn update_memory(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        op: crate::management::MemoryOp,
+    ) -> Result<crate::management::CasOutcome, StorageError> {
+        self.request(|reply| Command::UpdateMemory(id.into(), expected_revision, op, reply))
+    }
+
+    /// Do `update` to an improvement candidate only if its revision is still
+    /// `expected_revision` and its state allows it; check and write are one transaction.
+    pub fn update_improvement(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        update: crate::management::ImprovementUpdate,
+    ) -> Result<crate::management::CasOutcome, StorageError> {
+        self.request(|reply| {
+            Command::UpdateImprovement(id.into(), expected_revision, update, reply)
+        })
     }
 
     pub fn validate_lesson(&self, id: &str, evidence: &str) -> Result<(), StorageError> {

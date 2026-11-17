@@ -18,7 +18,7 @@
 
 pr10 area:settings area:auth crates/evorch-core/tests/core_settings_cache.rs docs/*
 pr13 area:diagnostics area:memory area:improvement area:evaluation docs/*
-pr14 area:memory area:improvement docs/*
+pr14 area:memory area:improvement crates/storage/src/management.rs crates/storage/src/management/* crates/*/tests/management_cas* docs/*
 pr15 area:pull_requests crates/evorch-core/tests/core_pr_cache.rs docs/*
 pr17c area:evaluation crates/evorch/src/cli/eval.rs crates/evorch/src/evaluation.rs crates/evorch/tests/evaluation_e2e.rs crates/evorch-core/tests/core_eval_cache.rs docs/*
 pr17d area:maintenance crates/evorch/src/cli/backfill.rs crates/evorch/src/backfill.rs crates/evorch/src/cli/reindex.rs crates/evorch/src/reindex_threads.rs crates/evorch/src/reindex_threads/* crates/evorch/tests/maintenance_backfill* docs/*

@@ -150,10 +150,40 @@ carries no `pr<N>` scope, so the gate does not check it. A rename to
 crates enter through the small integration PR that R2 asks for once the
 measurement is accepted.
 
+## I-14: the conditional update of the management screens
+
+Stage 14 moves the update operations of `memory` and `improvement` into the
+core. I-14 is the integration PR that lands what they share. It publishes no
+operation, command or capability.
+
+| Contract | Where it is held | Where it is tested |
+|---|---|---|
+| A conditional update reads the entity, compares the revision, judges the action and writes in one `IMMEDIATE` transaction on the existing single writer (`StorageHandle::update_memory` / `update_improvement`, module `storage::management`). The host never reads first and writes afterwards; there is no second writer and no GUI write to the database. | `crates/storage/src/management.rs`, `writer.rs` (`Command::UpdateMemory` / `UpdateImprovement`) | `crates/storage/tests/management_cas.rs` (barrier races, no sleeps) |
+| Three refusals are distinct and judged in this order: `NotFound` (the entity is gone or never existed), `StaleRevision { current }`, `Denied(Denial)` (the state forbids the action, for example rejecting a favorite lesson). A refusal writes nothing, so the revision does not move, and the writer keeps serving. | `CasRefusal` | `the_three_refusals_are_distinct`, `a_failed_write_rolls_back_and_the_writer_keeps_working` |
+| `Applied { revision }` carries the revision after the write; `Unchanged { revision }` is a successful no-op (attaching the draft already attached). Learning, validation, promotion and intake writes go through the same writer, so an update that names a revision from before one of them is stale instead of overwriting it. | `CasOutcome` | `a_learning_write_*`, `a_folded_duplicate_*`, `an_update_that_changes_nothing_keeps_the_revision` |
+| The read side and the update share one definition. The lesson revision is `Database::memory_revision` (the count of status rows and favorite changes of the ledger), the candidate revision is `improvement_revision` (the first eight bytes of SHA-256 over the JSON of status, occurrences, last seen, reopen count, reopen time and draft path), and the shown `actions` are `memory_denial` / `improvement_denial`. The stage 13 wire DTOs and values are unchanged. | `areas/memory.rs`, `areas/improvement.rs` call the storage functions | `crates/workbench-host/tests/management_cas_parity.rs` (the shown revision and actions equal what the update accepts, in every state; the improvement digest is pinned) |
+
+Notes for stage 14:
+
+- `expected_revision` of a command is the wire `Revision` the read side showed.
+  Map `CasRefusal` to the stale, not-found and denied errors, and `Denial` to
+  `DenialReason` with `areas::memory::denial_reason`. `Unchanged` is a success.
+- Triage writes nothing but `AttachDraft`. The host makes the draft from safe
+  references and the core never sends it on its own. A path that is not a valid
+  draft reference is a storage error, not a refusal.
+- `pr14` owns `crates/storage/src/management.rs`, `management/*` and
+  `crates/*/tests/management_cas*`; `writer.rs` stays central. A needed new
+  operation goes through the next integration PR.
+- I-14 also registers the cache target `core_pr_cache` of PR 15 (a placeholder
+  file, in `CACHE_CONTRACT_FILTER`). `scripts/tests/test_check_central_files.sh`
+  checks that every binary named in the cache filter has a test target.
+
 ## Reserved migration numbers
 
 Storage migrations are numbered from one shared ledger kept by the
-Orchestrator: v62 (07b-1, #602) and v63 (07b-2, #603) are merged; v64 is taken
-by 07b-2b (learning attempts). S0 adds none and reserves none. A PR that needs a
-migration asks the ledger for the next free number (v65 at the time of writing),
-and at most one numbered migration PR waits to merge at a time.
+Orchestrator, but the ledger below is old: the number to use is the highest one
+in `crates/storage/src/migrations` plus one (v65 is used by #623; the next free
+number at I-14 is v66). v62 (07b-1, #602) and v63 (07b-2, #603) are merged; v64
+was taken by 07b-2b (learning attempts). S0 and I-14 add none. A PR that needs a
+migration takes the next free number from the implementation, and at most one
+numbered migration PR waits to merge at a time.

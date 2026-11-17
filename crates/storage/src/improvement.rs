@@ -202,15 +202,24 @@ impl Database {
         &self,
         id: &str,
     ) -> Result<Option<ImprovementCandidate>, StorageError> {
-        let mut statement = self.conn.prepare(
-            "SELECT candidate_id, project, created_at_ns, source, code, severity,
-                    title, evidence, dedup_key, status, draft_path, run_id,
-                    occurrences, last_seen_at_ns, recent_run_ids, reopened_count, reopened_at_ns
-             FROM improvement_candidates WHERE candidate_id = ?1",
-        )?;
-        let mut rows = statement.query([id])?;
-        rows.next()?.map(candidate_row).transpose()
+        candidate_in(&self.conn, id)
     }
+}
+
+/// One candidate as `conn` sees it: the read of [`Database::improvement_candidate`] and of
+/// the conditional updates of [`crate::management`], inside their transaction.
+pub(crate) fn candidate_in(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<ImprovementCandidate>, StorageError> {
+    let mut statement = conn.prepare(
+        "SELECT candidate_id, project, created_at_ns, source, code, severity,
+                title, evidence, dedup_key, status, draft_path, run_id,
+                occurrences, last_seen_at_ns, recent_run_ids, reopened_count, reopened_at_ns
+         FROM improvement_candidates WHERE candidate_id = ?1",
+    )?;
+    let mut rows = statement.query([id])?;
+    rows.next()?.map(candidate_row).transpose()
 }
 
 fn candidate_row(row: &rusqlite::Row<'_>) -> Result<ImprovementCandidate, StorageError> {

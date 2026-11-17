@@ -702,6 +702,26 @@ pub(super) fn run_writer_with_index(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::UpdateMemory(id, expected, op, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "memory writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::management::update_memory(&state.conn, &id, expected, op)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::UpdateImprovement(id, expected, update, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "improvement writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::management::update_improvement(&state.conn, &id, expected, &update)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::TaskQueue(mutation, reply)) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(

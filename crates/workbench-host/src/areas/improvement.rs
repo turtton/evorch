@@ -26,14 +26,14 @@ use storage::{
         ImprovementCandidate, ImprovementSeverity as StoredSeverity,
         ImprovementSource as StoredSource, ImprovementStatus as StoredStatus,
     },
+    management::{ImprovementOp, improvement_denial, improvement_revision},
 };
 use workbench_protocol::{
     errors::{ErrorCode, WorkbenchError},
     events::UiEvent,
     ids::{ImprovementCandidateId, OperationId, RunId},
     management::{
-        ActionAvailability, ActionState, DenialReason, ImprovementAction, ImprovementState,
-        ImprovementStatus,
+        ActionAvailability, ActionState, ImprovementAction, ImprovementState, ImprovementStatus,
     },
     namespaces::{
         diagnostics::ReadOutcome,
@@ -237,51 +237,33 @@ fn wire_status(status: StoredStatus) -> ImprovementStatus {
 
 /// What may be done to a candidate now. PR 14's commands refuse exactly what is
 /// denied here.
+///
+/// The rule itself lives in [`storage::management::improvement_denial`], the one
+/// the writer's conditional update judges with.
 pub fn actions(status: ImprovementStatus) -> Vec<ActionAvailability<ImprovementAction>> {
-    let unless = |same: bool| {
-        if same {
-            ActionState::Denied {
-                reason: DenialReason::AlreadyResolved,
-            }
-        } else {
-            ActionState::Allowed
-        }
-    };
+    let status = stored_status(status);
     [
-        (
-            ImprovementAction::MarkReviewed,
-            unless(status == ImprovementStatus::Reviewed),
-        ),
-        (
-            ImprovementAction::Dismiss,
-            unless(status == ImprovementStatus::Dismissed),
-        ),
-        (
-            ImprovementAction::Triage,
-            if status == ImprovementStatus::Dismissed {
-                ActionState::Denied {
-                    reason: DenialReason::NotApplicableInState,
-                }
-            } else {
-                ActionState::Allowed
-            },
-        ),
+        (ImprovementAction::MarkReviewed, ImprovementOp::MarkReviewed),
+        (ImprovementAction::Dismiss, ImprovementOp::Dismiss),
+        (ImprovementAction::Triage, ImprovementOp::Triage),
     ]
     .into_iter()
-    .map(|(action, state)| ActionAvailability { action, state })
+    .map(|(action, op)| ActionAvailability {
+        action,
+        state: match improvement_denial(op, status) {
+            None => ActionState::Allowed,
+            Some(denial) => ActionState::Denied {
+                reason: super::memory::denial_reason(denial),
+            },
+        },
+    })
     .collect()
 }
 
-/// The revision of a candidate (see the module documentation).
+/// The revision of a candidate (see the module documentation), computed by the
+/// storage: the value the conditional update compares.
 pub fn revision_of(candidate: &ImprovementCandidate) -> Revision {
-    crate::queries::revision(&(
-        candidate.status.as_str(),
-        candidate.occurrences,
-        candidate.last_seen_at_ns,
-        candidate.reopened_count,
-        candidate.reopened_at_ns,
-        &candidate.draft_path,
-    ))
+    Revision(improvement_revision(candidate))
 }
 
 fn millis(ns: u64) -> u64 {
