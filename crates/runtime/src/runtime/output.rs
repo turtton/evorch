@@ -1,3 +1,6 @@
+#[path = "output/idle/adoption.rs"]
+mod input_adoption;
+
 use serde::Serialize;
 
 use super::{AgentRunPhase, AgentRuntime, RunId, lock_runs, unknown_run};

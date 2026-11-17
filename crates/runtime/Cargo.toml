@@ -73,5 +73,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 tracing-subscriber = { workspace = true }
 
 [features]
+# Per-run claim-to-phase gates, only for tests that explicitly opt in.
+idle-test-support = []
 # Per-runtime, explicit IPC probes for cross-process crash tests only.
 recovery-test-support = ["core-instance/recovery-test-support", "storage/recovery-test-support"]

@@ -13,6 +13,8 @@ mod durable;
 mod finalization;
 mod host_inputs;
 mod identical_calls;
+#[cfg(test)]
+mod idle_adoption_tests;
 mod mcp_setup;
 mod messages;
 mod observability;
@@ -164,6 +166,8 @@ pub(crate) struct LoopState {
     pub(crate) last_provider_input: Option<crate::quiesce::ProviderInput>,
     pub(crate) provider_request_started: bool,
     pub(crate) consumed_intent_inputs: Vec<String>,
+    /// Bridge inbox consumption to published execution, including unwinding.
+    input_adoptions: Vec<crate::runtime::user_inbox::InputAdoption>,
     /// One harness episode per execution incarnation, never per model report.
     lane_failure_episode: String,
     pub(crate) thread_id: Option<String>,
@@ -273,6 +277,7 @@ impl LoopState {
             last_provider_input: None,
             provider_request_started: false,
             consumed_intent_inputs: Vec::new(),
+            input_adoptions: Vec::new(),
             lane_failure_episode: providers::RequestTurnContext::unattributed(false).prompt_id,
             thread_id: None,
             turn: task.turn.clone(),
@@ -1886,6 +1891,7 @@ impl LoopState {
             self.pending_terminal = Some((previous, event));
         } else {
             self.publish_durable_task(phase, reason);
+            let adopted = phase == AgentRunPhase::Running || completed_turn.is_some();
             if let Some(runtime) = self.runtime() {
                 runtime.publish_live_phase(
                     self.task.run_id,
@@ -1896,6 +1902,11 @@ impl LoopState {
             } else {
                 self.channels.phase_tx.send_replace(phase);
                 self.shared.bus.emit(Event::new(event));
+            }
+            // Release only after the public phase/boundary replaces old Waiting.
+            // Failure/cancellation also releases on LoopState drop.
+            if adopted {
+                self.input_adoptions.clear();
             }
         }
         Ok(())
