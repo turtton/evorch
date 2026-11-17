@@ -156,6 +156,7 @@ fn a_refused_command_says_it_is_stale_and_reads_the_thread_again() {
             message: "stale".into(),
             outcome_unknown: false,
             code: Some(ErrorCode::StaleRevision),
+            retry: None,
         })),
     );
     screen.get_by_label(
@@ -184,6 +185,7 @@ fn a_lost_reply_is_checked_by_operation_id_and_never_shown_as_done() {
             message: "lost".into(),
             outcome_unknown: true,
             code: None,
+            retry: None,
         })),
     );
     screen.get_by_label(
@@ -205,6 +207,7 @@ fn a_lost_reply_is_checked_by_operation_id_and_never_shown_as_done() {
             message: "gone".into(),
             outcome_unknown: false,
             code: Some(ErrorCode::NotFound),
+            retry: None,
         })),
     );
     screen.get_by_label(

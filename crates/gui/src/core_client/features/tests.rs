@@ -427,3 +427,15 @@ fn a_slot_of_a_reserved_namespace_is_not_offered() {
         assert!(!offered.contains(&id), "{id:?} is offered while reserved");
     }
 }
+
+#[test]
+fn a_feature_error_carries_the_advice_only_when_one_is_set() {
+    use workbench_protocol::errors::{ErrorCode, RetryAdvice};
+    assert_eq!(FeatureError::new("x").retry, None);
+    assert_eq!(FeatureError::outcome_unknown("x").retry, None);
+    let refused = FeatureError::new("x")
+        .with_code(ErrorCode::LimitExceeded)
+        .with_retry(RetryAdvice::Never);
+    assert_eq!(refused.code, Some(ErrorCode::LimitExceeded));
+    assert_eq!(refused.retry, Some(RetryAdvice::Never));
+}
