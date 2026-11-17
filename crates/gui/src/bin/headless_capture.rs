@@ -2,15 +2,21 @@
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use gui::app::WorkbenchState;
-use gui::fixture::{DemoSource, demo_error_events, demo_runs, demo_sidebar, populate};
+use gui::fixture::{
+    DemoSource, FixturePlanReader, PlanScenario, demo_error_events, demo_runs, demo_sidebar,
+    populate,
+};
 use gui::headless::HeadlessWorkbench;
 use gui::model::composer::ProviderStatus;
+use gui::model::conversation_plan::{ConversationPlanModel, inline_spawner};
 use gui::theme::style::ThemePreset;
 use workspace_ui::UiSettings;
 
 const DEFAULT_OUTPUT: &str = "target/headless-capture.png";
+const PLAN_ERROR: &str = "--plan requires unplanned, mixed, or detailed";
 
 #[derive(Debug)]
 struct CaptureArgs {
@@ -27,6 +33,7 @@ struct CaptureArgs {
     open_sandbox_settings: bool,
     edit_profile: bool,
     activate: Option<String>,
+    plan: Option<PlanScenario>,
     pointer: Option<(f32, f32)>,
     size: (u32, u32),
     dpi: f32,
@@ -116,6 +123,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     if capture.pending_approvals {
         state.apply_events(gui::fixture::demo_pending_approval_events());
     }
+    if let Some(scenario) = capture.plan {
+        let model = ConversationPlanModel::default()
+            .with_reader(Arc::new(FixturePlanReader::new(scenario)))
+            .with_spawner(inline_spawner());
+        state = state.with_conversation_plan(model);
+        state.open_conversation_plan_tab();
+        if let Some(task) = scenario.selected_task() {
+            state.conversation_plan_mut().state_mut().select(task);
+        }
+    }
     let active_panel = if capture.pending_approvals {
         Some("agent-main")
     } else {
@@ -166,6 +183,7 @@ fn parse_args(
     let mut open_sandbox_settings = false;
     let mut edit_profile = false;
     let mut activate: Option<String> = None;
+    let mut plan: Option<PlanScenario> = None;
     let mut pointer: Option<(f32, f32)> = None;
     let mut size: Option<(u32, u32)> = None;
     let mut dpi: Option<f32> = None;
@@ -194,6 +212,17 @@ fn parse_args(
                 }
                 let id = arguments.next().ok_or("--activate requires a panel id")?;
                 activate = Some(id.to_string_lossy().into_owned());
+            }
+            Some("--plan") => {
+                if plan.is_some() {
+                    return Err("unexpected additional arguments".into());
+                }
+                let name = arguments.next().ok_or(PLAN_ERROR)?;
+                plan = Some(
+                    name.to_str()
+                        .and_then(PlanScenario::parse)
+                        .ok_or(PLAN_ERROR)?,
+                );
             }
             Some("--size") => {
                 if size.is_some() {
@@ -308,6 +337,9 @@ fn parse_args(
     if pending_approvals && !demo {
         return Err("--pending-approvals requires --demo".into());
     }
+    if plan.is_some() && !demo {
+        return Err("--plan requires --demo".into());
+    }
     if [
         open_settings,
         open_theme_settings,
@@ -336,6 +368,7 @@ fn parse_args(
         open_sandbox_settings,
         edit_profile,
         activate,
+        plan,
         pointer,
         size: size.unwrap_or((1280, 720)),
         dpi: dpi.unwrap_or(1.0),
@@ -364,6 +397,8 @@ Modes:
    --open-sandbox-settings  show sandbox settings
    --edit-profile   open the local demo profile editor
    --activate ID  activate the given panel tab before capturing (e.g. diff-main)
+   --plan NAME    with --demo: open the conversation plan tab on a fixture plan
+                  (unplanned, mixed, or detailed)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
 
 Capture dimensions:
@@ -399,6 +434,16 @@ mod tests {
         .expect("memory panel fixture must parse");
         assert!(capture.with_memory);
         assert_eq!(capture.activate.as_deref(), Some("memory-main"));
+    }
+
+    #[test]
+    fn parse_args_opens_a_fixture_conversation_plan() {
+        let capture = parse_args(args(["--demo", "--plan", "detailed"])).unwrap();
+        assert_eq!(capture.plan, Some(gui::fixture::PlanScenario::Detailed));
+        let error = parse_args(args(["--demo", "--plan", "other"])).unwrap_err();
+        assert_eq!(error.to_string(), super::PLAN_ERROR);
+        let error = parse_args(args(["--plan", "mixed"])).unwrap_err();
+        assert_eq!(error.to_string(), "--plan requires --demo");
     }
 
     #[test]

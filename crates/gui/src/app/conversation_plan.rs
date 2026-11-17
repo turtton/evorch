@@ -77,6 +77,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         &self.conversation_plan.model
     }
 
+    pub fn conversation_plan_mut(&mut self) -> &mut ConversationPlanModel {
+        &mut self.conversation_plan.model
+    }
+
     /// Show the plan panel beside the subagents, or bring an open one forward.
     pub fn open_conversation_plan_tab(&mut self) {
         let id = PanelId::new(PANEL);

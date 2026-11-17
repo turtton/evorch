@@ -207,14 +207,14 @@ pub fn band_row(ui: &mut Ui, band: PlanBand<'_>) -> bool {
 }
 
 fn counted(ui: &mut Ui, icon: &str, color: Color32, count: &str, name: &str) {
-    ui.label(small("·", palette().TEXT_MUTED));
-    let response = ui
-        .horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.label(small(icon, color));
-            ui.label(small(count, palette().TEXT));
-        })
-        .response;
+    // One unwrapped label, so the separator wraps together with its count.
+    let font = egui::FontId::proportional(FONT_SMALL);
+    let style = |color| egui::TextFormat::simple(font.clone(), color);
+    let mut job = egui::text::LayoutJob::default();
+    job.append("·", 0.0, style(palette().TEXT_MUTED));
+    job.append(icon, ui.spacing().item_spacing.x, style(color));
+    job.append(count, 2.0, style(palette().TEXT));
+    let response = ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
     let text = format!("{name}: {count}");
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
     let _ = response.on_hover_text(text);
@@ -236,16 +236,7 @@ pub fn plan_panel(ui: &mut Ui, state: &PlanState) -> Option<PlanPanelAction> {
             }
             ui.separator();
             let Some(tree) = state.tree().filter(|tree| !tree.nodes.is_empty()) else {
-                ui.label(small(
-                    if progress.is_some_and(is_planned)
-                        || state.tree().is_none() && state.summary().is_none()
-                    {
-                        ""
-                    } else {
-                        NOT_PLANNED
-                    },
-                    palette().TEXT_MUTED,
-                ));
+                // The legend row already says when there is no plan.
                 return;
             };
             let tree_height = (ui.available_height() * 0.45).max(ROW_DENSE * 3.0);
@@ -276,8 +267,9 @@ pub fn plan_panel(ui: &mut Ui, state: &PlanState) -> Option<PlanPanelAction> {
     action
 }
 
+/// Wraps rather than overlapping when the panel sits in a narrow column.
 fn legend_row(ui: &mut Ui, state: &PlanState, progress: Option<&PlanProgress>) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let planned = progress.filter(|p| is_planned(p));
         progress_bar(ui, BAR_WIDTH, planned.map(|p| &p.weighted_ppm));
         if let Some(progress) = planned {
@@ -299,7 +291,7 @@ fn legend_row(ui: &mut Ui, state: &PlanState, progress: Option<&PlanProgress>) {
         } else {
             ui.label(small(NOT_PLANNED, palette().TEXT_MUTED));
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        {
             let revision = state
                 .tree()
                 .map(|t| t.revision)
@@ -321,6 +313,7 @@ fn legend_row(ui: &mut Ui, state: &PlanState, progress: Option<&PlanProgress>) {
             }
             if !meta.is_empty() {
                 let text = meta.join(" · ");
+                ui.add_space(SP_2);
                 let response = ui.label(
                     RichText::new(&text)
                         .text_style(text_style_badge())
@@ -331,7 +324,7 @@ fn legend_row(ui: &mut Ui, state: &PlanState, progress: Option<&PlanProgress>) {
                     egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &hover)
                 });
             }
-        });
+        }
     });
 }
 
@@ -363,7 +356,6 @@ fn node_row(ui: &mut Ui, node: &PlanNodeView, selected: bool) -> bool {
                         ));
                     }
                 }
-                ui.add(egui::Label::new(&node.title).truncate());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let response = ui.label(small(
                         format!("{} {}", icons::SCALES, node.weight),
@@ -374,6 +366,9 @@ fn node_row(ui: &mut Ui, node: &PlanNodeView, selected: bool) -> bool {
                         egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &weight)
                     });
                     let _ = response.on_hover_text(weight);
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(egui::Label::new(&node.title).truncate());
+                    });
                 });
             });
         });
