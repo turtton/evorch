@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use egui::emath::GuiRounding as _;
+
 /// What a virtual row stands for. An entry row keeps the egui ID
 /// `scope.with(entry_id)` it always had; a group header is named by the stable
 /// entry ID of its first tool call and gets an ID of its own.
@@ -29,9 +31,18 @@ pub(super) struct VirtualList {
     enabled: bool,
     scope_id: Option<egui::Id>,
     async_generation: u64,
+    /// Off-screen rows skipped since the last drawn row, laid out as one spacer
+    /// when the next row is drawn or the list ends.
+    pending_skip: PendingSkip,
     /// Work counted this pass; only filled while the counters are enabled.
     pub(super) perf: super::perf::TranscriptPerf,
     perf_on: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PendingSkip {
+    rows: u32,
+    height: f32,
 }
 
 fn override_id() -> egui::Id {
@@ -97,6 +108,7 @@ impl VirtualList {
             cache.width = width;
         }
         cache.enabled = enabled;
+        cache.pending_skip = PendingSkip::default();
         cache.async_generation = super::async_layout::poll(ui.ctx());
         cache.scope_id = Some(id);
         let retained: HashSet<_> = entries.collect();
@@ -105,6 +117,26 @@ impl VirtualList {
             RowKey::Entry(id) | RowKey::GroupHeader(id) => retained.contains(id),
         });
         cache
+    }
+
+    /// Where the next row starts, counting the skipped rows not yet laid out.
+    pub(super) fn cursor_top(&self, ui: &egui::Ui) -> f32 {
+        ui.cursor().top()
+            + self.pending_skip.height
+            + self.pending_skip.rows as f32 * ui.spacing().item_spacing.y
+    }
+
+    /// Lays out the pending skipped rows as one spacer. Their extent is each
+    /// row's height plus the item spacing that follows every row, which the
+    /// spacer's own trailing spacing supplies once.
+    pub(super) fn flush(&mut self, ui: &mut egui::Ui) {
+        let PendingSkip { rows, height } = std::mem::take(&mut self.pending_skip);
+        if rows > 0 {
+            ui.allocate_space(egui::vec2(
+                0.0,
+                height + (rows - 1) as f32 * ui.spacing().item_spacing.y,
+            ));
+        }
     }
 
     pub(super) fn perf_on(&self) -> bool {
@@ -142,7 +174,7 @@ impl VirtualList {
     ) {
         let previous = self.heights.get(&key).copied();
         let height = previous.map(|row| row.height);
-        let top = ui.cursor().top();
+        let top = self.cursor_top(ui);
         let skip = self.enabled
             && previous.is_some_and(|row| {
                 row.revision == revision
@@ -158,41 +190,46 @@ impl VirtualList {
             RowKey::Entry(id) => scope_base.with(id),
             RowKey::GroupHeader(id) => scope_base.with(("tool-group-header", id)),
         };
+        if skip {
+            // Nothing is drawn for a skipped row, so a run of them costs one
+            // spacer rather than one scope each.
+            self.pending_skip.rows += 1;
+            // Each skipped row used to add its height rounded to a pixel.
+            self.pending_skip.height += height.unwrap_or_default().round_ui();
+            if self.perf_on {
+                self.perf.rows_listed += 1;
+                self.perf.rows_skipped += 1;
+            }
+            return;
+        }
+        self.flush(ui);
         let mut contains_async = false;
         let draw_clock = super::perf::Clock::start(self.perf_on);
         let response = ui.scope_builder(egui::UiBuilder::new().id(scope), |ui| {
-            if skip {
-                ui.add_space(height.unwrap_or_default());
-            } else {
-                let measurement = measurement_id(ui.ctx());
-                let outer = ui.data_mut(|data| {
-                    let outer = data.get_temp::<bool>(measurement);
-                    data.insert_temp(measurement, false);
-                    outer
-                });
-                draw(ui);
-                contains_async = ui.data_mut(|data| {
-                    let contains_async = data.remove_temp::<bool>(measurement).unwrap_or(false);
-                    if let Some(outer) = outer {
-                        data.insert_temp(measurement, outer || contains_async);
-                    }
-                    contains_async
-                });
-            }
+            let measurement = measurement_id(ui.ctx());
+            let outer = ui.data_mut(|data| {
+                let outer = data.get_temp::<bool>(measurement);
+                data.insert_temp(measurement, false);
+                outer
+            });
+            draw(ui);
+            contains_async = ui.data_mut(|data| {
+                let contains_async = data.remove_temp::<bool>(measurement).unwrap_or(false);
+                if let Some(outer) = outer {
+                    data.insert_temp(measurement, outer || contains_async);
+                }
+                contains_async
+            });
         });
         if self.perf_on {
             self.perf.rows_listed += 1;
-            if skip {
-                self.perf.rows_skipped += 1;
-            } else {
-                self.perf.rows_drawn += 1;
-                self.perf.draw_ns += draw_clock.elapsed_ns();
-                let rect = response.response.rect;
-                self.perf.rows_drawn_far +=
-                    u64::from(rect.bottom() < viewport.top() || rect.top() > viewport.bottom());
-            }
+            self.perf.rows_drawn += 1;
+            self.perf.draw_ns += draw_clock.elapsed_ns();
+            let rect = response.response.rect;
+            self.perf.rows_drawn_far +=
+                u64::from(rect.bottom() < viewport.top() || rect.top() > viewport.bottom());
         }
-        if !skip {
+        {
             // The scope's rect excludes its parent's trailing item spacing.
             // add_space reproduces precisely that rect on a skipped pass.
             let measured = response.response.rect.height();
@@ -263,6 +300,7 @@ mod tests {
                         }
                     });
                 }
+                list.flush(ui);
                 extent = ui.cursor().top();
                 list.store(ui, id);
             },
@@ -280,7 +318,8 @@ mod tests {
         let (settling, actual) = layout(&ctx, 640.0, 0..20);
         assert_eq!(settling, 20);
         assert_eq!(actual, expected);
-        assert_eq!(layout(&ctx, 640.0, 0..20).0, 0);
+        // Skipped rows lay out as one spacer with the extent they had drawn.
+        assert_eq!(layout(&ctx, 640.0, 0..20), (0, expected));
 
         // Appended offscreen rows must still be measured, not estimated.
         assert_eq!(layout(&ctx, 640.0, 0..21).0, 1);

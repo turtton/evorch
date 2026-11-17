@@ -478,7 +478,7 @@ fn run_detail_body(
                     let key = model.visible_entry_id(group.first_tool);
                     let open = open_groups.is_open(key);
                     let revision = group_revision(model, group, key, open, layout_revision);
-                    let row_top = ui.cursor().top();
+                    let row_top = list.cursor_top(ui);
                     list.keyed_row(
                         ui,
                         viewport,
@@ -500,7 +500,7 @@ fn run_detail_body(
                             }
                         },
                     );
-                    if first_visible.is_none() && ui.cursor().top() > screen_viewport.top() {
+                    if first_visible.is_none() && list.cursor_top(ui) > screen_viewport.top() {
                         first_visible = Some((key, row_top - content_top));
                     }
                     header_top = row_top - content_top;
@@ -547,7 +547,7 @@ fn run_detail_body(
                 );
                 list.perf.revisions += u64::from(list.perf_on());
                 list.perf.revision_ns += revision_clock.elapsed_ns();
-                let row_top = ui.cursor().top();
+                let row_top = list.cursor_top(ui);
                 if previous_anchor.is_some_and(|anchor| anchor.entry == entry_id) {
                     anchored_entry_y = Some(row_top - content_top);
                 }
@@ -765,10 +765,11 @@ fn run_detail_body(
                         }
                     });
                 });
-                if first_visible.is_none() && ui.cursor().top() > screen_viewport.top() {
+                if first_visible.is_none() && list.cursor_top(ui) > screen_viewport.top() {
                     first_visible = Some((entry_id, row_top - content_top));
                 }
             }
+            list.flush(ui);
             list.perf.loop_ns += loop_clock.elapsed_ns();
             if let Some(key) = toggled_group {
                 open_groups.toggle(key);

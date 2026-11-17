@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use event_bus::{AgentRunPhase, Event, LifecycleEvent, MessageEvent, ToolEvent};
 use gui::app::WorkbenchState;
 use gui::body::testing::FakeBackend;
@@ -674,10 +675,63 @@ fn measure(
     }
 }
 
-/// Group expansion needs tool groups; before they exist there is nothing to
-/// expand and the case reports nothing.
-fn expand(_rig: &mut Rig) -> Vec<(&'static str, Sample)> {
-    Vec::new()
+/// Opens one tool group of a settled, scrolled transcript and measures the
+/// frames until layout settles again. Shapes without groups report nothing.
+fn expand(rig: &mut Rig) -> Vec<(&'static str, Sample)> {
+    rig.settle();
+    let mut scrolled = Frames::default();
+    for _ in 0..5 {
+        rig.scroll_gesture(3_000.0, &mut scrolled);
+    }
+    rig.settle();
+    let target = rig
+        .harness
+        .query_all_by_label_contains("tool call")
+        .find(|node| node.rect().top() > 100.0 && node.rect().bottom() < 600.0)
+        .map(|node| node.rect().center());
+    let Some(center) = target else {
+        return Vec::new();
+    };
+    let before = rig.resolved();
+    rig.harness.hover_at(center);
+    rig.harness.event(egui::Event::PointerButton {
+        pos: center,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    let mut frames = Frames::default();
+    let (ms, perf) = rig.frame();
+    frames.add(ms, perf);
+    rig.harness.event(egui::Event::PointerButton {
+        pos: center,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    let (ms, perf) = rig.frame();
+    frames.add(ms, perf);
+    let first = Sample {
+        frames: frames.clone(),
+        bodies: 0,
+        bytes: 0,
+    };
+    let settle = rig.settle();
+    let mut all = frames;
+    all.ms.extend(settle.ms.iter().copied());
+    all.perf = sum(all.perf, settle.perf);
+    let now = rig.resolved();
+    vec![
+        ("expand: click frames", first),
+        (
+            "expand: until settled",
+            Sample {
+                frames: all,
+                bodies: now.0 - before.0,
+                bytes: now.1 - before.1,
+            },
+        ),
+    ]
 }
 
 fn percentile(sorted: &[f64], fraction: f64) -> f64 {
@@ -704,7 +758,7 @@ fn report_case(label: &str, entries: usize, runs: Vec<Sample>) {
     let last = runs.last().cloned().unwrap_or_default();
     let perf = last.frames.perf;
     println!(
-        "| {label} | {entries} | {} | {median:.2} | {p95:.2} | {frame_median:.3} | {frame_p95:.3} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.1} | {:.1} | {:.1} |",
+        "| {label} | {entries} | {} | {median:.2} | {p95:.2} | {frame_median:.3} | {frame_p95:.3} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.1} | {:.1} | {:.1} | {:.1} |",
         last.frames.ms.len(),
         perf.passes,
         perf.entries_enumerated,
@@ -718,14 +772,15 @@ fn report_case(label: &str, entries: usize, runs: Vec<Sample>) {
         perf.prep_ns as f64 / 1e6,
         perf.revision_ns as f64 / 1e6,
         perf.draw_ns as f64 / 1e6,
+        perf.loop_ns as f64 / 1e6,
     );
 }
 
 fn header() {
     println!(
-        "| case | entries | frames | total median ms | total p95 ms | frame median ms | frame p95 ms | passes | entries enumerated | rows listed | rows drawn | rows skipped | rows drawn far | projection rebuilds | bodies resolved | body bytes | prep ms | revision ms | draw ms |"
+        "| case | entries | frames | total median ms | total p95 ms | frame median ms | frame p95 ms | passes | entries enumerated | rows listed | rows drawn | rows skipped | rows drawn far | projection rebuilds | bodies resolved | body bytes | prep ms | revision ms | draw ms | loop ms |"
     );
-    println!("|{}", "---|".repeat(19));
+    println!("|{}", "---|".repeat(20));
 }
 
 // ---- history restore ----
