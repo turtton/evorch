@@ -42,16 +42,6 @@ fn backfill(state: Value, batches: u32, effect: &str, extra: Value) -> Value {
     view
 }
 
-fn reindex() -> Value {
-    json!({
-        "operation": {"operation_id": "op-2", "state": {"type": "ready"}, "revision": "4"},
-        "task": "reindex_threads", "batches": 2,
-        "progress": {"type": "reindex_threads", "payload": {
-            "request_id": "request-1", "target_count": 12, "succeeded": 11, "unindexed": 1}},
-        "effect": "complete", "outcome": "completed_with_gaps"
-    })
-}
-
 pub fn samples() -> AreaSamples {
     AreaSamples {
         name: "maintenance",
@@ -83,10 +73,18 @@ pub fn samples() -> AreaSamples {
             ),
         ],
         query_replies: vec![
-            reply("operation", reindex()),
+            reply(
+                "operation",
+                backfill(
+                    json!({"type": "ready"}),
+                    4,
+                    "complete",
+                    json!({"outcome": "completed"}),
+                ),
+            ),
             reply(
                 "list",
-                json!({"items": [reindex(),
+                json!({"items": [
                     backfill(json!({"type": "pending"}), 0, "none",
                              json!({"progress": {"type": "backfill_events", "payload": {
                                  "converted": 0, "reattributed": 0}}}))],

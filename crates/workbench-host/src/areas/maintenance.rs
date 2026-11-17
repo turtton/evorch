@@ -11,9 +11,8 @@
 //!   waits for a batch. Because the task is counted, the host's busy decision
 //!   (`AreaTasks::busy`) sees a running maintenance without any extra wiring.
 //! * **Bounded batches.** A backfill is a loop of one writer step per batch of
-//!   at most `batch_rows` rows and at most `max_rows` rows in all; a reindex is
-//!   a loop of one index step per batch. Each committed batch publishes a
-//!   progress event.
+//!   at most `batch_rows` rows and at most `max_rows` rows in all. Each
+//!   committed batch publishes a progress event.
 //! * **Idempotency and exclusion.** The same operation id with the same request
 //!   is answered from the table; another request under the id is a `Conflict`.
 //!   One operation per task runs at a time: another one is `Busy`, whoever asks.
@@ -33,14 +32,8 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
-use storage::StorageHandle;
-use storage::THREAD_INDEX_LEASE_NS;
-use storage::thread_index::{
-    IndexLease, IndexOwner, IndexOwnerKind, IndexStepResult, LeaseResult, ReindexRequest,
-    ReindexResult, RequestFailure, RequestProgress, RequestSummary,
-};
+use storage::{Database, StorageHandle};
 use tokio::sync::watch;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::events::UiEvent;
@@ -60,12 +53,9 @@ use crate::bootstrap::BootstrapError;
 use crate::bootstrap::restart::HostCommandPermit;
 use crate::queries::{Pager, error, revision};
 
-/// Operations the table keeps (running and settled).
+/// Operations the table keeps (running and settled). Beyond it a new id is
+/// refused: an id that is forgotten could run a second time.
 const MAX_OPERATIONS: usize = 64;
-
-/// How long an idle reindex waits before it looks at the index again, at most.
-const IDLE_POLL_MAX: Duration = Duration::from_secs(1);
-const IDLE_POLL_MIN: Duration = Duration::from_millis(25);
 
 /// Where a test may hold an operation.
 #[doc(hidden)]
@@ -87,24 +77,11 @@ pub type MaintenanceHook = Arc<
         + Sync,
 >;
 
-/// A seam for tests: how an idle reindex waits before it looks again. Production
-/// sleeps (and wakes at once for a cancel or a stop).
-#[doc(hidden)]
-pub type MaintenancePause =
-    Arc<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
-
-/// A seam for tests: the wall clock of the index control calls, in Unix
-/// nanoseconds.
-#[doc(hidden)]
-pub type MaintenanceClock = Arc<dyn Fn() -> i64 + Send + Sync>;
-
 /// The test seams of the area; the default is production behaviour.
 #[doc(hidden)]
 #[derive(Clone, Default)]
 pub struct MaintenanceSeams {
     pub hook: Option<MaintenanceHook>,
-    pub pause: Option<MaintenancePause>,
-    pub clock: Option<MaintenanceClock>,
 }
 
 /// An accepted request.
@@ -128,6 +105,9 @@ struct Inner {
     tasks: AreaTasks,
     source: ProjectionSource,
     storage: StorageHandle,
+    /// The event database file, opened read-only to count what a failed step
+    /// left committed (the writer reports nothing for a failed step).
+    database: PathBuf,
     seams: MaintenanceSeams,
 }
 
@@ -157,16 +137,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// What a started operation does, resolved by the handler.
 enum Work {
-    Backfill {
-        batch_rows: usize,
-        max_rows: u64,
-    },
-    Reindex {
-        /// The directory of the project to reindex, when one is named.
-        project_root: Option<PathBuf>,
-        since_ns: Option<i64>,
-        include_evicted: bool,
-    },
+    Backfill { batch_rows: usize, max_rows: u64 },
 }
 
 /// How an operation ended.
@@ -214,22 +185,6 @@ fn initial_progress(kind: MaintenanceKind) -> MaintenanceProgress {
             remaining_unconverted: None,
             remaining_unattributed: None,
         },
-        MaintenanceKind::ReindexThreads => MaintenanceProgress::ReindexThreads {
-            request_id: None,
-            target_count: 0,
-            succeeded: 0,
-            unindexed: 0,
-        },
-    }
-}
-
-fn reindex_progress(request_id: &str, summary: &RequestSummary) -> MaintenanceProgress {
-    let unindexed = summary.gaps.iter().map(|gap| gap.count).sum();
-    MaintenanceProgress::ReindexThreads {
-        request_id: Some(request_id.chars().take(128).collect()),
-        target_count: summary.target_count,
-        succeeded: summary.succeeded,
-        unindexed,
     }
 }
 
@@ -242,6 +197,7 @@ impl MaintenanceArea {
             handles.tasks.clone(),
             source,
             handles.storage.clone(),
+            handles.database.clone(),
             MaintenanceSeams::default(),
         ))
     }
@@ -252,6 +208,7 @@ impl MaintenanceArea {
         tasks: AreaTasks,
         source: ProjectionSource,
         storage: StorageHandle,
+        database: PathBuf,
         seams: MaintenanceSeams,
     ) -> Self {
         Self {
@@ -263,6 +220,7 @@ impl MaintenanceArea {
                 tasks,
                 source,
                 storage,
+                database,
                 seams,
             })),
             pager: Pager::default(),
@@ -280,8 +238,6 @@ impl MaintenanceArea {
 
     /// Accept a maintenance operation: start it, or answer from the table.
     ///
-    /// `project_root` is the directory of the project a reindex names.
-    ///
     /// # Errors
     /// `Conflict` for an id used by a different request, `Busy` when an
     /// operation of the task is running, `LimitExceeded` when every retained
@@ -289,7 +245,6 @@ impl MaintenanceArea {
     pub fn start(
         &self,
         start: &StartMaintenance,
-        project_root: Option<PathBuf>,
         accepted: HostCommandPermit,
     ) -> Result<Accepted, WorkbenchError> {
         let inner = self.inner()?;
@@ -300,11 +255,6 @@ impl MaintenanceArea {
             MaintenanceTask::BackfillEvents(task) => Work::Backfill {
                 batch_rows: task.batch_rows.unwrap_or(DEFAULT_BATCH_ROWS) as usize,
                 max_rows: task.max_rows.unwrap_or(DEFAULT_MAX_ROWS),
-            },
-            MaintenanceTask::ReindexThreads(task) => Work::Reindex {
-                project_root,
-                since_ns: task.since_ns,
-                include_evicted: task.include_evicted,
             },
         };
         let (view, cancel) = {
@@ -329,6 +279,15 @@ impl MaintenanceArea {
                 return Err(WorkbenchError::new(
                     ErrorCode::Busy,
                     "another operation of this task is running; list the maintenance operations to see it",
+                    RetryAdvice::UserActionRequired,
+                ));
+            }
+            // A full table never drops an entry: dropping a finished one would
+            // let its id run again when a client resends it.
+            if state.table.list().len() >= MAX_OPERATIONS {
+                return Err(WorkbenchError::new(
+                    ErrorCode::LimitExceeded,
+                    "the core holds as many maintenance operations as it can remember; restart the core to start a new one",
                     RetryAdvice::UserActionRequired,
                 ));
             }
@@ -439,20 +398,13 @@ impl Inner {
         }
     }
 
-    fn now_ns(&self) -> i64 {
-        match &self.seams.clock {
-            Some(clock) => clock(),
-            None => storage::system_time_to_ns(std::time::SystemTime::now()).unwrap_or(i64::MAX),
-        }
-    }
-
     async fn run(
         self: Arc<Self>,
         id: OperationId,
         kind: MaintenanceKind,
         work: Work,
-        mut stop: StopSignal,
-        mut cancel: watch::Receiver<bool>,
+        stop: StopSignal,
+        cancel: watch::Receiver<bool>,
     ) -> Result<(), BootstrapError> {
         let mut guard = Settle {
             inner: self.clone(),
@@ -468,21 +420,6 @@ impl Inner {
             } => {
                 self.backfill(&id, batch_rows, max_rows, &stop, &cancel)
                     .await
-            }
-            Work::Reindex {
-                project_root,
-                since_ns,
-                include_evicted,
-            } => {
-                self.reindex(
-                    &id,
-                    project_root,
-                    since_ns,
-                    include_evicted,
-                    &mut stop,
-                    &mut cancel,
-                )
-                .await
             }
         };
         guard.finish(&ended);
@@ -510,6 +447,8 @@ impl Inner {
     ) -> Ended {
         let mut batches = 0_u32;
         let (mut converted, mut reattributed) = (0_u64, 0_u64);
+        // What is left, as last seen: the base to measure a failed step against.
+        let mut left = self.remaining().await;
         loop {
             if let Some(reason) = Self::interrupted(stop, cancel) {
                 return Ended::Cancelled(reason);
@@ -532,9 +471,36 @@ impl Inner {
             let storage = self.storage.clone();
             let step = match blocking(move || storage.retention_backfill_step(rows)).await {
                 Ok(Ok(step)) => step,
-                Ok(Err(_)) => return Ended::storage(),
+                Ok(Err(_)) => {
+                    // The writer runs the conversion and the attribution as two
+                    // transactions: the first may have committed before the
+                    // second failed. Count what the file now says is left.
+                    if let (Some(before), Some(after)) = (left, self.remaining().await) {
+                        let done = (
+                            before.0.saturating_sub(after.0),
+                            before.1.saturating_sub(after.1),
+                        );
+                        if done != (0, 0) {
+                            converted += done.0;
+                            reattributed += done.1;
+                            batches += 1;
+                            self.record(
+                                id,
+                                batches,
+                                MaintenanceProgress::BackfillEvents {
+                                    converted,
+                                    reattributed,
+                                    remaining_unconverted: Some(after.0),
+                                    remaining_unattributed: Some(after.1),
+                                },
+                            );
+                        }
+                    }
+                    return Ended::storage();
+                }
                 Err(ended) => return ended,
             };
+            left = Some((step.remaining_unconverted, step.remaining_unattributed));
             converted += step.converted;
             reattributed += step.reattributed;
             let progress = MaintenanceProgress::BackfillEvents {
@@ -560,244 +526,20 @@ impl Inner {
         }
     }
 
-    async fn reindex(
-        &self,
-        id: &OperationId,
-        project_root: Option<PathBuf>,
-        since_ns: Option<i64>,
-        include_evicted: bool,
-        stop: &mut StopSignal,
-        cancel: &mut watch::Receiver<bool>,
-    ) -> Ended {
-        let canonical_project = match project_root {
-            None => None,
-            Some(root) => match blocking(move || {
-                root.canonicalize()
-                    .ok()
-                    .filter(|path| path.is_dir())
-                    .and_then(|path| path.into_os_string().into_string().ok())
-            })
-            .await
-            {
-                Ok(Some(path)) => Some(path),
-                Ok(None) => {
-                    return Ended::Failed {
-                        code: ErrorCode::NotFound,
-                        message: "the project directory is not available",
-                    };
-                }
-                Err(ended) => return ended,
-            },
-        };
-        let request = ReindexRequest {
-            canonical_project,
-            since_ns,
-            include_evicted,
-        };
-        let owner = IndexOwner {
-            id: format!("core-{}-{id}", std::process::id()),
-            kind: IndexOwnerKind::Cli,
-        };
-        let now = self.now_ns();
-        let storage = self.storage.clone();
-        let submitted = {
-            let owner = owner.clone();
-            blocking(move || {
-                storage.submit_thread_index_request(&request, &owner, now, THREAD_INDEX_LEASE_NS)
-            })
-            .await
-        };
-        let submission = match submitted {
-            Ok(Ok(submission)) => submission,
-            Ok(Err(reason)) => return failure_of(reason),
-            Err(ended) => return ended,
-        };
-        let request_id = submission.request_id;
-        let mut lease = match submission.lease {
-            LeaseResult::Acquired(lease) => Some(lease),
-            // Another live owner carries the durable request on.
-            LeaseResult::HeldByOther(_) | LeaseResult::Lost
-                if matches!(submission.progress, RequestProgress::Pending(_)) =>
-            {
-                return Ended::Completed {
-                    outcome: MaintenanceOutcome::Delegated,
-                    progress: Some(MaintenanceProgress::ReindexThreads {
-                        request_id: Some(request_id.chars().take(128).collect()),
-                        target_count: 0,
-                        succeeded: 0,
-                        unindexed: 0,
-                    }),
-                };
-            }
-            _ => None,
-        };
-        let ended = self
-            .drive(
-                id,
-                &owner,
-                &request_id,
-                submission.progress,
-                &mut lease,
-                stop,
-                cancel,
-            )
-            .await;
-        if let Some(lease) = lease {
-            // Fenced: a lost lease cannot release its successor.
-            let storage = self.storage.clone();
-            let _ = blocking(move || storage.release_thread_index_lease(&lease)).await;
-        }
-        ended
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn drive(
-        &self,
-        id: &OperationId,
-        owner: &IndexOwner,
-        request_id: &str,
-        mut progress: RequestProgress,
-        lease: &mut Option<IndexLease>,
-        stop: &mut StopSignal,
-        cancel: &mut watch::Receiver<bool>,
-    ) -> Ended {
-        let mut batches = 0_u32;
-        let mut backoff = IDLE_POLL_MIN;
-        loop {
-            match progress {
-                RequestProgress::Terminal(result) => return settled_reindex(request_id, result),
-                RequestProgress::Cancelled => return Ended::Cancelled(CancelReason::Requested),
-                RequestProgress::Pending(_) => {}
-            }
-            if let Some(reason) = Self::interrupted(stop, cancel) {
-                return self.cancel_request(request_id, reason).await;
-            }
-            self.at(MaintenanceStage::BeforeBatch, id, batches).await;
-            if let Some(reason) = Self::interrupted(stop, cancel) {
-                return self.cancel_request(request_id, reason).await;
-            }
-            let now = self.now_ns();
-            let mut next_due = None;
-            let storage = self.storage.clone();
-            let owner = owner.clone();
-            let held = lease.take();
-            let step = blocking(move || {
-                let mut lease = match held {
-                    Some(current)
-                        if current.expires_at_ns.saturating_sub(now)
-                            <= THREAD_INDEX_LEASE_NS / 2 =>
-                    {
-                        match storage.heartbeat_thread_index_lease(
-                            &current,
-                            now,
-                            THREAD_INDEX_LEASE_NS,
-                        )? {
-                            LeaseResult::Acquired(renewed) => Some(renewed),
-                            _ => None,
-                        }
-                    }
-                    Some(current) => Some(current),
-                    None => {
-                        match storage.acquire_thread_index_lease(
-                            &owner,
-                            now,
-                            THREAD_INDEX_LEASE_NS,
-                        )? {
-                            LeaseResult::Acquired(acquired) => Some(acquired),
-                            LeaseResult::HeldByOther(other) => {
-                                return Ok((None, None, Some(other.expires_at_ns)));
-                            }
-                            LeaseResult::Lost => None,
-                        }
-                    }
-                };
-                let mut stepped = None;
-                if let Some(current) = lease.as_ref() {
-                    stepped = Some(storage.step_thread_index(current, now)?);
-                    if matches!(stepped, Some(IndexStepResult::LeaseLost)) {
-                        lease = None;
-                    }
-                }
-                Ok::<_, RequestFailure>((lease, stepped, None))
-            })
-            .await;
-            let mut made_progress = false;
-            match step {
-                Ok(Ok((renewed, stepped, due))) => {
-                    *lease = renewed;
-                    next_due = due.or(next_due);
-                    match stepped {
-                        Some(IndexStepResult::Progress) => made_progress = true,
-                        Some(IndexStepResult::Idle { next_wake_at_ns }) => {
-                            next_due = next_wake_at_ns;
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(Err(reason)) => return failure_of(reason),
-                Err(ended) => return ended,
-            }
-            let storage = self.storage.clone();
-            let asked = request_id.to_owned();
-            let at = self.now_ns();
-            let status =
-                match blocking(move || storage.thread_index_request_status(&asked, at)).await {
-                    Ok(Ok(status)) => status,
-                    Ok(Err(reason)) => return failure_of(reason),
-                    Err(ended) => return ended,
-                };
-            progress = status.progress;
-            if made_progress {
-                batches += 1;
-                backoff = IDLE_POLL_MIN;
-                if let RequestProgress::Pending(summary) = &progress {
-                    self.record(id, batches, reindex_progress(request_id, summary));
-                }
-            } else if matches!(progress, RequestProgress::Pending(_)) {
-                let now = self.now_ns();
-                let until_due = next_due
-                    .map(|due| Duration::from_nanos(u64::try_from(due - now).unwrap_or(0)))
-                    .unwrap_or(backoff);
-                self.pause(
-                    backoff.min(until_due).max(Duration::from_millis(1)),
-                    stop,
-                    cancel,
-                )
-                .await;
-                backoff = (backoff * 2).min(IDLE_POLL_MAX);
-            }
-        }
-    }
-
-    /// Wait before the index is looked at again; a stop or a cancel ends it.
-    async fn pause(
-        &self,
-        wait: Duration,
-        stop: &mut StopSignal,
-        cancel: &mut watch::Receiver<bool>,
-    ) {
-        let waited: Pin<Box<dyn Future<Output = ()> + Send>> = match &self.seams.pause {
-            Some(pause) => pause(wait),
-            None => Box::pin(tokio::time::sleep(wait)),
-        };
-        tokio::select! {
-            () = waited => {}
-            () = stop.stopped() => {}
-            _ = cancel.wait_for(|requested| *requested) => {}
-        }
-    }
-
-    /// End a reindex that is stopped: a requested cancel also cancels the
-    /// durable request (shared work for other requests continues); a stop of
-    /// the host leaves the request for the next owner of the index.
-    async fn cancel_request(&self, request_id: &str, reason: CancelReason) -> Ended {
-        if reason == CancelReason::Requested {
-            let storage = self.storage.clone();
-            let asked = request_id.to_owned();
-            let at = self.now_ns();
-            let _ = blocking(move || storage.cancel_thread_index_request(&asked, at)).await;
-        }
-        Ended::Cancelled(reason)
+    /// The rows still to convert and to attribute, read from the file without
+    /// writing; `None` when they cannot be read.
+    async fn remaining(&self) -> Option<(u64, u64)> {
+        let path = self.database.clone();
+        blocking(move || {
+            let database = Database::open_read_only(&path).ok()?;
+            Some((
+                database.unbackfilled_event_count().ok()?,
+                database.unattributed_orchestrator_count().ok()?,
+            ))
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// A committed batch: keep its counters and tell the clients.
@@ -868,40 +610,6 @@ impl Inner {
                 view: Box::new(view),
             });
         }
-    }
-}
-
-fn failure_of(reason: RequestFailure) -> Ended {
-    match reason {
-        RequestFailure::InvalidArguments => Ended::Failed {
-            code: ErrorCode::InvalidRequest,
-            message: "the index refused the request",
-        },
-        RequestFailure::DatabaseUnavailable | RequestFailure::PersistenceUnavailable => {
-            Ended::storage()
-        }
-        RequestFailure::UnrecoverableControlFailure => Ended::Failed {
-            code: ErrorCode::Internal,
-            message: "the index could not run",
-        },
-    }
-}
-
-fn settled_reindex(request_id: &str, result: ReindexResult) -> Ended {
-    match result {
-        ReindexResult::Completed { summary, .. } => Ended::Completed {
-            outcome: MaintenanceOutcome::Completed,
-            progress: Some(reindex_progress(request_id, &summary)),
-        },
-        ReindexResult::CompletedWithGaps { summary, .. } => Ended::Completed {
-            outcome: MaintenanceOutcome::CompletedWithGaps,
-            progress: Some(reindex_progress(request_id, &summary)),
-        },
-        ReindexResult::Accepted { .. } => Ended::Completed {
-            outcome: MaintenanceOutcome::Delegated,
-            progress: None,
-        },
-        ReindexResult::Failed { reason, .. } => failure_of(reason),
     }
 }
 

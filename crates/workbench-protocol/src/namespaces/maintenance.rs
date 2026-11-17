@@ -2,9 +2,9 @@
 //! event database, run by the core through its one storage writer. A client
 //! never opens the database.
 //!
-//! Two tasks exist: `backfill_events` (convert the legacy `subkind` / `run_id`
-//! columns of the events table) and `reindex_threads` (rebuild the thread
-//! search index). Offline tools (`evorch maintenance <other>`, `inspect`) stay
+//! One task exists: `backfill_events` (convert the legacy `subkind` / `run_id`
+//! columns of the events table). The thread-index rebuild is not here yet: its
+//! request registration is one unbounded writer transaction. Offline tools (`evorch maintenance <other>`, `inspect`) stay
 //! outside the core and are not part of this namespace.
 //!
 //! # Operations
@@ -41,10 +41,10 @@ use super::diagnostics::OperationTarget;
 use crate::{
     errors::ErrorCode,
     handshake::{Capability, WireLimits},
-    ids::{OperationId, ProjectId},
+    ids::OperationId,
     operation::{OperationState, OperationView},
     queries::PageRequest,
-    validation::{ValidationError, check_bytes, check_line},
+    validation::{ValidationError, check_bytes},
     views::Page,
 };
 use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ pub const QUERY_OPERATIONS: &[&str] = &["get_maintenance", "list_maintenance"];
 pub const EVENT_TYPES: &[&str] = &["maintenance_progress", "maintenance_settled"];
 
 /// The tasks `start_maintenance` names, by wire name.
-pub const MAINTENANCE_TASKS: &[&str] = &["backfill_events", "reindex_threads"];
+pub const MAINTENANCE_TASKS: &[&str] = &["backfill_events"];
 /// Tagged choices inside a command's payload that classification names.
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[super::NestedOperation {
     operation: "start_maintenance",
@@ -72,8 +72,6 @@ pub const MAX_ROWS_LIMIT: u64 = 10_000_000;
 pub const DEFAULT_MAX_ROWS: u64 = 1_000_000;
 /// Longest [`MaintenanceView::message`], in bytes.
 pub const MAX_MESSAGE_BYTES: usize = 512;
-/// Longest index request id, in bytes.
-pub const MAX_REQUEST_ID_BYTES: usize = 128;
 
 /// Convert the legacy columns of the events table.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,20 +85,6 @@ pub struct BackfillEvents {
     pub max_rows: Option<u64>,
 }
 
-/// Rebuild the thread search index for the chosen threads.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReindexThreads {
-    /// Only the threads of this project; all projects when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<ProjectId>,
-    /// Only threads updated at or after this Unix time in nanoseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub since_ns: Option<i64>,
-    #[serde(default)]
-    pub include_evicted: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -110,14 +94,12 @@ pub struct ReindexThreads {
 )]
 pub enum MaintenanceTask {
     BackfillEvents(BackfillEvents),
-    ReindexThreads(ReindexThreads),
 }
 
 impl MaintenanceTask {
     pub fn kind(&self) -> MaintenanceKind {
         match self {
             Self::BackfillEvents(_) => MaintenanceKind::BackfillEvents,
-            Self::ReindexThreads(_) => MaintenanceKind::ReindexThreads,
         }
     }
 
@@ -142,15 +124,6 @@ impl MaintenanceTask {
                 }
                 Ok(())
             }
-            Self::ReindexThreads(task) => {
-                if task.since_ns.is_some_and(|since| since < 0) {
-                    return Err(ValidationError::OutOfRange {
-                        field: "since_ns",
-                        reason: "must not be negative",
-                    });
-                }
-                Ok(())
-            }
         }
     }
 }
@@ -160,7 +133,6 @@ impl MaintenanceTask {
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceKind {
     BackfillEvents,
-    ReindexThreads,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,11 +206,6 @@ pub enum MaintenanceOutcome {
     /// All targeted work is done (or the bound of the operation was reached;
     /// the counters tell what is left).
     Completed,
-    /// A reindex that finished with some threads it could not index.
-    CompletedWithGaps,
-    /// A reindex whose request another live owner of the index carries on; this
-    /// operation did not run it.
-    Delegated,
 }
 
 /// What the committed batches did so far, by task.
@@ -260,22 +227,12 @@ pub enum MaintenanceProgress {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining_unattributed: Option<u64>,
     },
-    ReindexThreads {
-        /// The persisted index request; absent before it was accepted.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
-        target_count: u64,
-        succeeded: u64,
-        /// Threads that ended without an index entry (a gap or a deletion).
-        unindexed: u64,
-    },
 }
 
 impl MaintenanceProgress {
     pub fn kind(&self) -> MaintenanceKind {
         match self {
             Self::BackfillEvents { .. } => MaintenanceKind::BackfillEvents,
-            Self::ReindexThreads { .. } => MaintenanceKind::ReindexThreads,
         }
     }
 }
@@ -309,13 +266,6 @@ impl MaintenanceView {
         }
         if let Some(message) = &self.message {
             check_bytes("message", message, MAX_MESSAGE_BYTES, true)?;
-        }
-        if let MaintenanceProgress::ReindexThreads {
-            request_id: Some(id),
-            ..
-        } = &self.progress
-        {
-            check_line("request_id", id, MAX_REQUEST_ID_BYTES, false)?;
         }
         let ready = self.operation.state == OperationState::Ready;
         if self.outcome.is_some() && !ready {

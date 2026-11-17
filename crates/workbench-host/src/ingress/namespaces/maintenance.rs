@@ -1,13 +1,11 @@
-//! Maintenance namespace adapter: a command only names its task (and, for a
-//! reindex, a project); the directory is resolved here from the project
-//! directory the core owns. The work itself is an operation of the
-//! `maintenance` area, which runs it in bounded batches through the one
-//! storage writer.
+//! Maintenance namespace adapter: a command only names its task. The work
+//! itself is an operation of the `maintenance` area, which runs it in bounded
+//! batches through the one storage writer.
 use workbench_protocol::commands::{CommandDisposition, CommandReply, CommandResult};
 use workbench_protocol::envelope::Provenance;
 use workbench_protocol::errors::WorkbenchError;
 use workbench_protocol::namespaces::maintenance::{
-    MaintenanceCommand, MaintenanceQuery, MaintenanceReply, MaintenanceResult, MaintenanceTask,
+    MaintenanceCommand, MaintenanceQuery, MaintenanceReply, MaintenanceResult,
 };
 use workbench_protocol::queries::{Query, QueryReply};
 
@@ -22,15 +20,7 @@ impl CommandHost {
     ) -> Result<CommandReply, WorkbenchError> {
         let accepted = match &command {
             MaintenanceCommand::StartMaintenance(start) => {
-                let root = match &start.task {
-                    MaintenanceTask::ReindexThreads(task) => task
-                        .project
-                        .as_ref()
-                        .map(|project| self.project_root(project))
-                        .transpose()?,
-                    MaintenanceTask::BackfillEvents(_) => None,
-                };
-                self.areas.maintenance.start(start, root, restart)?
+                self.areas.maintenance.start(start, restart)?
             }
             // Cancelling holds the restart gate only for this call; the
             // operation it names keeps the permit of its own start.

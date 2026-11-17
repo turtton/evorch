@@ -49,28 +49,6 @@
       "payload": {
         "items": [
           {
-            "batches": 2,
-            "effect": "complete",
-            "operation": {
-              "operation_id": "op-2",
-              "revision": "4",
-              "state": {
-                "type": "ready"
-              }
-            },
-            "outcome": "completed_with_gaps",
-            "progress": {
-              "payload": {
-                "request_id": "request-1",
-                "succeeded": 11,
-                "target_count": 12,
-                "unindexed": 1
-              },
-              "type": "reindex_threads"
-            },
-            "task": "reindex_threads"
-          },
-          {
             "batches": 0,
             "effect": "none",
             "operation": {
@@ -99,26 +77,26 @@
   "query_reply/maintenance/operation": {
     "payload": {
       "payload": {
-        "batches": 2,
+        "batches": 4,
         "effect": "complete",
         "operation": {
-          "operation_id": "op-2",
-          "revision": "4",
+          "operation_id": "op-1",
+          "revision": "3",
           "state": {
             "type": "ready"
           }
         },
-        "outcome": "completed_with_gaps",
+        "outcome": "completed",
         "progress": {
           "payload": {
-            "request_id": "request-1",
-            "succeeded": 11,
-            "target_count": 12,
-            "unindexed": 1
+            "converted": 3000,
+            "reattributed": 0,
+            "remaining_unattributed": 0,
+            "remaining_unconverted": 7000
           },
-          "type": "reindex_threads"
+          "type": "backfill_events"
         },
-        "task": "reindex_threads"
+        "task": "backfill_events"
       },
       "type": "operation"
     },

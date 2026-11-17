@@ -28,13 +28,11 @@ use workbench_protocol::commands::{Command, CommandDisposition, CommandReply, Co
 use workbench_protocol::envelope::Provenance;
 use workbench_protocol::errors::ErrorCode;
 use workbench_protocol::events::{Subscribe, SubscriptionScope, UiEvent};
-use workbench_protocol::ids::ProjectId;
 use workbench_protocol::namespaces::diagnostics::OperationTarget;
 use workbench_protocol::namespaces::maintenance::{
     BackfillEvents, CancelMaintenance, ListMaintenance, MaintenanceCommand, MaintenanceEffect,
-    MaintenanceEvent, MaintenanceKind, MaintenanceOutcome, MaintenanceProgress, MaintenanceQuery,
-    MaintenanceReply, MaintenanceResult, MaintenanceTask, MaintenanceView, ReindexThreads,
-    StartMaintenance,
+    MaintenanceEvent, MaintenanceOutcome, MaintenanceProgress, MaintenanceQuery, MaintenanceReply,
+    MaintenanceResult, MaintenanceTask, MaintenanceView, StartMaintenance,
 };
 use workbench_protocol::operation::{CancelReason, OperationState};
 use workbench_protocol::queries::{Query, QueryReply};
@@ -86,10 +84,8 @@ fn setup(hook: Option<MaintenanceHook>) -> World {
             parts.tasks.clone(),
             parts.projection.source("maintenance").unwrap(),
             parts.storage.clone(),
-            MaintenanceSeams {
-                hook,
-                ..Default::default()
-            },
+            parts.database.clone(),
+            MaintenanceSeams { hook },
         ),
         ..Default::default()
     })
@@ -245,10 +241,8 @@ fn settled_view(events: &[MaintenanceEvent]) -> &MaintenanceView {
 }
 
 fn converted_of(view: &MaintenanceView) -> u64 {
-    match &view.progress {
-        MaintenanceProgress::BackfillEvents { converted, .. } => *converted,
-        other => panic!("{other:?}"),
-    }
+    let MaintenanceProgress::BackfillEvents { converted, .. } = &view.progress;
+    *converted
 }
 
 #[test]
@@ -294,13 +288,11 @@ fn a_backfill_stops_at_its_row_bound_and_says_what_is_left() {
     let done = settled_view(&seen);
     assert_eq!(done.operation.state, OperationState::Ready);
     assert_eq!((done.batches, converted_of(done)), (3, 5));
-    match &done.progress {
-        MaintenanceProgress::BackfillEvents {
-            remaining_unconverted,
-            ..
-        } => assert_eq!(*remaining_unconverted, Some(5)),
-        other => panic!("{other:?}"),
-    }
+    let MaintenanceProgress::BackfillEvents {
+        remaining_unconverted,
+        ..
+    } = &done.progress;
+    assert_eq!(*remaining_unconverted, Some(5));
     assert_eq!(unconverted(&w), 5);
 }
 
@@ -524,39 +516,77 @@ fn a_running_maintenance_holds_the_restart_gate_and_a_cancel_is_still_admitted()
 }
 
 #[test]
-fn a_reindex_of_an_empty_index_completes_and_an_unknown_project_is_refused() {
+fn a_full_table_refuses_a_new_id_and_never_runs_an_old_one_again() {
     let mut w = setup(None);
     let mut events = subscribe(&w);
-    start(
-        &mut w,
-        web(),
-        "index",
-        MaintenanceTask::ReindexThreads(ReindexThreads::default()),
-    )
-    .unwrap();
-    let seen = events_until_settled(&w.rt, &mut events, "index");
-    let done = settled_view(&seen);
-    assert_eq!(done.task, MaintenanceKind::ReindexThreads);
-    assert_eq!(done.operation.state, OperationState::Ready);
-    assert_eq!(done.effect, MaintenanceEffect::Complete);
-    assert!(matches!(
-        done.progress,
-        MaintenanceProgress::ReindexThreads {
-            target_count: 0,
-            ..
-        }
-    ));
+    for n in 0..64 {
+        let id = format!("op-{n}");
+        start(&mut w, web(), &id, backfill(2, None)).unwrap();
+        events_until_settled(&w.rt, &mut events, &id);
+    }
+    let refused = start(&mut w, web(), "op-64", backfill(2, None)).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::LimitExceeded);
+    assert_eq!(get(&w, "op-64").unwrap_err().code, ErrorCode::NotFound);
 
-    let unknown = start(
-        &mut w,
-        web(),
-        "elsewhere",
-        MaintenanceTask::ReindexThreads(ReindexThreads {
-            project: Some(ProjectId::new("no-such-project").unwrap()),
-            ..Default::default()
-        }),
-    )
-    .unwrap_err();
-    assert_eq!(unknown.code, ErrorCode::NotFound);
-    assert_eq!(get(&w, "elsewhere").unwrap_err().code, ErrorCode::NotFound);
+    // The first id is still known: it is answered, not run again.
+    seed_legacy(&w, 4);
+    let first = start(&mut w, web(), "op-0", backfill(2, None)).unwrap();
+    assert_eq!(first.disposition, CommandDisposition::AlreadyApplied);
+    assert_eq!(unconverted(&w), 4);
+    assert_eq!(
+        get(&w, "op-0").unwrap().operation.state,
+        OperationState::Ready
+    );
+    assert_eq!(
+        get(&w, "op-63").unwrap().operation.state,
+        OperationState::Ready
+    );
+}
+
+#[test]
+fn a_step_that_converted_rows_before_it_failed_is_reported_partial_with_those_rows() {
+    let mut w = setup(None);
+    seed_legacy(&w, 3);
+    {
+        // Two events that only the attribution touches, and a fault that makes
+        // that second transaction of a step fail after the conversion committed.
+        let conn = rusqlite::Connection::open(db_path(&w)).unwrap();
+        for n in 0..2 {
+            conn.execute(
+                "INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind) \
+                 VALUES (1, ?1, ?1, 'TaskProgressed', '{}', 'TaskProgressed')",
+                [100 + n],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "CREATE TRIGGER refuse_attribution BEFORE UPDATE ON events \
+             WHEN OLD.subkind IS NOT NULL AND OLD.run_id IS NULL \
+             BEGIN SELECT RAISE(ABORT, 'fault'); END;",
+        )
+        .unwrap();
+    }
+    let mut events = subscribe(&w);
+    start(&mut w, web(), "half", backfill(10, None)).unwrap();
+    let seen = events_until_settled(&w.rt, &mut events, "half");
+    let done = settled_view(&seen);
+    assert_eq!(
+        done.operation.state,
+        OperationState::Failed {
+            code: ErrorCode::StorageUnavailable
+        }
+    );
+    assert_eq!(done.effect, MaintenanceEffect::Partial);
+    assert_eq!(done.batches, 1);
+    assert_eq!(
+        done.progress,
+        MaintenanceProgress::BackfillEvents {
+            converted: 3,
+            reattributed: 0,
+            remaining_unconverted: Some(0),
+            remaining_unattributed: Some(2),
+        }
+    );
+    assert_eq!(progress_views(&seen).len(), 1);
+    assert_eq!(unconverted(&w), 0);
 }
