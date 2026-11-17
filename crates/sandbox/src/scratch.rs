@@ -5,16 +5,17 @@
 //! Sandboxes without a configured directory fall back to a private one of their own.
 //!
 //! Neither path scans or recursively deletes on the caller's thread. Removal
-//! renames the tree aside, which frees its path at once, then a bounded queue
-//! and one throttled worker delete it. Crashed processes / full queues leave
-//! renamed trees for [`ScratchRoot::purge_trash`] or OS temporary-file cleanup.
+//! renames the tree aside, which frees its path at once. One process-wide,
+//! stoppable worker discovers pending work from validated roots' `.trash-*`
+//! entries; notifications are only rescan hints, never the deletion inventory.
 
 use std::fs;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, mpsc};
-use std::time::Duration;
+
+mod cleanup;
+pub use cleanup::{resume_scratch_cleanup, stop_scratch_cleanup};
 
 const TRASH_PREFIX: &str = ".trash-";
 /// Records which ownership root a fixed parent belongs to. Dot-prefixed, so
@@ -183,6 +184,15 @@ impl ScratchRoot {
     /// # Errors
     /// Fails when the parent is not a private directory owned by the current user.
     pub fn discard(&self, name: &str) -> io::Result<bool> {
+        let removed = self.discard_deferred(name)?;
+        if removed {
+            self.wake_cleanup();
+        }
+        Ok(removed)
+    }
+
+    /// Detach only; the caller must call purge_trash after releasing its gates.
+    pub fn discard_deferred(&self, name: &str) -> io::Result<bool> {
         let dir = self.dir(name)?;
         if !self.owned_parent()? || dir.symlink_metadata().is_err() {
             return Ok(false);
@@ -192,10 +202,7 @@ impl ScratchRoot {
             .tempdir_in(&self.parent)?
             .keep();
         match fs::rename(&dir, &trash) {
-            Ok(()) => {
-                queue_cleanup(trash);
-                Ok(true)
-            }
+            Ok(()) => Ok(true),
             Err(error) => {
                 let _ = fs::remove_dir(&trash);
                 if error.kind() == io::ErrorKind::NotFound {
@@ -322,16 +329,14 @@ impl ScratchRoot {
         if !self.owned_parent()? {
             return Ok(());
         }
-        for entry in fs::read_dir(&self.parent)?.filter_map(Result::ok) {
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(TRASH_PREFIX))
-            {
-                queue_cleanup(entry.path());
-            }
-        }
+        self.wake_cleanup();
         Ok(())
+    }
+
+    fn wake_cleanup(&self) {
+        if let Err(error) = cleanup::service().wake_root(self) {
+            tracing::warn!(%error, parent = %self.parent.display(), "scratch collector wake failed");
+        }
     }
 
     fn owned_parent(&self) -> io::Result<bool> {
@@ -401,7 +406,7 @@ fn read_marker(path: &Path) -> io::Result<String> {
 impl Drop for ScratchRoot {
     fn drop(&mut self) {
         if self.ephemeral {
-            queue_cleanup(self.parent.clone());
+            cleanup::service().request_exact(&self.parent);
         }
     }
 }
@@ -429,7 +434,7 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        queue_cleanup(self.path.clone());
+        cleanup::service().request_exact(&self.path);
     }
 }
 
@@ -482,76 +487,6 @@ fn euid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
-fn queue_cleanup(path: PathBuf) {
-    static CLEANUP: OnceLock<Option<mpsc::SyncSender<PathBuf>>> = OnceLock::new();
-    let sender = CLEANUP.get_or_init(|| {
-        let (sender, receiver) = mpsc::sync_channel::<PathBuf>(64);
-        std::thread::Builder::new()
-            .name("evorch-scratch-cleanup".into())
-            .spawn(move || {
-                for path in receiver {
-                    cleanup_tree(&path, Duration::from_millis(10));
-                }
-            })
-            .ok()
-            .map(|_| sender)
-    });
-    if let Some(sender) = sender {
-        // Never block teardown behind a large old scratch tree.
-        let _ = sender.try_send(path);
-    }
-}
-
-fn cleanup_tree(root: &Path, delay: Duration) {
-    use rustix::fs::{AtFlags, Dir, Mode, OFlags, open, openat, unlinkat};
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let Ok(root_fd) = open(root, flags, Mode::empty()) else {
-        return;
-    };
-    let Ok(entries) = Dir::new(root_fd) else {
-        return;
-    };
-    // Operate relative to open directory handles. NOFOLLOW prevents even a
-    // concurrently swapped symlink from redirecting cleanup outside the tree.
-    // Dir streams entries; memory is bounded by depth, not total file count.
-    let mut stack = vec![(std::ffi::CString::default(), entries)];
-    while let Some((_, entries)) = stack.last_mut() {
-        match entries.next() {
-            Some(Ok(entry)) => {
-                let name = entry.file_name();
-                if name == c"." || name == c".." {
-                    continue;
-                }
-                if let Ok(fd) = entries.fd() {
-                    match openat(fd, name, flags, Mode::empty()) {
-                        Ok(child) => {
-                            if let Ok(children) = Dir::new(child) {
-                                stack.push((name.to_owned(), children));
-                            }
-                        }
-                        Err(_) => {
-                            let _ = unlinkat(fd, name, AtFlags::empty());
-                        }
-                    }
-                }
-            }
-            Some(Err(_)) => {}
-            None => {
-                if let Some((name, _)) = stack.pop() {
-                    if let Some((_, parent)) = stack.last() {
-                        if let Ok(fd) = parent.fd() {
-                            let _ = unlinkat(fd, name.as_c_str(), AtFlags::REMOVEDIR);
-                        }
-                    } else {
-                        let _ = fs::remove_dir(root);
-                    }
-                }
-            }
-        }
-        std::thread::sleep(delay);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,7 +506,7 @@ mod tests {
         fs::create_dir(scratch.path().join("nested")).unwrap();
         fs::write(scratch.path().join("nested/file"), "remove").unwrap();
         symlink(outside.path(), scratch.path().join("external")).unwrap();
-        cleanup_tree(scratch.path(), Duration::ZERO);
+        cleanup::remove_for_test(scratch.path()).unwrap();
         assert!(!scratch.path().exists());
         assert_eq!(fs::read_to_string(protected).unwrap(), "keep");
     }
