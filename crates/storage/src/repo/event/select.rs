@@ -28,7 +28,11 @@ pub(crate) struct Candidate {
 
 pub(crate) const UNCONVERTED_EXISTS_SQL: &str =
     "SELECT EXISTS (SELECT 1 FROM events WHERE subkind IS NULL)";
-pub(crate) const IDS_BY_KIND_SQL: &str = "SELECT id FROM events WHERE kind = ?1";
+/// Every row of a kind except the retired `ThreadTodoUpdated` rows: nothing decodes them
+/// any more, so they are not even fetched. Rows not converted yet (`subkind IS NULL`)
+/// stay, as their subkind is unknown.
+pub(crate) const IDS_BY_KIND_SQL: &str =
+    "SELECT id FROM events WHERE kind = ?1 AND subkind IS NOT 'ThreadTodoUpdated'";
 pub(crate) const IDS_BY_SUBKIND_SQL: &str =
     "SELECT id FROM events WHERE kind = ?1 AND subkind = ?2";
 pub(crate) const IDS_UNCONVERTED_BY_KIND_SQL: &str =
