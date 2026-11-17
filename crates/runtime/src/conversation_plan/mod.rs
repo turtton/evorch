@@ -5,8 +5,9 @@ pub(crate) mod notice;
 #[cfg(test)]
 mod tests;
 pub(crate) mod tools;
-/// Name of the retired todo tool. It is outside every catalog; a call to it from a
-/// saved history is answered with this fixed error and changes nothing.
+/// Name of the retired todo tool, outside every catalog.
+pub(crate) const RETIRED_TODO_TOOL: &str = "todo_write";
+/// Fixed answer to a call of the retired tool from a saved history; it changes nothing.
 pub(crate) const RETIRED_TODO_WRITE: &str = "`todo_write`は廃止されました。現在の計画には`plan_read`と`plan_update`を使用してください。旧Todoデータは引き継がれず、この呼出しによる変更はありません。";
 /// Shared eligibility predicate.
 pub(crate) fn conversation_root(state: &crate::agent_loop::LoopState) -> bool {

@@ -289,6 +289,29 @@ fn fresh_open_applies_latest_schema() {
 }
 
 #[test]
+fn v67_drops_the_retired_todo_column_from_lane_handoffs() {
+    // Given: a fresh database at the latest schema
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let path = database_path(&temp_dir);
+    Database::open(&config_for(&path)).expect("fresh database must open");
+
+    // Then: the handoff row no longer has a place for a todo list
+    let connection = Connection::open(path).expect("migrated database must reopen");
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('lane_handoffs')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!columns.is_empty());
+    assert!(
+        !columns.iter().any(|name| name == "todo_json"),
+        "{columns:?}"
+    );
+}
+
+#[test]
 fn reopening_latest_database_is_idempotent() {
     // Given: 最新版へ移行済みのデータベース
     let temp_dir = TempDir::new().expect("temporary directory must be created");

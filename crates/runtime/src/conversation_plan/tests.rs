@@ -1,5 +1,6 @@
 //! Exercise the actual private handlers without advertising them to the model.
 mod boundaries;
+mod switch;
 mod writer;
 use super::*;
 use crate::{AgentInvocationContext, AgentModel, AgentRunPhase, Role, RunConfig, RuntimeError};

@@ -784,7 +784,11 @@ impl LoopState {
                     self.finish_owner_error("validate", error);
                     return false;
                 }
-                let local = is_meta_op(&name)
+                // Outside every catalog, yet it must reach the fixed refusal below
+                // rather than an unknown-tool rejection.
+                let retired = name == crate::conversation_plan::RETIRED_TODO_TOOL;
+                let local = retired
+                    || is_meta_op(&name)
                     || matches!(
                         name.as_str(),
                         "task_claim" | "task_complete" | "finding_append"
@@ -803,6 +807,9 @@ impl LoopState {
                         }
                     })
                 };
+                if retired {
+                    permission = Ok(());
+                }
                 if name == tools::tools::run_js::NAME && !self.run_js_offered() {
                     permission = permission
                         .and_then(|()| Err("run_js is not enabled for this run".to_owned()));
@@ -1198,7 +1205,7 @@ impl LoopState {
                         self.team_tool(&name, input.clone()).await
                     } else if let Err(error) = self.guard_team_artifact(&name, &input) {
                         ToolResult::error(error)
-                    } else if name == "todo_write" {
+                    } else if name == crate::conversation_plan::RETIRED_TODO_TOOL {
                         ToolResult::error(crate::conversation_plan::RETIRED_TODO_WRITE)
                     } else if let Err(error) = self.policy.authorize(&name) {
                         ToolResult::error(error.to_string())
