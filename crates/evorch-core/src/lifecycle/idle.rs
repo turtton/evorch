@@ -1,4 +1,6 @@
 //! Composition tests await transport/runtime completion, never elapsed real time.
+mod adoption;
+
 use super::*;
 use std::{future::Future, pin::Pin, sync::Arc, task::Poll};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,6 +36,12 @@ impl runtime::SandboxFactory for Direct {
     }
 }
 async fn open(dir: &test_socket_dir::SplitDir) -> BootstrappedHost {
+    open_with_model(dir, Arc::new(Model::default())).await
+}
+async fn open_with_model(
+    dir: &test_socket_dir::SplitDir,
+    model: Arc<dyn runtime::AgentModel>,
+) -> BootstrappedHost {
     let mut host = BootstrappedHost::open_with_test_seams(
         BootstrapOptions {
             config_dir: dir.path().into(),
@@ -41,7 +49,7 @@ async fn open(dir: &test_socket_dir::SplitDir) -> BootstrappedHost {
             ownership_root: dir.sockets().into(),
         },
         TestSeams {
-            model: Arc::new(Model::default()),
+            model,
             sandbox: Arc::new(Direct),
         },
     )
