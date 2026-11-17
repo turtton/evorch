@@ -2094,8 +2094,6 @@ dependencies = [
 [[package]]
 name = "egui-winit"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98466000559d66ba4db786a30448b01483946add4188e7f10f522a27b4fb89cc"
 dependencies = [
  "accesskit_winit",
  "arboard",
@@ -3061,6 +3059,7 @@ version = "0.1.0"
 dependencies = [
  "agents",
  "alacritty_terminal",
+ "arboard",
  "ashpd",
  "async-trait",
  "base64 0.22.1",
@@ -3089,6 +3088,7 @@ dependencies = [
  "portable-pty",
  "providers",
  "pulldown-cmark",
+ "raw-window-handle",
  "recorder",
  "routing",
  "runtime",
@@ -3112,6 +3112,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "wayland-client",
  "wiremock",
  "workbench-client",
  "workbench-host",
@@ -6114,6 +6115,7 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -8526,6 +8528,7 @@ dependencies = [
  "routing",
  "runtime",
  "rusqlite",
+ "rustix 1.1.4",
  "sandbox",
  "secret-guard",
  "serde",

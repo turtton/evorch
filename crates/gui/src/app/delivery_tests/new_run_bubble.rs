@@ -87,7 +87,6 @@ fn receipt_for(
         provenance: storage::HostInputProvenance::User,
         prompt_id: state.history[0].id.clone(),
         text: "hello".into(),
-        image_count: 0,
         ..super::review::receipt(status)
     }
 }

@@ -123,15 +123,15 @@ pub fn composer_strip_within(
             if let Some(selected) = selectors::row(ui, sandbox, (model.role, model.role_locked), (picker, picker_state)) {
                 action = Some(selected);
             }
-            if model.images_needed > 0 {
+            if model.attachments_needed > 0 {
                 ui.label(egui::RichText::new(format!(
                     "Re-attach {}",
-                    if model.images_needed == 1 { "1 image".to_owned() } else { format!("{} images", model.images_needed) }
+                    if model.attachments_needed == 1 { "1 image".to_owned() } else { format!("{} images", model.attachments_needed) }
                 )).color(palette().WARNING_FG));
             }
             images::render(ui, model);
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
-                let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();
+                let can_send = model.attachments_ready() && (!model.input.trim().is_empty() || !model.attachments.is_empty());
                 let can_stop = (phase == Some(ThreadRunPhase::Running) && items.is_empty())
                     || (phase == Some(ThreadRunPhase::Stopped) && model.running_children > 0);
                 let queued_send = if can_stop && can_send && phase == Some(ThreadRunPhase::Running) {

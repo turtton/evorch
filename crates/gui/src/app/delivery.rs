@@ -171,7 +171,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 && ids.contains(&message.id)
             {
                 message.status = DeliveryStatus::Delivered;
-                self.queued_images.remove(&message.id);
+                self.queued_attachments.remove(&message.id);
                 changed = true;
             }
         }
@@ -203,10 +203,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             let was_delivered = message.status == DeliveryStatus::Delivered;
             let status = if let Some(receipt) = receipts.get(message.id.as_str()) {
-                if message.image_count != receipt.image_count as usize {
-                    message.image_count = receipt.image_count as usize;
-                    changed = true;
-                }
                 match receipt.status {
                     // A failed withdrawal proves adoption before the snapshot
                     // receipt commits. Accepted cannot revoke that observation.
@@ -373,7 +369,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .filter(|message| message.status == DeliveryStatus::Queued || message.awaits_user())
             .map(|message| message.id.as_str())
             .collect();
-        self.queued_images
+        self.queued_attachments
             .retain(|id, _| pending.contains(id.as_str()));
         self.follow_up_queues.clear();
         for message in &self.history {
@@ -394,11 +390,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub(super) fn refresh_draft_banner(&mut self) {
         let thread = self.sidebar.active_thread.as_ref().map(ToString::to_string);
-        self.composer.images_needed = self
+        self.composer.attachments_needed = self
             .composer_drafts
             .iter()
             .filter(|draft| Some(&draft.thread_id) == thread.as_ref())
-            .map(|draft| draft.images_needed)
+            .map(|draft| draft.attachments_needed)
             .sum::<usize>()
             .saturating_sub(self.composer.attachments.len());
     }
@@ -424,24 +420,42 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let history = self.history.clone();
         let drafts = self.composer_drafts.clone();
         let sidebar = self.sidebar.clone();
-        let images = if withdrawn {
-            self.queued_images.get(id).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let images = self
+            .queued_attachments
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter(|draft| {
+                !self
+                    .composer
+                    .attachments
+                    .iter()
+                    .chain(self.composer_attachments.values().flatten())
+                    .any(|held| held.file.draft_id == draft.file.draft_id)
+            })
+            .cloned()
+            .map(|mut draft| {
+                draft.reupload();
+                draft
+            })
+            .collect::<Vec<_>>();
         let message = &mut self.history[index];
         let draft_id = uuid::Uuid::new_v4().to_string();
         message.resolution = Some(Resolution::MovedToComposer {
             draft_id: draft_id.clone(),
         });
         let thread = message.thread_id.clone();
-        let text = message.text.clone();
+        let text = message
+            .editor_text
+            .as_ref()
+            .unwrap_or(&message.text)
+            .clone();
         self.composer_drafts.push(ComposerDraft {
             draft_id,
             thread_id: thread.clone(),
             text: text.clone(),
             origin: id.into(),
-            images_needed: message.image_count,
+            attachments_needed: message.attachment_count,
         });
         let active = self
             .sidebar
@@ -488,7 +502,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // recovered editor contents in memory even when saving its draft fails.
         }
         if withdrawn {
-            self.queued_images.remove(id);
+            self.queued_attachments.remove(id);
+        }
+        if !active
+            && !images.is_empty()
+            && let Some(record) = self
+                .sidebar
+                .threads
+                .iter()
+                .find(|record| record.id.to_string() == thread)
+        {
+            self.composer_attachments
+                .entry(record.id.clone())
+                .or_default()
+                .extend(images.clone());
         }
         if active {
             self.composer.attachments.extend(images);
@@ -514,7 +541,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             reason: reason.into(),
         };
         let thread = message.thread_id.clone();
-        let text = message.text.clone();
+        let text = message
+            .editor_text
+            .as_ref()
+            .unwrap_or(&message.text)
+            .clone();
         // Persist the refusal before resolving it. A save failure leaves the
         // queued identity intact for receipt reconciliation after recovery.
         if let Err(error) = self.persist_history() {

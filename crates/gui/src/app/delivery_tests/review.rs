@@ -33,7 +33,6 @@ pub(super) fn receipt(status: storage::HostInputStatus) -> storage::HostInputRec
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
         text: "retry this".into(),
-        image_count: 2,
         status,
         reason: None,
         accepted_at_ns: 1,
@@ -189,7 +188,7 @@ async fn restart_recovers_accepted_without_chataccepted_run_binding() {
     );
     restored.restore_queued_follow_up(0);
     assert_eq!(restored.composer.input, "retry this");
-    assert_eq!(restored.composer.images_needed, 2);
+    assert_eq!(restored.composer.attachments_needed, 2);
     assert_eq!(restored.composer_drafts.len(), 1);
 }
 

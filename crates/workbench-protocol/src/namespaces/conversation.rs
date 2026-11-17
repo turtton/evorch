@@ -6,7 +6,7 @@
 //! project settings.
 use crate::{
     commands::{
-        ContinueChat, ImageRef, ModelPreference, SendChat, SubmitGoal, ThreadTarget,
+        AttachmentRef, ContinueChat, ModelPreference, SendChat, SubmitGoal, ThreadTarget,
         WithdrawFollowUp,
     },
     handshake::{Capability, WireLimits},
@@ -18,7 +18,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 /// Base64 bound keeps a complete upload below the default 1 MiB frame.
-pub const MAX_IMAGE_BASE64_BYTES: usize = 512 * 1024;
+pub const ATTACHMENT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub const ATTACHMENT_CHUNK_BYTES: usize = 256 * 1024;
+pub const MAX_ATTACHMENT_CHUNK_BASE64_BYTES: usize = (256 * 1024_usize).div_ceil(3) * 4;
 pub const MAX_PROJECT_ROOT_BYTES: usize = 4096;
 
 /// Wire names of the namespace's commands.
@@ -27,7 +29,9 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "create_execution",
     "create_goal",
     "prepare_existing_thread",
-    "upload_image",
+    "begin_attachment",
+    "append_attachment",
+    "finish_attachment",
     "discard_attachment",
     "send_chat",
     "continue_chat",
@@ -63,13 +67,21 @@ pub enum ConversationCommand {
         project: ProjectId,
         thread: ThreadId,
     },
-    /// Bytes, never a local path. The returned id is scoped to project + thread
-    /// and this core epoch. Clients retain unsent bytes across epoch changes.
-    UploadImage {
+    BeginAttachment {
         project: ProjectId,
         thread: ThreadId,
-        mime_type: String,
-        data: String,
+        client_upload_id: String,
+        filename: String,
+        media_type_hint: String,
+        byte_length: u64,
+    },
+    AppendAttachment {
+        upload_id: AttachmentId,
+        offset: u64,
+        data_base64: String,
+    },
+    FinishAttachment {
+        upload_id: AttachmentId,
     },
     DiscardAttachment {
         attachment_id: AttachmentId,
@@ -93,7 +105,9 @@ impl ConversationCommand {
             | Self::CreateExecution(_)
             | Self::CreateGoal(_)
             | Self::PrepareExistingThread { .. }
-            | Self::UploadImage { .. }
+            | Self::BeginAttachment { .. }
+            | Self::AppendAttachment { .. }
+            | Self::FinishAttachment { .. }
             | Self::DiscardAttachment { .. } => Capability::Conversation,
             Self::SendChat(_) | Self::WithdrawFollowUp(_) => Capability::InputReceipts,
             Self::ContinueChat(_) | Self::CompactChat(_) | Self::DeliverFollowUpsNextTurn(_) => {
@@ -113,12 +127,36 @@ impl ConversationCommand {
                 .model_preference
                 .as_ref()
                 .map_or(Ok(()), ModelPreference::validate),
-            Self::UploadImage {
-                mime_type, data, ..
+            Self::BeginAttachment {
+                client_upload_id,
+                filename,
+                media_type_hint,
+                byte_length,
+                ..
             } => {
-                check_line("mime_type", mime_type, crate::limits::MAX_MIME_BYTES, false)?;
-                check_text("data", data, MAX_IMAGE_BASE64_BYTES, false)
+                check_line("client_upload_id", client_upload_id, 128, false)?;
+                check_line("filename", filename, 255, false)?;
+                check_line(
+                    "media_type_hint",
+                    media_type_hint,
+                    crate::limits::MAX_MIME_BYTES,
+                    true,
+                )?;
+                if *byte_length > 8 * 1024 * 1024 {
+                    return Err(ValidationError::OutOfRange {
+                        field: "byte_length",
+                        reason: "attachment exceeds 8 MiB",
+                    });
+                }
+                Ok(())
             }
+            Self::AppendAttachment { data_base64, .. } => check_text(
+                "data_base64",
+                data_base64,
+                MAX_ATTACHMENT_CHUNK_BASE64_BYTES,
+                true,
+            ),
+            Self::FinishAttachment { .. } => Ok(()),
             Self::PrepareExistingThread { .. }
             | Self::DiscardAttachment { .. }
             | Self::CompactChat(_)
@@ -126,6 +164,18 @@ impl ConversationCommand {
             | Self::WithdrawFollowUp(_) => Ok(()),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentLimits {
+    pub file_bytes: u64,
+    pub chunk_bytes: u64,
+    pub thread_pending_count: u32,
+    pub thread_pending_bytes: u64,
+    pub store_pending_count: u32,
+    pub store_pending_bytes: u64,
+    pub thread_sent_bytes: u64,
 }
 
 /// What a conversation command answers with, beyond the common receipt.
@@ -137,9 +187,20 @@ impl ConversationCommand {
     deny_unknown_fields
 )]
 pub enum ConversationResult {
-    ProjectResolved { project: ProjectId },
-    ExistingThreadPrepared { thread: ThreadId },
-    ImageUploaded(ImageRef),
+    ProjectResolved {
+        project: ProjectId,
+    },
+    ExistingThreadPrepared {
+        thread: ThreadId,
+    },
+    AttachmentBegun {
+        upload_id: AttachmentId,
+        limits: AttachmentLimits,
+    },
+    AttachmentAppended {
+        next_offset: u64,
+    },
+    AttachmentFinished(AttachmentRef),
     AttachmentDiscarded,
 }
 

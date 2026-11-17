@@ -113,7 +113,6 @@ async fn same_run_restore_reconciles_old_receipts_before_inserting_the_new_input
         run_id: run.to_string(),
         root_run_id: run.to_string(),
         text: "left behind".into(),
-        image_count: 0,
         status: storage::HostInputStatus::Accepted,
         reason: None,
         accepted_at_ns: 1,
@@ -266,10 +265,9 @@ async fn invalid_team_setup_seals_and_settles_every_accepted_input_before_error(
     // Current-thread execution has registered the inbox but not run the failing setup yet.
     fixture
         .runtime
-        .send_message_with_images(
+        .send_user_input(
             run,
             "racing follow-up".into(),
-            vec![],
             Some("setup-follow-up".into()),
         )
         .unwrap();

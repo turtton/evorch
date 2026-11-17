@@ -23,7 +23,6 @@ fn receipt(id: &str, run: &str, status: HostInputStatus) -> HostInputReceipt {
         run_id: run.into(),
         root_run_id: run.into(),
         text: format!("message {id}"),
-        image_count: 1,
         status,
         reason: None,
         accepted_at_ns: 10,

@@ -31,6 +31,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .sidebar
             .lane_family_revision(&thread_id)
             .map_err(|_| ThreadError::UnknownThread)?;
+        let key = self.sidebar.family_key(&thread_id)?;
+        let attachment_members = self
+            .sidebar
+            .family_members(&key)
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        let attachment_guard = self
+            .sink
+            .attachment_archive_guard(&attachment_members)
+            .map_err(WorkbenchError::SidebarBusy)?;
         let phases = self.phases.clone();
         let now = now_unix_seconds();
         // The same guards run again on the newest state: a family is archived from
@@ -38,7 +49,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // ignored, also outside the sidebar UI), and an idle root must not hide a
         // running descendant. Restoring a family is always safe.
         let change = self
-            .shared_sidebar_transact(|latest| {
+            .shared_sidebar_transact_host(|latest| {
                 let sidebar = &mut latest.sidebar;
                 super::lane_management::check_family_membership(
                     sidebar,
@@ -46,7 +57,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     &expected_family,
                 )?;
                 if !sidebar.threads.iter().any(|thread| thread.id == thread_id) {
-                    return Err(ThreadError::UnknownThread);
+                    return Err(ThreadError::UnknownThread.into());
                 }
                 let key = sidebar.family_key(&thread_id)?;
                 let family: BTreeSet<ThreadId> = sidebar.family_members(&key).into_iter().collect();
@@ -65,6 +76,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 {
                     return Ok(None);
                 }
+                // A stale restore must not remove files added after another
+                // process already restored this family.
+                if !archived
+                    && states.get(&thread_id).is_some_and(|state| state.archived)
+                    && let Some(guard) = &attachment_guard
+                {
+                    guard.remove()?;
+                }
                 sidebar.set_family_archived(&thread_id, archived, now)?;
                 Ok(Some(ArchiveChange { archived, family }))
             })
@@ -72,6 +91,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(ArchiveChange { archived, family }) = change else {
             return Ok(());
         };
+        self.forget_family_attachment_drafts(&family);
+        if archived && let Some(guard) = attachment_guard {
+            guard.remove().map_err(|e| {
+                WorkbenchError::SidebarBusy(format!("attachment removal incomplete; retry: {e}"))
+            })?;
+        }
         self.refresh_retention();
         if archived
             && self

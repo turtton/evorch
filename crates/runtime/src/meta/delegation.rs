@@ -11,8 +11,6 @@ use crate::{AgentRuntime, InterruptKind, RunConfig};
 pub(super) struct DelegateArgs {
     #[serde(default)]
     task: Option<crate::team::TaskSpec>,
-    #[serde(default)]
-    images: Vec<crate::run::DelegateImage>,
     target: DelegateTarget,
     prompt: String,
     #[serde(default)]
@@ -239,9 +237,6 @@ pub(crate) fn spawn_delegate(
         Ok(target) => target,
         Err(message) => return Err(error(message)),
     };
-    if !args.images.is_empty() && role != agents::Role::MultimodalLooker {
-        return Err(error("image payload requires MultimodalLooker"));
-    }
     let load_skills = match validate_load_skills(state, &args.load_skills) {
         Ok(load_skills) => load_skills,
         Err(message) => return Err(error(message)),
@@ -249,7 +244,6 @@ pub(crate) fn spawn_delegate(
     let config = RunConfig {
         team_task: args.task,
         interactive: args.interactive,
-        images: args.images,
         name: args.name,
         category,
         allowed_skill_roots: state.allowed_skill_roots(&load_skills),

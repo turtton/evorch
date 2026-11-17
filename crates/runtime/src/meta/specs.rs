@@ -28,12 +28,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
                     "properties": {"id": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}},
                     "required": ["id", "paths"], "additionalProperties": false
                 },
-                "images": {
-                    "type": "array", "description": "Image payloads; requires target.role=multimodal_looker (alias: multimodallooker).",
-                    "items": {"type": "object", "properties": {
-                        "media_type": {"type": "string"}, "data": {"type": "string", "description": "Base64-encoded image data."}
-                    }, "required": ["media_type", "data"], "additionalProperties": false}
-                }
+
             },
             "required": ["target", "prompt"],
             "additionalProperties": false
@@ -359,7 +354,7 @@ fn delegate_target_schema() -> Value {
             "web_researcher" => "Collect external source evidence.".to_owned(),
             "planner" => format!("Create a plan through read-only investigation and return it in the final response body. Cannot create/edit files, run shell commands or delegate. Omit category; {} belongs to reviewer.", CategoryId::PlanReview),
             "advisor" | "oracle" => "Read-only consultant for stepping back on a stuck decision. Pass the findings, fix history or collected evidence. It reads code and materials but runs nothing, compares design options or cause hypotheses, and returns options, trade-offs, recommendation, uncertainty, and information that would change the decision, including checks that discriminate hypotheses; when the crux is user intent, it returns a question for you to ask the user. Advice is not an acceptance verdict: use a separate context for the final independent Reviewer. oracle is a legacy alias for advisor.".to_owned(),
-            "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images, or image files named by path in the task (opened with read).".to_owned(),
+            "multimodal_looker" | "multimodallooker" => "Interpret image files named by absolute path in the task (open them with read).".to_owned(),
             "evaluator" => "Consult on agent behaviour or configuration (models, prompts, generation settings): inspect recorded threads, propose a cause and the roles to swap, and pin threads as evaluation samples. Pass the user's concern and any thread it refers to.".to_owned(),
             _ => unreachable!("registered delegate role"),
         };

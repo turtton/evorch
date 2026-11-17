@@ -156,7 +156,7 @@ fn the_desktop_door_gets_the_same_answer_after_a_restart() {
         submission_id: "sub-1".into(),
         project_root: Some(dir.path().to_path_buf()),
         composer_role: ComposerRole::Worker,
-        images: Vec::new(),
+        attachments: Vec::new(),
         thread_id: "thread-1".into(),
         text: text.into(),
         skills: Vec::new(),

@@ -12,6 +12,35 @@ mod performance;
 mod review;
 mod skills;
 
+#[test]
+fn withdrawn_attachment_restores_raw_editor_and_reuploads_retained_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sidebar.json");
+    let mut state = state(&path);
+    let raw = "keep this [Attached files (read-only; open with read or shell)] literal";
+    let completed = format!(
+        "{raw}\n\n[Attached files (read-only; open with read or shell)]\n\"/old/files/notes.txt\""
+    );
+    state.history[0].text = completed;
+    state.history[0].editor_text = Some(raw.into());
+    state.history[0].attachment_count = 1;
+    let attachment = crate::fixture::attachment_draft();
+    let old_id = attachment.file.draft_id.clone();
+    let bytes = attachment.file.bytes.clone();
+    state
+        .queued_attachments
+        .insert("old".into(), vec![attachment]);
+    assert!(state.move_withdrawn_to_composer("old"));
+    assert_eq!(state.composer.input, raw);
+    assert_eq!(state.composer.attachments[0].file.bytes, bytes);
+    assert_ne!(state.composer.attachments[0].file.draft_id, old_id);
+    assert!(state.composer.attachments[0].reference().is_none());
+    assert!(!state.composer.attachments_ready());
+    assert_eq!(state.composer.attachments_needed, 0);
+    assert!(state.history.is_empty());
+    assert_eq!(state.composer_drafts[0].text, raw);
+}
+
 #[derive(Default)]
 struct Receipts(Arc<Mutex<Vec<storage::HostInputReceipt>>>);
 impl CommandSink for Receipts {
@@ -51,9 +80,10 @@ pub(super) fn state(path: &std::path::Path) -> WorkbenchState<DemoSource> {
         thread_id: "thread".into(),
         text: "retry this".into(),
         skills: Vec::new(),
+        editor_text: None,
         origin_unverified: false,
         at: std::time::SystemTime::now(),
-        image_count: 2,
+        attachment_count: 2,
         resent_from: None,
         status: DeliveryStatus::Dropped,
         starts_run: false,
@@ -87,10 +117,10 @@ fn edit_is_durable_once_and_resend_saves_new_identity_before_dispatch() {
     state.restore_queued_follow_up(0); // double click cannot create a second draft
     assert_eq!(state.composer.input, "retry this");
     assert_eq!(state.composer_drafts.len(), 1);
-    assert_eq!(state.composer.images_needed, 2);
+    assert_eq!(state.composer.attachments_needed, 2);
     assert!(state.composer.queued.is_empty());
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["composer_drafts"][0]["images_needed"], 2);
+    assert_eq!(saved["composer_drafts"][0]["attachments_needed"], 2);
     let mut restored = state_for_reload(&path, state.sidebar.clone());
     let config = storage::StorageConfig {
         db_path: dir.path().join("test.db"),
@@ -99,7 +129,7 @@ fn edit_is_durable_once_and_resend_saves_new_identity_before_dispatch() {
     restored
         .restore_history(&storage::Database::open(&config).unwrap())
         .unwrap();
-    assert_eq!(restored.composer.images_needed, 2);
+    assert_eq!(restored.composer.attachments_needed, 2);
     assert_eq!(restored.composer.input, "retry this");
 
     state.submit_composer();
@@ -150,7 +180,6 @@ fn receipts_override_counts_and_resolved_originals_ignore_late_delivery() {
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
         text: "retry this".into(),
-        image_count: 2,
         status: storage::HostInputStatus::Unknown,
         reason: None,
         accepted_at_ns: 1,
@@ -206,7 +235,6 @@ fn startup_missing_receipt_is_rejected_and_terminal_accepted_is_unknown() {
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
         text: "retry this".into(),
-        image_count: 0,
         status: storage::HostInputStatus::Accepted,
         reason: None,
         accepted_at_ns: 1,
@@ -263,7 +291,6 @@ fn withdrawn_receipt_removes_history_on_recovery_without_a_tombstone() {
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
         text: "withdrawn".into(),
-        image_count: 0,
         status: storage::HostInputStatus::Withdrawn,
         reason: None,
         accepted_at_ns: 0,
@@ -335,7 +362,6 @@ fn already_consumed_input_cannot_be_deleted_or_duplicated_into_composer() {
             run_id: "run-1".into(),
             root_run_id: "run-1".into(),
             text: "retry this".into(),
-            image_count: 2,
             status: storage::HostInputStatus::Accepted,
             reason: None,
             accepted_at_ns: 0,

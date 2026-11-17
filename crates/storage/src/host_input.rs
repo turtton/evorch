@@ -48,7 +48,7 @@ impl HostInputStatus {
 
 /// A durable input receipt. For User provenance, `text` is kept verbatim so an
 /// undelivered submission can be edited again. Lane notifications carry no human
-/// text, images or approval evidence and survive host-input reconciliation.
+/// text or approval evidence and survive host-input reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostInputReceipt {
     pub provenance: HostInputProvenance,
@@ -56,7 +56,6 @@ pub struct HostInputReceipt {
     pub run_id: String,
     pub root_run_id: String,
     pub text: String,
-    pub image_count: u32,
     pub status: HostInputStatus,
     pub reason: Option<String>,
     pub accepted_at_ns: i64,
@@ -120,11 +119,10 @@ impl HostInputReceipt {
             && (notification_id.is_empty()
                 || destination_thread_id.is_empty()
                 || self.evidence_id.is_some()
-                || !self.text.is_empty()
-                || self.image_count != 0)
+                || !self.text.is_empty())
         {
             return Err(StorageError::Serialization(
-                "non-user receipt cannot carry human text, images or approval evidence".into(),
+                "non-user receipt cannot carry human text or approval evidence".into(),
             ));
         }
         for (field, text) in [

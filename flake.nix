@@ -116,6 +116,13 @@
               in
               path != benchmark && !(pkgs.lib.hasPrefix "${benchmark}/" path);
           };
+          # Registry crates (eframe) consume the public API of patched path
+          # dependencies. Crane must not replace these vendor crates with empty
+          # workspace stubs while compiling the registry dependencies.
+          extraDummyScript = ''
+            rm -rf "$out/vendor"
+            cp -r ${./vendor} "$out/vendor"
+          '';
           cargoCheckCommand = "true";
           # Trade a little cold-build CPU for smaller cached dependency downloads.
           zstdCompressionExtraArgs = "-9";

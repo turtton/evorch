@@ -38,7 +38,7 @@ pub struct ChatSubmission {
     #[serde(default)]
     pub composer_role: super::composer::ComposerRole,
     #[serde(default)]
-    pub images: Vec<runtime::DelegateImage>,
+    pub attachments: Vec<workbench_protocol::commands::AttachmentRef>,
     pub thread_id: String,
     /// What the user typed. The runtime expands `skills` into the prompt the
     /// agent sees; the words stay as typed everywhere else.
@@ -272,7 +272,34 @@ pub enum BtwStartError {
     Refused(runtime::btw::BtwError),
 }
 
+pub type AttachmentUploadReceiver =
+    std::sync::mpsc::Receiver<Result<workbench_protocol::commands::AttachmentRef, String>>;
+
 pub trait CommandSink: Send {
+    fn upload_attachment(
+        &self,
+        _project: &std::path::Path,
+        _thread: &str,
+        _file: crate::attachments::AttachmentFile,
+    ) -> Result<AttachmentUploadReceiver, String> {
+        Err("Attachment upload unavailable".into())
+    }
+    fn discard_attachment(
+        &self,
+        _project: &std::path::Path,
+        _thread: &str,
+        _attachment: &workbench_protocol::ids::AttachmentId,
+    ) {
+    }
+
+    /// Pin the family against concurrent attachment sends until archive removal completes.
+    fn attachment_archive_guard(
+        &self,
+        _threads: &[String],
+    ) -> Result<Option<runtime::attachments::AttachmentArchive>, String> {
+        Ok(None)
+    }
+
     /// Asks `question` of the thread's conversation context without touching the
     /// thread. The default has no context to ask.
     fn start_btw(&self, _thread: &str, _question: String) -> Result<BtwJob, BtwStartError> {
@@ -561,7 +588,7 @@ mod tests {
                 project_root: None,
                 fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Worker,
-                images: Vec::new(),
+                attachments: Vec::new(),
                 thread_id: thread_id.into(),
                 text: "hi".into(),
                 model_preference: None,

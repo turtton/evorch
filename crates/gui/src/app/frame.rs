@@ -12,6 +12,7 @@ use crate::model::transcript::TranscriptEntry;
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Process validated runtime events even when eframe skips painting a hidden window.
     pub fn logic(&mut self, ctx: &egui::Context) {
+        self.poll_attachments(ctx);
         self.drain_pump(ctx, true);
         self.persist_composer_draft();
         self.dispatch_system_notifications(ctx);

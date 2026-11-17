@@ -179,7 +179,6 @@ impl CommandService {
                 .unwrap_or(run_id);
             let mut authority = RunConfig {
                 ownership: permit.clone(),
-                images: submission.images.clone(),
                 model_preference: submission.model_preference.clone(),
                 ..initial.clone()
             };
@@ -290,7 +289,6 @@ impl CommandService {
                 conversation,
                 category: worker.then(|| CategoryId::Conversation.to_string()),
                 ownership: permit.clone(),
-                images: submission.images.clone(),
                 model_preference: submission.model_preference.clone(),
                 ..initial.clone()
             };
@@ -363,7 +361,6 @@ impl CommandService {
             RunConfig {
                 conversation: true,
                 category: worker.then(|| CategoryId::Conversation.to_string()),
-                images: submission.images,
                 ownership: permit,
                 interactive: true,
                 keep_alive: true,

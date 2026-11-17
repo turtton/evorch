@@ -34,10 +34,10 @@ pub enum ResumeWait {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DurableInput {
     pub id: String,
     pub text: String,
-    pub images: Vec<crate::DelegateImage>,
     pub trusted_user: bool,
 }
 

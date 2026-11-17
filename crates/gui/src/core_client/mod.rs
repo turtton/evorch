@@ -1,11 +1,13 @@
 //! Opt-in conversation-only desktop. This module does not open a database,
 //! construct a runtime, read a sidebar, or own an agent lifecycle.
+pub mod attachments;
 pub mod cache;
+use crate::attachments::{AttachmentFile, AttachmentIo, Intake};
+pub use attachments::ClientAttachmentDraft;
 pub mod connection;
 pub mod features;
 use features::{FeatureFrame, FeatureView, Navigation, Selection};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
 use connection::Action;
 use std::{
     collections::BTreeMap,
@@ -29,22 +31,13 @@ pub struct Draft {
     pub revision: u64,
 }
 
-#[derive(Clone)]
-pub struct ImageDraft {
-    pub id: uuid::Uuid,
-    /// Queued, in flight, or OutcomeUnknown: never reallocate until resolved.
-    pub uploading: bool,
-    pub mime: String,
-    pub data: String,
-    pub reference: Option<ImageRef>,
-}
-
 #[derive(Default)]
 pub struct Shared {
     pub cache: cache::Cache,
     pub drafts: BTreeMap<String, Draft>,
-    pub image_drafts: BTreeMap<String, Vec<ImageDraft>>,
+    pub attachment_drafts: BTreeMap<String, Vec<ClientAttachmentDraft>>,
     pub sending: std::collections::BTreeSet<String>,
+    pub loading_attachments: BTreeMap<String, usize>,
     pub outcome_unknown: std::collections::BTreeSet<String>,
     pub connected: bool,
     pub status: String,
@@ -56,16 +49,17 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn take_image_drafts(&mut self, thread: &str) -> Option<Vec<ImageDraft>> {
-        if !self.can_discard_images(thread) {
+    pub fn take_attachment_drafts(&mut self, thread: &str) -> Option<Vec<ClientAttachmentDraft>> {
+        if !self.can_discard_attachments(thread) {
             return None;
         }
-        self.image_drafts.remove(thread)
+        self.attachment_drafts.remove(thread)
     }
-    pub fn can_discard_images(&self, thread: &str) -> bool {
+    pub fn can_discard_attachments(&self, thread: &str) -> bool {
         !self.sending.contains(thread)
+            && self.loading_attachments.get(thread).copied().unwrap_or(0) == 0
             && !self
-                .image_drafts
+                .attachment_drafts
                 .get(thread)
                 .into_iter()
                 .flatten()
@@ -74,30 +68,30 @@ impl Shared {
 
     pub fn can_send(&self, thread: &str) -> bool {
         !self.sending.contains(thread)
+            && self.loading_attachments.get(thread).copied().unwrap_or(0) == 0
             && !self
-                .image_drafts
+                .attachment_drafts
                 .get(thread)
                 .into_iter()
                 .flatten()
                 .any(|i| i.reference.is_none() || i.uploading)
     }
 
-    fn image_draft(&mut self, thread: &str, mime: String, data: String) -> &mut ImageDraft {
-        let images = self.image_drafts.entry(thread.to_owned()).or_default();
-        let position = images
+    fn attachment_draft(
+        &mut self,
+        project: ProjectId,
+        thread: &str,
+        file: AttachmentFile,
+    ) -> &mut ClientAttachmentDraft {
+        let drafts = self.attachment_drafts.entry(thread.to_owned()).or_default();
+        let position = drafts
             .iter()
-            .position(|i| i.mime == mime && i.data == data)
+            .position(|draft| draft.id == file.draft_id)
             .unwrap_or_else(|| {
-                images.push(ImageDraft {
-                    id: uuid::Uuid::new_v4(),
-                    uploading: false,
-                    mime,
-                    data,
-                    reference: None,
-                });
-                images.len() - 1
+                drafts.push(ClientAttachmentDraft::new(project, file));
+                drafts.len() - 1
             });
-        &mut images[position]
+        &mut drafts[position]
     }
 
     /// A snapshot cut arrived (connect, reconnect or resync): replace the
@@ -121,9 +115,16 @@ impl Shared {
 
     /// Replace a disposable cut without discarding human input or uncertainty.
     pub fn replace_projection(&mut self, cache: cache::Cache) {
-        if self.cache.cursor().map(|c| c.core_epoch) != cache.cursor().map(|c| c.core_epoch) {
-            for image in self.image_drafts.values_mut().flatten() {
-                image.reference = None;
+        if self.cache.cursor().is_some()
+            && self.cache.cursor().map(|c| c.core_epoch) != cache.cursor().map(|c| c.core_epoch)
+        {
+            for image in self.attachment_drafts.values_mut().flatten() {
+                if !image.uncertain {
+                    image.reference = None;
+                    image.upload_id = None;
+                    image.next_offset = 0;
+                    image.uploading = false;
+                }
             }
         }
         self.cache = cache;
@@ -203,6 +204,8 @@ pub struct CoreClientScreen {
     project: Option<ProjectId>,
     answers: BTreeMap<String, String>,
     attachment_path: String,
+    attachment_io: AttachmentIo,
+    attachment_imports: BTreeMap<String, (ProjectId, ThreadId)>,
     composer_role: ComposerRole,
     team: bool,
 }
@@ -221,6 +224,8 @@ impl CoreClientScreen {
             project,
             answers: BTreeMap::new(),
             attachment_path: String::new(),
+            attachment_io: AttachmentIo::default(),
+            attachment_imports: BTreeMap::new(),
             composer_role: ComposerRole::Worker,
             team: false,
         }
@@ -229,6 +234,35 @@ impl CoreClientScreen {
     /// The page scrolls as a whole, so the conversation controls below a long feature column
     /// stay reachable.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let results = self.attachment_io.poll().collect::<Vec<_>>();
+        for result in results {
+            let Some((project, thread)) = self.attachment_imports.remove(&result.request_id) else {
+                continue;
+            };
+            let mut shared = self
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(count) = shared.loading_attachments.get_mut(thread.as_str()) {
+                *count = count.saturating_sub(1);
+            }
+            match result.files {
+                Ok(files) => {
+                    for file in files {
+                        enqueue(
+                            &self.actions,
+                            &mut shared,
+                            Action::Upload {
+                                project: project.clone(),
+                                thread: thread.clone(),
+                                file,
+                            },
+                        );
+                    }
+                }
+                Err(error) => shared.status = error,
+            }
+        }
         egui::ScrollArea::vertical()
             .id_salt("core-client-page")
             .auto_shrink([false, false])
@@ -299,12 +333,33 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
             shared.sending.insert(thread.clone());
         }
         Action::Upload {
-            thread, mime, data, ..
+            project,
+            thread,
+            file,
+            ..
         } => {
             if shared.sending.contains(thread.as_str()) {
                 return;
             }
-            let image = shared.image_draft(thread.as_str(), mime.clone(), data.clone());
+            let drafts = shared.attachment_drafts.get(thread.as_str());
+            let fresh =
+                drafts.is_none_or(|drafts| drafts.iter().all(|draft| draft.id != file.draft_id));
+            if file.bytes.len() > workbench_protocol::conversation::ATTACHMENT_FILE_BYTES as usize
+                || (fresh
+                    && drafts.is_some_and(|drafts| {
+                        drafts.len() >= 32
+                            || drafts
+                                .iter()
+                                .map(|draft| draft.file.bytes.len())
+                                .sum::<usize>()
+                                + file.bytes.len()
+                                > 64 * 1024 * 1024
+                    }))
+            {
+                shared.status = "添付の上限は 8 MiB/件、32件・64 MiB/thread です".into();
+                return;
+            }
+            let image = shared.attachment_draft(project.clone(), thread.as_str(), file.clone());
             if image.uploading || image.reference.is_some() {
                 return;
             }
@@ -326,9 +381,14 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
                 shared.sending.remove(&thread);
             }
             Action::Upload {
-                thread, mime, data, ..
+                project,
+                thread,
+                file,
+                ..
             } => {
-                shared.image_draft(thread.as_str(), mime, data).uploading = false;
+                shared
+                    .attachment_draft(project, thread.as_str(), file)
+                    .uploading = false;
             }
             _ => (),
         }
@@ -522,37 +582,44 @@ impl CoreClientScreen {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.composer_role, ComposerRole::Worker, "Worker");
                 ui.selectable_value(&mut self.composer_role, ComposerRole::Orchestrator, "Orchestrator");
-                ui.checkbox(&mut self.team, "チームへの objective（画像は非対応）");
+                ui.checkbox(&mut self.team, "チームへの objective（添付は非対応）");
             });
             let draft = shared.drafts.entry(thread.to_string()).or_default();
             if ui.text_edit_multiline(&mut draft.text).changed() { draft.revision += 1; }
             ui.horizontal(|ui| {
-                ui.label("画像（GUI で読み取り、bytes のみ送信）");
+                ui.label("添付ファイル（コアの管理ディレクトリへ保存）");
                 ui.text_edit_singleline(&mut self.attachment_path);
                 if ui.add_enabled(!shared.sending.contains(thread.as_str()), egui::Button::new("添付")).clicked() {
-                    match read_image(&self.attachment_path) {
-                        Ok((mime, data)) => enqueue(&self.actions, &mut shared, Action::Upload { project: project.clone(), thread: thread.clone(), mime, data }),
+                    match self.attachment_io.submit(thread.as_str(), Intake::Files(vec![PathBuf::from(&self.attachment_path)]), ui.ctx()) {
+                        Ok(request) => {
+                            *shared.loading_attachments.entry(thread.to_string()).or_default() += 1;
+                            self.attachment_imports.insert(request, (project.clone(), thread.clone()));
+                        }
                         Err(error) => shared.status = error,
                     }
                 }
             });
-            ui.label(format!("添付済み: {}", shared.image_drafts.get(thread.as_str()).map_or(0, |images| images.iter().filter(|i| i.reference.is_some()).count())));
-            if ui.add_enabled(shared.can_discard_images(thread.as_str()), egui::Button::new("画像を破棄")).clicked() {
-                for image in shared.take_image_drafts(thread.as_str()).into_iter().flatten().filter_map(|image| image.reference) {
-                    enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::DiscardAttachment { attachment_id: image.attachment_id }), draft: None });
+            for file in shared.attachment_drafts.get(thread.as_str()).into_iter().flatten() {
+                ui.label(format!("{} · {} bytes · {}", file.file.filename, file.file.bytes.len(), if file.reference.is_some() { "準備完了" } else if file.uploading { "アップロード中" } else { "再試行が必要" }));
+            }
+            if ui.add_enabled(shared.can_discard_attachments(thread.as_str()), egui::Button::new("添付を破棄")).clicked() {
+                for file in shared.take_attachment_drafts(thread.as_str()).into_iter().flatten() {
+                    if let Some(id) = file.upload_id {
+                        enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::DiscardAttachment { attachment_id: id }), draft: None });
+                    }
                 }
             }
-            let upload_pending = shared.image_drafts.get(thread.as_str()).is_some_and(|images| images.iter().any(|i| i.reference.is_none()));
-            if upload_pending && ui.button("未送信の画像を再検証").clicked() {
-                for image in shared.image_drafts.get(thread.as_str()).cloned().unwrap_or_default().into_iter().filter(|i| i.reference.is_none() && !i.uploading) {
-                    enqueue(&self.actions, &mut shared, Action::Upload { project: project.clone(), thread: thread.clone(), mime: image.mime, data: image.data });
+            let upload_pending = shared.attachment_drafts.get(thread.as_str()).is_some_and(|files| files.iter().any(|file| file.reference.is_none()));
+            if upload_pending && ui.button("未送信の添付を再試行").clicked() {
+                for draft in shared.attachment_drafts.get(thread.as_str()).cloned().unwrap_or_default().into_iter().filter(|file| file.reference.is_none() && !file.uploading && !file.uncertain) {
+                    enqueue(&self.actions, &mut shared, Action::Upload { project: project.clone(), thread: thread.clone(), file: draft.file });
                 }
             }
             if ui.add_enabled(shared.can_send(thread.as_str()), egui::Button::new("送信 / follow-up")).clicked() {
                 let draft = shared.drafts.get(thread.as_str()).unwrap();
                 let revision = draft.revision;
-                let chat = SendChat { project, thread: thread.clone(), submission_id: SubmissionId::new(uuid::Uuid::new_v4().to_string()).unwrap(), composer_role: self.composer_role, text: draft.text.clone(), skills: vec![], images: shared.image_drafts.get(thread.as_str()).into_iter().flatten().filter_map(|i| i.reference.clone()).collect(), model_preference: None, fork_seed: None };
-                if self.team && !chat.images.is_empty() { shared.status = "チーム objective への画像添付は Unsupported".into(); return; }
+                let chat = SendChat { project, thread: thread.clone(), submission_id: SubmissionId::new(uuid::Uuid::new_v4().to_string()).unwrap(), composer_role: self.composer_role, text: draft.text.clone(), skills: vec![], attachments: shared.attachment_drafts.get(thread.as_str()).into_iter().flatten().filter_map(|i| i.reference.as_ref().map(|reference| reference.id.clone())).collect(), model_preference: None, fork_seed: None };
+                if self.team && !chat.attachments.is_empty() { shared.status = "チーム objective への添付は Unsupported".into(); return; }
                 let command = if self.team {
                     let goal = SubmitGoal { project: chat.project.clone(), thread: thread.clone(), objective: chat.text.clone(), references: vec![], constraints: vec![], delegation: Some(Delegation::Team { value: chat.text }) };
                     if shared.cache.threads.contains_key(thread.as_str()) { Command::Execution(ExecutionCommand::SubmitGoal(goal)) } else { Command::Conversation(ConversationCommand::CreateGoal(goal)) }
@@ -563,20 +630,6 @@ impl CoreClientScreen {
     }
 }
 
-fn read_image(path: &str) -> Result<(String, String), String> {
-    use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    file.take(384 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > 384 * 1024 {
-        return Err("画像は 384 KiB 以下にしてください".into());
-    }
-    let format = image::guess_format(&bytes).map_err(|e| e.to_string())?;
-    Ok((format.to_mime_type().into(), STANDARD.encode(bytes)))
-}
-
 #[cfg(test)]
 mod upload_regressions {
     use super::*;
@@ -585,8 +638,10 @@ mod upload_regressions {
         Action::Upload {
             project: ProjectId::new("p").unwrap(),
             thread: ThreadId::new("t").unwrap(),
-            mime: "image/png".into(),
-            data: "local bytes".into(),
+            file: crate::attachments::AttachmentFile {
+                bytes: b"local bytes".to_vec(),
+                ..crate::fixture::attachment_draft().file
+            },
         }
     }
     fn send() -> Action {
@@ -603,7 +658,10 @@ mod upload_regressions {
         let mut state = Shared::default();
         enqueue(&tx, &mut state, upload());
         assert!(
-            state.image_drafts.get("t").is_some_and(|i| i.len() == 1),
+            state
+                .attachment_drafts
+                .get("t")
+                .is_some_and(|i| i.len() == 1),
             "enqueue must register the image synchronously"
         );
         enqueue(&tx, &mut state, send());
@@ -617,39 +675,28 @@ mod upload_regressions {
         tx.try_send(Action::Reconnect).ok().unwrap();
         let mut state = Shared::default();
         enqueue(&tx, &mut state, upload());
-        assert_eq!(state.image_drafts["t"][0].data, "local bytes");
-        assert!(state.image_drafts["t"][0].reference.is_none());
+        assert_eq!(state.attachment_drafts["t"][0].file.bytes, b"local bytes");
+        assert!(state.attachment_drafts["t"][0].reference.is_none());
     }
     #[tokio::test]
     async fn discard_while_upload_reply_is_held_keeps_draft() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let mut state = Shared::default();
         enqueue(&tx, &mut state, upload());
-        let Action::Upload { mime, data, .. } = rx.recv().await.unwrap() else {
+        let Action::Upload { .. } = rx.recv().await.unwrap() else {
             panic!()
         };
-        // Model the old actor registration before its network await. The reply
-        // cannot arrive until the test explicitly releases this oneshot.
-        state.image_drafts.entry("t".into()).or_insert_with(|| {
-            vec![ImageDraft {
-                id: uuid::Uuid::new_v4(),
-                uploading: true,
-                mime,
-                data,
-                reference: None,
-            }]
-        });
         let (release, held) = tokio::sync::oneshot::channel();
         let reply = tokio::spawn(async move {
             held.await.unwrap();
         });
         assert!(
-            state.take_image_drafts("t").is_none(),
+            state.take_attachment_drafts("t").is_none(),
             "discard must be refused until upload has a known outcome"
         );
         release.send(()).unwrap();
         reply.await.unwrap();
-        assert_eq!(state.image_drafts["t"].len(), 1);
+        assert_eq!(state.attachment_drafts["t"].len(), 1);
     }
 }
 

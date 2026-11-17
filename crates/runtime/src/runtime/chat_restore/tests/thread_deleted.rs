@@ -30,6 +30,17 @@ async fn every_entry_refuses_a_deleted_thread_or_run() {
     let phase = |run| runtime.inspect_agent(run).unwrap().phase;
     let before = phase(gone);
 
+    let attachment_root = runtime.attachment_root().unwrap();
+    assert!(runtime.attachment_read_directories("gone-thread").is_err());
+    assert!(
+        !attachment_root
+            .path()
+            .join(sandbox::attachments::AttachmentRoot::thread_name(
+                "gone-thread"
+            ))
+            .exists()
+    );
+
     // Binding a root.
     assert!(runtime.bind_thread_root("gone-thread", kept).is_err());
     assert!(runtime.bind_thread_root("other-thread", gone).is_err());

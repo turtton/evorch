@@ -141,7 +141,7 @@ async fn saved_command_reports_completion_or_failure_and_never_starts_an_agent_t
                     submission_id: "not-accepted".into(),
                     project_root: None,
                     composer_role: Default::default(),
-                    images: Vec::new(),
+                    attachments: Vec::new(),
                     thread_id: "thread".into(),
                     text: "keep this draft".into(),
                     model_preference: None,

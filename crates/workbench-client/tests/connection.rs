@@ -446,7 +446,7 @@ async fn an_oversized_request_is_refused_locally() {
         composer_role: ComposerRole::Worker,
         text: "x".repeat(10_000),
         skills: vec![],
-        images: vec![],
+        attachments: vec![],
         model_preference: None,
         fork_seed: None,
     }));

@@ -9,6 +9,9 @@ pub(super) struct UserMessage {
     pub id: String,
     pub thread_id: String,
     pub text: String,
+    /// Raw editor text, distinct from the host-completed attachment path block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_text: Option<String>,
     /// Skills the user attached with `@name`; the runtime adds their bodies to
     /// what the agent receives, and the bubble shows them as chips.
     #[serde(default)]
@@ -18,7 +21,7 @@ pub(super) struct UserMessage {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub origin_unverified: bool,
     #[serde(default)]
-    pub image_count: usize,
+    pub attachment_count: usize,
     #[serde(default)]
     pub resent_from: Option<String>,
     pub at: std::time::SystemTime,
@@ -118,7 +121,7 @@ pub(super) struct ComposerDraft {
     pub thread_id: String,
     pub text: String,
     pub origin: String,
-    pub images_needed: usize,
+    pub attachments_needed: usize,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

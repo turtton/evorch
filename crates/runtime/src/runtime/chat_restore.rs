@@ -114,7 +114,6 @@ impl AgentRuntime {
         after_stop: Option<ResumeFence>,
     ) -> Result<RunId, RuntimeError> {
         self.reset_auto_wakes(run_id);
-        authority.images.clear();
         authority.initial_thread_goal = None;
         self.continue_chat_fenced(run_id, ChatContinuation::Resume, authority, after_stop)
     }
@@ -154,7 +153,6 @@ impl AgentRuntime {
         continuation: ChatContinuation,
         mut authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
-        authority.images.clear();
         authority.initial_thread_goal = None;
         self.continue_chat(run_id, continuation, authority)
     }
@@ -317,14 +315,7 @@ impl AgentRuntime {
             // Read the skills before anything is recorded: a failure refuses the whole message.
             let host = self.expand_host_prompt(prompt.into(), mentions, project_root.as_deref())?;
             self.set_model_preference(run_id, authority.model_preference)?;
-            self.send_inbox_message(
-                run_id,
-                host,
-                authority.images,
-                true,
-                authority.initial_thread_goal,
-                prompt_id,
-            )?;
+            self.send_inbox_message(run_id, host, true, authority.initial_thread_goal, prompt_id)?;
             if operator_resume {
                 self.commit_chat_resume(
                     run_id,
@@ -407,7 +398,6 @@ impl AgentRuntime {
             prompt.map(|_| crate::quiesce::DurableInput {
                 id: prompt_id.clone().unwrap_or_else(|| "initial".into()),
                 text: sent.unwrap_or_default().into(),
-                images: authority.images.clone(),
                 trusted_user: true,
             }),
         )?;
@@ -467,16 +457,8 @@ impl AgentRuntime {
             // The in-memory continuation still appends it exactly once at start.
             // The history holds what the agent was sent, skills included.
             let mut history = restored.messages.clone();
-            let mut content = vec![providers::ContentBlock::Text { text: sent.into() }];
-            content.extend(
-                authority
-                    .images
-                    .iter()
-                    .map(|image| providers::ContentBlock::Image {
-                        media_type: image.media_type.clone(),
-                        data: image.data.clone(),
-                    }),
-            );
+            let content = vec![providers::ContentBlock::Text { text: sent.into() }];
+
             history.push(providers::Message {
                 role: providers::Role::User,
                 content,
@@ -495,7 +477,6 @@ impl AgentRuntime {
                     run_id: run_id.to_string(),
                     root_run_id: String::new(),
                     text: prompt.into(),
-                    image_count: u32::try_from(authority.images.len()).unwrap_or(u32::MAX),
                     status: storage::HostInputStatus::Delivered,
                     reason: None,
                     accepted_at_ns: now,
@@ -1050,7 +1031,6 @@ impl AgentRuntime {
                             run_id: run_id.to_string(),
                             root_run_id: review.root_run_id.clone(),
                             text: host.typed.clone(),
-                            image_count: u32::try_from(config.images.len()).unwrap_or(u32::MAX),
                             status: storage::HostInputStatus::Accepted,
                             reason: None,
                             accepted_at_ns: now,

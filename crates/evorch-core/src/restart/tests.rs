@@ -245,7 +245,7 @@ async fn sealed_ingress_rejects_before_new_thread_reservation_and_requires_expli
         composer_role: ComposerRole::Worker,
         text: "refused".into(),
         skills: vec![],
-        images: vec![],
+        attachments: vec![],
         model_preference: None,
         fork_seed: None,
     };

@@ -3,6 +3,7 @@
 mod actions;
 mod agent_browser;
 mod agent_features;
+mod attachments;
 mod attention;
 mod auto_grouping;
 pub mod auto_title;
@@ -121,7 +122,8 @@ impl WorkbenchError {
 pub struct WorkbenchApp<S>(pub WorkbenchState<S>);
 
 impl<S: AgentRunSource> eframe::App for WorkbenchApp<S> {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.0.attachment_work.io.configure_window(frame);
         self.0.logic(ctx);
     }
 
@@ -134,6 +136,7 @@ impl<S: AgentRunSource> eframe::App for WorkbenchApp<S> {
     }
 
     fn on_exit(&mut self) {
+        self.0.attachment_work.io.shutdown_clipboard();
         self.0.flush_composer_draft();
     }
 }

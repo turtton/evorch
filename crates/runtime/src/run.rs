@@ -206,7 +206,6 @@ pub struct RunConfig {
     /// Trusted runtime authority; not accepted by model-facing delegation tools.
     pub purpose: RunPurpose,
     pub ownership: Option<crate::ownership::OwnerPermit>,
-    pub images: Vec<DelegateImage>,
     /// Explicit model selection for this run; absent means normal routing.
     pub model_preference: Option<crate::ModelPreference>,
     /// ユーザー入力を待ち受ける対話モードか。既定は `false` (非対話)。
@@ -226,13 +225,6 @@ pub struct RunConfig {
     /// Project this run works in. Children always inherit their parent's;
     /// `None` binds a root run to the runtime's active project at registration.
     pub project_root: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DelegateImage {
-    pub media_type: String,
-    pub data: String,
 }
 
 /// AgentRun に割り当てられた workspace の検査用 DTO。

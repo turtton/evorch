@@ -191,7 +191,6 @@ async fn accepted_input_invalidates_the_current_ack_before_a_new_seal() {
             DurableInput {
                 id: "during-park".into(),
                 text: "new input".into(),
-                images: vec![],
                 trusted_user: true,
             },
         )

@@ -115,5 +115,6 @@ debug = true
 # Adds a hyperlink context-menu hook (CommonMarkViewer::link_menu_fn) used by
 # transcript and file-viewer links. Drop once the hook is released upstream.
 [patch.crates-io]
+egui-winit = { path = "vendor/egui-winit" }
 egui_commonmark = { path = "vendor/egui_commonmark" }
 egui_commonmark_backend = { path = "vendor/egui_commonmark_backend" }

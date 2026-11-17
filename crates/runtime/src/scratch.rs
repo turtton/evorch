@@ -135,6 +135,7 @@ impl std::error::Error for ScratchRemovalError {}
 #[derive(Debug)]
 pub struct ThreadScratch {
     root: ScratchRoot,
+    attachments: sandbox::attachments::AttachmentRoot,
     state: Mutex<State>,
 }
 
@@ -157,11 +158,13 @@ impl ThreadScratch {
     /// # Errors
     /// Propagates [`ScratchRoot::fixed`] failures.
     pub fn for_ownership_root(ownership_root: &Path) -> io::Result<Self> {
-        let canonical = ownership_root
-            .canonicalize()
-            .unwrap_or_else(|_| ownership_root.to_path_buf());
+        let canonical = ownership_root.canonicalize()?;
         let digest = hex_digest(canonical.as_os_str().as_bytes());
-        Ok(Self::new(ScratchRoot::fixed(&digest[..8], &digest)?))
+        let mut scratch = Self::new(ScratchRoot::fixed(&digest[..8], &digest)?);
+        // Attachments use the complete ownership identity, not the scratch
+        // parent's short hash (whose collision guard belongs only to scratch).
+        scratch.attachments = sandbox::attachments::AttachmentRoot::for_scope(&canonical);
+        Ok(scratch)
     }
 
     /// A private parent removed when this value drops, for runtimes without ownership.
@@ -179,6 +182,7 @@ impl ThreadScratch {
 
     fn new(root: ScratchRoot) -> Self {
         Self {
+            attachments: sandbox::attachments::AttachmentRoot::for_scope(root.parent()),
             root,
             state: Mutex::default(),
         }
@@ -186,6 +190,10 @@ impl ThreadScratch {
 
     pub fn parent(&self) -> &Path {
         self.root.parent()
+    }
+
+    pub(crate) fn attachment_root(&self) -> sandbox::attachments::AttachmentRoot {
+        self.attachments.clone()
     }
 
     /// The fixed directory of `thread_id`, whether or not it exists yet.
@@ -453,6 +461,37 @@ impl AgentRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_scope_refuses_missing_and_symlink_loop_ownership_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(ThreadScratch::for_ownership_root(&temp.path().join("missing")).is_err());
+        let loop_path = temp.path().join("loop");
+        std::os::unix::fs::symlink(&loop_path, &loop_path).unwrap();
+        assert!(ThreadScratch::for_ownership_root(&loop_path).is_err());
+    }
+
+    #[test]
+    fn attachment_scope_is_the_full_canonical_ownership_root() {
+        let ownership = tempfile::tempdir().unwrap();
+        let alias = ownership.path().join(".");
+        let scratch = ThreadScratch::for_ownership_root(&alias).unwrap();
+        let expected = sandbox::attachments::AttachmentRoot::for_scope(
+            &ownership.path().canonicalize().unwrap(),
+        );
+        assert_eq!(scratch.attachment_root().path(), expected.path());
+        assert_eq!(
+            ThreadScratch::for_ownership_root(ownership.path())
+                .unwrap()
+                .attachment_root()
+                .path(),
+            expected.path()
+        );
+        assert_ne!(
+            scratch.attachment_root().path(),
+            sandbox::attachments::AttachmentRoot::for_scope(scratch.parent()).path()
+        );
+    }
 
     // Given: thread ids and unbound runs / When: deriving directories / Then: they depend
     // only on the parent and the key, are distinct, and hostile ids stay one component

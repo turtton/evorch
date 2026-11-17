@@ -16,23 +16,14 @@ use workbench_protocol::{
     queries::CommandReceiptState,
 };
 
-fn image() -> String {
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-        1,
-        1,
-        image::Rgba([0, 0, 0, 255]),
-    ))
-    .write_to(&mut bytes, image::ImageFormat::Png)
-    .unwrap();
-    STANDARD.encode(bytes.into_inner())
-}
-fn upload(data: String, mime_type: &str) -> Command {
-    Command::Conversation(Conversation::UploadImage {
+fn begin(filename: &str, byte_length: u64) -> Command {
+    Command::Conversation(Conversation::BeginAttachment {
         project: project(),
         thread: thread("thread-1"),
-        data,
-        mime_type: mime_type.into(),
+        client_upload_id: uuid::Uuid::new_v4().to_string(),
+        filename: filename.into(),
+        media_type_hint: "application/octet-stream".into(),
+        byte_length,
     })
 }
 
@@ -65,17 +56,13 @@ fn resolve_known_project_without_inventing_trust_or_registering_paths() {
 }
 
 #[test]
-fn validated_images_are_scoped_and_commands_are_correlatable_by_receipt() {
+fn generic_attachments_are_scoped_and_commands_are_correlatable_by_receipt() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut host = host_with_project(&rt, runtime(), dir.path());
-    for (data, mime) in [
-        (String::from("/etc/passwd"), "image/png"),
-        (STANDARD.encode("not an image"), "image/png"),
-        (image(), "image/jpeg"),
-    ] {
+    for filename in ["../bad", "bad\nname", ""] {
         assert_eq!(
-            host.handle_command(upload(data, mime), web())
+            host.handle_command(begin(filename, 1), web())
                 .unwrap_err()
                 .code,
             ErrorCode::InvalidRequest
@@ -84,22 +71,35 @@ fn validated_images_are_scoped_and_commands_are_correlatable_by_receipt() {
     let session = SessionId::new("desktop-session").unwrap();
     let request = RequestId::new("upload-1").unwrap();
     let reply = host
-        .handle_request(
-            &session,
-            &request,
-            upload(image(), "image/png"),
-            local_desktop(),
-        )
+        .handle_request(&session, &request, begin("opaque.bin", 5), local_desktop())
         .unwrap();
     assert!(matches!(
         host.command_receipt(&session, &request).unwrap().state,
         CommandReceiptState::Applied { .. }
     ));
-    let ConversationResult::ImageUploaded(reference) = conversation_result(reply) else {
+    let ConversationResult::AttachmentBegun { upload_id, .. } = conversation_result(reply) else {
+        panic!()
+    };
+    host.handle_command(
+        Command::Conversation(Conversation::AppendAttachment {
+            upload_id: upload_id.clone(),
+            offset: 0,
+            data_base64: STANDARD.encode(b"hello"),
+        }),
+        web(),
+    )
+    .unwrap();
+    let reply = host
+        .handle_command(
+            Command::Conversation(Conversation::FinishAttachment { upload_id }),
+            web(),
+        )
+        .unwrap();
+    let ConversationResult::AttachmentFinished(reference) = conversation_result(reply) else {
         panic!()
     };
     let mut chat = send("thread-1", "image-input", "");
-    chat.images.push(reference.clone());
+    chat.attachments.push(reference.id.clone());
     let mut other = chat.clone();
     other.thread = thread("thread-2");
     assert_eq!(
@@ -109,7 +109,7 @@ fn validated_images_are_scoped_and_commands_are_correlatable_by_receipt() {
         )
         .unwrap_err()
         .code,
-        ErrorCode::PermissionDenied
+        ErrorCode::NotFound
     );
     let first = host
         .handle_command(
@@ -131,7 +131,7 @@ fn validated_images_are_scoped_and_commands_are_correlatable_by_receipt() {
     );
     host.handle_command(
         Command::Conversation(Conversation::DiscardAttachment {
-            attachment_id: reference.attachment_id,
+            attachment_id: reference.id,
         }),
         web(),
     )

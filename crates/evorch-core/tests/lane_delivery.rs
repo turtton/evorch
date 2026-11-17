@@ -176,7 +176,7 @@ impl Core {
                     composer_role: ComposerRole::Orchestrator,
                     text: "coordinate".into(),
                     skills: Vec::new(),
-                    images: Vec::new(),
+                    attachments: Vec::new(),
                     model_preference: None,
                     fork_seed: None,
                 },

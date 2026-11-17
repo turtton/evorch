@@ -25,6 +25,7 @@ use workbench_protocol::{
 
 use super::{
     Shared,
+    attachments::ExpectedUploadReply,
     cache::Cache,
     features::{FeatureAction, FeatureError, FeatureId, FeatureReply, FeatureRequest, HeldReply},
 };
@@ -40,8 +41,7 @@ pub enum Action {
     Upload {
         project: ProjectId,
         thread: ThreadId,
-        mime: String,
-        data: String,
+        file: crate::attachments::AttachmentFile,
     },
     /// A request of a feature (`features/`): typed, tagged, answered through
     /// `Shared::features`. The feature gets no connection of its own.
@@ -65,8 +65,15 @@ fn update(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, f: impl FnOnce(&mut 
 #[derive(Clone)]
 enum Pending {
     Command(Option<(String, u64)>),
-    Upload { thread: String, id: uuid::Uuid },
-    Feature { feature: FeatureId, tag: u64 },
+    Upload {
+        thread: String,
+        id: String,
+        expected: ExpectedUploadReply,
+    },
+    Feature {
+        feature: FeatureId,
+        tag: u64,
+    },
 }
 
 impl Pending {
@@ -84,15 +91,16 @@ impl Pending {
             Self::Command(Some((thread, _))) => {
                 state.sending.remove(thread);
             }
-            Self::Upload { thread, id } => {
+            Self::Upload { thread, id, .. } => {
                 if let Some(image) = state
-                    .image_drafts
+                    .attachment_drafts
                     .get_mut(thread)
                     .into_iter()
                     .flatten()
                     .find(|i| i.id == *id)
                 {
                     image.uploading = false;
+                    image.uncertain = false;
                 }
             }
             _ => (),
@@ -245,7 +253,12 @@ pub async fn serve(
                 }
             }
             loop {
+                let upload = next_upload(&shared, &uncertain);
                 tokio::select! {
+                    () = std::future::ready(()), if upload.is_some() => {
+                        let (command, pending) = upload.expect("upload branch enabled");
+                        send_command(&client, &shared, &ctx, &mut uncertain, command, pending).await;
+                    }
                     event = stream.next() => {
                         let Some(event) = event else { break };
                         let mut valid = false;
@@ -307,30 +320,11 @@ pub async fn serve(
                                     }
                                 }
                             }
-                            Action::Upload { project, thread, mime, data } => {
-                                let mut id = None;
+                            Action::Upload { project, thread, file } => {
                                 update(&shared, &ctx, |s| {
-                                    let image = s.image_draft(thread.as_str(), mime.clone(), data.clone());
-                                    if image.reference.is_none() {
-                                        image.uploading = true;
-                                        id = Some(image.id);
-                                    }
+                                    let draft = s.attachment_draft(project, thread.as_str(), file);
+                                    if draft.reference.is_none() && !draft.uncertain { draft.uploading = true; }
                                 });
-                                let Some(id) = id else { continue; };
-                                let pending = Pending::Upload { thread: thread.to_string(), id };
-                                match client.command(Command::Conversation(ConversationCommand::UploadImage {
-                                    project, thread, mime_type: mime, data,
-                                })).await {
-                                    Ok(reply) => accepted(&client, &shared, &ctx, reply, pending).await,
-                                    Err(ClientError::Transport(TransportError::OutcomeUnknown { request_id })) => {
-                                        uncertain.push((request_id.clone(), pending));
-                                        update(&shared, &ctx, |s| {
-                                            s.outcome_unknown.insert(request_id.to_string());
-                                            s.status = format!("OutcomeUnknown: {request_id}。画像は再割当てせず receipt を照合します。");
-                                        });
-                                    }
-                                    Err(e) => update(&shared, &ctx, |s| { pending.rejected(s, &e.to_string()); s.status = e.to_string(); }),
-                                }
                             }
                             Action::Reconnect | Action::Shutdown => unreachable!(),
                         }
@@ -437,6 +431,16 @@ async fn send_command(
             uncertain.push((request_id.clone(), pending.clone()));
             update(shared, ctx, |s| {
                 s.outcome_unknown.insert(request_id.to_string());
+                if let Pending::Upload { thread, id, .. } = &pending
+                    && let Some(draft) = s
+                        .attachment_drafts
+                        .get_mut(thread)
+                        .into_iter()
+                        .flatten()
+                        .find(|draft| &draft.id == id)
+                {
+                    draft.uncertain = true;
+                }
                 s.status = format!("OutcomeUnknown: {request_id}。再接続後 receipt を照合します。");
                 if let Pending::Feature { feature, tag } = &pending {
                     s.features.reply(
@@ -460,16 +464,16 @@ async fn discard_unused(client: &WorkbenchClient, shared: &Arc<Mutex<Shared>>) {
     let images: Vec<_> = shared
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .image_drafts
+        .attachment_drafts
         .values()
         .flatten()
-        .filter_map(|image| image.reference.clone())
+        .filter_map(|file| file.upload_id.clone())
         .collect();
     for image in images {
         let _ = client
             .command(Command::Conversation(
                 ConversationCommand::DiscardAttachment {
-                    attachment_id: image.attachment_id,
+                    attachment_id: image,
                 },
             ))
             .await;
@@ -485,6 +489,7 @@ async fn accepted(
 ) {
     let mut discarded = Vec::new();
     update(shared, ctx, |s| {
+        let mut reply_error = None;
         let draft = match pending {
             Pending::Command(draft) => draft,
             Pending::Feature { feature, tag } => {
@@ -492,23 +497,49 @@ async fn accepted(
                     .reply(feature, tag, FeatureReply::Command(Ok(reply.clone())));
                 None
             }
-            Pending::Upload { thread, id } => {
+            Pending::Upload {
+                thread,
+                id,
+                expected,
+            } => {
                 if let Some(workbench_protocol::commands::CommandResult::Conversation(result)) =
                     reply.result.as_deref()
-                    && let ConversationResult::ImageUploaded(reference) = result
                 {
-                    if let Some(image) = s
-                        .image_drafts
+                    if let Some(file) = s
+                        .attachment_drafts
                         .get_mut(&thread)
                         .into_iter()
                         .flatten()
-                        .find(|i| i.id == id)
+                        .find(|file| file.id == id)
                     {
-                        image.reference = Some(reference.clone());
-                        image.uploading = false;
+                        if let Err(error) = file.acknowledge(expected, result) {
+                            file.uploading = false;
+                            file.uncertain = false;
+                            reply_error = Some(error);
+                        }
                     } else {
-                        discarded.push(reference.clone());
+                        match result {
+                            ConversationResult::AttachmentBegun { upload_id, .. } => {
+                                discarded.push(upload_id.clone())
+                            }
+                            ConversationResult::AttachmentFinished(reference) => {
+                                discarded.push(reference.id.clone())
+                            }
+                            _ => {}
+                        }
                     }
+                } else {
+                    if let Some(file) = s
+                        .attachment_drafts
+                        .get_mut(&thread)
+                        .into_iter()
+                        .flatten()
+                        .find(|file| file.id == id)
+                    {
+                        file.uploading = false;
+                        file.uncertain = false;
+                    }
+                    reply_error = Some("Attachment command returned no upload result".into());
                 }
                 None
             }
@@ -516,11 +547,11 @@ async fn accepted(
         if let Some((thread, _)) = &draft {
             s.sending.remove(thread);
             discarded.extend(
-                s.image_drafts
+                s.attachment_drafts
                     .remove(thread)
                     .into_iter()
                     .flatten()
-                    .filter_map(|image| image.reference),
+                    .filter_map(|file| file.upload_id),
             );
         }
         if let Some((thread, revision)) = draft
@@ -530,18 +561,41 @@ async fn accepted(
             draft.text.clear();
             draft.revision += 1;
         }
-        s.status = format!("受付済み: {:?}", reply.disposition);
+        s.status = reply_error.unwrap_or_else(|| format!("受付済み: {:?}", reply.disposition));
     });
-    for image in discarded {
-        // Resource cleanup only: a lost discard reply never replays human input.
+    for id in discarded {
+        // Discard never deletes committed files or replays user input.
         let _ = client
             .command(Command::Conversation(
-                ConversationCommand::DiscardAttachment {
-                    attachment_id: image.attachment_id,
-                },
+                ConversationCommand::DiscardAttachment { attachment_id: id },
             ))
             .await;
     }
+}
+
+fn next_upload(
+    shared: &Arc<Mutex<Shared>>,
+    uncertain: &[(RequestId, Pending)],
+) -> Option<(Command, Pending)> {
+    let state = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (thread, drafts) in &state.attachment_drafts {
+        for draft in drafts {
+            if uncertain.iter().any(|(_, pending)| matches!(pending, Pending::Upload { thread: pending_thread, id, .. } if pending_thread == thread && id == &draft.id)) { continue; }
+            if let Some((command, expected)) = draft.next_command(thread) {
+                return Some((
+                    command,
+                    Pending::Upload {
+                        thread: thread.clone(),
+                        id: draft.id.clone(),
+                        expected,
+                    },
+                ));
+            }
+        }
+    }
+    None
 }
 
 async fn wait_reconnect(
@@ -565,9 +619,12 @@ async fn wait_reconnect(
                     s.sending.remove(&thread);
                 }
                 Action::Upload {
-                    thread, mime, data, ..
+                    project,
+                    thread,
+                    file,
+                    ..
                 } => {
-                    s.image_draft(thread.as_str(), mime, data).uploading = false;
+                    s.attachment_draft(project, thread.as_str(), file).uploading = false;
                 }
                 Action::Feature(action) => s.features.refuse(&action, "disconnected"),
                 _ => (),
@@ -639,8 +696,10 @@ mod tests {
         tx.send(Action::Upload {
             project: ProjectId::new("p").unwrap(),
             thread: ThreadId::new("t").unwrap(),
-            mime: "image/png".into(),
-            data: "retained local bytes".into(),
+            file: crate::attachments::AttachmentFile {
+                bytes: b"retained local bytes".to_vec(),
+                ..crate::fixture::attachment_draft().file
+            },
         })
         .await
         .unwrap();
@@ -649,8 +708,11 @@ mod tests {
         let state = shared.lock().unwrap();
         assert_eq!(state.drafts["t"].text, "not written");
         assert!(!state.sending.contains("t"));
-        assert_eq!(state.image_drafts["t"][0].data, "retained local bytes");
-        assert!(state.image_drafts["t"][0].reference.is_none());
+        assert_eq!(
+            state.attachment_drafts["t"][0].file.bytes,
+            b"retained local bytes"
+        );
+        assert!(state.attachment_drafts["t"][0].reference.is_none());
     }
 
     /// Remembers what the features were told, in order.

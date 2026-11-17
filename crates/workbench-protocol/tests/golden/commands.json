@@ -11,6 +11,31 @@
     },
     "type": "approvals"
   },
+  "conversation/append_attachment": {
+    "payload": {
+      "payload": {
+        "data_base64": "AA==",
+        "offset": 0,
+        "upload_id": "att-1"
+      },
+      "type": "append_attachment"
+    },
+    "type": "conversation"
+  },
+  "conversation/begin_attachment": {
+    "payload": {
+      "payload": {
+        "byte_length": 1,
+        "client_upload_id": "draft-1",
+        "filename": "picture.png",
+        "media_type_hint": "image/png",
+        "project": "proj-1",
+        "thread": "thr-1"
+      },
+      "type": "begin_attachment"
+    },
+    "type": "conversation"
+  },
   "conversation/compact_chat": {
     "payload": {
       "payload": {
@@ -34,17 +59,14 @@
   "conversation/create_execution": {
     "payload": {
       "payload": {
+        "attachments": [
+          "att-1"
+        ],
         "composer_role": "orchestrator",
         "fork_seed": {
           "context_len": "9007199254740993",
           "source_run_id": "run-0"
         },
-        "images": [
-          {
-            "attachment_id": "att-1",
-            "mime_type": "image/png"
-          }
-        ],
         "model_preference": {
           "model": "gpt",
           "profile": "default",
@@ -99,6 +121,15 @@
     },
     "type": "conversation"
   },
+  "conversation/finish_attachment": {
+    "payload": {
+      "payload": {
+        "upload_id": "att-1"
+      },
+      "type": "finish_attachment"
+    },
+    "type": "conversation"
+  },
   "conversation/prepare_existing_thread": {
     "payload": {
       "payload": {
@@ -121,17 +152,14 @@
   "conversation/send_chat": {
     "payload": {
       "payload": {
+        "attachments": [
+          "att-1"
+        ],
         "composer_role": "orchestrator",
         "fork_seed": {
           "context_len": "9007199254740993",
           "source_run_id": "run-0"
         },
-        "images": [
-          {
-            "attachment_id": "att-1",
-            "mime_type": "image/png"
-          }
-        ],
         "model_preference": {
           "model": "gpt",
           "profile": "default",
@@ -146,18 +174,6 @@
         "thread": "thr-1"
       },
       "type": "send_chat"
-    },
-    "type": "conversation"
-  },
-  "conversation/upload_image": {
-    "payload": {
-      "payload": {
-        "data": "AA==",
-        "mime_type": "image/png",
-        "project": "proj-1",
-        "thread": "thr-1"
-      },
-      "type": "upload_image"
     },
     "type": "conversation"
   },

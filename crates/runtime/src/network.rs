@@ -27,6 +27,9 @@ pub(crate) fn sandbox_boundary(mounts: &WorkspaceMounts) -> Result<SandboxBounda
         detail: format!("一時ツール出力ディレクトリを作成できません: {error}"),
     })?;
     let mut boundary = SandboxBoundary::new(mounts.workspace_root.clone()).read_only(outputs);
+    for directory in &mounts.attachment_directories {
+        boundary = boundary.with_thread_read_directory(directory.clone());
+    }
     for path in &mounts.ro_binds {
         boundary = if let Some(identity) = mounts
             .thread_ro_identities
@@ -164,6 +167,7 @@ mod tests {
             workspace_root: PathBuf::from("/project"),
             ro_binds: vec![PathBuf::from("/opt/reference")],
             thread_ro_identities: Vec::new(),
+            attachment_directories: Vec::new(),
             rw_binds: vec![PathBuf::from("/opt/shared")],
             scratch: Some(PathBuf::from("/var/tmp/evo-test/thread-1")),
             allowed: Some(sandbox::AllowedRegions {

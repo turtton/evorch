@@ -25,6 +25,55 @@ fn store() -> (tempfile::TempDir, ArtifactStore) {
 }
 
 #[test]
+fn attachment_capture_uses_the_run_start_identity_and_is_read_only() {
+    use std::io::Write;
+    let (_store_dir, store) = store();
+    let workspace = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let root = sandbox::attachments::AttachmentRoot::at(temp.path().join("attachments"));
+    let files = root.files("thread").unwrap();
+    files
+        .file(
+            "picture.png",
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
+        )
+        .unwrap()
+        .write_all(PNG)
+        .unwrap();
+    let identities = [files.read_identity().unwrap()];
+    let path = files.path().join("picture.png");
+    assert!(
+        store
+            .capture_with_attachments(
+                workspace.path(),
+                None,
+                &identities,
+                &path,
+                request("attachment")
+            )
+            .is_ok()
+    );
+    let roots = SourceRoots::new(workspace.path(), None)
+        .unwrap()
+        .with_attachments(&identities)
+        .unwrap();
+    assert!(roots.destination(&path).is_err());
+    std::fs::rename(files.path(), files.path().with_file_name("old-files")).unwrap();
+    root.files("thread").unwrap();
+    assert!(
+        store
+            .capture_with_attachments(
+                workspace.path(),
+                None,
+                &identities,
+                &path,
+                request("replaced")
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn capture_keeps_the_content_seen_at_capture_time() {
     let (_store_dir, store) = store();
     let workspace = tempfile::tempdir().unwrap();

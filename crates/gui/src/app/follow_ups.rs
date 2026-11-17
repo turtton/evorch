@@ -128,7 +128,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.move_withdrawn_to_composer(&id);
                 } else {
                     self.history.retain(|message| message.id != id);
-                    self.queued_images.remove(&id);
+                    self.queued_attachments.remove(&id);
                     if let Err(error) = self.persist_history() {
                         self.push_notice(format!("Could not save deletion: {error}"));
                     }

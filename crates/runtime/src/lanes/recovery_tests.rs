@@ -232,7 +232,6 @@ async fn deleting_a_manifest_keeps_its_orphan_lane_recoverable() {
     intent.initial_input = Some(crate::quiesce::DurableInput {
         id: "orphan".into(),
         text: "recover".into(),
-        images: vec![],
         trusted_user: true,
     });
     db.execute(

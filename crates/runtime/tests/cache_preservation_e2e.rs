@@ -46,8 +46,8 @@ use mock_openai::cache_contract::{
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use routing::MapEnv;
 use runtime::{
-    AgentRuntime, DelegateImage, ModelSource, Role, RunConfig, RunId, RuntimeComposition,
-    SystemPromptCatalog, compose_runtime,
+    AgentRuntime, ModelSource, Role, RunConfig, RunId, RuntimeComposition, SystemPromptCatalog,
+    compose_runtime,
 };
 use sandbox::credential::FileCredentialStore;
 use serde_json::{Value, json};
@@ -81,6 +81,60 @@ impl Tool for BulkRead {
     }
 }
 
+// A real core-managed attachment, not a fabricated path or an inline image.
+struct CacheAttachment {
+    root: sandbox::attachments::AttachmentRoot,
+    thread: String,
+    path: std::path::PathBuf,
+}
+impl CacheAttachment {
+    fn new(runtime: &AgentRuntime, thread: &str) -> Self {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let root = runtime.attachment_root().unwrap();
+        let files = root.files(thread).unwrap();
+        let path = files.path().join("cache-contract.txt");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap()
+            .write_all(b"persistent attachment cache fixture")
+            .unwrap();
+        Self {
+            root,
+            thread: thread.into(),
+            path,
+        }
+    }
+    fn prompt(&self, text: &str) -> String {
+        format!(
+            "{text}\n\n[Attached files (read-only; open with read or shell)]\n{}",
+            serde_json::to_string(&self.path).unwrap()
+        )
+    }
+    async fn assert_readable(&self, runtime: &AgentRuntime) {
+        let directories = runtime.attachment_read_directories(&self.thread).unwrap();
+        assert!(
+            directories
+                .iter()
+                .any(|directory| self.path.starts_with(directory.path()))
+        );
+        let read = tools::Read
+            .execute(json!({"path": self.path}))
+            .await
+            .unwrap();
+        assert!(!read.is_error, "{read:?}");
+        assert!(read.content.contains("persistent attachment cache fixture"));
+    }
+}
+impl Drop for CacheAttachment {
+    fn drop(&mut self) {
+        self.root.remove_thread(&self.thread).unwrap();
+    }
+}
+
 struct GatedRead {
     started: Notify,
     release: Notify,
@@ -105,6 +159,15 @@ impl Tool for GatedRead {
         } else if input["index"] == 1 {
             self.child_started.notify_one();
             std::future::pending::<()>().await;
+        }
+        if input["index"] == 3 {
+            return Ok(
+                ToolResult::success("attachment opened").with_image(tools::ToolImage {
+                    media_type: "image/png".into(),
+                    data: "aW1hZ2U=".into(),
+                    path: None,
+                }),
+            );
         }
         BulkRead.execute(input).await
     }
@@ -3661,7 +3724,7 @@ async fn procedure_and_note_handoff_present_current_state_then_reuse_each_roots_
 }
 
 #[tokio::test]
-async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
+async fn wait_interrupted_by_attachment_path_and_read_image_reuses_the_wire_prefix() {
     let review_storage = support::ReviewStorage::new();
     let read = Arc::new(GatedRead {
         started: Notify::new(),
@@ -3680,6 +3743,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
                 "wait",
                 [json!({"run_id":"run-2"}).to_string()],
             ),
+            read_response(3),
             ScriptedResponse::tool_call(
                 "finish",
                 MODEL,
@@ -3709,15 +3773,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
     review_storage.attach(&harness.runtime);
     harness
         .runtime
-        .send_message_with_images(
-            run,
-            "Inspect the attached image".into(),
-            vec![DelegateImage {
-                media_type: "image/png".into(),
-                data: "aW1hZ2U=".into(),
-            }],
-            None,
-        )
+        .send_user_input(run, "Inspect the attached image\n\n[Attached files (read-only; open with read or shell)]\n\"/var/tmp/attachments/files/picture.png\"".into(), None)
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
     assert_eq!(
@@ -3741,7 +3797,7 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
         })
         .map(|request| request.body)
         .collect::<Vec<_>>();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     let usage = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -3766,25 +3822,22 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
             "previous wire input must remain cached"
         );
     }
-    let messages = requests[2]["messages"].as_array().unwrap();
+    let messages = requests[3]["messages"].as_array().unwrap();
     let input_index = messages
         .iter()
         .position(|message| {
-            message["content"].as_array().is_some_and(|blocks| {
-                blocks
-                    .iter()
-                    .any(|block| block["text"] == "Inspect the attached image")
-            })
+            message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("/var/tmp/attachments/files/picture.png"))
         })
         .expect("next wire request includes user input");
     assert_eq!(messages[input_index]["role"], "user");
-    assert!(
-        messages[input_index]["content"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|block| block["image_url"]["url"] == "data:image/png;base64,aW1hZ2U=")
-    );
+    assert!(!messages[input_index].to_string().contains("image_url"));
+    assert!(messages.iter().any(|message| {
+        message
+            .to_string()
+            .contains("data:image/png;base64,aW1hZ2U=")
+    }));
     assert_eq!(messages[input_index - 1]["role"], "tool");
     let result: Value =
         serde_json::from_str(messages[input_index - 1]["content"].as_str().unwrap()).unwrap();
@@ -3793,7 +3846,8 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
 }
 
 #[tokio::test]
-async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() {
+async fn queued_and_expedited_follow_ups_preserve_fifo_attachment_paths_and_read_images_and_wire_prefix()
+ {
     for expedite in [false, true] {
         // Each iteration runs "run-1" in a new runtime, so it needs an empty database.
         let review_storage = support::ReviewStorage::new();
@@ -3802,14 +3856,12 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             release: Notify::new(),
             child_started: Notify::new(),
         });
-        let mut script = vec![
-            read_response(0),
-            read_response(2),
-            text_response("original answer"),
-        ];
+        let mut script = vec![read_response(0), read_response(2)];
         if !expedite {
-            script.push(text_response("follow-up answer"));
+            script.push(text_response("original answer"));
         }
+        script.push(read_response(3));
+        script.push(text_response("follow-up answer"));
         let mut harness = harness_with_read(script, 1_000_000, read.clone());
         let run = harness.runtime.delegate_background(
             Role::Worker,
@@ -3820,13 +3872,9 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
         review_storage.attach(&harness.runtime);
         harness
             .runtime
-            .send_message_with_images(
+            .send_user_input(
                 run,
-                "first queued follow-up".into(),
-                vec![DelegateImage {
-                    media_type: "image/png".into(),
-                    data: "aW1hZ2U=".into(),
-                }],
+                "first queued follow-up\n\n[Attached files (read-only; open with read or shell)]\n\"/var/tmp/attachments/files/picture.png\"".into(),
                 Some(format!("delivered-{expedite}")),
             )
             .unwrap();
@@ -3862,15 +3910,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
         for id in &withdrawn_ids {
             harness
                 .runtime
-                .send_message_with_images(
-                    run,
-                    format!("never deliver {id}"),
-                    vec![DelegateImage {
-                        media_type: "image/png".into(),
-                        data: "d2l0aGRyYXdu".into(),
-                    }],
-                    Some(id.clone()),
-                )
+                .send_user_input(run, format!("never deliver {id}"), Some(id.clone()))
                 .unwrap();
         }
         assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 4);
@@ -3918,7 +3958,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             .filter(|r| r.path == "/v1/chat/completions")
             .map(|r| &r.body)
             .collect::<Vec<_>>();
-        assert_eq!(bodies.len(), if expedite { 3 } else { 4 });
+        assert_eq!(bodies.len(), if expedite { 4 } else { 5 });
         assert!(
             bodies
                 .iter()
@@ -3947,8 +3987,14 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
         assert!(
             messages[first]
                 .to_string()
-                .contains("data:image/png;base64,aW1hZ2U=")
+                .contains("/var/tmp/attachments/files/picture.png")
         );
+        assert!(!messages[first].to_string().contains("image_url"));
+        assert!(messages.iter().any(|message| {
+            message
+                .to_string()
+                .contains("data:image/png;base64,aW1hZ2U=")
+        }));
         assert_eq!(
             messages
                 .iter()
@@ -5151,6 +5197,154 @@ async fn delegated_child_starts_with_the_current_list_while_the_parent_only_appe
             "Delegated Workers have read-write access to every added or changed directory."
         ));
     }
+}
+
+// The stopped snapshot is a fixture for the already-sent pre-migration format.
+// No current chat/delegate ingress is used to create an image input. After the
+// first restore warms the input-derived cache, each subsequent restore must
+// keep that exact wire prefix, including the historical image block.
+#[tokio::test]
+async fn saved_image_history_survives_repeated_restore_with_identical_wire_prefix() {
+    let mut harness = harness(
+        vec![
+            text_response("bootstrap"),
+            text_response("first"),
+            text_response("second"),
+            text_response("third"),
+        ],
+        1_000_000,
+    );
+    let root = allowed_project(&harness);
+    let config = storage::StorageConfig {
+        db_path: root.join("legacy-image.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    harness
+        .runtime
+        .set_thread_scratch(Arc::new(runtime::scratch::ThreadScratch::at(
+            root.join("attachment-scratch"),
+        )));
+    let attachment = CacheAttachment::new(&harness.runtime, "legacy-image");
+    let prompt = attachment.prompt("Saved image conversation");
+    let run = harness.runtime.reserve_run_id();
+    harness
+        .runtime
+        .bind_thread_root("legacy-image", run)
+        .unwrap();
+    harness.runtime.spawn_reserved(
+        run,
+        None,
+        Role::Worker,
+        prompt.clone(),
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await;
+    harness.runtime.wait(run).await.unwrap();
+    let mut record = harness
+        .runtime
+        .with_storage_reader(|db| db.run_context(&run.to_string()))
+        .unwrap()
+        .flatten()
+        .unwrap();
+    let mut history: Vec<providers::Message> = serde_json::from_str(&record.messages_json).unwrap();
+    history.iter_mut().find(|message| message.role == providers::Role::User && message.content.iter().any(|block| matches!(block, providers::ContentBlock::Text { text } if text == &prompt))).unwrap().content.push(providers::ContentBlock::Image { media_type: "image/png".into(), data: "aW1hZ2U=".into() });
+    record.messages_json = serde_json::to_string(&history).unwrap();
+    storage.handle().upsert_run_context(&record).unwrap();
+    let mut events = Vec::new();
+    for text in [
+        "First restored input",
+        "Second restored input",
+        "Third restored input",
+    ] {
+        harness
+            .runtime
+            .resume_chat(run, RunConfig::default())
+            .unwrap();
+        through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+        attachment.assert_readable(&harness.runtime).await;
+        harness.runtime.send_message(run, text.into()).unwrap();
+        events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+        harness
+            .runtime
+            .stop(run, runtime::StopScope::SelfOnly)
+            .unwrap();
+        events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+        harness.runtime.wait(run).await.unwrap();
+    }
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    let all = chat_requests(&harness);
+    assert_eq!(all.len(), 4);
+    let requests = &all[1..];
+    let legacy = requests[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| {
+            message
+                .to_string()
+                .contains("data:image/png;base64,aW1hZ2U=")
+        })
+        .unwrap();
+    for request in requests {
+        assert!(
+            request["messages"].as_array().unwrap().contains(legacy),
+            "saved user image content must never be rewritten"
+        );
+        assert!(
+            request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| {
+                    message["role"] == "user"
+                        && message["content"].as_array().is_some_and(|blocks| {
+                            blocks.iter().any(|block| block["text"] == prompt)
+                        })
+                }),
+            "the exact path-bearing text block must survive alongside the legacy image"
+        );
+        assert_eq!(request["prompt_cache_key"], all[0]["prompt_cache_key"]);
+    }
+    let usage = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(id),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) if id == &run.to_string() => Some((*input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) => {
+                assert_ne!(diagnostic.code, "CacheRegression");
+                None
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), requests.len());
+    for (wire, tokens) in requests.windows(2).zip(usage.windows(2)) {
+        assert_append_only(CacheProtocol::OpenAi, &wire[0], &wire[1]).unwrap();
+        assert!(
+            tokens[1].1 >= tokens[0].0,
+            "the full prior image-bearing wire input must be reused"
+        );
+    }
+    harness
+        .runtime
+        .remove_thread_attachments("legacy-image")
+        .unwrap();
 }
 
 #[tokio::test]

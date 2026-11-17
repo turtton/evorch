@@ -510,7 +510,6 @@ fn harness_receipts_never_have_human_evidence() {
         run_id: "lead-root".into(),
         root_run_id: "lead-root".into(),
         text: String::new(),
-        image_count: 0,
         status: HostInputStatus::Delivered,
         reason: None,
         accepted_at_ns: 1,
@@ -526,14 +525,6 @@ fn harness_receipts_never_have_human_evidence() {
             .is_err()
     );
     r.text.clear();
-    r.image_count = 1;
-    assert!(r.validate().is_err());
-    assert!(
-        f.h()
-            .append_host_input_accepted(&[], &[], None, &r)
-            .is_err()
-    );
-    r.image_count = 0;
     r.evidence_id = Some("evidence".into());
     assert!(r.validate().is_err());
     assert!(
@@ -1007,7 +998,6 @@ fn real_user_receipt_resets_pr_guard_but_harness_receipt_does_not() {
         run_id: "lead-root".into(),
         root_run_id: "lead-root".into(),
         text: String::new(),
-        image_count: 0,
         status: HostInputStatus::Accepted,
         reason: None,
         accepted_at_ns: 1,

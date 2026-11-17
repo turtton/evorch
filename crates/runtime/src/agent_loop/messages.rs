@@ -37,11 +37,11 @@ impl LoopState {
     pub(crate) fn has_pending_user_messages(&self) -> bool {
         self.pending_user_messages
             .iter()
-            .any(|message| self.channels.user_inbox.is_pending(message.4))
+            .any(|message| self.channels.user_inbox.is_pending(message.3))
     }
 
     pub(crate) fn queue_user_message(&mut self, message: crate::runtime::user_inbox::UserInput) {
-        if self.channels.user_inbox.is_pending(message.4) {
+        if self.channels.user_inbox.is_pending(message.3) {
             self.pending_user_messages.push(message);
         }
     }
@@ -66,7 +66,7 @@ impl LoopState {
         }
         let mut later = Vec::new();
         messages.retain(|message| {
-            if message.2 && message.4 > cut {
+            if message.1 && message.3 > cut {
                 later.push(message.clone());
                 false
             } else {
@@ -76,7 +76,7 @@ impl LoopState {
         self.pending_user_messages = later;
         // A trusted goal wake is a scheduling signal, not a new human request.
         // When already running, the normal Stop boundary will perform the check.
-        messages.retain(|(text, _, trusted_user, _, _)| {
+        messages.retain(|(text, trusted_user, _, _)| {
             if !trusted_user && text == crate::thread_goals::CHECKS_WAKE {
                 self.goal_wake_pending = true;
                 false
@@ -188,7 +188,7 @@ mod shell_handoff_tests {
         let parallel = inbox.begin_wait();
         inbox
             .enqueue(None, |seq| {
-                sender.try_send(("before cut".into(), vec![], true, Some("one".into()), seq))
+                sender.try_send(("before cut".into(), true, Some("one".into()), seq))
             })
             .unwrap();
         assert!(*first.borrow() && *parallel.borrow());
@@ -199,7 +199,7 @@ mod shell_handoff_tests {
         let _new_wait = inbox.begin_wait();
         inbox
             .enqueue(None, |seq| {
-                sender.try_send(("after cut".into(), vec![], true, Some("two".into()), seq))
+                sender.try_send(("after cut".into(), true, Some("two".into()), seq))
             })
             .unwrap();
         assert!(state.flush_user_messages_through(cut));
@@ -228,7 +228,7 @@ mod shell_handoff_tests {
         for id in ["from-wait", "from-channel", "keep"] {
             inbox
                 .enqueue(Some(id), |seq| {
-                    sender.try_send((id.into(), vec![], true, Some(id.into()), seq))
+                    sender.try_send((id.into(), true, Some(id.into()), seq))
                 })
                 .unwrap();
         }
@@ -282,13 +282,7 @@ mod waiting_cut_tests {
         let inbox = state.channels.user_inbox.clone();
         inbox
             .enqueue(Some("withdraw"), |seq| {
-                sender.try_send((
-                    "never inject".into(),
-                    vec![],
-                    true,
-                    Some("withdraw".into()),
-                    seq,
-                ))
+                sender.try_send(("never inject".into(), true, Some("withdraw".into()), seq))
             })
             .unwrap();
         inbox.withdraw("withdraw", || Ok(())).unwrap();
@@ -327,13 +321,7 @@ mod waiting_cut_tests {
             pause.reached.recv().unwrap();
             inbox
                 .enqueue(None, |seq| {
-                    sender.try_send((
-                        "after last cut".into(),
-                        vec![],
-                        true,
-                        Some("late".into()),
-                        seq,
-                    ))
+                    sender.try_send(("after last cut".into(), true, Some("late".into()), seq))
                 })
                 .unwrap();
             pause.resume.send(()).unwrap();

@@ -27,12 +27,7 @@ async fn before_model_request_parks_without_consuming_durable_queue_with_admissi
             let runtime = weak.upgrade().unwrap();
             runtime.request_quiesce();
             runtime
-                .send_message_with_images(
-                    run,
-                    "queued".into(),
-                    Vec::new(),
-                    Some("queued-id".into()),
-                )
+                .send_user_input(run, "queued".into(), Some("queued-id".into()))
                 .unwrap();
         }));
     }
@@ -43,7 +38,7 @@ async fn before_model_request_parks_without_consuming_durable_queue_with_admissi
         fixture.runtime.request_quiesce();
         fixture
             .runtime
-            .send_message_with_images(run, "queued".into(), Vec::new(), Some("queued-id".into()))
+            .send_user_input(run, "queued".into(), Some("queued-id".into()))
             .unwrap();
     }
     fixture.runtime.wait_quiesced().await.unwrap();
@@ -416,12 +411,7 @@ async fn normal_persistence_failure_does_not_quiesce_other_runs_with_admission(a
     assert!(
         fixture
             .runtime
-            .send_message_with_images(
-                first,
-                "save fails".into(),
-                vec![],
-                Some("failed-input".into())
-            )
+            .send_user_input(first, "save fails".into(), Some("failed-input".into()))
             .is_err()
     );
     assert!(matches!(

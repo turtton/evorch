@@ -771,12 +771,12 @@ fn child(name: &str) -> bool {
     if std::env::var_os("EVORCH_BWRAP_CHILD").is_some() {
         return true;
     }
-    if Command::new("bwrap").arg("--version").output().is_err() {
+    if let Err(error) = BwrapSandbox::detect(BwrapConfig::new(std::env::current_dir().unwrap())) {
         assert!(
             std::env::var_os("EVORCH_REQUIRE_BWRAP").is_none(),
-            "EVORCH_REQUIRE_BWRAP: bwrap is not installed"
+            "EVORCH_REQUIRE_BWRAP: {error}"
         );
-        eprintln!("SKIP: bwrap is not installed");
+        eprintln!("SKIP: bwrap is unavailable: {error}");
         return false;
     }
     let output = Command::new(std::env::current_exe().expect("test binary"))
@@ -791,6 +791,231 @@ fn child(name: &str) -> bool {
         String::from_utf8_lossy(&output.stderr)
     );
     false
+}
+
+#[test]
+#[ignore = "requires usable bwrap; re-exec with EVORCH_BWRAP_CHILD"]
+fn attachment_files_are_read_only_and_staging_and_other_threads_are_invisible_in_bwrap() {
+    if child("attachment_files_are_read_only_and_staging_and_other_threads_are_invisible_in_bwrap")
+    {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use rustix::fs::OFlags;
+            use sandbox::attachments::AttachmentRoot;
+            use std::io::Write;
+            let dirs = Dirs::new();
+            BwrapSandbox::detect(BwrapConfig::new(dirs.repo.clone())).unwrap();
+            let root = AttachmentRoot::for_scope(dirs.scratch.parent());
+            let files = root.files("thread-a").unwrap();
+            let seed = files.path().join("seed.txt");
+            files
+                .file("seed.txt", OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY)
+                .unwrap()
+                .write_all(SEED.as_bytes())
+                .unwrap();
+            let staging = root
+                .thread("thread-a")
+                .unwrap()
+                .directory("staging")
+                .unwrap();
+            let pending = staging.path().join("pending.txt");
+            staging
+                .file(
+                    "pending.txt",
+                    OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY,
+                )
+                .unwrap()
+                .write_all(b"pending-secret")
+                .unwrap();
+            let model = Arc::new(ScriptedModel::new([
+                Ok(tool_response(
+                    "shell-read",
+                    "shell",
+                    json!({"command": format!("cat '{}'", seed.display())}),
+                )),
+                Ok(tool_response("file-read", "read", json!({"path": seed}))),
+                Ok(tool_response(
+                    "shell-write",
+                    "shell",
+                    json!({"command": format!("printf changed > '{}'", seed.display())}),
+                )),
+                Ok(tool_response(
+                    "file-write",
+                    "write",
+                    json!({"path": seed, "content": "changed"}),
+                )),
+                Ok(tool_response(
+                    "staging-shell",
+                    "shell",
+                    json!({"command": format!("cat '{}'", pending.display())}),
+                )),
+                Ok(tool_response(
+                    "staging-read",
+                    "read",
+                    json!({"path": pending}),
+                )),
+                Ok(text_response("done", FinishReason::Stop)),
+                Ok(tool_response(
+                    "other-shell",
+                    "shell",
+                    json!({"command": format!("cat '{}'", seed.display())}),
+                )),
+                Ok(tool_response("other-read", "read", json!({"path": seed}))),
+                Ok(text_response("done", FinishReason::Stop)),
+            ]));
+            let (runtime, _) = dirs.runtime(model.clone(), None);
+            let storage_config = storage::StorageConfig {
+                db_path: dirs.repo.join("attachments.db"),
+                ..Default::default()
+            };
+            let storage = storage::Storage::open(storage_config.clone()).unwrap();
+            let runtime = runtime.with_run_store(
+                runtime::RunStore::open(&storage_config, storage.handle()).unwrap(),
+            );
+            let mut source = None;
+            assert_eq!(runtime.attachment_root().unwrap().path(), root.path());
+            for thread in ["thread-a", "thread-b"] {
+                let run = start_in(&runtime, thread, Role::Worker, "WORK");
+                assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+                if thread == "thread-a" {
+                    source = Some(run);
+                }
+            }
+            for (thread, kind) in [
+                ("fork", storage::threads::ThreadLineageKind::Fork),
+                ("rewind", storage::threads::ThreadLineageKind::Rewind),
+                (
+                    "escalation",
+                    storage::threads::ThreadLineageKind::Escalation,
+                ),
+            ] {
+                storage
+                    .handle()
+                    .upsert_threads_host(&[storage::threads::ThreadUpsert {
+                        thread_id: thread.into(),
+                        parent_thread_id: (thread != "escalation").then(|| "thread-a".into()),
+                        lineage_kind: Some(kind),
+                        escalation_source_run_id: (thread == "escalation")
+                            .then(|| source.unwrap().to_string()),
+                        ..Default::default()
+                    }])
+                    .unwrap();
+                model
+                    .add_keyed(
+                        thread,
+                        [
+                            Ok(tool_response(
+                                &format!("{thread}-read"),
+                                "read",
+                                json!({"path": seed}),
+                            )),
+                            Ok(tool_response(
+                                &format!("{thread}-shell"),
+                                "shell",
+                                json!({"command": format!("cat '{}'", seed.display())}),
+                            )),
+                            Ok(text_response("done", FinishReason::Stop)),
+                        ],
+                    )
+                    .await;
+                let run = start_in(&runtime, thread, Role::Worker, thread);
+                assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+            }
+            let own = root.files("delegating").unwrap();
+            let delegated_seed = own.path().join("delegated.txt");
+            own.file(
+                "delegated.txt",
+                OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY,
+            )
+            .unwrap()
+            .write_all(SEED.as_bytes())
+            .unwrap();
+            model
+                .add_keyed(
+                    "COORDINATE ATTACHMENT",
+                    [
+                        Ok(tool_response(
+                            "delegate-attachment",
+                            "delegate",
+                            json!({"target":{"role":"worker"}, "prompt":"DELEGATED ATTACHMENT"}),
+                        )),
+                        Ok(tool_response("wait-attachment", "wait", json!({}))),
+                        Ok(tool_response(
+                            "finish-attachment",
+                            "finish",
+                            json!({"result":"done"}),
+                        )),
+                    ],
+                )
+                .await;
+            model
+                .add_keyed(
+                    "DELEGATED ATTACHMENT",
+                    [
+                        Ok(tool_response(
+                            "child-attachment-read",
+                            "read",
+                            json!({"path": delegated_seed}),
+                        )),
+                        Ok(tool_response(
+                            "child-attachment-shell",
+                            "shell",
+                            json!({"command": format!("cat '{}'", delegated_seed.display())}),
+                        )),
+                        Ok(text_response("done", FinishReason::Stop)),
+                    ],
+                )
+                .await;
+            let delegated = start_in(
+                &runtime,
+                "delegating",
+                Role::Orchestrator,
+                "COORDINATE ATTACHMENT",
+            );
+            assert_eq!(runtime.wait(delegated).await.unwrap(), AgentRunPhase::Done);
+            let seen = model.observed().await;
+            for id in [
+                "fork-read",
+                "fork-shell",
+                "rewind-read",
+                "rewind-shell",
+                "escalation-read",
+                "escalation-shell",
+                "child-attachment-read",
+                "child-attachment-shell",
+            ] {
+                assert!(
+                    tool_output(&seen, id).contains(SEED),
+                    "{id}: {}",
+                    tool_output(&seen, id)
+                );
+            }
+            let shell = tool_output(&seen, "shell-read");
+            assert!(
+                shell.starts_with("exit_code: 0") && shell.contains(SEED),
+                "{shell}"
+            );
+            assert!(tool_output(&seen, "file-read").contains(SEED));
+            assert!(tool_output(&seen, "shell-write").contains("Read-only file system"));
+            assert!(tool_output(&seen, "file-write").contains("read-only"));
+            for id in ["staging-shell", "staging-read"] {
+                assert!(!tool_output(&seen, id).contains("pending-secret"), "{id}");
+            }
+            for id in ["other-shell", "other-read"] {
+                assert!(!tool_output(&seen, id).contains(SEED), "{id}");
+            }
+            assert_eq!(std::fs::read_to_string(seed).unwrap(), SEED);
+            for thread in [
+                "thread-a",
+                "thread-b",
+                "fork",
+                "rewind",
+                "escalation",
+                "delegating",
+            ] {
+                runtime.remove_thread_attachments(thread).unwrap();
+            }
+        });
+    }
 }
 
 async fn bwrap_scenario() {

@@ -193,7 +193,18 @@ impl ArtifactStore {
         path: &Path,
         request: CaptureRequest<'_>,
     ) -> Result<ArtifactRecord, String> {
-        let roots = SourceRoots::new(workspace, scratch)?;
+        self.capture_with_attachments(workspace, scratch, &[], path, request)
+    }
+
+    pub fn capture_with_attachments(
+        &self,
+        workspace: &Path,
+        scratch: Option<&Path>,
+        attachments: &[sandbox::ThreadReadDirectory],
+        path: &Path,
+        request: CaptureRequest<'_>,
+    ) -> Result<ArtifactRecord, String> {
+        let roots = SourceRoots::new(workspace, scratch)?.with_attachments(attachments)?;
         let (source, kind, bytes) = read_source_file(&roots, path)?;
         if kind == ArtifactKind::Html
             && let Some(rule) = secret_guard::SecretRedactor::from_env()
@@ -278,6 +289,7 @@ pub(crate) struct SourceRoots {
     scratch: Option<PathBuf>,
     workspace_fd: std::fs::File,
     scratch_fd: Option<std::fs::File>,
+    attachments: Vec<(sandbox::ThreadReadDirectory, std::fs::File)>,
 }
 
 impl SourceRoots {
@@ -299,7 +311,25 @@ impl SourceRoots {
             scratch,
             workspace_fd,
             scratch_fd,
+            attachments: Vec::new(),
         })
+    }
+
+    pub(crate) fn with_attachments(
+        mut self,
+        attachments: &[sandbox::ThreadReadDirectory],
+    ) -> Result<Self, String> {
+        for identity in attachments {
+            if !identity.is_current() {
+                return Err("attachment source directory changed identity".into());
+            }
+            let fd = source_io::open_root(identity.path()).map_err(|e| e.to_string())?;
+            if !identity.is_current() {
+                return Err("attachment source directory changed identity".into());
+            }
+            self.attachments.push((identity.clone(), fd));
+        }
+        Ok(self)
     }
 
     pub(crate) fn read_image(
@@ -334,6 +364,9 @@ impl SourceRoots {
         if let Some(scratch) = &self.scratch {
             boundary = boundary.with_scratch(scratch);
         }
+        for (identity, _) in &self.attachments {
+            boundary = boundary.with_thread_read_directory(identity.clone());
+        }
         if boundary.access(&resolved) != Some(sandbox::PathAccess::ReadWrite) {
             return Err("output is not writable inside this run's boundary".into());
         }
@@ -358,7 +391,10 @@ impl SourceRoots {
 
     /// Whether `path`, already resolved, lies inside one of the roots.
     fn contains(&self, path: &Path) -> bool {
-        path.starts_with(&self.workspace)
+        self.attachments
+            .iter()
+            .any(|(identity, _)| identity.is_current() && path.starts_with(identity.path()))
+            || path.starts_with(&self.workspace)
             || self
                 .scratch
                 .as_ref()
@@ -366,6 +402,14 @@ impl SourceRoots {
     }
 
     fn open(&self, source: &Path) -> Result<std::fs::File, String> {
+        for (identity, fd) in &self.attachments {
+            if let Ok(relative) = source.strip_prefix(identity.path()) {
+                if !identity.is_current() {
+                    return Err("attachment source directory changed identity".into());
+                }
+                return source_io::open_file(fd, relative).map_err(|e| e.to_string());
+            }
+        }
         let (root, relative) = if let Ok(relative) = source.strip_prefix(&self.workspace) {
             (&self.workspace_fd, relative)
         } else if let Some((scratch, fd)) = self.scratch.as_ref().zip(self.scratch_fd.as_ref())
@@ -558,9 +602,10 @@ pub(crate) fn render(state: &LoopState, runtime: &AgentRuntime, input: Value) ->
             .default_cwd()
             .ok_or("this run has no workspace to capture from")?;
         let root = runtime.run_root(caller)?;
-        let record = store.capture(
+        let record = store.capture_with_attachments(
             &workspace,
             state.scratch_dir(),
+            &state.attachment_directories,
             Path::new(&args.path),
             CaptureRequest {
                 title: &args.title,

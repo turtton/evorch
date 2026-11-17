@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 /// internal team notification). Only host input contributes to the GUI queue.
 /// The fourth field is its durable prompt UUID; the fifth is an incarnation-local
 /// enqueue sequence (zero for internal notices), never a durable identity.
-pub(crate) type UserInput = (String, Vec<crate::DelegateImage>, bool, Option<String>, u64);
+pub(crate) type UserInput = (String, bool, Option<String>, u64);
 
 /// Receiving/draining is not adoption. Keep a removable staging buffer so a
 /// withdrawal releases its bounded channel slot even during an in-flight tool.
@@ -79,7 +79,7 @@ impl InboxReceiver {
 /// The prompt ID whose delivery receipt this input carries: host input with an
 /// ID. Internal notices, goal wakes and agent messages are never tracked.
 pub(crate) fn tracked_prompt_id(input: &UserInput) -> Option<&str> {
-    input.3.as_deref().filter(|_| input.2)
+    input.2.as_deref().filter(|_| input.1)
 }
 
 /// Why a queued input cannot be withdrawn from this incarnation.
@@ -354,7 +354,7 @@ impl UserInbox {
                 while let Ok(input) = receiver.channel.try_recv() {
                     receiver.staged.push_back(input);
                 }
-                receiver.staged.retain(|input| input.4 != seq);
+                receiver.staged.retain(|input| input.3 != seq);
             }
             Ok(())
         })
@@ -706,7 +706,7 @@ mod channel_withdrawal_tests {
         for id in ["first", "withdraw"] {
             inbox
                 .enqueue(Some(id), |seq| {
-                    sender.try_send((id.into(), vec![], true, Some(id.into()), seq))
+                    sender.try_send((id.into(), true, Some(id.into()), seq))
                 })
                 .unwrap();
         }
@@ -716,15 +716,15 @@ mod channel_withdrawal_tests {
         inbox.withdraw("withdraw", || Ok(())).unwrap();
         inbox
             .enqueue(Some("new"), |seq| {
-                sender.try_send(("new".into(), vec![], true, Some("new".into()), seq))
+                sender.try_send(("new".into(), true, Some("new".into()), seq))
             })
             .unwrap();
         let first = receiver.recv().await.unwrap();
         let newer = receiver.recv().await.unwrap();
         assert_eq!((first.0.as_str(), newer.0.as_str()), ("first", "new"));
-        assert!(first.4 <= cut && newer.4 > cut);
-        assert!(inbox.claim(first.4));
-        assert!(inbox.claim(newer.4));
+        assert!(first.3 <= cut && newer.3 > cut);
+        assert!(inbox.claim(first.3));
+        assert!(inbox.claim(newer.3));
         assert_eq!(inbox.status().pending, 0);
         assert!(receiver.try_recv().is_err());
         drop(receiver);

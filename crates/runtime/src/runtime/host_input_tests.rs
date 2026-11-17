@@ -114,7 +114,7 @@ impl Fixture {
         let run = self.run;
         let id = id.to_string();
         let send = tokio::task::spawn_blocking(move || {
-            runtime.send_message_with_images(run, format!("text of {id}"), Vec::new(), Some(id))
+            runtime.send_user_input(run, format!("text of {id}"), Some(id))
         });
         let user_inbox::test_pause::PauseControl { reached, resume } = control;
         let reached = tokio::task::spawn_blocking(move || {
@@ -344,10 +344,9 @@ async fn a_sealed_inbox_refuses_host_input_while_its_channel_is_open() {
     let runtime = fixture.runtime.clone();
     let run = fixture.run;
     let sent = tokio::task::spawn_blocking(move || {
-        runtime.send_message_with_images(
+        runtime.send_user_input(
             run,
             "after the seal".into(),
-            Vec::new(),
             Some("prompt-after-seal".into()),
         )
     })
@@ -377,7 +376,7 @@ async fn a_refused_acceptance_neither_enqueues_nor_writes_a_receipt() {
         assert!(
             fixture
                 .runtime
-                .send_message_with_images(fixture.run, text, vec![], Some(id.into()))
+                .send_user_input(fixture.run, text, Some(id.into()))
                 .is_err()
         );
         assert_eq!(fixture.inbox().status().pending, before);
@@ -388,10 +387,9 @@ async fn a_refused_acceptance_neither_enqueues_nor_writes_a_receipt() {
     assert!(
         fixture
             .runtime
-            .send_message_with_images(
+            .send_user_input(
                 fixture.run,
                 "sql failed input".into(),
-                vec![],
                 Some("sql-failed".into())
             )
             .is_err()
@@ -419,12 +417,7 @@ async fn a_failed_terminal_snapshot_leaves_no_false_delivery_or_unsettled_accept
     fixture.wait_running().await;
     fixture
         .runtime
-        .send_message_with_images(
-            fixture.run,
-            "not read".into(),
-            vec![],
-            Some("not-read".into()),
-        )
+        .send_user_input(fixture.run, "not read".into(), Some("not-read".into()))
         .unwrap();
     let store = fixture.runtime.shared.run_store.get().unwrap();
     let conn = rusqlite::Connection::open(&store.db_path).unwrap();
@@ -461,10 +454,9 @@ async fn closed_writer_refuses_before_enqueue_and_orphan_reconciliation_settles_
     fixture.wait_running().await;
     fixture
         .runtime
-        .send_message_with_images(
+        .send_user_input(
             fixture.run,
             "accepted before close".into(),
-            vec![],
             Some("before-close".into()),
         )
         .unwrap();
@@ -473,10 +465,9 @@ async fn closed_writer_refuses_before_enqueue_and_orphan_reconciliation_settles_
     assert!(
         fixture
             .runtime
-            .send_message_with_images(
+            .send_user_input(
                 fixture.run,
                 "never enqueued".into(),
-                vec![],
                 Some("after-close".into())
             )
             .is_err()

@@ -18,6 +18,7 @@ mod agent_loop;
 pub mod allowed_directories;
 pub mod allowed_instructions;
 pub mod artifacts;
+pub mod attachments;
 pub mod base_context;
 pub mod btw;
 pub mod budget_tracker;
@@ -125,8 +126,8 @@ pub use prompt::{
 };
 pub use rules::{ProjectTrust, RulesSession, RulesSettings, RulesSource};
 pub use run::{
-    AgentInspection, AgentSummary, DelegateImage, ParseRunIdError, PromptOrigin, RunConfig, RunId,
-    RunPurpose, WorkspaceInspection,
+    AgentInspection, AgentSummary, ParseRunIdError, PromptOrigin, RunConfig, RunId, RunPurpose,
+    WorkspaceInspection,
 };
 pub use run_store::RunStore;
 pub use runtime::{

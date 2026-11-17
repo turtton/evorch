@@ -119,7 +119,14 @@ fn role_qualified_chat_restores_user_assistant_and_tool_entries() {
         );
         storage.close();
         let expected = original.transcript().entries().to_vec();
-        assert_eq!(expected.iter().filter(|entry| matches!(entry, TranscriptEntry::UserMessage { text, .. } if text == "investigate this")).count(), 1);
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|entry| matches!(entry, TranscriptEntry::UserMessage {
+            text, .. } if text == "investigate this"))
+                .count(),
+            1
+        );
         assert_eq!(expected.iter().filter(|entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "found the cause")).count(), 1);
         assert!(expected.iter().any(|entry| matches!(entry, TranscriptEntry::Tool { status: ToolStatus::Succeeded, output: Some(text), .. } if text == "file contents")));
         assert!(
@@ -246,7 +253,8 @@ fn published_prompt_and_final_result_are_ordered_and_idempotent_live_and_in_repl
         "result is visible before the terminal event"
     );
     assert!(!live.transcript().entries().iter().any(|entry| matches!(
-        entry, TranscriptEntry::UserMessage { text, .. } if text == "Review the implementation"
+        entry, TranscriptEntry::UserMessage {
+            text, .. } if text == "Review the implementation"
     )));
     // A restore reuses the same run and must not duplicate its initial instruction.
     persist_and_apply(
@@ -275,7 +283,8 @@ fn published_prompt_and_final_result_are_ordered_and_idempotent_live_and_in_repl
             expected
         );
         assert!(
-            matches!(expected.first(), Some(TranscriptEntry::UserMessage { text, .. }) if text == "Review the implementation")
+            matches!(expected.first(), Some(TranscriptEntry::UserMessage {
+            text, .. }) if text == "Review the implementation")
         );
         assert_eq!(
             expected

@@ -724,7 +724,6 @@ mod review_tests {
                 run_id: target.clone(),
                 root_run_id: target.clone(),
                 text: "use @demo".into(),
-                image_count: 0,
                 status: storage::HostInputStatus::Accepted,
                 reason: None,
                 accepted_at_ns: 1,

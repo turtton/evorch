@@ -151,8 +151,11 @@ fn refused_chat_goes_back_to_the_composer_instead_of_the_transcript() {
     // Given: the runtime refuses chats, and the message carries an image.
     runtime.refuse("provider unavailable");
     let composer = gui.state_mut().composer_mut();
-    composer.image_input_supported = true;
-    assert!(composer.add_pasted_image("data:image/png;base64,aGVsbG8="));
+    assert!(
+        composer
+            .add_attachment(gui::fixture::attachment_draft())
+            .is_ok()
+    );
     // When: it is sent.
     send(&mut gui, "hello agent");
     // Then: nothing in the conversation claims it was sent, and the composer

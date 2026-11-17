@@ -170,7 +170,8 @@ fn btw_refuses_image_attachments_and_keeps_input_and_images() {
     harness
         .state_mut()
         .composer_mut()
-        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+        .add_attachment(gui::fixture::attachment_draft())
+        .unwrap();
     submit(&mut harness, "/btw look at this");
     assert!(script.asked.lock().unwrap().is_empty());
     assert_eq!(harness.state().composer().input, "/btw look at this");

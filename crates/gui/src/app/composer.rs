@@ -114,7 +114,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if !self.sync_shell_cwd() {
             return;
         }
-        self.refresh_image_capability();
         let raw = self.composer.input.clone();
         let parsed = if raw.trim().is_empty() && !self.composer.attachments.is_empty() {
             ComposerInput::Chat("")
@@ -132,8 +131,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match parsed {
             ComposerInput::Empty => {}
             ComposerInput::Chat(text) => {
-                if let Some(warning) = self.composer.image_warning() {
-                    self.push_notice(warning);
+                if !self.composer.attachments_ready() {
+                    self.push_notice("Wait for all attachments to finish uploading, or remove failed attachments");
                     return;
                 }
                 let (Some(_), Some(thread_id)) = (
@@ -156,14 +155,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 .thread_project(thread_id)
                                 .map(|project| project.repo_root.clone()),
                             composer_role: self.composer.role,
-                            images: self
+                            attachments: self
                                 .composer
                                 .attachments
                                 .iter()
-                                .map(|image| runtime::DelegateImage {
-                                    media_type: image.media_type.clone(),
-                                    data: image.data.clone(),
-                                })
+                                .filter_map(|draft| draft.reference().cloned())
                                 .collect(),
                             thread_id: thread_id.to_string(),
                             text: text.into(),
@@ -242,9 +238,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             thread_id: submission.thread_id.clone(),
                             text: text.into(),
                             skills: skills.clone(),
+                            editor_text: Some(text.into()),
                             origin_unverified: false,
                             at: sent_at,
-                            image_count: submission.images.len(),
+                            attachment_count: submission.attachments.len(),
                             resent_from,
                             status: DeliveryStatus::Queued,
                             starts_run,
@@ -266,7 +263,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             return;
                         }
                         let submission_id = submission.submission_id.clone();
-                        self.queued_images
+                        self.queued_attachments
                             .insert(submission_id.clone(), self.composer.attachments.clone());
                         let submission_thread = submission.thread_id.clone();
                         self.issued
@@ -503,43 +500,5 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .push_thread(crate::model::transcript::reason_entry(
                 prefix, reason, false,
             ));
-    }
-
-    pub(super) fn refresh_image_capability(&mut self) {
-        let Some(model) = self.active_model() else {
-            return;
-        };
-        let preference = self
-            .sidebar
-            .threads
-            .iter()
-            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
-            .and_then(|thread| thread.model_preference.as_ref());
-        let profiles = model.available_profiles();
-        let selected = preference
-            .and_then(|preference| {
-                preference.model.clone().or_else(|| {
-                    profiles
-                        .iter()
-                        .find(|profile| profile.name == preference.profile)
-                        .and_then(|profile| profile.default_model.clone())
-                })
-            })
-            .unwrap_or_else(|| {
-                runtime::AgentModel::selected_model(model.as_ref(), runtime::Role::Worker, None)
-            });
-        self.composer.image_input_supported = self
-            .provider_settings
-            .catalog
-            .catalog
-            .as_ref()
-            .and_then(|catalog| catalog.find_unique_model(&selected))
-            .is_some_and(|metadata| {
-                metadata
-                    .modalities
-                    .input
-                    .iter()
-                    .any(|value| value == "image")
-            });
     }
 }

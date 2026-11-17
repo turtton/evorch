@@ -131,7 +131,6 @@ impl AgentRuntime {
             });
         }
         let restored = RestoredState::from_bundle(&bundle)?;
-        authority.images.clear();
         authority.project_root = descriptor.project_root.clone();
         authority.category = descriptor.category.clone();
         authority.model_preference = authority

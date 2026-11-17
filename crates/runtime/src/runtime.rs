@@ -261,6 +261,7 @@ pub struct WorkspaceMounts {
     pub ro_binds: Vec<PathBuf>,
     /// Run-start identities for thread entries in `ro_binds`; ordinary binds stay live.
     pub thread_ro_identities: Vec<sandbox::ThreadReadDirectory>,
+    pub attachment_directories: Vec<sandbox::ThreadReadDirectory>,
     /// 読み書き可能で公開する path。
     pub rw_binds: Vec<PathBuf>,
     /// shell の `TMPDIR`。`None` なら sandbox ごとの一時領域を使う。
@@ -276,6 +277,7 @@ impl WorkspaceMounts {
             workspace_root,
             ro_binds: Vec::new(),
             thread_ro_identities: Vec::new(),
+            attachment_directories: Vec::new(),
             rw_binds: Vec::new(),
             scratch: None,
             allowed: None,
@@ -643,7 +645,6 @@ impl AgentRuntime {
         host: &HostPrompt,
         reference: Option<&PendingReference>,
         prompt_id: &str,
-        image_count: u32,
     ) -> Result<(), RuntimeError> {
         let store = self
             .shared
@@ -702,7 +703,6 @@ impl AgentRuntime {
                     run_id: run_id.to_string(),
                     root_run_id: review.root_run_id.clone(),
                     text: host.typed.clone(),
-                    image_count,
                     status: storage::HostInputStatus::Accepted,
                     reason: None,
                     accepted_at_ns: now,
@@ -2548,7 +2548,7 @@ impl AgentRuntime {
 
     /// 対話待機中の run へユーザーメッセージを送る。
     pub fn send_message(&self, run_id: RunId, text: String) -> Result<(), RuntimeError> {
-        self.send_message_with_images(run_id, text, Vec::new(), None)
+        self.send_user_input(run_id, text, None)
     }
 
     /// Send host input. `submission_id` is the host's ID for it (a UUID); the
@@ -2557,21 +2557,13 @@ impl AgentRuntime {
     /// # Errors
     /// [`RuntimeError::RunTerminated`] once the run stopped accepting input, or
     /// a persistence error; a refused message leaves no evidence or receipt.
-    pub fn send_message_with_images(
+    pub fn send_user_input(
         &self,
         run_id: RunId,
         text: String,
-        images: Vec<crate::DelegateImage>,
         submission_id: Option<String>,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(
-            run_id,
-            HostPrompt::plain(text),
-            images,
-            true,
-            None,
-            submission_id,
-        )
+        self.send_inbox_message(run_id, HostPrompt::plain(text), true, None, submission_id)
     }
 
     pub(crate) fn send_internal_message(
@@ -2579,14 +2571,7 @@ impl AgentRuntime {
         run_id: RunId,
         text: String,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(
-            run_id,
-            HostPrompt::plain(text),
-            Vec::new(),
-            false,
-            None,
-            None,
-        )
+        self.send_inbox_message(run_id, HostPrompt::plain(text), false, None, None)
     }
 
     /// Deliver a host notice, such as a finished evaluation (ADR 0036), to the
@@ -2655,7 +2640,6 @@ impl AgentRuntime {
         &self,
         run_id: RunId,
         host: HostPrompt,
-        images: Vec<crate::DelegateImage>,
         trusted_user: bool,
         initial_goal: Option<(String, Vec<String>)>,
         submission_id: Option<String>,
@@ -2699,8 +2683,7 @@ impl AgentRuntime {
             });
             if let Some(prompt_id) = &prompt_id {
                 let pending = self.persist_pending_reference(run_id)?;
-                let image_count = u32::try_from(images.len()).unwrap_or(u32::MAX);
-                self.record_host_input(run_id, &host, pending.as_ref(), prompt_id, image_count)?;
+                self.record_host_input(run_id, &host, pending.as_ref(), prompt_id)?;
                 if let Some(pending) = pending {
                     match self.take_pending_reference(run_id, pending.token) {
                         Ok(Some(_)) => {}
@@ -2750,14 +2733,12 @@ impl AgentRuntime {
                 crate::quiesce::DurableInput {
                     id: input_id.clone(),
                     text: host.prompt.clone(),
-                    images: images.clone(),
                     trusted_user,
                 },
             )?;
             let enqueue = |seq| {
                 permit.send((
                     host.prompt.clone(),
-                    images,
                     trusted_user,
                     Some(input_id.clone()),
                     seq,
@@ -4300,8 +4281,8 @@ mod review_provenance_tests {
         }
         let mut delivered = Vec::new();
         for _ in 0..16 {
-            let (text, images, trusted, prompt_id, _) = receiver.recv().await.unwrap();
-            assert!(trusted && images.is_empty());
+            let (text, trusted, prompt_id, _) = receiver.recv().await.unwrap();
+            assert!(trusted);
             assert!(prompt_id.is_some());
             delivered.push(text);
         }

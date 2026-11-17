@@ -1,6 +1,7 @@
 //! コマンドを隔離された環境で実行し、承認方針と資格情報を安全に扱う層です。
 
 pub mod approval;
+pub mod attachments;
 pub mod boundary;
 pub mod bwrap;
 pub mod composition;

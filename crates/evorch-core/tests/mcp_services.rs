@@ -312,7 +312,7 @@ fn send(
         composer_role: ComposerRole::Worker,
         text: "Inspect MCP evidence".into(),
         skills: vec![],
-        images: vec![],
+        attachments: vec![],
         model_preference: None,
         fork_seed: None,
     };

@@ -93,6 +93,7 @@ pub struct CacheMount {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadReadDirectory {
     path: PathBuf,
+    private: bool,
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
@@ -112,6 +113,7 @@ impl ThreadReadDirectory {
         use std::os::unix::fs::MetadataExt;
         Ok(Self {
             path,
+            private: false,
             #[cfg(unix)]
             device: metadata.dev(),
             #[cfg(unix)]
@@ -123,8 +125,34 @@ impl ThreadReadDirectory {
         &self.path
     }
 
+    /// Attachment mounts must retain both their inode and their privacy.
+    pub fn capture_private(path: &Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = path.symlink_metadata()?;
+            if !metadata.is_dir()
+                || metadata.uid() != rustix::process::geteuid().as_raw()
+                || metadata.mode() & 0o7777 != 0o700
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "attachment mount is not a private directory",
+                ));
+            }
+        }
+        let mut identity = Self::capture(path)?;
+        identity.private = true;
+        Ok(identity)
+    }
+
     pub fn is_current(&self) -> bool {
-        Self::capture(&self.path).is_ok_and(|current| current == *self)
+        let current = if self.private {
+            Self::capture_private(&self.path)
+        } else {
+            Self::capture(&self.path)
+        };
+        current.is_ok_and(|current| current == *self)
     }
 }
 

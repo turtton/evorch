@@ -130,7 +130,6 @@ impl AgentRuntime {
                         .clone()
                         .unwrap_or_else(|| "initial".into()),
                     text: prompt.into(),
-                    images: config.images.clone(),
                     trusted_user: config.initial_prompt_id.is_some(),
                 }),
                 inputs: Vec::new(),

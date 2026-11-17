@@ -337,6 +337,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// All selection paths, including archive -> None, preserve the old editor
     /// before restoring the new thread and committing the selection atomically.
     pub(super) fn finish_thread_switch(&mut self, previous: Option<ThreadId>) {
+        if let Some(previous) = &previous
+            && std::mem::take(&mut self.composer.pick_attachments)
+        {
+            self.attachment_work
+                .queued
+                .push((previous.clone(), crate::attachments::Intake::ChooseFiles));
+        }
         if let Some(previous) = previous
             && let Some(thread) = self
                 .sidebar
@@ -372,6 +379,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.composer.input.clear();
             self.composer.attachments.clear();
         }
+        self.refresh_attachment_import_count();
         self.composer.completions_dismissed_for = None;
         self.refresh_draft_banner();
         self.focus = ConversationFocus::Thread;

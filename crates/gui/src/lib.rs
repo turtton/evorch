@@ -12,6 +12,7 @@ compile_error!(
 );
 
 pub mod app;
+pub mod attachments;
 pub mod body;
 pub mod browser;
 pub mod core_client;

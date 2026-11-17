@@ -84,16 +84,16 @@ impl LoopState {
             self.queue_user_message(input);
             return false;
         }
-        if !self.channels.user_inbox.claim(input.4) {
+        if !self.channels.user_inbox.claim(input.3) {
             return false;
         }
-        if let Some(id) = &input.3 {
+        if let Some(id) = &input.2 {
             self.consumed_intent_inputs.push(id.clone());
         }
         let tracked = crate::runtime::user_inbox::tracked_prompt_id(&input).map(String::from);
-        let (text, images, trusted_user, prompt_id, _) = input;
+        let (text, trusted_user, prompt_id, _) = input;
         self.accept_input_identity(trusted_user, prompt_id);
-        self.append_user_message(&text, images, tracked);
+        self.append_user_message(&text, tracked);
         // Authenticated human input to a child is parent-equivalent involvement.
         // Internal wakes and root input do not renew the subagent activity window.
         if trusted_user && self.task.parent.is_some() {
@@ -103,21 +103,8 @@ impl LoopState {
     }
 
     /// Append a user message without changing the request turn.
-    pub(crate) fn append_user_message(
-        &mut self,
-        text: &str,
-        images: Vec<crate::DelegateImage>,
-        tracked: Option<String>,
-    ) {
+    pub(crate) fn append_user_message(&mut self, text: &str, tracked: Option<String>) {
         self.context.push_user(text);
-        if let Some(message) = self.context.messages.last_mut() {
-            message.content.extend(images.into_iter().map(|image| {
-                providers::ContentBlock::Image {
-                    media_type: image.media_type,
-                    data: image.data,
-                }
-            }));
-        }
         if let Some(prompt_id) = tracked {
             if self.initial_prompt_pending.as_deref() == Some(prompt_id.as_str()) {
                 self.initial_prompt_pending = None;

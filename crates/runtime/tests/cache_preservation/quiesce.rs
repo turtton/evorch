@@ -94,10 +94,9 @@ async fn safe_point_checkpoint_reuses_exact_prefix_after_reconnection() {
             harness.runtime.quiesce().await.unwrap();
             harness
                 .runtime
-                .send_message_with_images(
+                .send_user_input(
                     run,
                     "pending across restart".into(),
-                    vec![],
                     Some("pending-safe-point".into()),
                 )
                 .unwrap();
