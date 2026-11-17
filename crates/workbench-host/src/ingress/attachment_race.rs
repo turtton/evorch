@@ -234,6 +234,46 @@ fn archive_and_commit_serialize_across_processes() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_cleanup_rechecks_archive_after_restore_and_new_send() {
+    let temp = tempfile::tempdir().unwrap();
+    let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let mut live = World::new(temp.path(), Arc::new(Model(tx)));
+    live.upload("before-archive");
+    assert!(matches!(live.archive(true), WorkspaceResult::Applied(_)));
+
+    let (snapshot_tx, snapshot_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let base = temp.path().to_owned();
+    let handle = tokio::runtime::Handle::current();
+    let startup = std::thread::spawn(move || {
+        let _entered = handle.enter();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut startup = World::new(&base, Arc::new(Model(tx)));
+        startup.host.reconcile_attachments_after_snapshot(|| {
+            snapshot_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        })
+    });
+    // Startup has observed archived=true but has not acquired attachment locks.
+    snapshot_rx.await.unwrap();
+    assert!(matches!(live.archive(false), WorkspaceResult::Applied(_)));
+    let reference = live.upload("after-restore");
+    let reply = send(&mut live, "new-send", vec![reference.id]);
+    let (messages, _answer) = requests.recv().await.unwrap();
+    let user = messages.iter().rfind(|m| m.role == Role::User).unwrap();
+    let [ContentBlock::Text { text }] = user.content.as_slice() else {
+        panic!()
+    };
+    let path: String = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    resume_tx.send(()).unwrap();
+    startup.join().unwrap().unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"restored-attachment-content");
+    let run = reply.run_id.unwrap().as_str().parse().unwrap();
+    live.runtime.cancel(run).unwrap();
+    live.runtime.wait(run).await.unwrap();
+}
+
 fn response(content: Vec<ContentBlock>, finish_reason: FinishReason) -> ChatResponse {
     ChatResponse {
         usage_reported: true,

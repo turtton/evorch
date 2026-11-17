@@ -81,6 +81,60 @@ impl Tool for BulkRead {
     }
 }
 
+// A real core-managed attachment, not a fabricated path or an inline image.
+struct CacheAttachment {
+    root: sandbox::attachments::AttachmentRoot,
+    thread: String,
+    path: std::path::PathBuf,
+}
+impl CacheAttachment {
+    fn new(runtime: &AgentRuntime, thread: &str) -> Self {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let root = runtime.attachment_root().unwrap();
+        let files = root.files(thread).unwrap();
+        let path = files.path().join("cache-contract.txt");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap()
+            .write_all(b"persistent attachment cache fixture")
+            .unwrap();
+        Self {
+            root,
+            thread: thread.into(),
+            path,
+        }
+    }
+    fn prompt(&self, text: &str) -> String {
+        format!(
+            "{text}\n\n[Attached files (read-only; open with read or shell)]\n{}",
+            serde_json::to_string(&self.path).unwrap()
+        )
+    }
+    async fn assert_readable(&self, runtime: &AgentRuntime) {
+        let directories = runtime.attachment_read_directories(&self.thread).unwrap();
+        assert!(
+            directories
+                .iter()
+                .any(|directory| self.path.starts_with(directory.path()))
+        );
+        let read = tools::Read
+            .execute(json!({"path": self.path}))
+            .await
+            .unwrap();
+        assert!(!read.is_error, "{read:?}");
+        assert!(read.content.contains("persistent attachment cache fixture"));
+    }
+}
+impl Drop for CacheAttachment {
+    fn drop(&mut self) {
+        self.root.remove_thread(&self.thread).unwrap();
+    }
+}
+
 struct GatedRead {
     started: Notify,
     release: Notify,
@@ -5169,6 +5223,13 @@ async fn saved_image_history_survives_repeated_restore_with_identical_wire_prefi
     harness.runtime = harness
         .runtime
         .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    harness
+        .runtime
+        .set_thread_scratch(Arc::new(runtime::scratch::ThreadScratch::at(
+            root.join("attachment-scratch"),
+        )));
+    let attachment = CacheAttachment::new(&harness.runtime, "legacy-image");
+    let prompt = attachment.prompt("Saved image conversation");
     let run = harness.runtime.reserve_run_id();
     harness
         .runtime
@@ -5178,7 +5239,7 @@ async fn saved_image_history_survives_repeated_restore_with_identical_wire_prefi
         run,
         None,
         Role::Worker,
-        "Saved image conversation",
+        prompt.clone(),
         RunConfig {
             interactive: true,
             ..Default::default()
@@ -5198,7 +5259,7 @@ async fn saved_image_history_survives_repeated_restore_with_identical_wire_prefi
         .flatten()
         .unwrap();
     let mut history: Vec<providers::Message> = serde_json::from_str(&record.messages_json).unwrap();
-    history.iter_mut().find(|message| message.role == providers::Role::User && message.content.iter().any(|block| matches!(block, providers::ContentBlock::Text { text } if text == "Saved image conversation"))).unwrap().content.push(providers::ContentBlock::Image { media_type: "image/png".into(), data: "aW1hZ2U=".into() });
+    history.iter_mut().find(|message| message.role == providers::Role::User && message.content.iter().any(|block| matches!(block, providers::ContentBlock::Text { text } if text == &prompt))).unwrap().content.push(providers::ContentBlock::Image { media_type: "image/png".into(), data: "aW1hZ2U=".into() });
     record.messages_json = serde_json::to_string(&history).unwrap();
     storage.handle().upsert_run_context(&record).unwrap();
     let mut events = Vec::new();
@@ -5212,6 +5273,7 @@ async fn saved_image_history_survives_repeated_restore_with_identical_wire_prefi
             .resume_chat(run, RunConfig::default())
             .unwrap();
         through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+        attachment.assert_readable(&harness.runtime).await;
         harness.runtime.send_message(run, text.into()).unwrap();
         events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
         harness
@@ -5240,6 +5302,20 @@ async fn saved_image_history_survives_repeated_restore_with_identical_wire_prefi
             request["messages"].as_array().unwrap().contains(legacy),
             "saved user image content must never be rewritten"
         );
+        assert!(
+            request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| {
+                    message["role"] == "user"
+                        && message["content"].as_array().is_some_and(|blocks| {
+                            blocks.iter().any(|block| block["text"] == prompt)
+                        })
+                }),
+            "the exact path-bearing text block must survive alongside the legacy image"
+        );
+        assert_eq!(request["prompt_cache_key"], all[0]["prompt_cache_key"]);
     }
     let usage = events
         .iter()

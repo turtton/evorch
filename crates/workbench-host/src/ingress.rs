@@ -79,6 +79,13 @@ impl CommandHost {
     /// Startup reconciliation is also safe beside another live core: upload fds and
     /// per-thread archive locks are shared across processes.
     pub fn reconcile_attachments(&mut self) -> Result<(), WorkbenchError> {
+        self.reconcile_attachments_after_snapshot(|| {})
+    }
+
+    fn reconcile_attachments_after_snapshot(
+        &mut self,
+        after_snapshot: impl FnOnce(),
+    ) -> Result<(), WorkbenchError> {
         let root =
             self.service.runtime().attachment_root().map_err(|_| {
                 reject_error(RejectKind::Unavailable, "attachment root unavailable")
@@ -90,6 +97,32 @@ impl CommandHost {
         {
             return Ok(());
         }
+        let removed = self.attachment_cleanup_candidates()?;
+        after_snapshot();
+        let guard = runtime::attachments::AttachmentArchive::lock(root.clone(), removed.clone())
+            .map_err(|_| {
+                reject_error(
+                    RejectKind::Unavailable,
+                    "attachment archive cleanup is busy; retry",
+                )
+            })?;
+        // Another core can restore a thread and publish new attachments after the
+        // first snapshot. Only the state read under the attachment locks may
+        // authorize deletion. Archive/unarchive and send use these same locks.
+        let current = self.attachment_cleanup_candidates()?;
+        for thread in removed.iter().filter(|thread| current.contains(thread)) {
+            root.remove_thread(thread).map_err(|_| {
+                reject_error(
+                    RejectKind::Unavailable,
+                    "attachment archive cleanup incomplete; retry",
+                )
+            })?;
+        }
+        drop(guard);
+        self.attachment_service()?.recover_dead_uploads()
+    }
+
+    fn attachment_cleanup_candidates(&self) -> Result<Vec<String>, WorkbenchError> {
         let mut removed = self
             .service
             .runtime()
@@ -115,20 +148,7 @@ impl CommandHost {
                     .map(|(id, _)| id.to_string()),
             );
         }
-        let guard = runtime::attachments::AttachmentArchive::lock(root, removed).map_err(|_| {
-            reject_error(
-                RejectKind::Unavailable,
-                "attachment archive cleanup is busy; retry",
-            )
-        })?;
-        guard.remove().map_err(|_| {
-            reject_error(
-                RejectKind::Unavailable,
-                "attachment archive cleanup incomplete; retry",
-            )
-        })?;
-        drop(guard);
-        self.attachment_service()?.recover_dead_uploads()
+        Ok(removed)
     }
 
     pub fn attachment_writer(

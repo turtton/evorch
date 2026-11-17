@@ -193,10 +193,7 @@ impl CoreClipboard {
         .into_iter()
         .find(|wanted| mimes.iter().any(|mime| mime == wanted))
         .ok_or("Clipboard contains no supported image")?;
-        let (read, write) = rustix::pipe::pipe_with(
-            rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
-        )
-        .map_err(|e| e.to_string())?;
+        let (read, write) = transfer_pipe().map_err(|e| e.to_string())?;
         offer.receive(mime.to_owned(), write.as_fd());
         self.connection.flush().map_err(|e| e.to_string())?;
         drop(write);
@@ -248,6 +245,14 @@ impl CoreClipboard {
     }
 }
 
+// The compositor passes the write end to an arbitrary clipboard owner. It must
+// support ordinary blocking writers even when the payload exceeds pipe capacity.
+fn transfer_pipe() -> rustix::io::Result<(rustix::fd::OwnedFd, rustix::fd::OwnedFd)> {
+    let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+    rustix::fs::fcntl_setfl(&read, rustix::fs::OFlags::NONBLOCK)?;
+    Ok((read, write))
+}
+
 impl Drop for CoreClipboard {
     fn drop(&mut self) {
         for (_, (offer, _)) in self.state.offers.drain() {
@@ -281,6 +286,49 @@ fn unique_selection<T: Eq>(offers: impl IntoIterator<Item = T>) -> Result<Option
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+
+    #[test]
+    fn blocking_clipboard_writer_transfers_image_larger_than_pipe_capacity() {
+        let (read, write) = super::transfer_pipe().unwrap();
+        // Keep the payload well above pipe capacity, independently of the host
+        // default. FD assertions also catch the bug without scheduler dependence.
+        rustix::pipe::fcntl_setpipe_size(&write, 4096).unwrap();
+        assert!(
+            !rustix::fs::fcntl_getfl(&write)
+                .unwrap()
+                .contains(rustix::fs::OFlags::NONBLOCK)
+        );
+        let bytes: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let expected = bytes.clone();
+        let writer = std::thread::spawn(move || {
+            std::fs::File::from(write).write_all(&bytes).unwrap();
+        });
+        assert!(
+            rustix::fs::fcntl_getfl(&read)
+                .unwrap()
+                .contains(rustix::fs::OFlags::NONBLOCK)
+        );
+        let mut reader = std::fs::File::from(read);
+        let mut actual = Vec::new();
+        loop {
+            let mut polls = [rustix::event::PollFd::new(
+                &reader,
+                rustix::event::PollFlags::IN,
+            )];
+            rustix::event::poll(&mut polls, None).unwrap();
+            let mut buffer = [0; 16 * 1024];
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => actual.extend_from_slice(&buffer[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        writer.join().unwrap();
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn multiple_seat_selections_are_never_chosen_arbitrarily() {
         assert_eq!(super::unique_selection([7, 7]).unwrap(), Some(7));

@@ -96,6 +96,9 @@ fn process_with_catalog(
         .with_run_store(runtime::RunStore::open(config, storage.handle()).unwrap())
         .with_system_prompts(contract_prompts())
         .with_compaction(current.compaction.clone());
+    runtime.set_thread_scratch(Arc::new(runtime::scratch::ThreadScratch::at(
+        h._directory.path().join("attachment-scratch"),
+    )));
     (runtime, model, receiver)
 }
 
@@ -138,20 +141,31 @@ async fn planned_tool_schema_boundary_preserves_sent_history_and_reuses_the_new_
     }
 }
 
-struct ChangedRead;
+struct RecoveryRead {
+    path: std::path::PathBuf,
+    changed: bool,
+}
 #[async_trait::async_trait]
-impl Tool for ChangedRead {
+impl Tool for RecoveryRead {
     fn name(&self) -> &'static str {
         BulkRead.name()
     }
     fn schema(&self) -> Value {
-        changed_schema()
+        if self.changed {
+            changed_schema()
+        } else {
+            BulkRead.schema()
+        }
     }
     fn permissions(&self) -> Permissions {
         BulkRead.permissions()
     }
     async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
-        BulkRead.execute(input).await
+        if input["index"] == 7 {
+            tools::Read.execute(json!({"path": self.path})).await
+        } else {
+            BulkRead.execute(input).await
+        }
     }
 }
 fn changed_schema() -> Value {
@@ -178,6 +192,13 @@ async fn recover_case(
     } else {
         vec![text_response("completed"), text_response("followup")]
     };
+    // Retain all original turns, then read the same path on the successor and
+    // check reuse on one more turn after that read.
+    script.extend([
+        read_response(7),
+        text_response("attachment read"),
+        text_response("reuse after read"),
+    ]);
     if wait_schema {
         // The successor rejects this retired call, but its historical name, input,
         // call ID and error result must still remain byte-for-byte in the prefix.
@@ -218,6 +239,8 @@ async fn recover_case(
         Arc::new(BulkRead),
         predecessor.clone(),
     );
+    let attachment = CacheAttachment::new(&old, "wire-recovery-thread");
+    let prompt = attachment.prompt("Keep original task");
     // Current-thread test: pin is installed before the admitted task is polled.
     let run = old
         .delegate_chat(
@@ -227,7 +250,7 @@ async fn recover_case(
             } else {
                 Role::Worker
             },
-            "Keep original task".into(),
+            prompt.clone(),
             RunConfig {
                 interactive: true,
                 keep_alive: true,
@@ -344,11 +367,10 @@ async fn recover_case(
         &current,
         &storage,
         &config,
-        if changed_tool {
-            Arc::new(ChangedRead)
-        } else {
-            Arc::new(BulkRead)
-        },
+        Arc::new(RecoveryRead {
+            path: attachment.path.clone(),
+            changed: changed_tool,
+        }),
     );
     let fixture_db = storage::Database::open(&config).unwrap();
     let proof = support::inherited_fixture_proof(&fixture_db, &storage.handle())
@@ -550,6 +572,15 @@ async fn recover_case(
             .unwrap();
         all_events.extend(through_phase(&mut events, run, AgentRunPhase::Waiting).await);
     }
+    attachment.assert_readable(&restarted).await;
+    restarted
+        .send_message(run, "Read the original attachment path".into())
+        .unwrap();
+    all_events.extend(through_phase(&mut events, run, AgentRunPhase::Waiting).await);
+    restarted
+        .send_message(run, "Reuse after attachment read".into())
+        .unwrap();
+    all_events.extend(through_phase(&mut events, run, AgentRunPhase::Waiting).await);
     restarted.cancel(run).unwrap();
     restarted.wait(run).await.unwrap();
     let requests = h
@@ -559,7 +590,10 @@ async fn recover_case(
         .filter(|r| r.path == h.wire.path())
         .map(|r| r.body)
         .collect::<Vec<_>>();
-    assert_eq!(requests.len(), after_index + if tools_case { 2 } else { 1 });
+    assert_eq!(
+        requests.len(),
+        after_index + if tools_case { 2 } else { 1 } + 3
+    );
     for request in &requests[after_index..] {
         assert_eq!(
             request["tools"], expected_wire_tools,
@@ -581,6 +615,21 @@ async fn recover_case(
     } else {
         "input"
     };
+    assert!(
+        original[history_key]
+            .to_string()
+            .contains(&attachment.path.display().to_string())
+    );
+    for pair in requests[after_index..].windows(2) {
+        assert_append_only(h.wire.protocol(), &pair[0], &pair[1]).unwrap();
+        assert_eq!(pair[1]["prompt_cache_key"], original["prompt_cache_key"]);
+    }
+    assert!(
+        requests.last().unwrap()[history_key]
+            .to_string()
+            .contains("persistent attachment cache fixture"),
+        "the successor must return the contents from the original attachment path"
+    );
     let prefix = original[history_key].as_array().unwrap();
     assert_eq!(
         &after[history_key].as_array().unwrap()[..prefix.len()],
@@ -641,5 +690,11 @@ async fn recover_case(
     }
     if tools_case {
         assert_eq!(usage[after_index + 1].1, usage[after_index].0);
+    }
+    for pair in usage[after_index..].windows(2) {
+        assert_eq!(
+            pair[1].1, pair[0].0,
+            "successor must reuse the path-bearing prefix, including the real read result"
+        );
     }
 }
