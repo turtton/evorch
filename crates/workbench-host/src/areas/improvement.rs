@@ -86,6 +86,7 @@ pub struct ImprovementArea {
     updates: Option<Arc<Updates<ImprovementUpdateView>>>,
     storage: Option<storage::StorageHandle>,
     draft_dir: Option<PathBuf>,
+    publish_gate: Option<PublishGate>,
 }
 
 #[derive(Clone)]
@@ -176,6 +177,7 @@ impl ImprovementArea {
             updates: None,
             storage: None,
             draft_dir: None,
+            publish_gate: None,
         }
     }
 
@@ -204,6 +206,15 @@ impl ImprovementArea {
             self.storage = Some(storage);
             self.draft_dir = draft_dir;
         }
+        self
+    }
+
+    /// A test seam: called after a triage's conditional update applied and
+    /// before its draft file is placed, on the blocking thread that runs it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_publish_gate(mut self, gate: PublishGate) -> Self {
+        self.publish_gate = Some(gate);
         self
     }
 
@@ -324,6 +335,7 @@ impl ImprovementArea {
         let expected = command.expected_revision().0;
         let storage = storage.clone();
         let draft_dir = self.draft_dir.clone();
+        let gate = self.publish_gate.clone();
         let request = serde_json::to_vec(command).unwrap_or_default();
         let project = command.project().clone();
         let pending_candidate = candidate.clone();
@@ -372,7 +384,9 @@ impl ImprovementArea {
                         }
                     }
                 };
-                Ok(Box::new(move || commit(&storage, &id, expected, update)))
+                Ok(Box::new(move || {
+                    commit(&storage, &id, expected, update, gate.as_ref())
+                }))
             }),
             accepted,
         )
@@ -403,6 +417,11 @@ impl ImprovementArea {
         self.reads.view(id)
     }
 }
+
+/// A seam for tests: see [`ImprovementArea::with_publish_gate`]. Production
+/// installs none.
+#[doc(hidden)]
+pub type PublishGate = Arc<dyn Fn() + Send + Sync>;
 
 /// What the write step of an update does.
 enum Prepared {
@@ -439,21 +458,24 @@ pub fn draft_file_name(candidate_id: &str) -> String {
 /// owns (unique name, created exclusively), and the writer's conditional update
 /// decides what happens to it.
 ///
-/// * `Applied`: the staged file is renamed onto the draft's name (the name was
-///   not attached before, so nothing the candidate pointed at is replaced).
-/// * `Unchanged`: the draft is already attached. The file stays as it is; the
-///   staged one only fills the name if the file is missing (created, never
-///   replaced), and is removed.
-/// * refused or failed: the staged file is removed, nothing else is touched.
+/// * `Applied` and `Unchanged`: the staged file is hard-linked to the draft's
+///   name, which creates the name when it is free and never replaces a file
+///   that is there. An `Applied` update may run late: another triage may have
+///   found the draft attached (`Unchanged`), filled the name and the person
+///   may have edited the file since. Whatever is at the name then is the draft
+///   and stays as it is. A link that fails for another reason is a failure of
+///   the update, not a success.
+/// * refused or failed: nothing is placed, nothing else is touched.
 ///
-/// Two triages of one candidate share the draft's name but never a file they
-/// delete: each deletes only its own staged file, and only an `Applied` one
-/// (of which there is exactly one per attached name) writes the name.
+/// The staged file is removed in every case. Two triages of one candidate
+/// share the draft's name but never a file they delete: each deletes only its
+/// own staged file, and none replaces the name.
 fn commit(
     storage: &storage::StorageHandle,
     id: &str,
     expected: u64,
     prepared: Prepared,
+    gate: Option<&PublishGate>,
 ) -> Result<Done, Failure> {
     let (update, staged) = match prepared {
         Prepared::Plain(update) => (update, None),
@@ -477,32 +499,20 @@ fn commit(
     let outcome = storage.update_improvement(id, expected, update);
     let result = match outcome {
         Ok(CasOutcome::Applied { revision }) => {
-            let published = match &staged {
-                Some(staged) => staged.publish(),
-                None => Ok(()),
-            };
-            match published {
-                Ok(()) => Ok(Done {
-                    revision,
-                    changed: true,
-                    draft_file,
-                }),
-                Err(_) => Err(Failure::new(
-                    ErrorCode::StorageUnavailable,
-                    "the draft was attached but its file could not be placed; read the candidate",
-                )),
+            if let (Some(gate), Some(_)) = (gate, &staged) {
+                gate();
             }
-        }
-        Ok(CasOutcome::Unchanged { revision }) => {
-            if let Some(staged) = &staged {
-                staged.fill_if_missing();
-            }
-            Ok(Done {
+            place(&staged).map(|()| Done {
                 revision,
-                changed: false,
+                changed: true,
                 draft_file,
             })
         }
+        Ok(CasOutcome::Unchanged { revision }) => place(&staged).map(|()| Done {
+            revision,
+            changed: false,
+            draft_file,
+        }),
         Ok(CasOutcome::Refused(refusal)) => Err(refusal_failure(refusal, "candidate")),
         Err(_) => Err(Failure::storage()),
     };
@@ -514,6 +524,19 @@ fn commit(
     result
 }
 
+/// Put the staged draft, if there is one, at its name.
+fn place(staged: &Option<StagedDraft>) -> Result<(), Failure> {
+    match staged {
+        Some(staged) => staged.place().map_err(|_| {
+            Failure::new(
+                ErrorCode::StorageUnavailable,
+                "the draft is attached but its file could not be placed; read the candidate",
+            )
+        }),
+        None => Ok(()),
+    }
+}
+
 /// A draft written to a file only its operation owns, not yet at its name.
 struct StagedDraft {
     temp: PathBuf,
@@ -521,15 +544,16 @@ struct StagedDraft {
 }
 
 impl StagedDraft {
-    /// Put the file at its name, replacing nothing the candidate pointed at.
-    fn publish(&self) -> std::io::Result<()> {
-        std::fs::rename(&self.temp, &self.target)
-    }
-
-    /// Create the name when the file is missing; never replace one.
-    fn fill_if_missing(&self) {
-        // `AlreadyExists` is the expected answer: the draft is in place.
-        let _ = std::fs::hard_link(&self.temp, &self.target);
+    /// Create the name when it is free; never replace a file that is there.
+    ///
+    /// # Errors
+    /// Any failure but `AlreadyExists`, which is the expected answer when the
+    /// draft is in place: the file at the name wins.
+    fn place(&self) -> std::io::Result<()> {
+        match std::fs::hard_link(&self.temp, &self.target) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),
+            _ => Ok(()),
+        }
     }
 
     /// Remove the staged file if it is still there.
@@ -541,15 +565,11 @@ impl StagedDraft {
 /// Write `bytes` to an exclusive, owner-only temporary file next to `name`.
 fn stage_draft(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<StagedDraft> {
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
     std::fs::create_dir_all(dir)?;
     let target = dir.join(name);
-    let temp = dir.join(format!(
-        ".{name}.{}-{}.tmp",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    // A random part, so that a name is never used twice, not even by a core
+    // that started after a crash left a staged file behind.
+    let temp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

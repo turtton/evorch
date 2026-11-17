@@ -24,7 +24,7 @@ use storage::improvement::{
 };
 use storage::memory::{Lesson, LessonScope, MemoryStatus as StoredMemoryStatus};
 use support::{World, operation, project, world};
-use workbench_host::areas::improvement::{ImprovementArea, draft_file_name};
+use workbench_host::areas::improvement::{ImprovementArea, PublishGate, draft_file_name};
 use workbench_host::areas::memory::MemoryArea;
 use workbench_host::areas::memory::update::{UpdateHook, UpdateStage};
 use workbench_host::areas::{Areas, diagnostics::read_ops::SlugOf};
@@ -103,8 +103,26 @@ fn slug() -> SlugOf {
 
 /// A host with both updating areas. `drafts` says whether triage has a draft directory.
 fn setup(hook: Option<UpdateHook>, drafts: bool) -> World {
+    setup_gated(hook, drafts, None)
+}
+
+/// [`setup`] with a gate between the conditional update of a triage and the
+/// placing of its draft file.
+fn setup_gated(hook: Option<UpdateHook>, drafts: bool, gate: Option<PublishGate>) -> World {
     world(|parts| {
         let draft_dir = drafts.then(|| parts.dir.join("drafts"));
+        let improvement = ImprovementArea::from_parts(
+            parts.tasks.clone(),
+            parts.projection.source("improvement").unwrap(),
+            parts.database.clone(),
+            slug(),
+            true,
+        )
+        .with_writer(parts.storage.clone(), draft_dir, hook.clone());
+        let improvement = match gate {
+            Some(gate) => improvement.with_publish_gate(gate),
+            None => improvement,
+        };
         Areas {
             memory: MemoryArea::from_parts(
                 parts.tasks.clone(),
@@ -113,14 +131,7 @@ fn setup(hook: Option<UpdateHook>, drafts: bool) -> World {
                 slug(),
             )
             .with_writer(parts.storage.clone(), hook.clone()),
-            improvement: ImprovementArea::from_parts(
-                parts.tasks,
-                parts.projection.source("improvement").unwrap(),
-                parts.database,
-                slug(),
-                true,
-            )
-            .with_writer(parts.storage, draft_dir, hook),
+            improvement,
             ..Default::default()
         }
     })
@@ -1424,4 +1435,123 @@ fn two_clients_triaging_at_once_leave_the_draft_the_database_points_at() {
     let text = std::fs::read_to_string(w.dir.path().join("drafts/race.issue.md")).unwrap();
     assert!(text.contains("title of race"), "{text}");
     assert_eq!(drafts(&w), vec!["race.issue.md".to_owned()]);
+}
+
+/// The gate of a triage that waits, on its blocking thread, between its
+/// conditional update and the placing of its file, until the test lets it go.
+struct PublishHold {
+    reached: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+fn publish_hold() -> (PublishGate, PublishHold) {
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let reached_tx = std::sync::Mutex::new(reached_tx);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let gate: PublishGate = Arc::new(move || {
+        reached_tx.lock().unwrap().send(()).unwrap();
+        release_rx.lock().unwrap().recv().unwrap();
+    });
+    (gate, PublishHold { reached, release })
+}
+
+#[test]
+fn a_late_applied_triage_leaves_the_draft_another_triage_filled_and_the_person_edited() {
+    let (gate, hold) = publish_hold();
+    let mut w = setup_gated(None, true, Some(gate));
+    record(&w, "late");
+    let shown = improvement_detail(&w, "late").summary.state.revision;
+    let mut events = w
+        .host
+        .projection()
+        .subscribe_with_snapshot(&Subscribe {
+            scope: SubscriptionScope::All,
+            after: None,
+        })
+        .unwrap();
+
+    // A: its update is written, its file is not placed yet.
+    send_improvement(
+        &mut w,
+        local_desktop(),
+        triage_command("first", "late", shown.0),
+    )
+    .unwrap();
+    hold.reached.recv().unwrap();
+    let attached = stored_candidate(&w, "late").unwrap();
+    assert_eq!(attached.draft_path.as_deref(), Some("late.issue.md"));
+    assert!(drafts(&w).iter().all(|name| name.starts_with('.')));
+
+    // B reads the new revision: the draft is attached, so B changes nothing
+    // and fills the missing name.
+    let now = storage::management::improvement_revision(&attached);
+    send_improvement(&mut w, web(), triage_command("second", "late", now)).unwrap();
+    let second = w.rt.block_on(async {
+        loop {
+            match events.recv().await.expect("the subscription is open").event {
+                UiEvent::Improvement(ImprovementEvent::ImprovementUpdateCompleted { update })
+                    if update.operation.operation_id.as_str() == "second" =>
+                {
+                    return update;
+                }
+                _ => {}
+            }
+        }
+    });
+    assert!(is_ready(&second.operation.state));
+    assert_eq!(second.changed, Some(false));
+    let path = w.dir.path().join("drafts/late.issue.md");
+    assert!(path.exists(), "the second triage filled the missing file");
+
+    // The person edits the draft; then A goes on.
+    std::fs::write(&path, SENTINEL).unwrap();
+    hold.release.send(()).unwrap();
+    w.settle();
+    let first = improvement_update_checked(&w, "first");
+    assert!(is_ready(&first.operation.state));
+    assert_eq!(first.changed, Some(true));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), SENTINEL);
+    assert_eq!(drafts(&w), vec!["late.issue.md".to_owned()]);
+}
+
+#[test]
+fn a_draft_file_that_cannot_be_placed_fails_the_update_and_a_later_triage_places_it() {
+    // The staged file vanishes after the update was written, so the link fails
+    // with something other than "already exists".
+    let dir: Arc<std::sync::OnceLock<PathBuf>> = Arc::default();
+    let gate: PublishGate = {
+        let dir = dir.clone();
+        Arc::new(move || {
+            for entry in std::fs::read_dir(dir.get().unwrap()).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    std::fs::remove_file(entry.path()).unwrap();
+                }
+            }
+        })
+    };
+    let mut w = setup_gated(None, true, Some(gate));
+    dir.set(w.dir.path().join("drafts")).unwrap();
+    record(&w, "lost");
+    let shown = improvement_detail(&w, "lost").summary.state.revision;
+    send_improvement(&mut w, web(), triage_command("lose", "lost", shown.0)).unwrap();
+    w.settle();
+    assert_eq!(
+        improvement_failed(&improvement_update_checked(&w, "lose")),
+        ErrorCode::StorageUnavailable
+    );
+    // The update itself was written: the candidate points at a file that is not there.
+    let attached = stored_candidate(&w, "lost").unwrap();
+    assert_eq!(attached.draft_path.as_deref(), Some("lost.issue.md"));
+    assert!(drafts(&w).is_empty());
+
+    // Reading the candidate shows the new revision; a triage there places the file.
+    let now = storage::management::improvement_revision(&attached);
+    send_improvement(&mut w, web(), triage_command("again", "lost", now)).unwrap();
+    w.settle();
+    let again = improvement_update_checked(&w, "again");
+    assert!(is_ready(&again.operation.state));
+    assert_eq!(again.changed, Some(false));
+    assert_eq!(drafts(&w), vec!["lost.issue.md".to_owned()]);
 }
