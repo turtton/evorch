@@ -1,11 +1,11 @@
-//! Improvement namespace adapter (read side, PR 13): the namespace names no
-//! command, and a query only names its project; the directory is resolved here,
-//! from the project directory the core owns.
-use workbench_protocol::commands::CommandReply;
+//! Improvement namespace adapter: a command or query only names its project;
+//! the directory is resolved here, from the project directory the core owns. An
+//! update is handed to the `improvement` area, which runs it as an operation.
+use workbench_protocol::commands::{CommandDisposition, CommandReply, CommandResult};
 use workbench_protocol::envelope::Provenance;
 use workbench_protocol::errors::WorkbenchError;
 use workbench_protocol::namespaces::improvement::{
-    ImprovementCommand, ImprovementQuery, ImprovementReply,
+    ImprovementCommand, ImprovementQuery, ImprovementReply, ImprovementResult,
 };
 use workbench_protocol::queries::{Query, QueryReply};
 
@@ -16,9 +16,17 @@ impl CommandHost {
         &mut self,
         command: ImprovementCommand,
         _provenance: &Provenance,
-        _restart: crate::bootstrap::restart::HostCommandPermit,
+        restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
-        match command {}
+        let root = self.project_root(command.project())?;
+        let submitted = self.areas.improvement.submit(&command, root, restart)?;
+        let mut reply = CommandReply::with_result(CommandResult::Improvement(
+            ImprovementResult::Operation(submitted.view),
+        ));
+        if submitted.already_applied {
+            reply.disposition = CommandDisposition::AlreadyApplied;
+        }
+        Ok(reply)
     }
 
     pub(in crate::ingress) fn improvement_query(
@@ -37,18 +45,19 @@ impl CommandHost {
             ImprovementQuery::GetImprovementOperation(target) => {
                 ImprovementReply::Operation(improvement.operation(&target.operation_id)?)
             }
+            ImprovementQuery::GetImprovementUpdate(target) => {
+                ImprovementReply::Update(Box::new(improvement.update_of(&target.operation_id)?))
+            }
         }))
     }
 }
 
 impl CommandHost {
-    /// How a planned restart treats this namespace's commands. The namespace has
-    /// none yet, so this cannot be called; PR 14, which adds the first command,
-    /// writes the classification here (default: new work), not in the shared
-    /// `restart.rs`.
+    /// Every improvement command writes a candidate (triage also a draft file):
+    /// new work for a planned restart, like the memory commands.
     pub(in crate::ingress) fn improvement_command_access(
-        command: &ImprovementCommand,
+        _command: &ImprovementCommand,
     ) -> crate::bootstrap::restart::CommandAccess {
-        match *command {}
+        crate::bootstrap::restart::CommandAccess::NewWork
     }
 }

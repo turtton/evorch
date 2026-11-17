@@ -1,4 +1,4 @@
-//! Samples of the `memory` area (PR 13, read side).
+//! Samples of the `memory` area (PR 13 reads, PR 14 updates).
 use super::AreaSamples;
 use serde_json::{Value, json};
 use workbench_protocol::{
@@ -26,6 +26,24 @@ fn state() -> Value {
     })
 }
 
+fn command(operation: &str, payload: Value) -> Command {
+    de(json!({"type": "memory", "payload": {"type": operation, "payload": payload}}))
+}
+
+fn memory_update() -> Value {
+    json!({"operation_id": "op-3", "project": "project-1",
+           "target": {"id": "lesson-1", "expected_revision": "3"}})
+}
+
+fn update_view(state: Value, extra: Value) -> Value {
+    let mut view = json!({"operation": {"operation_id": "op-3", "state": state, "revision": "5"},
+        "project": "project-1", "id": "lesson-1", "action": "reject"});
+    for (key, value) in extra.as_object().unwrap() {
+        view[key] = value.clone();
+    }
+    view
+}
+
 fn query(operation: &str, payload: Value) -> Query {
     de(json!({"type": "memory", "payload": {"type": operation, "payload": payload}}))
 }
@@ -37,7 +55,13 @@ fn reply(kind: &str, payload: Value) -> QueryReply {
 pub fn samples() -> AreaSamples {
     AreaSamples {
         name: "memory",
-        commands: Vec::<Command>::new(),
+        commands: vec![
+            command("set_memory_favorite", memory_update()),
+            command("clear_memory_favorite", memory_update()),
+            command("validate_memory", memory_update()),
+            command("promote_memory", memory_update()),
+            command("reject_memory", memory_update()),
+        ],
         queries: vec![
             query(
                 "list_memory",
@@ -49,9 +73,17 @@ pub fn samples() -> AreaSamples {
                 json!({"operation_id": "op-2", "project": "project-1", "id": "lesson-1"}),
             ),
             query("get_memory_operation", json!({"operation_id": "op-1"})),
+            query("get_memory_update", json!({"operation_id": "op-3"})),
         ],
-        ui_events: vec![de::<UiEvent>(json!({"type": "memory", "payload": {
-            "type": "memory_operation_changed", "payload": {"view": view(json!({"type": "ready"}))}}}))],
+        ui_events: vec![
+            de::<UiEvent>(json!({"type": "memory", "payload": {
+                "type": "memory_operation_changed", "payload": {"view": view(json!({"type": "ready"}))}}})),
+            de::<UiEvent>(json!({"type": "memory", "payload": {
+                "type": "memory_update_completed", "payload": {"update": update_view(
+                    json!({"type": "failed", "code": "conflict"}),
+                    json!({"denial": "favorite_must_be_cleared",
+                           "message": "the current state does not allow this action"}))}}})),
+        ],
         query_replies: vec![
             reply(
                 "list",
@@ -67,6 +99,13 @@ pub fn samples() -> AreaSamples {
                     "evidence": {"text": "run-1", "total_bytes": 5, "truncated": false}}}),
             ),
             reply("operation", view(json!({"type": "pending"}))),
+            reply(
+                "update",
+                update_view(
+                    json!({"type": "ready"}),
+                    json!({"revision": "6", "changed": true}),
+                ),
+            ),
         ],
     }
 }

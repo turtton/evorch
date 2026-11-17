@@ -1,4 +1,74 @@
 {
+  "command/memory/clear_memory_favorite": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-3",
+        "project": "project-1",
+        "target": {
+          "expected_revision": "3",
+          "id": "lesson-1"
+        }
+      },
+      "type": "clear_memory_favorite"
+    },
+    "type": "memory"
+  },
+  "command/memory/promote_memory": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-3",
+        "project": "project-1",
+        "target": {
+          "expected_revision": "3",
+          "id": "lesson-1"
+        }
+      },
+      "type": "promote_memory"
+    },
+    "type": "memory"
+  },
+  "command/memory/reject_memory": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-3",
+        "project": "project-1",
+        "target": {
+          "expected_revision": "3",
+          "id": "lesson-1"
+        }
+      },
+      "type": "reject_memory"
+    },
+    "type": "memory"
+  },
+  "command/memory/set_memory_favorite": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-3",
+        "project": "project-1",
+        "target": {
+          "expected_revision": "3",
+          "id": "lesson-1"
+        }
+      },
+      "type": "set_memory_favorite"
+    },
+    "type": "memory"
+  },
+  "command/memory/validate_memory": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-3",
+        "project": "project-1",
+        "target": {
+          "expected_revision": "3",
+          "id": "lesson-1"
+        }
+      },
+      "type": "validate_memory"
+    },
+    "type": "memory"
+  },
   "query/memory/get_memory": {
     "payload": {
       "payload": {
@@ -16,6 +86,15 @@
         "operation_id": "op-1"
       },
       "type": "get_memory_operation"
+    },
+    "type": "memory"
+  },
+  "query/memory/get_memory_update": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-3"
+      },
+      "type": "get_memory_update"
     },
     "type": "memory"
   },
@@ -155,6 +234,26 @@
     },
     "type": "memory"
   },
+  "query_reply/memory/update": {
+    "payload": {
+      "payload": {
+        "action": "reject",
+        "changed": true,
+        "id": "lesson-1",
+        "operation": {
+          "operation_id": "op-3",
+          "revision": "5",
+          "state": {
+            "type": "ready"
+          }
+        },
+        "project": "project-1",
+        "revision": "6"
+      },
+      "type": "update"
+    },
+    "type": "memory"
+  },
   "ui_event/memory/memory_operation_changed": {
     "payload": {
       "payload": {
@@ -167,6 +266,29 @@
         }
       },
       "type": "memory_operation_changed"
+    },
+    "type": "memory"
+  },
+  "ui_event/memory/memory_update_completed": {
+    "payload": {
+      "payload": {
+        "update": {
+          "action": "reject",
+          "denial": "favorite_must_be_cleared",
+          "id": "lesson-1",
+          "message": "the current state does not allow this action",
+          "operation": {
+            "operation_id": "op-3",
+            "revision": "5",
+            "state": {
+              "code": "conflict",
+              "type": "failed"
+            }
+          },
+          "project": "project-1"
+        }
+      },
+      "type": "memory_update_completed"
     },
     "type": "memory"
   }

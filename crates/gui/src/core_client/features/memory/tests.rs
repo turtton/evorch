@@ -2,7 +2,10 @@
 //! again when it settles, an answer for another project is dropped, and the screen
 //! only ever sends queries.
 use super::*;
-use crate::core_client::features::execution::tests::{answer, asked, query_of, screen};
+use crate::core_client::features::{
+    FeatureAction, FeatureError, FeatureRequest,
+    execution::tests::{answer, asked, command_of, query_of, screen},
+};
 use egui_kittest::kittest::Queryable;
 use workbench_protocol::{
     errors::ErrorCode,
@@ -209,4 +212,192 @@ fn without_a_project_nothing_is_asked() {
     screen.state_mut().selection.project = None;
     assert!(asked(&mut screen).is_empty());
     screen.get_by_label("プロジェクトを選択すると教訓を表示します。");
+}
+
+/// A screen with `lesson-b` open: validated is offered, rejecting is refused
+/// because the lesson is a favorite.
+fn screen_with_detail()
+-> egui_kittest::Harness<'static, crate::core_client::features::execution::tests::Screen> {
+    let mut screen = screen(Box::<MemoryFeature>::default(), None);
+    let first = asked(&mut screen);
+    let list = list_of(&first[0]);
+    answer(
+        &mut screen,
+        first[0].tag,
+        list_reply(&list.operation_id, vec![summary("lesson-b", true)]),
+    );
+    screen
+        .get_by_label("★ lesson-b · 候補 · preview of lesson-b")
+        .click();
+    let detail = asked(&mut screen);
+    let Query::Memory(MemoryQuery::GetMemory(get)) = query_of(&detail[0]) else {
+        panic!("a detail was expected");
+    };
+    let mut state = summary("lesson-b", true).state;
+    state.revision = Revision(7);
+    state.actions = vec![
+        ActionAvailability {
+            action: MemoryAction::Validate,
+            state: ActionState::Allowed,
+        },
+        ActionAvailability {
+            action: MemoryAction::Reject,
+            state: ActionState::Denied {
+                reason: DenialReason::FavoriteMustBeCleared,
+            },
+        },
+    ];
+    let text = |text: &str| BoundedText {
+        text: text.into(),
+        total_bytes: text.len() as u64,
+        truncated: false,
+    };
+    answer(
+        &mut screen,
+        detail[0].tag,
+        FeatureReply::Query(Ok(QueryReply::Memory(MemoryReply::Detail(Box::new(
+            ReadOutcome {
+                operation: view(&get.operation_id, OperationState::Ready),
+                data: Some(MemoryDetail {
+                    state,
+                    scope: MemoryScope::Project,
+                    task_id: "task-1".into(),
+                    content: text("content"),
+                    evidence: text("evidence"),
+                }),
+            },
+        ))))),
+    );
+    screen
+}
+
+fn update_view(id: &OperationId, state: OperationState, changed: Option<bool>) -> MemoryUpdateView {
+    MemoryUpdateView {
+        operation: view(id, state),
+        project: ProjectId::new("p").unwrap(),
+        id: MemoryId::new("lesson-b").unwrap(),
+        action: MemoryAction::Validate,
+        revision: None,
+        changed,
+        denial: None,
+        message: None,
+    }
+}
+
+fn sent_update(action: &FeatureAction) -> &UpdateMemory {
+    match command_of(action) {
+        Command::Memory(MemoryCommand::ValidateMemory(update)) => update,
+        other => panic!("a validate was expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_update_carries_the_revision_that_was_read_and_is_sent_once() {
+    let mut screen = screen_with_detail();
+    // What the core refuses is shown as a disabled button, never sent.
+    screen.get_by_label("却下する");
+
+    screen.get_by_label("検証済みにする").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    let update = sent_update(&sent[0]);
+    assert_eq!(update.project.as_str(), "p");
+    assert_eq!(update.target.id.as_str(), "lesson-b");
+    assert_eq!(update.target.expected_revision, Revision(7));
+    screen.get_by_label("更新中…");
+
+    // While it runs, a second click sends nothing.
+    screen.get_by_label("検証済みにする").click();
+    assert!(asked(&mut screen).is_empty());
+
+    // Its end arrives as an event and the lesson is read again, not guessed.
+    let id = update.operation_id.clone();
+    screen
+        .state_mut()
+        .feature
+        .event(&UiEvent::Memory(MemoryEvent::MemoryUpdateCompleted {
+            update: update_view(&id, OperationState::Ready, Some(true)),
+        }));
+    let again = asked(&mut screen);
+    screen.get_by_label("更新しました。");
+    assert!(
+        again
+            .iter()
+            .all(|action| matches!(action.request, FeatureRequest::Query(_)))
+    );
+    assert!(
+        again
+            .iter()
+            .any(|action| matches!(query_of(action), Query::Memory(MemoryQuery::GetMemory(_))))
+    );
+}
+
+#[test]
+fn a_stale_revision_asks_to_read_again_and_does_not_resend() {
+    let mut screen = screen_with_detail();
+    screen.get_by_label("検証済みにする").click();
+    let sent = asked(&mut screen);
+    let id = sent_update(&sent[0]).operation_id.clone();
+    let failed = update_view(
+        &id,
+        OperationState::Failed {
+            code: ErrorCode::StaleRevision,
+        },
+        None,
+    );
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Ok({
+            let mut reply = workbench_protocol::commands::CommandReply::accepted();
+            reply.result = Some(Box::new(CommandResult::Memory(MemoryResult::Operation(
+                failed,
+            ))));
+            reply
+        })),
+    );
+    screen.get_by_label_contains("他の場所で更新されていました");
+    let next = asked(&mut screen);
+    assert!(
+        next.iter()
+            .all(|action| matches!(action.request, FeatureRequest::Query(_))),
+        "the stale update is read about, not retried"
+    );
+    assert!(!next.is_empty());
+}
+
+#[test]
+fn an_update_of_unknown_outcome_is_asked_for_and_never_counted_as_done() {
+    let mut screen = screen_with_detail();
+    screen.get_by_label("検証済みにする").click();
+    let sent = asked(&mut screen);
+    let id = sent_update(&sent[0]).operation_id.clone();
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+    );
+    let check = asked(&mut screen);
+    assert_eq!(check.len(), 1, "only a question about the operation");
+    let Query::Memory(MemoryQuery::GetMemoryUpdate(target)) = query_of(&check[0]) else {
+        panic!("the update was to be asked for");
+    };
+    assert_eq!(target.operation_id, id);
+
+    // The core does not know it (it restarted): not done, read the state.
+    answer(
+        &mut screen,
+        check[0].tag,
+        FeatureReply::Query(Err(
+            FeatureError::new("no such operation").with_code(ErrorCode::NotFound)
+        )),
+    );
+    screen.get_by_label_contains("成功とは扱いません");
+    assert!(screen.query_by_label("更新しました。").is_none());
+    let reread = asked(&mut screen);
+    assert!(
+        reread
+            .iter()
+            .all(|action| matches!(action.request, FeatureRequest::Query(_)))
+    );
 }
