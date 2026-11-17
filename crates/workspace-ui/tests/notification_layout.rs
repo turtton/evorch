@@ -1,7 +1,7 @@
 use workspace_ui::{LayoutNode, PanelId, Tabs, Workspace, from_json, to_json};
 
 #[test]
-fn notifications_append_to_global_tasks_leaf_when_missing() {
+fn notifications_append_to_global_diff_leaf_when_missing() {
     let mut workspace = Workspace::default();
     let id = PanelId::new("notifications-main");
     workspace.panels.remove(&id);
@@ -27,7 +27,7 @@ fn notifications_append_to_global_tasks_leaf_when_missing() {
     assert_eq!(
         *left.second,
         LayoutNode::Tabs(Tabs {
-            panels: vec![PanelId::new("tasks-main"), PanelId::new("diff-main"), id],
+            panels: vec![PanelId::new("diff-main"), id],
             active: 0
         })
     );
@@ -62,7 +62,6 @@ fn legacy_agents_layout_moves_global_panels_below_projects() {
     *content.second = LayoutNode::Tabs(Tabs {
         panels: vec![
             old.clone(),
-            PanelId::new("tasks-main"),
             PanelId::new("notifications-main"),
             PanelId::new("diff-main"),
         ],
@@ -81,7 +80,6 @@ fn legacy_agents_layout_moves_global_panels_below_projects() {
     let LayoutNode::Tabs(globals) = left.second.as_ref() else {
         panic!("tabs")
     };
-    assert!(globals.panels.contains(&PanelId::new("tasks-main")));
     assert!(globals.panels.contains(&PanelId::new("notifications-main")));
     assert!(globals.panels.contains(&PanelId::new("diff-main")));
     assert_eq!(from_json(&to_json(&loaded).unwrap()).unwrap(), loaded);
@@ -172,7 +170,7 @@ fn previous_subagents_layout_moves_diff_left_and_collapses_empty_right_split() {
         panic!("global tabs")
     };
     globals.panels.retain(|id| id.as_str() != "diff-main");
-    globals.active = 1;
+    globals.active = 0;
     let LayoutNode::Split(content) = root.second.as_mut() else {
         panic!("content split")
     };
@@ -199,11 +197,10 @@ fn previous_subagents_layout_moves_diff_left_and_collapses_empty_right_split() {
         *left.second,
         LayoutNode::Tabs(Tabs {
             panels: vec![
-                PanelId::new("tasks-main"),
                 PanelId::new("notifications-main"),
                 PanelId::new("diff-main"),
             ],
-            active: 1,
+            active: 0,
         })
     );
     let LayoutNode::Split(content) = root.second.as_ref() else {

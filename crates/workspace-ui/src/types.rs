@@ -89,7 +89,7 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Agent・Terminal・Tasks の nested split 既定レイアウトを構築します。
+    /// Agent・Terminal の split 既定レイアウトを構築します。
     pub fn default_v01() -> Self {
         let tabs = |id| {
             LayoutNode::Tabs(Tabs {
@@ -103,15 +103,10 @@ impl Workspace {
             panels: default_panels(),
             main: Window {
                 root: LayoutNode::Split(Split {
-                    direction: SplitDirection::Horizontal,
-                    fraction: 0.2,
-                    first: Box::new(tabs("tasks-main")),
-                    second: Box::new(LayoutNode::Split(Split {
-                        direction: SplitDirection::Vertical,
-                        fraction: 0.7,
-                        first: Box::new(tabs("agent-main")),
-                        second: Box::new(tabs("terminal-main")),
-                    })),
+                    direction: SplitDirection::Vertical,
+                    fraction: 0.7,
+                    first: Box::new(tabs("agent-main")),
+                    second: Box::new(tabs("terminal-main")),
                 }),
                 floating: Vec::new(),
                 rect: None,
@@ -130,7 +125,7 @@ impl Workspace {
         };
         let sidebar_panels: &[&str] = &["sidebar-main"];
         let conversation_panels: &[&str] = &["agent-main"];
-        let global_panels: &[&str] = &["tasks-main", "notifications-main", "diff-main"];
+        let global_panels: &[&str] = &["notifications-main", "diff-main"];
 
         Self {
             version: WORKSPACE_SCHEMA_VERSION,

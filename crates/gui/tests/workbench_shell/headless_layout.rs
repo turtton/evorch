@@ -25,8 +25,6 @@ mod right_panes_headless;
 mod status_line_headless;
 #[path = "headless_layout/subagent_tab_titles.rs"]
 mod subagent_tab_titles;
-#[path = "headless_layout/tasks_navigation_headless.rs"]
-mod tasks_navigation_headless;
 #[path = "headless_layout/terminal_default_layout.rs"]
 mod terminal_default_layout;
 #[path = "headless_layout/theme_hierarchy.rs"]

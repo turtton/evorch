@@ -188,7 +188,6 @@ fn default_keybinds_cover_every_action() {
     let actions = [
         KeyAction::FocusAgentPane,
         KeyAction::FocusTerminalPane,
-        KeyAction::FocusTasksPane,
         KeyAction::SaveLayout,
         KeyAction::ResetLayout,
     ];
@@ -243,4 +242,35 @@ fn settings_load_rejects_unsupported_version_and_invalid_workspace() {
         Err(SettingsError::Layout(workspace_ui::LayoutError::InvalidFraction { fraction }))
             if fraction == 1.0
     ));
+}
+
+#[test]
+fn saved_layout_with_the_removed_tasks_panel_is_rejected_not_migrated() {
+    // Given: a current-version layout saved before the Tasks panel was removed.
+    let workspace = serde_json::json!({
+        "version": 3,
+        "panels": {
+            "agent-main": {"id": "agent-main", "kind": "agent", "title": "Conversation"},
+            "tasks-main": {"id": "tasks-main", "kind": "tasks", "title": "Tasks"}
+        },
+        "main": {"root": {"type": "tabs", "panels": ["agent-main", "tasks-main"], "active": 0}, "floating": []},
+        "extra_windows": []
+    });
+    let directory = tempdir().expect("temp dir");
+    let settings_path = directory.path().join("ui.toml");
+    let settings = serde_json::json!({"version": 1, "layout": {"workspace": workspace}});
+    std::fs::write(&settings_path, toml::to_string(&settings).expect("TOML")).expect("write");
+    let layout_path = directory.path().join("layout.json");
+    std::fs::write(&layout_path, workspace.to_string()).expect("write");
+
+    // When: both the saved settings and an explicit --layout file are loaded.
+    let loaded_settings = load_settings(&settings_path);
+    let loaded_layout = workspace_ui::load_workspace(&layout_path);
+
+    // Then: neither silently drops the panel; callers see a typed load error.
+    assert!(
+        matches!(loaded_settings, Err(SettingsError::Serialization(_))),
+        "{loaded_settings:?}"
+    );
+    assert!(loaded_layout.is_err(), "{loaded_layout:?}");
 }

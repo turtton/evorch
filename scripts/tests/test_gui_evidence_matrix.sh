@@ -30,14 +30,14 @@ run() { # run <out-dir>; stdout and stderr go to $work/log
 for jobs in 1 4; do
   rm -rf "$work/ok"
   GUI_EVIDENCE_JOBS=$jobs run "$work/ok" || { cat "$work/log" >&2; echo "matrix failed with $jobs job(s)" >&2; exit 1; }
-  [[ "$(find "$work/ok" -name '*.png' | wc -l)" -eq 120 ]] \
-    || { echo "expected 120 PNGs with $jobs job(s)" >&2; exit 1; }
+  [[ "$(find "$work/ok" -name '*.png' | wc -l)" -eq 117 ]] \
+    || { echo "expected 117 PNGs with $jobs job(s)" >&2; exit 1; }
 done
 
 # Captures that fail at once, so they are finished when the script reaches them:
 # the first ones started, a middle one, and the very last one, which only the
 # final loop that collects what is still outstanding can see.
-for pattern in 'empty-1280x720@1.0' 'panel-tasks-main' 'modal-sandbox' 'high-contrast/edit-profile-1280x720@2.0'; do
+for pattern in 'empty-1280x720@1.0' 'panel-notifications-main' 'modal-sandbox' 'high-contrast/edit-profile-1280x720@2.0'; do
   for jobs in 1 2 4; do
     rm -rf "$work/bad"
     if FAKE_FAIL_PATTERN=$pattern GUI_EVIDENCE_JOBS=$jobs run "$work/bad"; then

@@ -41,7 +41,7 @@ fn assert_content_layout(root: &LayoutNode) {
             direction: SplitDirection::Vertical,
             fraction: 0.65,
             first: Box::new(tabs(&["sidebar-main"])),
-            second: Box::new(tabs(&["tasks-main", "notifications-main", "diff-main"])),
+            second: Box::new(tabs(&["notifications-main", "diff-main"])),
         })
     );
     assert_eq!(
@@ -129,7 +129,6 @@ fn reset_layout_restores_v02_default() {
         "sidebar-main",
         "agent-main",
         "subagents-home",
-        "tasks-main",
         "diff-main",
         "terminal-main",
     ] {
@@ -276,7 +275,6 @@ fn undock_to_floating_and_reload_preserves_v02_panels() {
         "sidebar-main",
         "agent-main",
         "subagents-home",
-        "tasks-main",
         "diff-main",
         "terminal-main",
     ] {
@@ -305,22 +303,14 @@ fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
 }
 
 fn assert_work_tabs<S: AgentRunSource>(state: &WorkbenchState<S>) {
-    for id in ["subagents-home", "tasks-main"] {
-        assert_eq!(
-            state
-                .dock()
-                .iter_all_tabs()
-                .filter(|(_, panel)| panel.as_str() == id)
-                .count(),
-            1,
-            "one canonical {id} tab"
-        );
-    }
-    assert!(
+    assert_eq!(
         state
             .dock()
-            .find_tab(&PanelId::new("durable-tasks-main"))
-            .is_none()
+            .iter_all_tabs()
+            .filter(|(_, panel)| panel.as_str() == "subagents-home")
+            .count(),
+        1,
+        "one canonical subagents-home tab"
     );
 }
 
@@ -361,9 +351,10 @@ fn memory_storage_registers_operational_tabs_without_arena_in_current_and_legacy
             .with_memory_storage(config.clone())
             .with_memory_storage(config);
         assert_work_tabs(&state);
-        let tasks = state
+        // Both companion tabs land together in one leaf.
+        let memory = state
             .dock()
-            .find_tab(&PanelId::new("tasks-main"))
+            .find_tab(&PanelId::new("memory-main"))
             .unwrap()
             .node_path();
         for global in ["memory-main", "self-improvement-main"] {
@@ -382,7 +373,7 @@ fn memory_storage_registers_operational_tabs_without_arena_in_current_and_legacy
                     .find_tab(&PanelId::new(global))
                     .unwrap()
                     .node_path(),
-                tasks
+                memory
             );
         }
         for id in ARENA_PANELS.map(PanelId::new) {

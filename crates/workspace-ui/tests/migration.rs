@@ -65,15 +65,15 @@ fn v1_fixture_loads_and_migrates_to_v3() {
     // When: it crosses the public JSON load boundary.
     let workspace = from_json(source).expect("v1 workspace must migrate");
 
-    // Then: the old arrangement survives with notifications appended beside Tasks.
+    // Then: the old arrangement survives with notifications appended beside Terminal.
     assert_eq!(workspace.version, 3);
-    assert_eq!(workspace.panels.len(), 4);
+    assert_eq!(workspace.panels.len(), 3);
     let mut expected = Workspace::default_v01();
     let workspace_ui::LayoutNode::Split(root) = &mut expected.main.root else {
         panic!("root split");
     };
-    let workspace_ui::LayoutNode::Tabs(tabs) = root.first.as_mut() else {
-        panic!("tasks tabs");
+    let workspace_ui::LayoutNode::Tabs(tabs) = root.second.as_mut() else {
+        panic!("terminal tabs");
     };
     tabs.panels.push(PanelId::new("notifications-main"));
     assert_eq!(workspace.main, expected.main);

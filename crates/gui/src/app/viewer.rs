@@ -9,7 +9,6 @@ use crate::panes::{
     notifications::NotificationsAction,
     requests::RequestAction,
     sidebar::{SidebarAction, set_sidebar_error},
-    tasks::TasksAction,
 };
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -116,7 +115,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.capture_thread_search_keys(&ctx);
         let mut sidebar_action = None;
         let mut agents_action = None;
-        let mut tasks_action = None;
         let mut notifications_action = None;
         let mut lane_attention_action = None;
         let mut request_action = None;
@@ -188,9 +186,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ledger: &self.ledger,
                 telemetry: &self.telemetry,
                 tasks: &mut self.tasks,
-                durable_tasks: &self.durable_tasks,
-                selected_task: self.selected_task.as_deref(),
-                tasks_action: &mut tasks_action,
                 terminals: &mut self.terminals,
                 terminal_target,
                 panels: &self.panels,
@@ -270,18 +265,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         });
                     }
                 }
-                AgentsAction::OpenTask(task_id) => {
-                    // Every navigation should reveal the target, including repeated visits.
-                    ctx.data_mut(|data| {
-                        data.remove::<String>(egui::Id::new("tasks_scrolled_selection"));
-                    });
-                    self.selected_task = Some(task_id);
-                    self.focus_panel("tasks-main");
-                }
             }
-        }
-        if let Some(TasksAction::OpenRun(run_id)) = tasks_action {
-            self.open_agent_pane(&run_id);
         }
         if let Some(crate::panes::self_improvement::SelfImprovementAction::CreateTriageThread {
             title,

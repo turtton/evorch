@@ -277,12 +277,7 @@ fn agents_cell_shows_pressure_when_window_is_known() {
             .with_size(egui::vec2(1200.0, 220.0))
             .build_ui(|ui| {
                 gui::theme::install(ui.ctx());
-                gui::panes::agents::agents_pane(
-                    ui,
-                    &tasks,
-                    gui.state().telemetry(),
-                    &Default::default(),
-                );
+                gui::panes::agents::agents_pane(ui, &tasks, gui.state().telemetry());
             });
         harness.run();
         harness

@@ -10,7 +10,7 @@ pub(crate) fn notifications(workspace: &mut Workspace) {
     let anchors: Vec<_> = workspace
         .panels
         .values()
-        .filter(|panel| matches!(panel.kind, PanelKind::Tasks | PanelKind::Agents))
+        .filter(|panel| matches!(panel.kind, PanelKind::Diff | PanelKind::Agents))
         .map(|panel| panel.id.clone())
         .collect();
     match find_tabs(workspace, &|tabs| {
@@ -46,7 +46,7 @@ fn move_main_diff_to_globals(workspace: &mut Workspace) {
     let anchors: Vec<_> = workspace
         .panels
         .values()
-        .filter(|panel| matches!(panel.kind, PanelKind::Tasks | PanelKind::Notifications))
+        .filter(|panel| panel.kind == PanelKind::Notifications)
         .map(|panel| panel.id.clone())
         .collect();
     let Some(globals) = find_node_tabs(&mut workspace.main.root, &|tabs| {
@@ -119,8 +119,7 @@ fn retire_agents(workspace: &mut Workspace) {
         .filter(|panel| {
             matches!(
                 panel.kind,
-                PanelKind::Tasks
-                    | PanelKind::Notifications
+                PanelKind::Notifications
                     | PanelKind::Memory
                     | PanelKind::Arena
                     | PanelKind::Usage

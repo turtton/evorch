@@ -331,7 +331,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         );
         self.ledger.apply(event);
         self.tasks.apply_event(event);
-        self.durable_tasks.apply_event(event);
         self.telemetry.apply_event(event);
         self.fold_system_notification(event);
     }
@@ -466,7 +465,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match action {
             KeyAction::FocusAgentPane => self.focus_panel("agent-main"),
             KeyAction::FocusTerminalPane => self.focus_panel("terminal-main"),
-            KeyAction::FocusTasksPane => self.focus_panel("tasks-main"),
             KeyAction::SaveLayout => self.save_layout(),
             KeyAction::ResetLayout => self.reset_layout(ctx),
             KeyAction::CycleAgentRole => self.composer.toggle_role(),

@@ -48,8 +48,7 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             | (PanelKind::SubagentRegion, None)
             | (PanelKind::Notifications, None)
             | (PanelKind::Diff, None)
-            | (PanelKind::Terminal, None)
-            | (PanelKind::Tasks, None) => {}
+            | (PanelKind::Terminal, None) => {}
             (
                 PanelKind::Memory
                 | PanelKind::Arena
@@ -66,8 +65,7 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             | (PanelKind::SubagentRegion, Some(_))
             | (PanelKind::Notifications, Some(_))
             | (PanelKind::Diff, Some(_))
-            | (PanelKind::Terminal, Some(_))
-            | (PanelKind::Tasks, Some(_)) => {
+            | (PanelKind::Terminal, Some(_)) => {
                 return Err(LayoutError::UnexpectedTarget {
                     panel_id: panel.id.to_string(),
                 });

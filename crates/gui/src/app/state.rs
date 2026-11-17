@@ -76,8 +76,6 @@ pub struct WorkbenchState<S> {
     pub(super) telemetry: TelemetryOverlay,
     pub(super) system_footer: super::system_footer::SystemFooter,
     pub(super) tasks: TasksModel<S>,
-    pub(super) durable_tasks: crate::model::durable_tasks::DurableTasksModel,
-    pub(super) selected_task: Option<String>,
     pub(super) terminals: crate::terminal::TerminalSessions,
     pub(super) dock: DockState<PanelId>,
     pub(super) panels: BTreeMap<PanelId, Panel>,
@@ -247,8 +245,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             telemetry: TelemetryOverlay::new(),
             system_footer: Default::default(),
             tasks: TasksModel::new(source),
-            durable_tasks: crate::model::durable_tasks::DurableTasksModel::default(),
-            selected_task: None,
             terminals: crate::terminal::TerminalSessions::default(),
             dock,
             panels: workspace.panels,
@@ -366,7 +362,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // A GUI-local companion tab: PanelKind belongs to workspace-ui, so
             // preserve that schema and dispatch by this distinct ID in the viewer.
             ("self-improvement-main", PanelKind::Memory),
-            ("tasks-main", PanelKind::Tasks),
         ] {
             let id = PanelId::new(id);
             if self.dock.find_tab(&id).is_none() {
@@ -383,7 +378,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         target: None,
                     },
                 );
-                if let Some(path) = self.dock.find_tab(&PanelId::new("tasks-main"))
+                if let Some(path) = self.dock.find_tab(&PanelId::new("notifications-main"))
                     && let Ok(leaf) = self.dock.leaf_mut(path.node_path())
                 {
                     leaf.tabs.push(id);

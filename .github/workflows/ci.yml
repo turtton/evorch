@@ -654,10 +654,9 @@ jobs:
           mkdir -p target/gui-pr-preview
           cp 'target/gui-evidence/graphite/demo-1280x720@1.0.png' target/gui-pr-preview/01-workbench.png
           cp 'target/gui-evidence/graphite/panel-agent-main-1280x720@1.0.png' target/gui-pr-preview/02-conversation.png
-          cp 'target/gui-evidence/graphite/panel-tasks-main-1280x720@1.0.png' target/gui-pr-preview/03-tasks.png
-          cp 'target/gui-evidence/graphite/modal-provider-1280x720@1.0.png' target/gui-pr-preview/04-provider-settings.png
-          cp 'target/gui-evidence/graphite/pending-approvals-1280x720@1.0.png' target/gui-pr-preview/05-approvals.png
-          cp 'target/gui-evidence/high-contrast/demo-1280x720@1.0.png' target/gui-pr-preview/06-high-contrast.png
+          cp 'target/gui-evidence/graphite/modal-provider-1280x720@1.0.png' target/gui-pr-preview/03-provider-settings.png
+          cp 'target/gui-evidence/graphite/pending-approvals-1280x720@1.0.png' target/gui-pr-preview/04-approvals.png
+          cp 'target/gui-evidence/high-contrast/demo-1280x720@1.0.png' target/gui-pr-preview/05-high-contrast.png
           jq -n --argjson pr "$PR_NUMBER" --arg sha "$PR_HEAD_SHA" --argjson run "$GITHUB_RUN_ID" \
             '{pr: $pr, head_sha: $sha, run_id: $run}' > target/gui-pr-preview/pr.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -38,7 +38,6 @@ pub mod settings;
 pub mod shell_jobs;
 pub mod sidebar;
 pub mod system_footer;
-pub mod tasks;
 pub mod team;
 pub mod terminal;
 pub mod thread_search;

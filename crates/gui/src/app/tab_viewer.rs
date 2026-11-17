@@ -22,7 +22,6 @@ use crate::panes::{
     notifications::{NotificationsAction, notifications_pane},
     requests::RequestAction,
     sidebar::{LaneCloseView, PullRequestsView, SidebarAction, sidebar_pane_with_lane_close},
-    tasks::{TasksAction, tasks_pane},
     terminal::terminal_pane,
 };
 
@@ -65,9 +64,6 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) ledger: &'a crate::model::ledger::LedgerRegistry,
     pub(super) telemetry: &'a TelemetryOverlay,
     pub(super) tasks: &'a mut TasksModel<S>,
-    pub(super) durable_tasks: &'a crate::model::durable_tasks::DurableTasksModel,
-    pub(super) selected_task: Option<&'a str>,
-    pub(super) tasks_action: &'a mut Option<TasksAction>,
     pub(super) terminals: &'a mut crate::terminal::TerminalSessions,
     pub(super) terminal_target: (crate::terminal::TerminalKey, std::path::PathBuf),
     pub(super) panels: &'a BTreeMap<PanelId, Panel>,
@@ -175,7 +171,6 @@ fn panel_icon(kind: PanelKind) -> &'static str {
         PanelKind::Diff => icons::GIT_DIFF,
         PanelKind::FileViewer => icons::FILE_TEXT,
         PanelKind::Terminal => icons::TERMINAL_WINDOW,
-        PanelKind::Tasks => icons::LIST_CHECKS,
         PanelKind::Notifications => icons::BELL,
         PanelKind::Memory => icons::BRAIN,
         PanelKind::Arena => icons::SCALES,
@@ -299,7 +294,6 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     ui,
                     self.tasks,
                     self.telemetry,
-                    self.durable_tasks,
                     thread
                         .map(|thread| thread.run_ids.as_slice())
                         .unwrap_or_default(),
@@ -439,17 +433,6 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 &self.terminal_target.0,
                 &self.terminal_target.1,
             ),
-            PanelKind::Tasks => {
-                if let Some(action) = tasks_pane(
-                    ui,
-                    self.durable_tasks,
-                    &self.tasks.teams(),
-                    self.memory.config.as_ref(),
-                    self.selected_task,
-                ) {
-                    *self.tasks_action = Some(action);
-                }
-            }
             PanelKind::Memory => {
                 let root = self
                     .sidebar

@@ -286,7 +286,6 @@ fn subagents_list_only_displays_delegated_runs_in_selected_thread() {
             ui,
             &tasks,
             &Default::default(),
-            &Default::default(),
             &["run-1".into(), "run-2".into()],
         );
     });
@@ -387,13 +386,7 @@ fn subagent_cards_show_category_and_model_provider_on_one_line() {
     }]));
     tasks.refresh();
     let mut harness = Harness::builder().build_ui(move |ui| {
-        gui::panes::agents::subagents_pane(
-            ui,
-            &tasks,
-            &Default::default(),
-            &Default::default(),
-            &["run-2".into()],
-        );
+        gui::panes::agents::subagents_pane(ui, &tasks, &Default::default(), &["run-2".into()]);
     });
     harness.run_steps(2);
     let role = harness.get_by_label("Worker(quick) · Done").rect();

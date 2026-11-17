@@ -355,7 +355,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.telemetry.apply_event(event);
         self.ledger.apply(event);
-        self.durable_tasks.apply_event(event);
         self.seed_system_notification(event);
         self.receipt_reconciliation.dirty = true;
     }

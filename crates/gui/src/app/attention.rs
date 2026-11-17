@@ -51,7 +51,6 @@ pub(super) fn attention_for(
             .map_or(PaneAttention::None, |phase| thread_phase_attention(*phase)),
         PanelKind::Sidebar
         | PanelKind::SubagentRegion
-        | PanelKind::Tasks
         | PanelKind::Notifications
         | PanelKind::Agent
         | PanelKind::FileViewer
@@ -159,7 +158,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .collect(),
                 PanelKind::Sidebar
                 | PanelKind::SubagentRegion
-                | PanelKind::Tasks
                 | PanelKind::Notifications
                 | PanelKind::FileViewer
                 | PanelKind::Diff
@@ -398,7 +396,6 @@ mod tests {
         // Then: navigation and static panes stay quiet
         for kind in [
             PanelKind::Sidebar,
-            PanelKind::Tasks,
             PanelKind::Agent,
             PanelKind::Diff,
             PanelKind::Terminal,
