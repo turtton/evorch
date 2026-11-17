@@ -329,6 +329,39 @@ impl Fixture {
             .unwrap();
     }
 
+    /// A plan of `thread` with more task and history rows than one reclaim batch holds,
+    /// and the change event of its last revision.
+    fn plan(&self, thread: &str, rows: u32) {
+        self.sql(&format!(
+            "INSERT INTO conversation_plans(plan_id, thread_id, revision, next_task_seq, node_count, \
+                plan_bytes, progress_json, updated_ns) \
+             VALUES ('plan-{thread}', '{thread}', {rows}, {rows} + 1, {rows}, 0, '{{}}', 1);
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {rows}) \
+             INSERT INTO conversation_plan_nodes(plan_id, task_id, ord, parent_id, position, depth, title, \
+                description, result, blocker, weight, status, child_count, share_json) \
+             SELECT 'plan-{thread}', 'plan-{thread}:' || x, x, NULL, x, 1, 't', '', '', '', 1, 'pending', 0, '{{}}' FROM n;
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {rows}) \
+             INSERT INTO conversation_plan_history(plan_id, revision, event_id) \
+             SELECT 'plan-{thread}', x, x FROM n;"
+        ));
+        let kind = EventKind::ConversationPlan(event_bus::ConversationPlanEvent::Changed {
+            thread_id: thread.into(),
+            plan_id: format!("plan-{thread}"),
+            revision: u64::from(rows),
+            cause: event_bus::PlanChangeCause::ModelUpdate,
+            source_run_id: None,
+            changes: vec![],
+            progress: event_bus::PlanProgress::default(),
+        });
+        self.conn
+            .execute(
+                "INSERT INTO events(session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
+                 payload, subkind, run_id) VALUES ('session-1', 1, 1, ?1, 'ConversationPlan', ?2, 'Changed', NULL)",
+                params![NOW_NS, serde_json::to_string(&kind).unwrap()],
+            )
+            .unwrap();
+    }
+
     fn task(&self, id: &str, run: &str) {
         self.conn
             .execute(
@@ -474,6 +507,8 @@ fn build_family(f: &Fixture) {
     f.todo_event("session-1", "C");
     f.pull_request_event("session-1", "P");
     f.pull_request_event("session-1", "C");
+    f.plan("P", 3);
+    f.plan("C", 600);
     f.task("task-1", "rp");
     f.task("task-2", "rp2");
     f.sql("INSERT INTO task_links(blocker_id, blocked_id) VALUES ('task-1', 'task-2');");
@@ -492,6 +527,7 @@ fn build_family(f: &Fixture) {
     f.run_payload("rx", "session-1");
     f.todo_event("session-1", "X");
     f.pull_request_event("session-1", "X");
+    f.plan("X", 600);
     f.task("task-x", "rx");
     f.start_state("X", "rx");
     f.lane("lane-x", "X", 3);
@@ -604,6 +640,10 @@ fn family_residue(f: &Fixture) -> Vec<(String, i64)> {
         ("thread_pull_request_state", "SELECT COUNT(*) FROM thread_pull_request_state WHERE thread_id IN ('P','C','E')".to_owned()),
         ("pull_request_snapshot facts of a deleted thread", "SELECT COUNT(*) FROM pull_request_snapshots WHERE repository = 'o/live' AND number = 1 AND state IS NOT NULL".to_owned()),
         ("todo events", "SELECT COUNT(*) FROM events WHERE subkind = 'ThreadTodoUpdated' AND json_extract(payload, '$.payload.payload.snapshot.thread_id') IN ('P','C','E')".to_owned()),
+        ("conversation_plans", "SELECT COUNT(*) FROM conversation_plans WHERE thread_id IN ('P','C','E')".to_owned()),
+        ("conversation_plan_nodes", "SELECT COUNT(*) FROM conversation_plan_nodes WHERE plan_id IN ('plan-P','plan-C')".to_owned()),
+        ("conversation_plan_history", "SELECT COUNT(*) FROM conversation_plan_history WHERE plan_id IN ('plan-P','plan-C')".to_owned()),
+        ("conversation plan events", "SELECT COUNT(*) FROM events WHERE kind = 'ConversationPlan' AND json_extract(payload, '$.payload.payload.thread_id') IN ('P','C','E')".to_owned()),
         ("pull request events", "SELECT COUNT(*) FROM events WHERE kind = 'PullRequest' AND json_extract(payload, '$.payload.payload.thread_id') IN ('P','C','E')".to_owned()),
     ] {
         checks.push((label.to_owned(), sql));
@@ -627,6 +667,10 @@ fn survivor_rows(f: &Fixture) -> Vec<i64> {
         f.count("SELECT COUNT(*) FROM events WHERE subkind = 'ThreadTodoUpdated' AND json_extract(payload, '$.payload.payload.snapshot.thread_id') = 'X'"),
         f.count("SELECT COUNT(*) FROM events WHERE kind = 'PullRequest' AND json_extract(payload, '$.payload.payload.thread_id') = 'X'"),
         f.count("SELECT COUNT(*) FROM conversation_blocks WHERE run_id = 'rx'"),
+        f.count("SELECT COUNT(*) FROM conversation_plans WHERE thread_id = 'X'"),
+        f.count("SELECT COUNT(*) FROM conversation_plan_nodes WHERE plan_id = 'plan-X'"),
+        f.count("SELECT COUNT(*) FROM conversation_plan_history WHERE plan_id = 'plan-X'"),
+        f.count("SELECT COUNT(*) FROM events WHERE kind = 'ConversationPlan' AND json_extract(payload, '$.payload.payload.thread_id') = 'X'"),
         f.count("SELECT COUNT(*) FROM tasks WHERE id = 'task-x'"),
         f.count("SELECT COUNT(*) FROM task_queue_ledger WHERE json_extract(payload, '$.id') = 'task-x'"),
         f.count("SELECT COUNT(*) FROM thread_start_states WHERE thread_id = 'X'"),

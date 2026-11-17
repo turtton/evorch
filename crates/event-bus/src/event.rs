@@ -168,6 +168,7 @@ impl EventKind {
                 LedgerEvent::LaneBriefRevised { .. } => "LaneBriefRevised",
             },
             Self::PullRequest(event) => event.subkind_name(),
+            Self::ConversationPlan(event) => event.subkind_name(),
             Self::Diagnostic(_) | Self::Ownership(_) => "",
         }
     }
@@ -255,7 +256,11 @@ impl EventKind {
                 OrchestratorEvent::ThreadGoalUpdated { snapshot } => Some(&snapshot.root_run_id),
                 OrchestratorEvent::ThreadTodoUpdated { .. } => None,
             },
-            Self::Usage(_) | Self::Fault(_) | Self::Ownership(_) | Self::PullRequest(_) => None,
+            Self::Usage(_)
+            | Self::Fault(_)
+            | Self::Ownership(_)
+            | Self::PullRequest(_)
+            | Self::ConversationPlan(_) => None,
         }
     }
 }
@@ -289,6 +294,9 @@ pub enum EventKind {
     Ledger(LedgerEvent),
     /// A change to the pull request a thread tracks (ADR 0043). Thread-scoped: it has no run.
     PullRequest(crate::PullRequestEvent),
+    /// A revision of a conversation's plan. Thread-scoped: it has no run. Stored only by the
+    /// transaction that changed the plan projection, never by the event recorder.
+    ConversationPlan(crate::ConversationPlanEvent),
 }
 
 /// run 台帳に関するイベント。

@@ -51,7 +51,8 @@ impl DurableTasksModel {
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
-            | EventKind::PullRequest(_) => {}
+            | EventKind::PullRequest(_)
+            | EventKind::ConversationPlan(_) => {}
         }
     }
 

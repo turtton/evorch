@@ -293,3 +293,49 @@ async fn an_interrupted_procedure_item_is_recorded_and_read_back_unchanged() {
     };
     assert_eq!(read, &snapshot);
 }
+
+#[tokio::test]
+async fn a_conversation_plan_change_on_the_bus_is_never_stored_by_the_recorder() {
+    use event_bus::{ConversationPlanEvent, EventKind, PlanChangeCause, PlanProgress};
+    // Given: the real bridge draining a bus. The plan transaction stores the change event
+    // itself, so the bus only carries it as a post-commit notification.
+    let (_dir, storage, db) = fixture();
+    let bus = Arc::new(EventBus::new(32));
+    let task = tokio::spawn(storage_bridge::run(
+        bus.clone(),
+        StorageBridge::new(storage.handle(), "session"),
+        Duration::from_millis(50),
+    ));
+    wait_for_subscription(&bus).await;
+
+    // When: the notification is followed by an ordinary event, then the bus closes.
+    bus.emit(Event::new(EventKind::ConversationPlan(
+        ConversationPlanEvent::Changed {
+            thread_id: "thread".into(),
+            plan_id: "plan-1".into(),
+            revision: 1,
+            cause: PlanChangeCause::ModelUpdate,
+            source_run_id: None,
+            changes: vec![],
+            progress: PlanProgress::default(),
+        },
+    )));
+    bus.emit(Event::new(LifecycleEvent::Started {
+        session_id: "session".into(),
+    }));
+    drop(bus);
+    task.await.unwrap();
+
+    // Then: the ordinary event was stored and the plan notification was not.
+    let stored = db.events_all_ordered().unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|row| matches!(row.event.kind, EventKind::Lifecycle(_)))
+    );
+    assert!(
+        !stored
+            .iter()
+            .any(|row| matches!(row.event.kind, EventKind::ConversationPlan(_)))
+    );
+}

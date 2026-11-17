@@ -274,6 +274,7 @@ async fn worker_run_with_tool_call_completes_over_mock() {
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
+            | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => {}
         }
     }

@@ -373,6 +373,7 @@ impl TombstoneSet {
                 Some(snapshot.thread_id.as_str())
             }
             EventKind::PullRequest(event) => Some(event.thread_id()),
+            EventKind::ConversationPlan(event) => Some(event.thread_id()),
             _ => None,
         }
         .filter(|thread| self.contains_thread(thread));

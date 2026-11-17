@@ -57,6 +57,7 @@ async fn run_emits_pending_running_done_in_order() {
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
+            | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => None,
         })
         .collect();

@@ -10,6 +10,12 @@ pub use fencing::{
     MutationBatchError, MutationBatchGuard, MutationCheck, MutationGuard, MutationGuardAttempt,
     MutationGuardCheck, MutationGuardTryCheck, MutationValidator,
 };
+pub mod conversation_plan;
+pub use conversation_plan::{
+    ConversationPlanEvent, PLAN_PPM_SCALE, PLAN_WEIGHT_DEFAULT, PLAN_WEIGHT_MAX, PLAN_WEIGHT_MIN,
+    PlanChange, PlanChangeCause, PlanProgress, PlanStatusValues, PlanTaskStatus, PlanWeight,
+    PlanWeightRange,
+};
 pub mod event;
 pub mod lane;
 #[cfg(test)]

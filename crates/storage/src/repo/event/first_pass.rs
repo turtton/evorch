@@ -350,7 +350,7 @@ fn columns_sql(read_payloads: bool) -> String {
                 OR (subkind = '' AND kind NOT IN ('Diagnostic', 'Ownership')) \
                 OR (?1 AND ((kind = 'Orchestrator' \
                     AND subkind IN ('ThreadGoalUpdated', 'ThreadTodoUpdated')) \
-                    OR kind = 'PullRequest')) \
+                    OR kind IN ('PullRequest', 'ConversationPlan'))) \
              THEN payload END"
         )
     };
@@ -472,7 +472,8 @@ fn classify(kind: &str, subkind: Option<&str>, probe_threads: bool) -> Reading {
         }
         ("Lifecycle", "Started" | "Completed" | "Failed") => Reading::SessionMarker,
         ("Message", "MessagePart") => Reading::Part,
-        ("Orchestrator", "ThreadGoalUpdated" | "ThreadTodoUpdated") | ("PullRequest", _)
+        ("Orchestrator", "ThreadGoalUpdated" | "ThreadTodoUpdated")
+        | ("PullRequest" | "ConversationPlan", _)
             if probe_threads =>
         {
             Reading::Decode(Decoding::ThreadProbe)

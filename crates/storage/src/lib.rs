@@ -58,6 +58,7 @@ mod body_ref;
 mod body_store;
 mod codec;
 pub mod config;
+pub mod conversation_plan;
 mod db;
 mod diagnostic;
 pub mod durable_tasks;
