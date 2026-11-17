@@ -105,7 +105,7 @@ monitor が件数を数える。
 （詳細は [storage-maintenance.md](storage-maintenance.md#スレッドの期限削除storage-基盤)）。
 
 - 1 transaction の上限: events は 500 行かつ格納 4 MiB、小さな表は 500 行、ledger と
-  ThreadTodoUpdated は走査 2,000 行（一致 0 件でも cursor は進む）、索引は 200 行かつ 2 MiB、
+  廃止済み ThreadTodoUpdated 行は走査 2,000 行（一致 0 件でも cursor は進む。型は廃止済みで何も書かず復号せず、既存行の物理削除だけを retention が担う）、索引は 200 行かつ 2 MiB、
   `run_contexts` は 1 行。大きい行は `reclaim_oversized` に回し、起動時の排他枠で削除する。
 - 対象が無い step は DB に書かない。
 - 履歴復元に必要な events の帰属補完（`Orchestrator` の `TaskProgressed` /

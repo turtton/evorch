@@ -52,6 +52,10 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
      demo / edit-profile x 2 DPI、既定の 6 パネルと Memory パネル、
      追加の 4 設定画面を撮影し、
      テーマごとに 39 枚、合計 117 PNG の枚数を検査する)
+  -  会話の計画の証跡: `scripts/gui-plan-evidence.sh [OUT]`
+     (デフォルト出力 `target/gui-evidence/conversation-plan`。基本マトリクスとは別に、
+     3 テーマ x 4 状態 (未計画 / 階層+混在進捗 / 長文詳細+変更履歴 / 消去済み) の
+     12 PNG を撮影し枚数を検査する。基本の 117 枚には含めない)
 - 環境変数: `EVORCH_REQUIRE_ADAPTER=1` (CI で必須化)、
   `EVORCH_METADATA_EVIDENCE` (model_metadata 証跡の出力先)、
   `WGPU_BACKEND=vulkan` (lavapipe 利用時の推奨指定)

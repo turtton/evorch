@@ -180,6 +180,14 @@ when focused local cache validation is needed.
 - End-to-end tests for this boundary must use the input-derived mock cache
   and independent wire assertions, proving unchanged history and affinity,
   the intended schema transition, and prefix reuse on the following turn.
+- A non-handoff restart after a build update continues with the current build's
+  effective tool catalog; it is not refused. When that catalog differs from the
+  one the conversation last sent, the next request is a one-request tools-only
+  cache boundary, not a history-replacement boundary: keep the sent
+  conversation, system/instructions, model/settings, ToolResults and cache
+  affinity key unchanged, and preserve the new prefix on subsequent turns.
+  End-to-end tests for this boundary follow the same input-derived mock cache
+  and independent wire-assertion rules.
 - Cache-affecting features must extend the end-to-end scenarios for their
   affected paths. Keep the input-derived mock cache and independent wire-prefix
   assertions; fixed high cached-token fixtures alone cannot prove preservation.
