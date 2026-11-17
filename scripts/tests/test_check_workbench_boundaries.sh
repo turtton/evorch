@@ -76,7 +76,7 @@ run_case() {
 }
 
 WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","evorch","core-instance","core-launcher","test-support","test-socket-dir"]'
-EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu","axum","http","futures-core","http-body-util","hyper","hyper-util"]'
+EXT='"external": ["serde","serde_json","thiserror","tokio","tokio-util","regex","egui","wgpu","axum","http","futures-core","http-body-util","hyper","hyper-util"]'
 GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","to":"serde_json"},{"from":"workbench-protocol","to":"thiserror"},
       {"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-client","to":"tokio"},{"from":"workbench-client","to":"thiserror"},
       {"from":"gui","to":"workbench-client"},
@@ -276,6 +276,14 @@ SPEC
 
 run_case web_declares_an_optional_rendering_crate fail "workbench-web declares GUI or client dependency wgpu" <<SPEC
 {$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"wgpu","optional":true,"resolved":false}]}
+SPEC
+
+run_case web_tracks_detached_work_with_tokio_util ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"tokio-util"}]}
+SPEC
+
+run_case web_utility_still_cannot_reach_rendering fail "workbench-web -> tokio-util@1.0.0 [normal; resolved] -> egui@1.0.0" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"tokio-util"},{"from":"tokio-util","to":"egui"}]}
 SPEC
 
 run_case web_third_party_outside_allowlist fail "workbench-web declares third-party dependency regex" <<SPEC
