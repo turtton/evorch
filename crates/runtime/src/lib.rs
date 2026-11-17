@@ -137,7 +137,9 @@ pub use runtime::{
     production_executor_with_host_tools, production_executor_with_prepared_sandbox,
     production_executor_with_prepared_sandbox_and_ledger,
 };
-pub use runtime::{RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession};
+pub use runtime::{
+    RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession, RestartPreflight,
+};
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,
     SkillResourceError, SkillScope, SkillValidationError, default_skill_dirs, discover_skills,

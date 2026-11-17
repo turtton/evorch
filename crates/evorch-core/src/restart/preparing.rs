@@ -48,6 +48,33 @@ impl RestartCoordinator {
             LearningSuspendWait::DeadlineExceeded => return Ok(None),
             LearningSuspendWait::Complete => {}
         }
+        let recipes = {
+            let state = self.0.state.lock().unwrap();
+            if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
+                return Err(RuntimeError::RestartBusy);
+            }
+            state.recipes.clone()
+        };
+        let preflight = if let Some(recipes) = recipes {
+            let runtime = self.0.runtime.clone();
+            #[cfg(test)]
+            let hook = self.0.preflight_hook.lock().unwrap().clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    #[cfg(test)]
+                    if let Some(hook) = hook {
+                        hook(id);
+                    }
+                    runtime.prepare_restart_quiesce(&recipes)
+                })
+                .await
+                .map_err(|e| RuntimeError::Model {
+                    reason: e.to_string(),
+                })??,
+            )
+        } else {
+            None
+        };
         let mut state = self.0.state.lock().unwrap();
         if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
             return Err(RuntimeError::RestartBusy);
@@ -57,8 +84,10 @@ impl RestartCoordinator {
         }
         // Cancellation, the final health check, attempt creation and host Preparing
         // share this mutex. No await leaves a reservation/attempt gap.
-        let attempt = if let Some(recipes) = &state.recipes {
-            self.0.runtime.begin_planned_restart_quiesce(recipes)?
+        let attempt = if let Some(preflight) = preflight {
+            self.0
+                .runtime
+                .begin_preflighted_restart_quiesce(preflight)?
         } else {
             self.0.runtime.begin_restart_quiesce()?
         };
@@ -86,7 +115,7 @@ impl RestartCoordinator {
             }
             Ok(Err(_)) => {
                 let mut state = self.0.state.lock().unwrap();
-                if state.id != Some(id) {
+                if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
                     return;
                 }
                 state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();

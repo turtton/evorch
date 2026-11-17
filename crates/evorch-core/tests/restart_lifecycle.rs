@@ -1,5 +1,8 @@
 //! Test-binary worker uses the production driver; there is no production restart entry.
 use core_instance::{ConfigIdentity, Instance, LaunchGuard};
+#[cfg(target_os = "linux")]
+#[path = "../shared-test-support/signal_entry.rs"]
+mod signal_entry;
 use evorch_core::{
     backend::HostBackend,
     lifecycle::{LifecycleDriver, OperatorSignals},
@@ -145,6 +148,9 @@ async fn restart_subprocess_worker() {
         host.host.clone(),
         instance.identity.clone(),
     ));
+    #[cfg(target_os = "linux")]
+    let signals = OperatorSignals::new(signal_entry::mask()).unwrap();
+    #[cfg(not(target_os = "linux"))]
     let signals = OperatorSignals::new().unwrap();
     let mut driver = LifecycleDriver::new(&host);
     let listener = instance.bind().unwrap();
@@ -221,7 +227,11 @@ async fn restart_subprocess_worker() {
     drop(launch);
 }
 #[tokio::test]
-async fn prepare_cancel_retains_lifetime_lock_and_sigterm_uses_shared_driver() {
+async fn prepare_cancel_retains_lifetime_lock_and_signals_use_shared_driver() {
+    exercise_signal(rustix::process::Signal::TERM).await;
+    exercise_signal(rustix::process::Signal::INT).await;
+}
+async fn exercise_signal(signal: rustix::process::Signal) {
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -231,6 +241,7 @@ async fn prepare_cancel_retains_lifetime_lock_and_sigterm_uses_shared_driver() {
             "--nocapture",
         ])
         .env("EVORCH_RESTART_TEST_ROOT", root.path())
+        .env("EVORCH_MASKED_TEST_CHILD", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -293,7 +304,7 @@ async fn prepare_cancel_retains_lifetime_lock_and_sigterm_uses_shared_driver() {
     }
     rustix::process::kill_process(
         rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap(),
-        rustix::process::Signal::TERM,
+        signal,
     )
     .unwrap();
     // Tokio stdin owns a blocking reader: EOF lets that reader exit at runtime teardown.

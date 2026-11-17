@@ -20,6 +20,9 @@ pub enum ExitStage {
     TargetChecked = 6,
     OwnersHeld = 7,
     Armed = 8,
+    ExecPrepared = 9,
+    SignalsStopped = 10,
+    OwnerStopped = 11,
 }
 struct Workers {
     services: services::BackgroundServices,
@@ -180,7 +183,12 @@ impl PlannedExit {
     }
     async fn run_stage(&mut self, stage: ExitStage, bounded: bool) -> Result<(), String> {
         match stage {
-            ExitStage::TargetChecked | ExitStage::OwnersHeld | ExitStage::Armed => {
+            ExitStage::TargetChecked
+            | ExitStage::OwnersHeld
+            | ExitStage::Armed
+            | ExitStage::ExecPrepared
+            | ExitStage::SignalsStopped
+            | ExitStage::OwnerStopped => {
                 return Err("later stages belong to the coordinator".into());
             }
             ExitStage::SpawnFenceClosed => {

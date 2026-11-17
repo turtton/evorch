@@ -44,6 +44,16 @@ pub fn detach_from_terminal(command: &mut Command) {
     unsafe {
         command.pre_exec(|| {
             rustix::process::setsid()?;
+            // Core's signalfd mask is process-local, not child policy. Normal
+            // tools must remain stoppable by TERM/INT. The handoff exec path
+            // deliberately does not use this ordinary child launch hook.
+            let mut shutdown: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut shutdown);
+            libc::sigaddset(&mut shutdown, libc::SIGINT);
+            libc::sigaddset(&mut shutdown, libc::SIGTERM);
+            if libc::sigprocmask(libc::SIG_UNBLOCK, &shutdown, std::ptr::null_mut()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
             Ok(())
         });
     }

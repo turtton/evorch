@@ -119,6 +119,15 @@ impl BlockedShutdownSignals {
         Ok(ShutdownInbox(unsafe { File::from_raw_fd(fd) }))
     }
     fn verify_masks(&self) -> io::Result<()> {
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            cvt(unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) })?;
+            if action.sa_sigaction != libc::SIG_DFL {
+                return Err(io::Error::other(
+                    "shutdown handler replaced the entry policy",
+                ));
+            }
+        }
         for thread in fs::read_dir("/proc/self/task")? {
             verify_thread_mask(fs::read_to_string(thread?.path().join("status")))?;
         }
@@ -147,6 +156,11 @@ fn verify_thread_mask(status: io::Result<String>) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+impl AsRawFd for ShutdownInbox {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.0.as_raw_fd()
+    }
 }
 impl AsFd for ShutdownInbox {
     fn as_fd(&self) -> BorrowedFd<'_> {
@@ -265,6 +279,9 @@ impl HandoffEntry {
 }
 
 impl Instance {
+    pub fn config_identity(&self) -> &ConfigIdentity {
+        &self.config
+    }
     /// Adopt the inherited OFD, without launch acquisition, open, flock or unlock.
     /// All errors are fatal for this entry; there is no cold-start fallback.
     ///
@@ -354,6 +371,20 @@ impl Instance {
         args: &[OsString],
         record: HandoffRecord,
     ) -> io::Result<Infallible> {
+        let prepared = self.prepare_exec_handoff(signals, path, args, record)?;
+        // SAFETY: caller holds the same final fences for preparation and exec.
+        unsafe { prepared.raw_exec() }
+    }
+    /// M2 stage 9: all allocation, validation, proc scans, serialization and
+    /// ticket I/O finish while the owner heartbeat is still running. No flags
+    /// or signal dispositions are changed here.
+    pub fn prepare_exec_handoff<'a>(
+        &'a self,
+        signals: &BlockedShutdownSignals,
+        path: &Path,
+        args: &[OsString],
+        record: HandoffRecord,
+    ) -> io::Result<PreparedExec<'a>> {
         record.validate()?;
         if record.config_identity != self.identity {
             return Err(unsafe_path());
@@ -373,65 +404,104 @@ impl Instance {
             }
             argv.push(cstring(arg)?);
         }
-        let env: Vec<_> = std::env::vars_os()
+        let env = std::env::vars_os()
             .map(|(k, v)| {
                 let mut s = k;
                 s.push("=");
                 s.push(v);
                 cstring(&s)
             })
-            .collect::<io::Result<_>>()?;
-        let mut boundary = Boundary::block()?;
+            .collect::<io::Result<Vec<_>>>()?;
+        let meta = self._lifetime.metadata()?;
+        let ticket = Ticket {
+            version: 1,
+            pid: std::process::id(),
+            device: meta.dev(),
+            inode: meta.ino(),
+            record,
+        };
+        let mut file = sealed_ticket(&ticket)?;
+        file.flush()?;
+        let lifetime = self._lifetime.as_raw_fd();
+        let ticket_fd = file.as_raw_fd();
+        argv.extend([
+            CString::new("--handoff-lifetime-fd").unwrap(),
+            CString::new(lifetime.to_string()).unwrap(),
+            CString::new("--handoff-ticket-fd").unwrap(),
+            CString::new(ticket_fd.to_string()).unwrap(),
+        ]);
+        let argv_ptrs = pointers(&argv);
+        let env_ptrs = pointers(&env);
+        let mut flags = fd_snapshot()?;
+        flags.retain(|(fd, flags)| {
+            flags & libc::FD_CLOEXEC == 0 || *fd <= 2 || *fd == lifetime || *fd == ticket_fd
+        });
+        Ok(PreparedExec {
+            instance: self,
+            path,
+            _argv: argv,
+            _env: env,
+            argv_ptrs,
+            env_ptrs,
+            ticket: file,
+            flags,
+        })
+    }
+}
+
+/// Owned heavy-preparation result, lifetime-bound to the lifetime lock. The
+/// backing strings, pointer arrays, sealed ticket and rollback FD inventory
+/// cannot disappear before the raw call. Preparing alone grants no exec right.
+pub struct PreparedExec<'a> {
+    instance: &'a Instance,
+    path: CString,
+    _argv: Vec<CString>,
+    _env: Vec<CString>,
+    argv_ptrs: Vec<*const libc::c_char>,
+    env_ptrs: Vec<*const libc::c_char>,
+    ticket: File,
+    flags: Vec<(i32, i32)>,
+}
+impl PreparedExec<'_> {
+    /// Minimal synchronous boundary: no proc scan, allocation, DB, hash, flush
+    /// or await. Only the final integrator (D-3) may connect this to M2.
+    ///
+    /// # Safety
+    /// The caller must stop the signal reader, check pending signals and its
+    /// exec-prohibition latch immediately before this call. The final spawn/FD
+    /// fence must remain held; inventoried descriptors must not close/reuse.
+    pub unsafe fn raw_exec(mut self) -> io::Result<Infallible> {
         let result = (|| {
-            let meta = self._lifetime.metadata()?;
-            let ticket = Ticket {
-                version: 1,
-                pid: std::process::id(),
-                device: meta.dev(),
-                inode: meta.ino(),
-                record,
-            };
-            let mut file = sealed_ticket(&ticket)?;
-            let lifetime = self._lifetime.as_raw_fd();
-            let ticket_fd = file.as_raw_fd();
-            argv.extend([
-                CString::new("--handoff-lifetime-fd").unwrap(),
-                CString::new(lifetime.to_string()).unwrap(),
-                CString::new("--handoff-ticket-fd").unwrap(),
-                CString::new(ticket_fd.to_string()).unwrap(),
-            ]);
-            let argv = pointers(&argv);
-            let env = pointers(&env);
-            // Snapshot after creating the ticket. The proc enumeration FD has
-            // already closed; all actual FDs are restored on syscall failure.
-            boundary.flags = fd_snapshot()?;
-            // Other atomic-CLOEXEC FDs need no restoration. They may be created
-            // or closed by background threads without a stale-number rollback.
-            boundary.flags.retain(|(fd, flags)| {
-                flags & libc::FD_CLOEXEC == 0 || *fd <= 2 || *fd == lifetime || *fd == ticket_fd
-            });
-            cloexec_all(&boundary.flags, false)?;
-            set_flags(lifetime, 0)?;
-            set_flags(ticket_fd, 0)?;
-            // Ensure stdio survives even if an embedder originally marked it.
-            for (fd, _) in &boundary.flags {
+            cloexec_all(&self.flags, false)?;
+            set_flags(self.instance._lifetime.as_raw_fd(), 0)?;
+            set_flags(self.ticket.as_raw_fd(), 0)?;
+            for (fd, _) in &self.flags {
                 if *fd <= 2 {
                     set_flags(*fd, 0)?;
                 }
             }
-            file.flush()?;
-            // SAFETY: all arrays are NUL-terminated and kept alive. Unlike
-            // CommandExt::exec, this call does not clear the signal mask.
+            // SAFETY: pointer arrays and their CString backing are owned here.
             unsafe {
-                libc::execve(path.as_ptr(), argv.as_ptr(), env.as_ptr());
+                libc::execve(
+                    self.path.as_ptr(),
+                    self.argv_ptrs.as_ptr(),
+                    self.env_ptrs.as_ptr(),
+                );
             }
             Err(io::Error::last_os_error())
         })();
-        let restore = boundary.restore();
-        match restore {
-            Ok(()) => result,
-            Err(e) => Err(io::Error::other(format!(
-                "exec/preparation failed: {result:?}; restoring attributes failed: {e}"
+        // Roll back only inventoried stable descriptors; atomic-CLOEXEC FDs
+        // created later are intentionally absent. Keep the ticket alive here.
+        let mut restore_error = None;
+        for (fd, flags) in self.flags.drain(..) {
+            if let Err(error) = set_flags(fd, flags) {
+                restore_error = Some(error);
+            }
+        }
+        match restore_error {
+            None => result,
+            Some(error) => Err(io::Error::other(format!(
+                "exec failed: {result:?}; restoring descriptor flags failed: {error}"
             ))),
         }
     }
@@ -583,62 +653,6 @@ fn set_mask(mask: &libc::sigset_t) -> io::Result<()> {
         return Err(io::Error::from_raw_os_error(rc));
     }
     Ok(())
-}
-struct Boundary {
-    mask: libc::sigset_t,
-    actions: Vec<(i32, libc::sigaction)>,
-    flags: Vec<(i32, i32)>,
-}
-impl Boundary {
-    fn block() -> io::Result<Self> {
-        let mask = mask_now()?;
-        let mut blocked = mask;
-        unsafe {
-            libc::sigaddset(&mut blocked, libc::SIGINT);
-            libc::sigaddset(&mut blocked, libc::SIGTERM);
-        }
-        set_mask(&blocked)?;
-        let mut this = Self {
-            mask,
-            actions: Vec::new(),
-            flags: Vec::new(),
-        };
-        for signal in [libc::SIGINT, libc::SIGTERM] {
-            let mut old = unsafe { std::mem::zeroed() };
-            let mut default: libc::sigaction = unsafe { std::mem::zeroed() };
-            default.sa_sigaction = libc::SIG_DFL;
-            unsafe {
-                libc::sigemptyset(&mut default.sa_mask);
-            }
-            if let Err(e) = cvt(unsafe { libc::sigaction(signal, &default, &mut old) }) {
-                this.restore()?;
-                return Err(e);
-            }
-            this.actions.push((signal, old));
-        }
-        Ok(this)
-    }
-    fn restore(&mut self) -> io::Result<()> {
-        let mut error = None;
-        for (fd, flags) in self.flags.drain(..) {
-            // The newly created ticket closed on syscall failure. The retained
-            // pre-existing descriptors are stable under the fence.
-            if let Err(e) = set_flags(fd, flags)
-                && e.raw_os_error() != Some(libc::EBADF)
-            {
-                error = Some(e);
-            }
-        }
-        for (signal, action) in self.actions.drain(..) {
-            if let Err(e) = cvt(unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) }) {
-                error = Some(e);
-            }
-        }
-        if let Err(e) = set_mask(&self.mask) {
-            error = Some(e);
-        }
-        error.map_or(Ok(()), Err)
-    }
 }
 
 #[cfg(test)]

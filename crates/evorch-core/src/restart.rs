@@ -14,6 +14,8 @@ use workbench_host::bootstrap::{
 };
 
 mod finalization;
+#[cfg(target_os = "linux")]
+pub use finalization::FinalizationEnvironment;
 pub use finalization::FinalizationTarget;
 mod preparing;
 mod stop;
@@ -77,6 +79,8 @@ struct State {
     evaluation_pause: Option<ProducerPause>,
     preparation_deadline: Option<tokio::time::Instant>,
 }
+#[cfg(test)]
+type PreflightHook = Arc<dyn Fn(RestartId) + Send + Sync>;
 struct Inner {
     owner: uuid::Uuid,
     runtime: AgentRuntime,
@@ -85,6 +89,8 @@ struct Inner {
     preparing: workbench_host::bootstrap::restart::PreparingServices,
     state: Mutex<State>,
     changed: watch::Sender<u64>,
+    #[cfg(test)]
+    preflight_hook: Mutex<Option<PreflightHook>>,
 }
 /// A revocable observation, NOT the consumable capture capability. Keeping any
 /// number of waiters alive cannot delay the coordinator's capture boundary.
@@ -164,6 +170,8 @@ impl RestartCoordinator {
                 preparation_deadline: None,
             }),
             changed: watch::channel(0).0,
+            #[cfg(test)]
+            preflight_hook: Mutex::new(None),
         }));
         coordinator
             .0
