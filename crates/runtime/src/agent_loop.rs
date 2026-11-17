@@ -706,6 +706,7 @@ pub(crate) async fn run_agent(
                         runtime.configure_shell_environment(&executor);
                     }
                     state.shared.executor = executor;
+                    state.start_scratch_monitor();
                 }
                 Err(error) => {
                     state.finish_error(error.to_string());
@@ -1708,6 +1709,14 @@ impl LoopState {
     }
 
     async fn wait_for_input_boundary(&mut self, completed_turn: bool) -> bool {
+        let resumed = self.wait_for_input_boundary_inner(completed_turn).await;
+        if resumed && let Err(error) = self.resume_scratch() {
+            self.finish_error(format!("scratch resume failed: {error}"));
+            return false;
+        }
+        resumed
+    }
+    async fn wait_for_input_boundary_inner(&mut self, completed_turn: bool) -> bool {
         if let Some(kind) = self.interrupted() {
             self.finish_interrupted(kind);
             return false;
@@ -1758,11 +1767,15 @@ impl LoopState {
         let completed_turn = (completed_turn
             && !runtime.has_unanswered_questions(self.task.run_id))
         .then(|| self.final_assistant_text());
+        let scratch_idle = completed_turn.is_some();
         if self
             .transition_with_turn(AgentRunPhase::Waiting, None, completed_turn)
             .is_err()
         {
             return false;
+        }
+        if scratch_idle {
+            self.release_scratch_usage();
         }
         if let Some(context_len) = turn_end {
             self.shared

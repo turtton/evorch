@@ -37,6 +37,7 @@ pub struct OwnerHost {
     /// Threads retention deleted; set once after the startup phase.
     tombstones: OnceLock<TombstoneGuard>,
     worker: Mutex<Option<WorkerControl>>,
+    archive: super::scratch_archive::ArchiveService,
 }
 
 struct WorkerControl {
@@ -104,6 +105,11 @@ impl OwnerHost {
         let release_deferred = Arc::new(AtomicBool::new(false));
         let worker_deferred = Arc::clone(&release_deferred);
         let worker_db = root.join("owners.db");
+        let archive = super::scratch_archive::ArchiveService::new(
+            root.join("owners.db"),
+            owner_id.clone(),
+            Arc::clone(&scratch),
+        )?;
         let worker = std::thread::spawn(move || {
             serve(
                 registry,
@@ -120,6 +126,7 @@ impl OwnerHost {
             )
         });
         Ok(Self {
+            archive,
             root: root.into(),
             owner_id,
             settings,
@@ -411,6 +418,13 @@ impl OwnerHost {
     /// Armed readback -> stop/join -> identity-checked unlink -> exec. No Drop,
     /// release or PID-liveness assumption. Idempotent after successful stopping.
     pub fn stop_worker_for_exec(&self) -> Result<(), RegistryError> {
+        let archive_result = self.archive.stop().map_err(RegistryError::from);
+        let owner_result = self.stop_owner_worker();
+        let cleanup_result = sandbox::scratch::stop_scratch_cleanup().map_err(RegistryError::from);
+        archive_result.and(owner_result).and(cleanup_result)
+    }
+
+    fn stop_owner_worker(&self) -> Result<(), RegistryError> {
         let mut slot = self
             .worker
             .lock()
@@ -450,6 +464,7 @@ impl OwnerHost {
     /// Restore only owner heartbeat/IPC after failed exec. Admission and run
     /// gates stay closed; call clear_planned_hold for every installed hold.
     pub fn restart_worker_failed_closed(&self) -> Result<(), RegistryError> {
+        sandbox::scratch::resume_scratch_cleanup()?;
         let mut slot = self
             .worker
             .lock()
@@ -505,6 +520,26 @@ impl OwnerHost {
         Ok(())
     }
 
+    /// Inject saved shared-sidebar state. Called only on the archive worker.
+    pub fn set_scratch_archive_checker(&self, checker: Arc<super::ScratchArchiveChecker>) {
+        self.archive.set_checker(checker);
+    }
+    /// Best effort hint after a successful archive save, outside its save lock.
+    pub fn hint_scratch_archive(&self, thread: &str) {
+        self.archive.hint(thread);
+    }
+    /// Call after producers have stopped, runs drained and ownership released.
+    pub fn stop_scratch_cleanup(&self) -> Result<(), RegistryError> {
+        let archive = self.archive.stop().map_err(RegistryError::from);
+        let cleanup = sandbox::scratch::stop_scratch_cleanup().map_err(RegistryError::from);
+        archive.and(cleanup)
+    }
+    #[cfg(any(test, feature = "idle-test-support"))]
+    #[doc(hidden)]
+    pub fn scratch_archive_barrier(&self) -> std::sync::mpsc::Receiver<()> {
+        self.archive.barrier()
+    }
+
     fn reader(&self) -> Result<MutexGuard<'_, Registry>, RegistryError> {
         self.reader
             .lock()
@@ -512,6 +547,8 @@ impl OwnerHost {
     }
 
     fn permit(&self, owner: &ThreadOwner) -> OwnerPermit {
+        self.scratch
+            .record_scratch_lease(&owner.thread_id, &owner.lease);
         OwnerPermit {
             registry_path: self.db(),
             thread_id: owner.thread_id.clone(),
@@ -574,7 +611,8 @@ impl Drop for OwnerHost {
         if self.release_on_drop.load(Ordering::SeqCst) {
             let _ = self.quiesce();
         }
-        let _ = self.stop_worker_for_exec();
+        let _ = self.archive.stop();
+        let _ = self.stop_owner_worker();
     }
 }
 

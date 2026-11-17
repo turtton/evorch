@@ -1571,6 +1571,22 @@ impl AgentRuntime {
             })
             .or(config.lane_scope);
         self.shared.bind_project(parent, &mut config);
+        let scratch_admission = if self
+            .shared
+            .sandbox_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            Some((
+                self.thread_scratch().map_err(|error| RuntimeError::Model {
+                    reason: format!("scratch admission failed: {error}"),
+                })?,
+                self.scratch_key(parent.unwrap_or(run_id)),
+            ))
+        } else {
+            None
+        };
         let mut intents = self
             .shared
             .spawn_intents
@@ -1658,6 +1674,13 @@ impl AgentRuntime {
                 paused_recovery: None,
             },
         );
+        if let Some((scratch, key)) = scratch_admission {
+            scratch
+                .register_execution(&key, run_id, &execution.publication().incarnation())
+                .map_err(|error| RuntimeError::Model {
+                    reason: format!("scratch admission failed: {error}"),
+                })?;
+        }
         match if preadmitted.is_some() {
             // Durable recovery intent is already admitted, not a queued launch.
             // The original I/dispatch fence owns initial provider admission.
@@ -1741,6 +1764,7 @@ impl AgentRuntime {
                 Ok(run) => run,
                 Err(error) => {
                     drop(intents);
+                    self.release_scratch_execution(run_id, &execution.publication().incarnation());
                     self.fail_admission(run_id, parent, &failure_config, error.clone());
                     return Err(error);
                 }

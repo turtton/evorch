@@ -176,6 +176,9 @@ impl LoopState {
         } else {
             false
         };
+        if released {
+            self.release_scratch_usage();
+        }
         if !self.benchmark_replay
             && let Some(checkpoint) = &self.benchmark
             && let Some(runtime) = self.shared.runtime.upgrade()
