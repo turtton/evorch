@@ -603,9 +603,13 @@ impl AttachmentService {
         upload.file.sync_all().map_err(io)?;
         upload.file.seek(SeekFrom::Start(0)).map_err(io)?;
         let mut verify = Sha256::new();
-        std::io::copy(&mut upload.file, &mut verify).map_err(io)?;
+        let copied = std::io::copy(
+            &mut (&mut upload.file).take(upload.metadata.reference.byte_length + 1),
+            &mut verify,
+        )
+        .map_err(io)?;
         let expected = upload.digest.clone().finalize();
-        if verify.finalize() != expected {
+        if copied != upload.metadata.reference.byte_length || verify.finalize() != expected {
             return Err(error(
                 ErrorCode::InvalidRequest,
                 "attachment checksum mismatch",
@@ -747,7 +751,8 @@ impl AttachmentService {
             }
             .map_err(io)?;
             // Finish is not authority for a directory entry replaced afterwards.
-            if source.metadata().map_err(io)?.len() != m.reference.byte_length
+            if m.reference.byte_length > FILE_BYTES
+                || source.metadata().map_err(io)?.len() != m.reference.byte_length
                 || m.reference.id != *id
             {
                 return Err(error(
@@ -756,15 +761,14 @@ impl AttachmentService {
                 ));
             }
             let mut hasher = Sha256::new();
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let count = source.read(&mut buffer).map_err(io)?;
-                if count == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..count]);
-            }
-            if format!("{:x}", hasher.finalize()) != m.reference.sha256 {
+            let copied = std::io::copy(
+                &mut (&mut source).take(m.reference.byte_length + 1),
+                &mut hasher,
+            )
+            .map_err(io)?;
+            if copied != m.reference.byte_length
+                || format!("{:x}", hasher.finalize()) != m.reference.sha256
+            {
                 return Err(error(
                     ErrorCode::Conflict,
                     "finished attachment bytes changed",

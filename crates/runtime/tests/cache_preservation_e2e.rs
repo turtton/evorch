@@ -5037,6 +5037,132 @@ async fn delegated_child_starts_with_the_current_list_while_the_parent_only_appe
     }
 }
 
+// The stopped snapshot is a fixture for the already-sent pre-migration format.
+// No current chat/delegate ingress is used to create an image input. After the
+// first restore warms the input-derived cache, each subsequent restore must
+// keep that exact wire prefix, including the historical image block.
+#[tokio::test]
+async fn saved_image_history_survives_repeated_restore_with_identical_wire_prefix() {
+    let mut harness = harness(
+        vec![
+            text_response("bootstrap"),
+            text_response("first"),
+            text_response("second"),
+            text_response("third"),
+        ],
+        1_000_000,
+    );
+    let root = allowed_project(&harness);
+    let config = storage::StorageConfig {
+        db_path: root.join("legacy-image.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let run = harness.runtime.reserve_run_id();
+    harness
+        .runtime
+        .bind_thread_root("legacy-image", run)
+        .unwrap();
+    harness.runtime.spawn_reserved(
+        run,
+        None,
+        Role::Worker,
+        "Saved image conversation",
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await;
+    harness.runtime.wait(run).await.unwrap();
+    let mut record = harness
+        .runtime
+        .with_storage_reader(|db| db.run_context(&run.to_string()))
+        .unwrap()
+        .flatten()
+        .unwrap();
+    let mut history: Vec<providers::Message> = serde_json::from_str(&record.messages_json).unwrap();
+    history.iter_mut().find(|message| message.role == providers::Role::User && message.content.iter().any(|block| matches!(block, providers::ContentBlock::Text { text } if text == "Saved image conversation"))).unwrap().content.push(providers::ContentBlock::Image { media_type: "image/png".into(), data: "aW1hZ2U=".into() });
+    record.messages_json = serde_json::to_string(&history).unwrap();
+    storage.handle().upsert_run_context(&record).unwrap();
+    let mut events = Vec::new();
+    for text in [
+        "First restored input",
+        "Second restored input",
+        "Third restored input",
+    ] {
+        harness
+            .runtime
+            .resume_chat(run, RunConfig::default())
+            .unwrap();
+        through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+        harness.runtime.send_message(run, text.into()).unwrap();
+        events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+        harness
+            .runtime
+            .stop(run, runtime::StopScope::SelfOnly)
+            .unwrap();
+        events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+        harness.runtime.wait(run).await.unwrap();
+    }
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    let all = chat_requests(&harness);
+    assert_eq!(all.len(), 4);
+    let requests = &all[1..];
+    let legacy = requests[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| {
+            message
+                .to_string()
+                .contains("data:image/png;base64,aW1hZ2U=")
+        })
+        .unwrap();
+    for request in requests {
+        assert!(
+            request["messages"].as_array().unwrap().contains(legacy),
+            "saved user image content must never be rewritten"
+        );
+    }
+    let usage = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(id),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) if id == &run.to_string() => Some((*input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) => {
+                assert_ne!(diagnostic.code, "CacheRegression");
+                None
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), requests.len());
+    for (wire, tokens) in requests.windows(2).zip(usage.windows(2)) {
+        assert_append_only(CacheProtocol::OpenAi, &wire[0], &wire[1]).unwrap();
+        assert!(
+            tokens[1].1 >= tokens[0].0,
+            "the full prior image-bearing wire input must be reused"
+        );
+    }
+    harness
+        .runtime
+        .remove_thread_attachments("legacy-image")
+        .unwrap();
+}
+
 #[tokio::test]
 async fn allowed_directories_restore_appends_only_the_saved_difference() {
     for changed in [true, false] {

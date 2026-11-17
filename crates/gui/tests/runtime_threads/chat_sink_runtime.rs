@@ -526,7 +526,7 @@ fn sink_followup_restores_terminal_chat_context() {
 }
 
 #[test]
-fn gui_paste_send_reaches_model_on_first_and_followup_turns() {
+fn gui_attachment_send_reaches_model_on_first_and_followup_turns() {
     use egui_kittest::kittest::Queryable;
     let mut fixture = Fixture::new();
     let temp = tempfile::tempdir().expect("project");
@@ -556,7 +556,20 @@ fn gui_paste_send_reaches_model_on_first_and_followup_turns() {
     );
     let mut ids = Vec::new();
     for reply in ["reply-1", "reply-2"] {
-        harness.event(egui::Event::Paste("data:image/png;base64,aGVsbG8=".into()));
+        let mut draft = gui::fixture::attachment_draft();
+        let uploaded = fixture
+            .sink
+            .upload_attachment(temp.path(), "thread-1", draft.file.clone())
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
+        draft.upload = gui::model::composer::AttachmentUploadState::Ready(uploaded);
+        harness
+            .state_mut()
+            .composer_mut()
+            .add_attachment(draft)
+            .unwrap();
         harness.run_steps(4);
         harness.get_by_label("Send").click();
         harness.run_steps(4);
@@ -581,10 +594,27 @@ fn gui_paste_send_reaches_model_on_first_and_followup_turns() {
             .rev()
             .find(|message| message.role == MessageRole::User)
             .expect("user");
-        assert!(user.content.iter().any(
-            |block| matches!(block, ContentBlock::Image { media_type, data }
-            if media_type == "image/png" && data == "aGVsbG8=")
-        ));
+        assert!(
+            !user
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        );
+        let text = user
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            text.matches("[Attached files (read-only; open with read or shell)]")
+                .count(),
+            1
+        );
+        let path: String = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"hello");
     }
     assert_eq!(requests.len(), 2);
 }

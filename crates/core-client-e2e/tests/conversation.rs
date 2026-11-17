@@ -383,12 +383,19 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         );
     }
     actions.send(Action::Reconnect).await.unwrap();
-    changed(&shared, |s| s.connected && s.outcome_unknown.is_empty()).await;
+    // A reconciled Begin receipt is not upload completion: wait for the
+    // acknowledged Append and Finish stages, not the connected flag.
+    changed(&shared, |s| {
+        s.connected
+            && s.outcome_unknown.is_empty()
+            && s.attachment_drafts["t"][0].reference.is_some()
+    })
+    .await;
     assert!(
         shared.lock().unwrap().attachment_drafts["t"][0]
             .reference
             .is_some(),
-        "Applied ImageUploaded receipt must update its original draft"
+        "the reconciled upload must finish on its original draft"
     );
     assert!(shared.lock().unwrap().outcome_unknown.is_empty());
     {
@@ -432,11 +439,24 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         .await
         .unwrap();
     let (first_messages, finish_first) = provider.recv().await.unwrap();
+    let first_user = first_messages.iter().find(|message| message.role == providers::Role::User && message.content.iter().any(|block| matches!(block, providers::ContentBlock::Text { text } if text.contains("[Attached files (read-only; open with read or shell)]")))).unwrap();
     assert!(
-        serde_json::to_string(&first_messages)
-            .unwrap()
-            .contains("image/png")
+        !first_user
+            .content
+            .iter()
+            .any(|block| matches!(block, providers::ContentBlock::Image { .. }))
     );
+    let attached_text = first_user
+        .content
+        .iter()
+        .find_map(|block| match block {
+            providers::ContentBlock::Text { text } => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    let attached_path: String =
+        serde_json::from_str(attached_text.lines().last().unwrap()).unwrap();
+    assert_eq!(std::fs::read(attached_path).unwrap(), png_data);
     changed(&shared, |s| !s.connected && !s.outcome_unknown.is_empty()).await;
     assert_eq!(shared.lock().unwrap().drafts["t"].text, "desktop initial");
     let unknown = shared
