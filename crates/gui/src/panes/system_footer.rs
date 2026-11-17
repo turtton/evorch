@@ -107,6 +107,7 @@ mod tests {
     use super::*;
     use crate::model::system_stats::StorageUsage;
     use crate::theme::tokens::palette;
+    use egui_kittest::kittest::Queryable as _;
     use std::path::PathBuf;
 
     fn snapshot(storage: bool) -> SystemSnapshot {
@@ -195,25 +196,31 @@ mod tests {
         );
     }
 
-    // Given: the same left content drawn without and then with a reading
-    // When: the bars appear / Then: ids in the left content do not change, so an open menu stays open
+    // Given: a settings-style menu in the left content, opened before any reading exists
+    // When: the first reading arrives and the bars appear / Then: the menu is still open
     #[test]
-    fn left_content_ids_survive_the_first_reading() {
+    fn open_menu_survives_the_first_reading() {
         let reading = std::cell::Cell::new(None);
-        let id = std::cell::Cell::new(None);
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(900.0, 100.0))
+            .with_size(egui::vec2(900.0, 200.0))
             .build_ui(|ui| {
                 let snapshot = reading.take();
                 with_right_stats(ui, snapshot.as_ref(), |ui| {
-                    id.set(Some(ui.make_persistent_id("probe")));
+                    ui.menu_button("Menu", |ui| {
+                        let _ = ui.button("Entry");
+                    });
                 });
                 reading.set(snapshot);
             });
+        harness.get_by_label("Menu").click();
         harness.run();
-        let before = id.get().expect("left drawn");
+        assert!(harness.query_by_label("Entry").is_some(), "the menu opened");
         reading.set(Some(snapshot(true)));
         harness.run();
-        assert_eq!(id.get(), Some(before));
+        assert!(harness.query_by_label("CPU").is_some(), "the bars appeared");
+        assert!(
+            harness.query_by_label("Entry").is_some(),
+            "the menu stayed open"
+        );
     }
 }

@@ -79,16 +79,65 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// The mount whose filesystem holds `path`: the deepest mount point that is a prefix of it.
+/// A mounted filesystem: where it is mounted, its device id when known, and its usage.
+#[derive(Debug, Clone, Copy)]
+pub struct Mount<'a> {
+    pub point: &'a Path,
+    pub device: Option<u64>,
+    pub usage: Usage,
+}
+
+/// The mount whose filesystem holds `path`, whose device id is `device` when known.
+///
+/// The device id decides first, because a path prefix can name the wrong mount: on macOS
+/// `/Users/...` lives on the data volume mounted at `/System/Volumes/Data`, yet only `/`
+/// is a prefix of it. Among the mounts on that device the deepest prefix of `path` wins,
+/// else the deepest mount. Without a device match the deepest prefix is used.
 /// Mounts reporting no space (pseudo filesystems) are skipped.
 pub fn mount_holding<'a>(
     path: &Path,
-    mounts: impl IntoIterator<Item = (&'a Path, Usage)>,
-) -> Option<(&'a Path, Usage)> {
-    mounts
+    device: Option<u64>,
+    mounts: impl IntoIterator<Item = Mount<'a>>,
+) -> Option<Mount<'a>> {
+    let real: Vec<Mount<'a>> = mounts
         .into_iter()
-        .filter(|(mount, usage)| usage.total > 0 && path.starts_with(mount))
-        .max_by_key(|(mount, _)| mount.components().count())
+        .filter(|mount| mount.usage.total > 0)
+        .collect();
+    let deepest = |mounts: Vec<Mount<'a>>| {
+        mounts
+            .into_iter()
+            .max_by_key(|mount| mount.point.components().count())
+    };
+    if let Some(device) = device {
+        let same_device: Vec<Mount<'a>> = real
+            .iter()
+            .copied()
+            .filter(|mount| mount.device == Some(device))
+            .collect();
+        let (prefixes, others): (Vec<_>, Vec<_>) = same_device
+            .into_iter()
+            .partition(|mount| path.starts_with(mount.point));
+        if let Some(found) = deepest(prefixes).or_else(|| deepest(others)) {
+            return Some(found);
+        }
+    }
+    deepest(
+        real.into_iter()
+            .filter(|mount| path.starts_with(mount.point))
+            .collect(),
+    )
+}
+
+/// The id of the device holding `path`; unknown where the platform has none.
+#[cfg(unix)]
+fn device_of(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).ok().map(|metadata| metadata.dev())
+}
+
+#[cfg(not(unix))]
+fn device_of(_path: &Path) -> Option<u64> {
+    None
 }
 
 /// Reads the machine with `sysinfo`.
@@ -134,23 +183,26 @@ impl SysinfoSource {
     fn storage(&mut self) -> Option<StorageUsage> {
         let directory = self.storage_directory.clone()?;
         self.disks.refresh(true);
-        let (mount, usage) = mount_holding(
+        let found = mount_holding(
             &directory,
+            device_of(&directory),
             self.disks.list().iter().map(|disk| {
                 let total = disk.total_space();
-                (
-                    disk.mount_point(),
-                    Usage {
+                Mount {
+                    point: disk.mount_point(),
+                    // A mount that reports no space is skipped, so it is not worth a lookup.
+                    device: (total > 0).then(|| device_of(disk.mount_point())).flatten(),
+                    usage: Usage {
                         used: total.saturating_sub(disk.available_space()),
                         total,
                     },
-                )
+                }
             }),
         )?;
         Some(StorageUsage {
-            mount: mount.to_path_buf(),
+            mount: found.point.to_path_buf(),
             directory,
-            usage,
+            usage: found.usage,
         })
     }
 }
@@ -159,7 +211,7 @@ impl SysinfoSource {
 pub struct SystemSampler {
     updates: Receiver<SystemSnapshot>,
     latest: Option<SystemSnapshot>,
-    /// Dropping it disconnects the thread's wait, which ends the thread at once.
+    /// Dropping it disconnects the thread's wait between readings, so a waiting thread ends at once.
     _stop: Sender<()>,
 }
 
@@ -269,26 +321,64 @@ mod tests {
         assert_eq!(format_bytes(2048 * 1024_u64.pow(4)), "2048.0 TiB");
     }
 
-    // Given: nested mounts, a pseudo mount with no space, and an unrelated mount
+    fn mount(point: &str, device: Option<u64>, used: u64, total: u64) -> Mount<'_> {
+        Mount {
+            point: Path::new(point),
+            device,
+            usage: usage(used, total),
+        }
+    }
+
+    // Given: nested mounts, a pseudo mount with no space, and an unrelated mount, with no device ids
     // When: the mount holding a path is looked up / Then: the deepest real prefix wins
     #[test]
-    fn mount_holding_picks_the_deepest_real_prefix() {
+    fn mount_holding_without_devices_picks_the_deepest_real_prefix() {
         let mounts = [
-            (Path::new("/"), usage(10, 100)),
-            (Path::new("/home"), usage(20, 200)),
-            (Path::new("/home/user/data"), usage(0, 0)),
-            (Path::new("/homework"), usage(30, 300)),
+            mount("/", None, 10, 100),
+            mount("/home", None, 20, 200),
+            mount("/home/user/data", None, 0, 0),
+            mount("/homework", None, 30, 300),
         ];
-        let found = |path: &str| {
-            mount_holding(Path::new(path), mounts.iter().copied()).map(|(mount, _)| mount)
-        };
+        let found =
+            |path: &str| mount_holding(Path::new(path), None, mounts).map(|mount| mount.point);
         assert_eq!(found("/home/user/data/db"), Some(Path::new("/home")));
         assert_eq!(found("/homework/db"), Some(Path::new("/homework")));
         assert_eq!(found("/var/lib/db"), Some(Path::new("/")));
-        assert_eq!(
-            mount_holding(Path::new("/var"), [(Path::new("/home"), usage(1, 2))]),
-            None
-        );
+        assert!(mount_holding(Path::new("/var"), None, [mount("/home", None, 1, 2)]).is_none());
+    }
+
+    // Given: macOS-like mounts where `/Users` is a firmlink into the data volume, so only `/` is a path prefix
+    // When: the data directory's device is the data volume's / Then: the data volume is chosen, not `/`
+    #[test]
+    fn mount_holding_follows_the_device_across_firmlinks() {
+        const SYSTEM: u64 = 1;
+        const DATA: u64 = 2;
+        let mounts = [
+            mount("/", Some(SYSTEM), 10, 100),
+            mount("/System/Volumes/Data", Some(DATA), 60, 100),
+            mount("/System/Volumes/VM", Some(3), 5, 100),
+        ];
+        let data = Path::new("/Users/me/Library/Application Support/evorch");
+        let found = mount_holding(data, Some(DATA), mounts).expect("a mount");
+        assert_eq!(found.point, Path::new("/System/Volumes/Data"));
+        assert_eq!(found.usage, usage(60, 100));
+        let system = mount_holding(Path::new("/usr/bin"), Some(SYSTEM), mounts).expect("a mount");
+        assert_eq!(system.point, Path::new("/"));
+    }
+
+    // Given: bind-like mounts sharing one device, and a device no mount reports
+    // When: looked up / Then: the deepest prefix among the shared device wins, and an unknown device falls back to prefixes
+    #[test]
+    fn mount_holding_prefers_prefixes_on_a_shared_device_and_falls_back() {
+        let mounts = [
+            mount("/", Some(1), 10, 100),
+            mount("/srv", Some(1), 20, 200),
+            mount("/mnt/other", Some(9), 30, 300),
+        ];
+        let found = mount_holding(Path::new("/srv/evorch"), Some(1), mounts).expect("a mount");
+        assert_eq!(found.point, Path::new("/srv"));
+        let fallback = mount_holding(Path::new("/srv/evorch"), Some(77), mounts).expect("a mount");
+        assert_eq!(fallback.point, Path::new("/srv"));
     }
 
     // Given: a sampler whose source takes readings on its own thread
@@ -328,13 +418,17 @@ mod tests {
         assert!(newest >= 1.0, "the second reading was delivered: {newest}");
     }
 
-    // Given: a running sampler / When: it is dropped / Then: the thread ends, which closes the wake
+    // Given: a sampler that has delivered its first reading and now waits out a very long interval
+    // When: it is dropped / Then: the thread leaves that wait and ends, which drops its source
     #[test]
-    fn dropping_the_sampler_stops_the_thread() {
+    fn dropping_the_sampler_ends_a_waiting_thread() {
         let (done_tx, done_rx) = mpsc::channel::<()>();
+        let (woke_tx, woke_rx) = mpsc::channel::<()>();
         let sampler = SystemSampler::spawn(
             Duration::from_secs(3600),
-            || {},
+            move || {
+                let _ = woke_tx.send(());
+            },
             move || {
                 // Dropped when the thread's loop ends.
                 let done = done_tx;
@@ -345,6 +439,7 @@ mod tests {
             },
         )
         .expect("the sampler thread starts");
+        woke_rx.recv().expect("the first reading was announced");
         drop(sampler);
         assert!(
             done_rx.recv().is_err(),
