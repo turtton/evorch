@@ -13,8 +13,8 @@ use std::sync::Arc;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::point_to_viewport;
 use egui::{
-    Event, EventFilter, ImeEvent, Key, Rect, Sense, TextStyle, UiBuilder, Vec2, WidgetInfo,
-    WidgetType,
+    CornerRadius, Event, EventFilter, ImeEvent, Key, Rect, Sense, Stroke, StrokeKind, TextStyle,
+    UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 
 use crate::terminal::{
@@ -22,7 +22,7 @@ use crate::terminal::{
 };
 use crate::theme::icons;
 use crate::theme::text::muted;
-use crate::theme::tokens::{SP_1, SP_2, palette};
+use crate::theme::tokens::{R_MD, SP_1, SP_2, palette};
 use crate::theme::widgets::{empty_state, icon_button, surface_frame};
 use paint::CellMetrics;
 
@@ -36,7 +36,7 @@ pub fn terminal_pane(
     let spawner = sessions.spawner();
     let pending = std::mem::take(&mut sessions.pending_events);
     let session = sessions.session_mut(key, cwd);
-    let focused = surface_frame(palette().INPUT)
+    let frame = surface_frame(palette().INPUT)
         .inner_margin(egui::Margin::same(SP_2 as i8))
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
@@ -51,8 +51,17 @@ pub fn terminal_pane(
                 handle_keys(ui, session, pending);
             }
             focused
-        })
-        .inner;
+        });
+    let focused = frame.inner;
+    if focused {
+        // The frame has already drawn its neutral border; the accent goes over it.
+        ui.painter().rect_stroke(
+            frame.response.rect,
+            CornerRadius::same(R_MD),
+            Stroke::new(1.0, palette().ACCENT),
+            StrokeKind::Inside,
+        );
+    }
     sessions.focused |= focused;
 }
 
@@ -125,6 +134,12 @@ fn grid(ui: &mut egui::Ui, session: &mut TerminalSession, has_spawner: bool) -> 
     let id = ui.id().with("terminal-grid");
     let response = ui.interact(rect, id, Sense::click_and_drag());
     ui.advance_cursor_after_rect(rect);
+    // egui only gives focus up on a *click* elsewhere, so pressing to start a text selection
+    // elsewhere would leave the terminal grabbing Ctrl+C. Release it as soon as the button
+    // goes down outside the grid.
+    if pressed_outside(ui, rect) {
+        response.surrender_focus();
+    }
     if response.clicked() || response.drag_started() || response.secondary_clicked() {
         response.request_focus();
     }
@@ -155,14 +170,20 @@ fn grid(ui: &mut egui::Ui, session: &mut TerminalSession, has_spawner: bool) -> 
         ui.ctx().copy_text(text);
     }
 
-    paint::paint_grid(
+    let blink = paint::CursorBlink::at(ui.input(|input| input.time));
+    let cursor_blinks = paint::paint_grid(
         &ui.painter_at(rect),
         rect,
         &font,
         cell,
         session.emulator(),
         focused,
+        blink.on,
     );
+    if cursor_blinks {
+        // Wake only for the next toggle; an idle terminal does not repaint every frame.
+        ui.ctx().request_repaint_after(blink.until_toggle);
+    }
     if !has_spawner
         && session.status() == &TerminalStatus::NotStarted
         && session.emulator().is_blank()
@@ -180,6 +201,18 @@ fn grid(ui: &mut egui::Ui, session: &mut TerminalSession, has_spawner: bool) -> 
         publish_ime_area(ui, rect, cell, session);
     }
     focused
+}
+
+/// このフレームで、`rect` の外でマウスボタンが押されたか。
+fn pressed_outside(ui: &egui::Ui, rect: Rect) -> bool {
+    ui.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                Event::PointerButton { pos, pressed: true, .. } if !rect.contains(*pos)
+            )
+        })
+    })
 }
 
 fn context_menu(ui: &mut egui::Ui, session: &mut TerminalSession) {
@@ -268,5 +301,115 @@ fn handle_keys(ui: &egui::Ui, session: &mut TerminalSession, events: Vec<Event>)
             Event::Cut if !current.shift => session.write_input(b"\x18"),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use egui::epaint::Shape;
+
+    use super::*;
+
+    const SIZE: Vec2 = Vec2::new(400.0, 300.0);
+
+    struct Pane {
+        ctx: egui::Context,
+        sessions: TerminalSessions,
+        cwd: PathBuf,
+    }
+
+    struct Frame {
+        repaint_delay: Duration,
+        accent_border: bool,
+    }
+
+    impl Pane {
+        fn new() -> Self {
+            let mut pane = Self {
+                ctx: egui::Context::default(),
+                sessions: TerminalSessions::default(),
+                cwd: PathBuf::from("/"),
+            };
+            // A fresh context owes a few immediate frames; pass through them to reach rest.
+            for _ in 0..4 {
+                pane.frame(Vec::new());
+            }
+            pane
+        }
+
+        fn frame(&mut self, events: Vec<Event>) -> Frame {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, SIZE)),
+                time: Some(0.1),
+                events,
+                ..egui::RawInput::default()
+            };
+            // The workbench clears this at the start of every frame, before the pane asserts it.
+            self.sessions.focused = false;
+            let (sessions, cwd) = (&mut self.sessions, &self.cwd);
+            let mut output = self.ctx.run_ui(raw, |ui| {
+                terminal_pane(ui, sessions, &None, cwd);
+            });
+            output.textures_delta.clear();
+            let accent = palette().ACCENT;
+            Frame {
+                repaint_delay: output.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+                accent_border: output.shapes.iter().any(|clipped| {
+                    matches!(&clipped.shape, Shape::Rect(rect) if rect.stroke.color == accent)
+                }),
+            }
+        }
+
+        fn button(&mut self, pos: egui::Pos2, pressed: bool) -> Frame {
+            self.frame(vec![
+                Event::PointerMoved(pos),
+                Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ])
+        }
+
+        fn click_grid(&mut self) -> Frame {
+            let pos = egui::pos2(SIZE.x / 2.0, SIZE.y / 2.0);
+            self.frame(vec![Event::PointerMoved(pos)]);
+            self.button(pos, true);
+            self.button(pos, false);
+            self.frame(Vec::new())
+        }
+    }
+
+    // Given: an idle terminal / When: it gains and loses focus / Then: only the focused pane wears the accent border and asks for blink wake-ups.
+    #[test]
+    fn focus_draws_the_accent_border_and_schedules_blink_repaints_only_while_focused() {
+        let mut pane = Pane::new();
+        let idle = pane.frame(Vec::new());
+        assert!(!idle.accent_border);
+        assert_eq!(idle.repaint_delay, Duration::MAX);
+
+        let focused = pane.click_grid();
+        assert!(pane.sessions.focused);
+        assert!(focused.accent_border);
+        assert!(
+            focused.repaint_delay <= Duration::from_secs(1),
+            "blink needs a timed wake-up, got {:?}",
+            focused.repaint_delay
+        );
+
+        // A press in the pane's margin is outside the grid.
+        let released = pane.button(egui::pos2(2.0, 2.0), true);
+        assert!(!pane.sessions.focused);
+        assert!(!released.accent_border);
+        pane.button(egui::pos2(2.0, 2.0), false);
+        let mut after = pane.frame(Vec::new());
+        for _ in 0..4 {
+            after = pane.frame(Vec::new());
+        }
+        assert_eq!(after.repaint_delay, Duration::MAX);
     }
 }

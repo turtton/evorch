@@ -1,5 +1,7 @@
 //! 端末グリッドの描画。
 
+use std::time::Duration;
+
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
@@ -116,7 +118,61 @@ fn cell_text(cell: &Cell) -> String {
     text
 }
 
+/// カーソルの点滅半周期です。
+const BLINK_HALF_PERIOD: Duration = Duration::from_millis(530);
+
+/// ある時刻でのカーソル点滅の位相です。時刻だけで決まるので、描画間隔に依存しません。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CursorBlink {
+    /// カーソルを描く位相か。
+    pub(super) on: bool,
+    /// 次に位相が切り替わるまでの時間。
+    pub(super) until_toggle: Duration,
+}
+
+impl CursorBlink {
+    /// `time` (秒) の位相です。
+    pub(super) fn at(time: f64) -> Self {
+        let half = BLINK_HALF_PERIOD.as_secs_f64();
+        let ticks = (time / half).floor();
+        Self {
+            on: ticks.rem_euclid(2.0) == 0.0,
+            until_toggle: Duration::from_secs_f64(((ticks + 1.0) * half - time).max(0.0)),
+        }
+    }
+}
+
+/// カーソルの描き方です。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorLook {
+    Hidden,
+    /// 塗りつぶしのブロック (文字は反転)。
+    Block,
+    /// 中抜きの枠。
+    Hollow,
+    Beam,
+    Underline,
+}
+
+/// フォーカスと点滅位相からカーソルの見た目を決めます。
+///
+/// フォーカス中は点滅し、アプリケーションが DECSCUSR で指定した形 (ブロック・ビーム・
+/// アンダーライン) を保ちます。フォーカス外は形によらず、点滅しない中抜きの枠です。
+fn cursor_look(shape: CursorShape, focused: bool, blink_on: bool) -> CursorLook {
+    match shape {
+        CursorShape::Hidden => CursorLook::Hidden,
+        _ if !focused => CursorLook::Hollow,
+        _ if !blink_on => CursorLook::Hidden,
+        CursorShape::Beam => CursorLook::Beam,
+        CursorShape::Underline => CursorLook::Underline,
+        CursorShape::Block | CursorShape::HollowBlock => CursorLook::Block,
+    }
+}
+
 /// グリッド・選択範囲・カーソルを `rect` へ描きます。
+///
+/// フォーカス中で点滅するカーソルが画面内にあれば `true` を返します。呼び出し側はその間、
+/// 次の位相切り替えに合わせて再描画を要求します。
 pub(super) fn paint_grid(
     painter: &Painter,
     rect: Rect,
@@ -124,7 +180,8 @@ pub(super) fn paint_grid(
     cell: CellMetrics,
     emulator: &TerminalEmulator,
     focused: bool,
-) {
+    blink_on: bool,
+) -> bool {
     let term = emulator.term();
     let content = term.renderable_content();
     let overrides: &Colors = content.colors;
@@ -136,7 +193,8 @@ pub(super) fn paint_grid(
     let offset = content.display_offset;
     let cursor = content.cursor;
     let cursor_viewport = point_to_viewport(offset, cursor.point);
-    let solid_cursor = focused && cursor.shape == CursorShape::Block;
+    let look = cursor_look(cursor.shape, focused, blink_on);
+    let solid_cursor = look == CursorLook::Block;
     let selection = content.selection;
 
     let mut painting = Painting {
@@ -201,11 +259,12 @@ pub(super) fn paint_grid(
             painter,
             painting.cell_pos(viewport.line, viewport.column.0),
             cell,
-            cursor.shape,
+            look,
             cursor_color,
             cursor_is_wide(emulator, cursor.point),
         );
     }
+    focused && cursor_viewport.is_some() && cursor.shape != CursorShape::Hidden
 }
 
 fn cursor_is_wide(emulator: &TerminalEmulator, point: Point) -> bool {
@@ -218,36 +277,94 @@ fn paint_cursor(
     painter: &Painter,
     min: Pos2,
     cell: CellMetrics,
-    shape: CursorShape,
+    look: CursorLook,
     color: Color32,
     wide: bool,
 ) {
     let width = if wide { cell.width * 2.0 } else { cell.width };
     let full = Rect::from_min_size(min, Vec2::new(width, cell.height));
-    match shape {
-        CursorShape::Hidden => {}
-        CursorShape::Beam => {
+    match look {
+        CursorLook::Hidden | CursorLook::Block => {}
+        CursorLook::Beam => {
             painter.rect_filled(
                 Rect::from_min_size(min, Vec2::new(2.0, cell.height)),
                 0.0,
                 color,
             );
         }
-        CursorShape::Underline => {
+        CursorLook::Underline => {
             painter.rect_filled(
                 Rect::from_min_max(Pos2::new(full.left(), full.bottom() - 2.0), full.max),
                 0.0,
                 color,
             );
         }
-        // Unfocused block cursors are drawn hollow, like most terminals.
-        CursorShape::Block | CursorShape::HollowBlock => {
+        CursorLook::Hollow => {
             painter.rect_stroke(
                 full.shrink(0.5),
                 0.0,
                 Stroke::new(1.0, color),
                 egui::StrokeKind::Inside,
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blink_alternates_each_half_period_and_reports_the_next_toggle() {
+        let half = BLINK_HALF_PERIOD.as_secs_f64();
+        let early = CursorBlink::at(0.1);
+        assert!(early.on);
+        assert!((early.until_toggle.as_secs_f64() - (half - 0.1)).abs() < 1e-9);
+
+        let late = CursorBlink::at(half + 0.1);
+        assert!(!late.on);
+        assert!((late.until_toggle.as_secs_f64() - (half - 0.1)).abs() < 1e-9);
+
+        assert!(CursorBlink::at(2.0 * half + 0.1).on);
+        assert!(CursorBlink::at(0.0).until_toggle <= BLINK_HALF_PERIOD);
+    }
+
+    #[test]
+    fn focused_cursor_keeps_the_requested_shape_and_blinks() {
+        for (shape, look) in [
+            (CursorShape::Block, CursorLook::Block),
+            (CursorShape::HollowBlock, CursorLook::Block),
+            (CursorShape::Beam, CursorLook::Beam),
+            (CursorShape::Underline, CursorLook::Underline),
+        ] {
+            assert_eq!(cursor_look(shape, true, true), look);
+            assert_eq!(cursor_look(shape, true, false), CursorLook::Hidden);
+        }
+    }
+
+    #[test]
+    fn unfocused_cursor_is_a_steady_hollow_box_whatever_the_shape() {
+        for shape in [
+            CursorShape::Block,
+            CursorShape::HollowBlock,
+            CursorShape::Beam,
+            CursorShape::Underline,
+        ] {
+            for blink_on in [true, false] {
+                assert_eq!(cursor_look(shape, false, blink_on), CursorLook::Hollow);
+            }
+        }
+    }
+
+    #[test]
+    fn a_hidden_cursor_stays_hidden() {
+        for focused in [true, false] {
+            for blink_on in [true, false] {
+                assert_eq!(
+                    cursor_look(CursorShape::Hidden, focused, blink_on),
+                    CursorLook::Hidden
+                );
+            }
         }
     }
 }
