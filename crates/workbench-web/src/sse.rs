@@ -320,14 +320,22 @@ pub(crate) async fn events<B: WorkbenchBackend>(
     if state
         .shared
         .tasks
-        .spawn(pump(
-            Arc::clone(&state.backend),
-            events,
-            queue,
-            CursorTracker::new(started.high_water),
-            started.subscription_id.clone(),
-            state.shared.shutdown.clone(),
-        ))
+        .spawn({
+            let task = pump(
+                Arc::clone(&state.backend),
+                events,
+                queue,
+                CursorTracker::new(started.high_water),
+                started.subscription_id.clone(),
+                state.shared.shutdown.clone(),
+            );
+            let observer = state.shared.observer.clone();
+            async move {
+                observer.record("web_sse_begin");
+                task.await;
+                observer.record("web_sse_end");
+            }
+        })
         .is_err()
     {
         return error_response(

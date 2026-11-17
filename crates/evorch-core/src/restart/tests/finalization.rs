@@ -76,7 +76,7 @@ async fn planned_chat(host: &BootstrappedHost, core: &RestartCoordinator) -> (Ru
 #[tokio::test(start_paused = true)]
 async fn atomic_capture_owns_sealed_rejects_both_stop_entries_and_never_grants_exec() {
     let model = Arc::new(Model::default());
-    let (_dir, mut host) = boot_with_model(model.clone()).await;
+    let (_dir, mut host) = boot_composition(model.clone(), true).await;
     let core = RestartCoordinator::new(&host);
     let (run, id) = planned_chat(&host, &core).await;
     let observation = core.wait_sealed(id).await.unwrap();
@@ -141,7 +141,7 @@ async fn atomic_capture_owns_sealed_rejects_both_stop_entries_and_never_grants_e
 }
 #[tokio::test]
 async fn stop_before_atomic_capture_cancels_planned_attempt_and_stale_capture_is_rejected() {
-    let (_dir, mut host) = boot().await;
+    let (_dir, mut host) = boot_composition(Arc::new(Model::default()), true).await;
     let core = RestartCoordinator::new(&host);
     let (run, id) = planned_chat(&host, &core).await;
     let tx = transaction(&host);
@@ -191,7 +191,7 @@ async fn capture_commit_failure_is_failed_closed_before_any_m2_stage() {
 }
 #[tokio::test]
 async fn shutdown_after_capture_retains_finalizer_and_prevents_m2_progress() {
-    let (_dir, mut host) = boot().await;
+    let (_dir, mut host) = boot_composition(Arc::new(Model::default()), true).await;
     let witness = cleanup_service(&mut host);
     let core = RestartCoordinator::new(&host);
     let id = core.request_planned(BTreeMap::new()).unwrap();

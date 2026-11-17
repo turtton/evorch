@@ -138,8 +138,11 @@ pub(crate) async fn request<B: WorkbenchBackend>(
     // request id lets the browser ask again and get the recorded outcome. The
     // slot belongs to the task, so a disconnect does not free it early.
     let backend = Arc::clone(&state.backend);
+    let observer = state.shared.observer.clone();
     let handle = state.shared.tasks.spawn(async move {
+        observer.record("web_api_begin");
         let answer = backend.handle_request(&session, envelope, provenance).await;
+        observer.record("web_api_end");
         drop(slot);
         answer
     });

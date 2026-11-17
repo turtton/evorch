@@ -83,6 +83,11 @@ async fn owned_chats(
     core: &RestartCoordinator,
     count: usize,
 ) -> (Vec<RunId>, RestartId) {
+    let runs = owner_runs(host, count).await;
+    let id = seal_runs(core, &runs).await;
+    (runs, id)
+}
+async fn owner_runs(host: &BootstrappedHost, count: usize) -> Vec<RunId> {
     let permit = host.owner.start("active").unwrap();
     host.owner.start("idle").unwrap();
     let mut runs = Vec::new();
@@ -108,6 +113,9 @@ async fn owned_chats(
         waiting(run, events).await;
         runs.push(run);
     }
+    runs
+}
+async fn seal_runs(core: &RestartCoordinator, runs: &[RunId]) -> RestartId {
     let id = core
         .request_planned(
             runs.iter()
@@ -130,7 +138,7 @@ async fn owned_chats(
         )
         .unwrap();
     core.wait_sealed(id).await.unwrap();
-    (runs, id)
+    id
 }
 fn create(host: &BootstrappedHost, metadata: RestartMetadata) -> RestartTransaction {
     host.composition
@@ -271,7 +279,7 @@ enum Race {
 async fn shared_cleanup_retries_unconfirmed_invalidation_and_hold_removal_without_resume() {
     for block_invalidation in [false, true] {
         let model = Arc::new(Model::default());
-        let (dir, mut host) = boot_with_model(model.clone()).await;
+        let (dir, mut host) = boot_composition(model.clone(), true).await;
         let (mut target, metadata) = target(dir.path()).await;
         let core = RestartCoordinator::new(&host);
         let (run, id) = owned_chat(&host, &core).await;
@@ -346,7 +354,7 @@ async fn matrix(stage: ExitStage) {
         Race::FailureShutdown,
     ] {
         let model = Arc::new(Model::default());
-        let (dir, mut host) = boot_with_model(model.clone()).await;
+        let (dir, mut host) = boot_composition(model.clone(), true).await;
         let (mut target, metadata) = target(dir.path()).await;
         let (returned, service_returned) = tokio::sync::oneshot::channel();
         host.services
@@ -468,7 +476,7 @@ async fn stop_and_shutdown_after_each_effect_never_resume_or_strand_armed_holds(
     ] {
         for shutdown in [false, true] {
             let model = Arc::new(Model::default());
-            let (dir, mut host) = boot_with_model(model.clone()).await;
+            let (dir, mut host) = boot_composition(model.clone(), true).await;
             let (mut target, metadata) = target(dir.path()).await;
             let core = RestartCoordinator::new(&host);
             let (run, id) = owned_chat(&host, &core).await;

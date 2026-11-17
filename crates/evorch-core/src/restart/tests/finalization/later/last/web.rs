@@ -68,7 +68,7 @@ pub(super) async fn cell(mode: Mode) {
     let expire = mode == Mode::Deadline;
     eprintln!("held-web {mode:?}: boot");
     let model = Arc::new(Model::default());
-    let (dir, mut host) = boot_with_model(model.clone()).await;
+    let (dir, mut host) = boot_composition(model.clone(), true).await;
     let config = ConfigIdentity::new(dir.path()).unwrap();
     let launch = LaunchGuard::acquire(&config).unwrap();
     let instance = Arc::new(Instance::acquire(&launch, Path::new("/tmp")).unwrap());
