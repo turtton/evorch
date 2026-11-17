@@ -107,6 +107,28 @@ fn screen(harness: &HeadlessWorkbench<Source>) -> Vec<String> {
         .screen_lines()
 }
 
+/// Steps frames on every PTY wakeup until `done` holds.
+///
+/// The PTY announces each output chunk, so no deadline is needed here: a shell that never
+/// produces the awaited output is a hang that nextest's `slow-timeout` terminates.
+#[track_caller]
+fn wait_until(
+    harness: &mut HeadlessWorkbench<Source>,
+    wake: &mpsc::Receiver<()>,
+    done: impl Fn(&HeadlessWorkbench<Source>) -> bool,
+) {
+    harness.step();
+    while !done(harness) {
+        if wake.recv().is_err() {
+            panic!(
+                "PTY wake channel closed before the condition held; screen={:#?}",
+                screen(harness)
+            );
+        }
+        harness.step();
+    }
+}
+
 /// Steps frames on every PTY wakeup until `done` holds, with a total deadline.
 #[track_caller]
 fn run_until(
@@ -374,4 +396,59 @@ fn each_project_gets_its_own_shell_in_its_root() {
         2,
         "switching back reuses the running shell"
     );
+}
+
+fn terminal_focused(harness: &HeadlessWorkbench<Source>) -> bool {
+    harness
+        .state()
+        .active_terminal()
+        .expect("terminal session exists")
+        .is_focused()
+}
+
+fn pointer_button(harness: &mut HeadlessWorkbench<Source>, pos: egui::Pos2, pressed: bool) {
+    let events = &mut harness.input_mut().events;
+    events.push(Event::PointerMoved(pos));
+    events.push(Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    });
+}
+
+// Given: a focused terminal / When: a selection drag starts outside it / Then: focus is released at the press, so Ctrl+C no longer reaches the shell.
+#[test]
+fn pressing_outside_the_terminal_releases_focus_and_stops_ctrl_c() {
+    // With ISIG off the line discipline echoes a received 0x03 as "^C" instead of signalling.
+    let (spawner, wake) = ScriptSpawner::new("stty -isig; printf 'ready\\n'; exec cat");
+    let state = default_state().with_terminal_spawner(spawner);
+    let mut harness = terminal_harness_with(state, [800.0, 600.0]);
+    wait_until(&mut harness, &wake, |h| screen_contains(h, "ready"));
+    assert!(!terminal_focused(&harness));
+
+    harness.click_label("Terminal");
+    harness.run();
+    assert!(terminal_focused(&harness));
+    harness.input_mut().events.push(Event::Copy);
+    wait_until(&mut harness, &wake, |h| screen_contains(h, "^C"));
+
+    // Press only: egui itself surrenders focus on a click, not on the press that starts a drag.
+    let outside = harness.label_rects("Projects")[0].center();
+    pointer_button(&mut harness, outside, true);
+    harness.step();
+    assert!(!terminal_focused(&harness));
+    pointer_button(&mut harness, outside, false);
+    harness.run();
+    harness.input_mut().events.push(Event::Copy);
+    harness.run();
+
+    // Anything still in flight reaches the shell before this marker does.
+    harness.click_label("Terminal");
+    harness.run();
+    assert!(terminal_focused(&harness));
+    type_text(&mut harness, "marker");
+    press(&mut harness, Key::Enter, Modifiers::NONE);
+    wait_until(&mut harness, &wake, |h| screen_contains(h, "marker"));
+    assert_eq!(screen(&harness).join("\n").matches("^C").count(), 1);
 }

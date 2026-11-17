@@ -65,10 +65,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Tab, arrows and Escape would otherwise move or drop focus, and global shortcuts
     /// would steal control keys the shell needs. Workbench shortcuts that a terminal has no
     /// use for (see [`crate::keymap::Keymap::passes_through_terminal`]) still reach the keymap.
+    ///
+    /// A button press outside the terminal grid hands input ownership back: it and every
+    /// later event of the batch stay with egui (so Ctrl+C right after it copies a selection),
+    /// while earlier events still belong to the terminal.
     fn capture_terminal_input(&mut self, raw_input: &mut egui::RawInput) {
         let keymap = &self.keymap;
         let pending = &mut self.terminals.pending_events;
+        let grid = self.terminals.grid_rect;
+        let mut released = false;
         raw_input.events.retain(|event| {
+            if let egui::Event::PointerButton {
+                pos, pressed: true, ..
+            } = event
+                && grid.is_some_and(|grid| !grid.contains(*pos))
+            {
+                released = true;
+            }
+            if released {
+                return true;
+            }
             let captured = match event {
                 egui::Event::Key { key, modifiers, .. } => {
                     !keymap.passes_through_terminal(*key, *modifiers)
@@ -85,5 +101,150 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             !captured
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, Modifiers, PointerButton, Pos2, Rect};
+    use workspace_ui::UiSettings;
+
+    use super::*;
+    use crate::fixture::DemoSource;
+
+    const INSIDE: Pos2 = Pos2::new(150.0, 150.0);
+    const OUTSIDE: Pos2 = Pos2::new(10.0, 10.0);
+
+    fn focused_terminal() -> WorkbenchState<DemoSource> {
+        let mut state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default()).unwrap();
+        state.terminals.focused = true;
+        state.terminals.grid_rect = Some(Rect::from_min_max(
+            Pos2::new(100.0, 100.0),
+            Pos2::new(300.0, 300.0),
+        ));
+        state
+    }
+
+    fn press(pos: Pos2) -> Event {
+        Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    fn route(state: &mut WorkbenchState<DemoSource>, events: Vec<Event>) -> Vec<Event> {
+        let mut raw = egui::RawInput {
+            events,
+            ..egui::RawInput::default()
+        };
+        state.raw_input_hook(&mut raw);
+        raw.events
+    }
+
+    // Given: a focused terminal / When: a press outside the grid and Ctrl+C share one batch / Then: the copy stays with egui instead of being swallowed.
+    #[test]
+    fn a_press_outside_hands_the_rest_of_the_batch_back_to_egui() {
+        let mut state = focused_terminal();
+
+        let remaining = route(
+            &mut state,
+            vec![
+                Event::Text("a".into()),
+                press(OUTSIDE),
+                Event::Copy,
+                Event::Text("b".into()),
+            ],
+        );
+
+        assert_eq!(
+            state.terminals.pending_events,
+            [Event::Text("a".into())],
+            "input typed before the press still belongs to the terminal"
+        );
+        assert_eq!(
+            remaining,
+            [press(OUTSIDE), Event::Copy, Event::Text("b".into())]
+        );
+    }
+
+    // Given: a focused terminal / When: the press lands inside the grid / Then: the terminal keeps owning the whole batch.
+    #[test]
+    fn a_press_inside_keeps_the_batch_with_the_terminal() {
+        let mut state = focused_terminal();
+
+        let remaining = route(&mut state, vec![press(INSIDE), Event::Copy]);
+
+        assert_eq!(state.terminals.pending_events, [Event::Copy]);
+        assert_eq!(remaining, [press(INSIDE)]);
+    }
+
+    // Given: label text selected outside a focused terminal / When: a press outside the grid and Ctrl+C share one input batch / Then: the selection is copied, not swallowed with the terminal's events.
+    #[test]
+    fn copy_batched_with_an_outside_press_still_copies_the_selection() {
+        const LABEL: &str = "selected words";
+        let mut state = focused_terminal();
+        state.terminals.focused = false;
+        let ctx = egui::Context::default();
+        let label_rect = std::cell::Cell::new(Rect::NOTHING);
+        let frame = |state: &mut WorkbenchState<DemoSource>, events: Vec<Event>| {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 400.0))),
+                time: Some(0.1),
+                events,
+                ..egui::RawInput::default()
+            };
+            state.raw_input_hook(&mut raw);
+            let mut output = ctx.run_ui(raw, |ui| {
+                label_rect.set(ui.label(LABEL).rect);
+            });
+            output.textures_delta.clear();
+            output
+                .platform_output
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..4 {
+            frame(&mut state, Vec::new());
+        }
+        let rect = label_rect.get();
+        let (start, end) = (
+            Pos2::new(rect.left() + 1.0, rect.center().y),
+            Pos2::new(rect.right() - 1.0, rect.center().y),
+        );
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&mut state, vec![Event::PointerMoved(start)]);
+        frame(&mut state, vec![button(start, true)]);
+        frame(&mut state, vec![Event::PointerMoved(end)]);
+        frame(&mut state, vec![button(end, false)]);
+        assert!(
+            ctx.with_plugin(
+                |selection: &mut egui::text_selection::LabelSelectionState| {
+                    selection.has_selection()
+                }
+            )
+            .unwrap(),
+            "dragging selected the label text"
+        );
+
+        state.terminals.focused = true;
+        let copied = frame(
+            &mut state,
+            vec![Event::PointerMoved(end), button(end, true), Event::Copy],
+        );
+
+        assert_eq!(copied, [LABEL]);
+        assert!(state.terminals.pending_events.is_empty());
     }
 }

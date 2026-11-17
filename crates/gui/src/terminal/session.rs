@@ -170,6 +170,9 @@ pub struct TerminalSessions {
     spawner: Option<Arc<dyn TerminalSpawner>>,
     /// 前フレームで端末がキーボードフォーカスを持っていたかどうかです。
     pub(crate) focused: bool,
+    /// 前フレームでフォーカス中だった端末のグリッド領域です。`raw_input_hook` が、領域外の
+    /// 押下以降のイベントを端末へ取り込まないために使います。
+    pub(crate) grid_rect: Option<egui::Rect>,
     /// `raw_input_hook` が端末用に取り分けたキーボードイベントです。
     pub(crate) pending_events: Vec<egui::Event>,
 }
