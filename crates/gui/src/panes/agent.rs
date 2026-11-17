@@ -385,6 +385,7 @@ fn run_detail_body(
         pane_id.with(("transcript", model.cache_identity()))
     };
     let cache_key = model_id.with("entry-heights");
+    retire_previous_scope(ui, pane_id, model_id);
     let passive_artifacts = super::artifact_card::is_passive(ui.ctx());
     for entry in model.visible_entries() {
         if passive_artifacts {
@@ -409,7 +410,7 @@ fn run_detail_body(
     let anchor_key = model_id.with("body-anchor");
     let open_groups_key = model_id.with("tool-groups-open");
     let previous_anchor: Option<ScrollAnchor> = ui.data(|data| data.get_temp(anchor_key));
-    let mut first_visible: Option<(usize, f32)> = None;
+    let mut first_visible: Option<(usize, bool, f32)> = None;
     // Where the entry the reader was looking at stands now, whether or not it
     // is still the first in view: a row above it that changed height can put
     // another entry first.
@@ -463,10 +464,14 @@ fn run_detail_body(
             let mut hidden_until = 0;
             let mut header_top = 0.0_f32;
             list.perf.group_headers += groups.len() as u64;
-            // shell-job map, run_js nesting and the row loop each walk every entry.
+            // Full scans of the entries this pass: the artifact poll (unless the
+            // pane is passive), the shell-job map, the two of run_js nesting, the
+            // grouping and the row loop. The height-cache prune in
+            // `VirtualList::load` counts its own.
             list.perf.passes += 1;
             list.perf.projection_rebuilds += 1;
-            list.perf.entries_enumerated += 3 * entries.len() as u64;
+            list.perf.entries_enumerated +=
+                (5 + u64::from(!passive_artifacts)) * entries.len() as u64;
             list.perf.prep_ns += prep_clock.elapsed_ns();
             let loop_clock = perf::Clock::start(list.perf_on());
             let mut folded_until = 0;
@@ -479,6 +484,9 @@ fn run_detail_body(
                     let open = open_groups.is_open(key);
                     let revision = group_revision(model, group, key, open, layout_revision);
                     let row_top = list.cursor_top(ui);
+                    if previous_anchor.is_some_and(|anchor| anchor.header && anchor.entry == key) {
+                        anchored_entry_y = Some(row_top - content_top);
+                    }
                     list.keyed_row(
                         ui,
                         viewport,
@@ -501,7 +509,7 @@ fn run_detail_body(
                         },
                     );
                     if first_visible.is_none() && list.cursor_top(ui) > screen_viewport.top() {
-                        first_visible = Some((key, row_top - content_top));
+                        first_visible = Some((key, true, row_top - content_top));
                     }
                     header_top = row_top - content_top;
                     if !open {
@@ -511,8 +519,9 @@ fn run_detail_body(
                 if entry_idx < hidden_until {
                     // An anchor hidden by a collapse follows its group header.
                     if anchored_entry_y.is_none()
-                        && previous_anchor
-                            .is_some_and(|anchor| anchor.entry == model.visible_entry_id(entry_idx))
+                        && previous_anchor.is_some_and(|anchor| {
+                            !anchor.header && anchor.entry == model.visible_entry_id(entry_idx)
+                        })
                     {
                         anchored_entry_y = Some(header_top);
                     }
@@ -548,7 +557,8 @@ fn run_detail_body(
                 list.perf.revisions += u64::from(list.perf_on());
                 list.perf.revision_ns += revision_clock.elapsed_ns();
                 let row_top = list.cursor_top(ui);
-                if previous_anchor.is_some_and(|anchor| anchor.entry == entry_id) {
+                if previous_anchor.is_some_and(|anchor| !anchor.header && anchor.entry == entry_id)
+                {
                     anchored_entry_y = Some(row_top - content_top);
                 }
                 list.row(ui, viewport, entry_id, revision, |ui| {
@@ -766,7 +776,7 @@ fn run_detail_body(
                     });
                 });
                 if first_visible.is_none() && list.cursor_top(ui) > screen_viewport.top() {
-                    first_visible = Some((entry_id, row_top - content_top));
+                    first_visible = Some((entry_id, false, row_top - content_top));
                 }
             }
             list.flush(ui);
@@ -791,13 +801,14 @@ fn run_detail_body(
             requests.and_then(|requests| requests.show(ui))
         });
     virtual_list::record_layout(ui, output.content_size, output.state.offset);
-    if let Some((entry, content_y)) = first_visible {
+    if let Some((entry, header, content_y)) = first_visible {
         let offset_y = corrected_offset.unwrap_or(output.state.offset.y);
         ui.data_mut(|data| {
             data.insert_temp(
                 anchor_key,
                 ScrollAnchor {
                     entry,
+                    header,
                     content_y,
                     offset_y,
                 },
@@ -811,6 +822,29 @@ fn run_detail_body(
     output.inner
 }
 
+/// A pane that shows another transcript than it did drops what it kept for the
+/// old one (the measured heights, the reader's open groups, the scroll anchor):
+/// that state is keyed by the transcript's scope and nothing else would ever
+/// collect it. Two scopes drawn in one pass share the pane ID; they are left
+/// alone rather than made to evict each other.
+fn retire_previous_scope(ui: &egui::Ui, pane_id: egui::Id, scope: egui::Id) {
+    let key = pane_id.with("transcript-scope");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let previous: Option<(egui::Id, u64)> = ui.data(|data| data.get_temp(key));
+    match previous {
+        Some((old, _)) if old == scope => {}
+        // Another scope of this pane already drew this pass.
+        Some((_, seen)) if seen == pass => return,
+        Some((old, _)) => ui.data_mut(|data| {
+            virtual_list::VirtualList::forget(data, old.with("entry-heights"));
+            data.remove_temp::<tool_group::OpenGroups>(old.with("tool-groups-open"));
+            data.remove_temp::<ScrollAnchor>(old.with("body-anchor"));
+        }),
+        None => {}
+    }
+    ui.data_mut(|data| data.insert_temp(key, (scope, pass)));
+}
+
 const LATEST_ANCHOR_ID: &str = "transcript-latest-anchor";
 
 /// The entry the reader is looking at (the first in view) and where it is on
@@ -819,14 +853,18 @@ const LATEST_ANCHOR_ID: &str = "transcript-latest-anchor";
 #[doc(hidden)]
 #[must_use]
 pub fn first_visible_entry_for_tests(ctx: &egui::Context) -> Option<(usize, f32)> {
+    // A group header reports the entry ID of its first tool, as it is named.
     ctx.data(|data| data.get_temp(egui::Id::new(LATEST_ANCHOR_ID)))
 }
 
 /// The first entry in view, and where it was: its place in the content and
 /// the scroll offset that put it on screen.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct ScrollAnchor {
     entry: usize,
+    /// Whether it is the header of the tool group whose first tool is `entry`
+    /// (a group header and that tool share the entry ID but are distinct rows).
+    header: bool,
     content_y: f32,
     offset_y: f32,
 }
@@ -839,15 +877,20 @@ fn anchor_correction(
     ui: &egui::Ui,
     previous: Option<ScrollAnchor>,
     anchored_entry_y: Option<f32>,
-    first_visible: Option<(usize, f32)>,
+    first_visible: Option<(usize, bool, f32)>,
     (used_offset, viewport_height): (f32, f32),
 ) -> Option<f32> {
     let transitioned = crate::body::ui::take_transition(ui.ctx());
-    let (entry, content_y) = match (previous, anchored_entry_y) {
-        (Some(previous), Some(y)) => (previous.entry, y),
-        _ => first_visible?,
+    let (previous, content_y) = match (previous, anchored_entry_y) {
+        (Some(previous), Some(y)) => (previous, y),
+        _ => {
+            let (entry, header, y) = first_visible?;
+            (
+                previous.filter(|p| p.entry == entry && p.header == header)?,
+                y,
+            )
+        }
     };
-    let previous = previous.filter(|previous| previous.entry == entry)?;
     let scrolled = ui.input(|input| input.is_scrolling() || input.pointer.any_down());
     if !transitioned || scrolled {
         return None;

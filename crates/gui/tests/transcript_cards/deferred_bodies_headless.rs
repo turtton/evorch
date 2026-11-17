@@ -997,3 +997,77 @@ fn a_joined_body_that_is_kept_is_drawn_frame_after_frame_without_reading_its_pie
 
     assert_eq!(backend.bodies_read(), reads, "no piece was read again");
 }
+
+fn read_call(registry: &mut TranscriptRegistry, call: &str, path: &str) {
+    registry.apply(&Event::new(ToolEvent::ToolStarted {
+        tool_name: "read".into(),
+        call_id: call.into(),
+        input: Some(serde_json::json!({ "path": path })),
+        run_id: Some(RUN.into()),
+        parent_call_id: None,
+    }));
+    registry.apply(&Event::new(ToolEvent::ToolCompleted {
+        tool_name: "read".into(),
+        call_id: call.into(),
+        is_error: false,
+        output: Some("contents".into()),
+        detail: None,
+        run_id: Some(RUN.into()),
+        parent_call_id: None,
+    }));
+}
+
+#[test]
+fn an_opened_group_at_the_top_stays_put_while_the_bodies_below_it_load() {
+    // Given: folded turns whose answers are deferred bodies of different sizes,
+    // the pane at the top.
+    let mut rig = rig_sized(egui::vec2(720.0, 360.0), |backend, registry| {
+        for n in 0..12_usize {
+            read_call(registry, &format!("c{n}"), &format!("f{n}.rs"));
+            completed(
+                registry,
+                BodyText::deferred(backend.deferred(
+                    &format!("Answer {n}: {}", text_of(20 + (n * 37) % 150)),
+                    RUN,
+                    n as i64,
+                )),
+            );
+        }
+    });
+    rig.harness.state_mut().virtualize = true;
+    rig.run();
+    scroll_by(&mut rig, 100_000.0);
+
+    // When: the first group is opened, and then the bodies below it arrive.
+    let top = first_header_top(&rig);
+    rig.harness
+        .query_all_by_label_contains("1 tool call")
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("a header")
+        .click();
+    rig.run();
+    assert!(rig.has("Read f0.rs"), "the group opened");
+    assert!((first_header_top(&rig) - top).abs() < 1.0);
+    rig.read();
+    rig.read();
+
+    // Then: neither the header nor its first card moved on the pane.
+    let after = first_header_top(&rig);
+    assert!(
+        (after - top).abs() < 1.0,
+        "the header moved from {top} to {after}"
+    );
+    let offset = gui::panes::agent::transcript_layout_for_tests(&rig.harness.ctx)
+        .expect("layout recorded")
+        .1
+        .y;
+    assert!(offset.abs() < 1.0, "the pane scrolled to {offset}");
+}
+
+fn first_header_top(rig: &Rig) -> f32 {
+    rig.harness
+        .query_all_by_label_contains("1 tool call")
+        .map(|node| node.rect().top())
+        .min_by(f32::total_cmp)
+        .expect("a header is on screen")
+}

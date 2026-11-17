@@ -3,15 +3,12 @@
 //! and, only while enabled, time its phases. Timing is report-only: nothing
 //! may use it as a pass criterion.
 //!
-//! Disabled, a pass costs one relaxed atomic load: counters are plain integers
+//! Disabled, a pass costs one thread-local read: counters are plain integers
 //! in a per-pass struct that is published once, at the end of the pass, into a
 //! thread-local total. Nothing is written to `egui::Context` data per row.
 
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
-
-static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Work done by transcript passes since the last [`take_transcript_perf`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -74,13 +71,15 @@ impl TranscriptPerf {
 }
 
 thread_local! {
+    static ENABLED: Cell<bool> = const { Cell::new(false) };
     static TOTAL: RefCell<TranscriptPerf> = RefCell::new(TranscriptPerf::default());
 }
 
-/// Turns the counters on or off for every thread. Off by default.
+/// Turns the counters on or off for the calling thread (frames run on it), so that parallel tests do not
+/// disturb each other. Off by default.
 #[doc(hidden)]
 pub fn set_transcript_perf_enabled(enabled: bool) {
-    ENABLED.store(enabled, Ordering::Relaxed);
+    ENABLED.with(|flag| flag.set(enabled));
 }
 
 /// Returns what this thread's passes counted since the last call.
@@ -90,7 +89,7 @@ pub fn take_transcript_perf() -> TranscriptPerf {
 }
 
 pub(super) fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    ENABLED.with(Cell::get)
 }
 
 pub(super) fn publish(pass: &TranscriptPerf) {

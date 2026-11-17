@@ -90,6 +90,11 @@ pub(super) fn record_layout(ui: &egui::Ui, content: egui::Vec2, offset: egui::Ve
 }
 
 impl VirtualList {
+    /// Drops the cache stored under `id`.
+    pub(super) fn forget(data: &mut egui::util::IdTypeMap, id: egui::Id) {
+        data.remove_temp::<Self>(id);
+    }
+
     pub(super) fn load(ui: &egui::Ui, id: egui::Id, entries: impl Iterator<Item = usize>) -> Self {
         let enabled = ui
             .data(|data| data.get_temp::<bool>(override_id()))

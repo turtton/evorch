@@ -432,3 +432,69 @@ fn toggling_keeps_the_header_in_place_and_matches_the_full_layout() {
     let full = transcript_layout_for_tests(&harness.ctx).unwrap();
     assert_eq!(virtualized.0.y, full.0.y, "total content height");
 }
+
+fn turns(prefix: &str, count: usize) -> TranscriptModel {
+    let mut model = TranscriptModel::new();
+    for turn in 0..count {
+        let run = format!("{prefix}-{turn}");
+        read(&mut model, &run, "c1", &format!("f{turn}.rs"));
+        say_completed(&mut model, &run, &format!("Answer {turn}"));
+    }
+    model
+}
+
+#[test]
+fn what_a_pane_kept_for_a_transcript_it_no_longer_shows_is_dropped() {
+    // Given: a long history whose first group the reader opened, and rows
+    // whose heights are known, so that off-screen rows are skipped.
+    let mut harness = harness(turns("a", 300));
+    harness.state_mut().force = Some(true);
+    harness.run_steps(4);
+    harness
+        .query_all_by_label_contains("1 tool call")
+        .filter(|node| node.rect().top() >= 0.0)
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("a header")
+        .click();
+    harness.run_steps(4);
+    assert!(shown(&harness, "Read f") >= 1, "the reader opened a group");
+    set_transcript_perf_enabled(true);
+    let _ = take_transcript_perf();
+    harness.run_steps(2);
+    assert!(
+        take_transcript_perf().rows_skipped > 0,
+        "known heights let rows off screen be skipped"
+    );
+
+    // When: the pane shows another transcript, and then the first again.
+    harness.state_mut().model = turns("b", 300);
+    harness.run_steps(4);
+    harness.state_mut().model = turns("a", 300);
+    let _ = take_transcript_perf();
+    harness.step();
+    let perf = take_transcript_perf();
+    set_transcript_perf_enabled(false);
+
+    // Then: neither the open toggle nor the measured heights survived.
+    assert_eq!(shown(&harness, "Read f"), 0, "the group is closed again");
+    assert_eq!(perf.rows_skipped, 0, "every row is measured afresh");
+    assert!(perf.rows_drawn > 0, "{perf:?}");
+}
+
+#[test]
+fn full_scans_of_the_entries_are_counted_as_they_happen() {
+    // Given: entries with no artifacts, a pass over them.
+    let model = turns("run", 10);
+    let entries = model.visible_entries().len() as u64;
+    set_transcript_perf_enabled(true);
+    let _ = take_transcript_perf();
+    let _harness = harness(model);
+    let perf = take_transcript_perf();
+    set_transcript_perf_enabled(false);
+
+    // Then: each pass scanned them seven times: the artifact poll, the
+    // shell-job map, run_js nesting (two scans), the grouping, the row loop
+    // and the height-cache prune.
+    assert!(perf.passes > 0);
+    assert_eq!(perf.entries_enumerated, perf.passes * 7 * entries);
+}
