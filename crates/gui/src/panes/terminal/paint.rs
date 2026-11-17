@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
@@ -192,7 +193,10 @@ pub(super) fn paint_grid(
 
     let offset = content.display_offset;
     let cursor = content.cursor;
-    let cursor_viewport = point_to_viewport(offset, cursor.point);
+    // Scrolled back, the cursor row sits below the viewport; it is then neither drawn nor blinking.
+    let screen_lines = term.grid().screen_lines();
+    let cursor_viewport =
+        point_to_viewport(offset, cursor.point).filter(|viewport| viewport.line < screen_lines);
     let look = cursor_look(cursor.shape, focused, blink_on);
     let solid_cursor = look == CursorLook::Block;
     let selection = content.selection;
@@ -366,5 +370,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Given: output taller than the grid, scrolled back so the cursor row is below the viewport.
+    // Then: no blinking cursor is reported, so the blink timer stops.
+    #[test]
+    fn a_cursor_scrolled_out_of_view_does_not_blink() {
+        let mut emulator = TerminalEmulator::new(crate::terminal::GridSize::new(10, 3));
+        emulator.feed(b"1\r\n2\r\n3\r\n4\r\n5");
+        let ctx = egui::Context::default();
+        let blinks = |emulator: &TerminalEmulator| {
+            let mut blinks = false;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 30.0));
+                let cell = CellMetrics {
+                    width: 8.0,
+                    height: 10.0,
+                };
+                blinks = paint_grid(
+                    &ui.painter().clone(),
+                    rect,
+                    &FontId::monospace(10.0),
+                    cell,
+                    emulator,
+                    true,
+                    true,
+                );
+            });
+            output.textures_delta.clear();
+            blinks
+        };
+
+        assert!(blinks(&emulator), "the cursor is on screen at the bottom");
+        emulator.scroll_lines(2);
+        assert!(
+            !blinks(&emulator),
+            "scrolled back, the cursor is off screen"
+        );
     }
 }

@@ -42,17 +42,20 @@ pub fn terminal_pane(
             ui.set_min_size(ui.available_size());
             header(ui, session, spawner.is_some());
             ui.add_space(SP_1);
-            let focused = grid(ui, session, spawner.is_some());
+            let owned_input = session.is_focused();
+            let grid_rect = grid(ui, session, spawner.is_some());
             if let Some(spawner) = &spawner {
                 let ctx = ui.ctx().clone();
                 session.ensure_started(spawner.as_ref(), Arc::new(move || ctx.request_repaint()));
             }
-            if focused {
+            // Events the hook took while the terminal owned input are the terminal's even when
+            // a press outside the grid ended that ownership in this same frame.
+            if grid_rect.is_some() || owned_input {
                 handle_keys(ui, session, pending);
             }
-            focused
+            grid_rect
         });
-    let focused = frame.inner;
+    let focused = frame.inner.is_some();
     if focused {
         // The frame has already drawn its neutral border; the accent goes over it.
         ui.painter().rect_stroke(
@@ -63,6 +66,9 @@ pub fn terminal_pane(
         );
     }
     sessions.focused |= focused;
+    if frame.inner.is_some() {
+        sessions.grid_rect = frame.inner;
+    }
 }
 
 fn display_path(path: &Path) -> String {
@@ -112,8 +118,8 @@ fn header(ui: &mut egui::Ui, session: &mut TerminalSession, has_spawner: bool) {
     });
 }
 
-/// グリッドを確保・描画し、フォーカスとマウス操作を処理します。フォーカス中なら `true`。
-fn grid(ui: &mut egui::Ui, session: &mut TerminalSession, has_spawner: bool) -> bool {
+/// グリッドを確保・描画し、フォーカスとマウス操作を処理します。フォーカス中ならグリッドの領域を返します。
+fn grid(ui: &mut egui::Ui, session: &mut TerminalSession, has_spawner: bool) -> Option<Rect> {
     let font = TextStyle::Monospace.resolve(ui.style());
     let cell = ui.fonts_mut(|fonts| CellMetrics {
         width: fonts.glyph_width(&font, 'M'),
@@ -200,7 +206,7 @@ fn grid(ui: &mut egui::Ui, session: &mut TerminalSession, has_spawner: bool) -> 
     if focused {
         publish_ime_area(ui, rect, cell, session);
     }
-    focused
+    focused.then_some(rect)
 }
 
 /// このフレームで、`rect` の外でマウスボタンが押されたか。
@@ -392,11 +398,16 @@ mod tests {
         assert!(!idle.accent_border);
         assert_eq!(idle.repaint_delay, Duration::MAX);
 
-        let focused = pane.click_grid();
+        let mut focused = pane.click_grid();
+        // Gaining focus owes egui a few immediate frames; the blink wake-up is what remains at rest.
+        for _ in 0..4 {
+            focused = pane.frame(Vec::new());
+        }
         assert!(pane.sessions.focused);
         assert!(focused.accent_border);
         assert!(
-            focused.repaint_delay <= Duration::from_secs(1),
+            (Duration::ZERO < focused.repaint_delay
+                && focused.repaint_delay <= Duration::from_secs(1)),
             "blink needs a timed wake-up, got {:?}",
             focused.repaint_delay
         );

@@ -429,6 +429,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     fn drain_pty(&mut self, ctx: &egui::Context) {
         // The terminal pane re-asserts focus while it renders this frame.
         self.terminals.focused = false;
+        self.terminals.grid_rect = None;
         let projects = &self.sidebar.projects;
         self.terminals
             .retain_projects(|id| projects.iter().any(|project| &project.id == id));
