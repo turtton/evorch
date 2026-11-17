@@ -27,6 +27,9 @@ fn capture_role_routing_states() {
         std::fs::create_dir_all(&output).expect("evidence directory");
         for state in ["warning-preview", "prefilled-routing"] {
             if state == "prefilled-routing" {
+                // The shared modal's chrome leaves less room, so scroll the action clear first.
+                harness.scroll_label_into_view("Create route");
+                harness.run();
                 harness.click_label("Create route");
                 harness.run();
             }
