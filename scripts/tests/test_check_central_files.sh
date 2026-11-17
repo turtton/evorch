@@ -75,6 +75,9 @@ expect fail "pr10 does not own the management module" "$central" --scope pr10 --
 files crates/evorch-core/tests/core_pr_cache.rs
 expect ok "pr15 owns its cache target" "$central" --scope pr15 --files-from "$work/files"
 expect fail "pr14 does not own the pr15 cache target" "$central" --scope pr14 --files-from "$work/files"
+files crates/evorch-core/tests/core_eval_cache.rs
+expect ok "pr17c owns its cache target" "$central" --scope pr17c --files-from "$work/files"
+expect fail "pr15 does not own the pr17c cache target" "$central" --scope pr15 --files-from "$work/files"
 
 # Every binary the cache gate names is a test target that exists: nextest rejects
 # a binary name that matches nothing, and a registered placeholder is a file.
@@ -97,6 +100,8 @@ missing_targets() {
 no_missing_targets() { [[ -z "$(missing_targets "$1")" ]]; }
 expect ok "the cache gate names core_pr_cache" bash -c "grep -q 'binary(=core_pr_cache)' scripts/contract-test-filters.sh"
 expect ok "core_pr_cache has a test target" test -f crates/evorch-core/tests/core_pr_cache.rs
+expect ok "the cache gate names core_eval_cache" bash -c "grep -q 'binary(=core_eval_cache)' scripts/contract-test-filters.sh"
+expect ok "core_eval_cache has a test target" test -f crates/evorch-core/tests/core_eval_cache.rs
 expect ok "every binary of the cache gate has a test target" no_missing_targets scripts/contract-test-filters.sh
 printf "CACHE_CONTRACT_FILTER='package(=x) & binary(=no_such_cache_target)'\n" > "$work/bad-filter.sh"
 expect fail "a binary without a target is detected" no_missing_targets "$work/bad-filter.sh"

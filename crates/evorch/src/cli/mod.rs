@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 pub mod backfill;
 pub mod benchmark;
+pub mod core_client;
 pub mod eval;
 pub mod inspect;
 pub mod maintenance;

@@ -2453,6 +2453,8 @@ dependencies = [
  "async-trait",
  "catalog",
  "config",
+ "core-instance",
+ "core-launcher",
  "eval",
  "event-bus",
  "js-engine",
@@ -2471,6 +2473,9 @@ dependencies = [
  "tokio",
  "tools",
  "tracing-subscriber",
+ "uuid",
+ "workbench-client",
+ "workbench-protocol",
 ]
 
 [[package]]
