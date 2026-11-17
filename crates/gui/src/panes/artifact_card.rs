@@ -238,7 +238,7 @@ fn artifact_item(ui: &mut Ui, artifact: &PresentedArtifact) {
         return;
     }
     if artifact.is_image() {
-        if let Some(preview) = image_preview(ui, path, &artifact.title) {
+        if let Some(preview) = image_preview(ui, path, &artifact.title, egui::Sense::click()) {
             let preview = preview
                 .on_hover_cursor(egui::CursorIcon::ZoomIn)
                 .on_hover_text(format!(
@@ -284,7 +284,12 @@ fn preview_note(ui: &mut Ui, text: impl Into<String>) {
 
 /// egui normally puts load errors in a hover tooltip on a tiny image icon.
 /// Keep the actual bounded loader's reason visible in the conversation instead.
-fn image_preview(ui: &mut Ui, path: &Path, title: &str) -> Option<egui::Response> {
+pub(crate) fn image_preview(
+    ui: &mut Ui,
+    path: &Path,
+    title: &str,
+    sense: egui::Sense,
+) -> Option<egui::Response> {
     let Some(uri) = crate::panes::file_viewer::image_uri(path) else {
         preview_note(ui, "Preview unavailable: invalid image path");
         return None;
@@ -298,7 +303,7 @@ fn image_preview(ui: &mut Ui, path: &Path, title: &str) -> Option<egui::Response
         .max_width(ui.available_width().min(PREVIEW_MAX_WIDTH))
         .max_height(PREVIEW_MAX_HEIGHT)
         .maintain_aspect_ratio(true)
-        .sense(egui::Sense::click());
+        .sense(sense);
     match image.load_for_size(ui.ctx(), ui.available_size()) {
         Ok(egui::load::TexturePoll::Ready { .. }) => {
             ui.add_space(SP_1);
@@ -323,7 +328,8 @@ fn html_snapshot(
 ) {
     match snapshots.state(&artifact.sha256, path) {
         SnapshotState::Ready(png) => {
-            let Some(preview) = image_preview(ui, &png, &artifact.title) else {
+            let Some(preview) = image_preview(ui, &png, &artifact.title, egui::Sense::click())
+            else {
                 return;
             };
             let preview = preview

@@ -13,6 +13,7 @@ mod ledger_tool_calls;
 mod message_roles;
 mod meta_tool_cards;
 mod poll_folding;
+mod read_image;
 mod reasoning_stream_wiring;
 mod run_js_cards;
 mod runless_delta_drop;

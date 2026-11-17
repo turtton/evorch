@@ -19,6 +19,7 @@ use crate::theme::widgets::{ghost_icon_button, icon_button, soft_frame};
 mod header;
 mod live_detail;
 mod orchestration;
+mod read_image;
 mod run_js;
 mod sticky;
 
@@ -342,6 +343,14 @@ pub fn tool_card_group(
         for review in reviews {
             review_line(ui, review);
         }
+        read_image::show(
+            ui,
+            tool_name,
+            status,
+            *is_error,
+            detail.as_ref(),
+            context.repo_root,
+        );
         if let Some(live) = &live {
             live_detail::show(ui, id, live, expanded);
         }
