@@ -34,8 +34,9 @@ use event_bus::{EventKind, PullRequestChangedField, PullRequestEvent, RecvError}
 use runtime::AgentRuntime;
 use runtime::ownership::OwnerPermit;
 use runtime::pull_requests::{PullRequestError, PullRequestService};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use storage::pull_request_auto_fix::{PR_AUTO_FIX_LIMIT, PrAutoFixRejection, PrLimitClaim};
+use storage::pull_request_auto_fix::{PR_AUTO_FIX_LIMIT, PrAutoFixRejection};
 use storage::pull_requests as stored;
 use workbench_protocol::{
     errors::{ErrorCode, RetryAdvice, WorkbenchError},
@@ -72,10 +73,53 @@ pub struct PullRequestsArea {
 
 struct Inner {
     runtime: AgentRuntime,
-    storage: storage::StorageHandle,
     tasks: super::AreaTasks,
     source: ProjectionSource,
     operations: Mutex<Operations<PullRequestOperationView>>,
+    /// Taken after `operations` when both are held.
+    seen: Mutex<Seen>,
+}
+
+/// How many accepted requests the area still recognises after their operation
+/// left the table (which keeps [`MAX_OPERATIONS`] for reading outcomes).
+const MAX_SEEN: usize = 8192;
+
+/// The id and request digest of every accepted command, kept far longer than
+/// the operation itself. A request sent again after its operation was evicted
+/// is answered as an unknown outcome and never runs a second time, and the
+/// same id with another request is still a conflict. The bound is only on how
+/// many later commands may be accepted before a resend is no longer recognised.
+#[derive(Default)]
+struct Seen {
+    digests: HashMap<OperationId, [u8; 32]>,
+    order: VecDeque<OperationId>,
+}
+
+impl Seen {
+    fn lookup(&self, id: &OperationId, digest: &[u8; 32]) -> Lookup<()> {
+        match self.digests.get(id) {
+            None => Lookup::New,
+            Some(known) if known == digest => Lookup::Same(()),
+            Some(_) => Lookup::Conflict,
+        }
+    }
+
+    fn remember(&mut self, id: &OperationId, digest: [u8; 32]) {
+        if self.digests.insert(id.clone(), digest).is_none() {
+            self.order.push_back(id.clone());
+        }
+        while self.order.len() > MAX_SEEN {
+            if let Some(oldest) = self.order.pop_front() {
+                self.digests.remove(&oldest);
+            }
+        }
+    }
+
+    fn forget(&mut self, id: &OperationId) {
+        if self.digests.remove(id).is_some() {
+            self.order.retain(|known| known != id);
+        }
+    }
 }
 
 /// How an accepted command stands.
@@ -190,10 +234,10 @@ impl PullRequestsArea {
         let source = handles.source("pull_requests")?;
         let inner = Arc::new(Inner {
             runtime: handles.runtime.clone(),
-            storage: handles.storage.clone(),
             tasks: handles.tasks.clone(),
             source,
             operations: Mutex::new(Operations::new(MAX_OPERATIONS)),
+            seen: Mutex::default(),
         });
         // Subscribed before the task starts, so a change during startup is announced.
         let mut events = handles.bus.subscribe();
@@ -249,21 +293,14 @@ impl PullRequestsArea {
         let inner = self.inner()?;
         let id = command.operation_id().clone();
         let digest = digest_of(&[serde_json::to_vec(&command).unwrap_or_default().as_slice()]);
-        if let Some(known) = inner.known(&id, &digest)? {
+        if let Some(known) = inner.known(&command, &id, &digest)? {
             return Ok(known);
         }
         let permit = permit()?;
         let view = {
             let mut operations = lock(&inner.operations);
-            match operations.lookup(&id, &digest) {
-                Lookup::Same(view) => {
-                    return Ok(Submitted {
-                        view,
-                        already_applied: true,
-                    });
-                }
-                Lookup::Conflict => return Err(conflict()),
-                Lookup::New => {}
+            if let Some(known) = inner.answer(&mut operations, &command, &id, &digest)? {
+                return Ok(known);
             }
             let revision = operations.next_revision();
             let view = PullRequestOperationView {
@@ -282,6 +319,7 @@ impl PullRequestsArea {
                 outcome_unknown: false,
             };
             operations.insert(view.clone(), digest)?;
+            lock(&inner.seen).remember(&id, digest);
             view
         };
         let task = inner.clone();
@@ -294,6 +332,7 @@ impl PullRequestsArea {
                 });
         if let Err(refused) = spawned {
             lock(&inner.operations).forget(&id);
+            lock(&inner.seen).forget(&id);
             return Err(error(
                 ErrorCode::Draining,
                 &refused.to_string(),
@@ -422,16 +461,64 @@ fn storage_error(_: storage::StorageError) -> WorkbenchError {
 impl Inner {
     fn known(
         &self,
+        command: &PullRequestsCommand,
         id: &OperationId,
         digest: &[u8; 32],
     ) -> Result<Option<Submitted>, WorkbenchError> {
-        match lock(&self.operations).lookup(id, digest) {
+        let mut operations = lock(&self.operations);
+        self.answer(&mut operations, command, id, digest)
+    }
+
+    /// What the area already says of a request: the retained operation, the
+    /// unknown outcome of one that was evicted, a conflict, or nothing.
+    fn answer(
+        &self,
+        operations: &mut Operations<PullRequestOperationView>,
+        command: &PullRequestsCommand,
+        id: &OperationId,
+        digest: &[u8; 32],
+    ) -> Result<Option<Submitted>, WorkbenchError> {
+        match operations.lookup(id, digest) {
+            Lookup::Same(view) => {
+                return Ok(Some(Submitted {
+                    view,
+                    already_applied: true,
+                }));
+            }
+            Lookup::Conflict => return Err(conflict()),
+            Lookup::New => {}
+        }
+        match lock(&self.seen).lookup(id, digest) {
             Lookup::New => Ok(None),
-            Lookup::Same(view) => Ok(Some(Submitted {
-                view,
-                already_applied: true,
-            })),
             Lookup::Conflict => Err(conflict()),
+            Lookup::Same(()) => {
+                // Accepted before and its record is gone: whether it took
+                // effect is unknown, and it must not run again.
+                let revision = operations.next_revision();
+                Ok(Some(Submitted {
+                    view: PullRequestOperationView {
+                        operation: OperationView {
+                            operation_id: id.clone(),
+                            state: OperationState::Failed {
+                                code: ErrorCode::Internal,
+                            },
+                            revision,
+                            result: None,
+                        },
+                        kind: command.kind(),
+                        thread: command.thread().clone(),
+                        lifecycle_revision: None,
+                        policy_revision: None,
+                        notice_id: None,
+                        message: Some(
+                            "this request was accepted earlier and its outcome is no longer kept; read the thread's pull request again"
+                                .into(),
+                        ),
+                        outcome_unknown: true,
+                    },
+                    already_applied: true,
+                }))
+            }
         }
     }
 
@@ -599,53 +686,26 @@ impl Inner {
         }
     }
 
-    /// Claim and announce the stop of `thread`'s pull request at the limit,
-    /// once for the budget epoch whoever asks.
+    /// Announce the stop of `thread`'s pull request at the limit when the
+    /// service hands this caller its one notification.
     fn announce_limit(&self, thread: &str) {
-        let Ok(Some(Some(link))) = self.runtime.with_storage_reader(|db| {
-            db.pull_request_thread_state(thread)
-                .map(|state| state.active_link)
-        }) else {
+        let Some(service) = self.runtime.pull_requests() else {
             return;
         };
-        let Ok(Some(state)) = self
-            .runtime
-            .with_storage_reader(|db| db.pr_auto_fix_state(&link.key))
-        else {
-            return;
-        };
-        let stopped = state.stop_reason.as_deref() == Some("limit_reached")
-            && state.limit_reached_epoch == Some(state.budget_epoch)
-            && state.destination_thread_id.as_deref() == Some(thread)
-            && state.link_revision == Some(link.link_revision);
-        if !stopped {
-            return;
-        }
-        let claim = PrLimitClaim {
-            key: link.key.clone(),
-            thread_id: thread.to_owned(),
-            link_revision: link.link_revision,
-            budget_epoch: state.budget_epoch,
-        };
-        let now_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |elapsed| {
-                i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)
-            });
-        match self.storage.claim_pr_limit_notification(claim, now_ns) {
-            Ok(true) => {
+        match service.claim_limit_notification(thread) {
+            Ok(Some(notice)) => {
                 let Ok(thread) = ThreadId::new(thread) else {
                     return;
                 };
                 self.publish(PullRequestsEvent::AutoFixLimitReached {
                     thread,
-                    pull_request: reference(&link.key),
-                    link_revision: Revision(link.link_revision),
-                    budget_epoch: state.budget_epoch,
+                    pull_request: reference(&notice.key),
+                    link_revision: Revision(notice.link_revision),
+                    budget_epoch: notice.budget_epoch,
                     limit: AUTO_FIX_LIMIT,
                 });
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(error) => {
                 tracing::warn!(%error, "the limit notification could not be claimed");
             }

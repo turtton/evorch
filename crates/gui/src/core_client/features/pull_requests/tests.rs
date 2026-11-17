@@ -267,3 +267,67 @@ fn linking_sends_the_locator_with_the_revision_read() {
     assert_eq!(link.locator, "o/r#7");
     assert_eq!(link.expected_revision, Revision(3));
 }
+
+fn linked_with_destination(destination: &str) -> ThreadPullRequest {
+    let mut view = view(true, true);
+    view.auto_fix.as_mut().unwrap().destination = Some(ThreadId::new(destination).unwrap());
+    view
+}
+
+#[test]
+fn a_reset_that_leaves_the_destination_alone_confirms_nothing() {
+    let mut view = view(true, true);
+    view.auto_fix.as_mut().unwrap().destination = Some(ThreadId::new(THREAD).unwrap());
+    let mut screen = loaded(view);
+    screen.get_by_label("予算をリセット").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    let PullRequestsCommand::ResetAutoFixBudget(reset) = pr_command(&sent[0]) else {
+        panic!("a reset was expected");
+    };
+    assert_eq!(reset.confirmed_previous, None);
+}
+
+#[test]
+fn a_reset_never_moves_the_destination_without_the_person_confirming_it() {
+    let mut screen = loaded(linked_with_destination("t-other"));
+    screen.get_by_label("予算をリセット").click();
+    assert!(
+        asked(&mut screen).is_empty(),
+        "reading the destination is not confirming it"
+    );
+    screen.get_by_label_contains("t-other からこのスレッド");
+    screen.get_by_label("やめる").click();
+    screen.run_steps(2);
+    assert!(asked(&mut screen).is_empty());
+
+    screen.get_by_label("予算をリセット").click();
+    screen.run_steps(2);
+    screen.get_by_label("移す").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    let PullRequestsCommand::ResetAutoFixBudget(reset) = pr_command(&sent[0]) else {
+        panic!("a reset was expected");
+    };
+    assert_eq!(
+        reset.confirmed_previous.as_ref().map(ThreadId::as_str),
+        Some("t-other")
+    );
+}
+
+#[test]
+fn taking_over_the_notices_names_the_thread_it_takes_them_from() {
+    let mut screen = loaded(linked_with_destination("t-other"));
+    screen.get_by_label("通知先をこのスレッドにする").click();
+    assert!(asked(&mut screen).is_empty());
+    screen.get_by_label("移す").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    let PullRequestsCommand::ChangeAutoFixDestination(change) = pr_command(&sent[0]) else {
+        panic!("a destination change was expected");
+    };
+    assert_eq!(
+        change.confirmed_previous.as_ref().map(ThreadId::as_str),
+        Some("t-other")
+    );
+}

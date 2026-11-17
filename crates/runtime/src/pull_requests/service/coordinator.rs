@@ -355,6 +355,54 @@ impl PullRequestService {
             .await;
         Ok(notice)
     }
+
+    /// Takes the one notification of `thread`'s pull request having stopped at its limit.
+    ///
+    /// The decision and the claim are the service's, so any number of hosts and clients that
+    /// ask for the same stop get it once: the stop must still stand for this budget epoch, the
+    /// thread must still be the destination and its link the one the stop was told for, and
+    /// the claim is a compare-and-set in storage. `None` means there is nothing to tell (no
+    /// stop, another destination, or the stop was already claimed).
+    ///
+    /// Blocks on storage: call it from a blocking context.
+    ///
+    /// # Errors
+    /// Storage failures.
+    pub fn claim_limit_notification(&self, thread: &str) -> Result<Option<LimitNotice>> {
+        let storage = &self.inner.storage;
+        let Some(link) = storage.pull_request_thread_state(thread)?.active_link else {
+            return Ok(None);
+        };
+        let state = storage.pr_auto_fix_state(link.key.clone())?;
+        let stopped = state.stop_reason.as_deref() == Some("limit_reached")
+            && state.limit_reached_epoch == Some(state.budget_epoch)
+            && state.destination_thread_id.as_deref() == Some(thread)
+            && state.link_revision == Some(link.link_revision);
+        if !stopped {
+            return Ok(None);
+        }
+        let notice = LimitNotice {
+            key: link.key,
+            link_revision: link.link_revision,
+            budget_epoch: state.budget_epoch,
+        };
+        let claim = PrLimitClaim {
+            key: notice.key.clone(),
+            thread_id: thread.to_owned(),
+            link_revision: notice.link_revision,
+            budget_epoch: notice.budget_epoch,
+        };
+        let claimed = storage.claim_pr_limit_notification(claim, self.inner.clock.now_ns())?;
+        Ok(claimed.then_some(notice))
+    }
+}
+
+/// A limit stop whose one notification this caller took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitNotice {
+    pub key: storage::pull_requests::PullRequestKey,
+    pub link_revision: u64,
+    pub budget_epoch: u64,
 }
 
 impl Inner {

@@ -34,7 +34,7 @@ use workbench_protocol::ids::{
 use workbench_protocol::namespaces::pull_requests::{
     ChangeAutoFixDestination, LinkPullRequest, PullRequestOperationView, PullRequestsCommand,
     PullRequestsEvent, PullRequestsQuery, PullRequestsReply, PullRequestsResult,
-    RefreshPullRequest, ResetAutoFixBudget, SetAutoFix, ThreadPullRequest,
+    RefreshPullRequest, RequestManualNotice, ResetAutoFixBudget, SetAutoFix, ThreadPullRequest,
 };
 use workbench_protocol::operation::OperationState;
 use workbench_protocol::queries::{Query, QueryReply};
@@ -228,6 +228,17 @@ fn marker_count(request: &serde_json::Value) -> usize {
 #[tokio::test(flavor = "multi_thread")]
 async fn pull_request_commands_and_one_auto_fix_notice_keep_the_sent_prefix_on_the_production_wire()
 {
+    scenario(false).await;
+}
+
+/// The same conversation with the global automatic switch off: the only notice
+/// is the manual one the person asks for, sent twice under one operation id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manual_notice_asked_for_twice_keeps_the_sent_prefix_on_the_production_wire() {
+    scenario(true).await;
+}
+
+async fn scenario(manual: bool) {
     let project = cache::Project::new();
     let provider = cache::Provider::new(false).await;
     let config = cache::configuration(&provider);
@@ -238,8 +249,9 @@ async fn pull_request_commands_and_one_auto_fix_notice_keep_the_sent_prefix_on_t
     std::fs::write(
         user.join("config.toml"),
         format!(
-            "version = {}\n[pull_requests]\nenabled = true\nauto_fix_enabled = true\n",
-            config::CURRENT_VERSION
+            "version = {}\n[pull_requests]\nenabled = true\nauto_fix_enabled = {}\n",
+            config::CURRENT_VERSION,
+            !manual
         ),
     )
     .unwrap();
@@ -370,34 +382,49 @@ async fn pull_request_commands_and_one_auto_fix_notice_keep_the_sent_prefix_on_t
     assert_eq!(provider.requests().len(), 1, "linking sends nothing");
 
     // Auto fix is switched on from the other client while the fetch is held.
-    let view = read(&core);
-    let state = view.link.as_ref().expect("linked");
-    let on = PullRequestsCommand::SetAutoFix(SetAutoFix {
-        operation_id: op("auto-on"),
-        thread: thread(),
-        link_revision: state.link_revision,
-        policy_revision: view
-            .auto_fix
-            .as_ref()
-            .map_or(Revision(0), |auto| auto.policy_revision),
-        enabled: true,
-    });
-    assert_eq!(
-        settle(&core, &mut events, on, web()).await.operation.state,
-        OperationState::Ready
-    );
-    assert_eq!(
-        provider.requests().len(),
-        1,
-        "a policy change sends nothing"
-    );
+    if !manual {
+        let view = read(&core);
+        let state = view.link.as_ref().expect("linked");
+        let on = PullRequestsCommand::SetAutoFix(SetAutoFix {
+            operation_id: op("auto-on"),
+            thread: thread(),
+            link_revision: state.link_revision,
+            policy_revision: view
+                .auto_fix
+                .as_ref()
+                .map_or(Revision(0), |auto| auto.policy_revision),
+            enabled: true,
+        });
+        assert_eq!(
+            settle(&core, &mut events, on, web()).await.operation.state,
+            OperationState::Ready
+        );
+        assert_eq!(
+            provider.requests().len(),
+            1,
+            "a policy change sends nothing"
+        );
+    }
 
-    // The failing head arrives: the core, and only the core, sends one notice.
-    provider.enqueue(vec![cache::answer()]);
-    gate.release_ok(failing(&head));
-    cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
-    let spent = read(&core).auto_fix.expect("auto fix state").used;
-    assert_eq!(spent, 1, "one notice spent one budget slot");
+    if manual {
+        // The failing head is stored; with the switch off nothing is sent.
+        gate.release_ok(failing(&head));
+        loop {
+            let facts = read(&core).snapshot.and_then(|snapshot| snapshot.facts);
+            if facts.is_some() {
+                break;
+            }
+            events.recv().await.expect("the subscription is open");
+        }
+        assert_eq!(provider.requests().len(), 1, "a stored head sends nothing");
+    } else {
+        // The failing head arrives: the core, and only the core, sends one notice.
+        provider.enqueue(vec![cache::answer()]);
+        gate.release_ok(failing(&head));
+        cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
+        let spent = read(&core).auto_fix.expect("auto fix state").used;
+        assert_eq!(spent, 1, "one notice spent one budget slot");
+    }
 
     // Refreshes (one of them sent twice under its id), a reset and a move of the
     // destination do not reach the model, and they do not make a second notice.
@@ -443,36 +470,63 @@ async fn pull_request_commands_and_one_auto_fix_notice_keep_the_sent_prefix_on_t
             .as_ref()
             .map_or(Revision(0), |auto| auto.policy_revision)
     };
-    let reset = PullRequestsCommand::ResetAutoFixBudget(ResetAutoFixBudget {
-        operation_id: op("reset"),
-        thread: thread(),
-        link_revision,
-        policy_revision: policy(&view),
-        confirmed_previous: None,
-    });
-    assert_eq!(
-        settle(&core, &mut events, reset, local_desktop())
-            .await
-            .operation
-            .state,
-        OperationState::Ready
-    );
-    let view = read(&core);
-    let destination = PullRequestsCommand::ChangeAutoFixDestination(ChangeAutoFixDestination {
-        operation_id: op("destination"),
-        thread: thread(),
-        link_revision,
-        policy_revision: policy(&view),
-        confirmed_previous: Some(thread()),
-    });
-    assert_eq!(
-        settle(&core, &mut events, destination, web())
-            .await
-            .operation
-            .state,
-        OperationState::Ready
-    );
-    assert_eq!(provider.requests().len(), 2, "commands send nothing");
+    if !manual {
+        let reset = PullRequestsCommand::ResetAutoFixBudget(ResetAutoFixBudget {
+            operation_id: op("reset"),
+            thread: thread(),
+            link_revision,
+            policy_revision: policy(&view),
+            confirmed_previous: None,
+        });
+        assert_eq!(
+            settle(&core, &mut events, reset, local_desktop())
+                .await
+                .operation
+                .state,
+            OperationState::Ready
+        );
+        let view = read(&core);
+        let destination = PullRequestsCommand::ChangeAutoFixDestination(ChangeAutoFixDestination {
+            operation_id: op("destination"),
+            thread: thread(),
+            link_revision,
+            policy_revision: policy(&view),
+            confirmed_previous: Some(thread()),
+        });
+        assert_eq!(
+            settle(&core, &mut events, destination, web())
+                .await
+                .operation
+                .state,
+            OperationState::Ready
+        );
+        assert_eq!(provider.requests().len(), 2, "commands send nothing");
+    } else {
+        // A manual notice asked for twice under one id (from two clients) is one
+        // request appended after the previous answer, never two.
+        provider.enqueue(vec![cache::answer()]);
+        let notice = PullRequestsCommand::RequestManualNotice(RequestManualNotice {
+            operation_id: op("manual"),
+            thread: thread(),
+            link_revision,
+            expected_head: head.clone(),
+        });
+        let requested = settle(&core, &mut events, notice.clone(), local_desktop()).await;
+        assert_eq!(requested.operation.state, OperationState::Ready);
+        cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
+        let resent = core
+            .host
+            .lock()
+            .unwrap()
+            .handle_command(Command::PullRequests(notice), web())
+            .unwrap();
+        assert_eq!(resent.disposition, CommandDisposition::AlreadyApplied);
+        assert_eq!(
+            provider.requests().len(),
+            2,
+            "one manual notice made exactly one more request"
+        );
+    }
 
     // Turn three is an ordinary one.
     provider.enqueue(vec![cache::answer()]);

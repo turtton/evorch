@@ -584,3 +584,125 @@ async fn the_limit_stop_is_announced_once_for_every_client_together() {
     );
     core.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_sent_again_after_its_operation_left_the_table_does_not_run_again() {
+    let f = Fixture::new();
+    f.source.push_ok(&key(7), fetched(7));
+    f.source.repeat_last();
+    let mut core = f.core().await;
+    let _permit = core.owner.start(THREAD).unwrap();
+    let mut events = subscribe(&core);
+    let revision = read(&core).lifecycle_revision;
+    send(
+        &core,
+        link("link-1", "owner/repo#7", revision),
+        local_desktop(),
+    )
+    .unwrap();
+    settled(&mut events, &["link-1"]).await;
+    // More finished operations than the table keeps push the first ones out.
+    let ids: Vec<String> = (0..workbench_protocol::namespaces::pull_requests::MAX_OPERATIONS + 2)
+        .map(|n| format!("refresh-{n}"))
+        .collect();
+    for id in &ids {
+        send(&core, refresh(id), local_desktop()).unwrap();
+        settled(&mut events, &[id]).await;
+    }
+    // Sent again, the evicted requests are recognised: neither runs a second
+    // time, and neither is reported as done.
+    for (id, command) in [
+        ("link-1", link("link-1", "owner/repo#7", revision)),
+        ("refresh-0", refresh("refresh-0")),
+    ] {
+        let again = send(&core, command, web()).unwrap();
+        assert_eq!(
+            again.disposition,
+            CommandDisposition::AlreadyApplied,
+            "{id}"
+        );
+        let Some(CommandResult::PullRequests(PullRequestsResult::Operation(view))) =
+            again.result.as_deref()
+        else {
+            panic!("{id}: the repeated command names its operation");
+        };
+        assert!(view.outcome_unknown, "{id}");
+        assert!(
+            matches!(view.operation.state, OperationState::Failed { .. }),
+            "{id}: {view:?}"
+        );
+    }
+    // The id still belongs to the request it was first used for.
+    let conflict = send(&core, link("link-1", "owner/repo#8", revision), web()).unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::Conflict);
+    assert_eq!(
+        read(&core).link.as_ref().map(|l| l.link_revision),
+        Some(Revision(1)),
+        "the link was applied once"
+    );
+    core.shutdown().await.unwrap();
+}
+
+/// A planned restart seals the host's admission: a command already accepted keeps
+/// the restart permit until its outcome is settled (even before its task was
+/// polled), new work is refused, and a fetch that is still held when the core
+/// stops is never adopted afterwards.
+#[tokio::test(flavor = "current_thread")]
+async fn a_planned_restart_waits_for_accepted_commands_and_never_adopts_a_cut_off_fetch() {
+    use workbench_host::bootstrap::restart::HostRestartPhase;
+
+    let f = Fixture::new();
+    let gate = f.source.push_gate(&key(7));
+    let mut core = f.core().await;
+    let _permit = core.owner.start(THREAD).unwrap();
+    let mut events = subscribe(&core);
+    let restart = core.host.lock().unwrap().service().restart_gate();
+    let revision = read(&core).lifecycle_revision;
+
+    // Accepted, answered pending, but not yet polled: nothing has run.
+    send(
+        &core,
+        link("link-1", "owner/repo#7", revision),
+        local_desktop(),
+    )
+    .unwrap();
+    assert!(restart.transition(1, HostRestartPhase::Sealing));
+    let refused = send(&core, refresh("refresh-late"), web())
+        .expect_err("new work is refused while the host prepares to restart");
+    assert_eq!(refused.code, ErrorCode::Busy);
+    let mut drained = Box::pin(restart.drained());
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(drained.as_mut().poll(cx).is_pending()))
+            .await,
+        "the accepted command still holds the restart permit"
+    );
+
+    // Its outcome settles, and only then does the host drain.
+    let ended = settled(&mut events, &["link-1"]).await;
+    assert_eq!(ended[0].operation.state, OperationState::Ready);
+    drained.await;
+    assert!(
+        read(&core).link.is_some(),
+        "the accepted command was applied"
+    );
+
+    // The fetch the link started is still held when the core stops.
+    gate.arrived().await;
+    core.shutdown().await.unwrap();
+    gate.release_ok(fetched(7));
+    let snapshot = f.storage.handle().pull_request_snapshot(&key(7)).unwrap();
+    assert!(
+        snapshot.is_none_or(|snapshot| snapshot.facts.is_none()),
+        "a result that arrives after the seal is not adopted"
+    );
+    let mut again = f.core().await;
+    assert!(read(&again).link.is_some(), "the link is durable");
+    assert!(
+        read(&again)
+            .snapshot
+            .as_ref()
+            .is_none_or(|s| s.facts.is_none()),
+        "no facts came from the cut-off fetch"
+    );
+    again.shutdown().await.unwrap();
+}

@@ -63,6 +63,23 @@ pub struct PullRequestsFeature {
     notices: Vec<String>,
     stale: bool,
     in_flight: bool,
+    /// A move of the notice destination the person has not confirmed yet.
+    destination_move: Option<DestinationMove>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestinationChange {
+    ResetBudget,
+    ChangeDestination,
+}
+
+/// Taking the notices over from another thread moves them away from it, so
+/// the person confirms the exact thread they leave before the command is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DestinationMove {
+    thread: ThreadId,
+    change: DestinationChange,
+    previous: ThreadId,
 }
 
 const MAX_NOTICES: usize = 16;
@@ -493,6 +510,12 @@ impl Feature for PullRequestsFeature {
                         .destination
                         .clone()
                         .filter(|destination| *destination != thread);
+                    // A confirmation is only good for the destination it named.
+                    if self.destination_move.as_ref().is_some_and(|pending| {
+                        pending.thread != thread || Some(&pending.previous) != previous.as_ref()
+                    }) {
+                        self.destination_move = None;
+                    }
                     ui.horizontal_wrapped(|ui| {
                         let toggle = if auto_fix.enabled {
                             "無効にする"
@@ -515,15 +538,25 @@ impl Feature for PullRequestsFeature {
                             .add_enabled(can_write, egui::Button::new("予算をリセット"))
                             .clicked()
                         {
-                            commands.push(PullRequestsCommand::ResetAutoFixBudget(
-                                ResetAutoFixBudget {
-                                    operation_id: new_operation(),
-                                    thread: thread.clone(),
-                                    link_revision,
-                                    policy_revision,
-                                    confirmed_previous: previous.clone(),
-                                },
-                            ));
+                            match &previous {
+                                // Nothing is moved: no confirmation to give.
+                                None => commands.push(PullRequestsCommand::ResetAutoFixBudget(
+                                    ResetAutoFixBudget {
+                                        operation_id: new_operation(),
+                                        thread: thread.clone(),
+                                        link_revision,
+                                        policy_revision,
+                                        confirmed_previous: None,
+                                    },
+                                )),
+                                Some(previous) => {
+                                    self.destination_move = Some(DestinationMove {
+                                        thread: thread.clone(),
+                                        change: DestinationChange::ResetBudget,
+                                        previous: previous.clone(),
+                                    });
+                                }
+                            }
                         }
                         if ui
                             .add_enabled(
@@ -532,15 +565,26 @@ impl Feature for PullRequestsFeature {
                             )
                             .clicked()
                         {
-                            commands.push(PullRequestsCommand::ChangeAutoFixDestination(
-                                ChangeAutoFixDestination {
-                                    operation_id: new_operation(),
-                                    thread: thread.clone(),
-                                    link_revision,
-                                    policy_revision,
-                                    confirmed_previous: previous.clone(),
-                                },
-                            ));
+                            match &previous {
+                                None => {
+                                    commands.push(PullRequestsCommand::ChangeAutoFixDestination(
+                                        ChangeAutoFixDestination {
+                                            operation_id: new_operation(),
+                                            thread: thread.clone(),
+                                            link_revision,
+                                            policy_revision,
+                                            confirmed_previous: None,
+                                        },
+                                    ))
+                                }
+                                Some(previous) => {
+                                    self.destination_move = Some(DestinationMove {
+                                        thread: thread.clone(),
+                                        change: DestinationChange::ChangeDestination,
+                                        previous: previous.clone(),
+                                    });
+                                }
+                            }
                         }
                         let head = view
                             .snapshot
@@ -565,6 +609,51 @@ impl Feature for PullRequestsFeature {
                             ));
                         }
                     });
+                    if let Some(pending) = self.destination_move.clone() {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!(
+                                "自動修正の通知先を {} からこのスレッドへ移します。よろしいですか。",
+                                pending.previous
+                            ),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(can_write, egui::Button::new("移す"))
+                                .clicked()
+                            {
+                                let confirmed_previous = Some(pending.previous.clone());
+                                commands.push(match pending.change {
+                                    DestinationChange::ResetBudget => {
+                                        PullRequestsCommand::ResetAutoFixBudget(
+                                            ResetAutoFixBudget {
+                                                operation_id: new_operation(),
+                                                thread: thread.clone(),
+                                                link_revision,
+                                                policy_revision,
+                                                confirmed_previous,
+                                            },
+                                        )
+                                    }
+                                    DestinationChange::ChangeDestination => {
+                                        PullRequestsCommand::ChangeAutoFixDestination(
+                                            ChangeAutoFixDestination {
+                                                operation_id: new_operation(),
+                                                thread: thread.clone(),
+                                                link_revision,
+                                                policy_revision,
+                                                confirmed_previous,
+                                            },
+                                        )
+                                    }
+                                });
+                                self.destination_move = None;
+                            }
+                            if ui.button("やめる").clicked() {
+                                self.destination_move = None;
+                            }
+                        });
+                    }
                 }
             }
             None => {
