@@ -84,7 +84,6 @@ fn setup(hook: Option<MaintenanceHook>) -> World {
             parts.tasks.clone(),
             parts.projection.source("maintenance").unwrap(),
             parts.storage.clone(),
-            parts.database.clone(),
             MaintenanceSeams { hook },
         ),
         ..Default::default()
@@ -332,7 +331,7 @@ fn a_cancel_stops_at_the_next_batch_boundary_and_keeps_the_committed_batches() {
 }
 
 #[test]
-fn a_batch_the_writer_fails_ends_the_operation_partial_without_leaking_the_cause() {
+fn a_batch_the_writer_fails_ends_the_operation_unknown_without_leaking_the_cause() {
     let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
     let mut w = setup(Some(hold.hook()));
     seed_legacy(&w, 10);
@@ -352,7 +351,8 @@ fn a_batch_the_writer_fails_ends_the_operation_partial_without_leaking_the_cause
             code: ErrorCode::StorageUnavailable
         }
     );
-    assert_eq!(done.effect, MaintenanceEffect::Partial);
+    // The first batch was reported; the failed step is claimed neither way.
+    assert_eq!(done.effect, MaintenanceEffect::Unknown);
     assert_eq!((done.batches, converted_of(done)), (1, 3));
     assert!(!done.message.as_deref().unwrap().contains("host.db"));
     assert_eq!(unconverted_at(dir.path().join("host.db")), 7);
@@ -556,7 +556,7 @@ fn a_full_table_refuses_only_unknown_ids_and_keeps_answering_known_ones() {
 }
 
 #[test]
-fn a_step_that_converted_rows_before_it_failed_is_reported_partial_with_those_rows() {
+fn a_step_that_converted_rows_before_it_failed_is_unknown_and_claims_no_count() {
     let mut w = setup(None);
     seed_legacy(&w, 3);
     {
@@ -588,17 +588,46 @@ fn a_step_that_converted_rows_before_it_failed_is_reported_partial_with_those_ro
             code: ErrorCode::StorageUnavailable
         }
     );
-    assert_eq!(done.effect, MaintenanceEffect::Partial);
-    assert_eq!(done.batches, 1);
-    assert_eq!(
-        done.progress,
-        MaintenanceProgress::BackfillEvents {
-            converted: 3,
-            reattributed: 0,
-            remaining_unconverted: Some(0),
-            remaining_unattributed: Some(2),
-        }
+    // The conversion did commit, but the writer did not say so: the operation
+    // claims neither a count nor "nothing happened", and tells to read again.
+    assert_eq!(done.effect, MaintenanceEffect::Unknown);
+    assert_eq!((done.batches, converted_of(done)), (0, 0));
+    assert!(progress_views(&seen).is_empty());
+    assert!(
+        done.message
+            .as_deref()
+            .unwrap()
+            .contains("read the state again")
     );
-    assert_eq!(progress_views(&seen).len(), 1);
     assert_eq!(unconverted(&w), 0);
+}
+
+#[test]
+fn automatic_retention_running_beside_a_backfill_does_not_change_what_it_reports() {
+    // Another writer path removes rows while the operation runs (what the
+    // retention does on its own): the counters come from the writer's own
+    // reports, so rows deleted elsewhere are never counted as this operation's.
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
+    let mut w = setup(Some(hold.hook()));
+    seed_legacy(&w, 10);
+    let mut events = subscribe(&w);
+    start(&mut w, web(), "beside", backfill(3, Some(6))).unwrap();
+    w.rt.block_on(hold.reached());
+    {
+        // Three rows nobody converted yet disappear between the two batches.
+        let conn = rusqlite::Connection::open(db_path(&w)).unwrap();
+        conn.execute(
+            "DELETE FROM events WHERE id IN \
+             (SELECT id FROM events WHERE subkind IS NULL ORDER BY id DESC LIMIT 3)",
+            [],
+        )
+        .unwrap();
+    }
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "beside");
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    assert_eq!(done.effect, MaintenanceEffect::Complete);
+    assert_eq!((done.batches, converted_of(done)), (2, 6));
+    assert_eq!(unconverted(&w), 1);
 }

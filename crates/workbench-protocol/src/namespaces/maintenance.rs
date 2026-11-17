@@ -26,9 +26,13 @@
 //!   the running one.
 //! * **Partial results are told apart.** [`MaintenanceView::effect`] says how
 //!   much of the task the committed batches cover: `none`, `partial` (a failed
-//!   or cancelled operation that committed batches before it ended) or
-//!   `complete`. A batch is one writer transaction: it is either fully
-//!   committed or not at all, and the counters count committed batches only.
+//!   or cancelled operation that committed batches before it ended),
+//!   `unknown` or `complete`. The counters count the batches the writer
+//!   reported committed, exactly. A writer step that fails can have committed
+//!   part of its work (the conversion and the attribution are two transactions)
+//!   without saying so: the operation then ends `failed` with `unknown`, the
+//!   counters keep what was reported, and a client reads the state again
+//!   before it treats the work as done or untouched.
 //! * **Cancel.** `cancel_maintenance` stops the operation at its next batch
 //!   boundary. The batch in flight commits first; the operation then ends
 //!   `cancelled(requested)` with what was done. A planned restart or a shutdown
@@ -197,6 +201,10 @@ pub enum MaintenanceEffect {
     Partial,
     /// The operation ended `ready`: it did what it was asked.
     Complete,
+    /// A writer step failed and may have committed part of its work, which
+    /// the writer did not report. The counters hold only the batches that were
+    /// reported; read the state again, and do not take the work as done.
+    Unknown,
 }
 
 /// How a `ready` operation ended.
@@ -284,6 +292,14 @@ impl MaintenanceView {
             return Err(ValidationError::Inconsistent {
                 field: "effect",
                 reason: "a partial effect needs a committed batch",
+            });
+        }
+        if self.effect == MaintenanceEffect::Unknown
+            && !matches!(self.operation.state, OperationState::Failed { .. })
+        {
+            return Err(ValidationError::Inconsistent {
+                field: "effect",
+                reason: "only a failed operation can leave an unknown effect",
             });
         }
         Ok(())

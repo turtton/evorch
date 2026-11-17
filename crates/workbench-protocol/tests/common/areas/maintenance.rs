@@ -87,7 +87,10 @@ pub fn samples() -> AreaSamples {
                 json!({"items": [
                     backfill(json!({"type": "pending"}), 0, "none",
                              json!({"progress": {"type": "backfill_events", "payload": {
-                                 "converted": 0, "reattributed": 0}}}))],
+                                 "converted": 0, "reattributed": 0}}})),
+                    backfill(json!({"type": "failed", "code": "storage_unavailable"}), 3,
+                             "unknown",
+                             json!({"message": "a batch failed and may have committed part of its work; read the state again"}))],
                     "snapshot_revision": "5"}),
             ),
         ],

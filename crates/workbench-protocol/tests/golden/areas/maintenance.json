@@ -66,6 +66,29 @@
               "type": "backfill_events"
             },
             "task": "backfill_events"
+          },
+          {
+            "batches": 3,
+            "effect": "unknown",
+            "message": "a batch failed and may have committed part of its work; read the state again",
+            "operation": {
+              "operation_id": "op-1",
+              "revision": "3",
+              "state": {
+                "code": "storage_unavailable",
+                "type": "failed"
+              }
+            },
+            "progress": {
+              "payload": {
+                "converted": 3000,
+                "reattributed": 0,
+                "remaining_unattributed": 0,
+                "remaining_unconverted": 7000
+              },
+              "type": "backfill_events"
+            },
+            "task": "backfill_events"
           }
         ],
         "snapshot_revision": "5"

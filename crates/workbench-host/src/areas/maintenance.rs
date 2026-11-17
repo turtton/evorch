@@ -29,11 +29,10 @@
 //!   empty and a client reads the progress counters of a new operation.
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use storage::{Database, StorageHandle};
+use storage::StorageHandle;
 use tokio::sync::watch;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::events::UiEvent;
@@ -105,9 +104,6 @@ struct Inner {
     tasks: AreaTasks,
     source: ProjectionSource,
     storage: StorageHandle,
-    /// The event database file, opened read-only to count what a failed step
-    /// left committed (the writer reports nothing for a failed step).
-    database: PathBuf,
     seams: MaintenanceSeams,
 }
 
@@ -149,6 +145,8 @@ enum Ended {
     Failed {
         code: ErrorCode,
         message: &'static str,
+        /// A writer step failed and may have committed work it did not report.
+        unknown: bool,
     },
     Cancelled(CancelReason),
 }
@@ -158,6 +156,20 @@ impl Ended {
         Self::Failed {
             code: ErrorCode::StorageUnavailable,
             message: "the storage is unavailable",
+            unknown: false,
+        }
+    }
+
+    /// The failure of a writer step: it may have committed part of its work
+    /// that it did not report.
+    fn unreported(self) -> Self {
+        match self {
+            Self::Failed { code, .. } => Self::Failed {
+                code,
+                message: "a batch failed and may have committed part of its work; read the state again",
+                unknown: true,
+            },
+            other => other,
         }
     }
 
@@ -165,6 +177,7 @@ impl Ended {
         Self::Failed {
             code: ErrorCode::Internal,
             message: "the maintenance task did not finish",
+            unknown: false,
         }
     }
 }
@@ -197,7 +210,6 @@ impl MaintenanceArea {
             handles.tasks.clone(),
             source,
             handles.storage.clone(),
-            handles.database.clone(),
             MaintenanceSeams::default(),
         ))
     }
@@ -208,7 +220,6 @@ impl MaintenanceArea {
         tasks: AreaTasks,
         source: ProjectionSource,
         storage: StorageHandle,
-        database: PathBuf,
         seams: MaintenanceSeams,
     ) -> Self {
         Self {
@@ -220,7 +231,6 @@ impl MaintenanceArea {
                 tasks,
                 source,
                 storage,
-                database,
                 seams,
             })),
             pager: Pager::default(),
@@ -240,8 +250,10 @@ impl MaintenanceArea {
     ///
     /// # Errors
     /// `Conflict` for an id used by a different request, `Busy` when an
-    /// operation of the task is running, `LimitExceeded` when every retained
-    /// operation is still running, `Draining` once the host stops.
+    /// operation of the task is running, `LimitExceeded` for a new id once the
+    /// table holds `MAX_OPERATIONS` operations (finished ones included: none is
+    /// forgotten, so a resent id never runs twice), `Draining` once the host
+    /// stops.
     pub fn start(
         &self,
         start: &StartMaintenance,
@@ -447,8 +459,6 @@ impl Inner {
     ) -> Ended {
         let mut batches = 0_u32;
         let (mut converted, mut reattributed) = (0_u64, 0_u64);
-        // What is left, as last seen: the base to measure a failed step against.
-        let mut left = self.remaining().await;
         loop {
             if let Some(reason) = Self::interrupted(stop, cancel) {
                 return Ended::Cancelled(reason);
@@ -471,36 +481,12 @@ impl Inner {
             let storage = self.storage.clone();
             let step = match blocking(move || storage.retention_backfill_step(rows)).await {
                 Ok(Ok(step)) => step,
-                Ok(Err(_)) => {
-                    // The writer runs the conversion and the attribution as two
-                    // transactions: the first may have committed before the
-                    // second failed. Count what the file now says is left.
-                    if let (Some(before), Some(after)) = (left, self.remaining().await) {
-                        let done = (
-                            before.0.saturating_sub(after.0),
-                            before.1.saturating_sub(after.1),
-                        );
-                        if done != (0, 0) {
-                            converted += done.0;
-                            reattributed += done.1;
-                            batches += 1;
-                            self.record(
-                                id,
-                                batches,
-                                MaintenanceProgress::BackfillEvents {
-                                    converted,
-                                    reattributed,
-                                    remaining_unconverted: Some(after.0),
-                                    remaining_unattributed: Some(after.1),
-                                },
-                            );
-                        }
-                    }
-                    return Ended::storage();
-                }
-                Err(ended) => return ended,
+                // A failed step may have committed its conversion before its
+                // attribution failed and the writer says nothing of it: the
+                // counters keep the reported batches, the effect says unknown.
+                Ok(Err(_)) => return Ended::storage().unreported(),
+                Err(ended) => return ended.unreported(),
             };
-            left = Some((step.remaining_unconverted, step.remaining_unattributed));
             converted += step.converted;
             reattributed += step.reattributed;
             let progress = MaintenanceProgress::BackfillEvents {
@@ -524,22 +510,6 @@ impl Inner {
                 };
             }
         }
-    }
-
-    /// The rows still to convert and to attribute, read from the file without
-    /// writing; `None` when they cannot be read.
-    async fn remaining(&self) -> Option<(u64, u64)> {
-        let path = self.database.clone();
-        blocking(move || {
-            let database = Database::open_read_only(&path).ok()?;
-            Some((
-                database.unbackfilled_event_count().ok()?,
-                database.unattributed_orchestrator_count().ok()?,
-            ))
-        })
-        .await
-        .ok()
-        .flatten()
     }
 
     /// A committed batch: keep its counters and tell the clients.
@@ -581,9 +551,17 @@ impl Inner {
                             view.progress = progress.clone();
                         }
                     }
-                    Ended::Failed { code, message } => {
+                    Ended::Failed {
+                        code,
+                        message,
+                        unknown,
+                    } => {
                         view.operation.state = OperationState::Failed { code: *code };
-                        view.effect = partial;
+                        view.effect = if *unknown {
+                            MaintenanceEffect::Unknown
+                        } else {
+                            partial
+                        };
                         view.message = Some(bounded(message));
                     }
                     Ended::Cancelled(reason) => {
