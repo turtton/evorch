@@ -158,6 +158,7 @@ fn event_family(event: &Event) -> &'static str {
         EventKind::Ownership(_) => "ownership",
         EventKind::Ledger(_) => "ledger",
         EventKind::PullRequest(_) => "pull_request",
+        EventKind::ConversationPlan(_) => "conversation_plan",
     }
 }
 

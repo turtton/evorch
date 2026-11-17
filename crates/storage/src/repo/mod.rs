@@ -8,6 +8,7 @@ pub(crate) mod artifact_refs;
 pub(crate) mod assistant_reference;
 pub mod catalog;
 pub(crate) mod content_blobs;
+pub(crate) mod conversation_plan;
 pub(crate) mod eval_sample;
 pub mod event;
 pub(crate) mod host_chat_submission;

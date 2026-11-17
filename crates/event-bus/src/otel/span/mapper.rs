@@ -19,7 +19,8 @@ impl SpanMapper {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Ownership(_)
-            | EventKind::PullRequest(_) => Vec::new(),
+            | EventKind::PullRequest(_)
+            | EventKind::ConversationPlan(_) => Vec::new(),
         }
     }
 

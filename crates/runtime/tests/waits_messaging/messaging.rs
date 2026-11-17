@@ -536,6 +536,7 @@ async fn message_delivery_emits_agent_message_event_and_no_lifecycle_completion(
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
+            | EventKind::ConversationPlan(_)
             | EventKind::PullRequest(_) => None,
         })
         .collect();

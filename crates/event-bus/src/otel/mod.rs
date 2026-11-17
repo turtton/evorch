@@ -371,7 +371,8 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
         | EventKind::Orchestrator(_)
         | EventKind::Diagnostic(_)
         | EventKind::Ownership(_)
-        | EventKind::PullRequest(_) => Vec::new(),
+        | EventKind::PullRequest(_)
+        | EventKind::ConversationPlan(_) => Vec::new(),
     }
 }
 

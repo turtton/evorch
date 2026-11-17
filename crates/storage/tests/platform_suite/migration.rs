@@ -11,9 +11,9 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 65;
+const LATEST_SCHEMA: u32 = 66;
 
-const EXPECTED_TABLES: [&str; 118] = [
+const EXPECTED_TABLES: [&str; 121] = [
     "restart_learning_inventory",
     "restart_learning_members",
     "restart_run_tools",
@@ -132,10 +132,14 @@ const EXPECTED_TABLES: [&str; 118] = [
     "learning_job_staging",
     "learning_job_publications",
     "learning_attempt_receipts",
+    "conversation_plans",
+    "conversation_plan_nodes",
+    "conversation_plan_history",
 ];
 
-const EXPECTED_INDICES: [&str; 96] = [
+const EXPECTED_INDICES: [&str; 97] = [
     "learning_jobs_state",
+    "idx_conversation_plan_nodes_ord",
     "restart_expected_run",
     "recovery_members_run",
     "recovery_claim_prepared",
@@ -1218,6 +1222,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v66.sql"),
                 include_str!("../../undo/undo_v65.sql"),
                 include_str!("../../undo/undo_v64.sql"),
                 include_str!("../../undo/undo_v63.sql"),

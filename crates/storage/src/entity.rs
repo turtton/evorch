@@ -369,6 +369,12 @@ impl SecretGuard {
                     .map_err(|error| StorageError::Serialization(error.to_string()))?;
                 self.check_text("event", "PullRequest.payload", &payload)
             }
+            // Titles, descriptions, results and blockers are free text written by the model.
+            EventKind::ConversationPlan(event) => {
+                let payload = serde_json::to_string(event)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
+                self.check_text("event", "ConversationPlan.payload", &payload)
+            }
         }
     }
 

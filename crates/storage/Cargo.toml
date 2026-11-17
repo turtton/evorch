@@ -21,6 +21,9 @@ event-bus = { path = "../event-bus" }
 [features]
 # Read instrumentation for downstream regression tests; absent from product builds.
 test-support = []
+# `plan_write_gate`: holds a conversation plan write before or after its commit, so a test
+# can stop it there. Enabled only through a dev-dependency; no product build has it.
+plan-write-gate = []
 # Legacy manifest binding is a logical recovery fixture only.
 recovery-test-support = []
 # `Database::open_unchecked`: opens an old-format database without the conversion gate.
@@ -32,7 +35,7 @@ unchecked-open = []
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
-storage = { path = ".", features = ["unchecked-open"] }
+storage = { path = ".", features = ["unchecked-open", "plan-write-gate"] }
 # Contract tests serialize canonical provider messages so the JSON shape storage keys on cannot drift.
 providers = { path = "../providers" }
 rusqlite = { workspace = true, features = ["hooks"] }

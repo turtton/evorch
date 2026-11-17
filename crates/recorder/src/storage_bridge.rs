@@ -86,6 +86,10 @@ impl PersistencePolicy {
                 reason: event_bus::PullRequestAutoFixChange::Settings,
                 ..
             }) => true,
+            // The plan transaction stored this event in the same commit as the projection it
+            // describes. Storing it again here would duplicate the row; the bus carries it only
+            // as a post-commit notification.
+            EventKind::ConversationPlan(_) => true,
             // The bus already logs each lag episode and live subscribers still
             // see the fault. Persisting it let a saturated subscriber write one
             // row per episode, and nothing reads those rows back.
