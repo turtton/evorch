@@ -241,13 +241,18 @@ fn live_run_does_not_erase_other_parked_runs_and_resumed_parked_run_stays_proven
     let permit = f.host.start("thread").unwrap();
     checkpoint_run(&permit, "a", TurnEnd);
     checkpoint_run(&permit, "b", TurnEnd);
-    // "a" resumes (live) and "b" stays parked; "c" is a new live run.
+    // "a" resumes (live) and "b" stays parked.
     let mut live = permit.clone();
     live.run_id = Some("a".into());
     live.begin_turn().unwrap();
-    let mut other = permit.clone();
-    other.run_id = Some("c".into());
-    other.begin_turn().unwrap();
+    // A new run "c" parks while "a" is live: this write must neither erase
+    // the parked proof of "b" nor the record of the live "a".
+    checkpoint_run(&permit, "c", TurnEnd);
+    let row = stored_checkpoint(&f, "thread");
+    assert_eq!(
+        row.runs.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
     let holds = f
         .host
         .hold_captured_for_restart(
@@ -256,11 +261,11 @@ fn live_run_does_not_erase_other_parked_runs_and_resumed_parked_run_stays_proven
             &captured(&permit, "thread", &["a", "b", "c"]),
         )
         .unwrap();
+    assert_eq!(holds[0].active_runs, BTreeSet::from(["a".into()]));
     assert_eq!(
-        holds[0].active_runs,
-        BTreeSet::from(["a".into(), "c".into()])
+        holds[0].parked_runs,
+        BTreeSet::from(["b".into(), "c".into()])
     );
-    assert_eq!(holds[0].parked_runs, BTreeSet::from(["b".into()]));
 }
 
 #[test]
