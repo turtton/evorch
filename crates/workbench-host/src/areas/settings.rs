@@ -71,6 +71,8 @@ struct Inner {
     state: Mutex<State>,
     /// One writer at a time, held across compare, check and write.
     writer: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    before_snapshot_publish: Mutex<Option<tests::PublishHook>>,
 }
 
 struct State {
@@ -175,6 +177,8 @@ impl SettingsArea {
                     reads_published: 0,
                 }),
                 writer: Arc::default(),
+                #[cfg(test)]
+                before_snapshot_publish: Mutex::default(),
             })),
         }
     }
@@ -309,6 +313,13 @@ impl SettingsArea {
 
 impl Inner {
     fn publish(&self, event: SettingsEvent) {
+        #[cfg(test)]
+        if matches!(event, SettingsEvent::SettingsSnapshotChanged { .. }) {
+            let hook = self.before_snapshot_publish.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook(self);
+            }
+        }
         if let Err(error) = self.source.publish(UiEvent::Settings(event)) {
             tracing::warn!(code = ?error.code, "settings event could not be published");
         }
@@ -438,17 +449,16 @@ impl Inner {
     /// announced from the state itself when it changed, so a re-read finding
     /// it already moved would see no change to tell anybody about.
     fn set_applied(&self, applied: Option<SettingsRevision>, failure: Option<String>) {
-        let announce = {
-            let mut state = lock(&self.state);
-            let changed = state.snapshot.applied_revision != applied
-                || state.snapshot.apply_failure != failure;
-            state.snapshot.applied_revision.clone_from(&applied);
-            state.snapshot.apply_failure = failure;
-            changed.then(|| state.snapshot.revision.clone())
-        };
-        if let Some(saved) = announce {
+        // Keep the state lock through synchronous publication, as in reread:
+        // otherwise a newer change can announce first, then this stale event.
+        let mut state = lock(&self.state);
+        let changed =
+            state.snapshot.applied_revision != applied || state.snapshot.apply_failure != failure;
+        state.snapshot.applied_revision.clone_from(&applied);
+        state.snapshot.apply_failure = failure;
+        if changed {
             self.publish(SettingsEvent::SettingsSnapshotChanged {
-                revision: saved,
+                revision: state.snapshot.revision.clone(),
                 applied_revision: applied,
             });
         }
@@ -467,24 +477,23 @@ impl Inner {
         };
         let store = self.store.clone();
         let mut fresh = Self::blocking(move || store.snapshot(applied.as_ref())).await?;
-        let announce = {
-            let mut state = lock(&self.state);
-            if ticket < state.reads_published {
-                return Ok(());
-            }
-            state.reads_published = ticket;
-            fresh
-                .applied_revision
-                .clone_from(&state.snapshot.applied_revision);
-            fresh
-                .apply_failure
-                .clone_from(&state.snapshot.apply_failure);
-            let announce = (state.snapshot.revision != fresh.revision
-                || state.snapshot.applied_revision != fresh.applied_revision)
-                .then(|| (fresh.revision.clone(), fresh.applied_revision.clone()));
-            state.snapshot = fresh;
-            announce
-        };
+        // Only the snapshot update and its publication are serialized here;
+        // file I/O stays outside the state lock.
+        let mut state = lock(&self.state);
+        if ticket < state.reads_published {
+            return Ok(());
+        }
+        state.reads_published = ticket;
+        fresh
+            .applied_revision
+            .clone_from(&state.snapshot.applied_revision);
+        fresh
+            .apply_failure
+            .clone_from(&state.snapshot.apply_failure);
+        let announce = (state.snapshot.revision != fresh.revision
+            || state.snapshot.applied_revision != fresh.applied_revision)
+            .then(|| (fresh.revision.clone(), fresh.applied_revision.clone()));
+        state.snapshot = fresh;
         if let Some((revision, applied_revision)) = announce {
             self.publish(SettingsEvent::SettingsSnapshotChanged {
                 revision,
@@ -514,3 +523,6 @@ impl Inner {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
