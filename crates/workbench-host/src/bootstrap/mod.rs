@@ -13,6 +13,7 @@ pub mod components;
 pub mod core_startup;
 pub mod evaluation;
 mod host_services;
+mod idle;
 pub mod lane_pr;
 pub mod learning;
 #[cfg(test)]
@@ -32,7 +33,9 @@ mod tests;
 use crate::areas::{AreaHandles, AreaTasks, Areas};
 use crate::projects::ProjectDirectory;
 use crate::{CommandHost, commands::CommandService, projects::StaticProjects};
-use event_bus::{AgentRunPhase, EventBus};
+#[cfg(test)]
+use event_bus::AgentRunPhase;
+use event_bus::EventBus;
 use recorder::{pricing::UsagePricing, storage_bridge::OwnedStorageBridge};
 use runtime::{AgentRuntime, ModelSource, RunStore, RuntimeComposition, ownership::OwnerHost};
 use sha2::{Digest, Sha256};
@@ -826,29 +829,6 @@ impl BootstrappedHost {
     /// decision is taken again (ADR 0045 §2, §3).
     pub fn area_work_notify(&self) -> Arc<tokio::sync::Notify> {
         self.area_tasks.counted_ended_notify()
-    }
-
-    pub fn busy(&self) -> bool {
-        // TODO(P9): once safe-point restart/auto-resume can restore an ordinary
-        // chat's Waiting state, count that idle conversation as no work. Until
-        // then retain all Waiting runs conservatively to avoid losing them.
-        self.host.lock().unwrap().service().restart_gate().busy()
-            || self.evaluations.is_busy()
-            // A live external owner's lease may outlast idle grace. Keep the
-            // managed retry alive even before it can publish any local RunEntry.
-            || self.recovery_diagnostics.as_ref().is_some_and(|d| d.has_pending_work())
-            || self.runtime.has_paused_recovery()
-            || self.runtime.pending_lane_stop_writes() != 0
-            || !self.runtime.pending_lane_admissions().is_empty()
-            || self.host.lock().unwrap().service().has_background_work()
-            || self.area_tasks.busy()
-            || self.runtime.list_agents().iter().any(|r| {
-                self.executor.has_running_shell_jobs(&r.run_id.to_string())
-                    || matches!(
-                        r.phase,
-                        AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
-                    )
-            })
     }
 
     /// Runtime-only safe-point observation, separate from operator stop.
