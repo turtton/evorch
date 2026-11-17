@@ -131,6 +131,9 @@ pub struct PlanState {
     tree_read: Option<TreeRead>,
     selected: Option<String>,
     task: Option<PlanTaskRead>,
+    /// The task the read in flight asks for, so a failure of an old read
+    /// never deselects a task chosen since.
+    task_read: Option<String>,
     history: Option<PlanHistory>,
     history_page: u32,
     /// The `(page, newest revision)` the history read in flight covers.
@@ -195,6 +198,18 @@ impl PlanState {
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// Whether the plan was written to and is empty now: every task deleted
+    /// (revision above 0, no node). A plan never written to has revision 0 and
+    /// is not cleared, so it has no history to open.
+    pub fn is_cleared(&self) -> bool {
+        let progress = self
+            .tree
+            .as_ref()
+            .map(|tree| &tree.progress)
+            .or_else(|| self.summary.as_ref().map(|summary| &summary.progress));
+        progress.is_some_and(|progress| !is_planned(progress)) && self.latest > 0
     }
 
     /// A change notification. Only a revision newer than any known one makes
@@ -274,6 +289,7 @@ impl PlanState {
                         self.stale[i] = false;
                         continue;
                     };
+                    self.task_read = Some(task_id.clone());
                     ExecutionQuery::GetConversationPlanTask(PlanTaskQuery {
                         thread: thread.clone(),
                         task_id,
@@ -342,8 +358,14 @@ impl PlanState {
                 self.stale[i] = true;
             }
             (ReadKind::Task, ReadFailure::NotFound) => {
-                self.selected = None;
-                self.task = None;
+                if self.task_read.take() == self.selected {
+                    self.selected = None;
+                    self.task = None;
+                } else {
+                    // The task asked for is no longer the selected one: the
+                    // current selection has its own read due.
+                    self.stale[i] = self.selected.is_some();
+                }
             }
             (ReadKind::Tree, failure) => {
                 self.tree_read = None;
@@ -480,6 +502,12 @@ fn describe(failure: &ReadFailure) -> String {
 /// "not planned", never 100%.
 pub fn is_planned(progress: &PlanProgress) -> bool {
     progress.node_count > 0
+}
+
+/// Whether the summary is of a plan that was written to and then emptied: it has
+/// no task but a revision, so its history is still worth opening.
+pub fn summary_is_cleared(summary: &PlanSummary) -> bool {
+    !is_planned(&summary.progress) && summary.revision.0 > 0
 }
 
 /// Completion in whole percent: the completed share of the plan's weight.

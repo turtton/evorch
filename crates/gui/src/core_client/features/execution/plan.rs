@@ -55,7 +55,12 @@ impl PlanLine {
         };
         let progress = &summary.progress;
         if !is_planned(progress) {
-            ui.label("計画: 未計画");
+            let text = if crate::model::conversation_plan::summary_is_cleared(summary) {
+                "計画: 消去済み"
+            } else {
+                "計画: 未計画"
+            };
+            ui.label(text);
             return;
         }
         let counts = &progress.leaf_counts;

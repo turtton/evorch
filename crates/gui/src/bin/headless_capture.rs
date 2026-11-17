@@ -16,7 +16,7 @@ use gui::theme::style::ThemePreset;
 use workspace_ui::UiSettings;
 
 const DEFAULT_OUTPUT: &str = "target/headless-capture.png";
-const PLAN_ERROR: &str = "--plan requires unplanned, mixed, or detailed";
+const PLAN_ERROR: &str = "--plan requires unplanned, mixed, detailed, or cleared";
 
 #[derive(Debug)]
 struct CaptureArgs {
@@ -398,7 +398,7 @@ Modes:
    --edit-profile   open the local demo profile editor
    --activate ID  activate the given panel tab before capturing (e.g. diff-main)
    --plan NAME    with --demo: open the conversation plan tab on a fixture plan
-                  (unplanned, mixed, or detailed)
+                  (unplanned, mixed, detailed, or cleared)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
 
 Capture dimensions:

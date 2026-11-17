@@ -1,6 +1,6 @@
 //! Fixed conversation plans for headless capture and tests: no plan, a
 //! hierarchy in mixed progress, and the same plan with a long selected task
-//! and two pages of change history.
+//! and two pages of change history, and the same plan after every task was deleted.
 
 use workbench_protocol::namespaces::execution::plan::{
     PlanChange, PlanChangeCause, PlanHistoryChange, PlanHistoryEntry, PlanHistoryPage,
@@ -22,16 +22,20 @@ pub enum PlanScenario {
     /// [`Self::Mixed`] with the blocked task selected and fourteen revisions
     /// of history.
     Detailed,
+    /// A plan whose tasks were all deleted: no task, but fifteen revisions of
+    /// history.
+    Cleared,
 }
 
 impl PlanScenario {
-    pub const ALL: [Self; 3] = [Self::Unplanned, Self::Mixed, Self::Detailed];
+    pub const ALL: [Self; 4] = [Self::Unplanned, Self::Mixed, Self::Detailed, Self::Cleared];
 
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "unplanned" => Some(Self::Unplanned),
             "mixed" => Some(Self::Mixed),
             "detailed" => Some(Self::Detailed),
+            "cleared" => Some(Self::Cleared),
             _ => None,
         }
     }
@@ -41,6 +45,7 @@ impl PlanScenario {
             Self::Unplanned => "unplanned",
             Self::Mixed => "mixed",
             Self::Detailed => "detailed",
+            Self::Cleared => "cleared",
         }
     }
 
@@ -52,10 +57,16 @@ impl PlanScenario {
         }
     }
 
+    /// Whether the plan has tasks now.
+    const fn has_tasks(self) -> bool {
+        matches!(self, Self::Mixed | Self::Detailed)
+    }
+
     const fn revision(self) -> u64 {
         match self {
             Self::Unplanned => 0,
             Self::Mixed | Self::Detailed => HISTORY_LEN,
+            Self::Cleared => HISTORY_LEN + 1,
         }
     }
 }
@@ -68,6 +79,15 @@ const FIRST_SAVE_MS: i64 = 1_791_550_800_000;
 fn saved_at(revision: u64) -> i64 {
     FIRST_SAVE_MS + (revision as i64 - 1) * 180_000
 }
+/// Added in the first revision and deleted in the fourteenth: the history names
+/// it though the tree no longer has it.
+const DRAFT: Row = (
+    "band-draft",
+    Some("band"),
+    "Sketch the tooltip draft",
+    1,
+    Some(PlanTaskStatus::Pending),
+);
 const BLOCKED_TASK: &str = "verify-capture";
 
 type Row = (
@@ -285,12 +305,12 @@ fn added(row: &Row) -> PlanChange {
     }
 }
 
-/// Revisions 1..=14, oldest first.
-fn history() -> Vec<PlanHistoryEntry> {
+/// Revisions 1..=14, oldest first; 15 deletes every task when `cleared`.
+fn history(cleared: bool) -> Vec<PlanHistoryEntry> {
     use PlanTaskStatus::{Blocked, Completed, InProgress, Interrupted};
     let mut changes: Vec<(PlanChangeCause, Vec<PlanChange>)> = vec![(
         PlanChangeCause::ModelUpdate,
-        ROWS.iter().map(added).collect(),
+        ROWS.iter().map(added).chain([added(&DRAFT)]).collect(),
     )];
     let steps = [
         ("inspect-goal", InProgress),
@@ -328,19 +348,32 @@ fn history() -> Vec<PlanHistoryEntry> {
             task_ids: vec!["band-draft".into()],
         }],
     ));
+    if cleared {
+        changes.push((
+            PlanChangeCause::ModelUpdate,
+            vec![PlanChange::Cleared { removed: 10 }],
+        ));
+    }
     changes
         .into_iter()
         .zip(1..)
-        .map(|((cause, changes), revision)| PlanHistoryEntry {
-            revision: Revision(revision),
-            event_id: Sequence(100 + revision),
-            change: Some(PlanHistoryChange {
-                cause,
-                source_run_id: Some("run-2".into()),
-                changes,
-                progress: progress(),
-            }),
-            updated_at_unix_ms: Some(saved_at(revision)),
+        .map(|((cause, changes), revision)| {
+            let progress = if matches!(changes.as_slice(), [PlanChange::Cleared { .. }]) {
+                PlanProgress::default()
+            } else {
+                progress()
+            };
+            PlanHistoryEntry {
+                revision: Revision(revision),
+                event_id: Sequence(100 + revision),
+                change: Some(PlanHistoryChange {
+                    cause,
+                    source_run_id: Some("run-2".into()),
+                    changes,
+                    progress,
+                }),
+                updated_at_unix_ms: Some(saved_at(revision)),
+            }
         })
         .collect()
 }
@@ -356,14 +389,14 @@ impl FixturePlanReader {
     }
 
     fn planned(&self) -> bool {
-        self.scenario != PlanScenario::Unplanned
+        self.scenario.has_tasks()
     }
 }
 
 impl PlanReader for FixturePlanReader {
     fn read(&self, query: &ExecutionQuery) -> Result<ExecutionReply, ReadFailure> {
         let revision = Revision(self.scenario.revision());
-        let plan_id = self.planned().then(|| PLAN_ID.to_owned());
+        let plan_id = (revision.0 > 0).then(|| PLAN_ID.to_owned());
         let progress = if self.planned() {
             progress()
         } else {
@@ -405,8 +438,8 @@ impl PlanReader for FixturePlanReader {
             ExecutionQuery::ReadConversationPlanHistory(query) => {
                 let after = query.after_revision.map_or(0, |revision| revision.0);
                 let limit = query.limit.map_or(usize::MAX, |limit| limit as usize);
-                let all: Vec<_> = if self.planned() {
-                    history()
+                let all: Vec<_> = if self.scenario.revision() > 0 {
+                    history(self.scenario == PlanScenario::Cleared)
                         .into_iter()
                         .filter(|entry| entry.revision.0 > after)
                         .collect()

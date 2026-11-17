@@ -33,6 +33,9 @@ pub struct ConversationPlanPane {
 impl ConversationPlanPane {
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
         if !self.shown_last_frame {
+            // A panel shown again may have missed changes while hidden or while
+            // its tab was closed: read the plan again, not only on notification.
+            self.model.state_mut().refresh();
             // Panel reads start at the next poll; make sure there is one.
             ui.ctx().request_repaint();
         }
@@ -187,6 +190,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if pane.model.poll(visible) {
             ctx.request_repaint();
         }
+    }
+
+    /// Notifications were lost (a lagging event subscription): the shown plan
+    /// may be behind with nothing to say so, so every view reads it again.
+    pub(super) fn recover_conversation_plan(&mut self) {
+        self.conversation_plan.model.state_mut().refresh();
     }
 
     /// A plan change only names its revision; the views read it again.

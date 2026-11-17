@@ -235,3 +235,79 @@ fn without_a_reader_there_is_no_band() {
     state.poll_conversation_plan(&egui::Context::default());
     assert!(state.conversation_plan.band().is_none());
 }
+
+fn render_panel(state: &mut WorkbenchState<DemoSource>, ctx: &egui::Context) {
+    // The theme takes effect from the next pass; the panel needs its text styles.
+    crate::theme::install(ctx);
+    ctx.run_ui(egui::RawInput::default(), |_| {})
+        .textures_delta
+        .clear();
+    ctx.run_ui(egui::RawInput::default(), |ui| {
+        state.conversation_plan.render(ui);
+    })
+    .textures_delta
+    .clear();
+}
+
+#[test]
+fn a_lagged_event_subscription_reads_the_shown_plan_again() {
+    // Given: a pump whose subscription overflowed before it could read, so
+    // change notifications may be lost for good.
+    let (state, recorder) = workbench();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let bus = event_bus::EventBus::new(2);
+    let receiver = bus.subscribe();
+    for id in 0..8 {
+        bus.emit(Event::new(event_bus::LifecycleEvent::Started {
+            session_id: id.to_string(),
+        }));
+    }
+    let (wake, woken) = std::sync::mpsc::channel();
+    let pump = crate::events::EventPump::spawn(
+        runtime.handle(),
+        receiver,
+        Some(Arc::new(move || {
+            let _ = wake.send(());
+        })),
+    );
+    let mut state = state.with_pump(pump);
+    let ctx = egui::Context::default();
+    state.poll_conversation_plan(&ctx);
+    recorder.take();
+
+    // When: the frame learns of the lag.
+    woken.recv().expect("the lag wakes the frame");
+    state.drain_pump(&ctx, false);
+    state.poll_conversation_plan(&ctx);
+
+    // Then: the plan is read from its source again, with no notification.
+    assert_eq!(recorder.take(), vec![("summary", "first".to_owned())]);
+}
+
+#[test]
+fn showing_the_panel_again_reads_the_plan_again() {
+    // Given: the panel was shown and read in full, then hidden for a frame.
+    let (mut state, recorder) = workbench();
+    let ctx = egui::Context::default();
+    state.poll_conversation_plan(&ctx);
+    recorder.take();
+    render_panel(&mut state, &ctx);
+    state.poll_conversation_plan(&ctx);
+    let first: Vec<_> = recorder.take().into_iter().map(|(kind, _)| kind).collect();
+    assert_eq!(first, ["summary", "tree", "history"]);
+    render_panel(&mut state, &ctx);
+    state.poll_conversation_plan(&ctx);
+    assert!(
+        recorder.take().is_empty(),
+        "a panel kept on screen is not read"
+    );
+    state.poll_conversation_plan(&ctx);
+
+    // When: it is shown again, with no notification in between.
+    render_panel(&mut state, &ctx);
+    state.poll_conversation_plan(&ctx);
+
+    // Then: every view is read from the source again.
+    let again: Vec<_> = recorder.take().into_iter().map(|(kind, _)| kind).collect();
+    assert_eq!(again, ["summary", "tree", "history"]);
+}

@@ -308,3 +308,63 @@ fn the_model_reads_through_the_reader_and_wakes_once_answered() {
         Some(Revision(3))
     );
 }
+
+#[test]
+fn a_not_found_for_an_old_selection_keeps_the_new_one() {
+    // Given: task t1 is asked for, then t2 is chosen before the answer.
+    let mut state = shown(5);
+    state.select("t1");
+    let requests = state.requests(true);
+    let generation = take(&requests, ReadKind::Task).generation;
+    state.select("t2");
+
+    // When: the read for t1 fails with "not found".
+    state.apply(ReadKind::Task, generation, Err(ReadFailure::NotFound));
+
+    // Then: t2 stays selected and is read next.
+    assert_eq!(state.selected(), Some("t2"));
+    let requests = state.requests(true);
+    assert_eq!(
+        take(&requests, ReadKind::Task).query,
+        ExecutionQuery::GetConversationPlanTask(PlanTaskQuery {
+            thread: thread("a"),
+            task_id: "t2".into(),
+        })
+    );
+}
+
+#[test]
+fn refresh_reads_every_view_again_at_the_known_revision() {
+    // Given: every view read and up to date at revision 5.
+    let mut state = shown(5);
+    let requests = state.requests(true);
+    let generation = take(&requests, ReadKind::Tree).generation;
+    state.apply(ReadKind::Tree, generation, Ok(tree_page(5, &["t1"], None)));
+    state.apply(ReadKind::History, generation, Ok(history(5, 1..=5)));
+    assert!(state.requests(true).is_empty());
+
+    // When: notifications were lost and the views are asked to read again.
+    state.refresh();
+
+    // Then: all of them are read though no newer revision is known.
+    assert_eq!(
+        kinds(&state.requests(true)),
+        [ReadKind::Summary, ReadKind::Tree, ReadKind::History]
+    );
+}
+
+#[test]
+fn a_refresh_during_a_read_keeps_the_view_due_for_another() {
+    // Given: a summary read is in flight when notifications are found lost.
+    let mut state = PlanState::default();
+    state.set_thread(Some(thread("a")));
+    let requests = state.requests(false);
+    let generation = take(&requests, ReadKind::Summary).generation;
+    state.refresh();
+
+    // When: the (possibly older) answer arrives.
+    state.apply(ReadKind::Summary, generation, Ok(summary("a", 3, 0)));
+
+    // Then: the summary is read once more.
+    assert_eq!(kinds(&state.requests(false)), [ReadKind::Summary]);
+}

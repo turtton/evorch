@@ -11,7 +11,9 @@ use workbench_protocol::namespaces::execution::plan::{
     PlanSummary, PlanTaskStatus,
 };
 
-use crate::model::conversation_plan::{PlanState, completed_percent, is_planned};
+use crate::model::conversation_plan::{
+    PlanState, completed_percent, is_planned, summary_is_cleared,
+};
 use crate::theme::icons;
 use crate::theme::tokens::{
     FONT_SMALL, R_MD, ROW_DENSE, SP_1, SP_2, SP_3, palette, text_style_badge,
@@ -36,6 +38,7 @@ pub enum PlanPanelAction {
 pub const PANEL_ID: &str = "conversation-plan-main";
 pub const OPEN_LABEL: &str = "Open plan";
 const NOT_PLANNED: &str = "Not planned";
+const CLEARED: &str = "Plan cleared";
 const BAR_WIDTH: f32 = 120.0;
 const MINI_BAR_WIDTH: f32 = 44.0;
 const BAR_HEIGHT: f32 = 6.0;
@@ -142,6 +145,9 @@ const fn percent(ppm: u32) -> u32 {
 
 /// The band's sentence for screen readers and its hover text.
 pub fn band_label(summary: Option<&PlanSummary>) -> String {
+    if summary.is_some_and(summary_is_cleared) {
+        return CLEARED.to_owned();
+    }
     let Some(progress) = summary.map(|s| &s.progress).filter(|p| is_planned(p)) else {
         return NOT_PLANNED.to_owned();
     };
@@ -224,12 +230,19 @@ pub fn band_row(ui: &mut Ui, band: PlanBand<'_>) -> bool {
     let row = ui.horizontal(|ui| {
         ui.set_min_height(ROW_DENSE - SP_1);
         let Some(progress) = progress else {
-            labeled_icon(ui, icons::CIRCLE, palette().TEXT_MUTED, NOT_PLANNED);
+            // A plan whose tasks were all deleted still has history to open.
+            let cleared = band.summary.is_some_and(summary_is_cleared);
+            let (icon, text) = if cleared {
+                (icons::BROOM, CLEARED)
+            } else {
+                (icons::CIRCLE, NOT_PLANNED)
+            };
+            labeled_icon(ui, icon, palette().TEXT_MUTED, text);
             progress_bar(ui, egui::vec2(BAR_WIDTH, BAR_HEIGHT), None);
-            ui.label(small(NOT_PLANNED, palette().TEXT_MUTED));
+            ui.label(small(text, palette().TEXT_MUTED));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_enabled_ui(false, |ui| {
-                    icon_button(ui, icons::ARROW_SQUARE_OUT, OPEN_LABEL)
+                ui.add_enabled_ui(cleared, |ui| {
+                    open = icon_button(ui, icons::ARROW_SQUARE_OUT, OPEN_LABEL).clicked();
                 });
             });
             return;
@@ -313,7 +326,22 @@ pub fn plan_panel(ui: &mut Ui, state: &PlanState) -> Option<PlanPanelAction> {
             ui.separator();
             let Some(tree) = state.tree().filter(|tree| !tree.nodes.is_empty()) else {
                 if planned.is_none() {
-                    not_planned(ui);
+                    if state.is_cleared() {
+                        // No task, but a history to look back on.
+                        let mut page = None;
+                        egui::ScrollArea::vertical()
+                            .id_salt("plan-detail")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                cleared_notice(ui);
+                                page = history(ui, state, &[]);
+                            });
+                        if let Some(page) = page {
+                            action = Some(PlanPanelAction::HistoryPage(page));
+                        }
+                    } else {
+                        not_planned(ui);
+                    }
                 }
                 return;
             };
@@ -381,6 +409,14 @@ pub fn plan_panel(ui: &mut Ui, state: &PlanState) -> Option<PlanPanelAction> {
     action
 }
 
+/// The line above the history of a plan whose tasks were all deleted.
+fn cleared_notice(ui: &mut Ui) {
+    ui.horizontal(|ui| {
+        labeled_icon(ui, icons::BROOM, palette().TEXT_MUTED, CLEARED);
+        ui.label(small(CLEARED, palette().TEXT_MUTED));
+    });
+}
+
 /// The empty panel of a conversation without a plan.
 fn not_planned(ui: &mut Ui) {
     ui.vertical_centered(|ui| {
@@ -428,7 +464,7 @@ fn summary(ui: &mut Ui, state: &PlanState, planned: Option<&PlanProgress>) {
     let meta = meta_text(state).map(|text| format!("Revision and last run: {text}"));
     let Some(progress) = planned else {
         let response = progress_bar(ui, egui::vec2(BAR_WIDTH, PANEL_BAR_HEIGHT), None);
-        let _ = response.on_hover_text(NOT_PLANNED);
+        let _ = response.on_hover_text(band_label(state.summary()));
         return;
     };
     let band = band_label(state.summary());
@@ -658,6 +694,35 @@ const fn new_status(change: &PlanChange) -> Option<PlanTaskStatus> {
     }
 }
 
+/// A task's title for the history: the current tree's, else the latest one
+/// this page's changes gave it. `None` when neither knows the task.
+fn task_title<'a>(
+    entries: &'a [PlanHistoryEntry],
+    nodes: &'a [PlanNodeView],
+    task: &str,
+) -> Option<&'a str> {
+    if let Some(node) = nodes.iter().find(|node| node.task_id == task) {
+        return Some(node.title.as_str());
+    }
+    entries.iter().find_map(|entry| {
+        entry
+            .change
+            .as_ref()?
+            .changes
+            .iter()
+            .rev()
+            .find_map(|change| match change {
+                PlanChange::Added { task_id, title, .. } if task_id == task => Some(title.as_str()),
+                PlanChange::Updated {
+                    task_id,
+                    title: Some(title),
+                    ..
+                } if task_id == task => Some(title.as_str()),
+                _ => None,
+            })
+    })
+}
+
 /// The state `task` had before `index` on this page, if an older entry shows it.
 fn previous_status(
     entries: &[PlanHistoryEntry],
@@ -746,12 +811,9 @@ fn history_row(
     };
     for item in &change.changes {
         let (icon, kind, task) = change_style(item);
-        let title = task.and_then(|task| {
-            nodes
-                .iter()
-                .find(|node| node.task_id == task)
-                .map(|node| node.title.as_str())
-        });
+        // The task may be gone from the tree (deleted since): name it by the
+        // title this history saved, and by its id when no entry on the page has one.
+        let title = task.map(|task| task_title(entries, nodes, task));
         let time = clock(entry.updated_at_unix_ms);
         let mut label = format!("Revision {}, {kind}", entry.revision.0);
         if let Some(time) = &time {
@@ -790,9 +852,27 @@ fn history_row(
                 }
                 status_icon(ui, new);
             }
-            if let Some(title) = title {
-                ui.add(egui::Label::new(small(title, palette().TEXT)).truncate());
-                label.push_str(&format!(", {title}"));
+            if let (Some(title), Some(task)) = (title, task) {
+                let shown = title.unwrap_or(task);
+                ui.add(egui::Label::new(small(shown, palette().TEXT)).truncate())
+                    .on_hover_text(format!("{shown} ({task})"));
+                label.push_str(&format!(", {shown}"));
+                if title.is_some() {
+                    label.push_str(&format!(", task {task}"));
+                }
+            }
+            if let PlanChange::SubtreeRemoved { task_ids, .. } = item {
+                let more = task_ids.len().saturating_sub(1);
+                if more > 0 {
+                    let text = format!("+{more} subtasks");
+                    ui.label(small(&text, palette().TEXT_MUTED));
+                    label.push_str(&format!(", {text}"));
+                }
+            }
+            if let PlanChange::Cleared { removed } = item {
+                let text = format!("{removed} tasks");
+                ui.label(small(&text, palette().TEXT_MUTED));
+                label.push_str(&format!(", {text}"));
             }
         })
         .response

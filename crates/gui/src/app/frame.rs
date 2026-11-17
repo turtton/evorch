@@ -213,7 +213,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    fn drain_pump(&mut self, ctx: &egui::Context, logic: bool) -> (usize, Duration, Duration) {
+    pub(super) fn drain_pump(
+        &mut self,
+        ctx: &egui::Context,
+        logic: bool,
+    ) -> (usize, Duration, Duration) {
         let frame = ctx.cumulative_frame_nr();
         // eframe calls logic and ui in the same frame; egui can also rerun a
         // discarded UI pass. Neither may read the receipts a second time.
@@ -236,6 +240,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .pump
             .as_mut()
             .map_or_else(Vec::new, crate::events::EventPump::drain);
+        if self
+            .pump
+            .as_ref()
+            .is_some_and(crate::events::EventPump::take_lagged)
+        {
+            self.recover_conversation_plan();
+        }
         let drain_time = drain_started.elapsed();
         let event_count = events.len();
         let fold_started = Instant::now();

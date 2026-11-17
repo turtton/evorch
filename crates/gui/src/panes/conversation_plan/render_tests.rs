@@ -217,3 +217,117 @@ fn the_history_pages_older_and_the_panel_edits_nothing() {
         "{controls:?}"
     );
 }
+
+/// What a screen reader reads for a node: its label, or its value.
+fn row_text(node: &egui_kittest::Node<'_>) -> String {
+    let node = node.accesskit_node();
+    node.label().or_else(|| node.value()).unwrap_or_default()
+}
+
+#[test]
+fn a_cleared_plan_still_opens_from_the_band() {
+    // Given: a plan that had tasks and has none now (revision above 0).
+    let mut harness = band_harness(PlanScenario::Cleared);
+    harness.run();
+    assert!(harness.query_all_by_label(CLEARED).next().is_some());
+    let open = harness.get_by_label(OPEN_LABEL);
+    assert!(!open.accesskit_node().is_disabled());
+
+    // When: the open button is used.
+    open.click();
+    harness.run();
+
+    // Then: the tab is asked for, unlike a plan never written to.
+    assert!(harness.state().1);
+}
+
+#[test]
+fn a_cleared_plan_shows_its_history_which_ends_with_the_clearing() {
+    // Given / When: the panel of a plan whose every task was deleted.
+    let mut harness = panel_harness(PlanScenario::Cleared);
+
+    // Then: it says so and keeps the history, newest change first.
+    assert!(harness.query_all_by_label(NOT_PLANNED).next().is_none());
+    assert!(harness.query_all_by_label(CLEARED).next().is_some());
+    harness.get_by_label("History");
+    let row = harness.get_by_label_contains("Revision 15, Cleared");
+    assert!(row_text(&row).ends_with(", 10 tasks"));
+    assert_eq!(harness.state().0.state().history_pages(), 2);
+    let older = harness.get_by_label("Older changes");
+    assert!(!older.accesskit_node().is_disabled());
+
+    // And the older page can be asked for.
+    older.click();
+    harness.run();
+    assert_eq!(harness.state().1, vec![PlanPanelAction::HistoryPage(1)]);
+}
+
+#[test]
+fn a_plan_never_written_to_has_no_history_to_show() {
+    let harness = panel_harness(PlanScenario::Unplanned);
+    assert!(harness.query_all_by_label(CLEARED).next().is_none());
+    assert!(harness.query_all_by_label("History").next().is_none());
+}
+
+#[test]
+fn a_removed_task_is_named_in_the_history_by_its_id_when_no_title_is_saved() {
+    // Given: the newest page, where task band-draft is deleted and neither the
+    // tree nor the page's changes know its title.
+    let harness = panel_harness(PlanScenario::Detailed);
+
+    // Then: its id identifies the row, visibly and to a screen reader.
+    let row = harness.get_by_label_contains("Revision 14, Removed");
+    assert!(row_text(&row).ends_with(", band-draft"));
+    assert!(harness.query_all_by_label("band-draft").next().is_some());
+}
+
+#[test]
+fn a_removed_task_is_named_by_the_title_its_history_saved() {
+    let entry = |revision, change| PlanHistoryEntry {
+        revision: workbench_protocol::wire::Revision(revision),
+        event_id: workbench_protocol::wire::Sequence(revision),
+        change: Some(
+            workbench_protocol::namespaces::execution::plan::PlanHistoryChange {
+                cause: PlanChangeCause::ModelUpdate,
+                source_run_id: None,
+                changes: vec![change],
+                progress: PlanProgress::default(),
+            },
+        ),
+        updated_at_unix_ms: None,
+    };
+    let renamed = |title: &str| PlanChange::Updated {
+        task_id: "gone".into(),
+        title: Some(title.into()),
+        description: None,
+        result: None,
+        blocker: None,
+        weight: None,
+        status: None,
+    };
+    let added = PlanChange::Added {
+        task_id: "gone".into(),
+        parent_id: None,
+        position: 0,
+        title: "First name".into(),
+        description: String::new(),
+        weight: 1,
+        status: PlanTaskStatus::Pending,
+    };
+    // Newest first, as a page is.
+    let entries = vec![
+        entry(
+            3,
+            PlanChange::SubtreeRemoved {
+                task_id: "gone".into(),
+                task_ids: vec!["gone".into()],
+            },
+        ),
+        entry(2, renamed("Second name")),
+        entry(1, added),
+    ];
+
+    assert_eq!(task_title(&entries, &[], "gone"), Some("Second name"));
+    assert_eq!(task_title(&entries[..1], &[], "gone"), None);
+    assert_eq!(task_title(&entries, &[], "other"), None);
+}

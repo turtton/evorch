@@ -429,3 +429,39 @@ fn a_validation_retry_continues_through_the_immediate_hook() {
     assert!(attempts.load(Ordering::Relaxed) >= 2);
     assert!(arrival.try_recv().is_err());
 }
+
+#[test]
+fn a_subscription_that_overflowed_reports_the_lost_events_once() {
+    // Given: more events than the bus retains arrive before the pump reads.
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let bus = EventBus::new(2);
+    let receiver = bus.subscribe();
+    for id in 0..8 {
+        bus.emit(event(id));
+    }
+    let (sender, repaint) = mpsc::channel();
+    let pump = EventPump::spawn(
+        runtime.handle(),
+        receiver,
+        Some(Arc::new(move || {
+            let _ = sender.send(());
+        })),
+    );
+
+    // When / Then: the first wake-up already carries the loss, and it is
+    // reported once, not again until the next overflow.
+    repaint.recv().expect("lag wake-up");
+    assert!(pump.take_lagged());
+    assert!(!pump.take_lagged());
+}
+
+#[test]
+fn a_subscription_that_kept_up_reports_no_loss() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let bus = EventBus::new(8);
+    let (mut pump, repaint) = pump(&runtime, &bus);
+    bus.emit(event("a"));
+    repaint.recv().expect("queued");
+    assert!(!pump.take_lagged());
+    assert_eq!(pump.drain().len(), 1);
+}

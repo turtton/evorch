@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Captures the conversation plan evidence: the composer progress band and the
 # plan panel in every theme, for a conversation without a plan, for a plan in
-# mixed progress, and for a selected task with long text and paged history.
+# mixed progress, for a selected task with long text and paged history, and for
+# a plan whose tasks were all deleted (history only).
 # Kept apart from scripts/gui-evidence-matrix.sh so its 117 PNGs stay as they are.
 #
 # Usage: scripts/gui-plan-evidence.sh [OUT]
@@ -20,7 +21,7 @@ fi
 [[ -x "$HEADLESS_CAPTURE_BIN" ]] || { echo "headless_capture is not executable: $HEADLESS_CAPTURE_BIN" >&2; exit 1; }
 
 themes=(graphite tokyo-night high-contrast)
-scenarios=(unplanned mixed detailed)
+scenarios=(unplanned mixed detailed cleared)
 for theme in "${themes[@]}"; do
     for scenario in "${scenarios[@]}"; do
         "$HEADLESS_CAPTURE_BIN" --theme "$theme" --demo --plan "$scenario" \
