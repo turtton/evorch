@@ -432,18 +432,33 @@ pub fn draft_file_name(candidate_id: &str) -> String {
     format!("{id}.issue.md")
 }
 
+/// The write step of an update.
+///
+/// A triage never touches the file the candidate points at before the writer
+/// has judged it: the draft is staged in a temporary file only this operation
+/// owns (unique name, created exclusively), and the writer's conditional update
+/// decides what happens to it.
+///
+/// * `Applied`: the staged file is renamed onto the draft's name (the name was
+///   not attached before, so nothing the candidate pointed at is replaced).
+/// * `Unchanged`: the draft is already attached. The file stays as it is; the
+///   staged one only fills the name if the file is missing (created, never
+///   replaced), and is removed.
+/// * refused or failed: the staged file is removed, nothing else is touched.
+///
+/// Two triages of one candidate share the draft's name but never a file they
+/// delete: each deletes only its own staged file, and only an `Applied` one
+/// (of which there is exactly one per attached name) writes the name.
 fn commit(
     storage: &storage::StorageHandle,
     id: &str,
     expected: u64,
     prepared: Prepared,
 ) -> Result<Done, Failure> {
-    let (update, written) = match prepared {
+    let (update, staged) = match prepared {
         Prepared::Plain(update) => (update, None),
         Prepared::Draft { dir, name, text } => {
-            let path = dir.join(&name);
-            let existed = path.exists();
-            write_draft(&dir, &path, text.as_bytes()).map_err(|_| {
+            let staged = stage_draft(&dir, &name, text.as_bytes()).map_err(|_| {
                 Failure::new(
                     ErrorCode::StorageUnavailable,
                     "the draft could not be saved",
@@ -451,7 +466,7 @@ fn commit(
             })?;
             (
                 ImprovementUpdate::AttachDraft { draft_path: name },
-                (!existed).then_some(path),
+                Some(staged),
             )
         }
     };
@@ -461,37 +476,77 @@ fn commit(
     };
     let outcome = storage.update_improvement(id, expected, update);
     let result = match outcome {
-        Ok(CasOutcome::Applied { revision }) => Ok(Done {
-            revision,
-            changed: true,
-            draft_file,
-        }),
-        Ok(CasOutcome::Unchanged { revision }) => Ok(Done {
-            revision,
-            changed: false,
-            draft_file,
-        }),
+        Ok(CasOutcome::Applied { revision }) => {
+            let published = match &staged {
+                Some(staged) => staged.publish(),
+                None => Ok(()),
+            };
+            match published {
+                Ok(()) => Ok(Done {
+                    revision,
+                    changed: true,
+                    draft_file,
+                }),
+                Err(_) => Err(Failure::new(
+                    ErrorCode::StorageUnavailable,
+                    "the draft was attached but its file could not be placed; read the candidate",
+                )),
+            }
+        }
+        Ok(CasOutcome::Unchanged { revision }) => {
+            if let Some(staged) = &staged {
+                staged.fill_if_missing();
+            }
+            Ok(Done {
+                revision,
+                changed: false,
+                draft_file,
+            })
+        }
         Ok(CasOutcome::Refused(refusal)) => Err(refusal_failure(refusal, "candidate")),
         Err(_) => Err(Failure::storage()),
     };
-    if result.is_err()
-        && let Some(path) = written
-    {
-        // A draft nothing refers to is not left behind.
-        let _ = std::fs::remove_file(path);
+    // Whatever happened, the staged file is this operation's own: it is gone
+    // now (after a rename it no longer exists).
+    if let Some(staged) = staged {
+        staged.discard();
     }
     result
 }
 
-/// Exclusive temporary file in the draft directory, then a rename: no
-/// partially visible draft, and the file is private to the owner.
-fn write_draft(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// A draft written to a file only its operation owns, not yet at its name.
+struct StagedDraft {
+    temp: PathBuf,
+    target: PathBuf,
+}
+
+impl StagedDraft {
+    /// Put the file at its name, replacing nothing the candidate pointed at.
+    fn publish(&self) -> std::io::Result<()> {
+        std::fs::rename(&self.temp, &self.target)
+    }
+
+    /// Create the name when the file is missing; never replace one.
+    fn fill_if_missing(&self) {
+        // `AlreadyExists` is the expected answer: the draft is in place.
+        let _ = std::fs::hard_link(&self.temp, &self.target);
+    }
+
+    /// Remove the staged file if it is still there.
+    fn discard(self) {
+        let _ = std::fs::remove_file(&self.temp);
+    }
+}
+
+/// Write `bytes` to an exclusive, owner-only temporary file next to `name`.
+fn stage_draft(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<StagedDraft> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     std::fs::create_dir_all(dir)?;
-    let temp = path.with_extension(format!(
-        "{}-{}.tmp",
+    let target = dir.join(name);
+    let temp = dir.join(format!(
+        ".{name}.{}-{}.tmp",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
@@ -505,13 +560,13 @@ fn write_draft(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = options.open(&temp)?;
     let result = (|| {
         file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temp, path)
+        file.sync_all()
     })();
-    if result.is_err() {
+    if let Err(error) = result {
         let _ = std::fs::remove_file(&temp);
+        return Err(error);
     }
-    result
+    Ok(StagedDraft { temp, target })
 }
 
 fn open(path: &Path) -> Result<Database, WorkbenchError> {

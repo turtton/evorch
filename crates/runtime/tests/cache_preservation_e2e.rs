@@ -1572,6 +1572,20 @@ async fn resume_unfinished_model_request(
     above_threshold: bool,
     convert: Option<u32>,
 ) {
+    resume_unfinished_model_request_with(compacted, restart, above_threshold, convert, false).await;
+}
+
+/// `through_management`: the lesson that arrives while the run is stopped is
+/// validated and promoted by the management screens' conditional update (the
+/// one the core's `memory` commands call, quoting the revision read) instead
+/// of the learning queue's own writes.
+async fn resume_unfinished_model_request_with(
+    compacted: bool,
+    restart: bool,
+    above_threshold: bool,
+    convert: Option<u32>,
+    through_management: bool,
+) {
     let (gate, arrived) = mock_openai::ResponseGate::new();
     let mut script = vec![read_response(2)];
     if compacted {
@@ -1654,11 +1668,26 @@ async fn resume_unfinished_model_request(
         scope: storage::memory::LessonScope::Project,
     };
     storage.handle().append_lesson(&lesson).unwrap();
-    storage
-        .handle()
-        .validate_lesson(&lesson.id, &lesson.evidence)
-        .unwrap();
-    storage.handle().promote_lesson(&lesson.id).unwrap();
+    if through_management {
+        use storage::management::{CasOutcome, MemoryOp};
+        for op in [MemoryOp::Validate, MemoryOp::Promote] {
+            let revision = storage::Database::open(&config)
+                .unwrap()
+                .memory_revision(&lesson.id)
+                .unwrap();
+            let outcome = storage
+                .handle()
+                .update_memory(&lesson.id, revision, op)
+                .unwrap();
+            assert!(matches!(outcome, CasOutcome::Applied { .. }), "{outcome:?}");
+        }
+    } else {
+        storage
+            .handle()
+            .validate_lesson(&lesson.id, &lesson.evidence)
+            .unwrap();
+        storage.handle().promote_lesson(&lesson.id).unwrap();
+    }
     let memory = runtime::memory::MemoryBoundary::capture(&config, "project").unwrap();
     assert_eq!(memory.entries().len(), 1);
     let (storage, restart) = if let Some(source) = convert {
@@ -1733,6 +1762,16 @@ async fn resume_unfinished_model_request(
     assert!(events[restored_from..].iter().any(|event| matches!(&event.kind,
         EventKind::Provider(ProviderEvent::RequestCompleted { cache_read_tokens, run_id: Some(id), .. })
         if id == &run.to_string() && *cache_read_tokens > 0)));
+}
+
+/// A lesson promoted by a person through the management update reaches the tasks
+/// created afterwards (the boundary captured above holds it), but not a run that
+/// already exists: its resume sends exactly the input it was interrupted with.
+#[tokio::test]
+async fn promoting_a_lesson_through_the_management_update_keeps_an_existing_runs_resume_prefix() {
+    for compacted in [false, true] {
+        resume_unfinished_model_request_with(compacted, true, false, None, true).await;
+    }
 }
 
 #[tokio::test]

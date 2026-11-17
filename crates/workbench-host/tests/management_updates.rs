@@ -1295,3 +1295,133 @@ fn an_unknown_operation_id_is_not_found() {
     let _: OperationId = operation("unused");
     let _ = MemoryStatus::Candidate;
 }
+
+const SENTINEL: &str = "a draft somebody else wrote";
+
+/// A draft file at the name a triage of `id` uses, with content only the test knows.
+fn put_draft(w: &World, id: &str) -> PathBuf {
+    let dir = w.dir.path().join("drafts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{id}.issue.md"));
+    std::fs::write(&path, SENTINEL).unwrap();
+    path
+}
+
+#[test]
+fn a_triage_the_writer_refuses_keeps_the_draft_that_was_already_there() {
+    let mut w = setup(None, true);
+    record(&w, "kept");
+    let path = put_draft(&w, "kept");
+    let shown = improvement_detail(&w, "kept").summary.state.revision;
+
+    // Stale: the candidate moved on after the revision was read.
+    w.store
+        .handle()
+        .set_improvement_status("kept", storage::improvement::ImprovementStatus::Reviewed)
+        .unwrap();
+    send_improvement(&mut w, web(), triage_command("stale", "kept", shown.0)).unwrap();
+    w.settle();
+    assert_eq!(
+        improvement_failed(&improvement_update_checked(&w, "stale")),
+        ErrorCode::StaleRevision
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), SENTINEL);
+
+    // Denied: a dismissed candidate is not triaged, at the revision that stands.
+    w.store
+        .handle()
+        .set_improvement_status("kept", storage::improvement::ImprovementStatus::Dismissed)
+        .unwrap();
+    let now = improvement_detail(&w, "kept").summary.state.revision;
+    send_improvement(&mut w, web(), triage_command("denied", "kept", now.0)).unwrap();
+    w.settle();
+    assert_eq!(
+        improvement_update_checked(&w, "denied").denial,
+        Some(DenialReason::NotApplicableInState)
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), SENTINEL);
+    assert_eq!(drafts(&w), vec!["kept.issue.md".to_owned()]);
+    assert_eq!(stored_candidate(&w, "kept").unwrap().draft_path, None);
+}
+
+#[test]
+fn a_triage_that_changes_nothing_keeps_the_attached_draft_and_fills_a_missing_one() {
+    let mut w = setup(None, true);
+    record(&w, "same");
+    let revision = improvement_detail(&w, "same").summary.state.revision;
+    send_improvement(&mut w, web(), triage_command("first", "same", revision.0)).unwrap();
+    w.settle();
+    let attached = improvement_detail(&w, "same");
+    let path = w.dir.path().join("drafts/same.issue.md");
+
+    // The attached file has since been edited: another triage must not replace it.
+    std::fs::write(&path, SENTINEL).unwrap();
+    send_improvement(
+        &mut w,
+        local_desktop(),
+        triage_command("again", "same", attached.summary.state.revision.0),
+    )
+    .unwrap();
+    w.settle();
+    assert_eq!(improvement_update_checked(&w, "again").changed, Some(false));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), SENTINEL);
+
+    // A draft that is attached but whose file is gone is made again, never over a file.
+    std::fs::remove_file(&path).unwrap();
+    send_improvement(
+        &mut w,
+        web(),
+        triage_command("refill", "same", attached.summary.state.revision.0),
+    )
+    .unwrap();
+    w.settle();
+    let refilled = improvement_update_checked(&w, "refill");
+    assert_eq!(refilled.changed, Some(false));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("title of same"), "{text}");
+    assert_eq!(
+        drafts(&w),
+        vec!["same.issue.md".to_owned()],
+        "no staged file stays"
+    );
+}
+
+#[test]
+fn two_clients_triaging_at_once_leave_the_draft_the_database_points_at() {
+    let hold = Hold::new(UpdateStage::BeforeCommit);
+    let mut w = setup(Some(hold.hook()), true);
+    record(&w, "race");
+    let shown = improvement_detail(&w, "race").summary.state.revision;
+
+    send_improvement(
+        &mut w,
+        local_desktop(),
+        triage_command("desktop", "race", shown.0),
+    )
+    .unwrap();
+    send_improvement(&mut w, web(), triage_command("web", "race", shown.0)).unwrap();
+    // Both are at the write with nothing staged or attached; they go together.
+    w.rt.block_on(hold.reached(2));
+    hold.release();
+    w.settle();
+
+    let desktop = improvement_update_checked(&w, "desktop");
+    let web = improvement_update_checked(&w, "web");
+    let (winner, loser) = match (
+        is_ready(&desktop.operation.state),
+        is_ready(&web.operation.state),
+    ) {
+        (true, false) => (&desktop, &web),
+        (false, true) => (&web, &desktop),
+        other => panic!("exactly one triage wins, got {other:?}"),
+    };
+    assert_eq!(improvement_failed(loser), ErrorCode::StaleRevision);
+    assert_eq!(winner.draft_file.as_deref(), Some("race.issue.md"));
+
+    // Whoever lost, the file the winner attached is there, whole, and alone.
+    let stored = stored_candidate(&w, "race").unwrap();
+    assert_eq!(stored.draft_path.as_deref(), Some("race.issue.md"));
+    let text = std::fs::read_to_string(w.dir.path().join("drafts/race.issue.md")).unwrap();
+    assert!(text.contains("title of race"), "{text}");
+    assert_eq!(drafts(&w), vec!["race.issue.md".to_owned()]);
+}
