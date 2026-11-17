@@ -138,11 +138,21 @@ pub(crate) async fn request<B: WorkbenchBackend>(
     // request id lets the browser ask again and get the recorded outcome. The
     // slot belongs to the task, so a disconnect does not free it early.
     let backend = Arc::clone(&state.backend);
-    let handle = tokio::spawn(async move {
+    let handle = state.shared.tasks.spawn(async move {
         let answer = backend.handle_request(&session, envelope, provenance).await;
         drop(slot);
         answer
     });
+    let Ok(handle) = handle else {
+        return error_response(
+            WorkbenchError::new(
+                ErrorCode::Draining,
+                "restart task admission closed",
+                RetryAdvice::Never,
+            ),
+            Some(&request_id),
+        );
+    };
     match handle.await {
         Ok(answer) if answer.request_id == request_id => reply_response(answer),
         Ok(_) | Err(_) => error_response(internal(), Some(&request_id)),

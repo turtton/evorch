@@ -14,6 +14,7 @@ use axum::routing::{get, post};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -38,12 +39,15 @@ pub enum WebServerError {
     Serve(#[source] io::Error),
     #[error("the web server task panicked")]
     Panicked,
+    #[error("restart web drain failed: {0}")]
+    RestartDrain(String),
 }
 
 /// The HTTP application without a socket, for embedding and tests.
 pub struct WebApp {
     router: Router,
     shutdown: ShutdownSignal,
+    tasks: crate::RestartTasks,
 }
 
 impl WebApp {
@@ -62,12 +66,14 @@ impl WebApp {
     ) -> Result<Self, ConfigError> {
         let policy = config.policy()?;
         let shutdown = ShutdownSignal::new();
+        let tasks = crate::RestartTasks::default();
         let shared = Arc::new(Shared {
             policy,
             in_flight: Arc::new(Semaphore::new(config.max_in_flight_requests)),
             backend_slots: Arc::new(Semaphore::new(config.max_in_flight_requests)),
             sse_slots: Arc::new(Semaphore::new(config.max_sse_streams)),
             shutdown: shutdown.clone(),
+            tasks: tasks.clone(),
         });
         let output_backend = Arc::clone(&backend);
         let state = Arc::new(AppState::new(backend, Arc::clone(&shared), config, assets));
@@ -91,7 +97,11 @@ impl WebApp {
                 output_backend,
                 crate::output::protect_response::<B>,
             ));
-        Ok(Self { router, shutdown })
+        Ok(Self {
+            router,
+            shutdown,
+            tasks,
+        })
     }
 
     /// The router, ready to be served or driven with `tower::ServiceExt`.
@@ -112,6 +122,10 @@ pub struct WebServer {
     local_addr: SocketAddr,
     shutdown: ShutdownSignal,
     task: Option<JoinHandle<io::Result<()>>>,
+    tasks: crate::RestartTasks,
+    backend_drain: Pin<
+        Box<dyn Future<Output = Result<(), workbench_protocol::errors::WorkbenchError>> + Send>,
+    >,
 }
 
 impl WebServer {
@@ -135,7 +149,8 @@ impl WebServer {
         if !config.enabled {
             return Ok(None);
         }
-        let app = WebApp::with_assets(&config, backend, assets)?;
+        let app = WebApp::with_assets(&config, backend.clone(), assets)?;
+        let backend_drain = Box::pin(async move { backend.drain_for_restart().await });
         let listener = TcpListener::bind(config.bind)
             .await
             .map_err(WebServerError::Bind)?;
@@ -161,6 +176,8 @@ impl WebServer {
             local_addr,
             shutdown,
             task: Some(task),
+            tasks: app.tasks.clone(),
+            backend_drain,
         }))
     }
 
@@ -169,9 +186,29 @@ impl WebServer {
         self.local_addr
     }
 
-    /// Stop accepting connections, end every SSE stream and wait until the
-    /// server has finished its in-flight requests.
+    /// Stop accepting connections, end SSE streams and join connections within
+    /// the configured grace. Accepted backend commands are NOT interrupted or
+    /// joined; only restart uses the stronger detached-work completion proof.
     pub async fn shutdown(mut self) -> Result<(), WebServerError> {
+        self.stop_connections().await
+    }
+
+    /// Join connections, accepted backend requests, adapter SSE pumps and
+    /// backend-owned delivery work. The caller must enforce its fixed restart
+    /// deadline; cancellation never aborts an already accepted backend command.
+    pub async fn shutdown_for_restart(mut self) -> Result<(), WebServerError> {
+        self.stop_connections().await?;
+        self.tasks
+            .drain()
+            .await
+            .map_err(|e| WebServerError::RestartDrain(e.to_string()))?;
+        self.backend_drain
+            .as_mut()
+            .await
+            .map_err(|e| WebServerError::RestartDrain(format!("{e:?}")))
+    }
+
+    async fn stop_connections(&mut self) -> Result<(), WebServerError> {
         self.shutdown.trigger();
         match self.task.take() {
             Some(task) => match task.await {

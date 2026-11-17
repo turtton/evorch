@@ -3,17 +3,23 @@
 use crate::backend::HostBackend;
 use std::{io, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
-pub(super) type Request = oneshot::Sender<io::Result<ControlDrained>>;
+pub(super) struct Request {
+    pub deadline: tokio::time::Instant,
+    pub reply: oneshot::Sender<io::Result<ControlDrained>>,
+}
 #[derive(Clone)]
 pub struct ControlDrainHandle(pub(super) mpsc::UnboundedSender<Request>);
 pub struct ControlDrained {
     pub(super) backend: Arc<HostBackend>,
 }
 impl ControlDrainHandle {
-    pub async fn drain(&self) -> io::Result<ControlDrained> {
+    pub async fn drain(&self, deadline: tokio::time::Instant) -> io::Result<ControlDrained> {
         let (send, reply) = oneshot::channel();
         self.0
-            .send(send)
+            .send(Request {
+                deadline,
+                reply: send,
+            })
             .map_err(|_| io::Error::other("control owner unavailable"))?;
         reply
             .await

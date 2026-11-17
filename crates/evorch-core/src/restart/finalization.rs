@@ -1,4 +1,4 @@
-//! Irreversible capture and M2 stages 1–8. Nothing here can exec.
+//! Irreversible capture and M2 stages 1–11. Raw exec remains disconnected.
 #[cfg(target_os = "linux")]
 mod later;
 #[cfg(not(target_os = "linux"))]
@@ -17,7 +17,7 @@ impl RestartCoordinator {
     /// Internal wiring point, not a transport operation. The prepared transaction
     /// is created/read back through the existing writer BEFORE calling this.
     /// Returns only acceptance; use wait_finalization for completion (currently
-    /// always FailedClosed because stages 9..11 and raw exec are not connected).
+    /// always FailedClosed because raw exec (stage 12) is not connected).
     pub fn start_finalization(
         &self,
         id: RestartId,

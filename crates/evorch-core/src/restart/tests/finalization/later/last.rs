@@ -12,6 +12,7 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 const WORKER: &str = "restart::tests::finalization::later::last::final_three_process_worker";
+mod web;
 
 #[derive(Clone, Copy, Debug)]
 enum Action {
@@ -30,11 +31,30 @@ fn signal(name: &str) {
     )
     .unwrap();
 }
+// Each group retains every cell and uses a fresh masked subprocess. Keeping
+// independent stages in separate runner cases avoids serial ELF/SQLite fixture
+// work accumulating against nextest's centralized hang watchdog.
 #[tokio::test]
-async fn final_three_failure_stop_shutdown_and_real_signal_matrix() {
+async fn stage_nine_failure_stop_shutdown_matrix() {
+    matrix("9", 5, 0).await;
+}
+#[tokio::test]
+async fn stage_ten_failure_stop_shutdown_matrix() {
+    matrix("10", 5, 0).await;
+}
+#[tokio::test]
+async fn stage_eleven_partial_stop_failure_stop_shutdown_matrix() {
+    matrix("11", 5, 0).await;
+}
+#[tokio::test]
+async fn final_signal_restore_and_web_drain_matrix() {
+    matrix("boundaries", 10, 6).await;
+}
+async fn matrix(group: &str, expected_cells: usize, expected_signals: usize) {
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", WORKER, "--nocapture"])
         .env("EVORCH_MASKED_TEST_CHILD", "1")
+        .env("EVORCH_M2_MATRIX_GROUP", group)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -45,6 +65,7 @@ async fn final_three_failure_stop_shutdown_and_real_signal_matrix() {
     let mut cells = 0;
     let mut signals = 0;
     while let Some(line) = lines.next_line().await.unwrap() {
+        eprintln!("M2 child: {line}");
         if let Some(name) = line.strip_prefix("M2-SIGNAL ") {
             rustix::process::kill_process(
                 rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap(),
@@ -70,17 +91,20 @@ async fn final_three_failure_stop_shutdown_and_real_signal_matrix() {
     }
     drop(child.stdin.take());
     assert!(child.wait().await.unwrap().success());
-    assert_eq!(cells, 22); // 3 stages x 5 races, success, 3 boundaries x 2 signals
-    assert_eq!(signals, 6);
+    assert_eq!(cells, expected_cells);
+    assert_eq!(signals, expected_signals);
 }
 #[tokio::test]
 #[ignore = "single-threaded-entry subprocess, invoked by the matrix parent"]
 async fn final_three_process_worker() {
-    for stage in [
-        ExitStage::ExecPrepared,
-        ExitStage::SignalsStopped,
-        ExitStage::OwnerStopped,
-    ] {
+    let group = std::env::var("EVORCH_M2_MATRIX_GROUP").unwrap();
+    if group != "boundaries" {
+        let stage = match group.as_str() {
+            "9" => ExitStage::ExecPrepared,
+            "10" => ExitStage::SignalsStopped,
+            "11" => ExitStage::OwnerStopped,
+            _ => panic!("unknown matrix group"),
+        };
         for race in [
             Race::Failure,
             Race::Stop,
@@ -90,8 +114,12 @@ async fn final_three_process_worker() {
         ] {
             cell(stage, Action::Race(race), false).await;
         }
+        return;
     }
     cell(ExitStage::OwnerStopped, Action::Success, true).await;
+    web::cell(web::Mode::Release).await;
+    web::cell(web::Mode::Deadline).await;
+    web::cell(web::Mode::Shutdown).await;
     for (stage, after) in [
         (ExitStage::SignalsStopped, false),
         (ExitStage::OwnerStopped, false),
@@ -182,6 +210,15 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
         None
     };
     let tx = create(&host, metadata);
+    let reached = Arc::new(Mutex::new(Vec::new()));
+    let previous = target.observe.take();
+    let trace = reached.clone();
+    target.observe = Some(Arc::new(move |now| {
+        trace.lock().unwrap().push(now);
+        if let Some(previous) = &previous {
+            previous(now);
+        }
+    }));
     core.start_finalization(id, &mut host, tx, target).unwrap();
     let check = async {
         let mut control_client = if let Some((mut stream, ready, release)) = control_client {
@@ -291,6 +328,45 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
         ));
         reclaimed(&host, &core, true).await;
         let completed = core.0.state.lock().unwrap().completed_stage.unwrap();
+        let interrupted =
+            failure || matches!(action, Action::Race(Race::Shutdown) | Action::Signal(_));
+        let expected = if matches!(action, Action::Race(Race::Shutdown))
+            && stage == ExitStage::SignalsStopped
+        {
+            // Reader transfer completes before its prohibition checkpoint. The
+            // factual stage is retained, but stage 11 must never be entered.
+            ExitStage::SignalsStopped
+        } else if interrupted && !after_owner {
+            match stage {
+                ExitStage::ExecPrepared => ExitStage::Armed,
+                ExitStage::SignalsStopped => ExitStage::ExecPrepared,
+                ExitStage::OwnerStopped => ExitStage::SignalsStopped,
+                _ => unreachable!(),
+            }
+        } else {
+            ExitStage::OwnerStopped
+        };
+        assert_eq!(completed, expected, "{stage:?}/{action:?}/{after_owner}");
+        let last_reached = if interrupted && !after_owner {
+            stage
+        } else {
+            ExitStage::OwnerStopped
+        };
+        assert_eq!(
+            *reached.lock().unwrap(),
+            [
+                ExitStage::TargetChecked,
+                ExitStage::OwnersHeld,
+                ExitStage::Armed,
+                ExitStage::ExecPrepared,
+                ExitStage::SignalsStopped,
+                ExitStage::OwnerStopped,
+            ]
+            .into_iter()
+            .filter(|now| *now <= last_reached)
+            .collect::<Vec<_>>(),
+            "failure must not enter a later stage"
+        );
         if matches!(action, Action::Race(Race::Stop) | Action::Success) {
             assert_eq!(completed, ExitStage::OwnerStopped);
             assert!(
@@ -329,6 +405,21 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
             std::fs::remove_file(&socket).unwrap();
             std::fs::rename(&displaced, &socket).unwrap();
         }
+        let partial_owner_stop = failure
+            && stage == ExitStage::OwnerStopped
+            && !matches!(action, Action::Race(Race::FailureShutdown));
+        if partial_owner_stop {
+            // The worker joined, but identity-guarded unlink refused our
+            // replacement. This is NOT a pre-stop failure: recovery must stay
+            // sticky/unconfirmed, without dropping lifetime or reopening gates.
+            assert!(matches!(
+                host.owner.restart_worker_failed_closed(),
+                Err(runtime::ownership::RegistryError::Preparation(_))
+            ));
+            assert_eq!(completed, ExitStage::SignalsStopped);
+        } else if completed < ExitStage::OwnerStopped {
+            heartbeat(&host).await;
+        }
         assert_eq!(model.0.load(Ordering::SeqCst), 1);
         assert!(host.restart_producers().iter().all(|gate| !gate.is_open()));
         assert!(
@@ -353,4 +444,25 @@ async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
     drop(instance);
     println!("M2-CELL {stage:?} {action:?} {after_owner}");
     std::io::stdout().flush().unwrap();
+}
+
+async fn heartbeat(host: &BootstrappedHost) {
+    // Subscribe AFTER failure cleanup: a stale pre-failure event cannot prove
+    // that the worker continues to renew the same held generation.
+    let mut events = host.runtime.event_bus().subscribe();
+    let idle = host.owner.attach("idle").unwrap();
+    loop {
+        let event = match events.recv().await {
+            Ok(event) => event,
+            Err(event_bus::RecvError::Lagged(_)) => continue,
+            Err(error) => panic!("heartbeat stream ended: {error:?}"),
+        };
+        if matches!(event.kind, event_bus::EventKind::Ownership(event)
+            if event.thread_id == "idle" && event.owner_id == idle.lease.owner_id
+                && event.generation == idle.lease.generation
+                && event.action == event_bus::OwnershipAction::Heartbeat)
+        {
+            break;
+        }
+    }
 }

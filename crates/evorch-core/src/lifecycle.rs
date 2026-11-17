@@ -122,21 +122,41 @@ impl LifecycleDriver {
                 Some(request) = self.control_requests.recv() => {
                     // A caller that retained web ownership cannot supply a receipt.
                     if web_enabled && web.is_none() {
-                        let _ = request.send(Err(std::io::Error::other("web control drain not owned")));
+                        let _ = request.reply.send(Err(std::io::Error::other("web control drain not owned")));
                         continue;
                     }
                     drop(listener.take());
                     backend.close();
                     let _ = shutdown.send(true);
-                    let mut result = client_failure.take().map_or(Ok(()), |e| Err(std::io::Error::other(e)));
-                    if let Some(web) = web.take()
-                        && let Err(error) = web.shutdown().await {
-                        result = Err(std::io::Error::other(error));
-                    }
-                    while let Some(joined) = clients.join_next().await {
-                        if let Err(error) = joined { result = Err(std::io::Error::other(error)); }
-                    }
-                    let _ = request.send(result.map(|()| control::ControlDrained { backend: backend.clone() }));
+                    // Use the SAME boot deadline, not a fresh grace window.
+                    // A blocked backend cannot strand the signal owner forever.
+                    let drain = async {
+                        let mut result = client_failure.take().map_or(Ok(()), |e| Err(std::io::Error::other(e)));
+                        if let Some(web) = web.take()
+                            && let Err(error) = web.shutdown_for_restart().await {
+                            result = Err(std::io::Error::other(error));
+                        }
+                        while let Some(joined) = clients.join_next().await {
+                            if let Err(error) = joined { result = Err(std::io::Error::other(error)); }
+                        }
+                        result
+                    };
+                    let (result, operator_shutdown) = tokio::select! {
+                        result = tokio::time::timeout_at(request.deadline, drain) => (
+                            result.unwrap_or_else(|_| Err(std::io::Error::other("control drain exceeded fixed boot deadline"))),
+                            false,
+                        ),
+                        _ = signals.received() => (
+                            Err(std::io::Error::other("control drain interrupted by operator shutdown")),
+                            true,
+                        ),
+                    };
+                    let result = result
+                        .and_then(|()| if Instant::now() >= request.deadline {
+                            Err(std::io::Error::other("control drain completed after fixed boot deadline"))
+                        } else { Ok(()) });
+                    let _ = request.reply.send(result.map(|()| control::ControlDrained { backend: backend.clone() }));
+                    if operator_shutdown { break Ok(()); }
                 },
                 _ = background.notified() => (),
                 _ = area_work.notified() => (),

@@ -185,9 +185,10 @@ impl RestartCoordinator {
             .environment
             .as_ref()
             .ok_or("exec environment missing")?;
+        let control_deadline = origin + std::time::Duration::from_secs(BOOT_TIMEOUT_SECS);
         let control = tokio::time::timeout_at(
-            origin + std::time::Duration::from_secs(BOOT_TIMEOUT_SECS),
-            environment.control.drain(),
+            control_deadline,
+            environment.control.drain(control_deadline),
         )
         .await
         .map_err(|_| "control drain exceeded fixed boot deadline")?

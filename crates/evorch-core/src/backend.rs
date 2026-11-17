@@ -20,6 +20,7 @@ pub struct HostBackend {
     closing: AtomicBool,
     unix_clients: AtomicU32,
     web_enabled: AtomicBool,
+    web_deliveries: workbench_web::RestartTasks,
 }
 
 pub(crate) struct ConnectedClient<'a>(&'a HostBackend);
@@ -72,6 +73,7 @@ impl HostBackend {
             closing: AtomicBool::new(false),
             unix_clients: AtomicU32::new(0),
             web_enabled: AtomicBool::new(false),
+            web_deliveries: Default::default(),
             hello: ServerHello {
                 protocol_version: ProtocolVersion::CURRENT,
                 capabilities: Capability::IMPLEMENTED.to_vec(),
@@ -202,6 +204,12 @@ impl HostBackend {
     }
 }
 impl WorkbenchBackend for HostBackend {
+    async fn drain_for_restart(&self) -> Result<(), WorkbenchError> {
+        self.web_deliveries
+            .drain()
+            .await
+            .map_err(|_| error(ErrorCode::Internal, "web delivery drain unconfirmed"))
+    }
     fn protect_output(&self, output: serde_json::Value) -> serde_json::Value {
         protect_value(&self.redactor, output)
     }
@@ -225,7 +233,7 @@ impl WorkbenchBackend for HostBackend {
         let redactor = self.redactor.clone();
         // Reserve capacity BEFORE reading: host queue retains a bounded terminal
         // slot and delivers ResyncRequired if this downstream is slow.
-        tokio::spawn(async move {
+        self.web_deliveries.spawn(async move {
             loop {
                 let Ok(permit) = tx.reserve().await else {
                     break;
@@ -244,7 +252,7 @@ impl WorkbenchBackend for HostBackend {
                     break;
                 }
             }
-        });
+        }).map_err(|_| error(ErrorCode::Draining, "web delivery admission closed"))?;
         Ok(BackendSubscription { started, events })
     }
     async fn server_hello(&self) -> Result<ServerHello, WorkbenchError> {
