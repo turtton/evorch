@@ -643,6 +643,82 @@ async fn a_request_sent_again_after_its_operation_left_the_table_does_not_run_ag
     core.shutdown().await.unwrap();
 }
 
+/// The area remembers the id and digest of 8192 accepted commands for as long as
+/// the core runs and never evicts one. Once that memory is full a new id is
+/// refused before it is accepted, and every id it still knows is answered:
+/// resent, it is never run again; used for another request, it conflicts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_memory_of_accepted_commands_refuses_new_ids_and_still_answers_known_ones() {
+    // Mirrors `MAX_SEEN` in the area: a mismatch fails one of the assertions below.
+    const REMEMBERED: usize = 8192;
+    let f = Fixture::new();
+    f.source.push_ok(&key(7), fetched(7));
+    f.source.repeat_last();
+    let mut core = f.core().await;
+    let _permit = core.owner.start(THREAD).unwrap();
+    let mut events = subscribe(&core);
+    let revision = read(&core).lifecycle_revision;
+    send(
+        &core,
+        link("link-1", "owner/repo#7", revision),
+        local_desktop(),
+    )
+    .unwrap();
+    settled(&mut events, &["link-1"]).await;
+    // Accepted up to the last one the memory holds, in batches the table can keep running.
+    let ids: Vec<String> = (0..REMEMBERED - 1).map(|n| format!("r-{n}")).collect();
+    for batch in ids.chunks(32) {
+        for id in batch {
+            send(&core, refresh(id), local_desktop()).unwrap();
+        }
+        let names: Vec<&str> = batch.iter().map(String::as_str).collect();
+        settled(&mut events, &names).await;
+    }
+    // The memory is full: a new id is refused, and again, and nothing was run.
+    for id in ["one-too-many", "and-another"] {
+        let refused = send(&core, refresh(id), local_desktop()).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::LimitExceeded, "{id}");
+    }
+    // The oldest ids, long gone from the operation table, are still recognised.
+    for (id, command) in [
+        ("link-1", link("link-1", "owner/repo#7", revision)),
+        ("r-0", refresh("r-0")),
+        ("r-1", refresh("r-1")),
+    ] {
+        let again = send(&core, command, web()).unwrap();
+        assert_eq!(
+            again.disposition,
+            CommandDisposition::AlreadyApplied,
+            "{id}"
+        );
+        let Some(CommandResult::PullRequests(PullRequestsResult::Operation(view))) =
+            again.result.as_deref()
+        else {
+            panic!("{id}: the repeated command names its operation");
+        };
+        assert!(view.outcome_unknown, "{id}");
+        assert!(
+            matches!(view.operation.state, OperationState::Failed { .. }),
+            "{id}: {view:?}"
+        );
+    }
+    // The newest id is still in the table and answers with its real outcome.
+    let newest = format!("r-{}", REMEMBERED - 2);
+    let again = send(&core, refresh(&newest), web()).unwrap();
+    assert_eq!(again.disposition, CommandDisposition::AlreadyApplied);
+    // An id belongs to the request it was first used for, full memory or not.
+    let conflict = send(&core, link("link-1", "owner/repo#8", revision), web()).unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::Conflict);
+    let conflict = send(&core, unlink("r-0", revision), web()).unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::Conflict);
+    assert_eq!(
+        read(&core).link.as_ref().map(|l| l.link_revision),
+        Some(Revision(1)),
+        "the link was applied once"
+    );
+    core.shutdown().await.unwrap();
+}
+
 /// A planned restart seals the host's admission: a command already accepted keeps
 /// the restart permit until its outcome is settled (even before its task was
 /// polled), new work is refused, and a fetch that is still held when the core
@@ -666,7 +742,8 @@ async fn a_planned_restart_waits_for_accepted_commands_and_never_adopts_a_cut_of
         local_desktop(),
     )
     .unwrap();
-    assert!(restart.transition(1, HostRestartPhase::Sealing));
+    // The order the restart coordinator takes: Preparing while it drains, then Sealing.
+    assert!(restart.transition(1, HostRestartPhase::Preparing));
     let refused = send(&core, refresh("refresh-late"), web())
         .expect_err("new work is refused while the host prepares to restart");
     assert_eq!(refused.code, ErrorCode::Busy);
@@ -681,6 +758,10 @@ async fn a_planned_restart_waits_for_accepted_commands_and_never_adopts_a_cut_of
     let ended = settled(&mut events, &["link-1"]).await;
     assert_eq!(ended[0].operation.state, OperationState::Ready);
     drained.await;
+    assert!(restart.transition(1, HostRestartPhase::Sealing));
+    let refused = send(&core, refresh("refresh-sealed"), web())
+        .expect_err("a sealed host takes no new work either");
+    assert_eq!(refused.code, ErrorCode::Busy);
     assert!(
         read(&core).link.is_some(),
         "the accepted command was applied"

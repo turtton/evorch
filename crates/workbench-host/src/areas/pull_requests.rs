@@ -34,7 +34,7 @@ use event_bus::{EventKind, PullRequestChangedField, PullRequestEvent, RecvError}
 use runtime::AgentRuntime;
 use runtime::ownership::OwnerPermit;
 use runtime::pull_requests::{PullRequestError, PullRequestService};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use storage::pull_request_auto_fix::{PR_AUTO_FIX_LIMIT, PrAutoFixRejection};
 use storage::pull_requests as stored;
@@ -80,19 +80,18 @@ struct Inner {
     seen: Mutex<Seen>,
 }
 
-/// How many accepted requests the area still recognises after their operation
-/// left the table (which keeps [`MAX_OPERATIONS`] for reading outcomes).
+/// How many accepted requests the area remembers for the life of the core.
 const MAX_SEEN: usize = 8192;
 
-/// The id and request digest of every accepted command, kept far longer than
-/// the operation itself. A request sent again after its operation was evicted
-/// is answered as an unknown outcome and never runs a second time, and the
-/// same id with another request is still a conflict. The bound is only on how
-/// many later commands may be accepted before a resend is no longer recognised.
+/// The id and request digest of every accepted command, kept for as long as the
+/// core runs and never evicted: a request sent again after its operation left
+/// the table is answered as an unknown outcome and never runs a second time, and
+/// the same id with another request is still a conflict. When the memory is full
+/// a new id is refused before it is accepted (`LimitExceeded`), while an id that
+/// is already known is still answered.
 #[derive(Default)]
 struct Seen {
     digests: HashMap<OperationId, [u8; 32]>,
-    order: VecDeque<OperationId>,
 }
 
 impl Seen {
@@ -104,21 +103,16 @@ impl Seen {
         }
     }
 
+    fn is_full(&self) -> bool {
+        self.digests.len() >= MAX_SEEN
+    }
+
     fn remember(&mut self, id: &OperationId, digest: [u8; 32]) {
-        if self.digests.insert(id.clone(), digest).is_none() {
-            self.order.push_back(id.clone());
-        }
-        while self.order.len() > MAX_SEEN {
-            if let Some(oldest) = self.order.pop_front() {
-                self.digests.remove(&oldest);
-            }
-        }
+        self.digests.insert(id.clone(), digest);
     }
 
     fn forget(&mut self, id: &OperationId) {
-        if self.digests.remove(id).is_some() {
-            self.order.retain(|known| known != id);
-        }
+        self.digests.remove(id);
     }
 }
 
@@ -281,7 +275,8 @@ impl PullRequestsArea {
     /// answered even when the thread has meanwhile left this core.
     ///
     /// # Errors
-    /// `Conflict` for an id used by a different request, `LimitExceeded` when
+    /// `Conflict` for an id used by a different request, `LimitExceeded` when the
+    /// memory of accepted ids is full or
     /// every retained operation is still running, `Draining` once the host is
     /// stopping, and what `permit` refuses with.
     pub(crate) fn submit(
@@ -301,6 +296,13 @@ impl PullRequestsArea {
             let mut operations = lock(&inner.operations);
             if let Some(known) = inner.answer(&mut operations, &command, &id, &digest)? {
                 return Ok(known);
+            }
+            if lock(&inner.seen).is_full() {
+                return Err(error(
+                    ErrorCode::LimitExceeded,
+                    "this core remembers no more new commands until it restarts",
+                    RetryAdvice::Never,
+                ));
             }
             let revision = operations.next_revision();
             let view = PullRequestOperationView {
