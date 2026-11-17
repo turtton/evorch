@@ -51,6 +51,8 @@ pub struct WorkbenchState<S> {
     pub(super) usage: crate::panes::usage::UsagePane,
     pub(super) context_inspector: crate::panes::context_inspector::ContextInspectorPane,
     pub(super) shell_jobs: crate::panes::shell_jobs::ShellJobsPane,
+    /// Threads and runs deleted since the last frame, whose pane state is dropped there.
+    pub(super) retired_view_owners: Vec<String>,
     pub(super) evaluations: crate::model::evaluations::EvaluationsModel,
     pub(super) evaluations_waker_installed: bool,
     pub(super) memory: crate::panes::memory::MemoryPane,
@@ -219,6 +221,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             usage: crate::panes::usage::UsagePane::default(),
             context_inspector: crate::panes::context_inspector::ContextInspectorPane::default(),
             shell_jobs: crate::panes::shell_jobs::ShellJobsPane::default(),
+            retired_view_owners: Vec::new(),
             evaluations: crate::model::evaluations::EvaluationsModel::default(),
             evaluations_waker_installed: false,
             memory: crate::panes::memory::MemoryPane::default(),

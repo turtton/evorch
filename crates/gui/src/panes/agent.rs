@@ -166,6 +166,9 @@ pub fn agent_pane_with_repo_root(
                         .is_none_or(|requests| requests.is_empty())
                     && identity.is_none_or(|identity| identity.ledger.is_empty())
                 {
+                    // Nothing is drawn for a transcript now: what the pane kept
+                    // for the one it showed before goes with it.
+                    retire_pane_scope(ui, ui.id());
                     empty_state_body(ui, &ctx, &mut action);
                 } else {
                     let mut branch_action = None;
@@ -367,10 +370,16 @@ fn run_detail_body(
 ) -> Option<super::requests::RequestAction> {
     let (identity, task_rows) = context;
     let pane_id = ui.id();
-    let model_id = if let Some(branch) = branch {
-        pane_id.with(("thread", &branch.thread.id))
+    let (model_id, owner) = if let Some(branch) = branch {
+        (
+            pane_id.with(("thread", &branch.thread.id)),
+            Some(branch.thread.id.to_string()),
+        )
     } else if let Some(identity) = identity {
-        pane_id.with(("run", identity.run_id))
+        (
+            pane_id.with(("run", identity.run_id)),
+            Some(identity.run_id.to_string()),
+        )
     } else if let Some(run_id) = model.entries().iter().find_map(|entry| match entry {
         TranscriptEntry::Message { run_id, .. }
         | TranscriptEntry::Reasoning { run_id, .. }
@@ -379,13 +388,13 @@ fn run_detail_body(
         TranscriptEntry::TurnEnd { run_id, .. } => Some(run_id.as_str()),
         _ => None,
     }) {
-        pane_id.with(("run", run_id))
+        (pane_id.with(("run", run_id)), Some(run_id.to_owned()))
     } else {
         // Standalone transcripts may have no thread or run identity.
-        pane_id.with(("transcript", model.cache_identity()))
+        (pane_id.with(("transcript", model.cache_identity())), None)
     };
     let cache_key = model_id.with("entry-heights");
-    retire_previous_scope(ui, pane_id, model_id);
+    retire_previous_scope(ui, pane_id, model_id, owner);
     let passive_artifacts = super::artifact_card::is_passive(ui.ctx());
     for entry in model.visible_entries() {
         if passive_artifacts {
@@ -822,27 +831,108 @@ fn run_detail_body(
     output.inner
 }
 
+/// What a pane keeps for a transcript it shows, keyed by the transcript's scope
+/// and nothing else would ever collect it: the measured heights, the reader's
+/// open groups and the scroll anchor.
+fn forget_scope(data: &mut egui::util::IdTypeMap, scope: egui::Id) {
+    virtual_list::VirtualList::forget(data, scope.with("entry-heights"));
+    data.remove_temp::<tool_group::OpenGroups>(scope.with("tool-groups-open"));
+    data.remove_temp::<ScrollAnchor>(scope.with("body-anchor"));
+}
+
+fn scope_registry_id() -> egui::Id {
+    egui::Id::new("transcript-scope-registry")
+}
+
+/// Scopes that hold state, with the thread or run each shows (a standalone
+/// transcript has none). It lets a deletion find state of panes it cannot see.
+type ScopeRegistry = Vec<(egui::Id, String)>;
+
 /// A pane that shows another transcript than it did drops what it kept for the
-/// old one (the measured heights, the reader's open groups, the scroll anchor):
-/// that state is keyed by the transcript's scope and nothing else would ever
-/// collect it. Two scopes drawn in one pass share the pane ID; they are left
+/// old one. Two scopes drawn in one pass share the pane ID; they are left
 /// alone rather than made to evict each other.
-fn retire_previous_scope(ui: &egui::Ui, pane_id: egui::Id, scope: egui::Id) {
+fn retire_previous_scope(ui: &egui::Ui, pane_id: egui::Id, scope: egui::Id, owner: Option<String>) {
     let key = pane_id.with("transcript-scope");
     let pass = ui.ctx().cumulative_pass_nr();
-    let previous: Option<(egui::Id, u64)> = ui.data(|data| data.get_temp(key));
+    let previous: Option<(egui::Id, u64)> = ui
+        .data(|data| data.get_temp::<(Option<egui::Id>, u64)>(key))
+        .and_then(|(scope, pass)| scope.map(|scope| (scope, pass)));
     match previous {
-        Some((old, _)) if old == scope => {}
-        // Another scope of this pane already drew this pass.
-        Some((_, seen)) if seen == pass => return,
+        Some((old, _)) if old == scope => return,
+        Some((_, seen)) if seen == pass => {}
         Some((old, _)) => ui.data_mut(|data| {
-            virtual_list::VirtualList::forget(data, old.with("entry-heights"));
-            data.remove_temp::<tool_group::OpenGroups>(old.with("tool-groups-open"));
-            data.remove_temp::<ScrollAnchor>(old.with("body-anchor"));
+            forget_scope(data, old);
+            unregister_scope(data, old);
         }),
         None => {}
     }
-    ui.data_mut(|data| data.insert_temp(key, (scope, pass)));
+    ui.data_mut(|data| {
+        if previous.is_none_or(|(_, seen)| seen != pass) {
+            data.insert_temp(key, (Some(scope), pass));
+        }
+        if let Some(owner) = owner {
+            let mut registry: ScopeRegistry =
+                data.get_temp(scope_registry_id()).unwrap_or_default();
+            if !registry.iter().any(|(id, _)| *id == scope) {
+                registry.push((scope, owner));
+                data.insert_temp(scope_registry_id(), registry);
+            }
+        }
+    });
+}
+
+/// A pane that draws no transcript (an empty thread, none selected) drops what
+/// it kept for the one it drew before.
+fn retire_pane_scope(ui: &egui::Ui, pane_id: egui::Id) {
+    let key = pane_id.with("transcript-scope");
+    let previous: Option<(egui::Id, u64)> = ui
+        .data(|data| data.get_temp::<(Option<egui::Id>, u64)>(key))
+        .and_then(|(scope, pass)| scope.map(|scope| (scope, pass)));
+    if let Some((old, _)) = previous {
+        ui.data_mut(|data| {
+            forget_scope(data, old);
+            unregister_scope(data, old);
+            data.insert_temp(key, (None::<egui::Id>, 0_u64));
+        });
+    }
+}
+
+fn unregister_scope(data: &mut egui::util::IdTypeMap, scope: egui::Id) {
+    if let Some(mut registry) = data.get_temp::<ScopeRegistry>(scope_registry_id()) {
+        registry.retain(|(id, _)| *id != scope);
+        data.insert_temp(scope_registry_id(), registry);
+    }
+}
+
+/// Drops the pane state kept for deleted threads and runs, whichever pane
+/// showed them, whether or not any pane shows them now.
+pub fn forget_transcript_view_state(ctx: &egui::Context, owners: &[String]) {
+    if owners.is_empty() {
+        return;
+    }
+    ctx.data_mut(|data| {
+        let Some(registry) = data.get_temp::<ScopeRegistry>(scope_registry_id()) else {
+            return;
+        };
+        let (gone, kept): (ScopeRegistry, ScopeRegistry) = registry
+            .into_iter()
+            .partition(|(_, owner)| owners.contains(owner));
+        for (scope, _) in &gone {
+            forget_scope(data, *scope);
+        }
+        data.insert_temp(scope_registry_id(), kept);
+    });
+}
+
+/// Whether the pane still holds state for a scope of this thread or run
+/// (for tests).
+#[doc(hidden)]
+#[must_use]
+pub fn holds_transcript_view_state_for_tests(ctx: &egui::Context, owner: &str) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<ScopeRegistry>(scope_registry_id())
+            .is_some_and(|registry| registry.iter().any(|(_, o)| o == owner))
+    })
 }
 
 const LATEST_ANCHOR_ID: &str = "transcript-latest-anchor";

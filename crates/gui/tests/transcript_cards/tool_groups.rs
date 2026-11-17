@@ -498,3 +498,126 @@ fn full_scans_of_the_entries_are_counted_as_they_happen() {
     assert!(perf.passes > 0);
     assert_eq!(perf.entries_enumerated, perf.passes * 7 * entries);
 }
+
+struct PaneState {
+    model: TranscriptModel,
+    composer: gui::model::composer::ComposerModel,
+    picker: gui::model::model_picker::ModelPickerState,
+    draw: bool,
+}
+
+/// The whole conversation pane, which shows an empty state for an empty thread.
+fn pane(model: TranscriptModel) -> Harness<'static, PaneState> {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 600.0))
+        .build_ui_state(
+            |ui, state: &mut PaneState| {
+                gui::theme::install(ui.ctx());
+                if !state.draw {
+                    return;
+                }
+                gui::panes::agent::agent_pane(
+                    ui,
+                    &state.model,
+                    None,
+                    gui::panes::agent::ConversationContext {
+                        todo: None,
+                        goal: None,
+                        requests: None,
+                        task_rows: &[],
+                        phase_unread: false,
+                        has_project: true,
+                        active_thread_title: Some("Chat"),
+                        extra_read_dirs: &[],
+                        parent_thread: None,
+                        child_threads: Vec::new(),
+                        lane: None,
+                        lead: None,
+                        thread_metrics: None,
+                        phase: None,
+                        model_picker: gui::panes::model_picker::ModelPickerContext {
+                            profiles: &[],
+                            preference: None,
+                            default_model: None,
+                            enabled: false,
+                        },
+                        sandbox_picker: Default::default(),
+                        branch: None,
+                        pull_request: None,
+                        pull_request_chips: None,
+                    },
+                    &mut state.composer,
+                    &mut state.picker,
+                );
+            },
+            PaneState {
+                model,
+                composer: Default::default(),
+                picker: Default::default(),
+                draw: true,
+            },
+        );
+    harness.run_steps(3);
+    harness
+}
+
+fn open_first_group(harness: &mut Harness<'_, PaneState>) {
+    harness.get_by_label_contains("1 tool call").click();
+    harness.run_steps(3);
+    assert!(
+        harness.query_all_by_label_contains("Read f0.rs").count() > 0,
+        "the group is open"
+    );
+}
+
+#[test]
+fn a_pane_that_shows_an_empty_thread_forgets_the_open_groups_of_the_one_before() {
+    // Given: a reader who opened a group of thread A.
+    let mut harness = pane(turns("a", 1));
+    open_first_group(&mut harness);
+    assert!(gui::panes::agent::holds_transcript_view_state_for_tests(
+        &harness.ctx,
+        "a-0"
+    ));
+
+    // When: the pane shows an empty thread, and then A again.
+    harness.state_mut().model = TranscriptModel::new();
+    harness.run_steps(3);
+    let kept = gui::panes::agent::holds_transcript_view_state_for_tests(&harness.ctx, "a-0");
+    harness.state_mut().model = turns("a", 1);
+    harness.run_steps(3);
+
+    // Then: nothing was kept while it was empty, and A comes back closed.
+    assert!(!kept, "state kept for a thread nothing shows");
+    assert_eq!(harness.query_all_by_label_contains("Read f0.rs").count(), 0);
+    assert!(harness.query_by_label_contains("1 tool call").is_some());
+}
+
+#[test]
+fn deleting_a_thread_drops_the_open_groups_a_pane_kept_for_it() {
+    // Given: a group opened in a pane that is not drawn from now on (a hidden
+    // tab), so no frame of it could retire anything.
+    let mut harness = pane(turns("a", 1));
+    open_first_group(&mut harness);
+    harness.state_mut().draw = false;
+    harness.run_steps(2);
+    assert!(gui::panes::agent::holds_transcript_view_state_for_tests(
+        &harness.ctx,
+        "a-0"
+    ));
+
+    // When: the thread is deleted (the app passes its thread and run IDs).
+    gui::panes::agent::forget_transcript_view_state(
+        &harness.ctx,
+        &["thread-a".to_owned(), "a-0".to_owned()],
+    );
+
+    // Then: the pane holds nothing for it, and shows it closed if it comes back.
+    assert!(!gui::panes::agent::holds_transcript_view_state_for_tests(
+        &harness.ctx,
+        "a-0"
+    ));
+    harness.state_mut().draw = true;
+    harness.run_steps(3);
+    assert_eq!(harness.query_all_by_label_contains("Read f0.rs").count(), 0);
+}
