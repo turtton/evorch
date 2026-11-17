@@ -4,7 +4,7 @@
 //! percentiles and asserts nothing; the numbers feed the choice of the bridge
 //! confirmation deadline.
 //!
-//! `cargo run --release -p recorder --example bridge_latency -- [rounds] [raw.csv]`
+//! `cargo run --release -p recorder --example bridge_latency -- [rounds] [raw.csv] [load-threads]`
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,7 +50,7 @@ fn report(label: &str, mut samples: Vec<Duration>, raw: &mut Option<std::fs::Fil
     use std::io::Write;
     if let Some(file) = raw {
         for sample in &samples {
-            let _ = writeln!(file, "{label},{}", sample.as_micros());
+            writeln!(file, "{label},{}", sample.as_micros()).unwrap();
         }
     }
     samples.sort();
@@ -69,6 +69,22 @@ fn main() {
         .nth(1)
         .and_then(|rounds| rounds.parse().ok())
         .unwrap_or(50);
+    assert!(rounds > 0);
+    let load: usize = std::env::args()
+        .nth(3)
+        .map(|n| n.parse().unwrap())
+        .unwrap_or(0);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let busy: Vec<_> = (0..load)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+        })
+        .collect();
     let mut raw = std::env::args()
         .nth(2)
         .map(|path| std::fs::File::create(path).unwrap());
@@ -84,7 +100,7 @@ fn main() {
             "release"
         },
     );
-    println!("rounds per cell: {rounds}");
+    println!("rounds per cell: {rounds}, busy load threads: {load}");
     for events in [0_usize, 100, 1_000, 10_000] {
         let mut flush = Vec::new();
         let mut stop = Vec::new();
@@ -104,5 +120,9 @@ fn main() {
             stop,
             &mut raw,
         );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for thread in busy {
+        thread.join().unwrap();
     }
 }

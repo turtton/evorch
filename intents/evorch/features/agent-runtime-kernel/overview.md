@@ -49,11 +49,11 @@ oh-my-pi（can1357/oh-my-pi、commit 51f0380 調査）の設計をベースに�
 
 ### messaging op 再編（`crates/runtime/src/meta.rs`）
 
-- `send`: fire-and-forget。相手の応答や完了を待たない
-- `wait_reply`: timeout 付き reply waiter。返信が必要な場合のみ使用
+- `send`: fire-and-forget。相手の応答や完了を待たない（返信の場合は相関用に `reply_to` を指定）
+- `wait`: イベント待機。メッセージ・返信、質問・回答、ホスト入力、lane、親の終了、shell 完了などを待つ（PR #630 で旧 `wait_reply` を廃止し `wait` へ一本化）
 - `inbox`: 未読メッセージの pull 参照
 
-現行 `send_message` は送信後に相手 run の完了を待つ同期寄りの形であり、この 3 op 構成に再編する。宛先検証は delegation tree の親子関係で行う（ADR 0022）。
+現行 `send_message` は送信後に相手 run の完了を待つ同期寄りの形であり、この構成に再編する。宛先検証は delegation tree の親子関係で行う（ADR 0022）。
 
 ### 配送语义
 
@@ -80,7 +80,7 @@ AgentRunPhase に parked 相当の状態（または Done + revive 経路）を�
 
 **スコープ修正（grill grill-v02-loop-foundation Q2、2026-09-02）**: 厳密な revive（会話・tool 状態のスナップショット復元を含む durable inbox）は v0.3 送りとする。v0.2 では AgentMessage（send / reply / steering）を Event Bus イベントとして transcript 永続化（message repo 既存）し、run crash 時は親が新規 run を起動して transcript から文脈を再構成する運用とする。durable 化・監査基盤（ADR 0018 event sourcing）の上に置く構造は維持。
 
-**実装確定（issue #47、PR #48、2026-09-02）**: 上記 messaging op 再編が runtime/event-bus/storage に実装済み。envelope は `crates/event-bus/src/event.rs` の `AgentMessage`（message_id / sender_run_id / recipient_run_id / kind（send/reply/steering）/ content / reply_to 任意 / disposition）で、serialization は `EventKind::AgentMessage` として lifecycle event とは別種。配送 core は `crates/runtime/src/mailbox.rs`（fire-and-forget send、wait_reply の reply_to 相関+typed timeout、inbox は配送順 pull・既読は再返却しない）。親子限定 addressing（ADR 0022）は meta / runtime 両層で全入口強制、sibling・無関係 run・自己宛は fail-closed。steering（親→Running 宛に進行中 turn 注入）/ aside（非親→step boundary まで保留）/ wake（Waiting 宛を Running へ）は agent loop 内で実装済み。永続化は Event Bus → storage bridge → `agent_messages_by_session` 読取 API（順序 / sender / recipient / correlation の復元可）。crash 復旧は親が新規 run を起動して transcript から文脈を再構成する方式で実装・検証済み（厳密 revive は引き続き v0.3）。meta op 面は `meta/messaging.rs` へ再編（旧 `send_message` は fire-and-forget alias 化）。既存 delegate / wait / cancel / orchestration consumer と `orchestrator_demo` の回帰は無差異。
+**実装確定（issue #47、PR #48、2026-09-02、PR #630 で wait_reply 廃止・wait 一本化）**: 上記 messaging op 再編が runtime/event-bus/storage に実装済み。envelope は `crates/event-bus/src/event.rs` の `AgentMessage`（message_id / sender_run_id / recipient_run_id / kind（send/reply/steering）/ content / reply_to 任意 / disposition）で、serialization は `EventKind::AgentMessage` として lifecycle event とは別種。配送 core は `crates/runtime/src/mailbox.rs`（fire-and-forget send、wait によるイベント駆動のメッセージ・返信受信、inbox は未観測完了通知やキューの配送順 pull・提示により既読化）。親子限定 addressing（ADR 0022）は meta / runtime 両層で全入口強制、sibling・無関係 run・自己宛は fail-closed。steering（親→Running 宛に進行中 turn 注入）/ aside（非親→step boundary まで保留）/ wake（Waiting 宛を Running へ）は agent loop 内で実装済み。永続化は Event Bus → storage bridge → `agent_messages_by_session` 読取 API（順序 / sender / recipient / correlation の復元可）。crash 復旧は親が新規 run を起動して transcript から文脈を再構成する方式で実装・検証済み（厳密 revive は引き続き v0.3）。meta op 面は `meta/messaging.rs` へ再編（旧 `send_message` は fire-and-forget alias 化）。既存 delegate / wait / cancel / orchestration consumer と `orchestrator_demo` の回帰は無差異。
 
 ### loop 基盤の関連 packet 索引（grill grill-v02-loop-foundation、2026-09-02）
 

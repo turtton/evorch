@@ -14,6 +14,7 @@ use crate::producer::ProducerPause;
 use crate::{AgentRuntime, RunId};
 
 mod execution;
+mod tasks;
 
 type Receipt = watch::Receiver<Option<Result<(), String>>>;
 
@@ -32,7 +33,7 @@ pub(crate) struct LearningExecutions {
     /// cleanup and a new attempt at the same time.
     entries: Mutex<HashMap<String, Arc<LearningExecution>>>,
     internal: Mutex<HashMap<RunId, watch::Sender<bool>>>,
-    detached: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    pub(crate) tasks: tasks::Tasks,
 }
 
 #[derive(Default)]
@@ -170,12 +171,6 @@ impl LearningExecutions {
         cohort
     }
 
-    pub(crate) fn own(&self, task: tokio::task::JoinHandle<()>) {
-        let mut tasks = self.detached.lock().unwrap();
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(task);
-    }
-
     pub(crate) fn internal_started(&self, run: RunId) {
         self.internal
             .lock()
@@ -284,7 +279,7 @@ impl AgentRuntime {
             return;
         }
         let weak = Arc::downgrade(&self.shared);
-        let task = tokio::spawn(async move {
+        executions.tasks.spawn(async move {
             let mut delay = LEARNING_RETRY_BASE;
             let mut stalled = false;
             loop {
@@ -321,7 +316,6 @@ impl AgentRuntime {
                 delay = (delay * 2).min(LEARNING_RETRY_CAP);
             }
         });
-        executions.own(task);
     }
 
     async fn reconcile_returned(&self, entry: &Arc<LearningExecution>) {
@@ -361,6 +355,41 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// After dispatch/host tails have drained, join ALL finite registry tails,
+    /// including an earlier cancellation's requeue and pending scan. A cohort
+    /// receipt alone is not this proof. Cancellation retains unjoined handles.
+    pub async fn drain_learning_for_restart(&self) -> Result<(), String> {
+        if self.learning_gate().is_open() || self.producer_gate().is_open() {
+            return Err("learning registry drain requires paused admission".into());
+        }
+        self.learning_gate().drained().await;
+        self.shared.learning_executions.tasks.drain().await?;
+        if !self.shared.learning_executions.cohort().is_empty() {
+            return Err("learning registry has unsettled entries".into());
+        }
+        Ok(())
+    }
+
+    /// Synchronous, memory-only guard used in the coordinator capture mutex.
+    /// Once sealed, no cleanup/scan/pipeline tail may start in the old image.
+    pub fn seal_learning_for_capture(&self) -> Result<(), String> {
+        if self.learning_gate().is_open()
+            || self.learning_gate().active() != 0
+            || !self.shared.learning_executions.cohort().is_empty()
+        {
+            return Err("learning registry has not drained".into());
+        }
+        self.shared.learning_executions.tasks.seal()
+    }
+
+    /// Planned M2 stage 4 only, after the learning gate is permanently closed.
+    pub async fn join_learning_for_planned_exit(&self) -> Result<(), String> {
+        if !self.learning_gate().is_closed() {
+            return Err("learning scheduler is not stopped".into());
+        }
+        self.shared.learning_executions.tasks.join_scheduler().await
+    }
+
     pub fn pause_learning(&self) -> LearningPause {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         LearningPause {
@@ -383,7 +412,7 @@ impl AgentRuntime {
         let runtime = self.clone();
         let cohort = entries.clone();
         let id = pause.id.clone();
-        let task = tokio::spawn(async move {
+        self.shared.learning_executions.tasks.spawn(async move {
             // The single cohort deadline includes durable I/O. A blocked SQLite
             // writer must not block the runtime timer or drop any owned cleanup.
             let result = tokio::task::spawn_blocking(move || {
@@ -397,7 +426,6 @@ impl AgentRuntime {
             .map_err(|_| "learning fence task panicked".to_string());
             fenced.send_replace(Some(result));
         });
-        self.shared.learning_executions.own(task);
         Ok(LearningSuspension {
             id: pause.id.clone(),
             entries,
@@ -411,7 +439,20 @@ impl AgentRuntime {
         if !self.learning_gate().resume(pause.pause) {
             return false;
         }
-        self.dispatch_pending_learning();
+        if self.shared.learning.get().is_none() {
+            return true;
+        }
+        // The coordinator calls this under its cancellation mutex. DB open/readback
+        // must not pin that mutex or a Tokio worker after the cohort deadline.
+        let runtime = self.clone();
+        self.shared
+            .learning_executions
+            .tasks
+            .spawn_result(async move {
+                tokio::task::spawn_blocking(move || runtime.dispatch_pending_learning())
+                    .await
+                    .map_err(|_| "learning pending scan task panicked".to_string())
+            });
         true
     }
 
@@ -434,7 +475,7 @@ impl AgentRuntime {
             return Err("learning pause is stale".into());
         }
         let runtime = self.clone();
-        let task = tokio::spawn(async move {
+        self.shared.learning_executions.tasks.spawn(async move {
             suspension.wait_cleanup().await;
             let Some(queue) = runtime.learning_job_queue() else {
                 return;
@@ -491,7 +532,6 @@ impl AgentRuntime {
                 .send_modify(|n| *n = n.wrapping_add(1));
             runtime.dispatch_pending_learning();
         });
-        self.shared.learning_executions.own(task);
         Ok(())
     }
 
@@ -532,7 +572,7 @@ impl AgentRuntime {
         let mut learning = self.learning_gate().subscribe_admission();
         let mut producers = self.producer_gate().subscribe_admission();
         let mut jobs = self.subscribe_learning_changes();
-        let task = tokio::spawn(async move {
+        self.shared.learning_executions.tasks.scheduler(async move {
             loop {
                 let gate_changed = tokio::select! {
                     result = learning.changed() => { if result.is_err() { break } true },
@@ -554,11 +594,15 @@ impl AgentRuntime {
                 }
             }
         });
-        self.shared.learning_executions.own(task);
     }
 
     fn dispatch_pending_learning(&self) {
-        if !self.learning_gate().is_open() || !self.producer_gate().is_open() {
+        // A permit covers the entire scan, including abandon/requeue writes.
+        // Pausing + draining therefore fences scans, not just provider pipelines.
+        let Some(_scan) = self.learning_gate().try_enter() else {
+            return;
+        };
+        if !self.producer_gate().is_open() {
             return;
         }
         let Some(queue) = self.learning_job_queue() else {

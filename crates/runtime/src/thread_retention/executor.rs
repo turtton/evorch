@@ -431,9 +431,14 @@ impl ReclaimExecutor {
         self.join()
     }
 
+    /// Planned M2 stage 2: signal now, join only after child reap.
+    pub fn request_stop(&self) {
+        let _ = self.stop.send(());
+    }
+
     fn join(&mut self) -> std::io::Result<()> {
         // A closed channel means the thread already ended.
-        let _ = self.stop.send(());
+        self.request_stop();
         let Some(thread) = self.thread.take() else {
             return Ok(());
         };

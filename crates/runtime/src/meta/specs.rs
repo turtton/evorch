@@ -44,7 +44,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
 pub(super) fn run_output(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Read a direct child's or parent's phase/status, terminal or idle-turn output, or failure/cancellation/stop reason without waiting or restoring terminal runs. An interactive turn that successfully ends without unanswered questions has phase=Waiting, status=turn_completed, output and turn_generation. Returning a direct child's idle-turn output acknowledges that generation, so wait will not wake again for it; snapshots remain readable. Ordinary Waiting (nested waits, questions or reviews) is not a completed turn. Returning a terminal child's result acknowledges that completion and removes its still-queued automatic notice; explicit agent messages and other completion generations are not consumed. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use has_pending_question from wait and subagent_questions to identify unanswered questions.".into(),
+        description: "Read direct parent/child phase, terminal or idle-turn output and stop/failure reason, without waiting/restoring. Only status=turn_completed marks a completed interactive turn. Presenting output ACKs that child completion/generation and its automatic notice, not explicit messages; phase-only reads do not ACK. Snapshots remain readable. continuable/continuation_blocked explain whether a finished child can resume via send. Use subagent_questions for unanswered questions.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {"run_id": run_id()},
@@ -56,18 +56,19 @@ pub(super) fn run_output(name: &str) -> ToolSpec {
 pub(super) fn wait(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Wait for direct children or a parent to terminate, or for interactive direct children to complete a turn and idle. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. There is no deadline: besides terminal or previously unobserved idle-turn completion per mode, it returns when a target asks a question not yet reported to you (including nonblocking questions), an agent message arrives, or user input arrives, or one of your own questions is answered (answer_ready, question_ids; the text arrives in the next model input). Returns {messages, user_input_ready, completed_run_ids, attention_run_ids, runs}: messages are explicit agent messages that arrived, consumed as by inbox; automatic completion notices are not included as messages. Returning terminal or idle-turn child output in runs acknowledges that completion and removes its still-queued automatic notice; unobserved and other-generation notices remain; attention_run_ids are the targets with newly reported questions. User input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal: a successfully completed interactive turn without unanswered questions has status=turn_completed, output and turn_generation and is included in completed_run_ids once per generation. Output-bearing wait, delegate or run_output acknowledges that idle generation; repeating wait then waits for a new turn or other event instead of spinning. Ordinary Waiting (including nested wait, question or review waits) alone does not wake wait. needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error/Stopped on completion with nothing else to report, otherwise the object (always for an idle-turn result). A phase-only response does not acknowledge the output and leaves its automatic notice queued. A target that already finished returns at once, so leave finished targets out. For a snapshot without waiting, use run_output. Does not cancel targets. Caller cancellation interrupts immediately.",
+        "Wait without a deadline. Explicit targets are direct parent/children only; terminal targets return immediately. Waiting alone isn't completion; status=turn_completed means an interactive turn finished. With no targets, discovers parent/children, reviews/admissions, questions, lanes and own shells. any/all applies only to run completion; messages/replies, questions/answers, host input, lanes, parent termination and shell teardown interrupt either. Returns event runs and bounded correlated messages; presentation ACKs returned child output/messages only. Parent questions/idle/output excluded. Lane bodies/answers/input follow tools. Running shells stay sources; completion cites original call ID, no duplicate ToolResult. Non-error no_wait_sources explains absence: report status, don't poll. Lone run_id may return phase-only status with no output ACK.",
         json!({
             "run_id": run_id(),
             "run_ids": {"type":"array", "items":run_id(), "minItems":1, "maxItems":super::runs::waiting::MAX_WAIT_RUNS, "uniqueItems":true},
-            "mode":{"type":"string", "enum":["any","all"], "default":"any", "description":"any returns when one target terminates; all waits for every target. Both return early for new questions, agent messages and user input."}
+            "mode":{"type":"string", "enum":["any","all"], "default":"any"}
         }),
         &[],
         true,
     );
     spec.input_schema["oneOf"] = json!([
         {"required":["run_id"], "not":{"required":["run_ids"]}},
-        {"required":["run_ids"], "not":{"required":["run_id"]}}
+        {"required":["run_ids"], "not":{"required":["run_id"]}},
+        {"not":{"anyOf":[{"required":["run_id"]},{"required":["run_ids"]},{"required":["mode"]}]}}
     ]);
     spec
 }
@@ -86,7 +87,7 @@ pub(super) fn send(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
         "Deliver a message to a direct child or parent and return message_id without waiting for a reply. A finished direct child resumes with its saved context under your current authority; a child's message to a finished parent is held until the parent continues. Runs the user stopped or that were cancelled are not resumed; other refusals return the restore error. Self, sibling and unrelated recipients are denied.",
-        json!({"run_id":run_id(), "message":{"type":"string"}, "kind":{"type":"string", "enum":["send","reply","steering"], "default":"send", "description":"send delivers a message; reply correlates via required reply_to; steering supplies a parent instruction at the recipient's next safe boundary."}, "reply_to":{"type":"string", "description":"Original message_id, required for kind=reply."}}),
+        json!({"run_id":run_id(), "message":{"type":"string"}, "kind":{"type":"string", "enum":["send","reply","steering"], "default":"send", "description":"send delivers a message; reply correlates via required reply_to; steering supplies a parent instruction at the recipient's next safe boundary."}, "reply_to":{"type":"string", "description":"Original message_id, required for kind=reply. This records correlation; all replies and ordinary messages are received by wait."}}),
         &["run_id", "message"],
         false,
     );
@@ -94,20 +95,10 @@ pub(super) fn send(name: &str) -> ToolSpec {
     spec
 }
 
-pub(super) fn wait_reply(name: &str) -> ToolSpec {
-    object_spec(
-        name,
-        "Wait for and consume a reply to this run's sent message, leaving unrelated messages queued. Your own new answer or host input ends the wait early with {status: answer_ready|user_input_ready, message_id}; the text follows in the next model input and the message_id stays waitable. Timeout returns ReplyTimeout; recipient termination returns RunTerminated. Unknown message IDs or invalid ownership fail.",
-        json!({"message_id":{"type":"string", "description":"ID returned by send or send_message."},"timeout_ms":{"type":"integer","minimum":0, "description":"Maximum wait in milliseconds."}}),
-        &["message_id", "timeout_ms"],
-        false,
-    )
-}
-
 pub(super) fn inbox(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Consume this run's queued agent messages, including unobserved automatic child completion notices, and return a JSON array with IDs, sender, kind, content and reply correlation. Only automatic notices already acknowledged by output-bearing wait or terminal run_output are omitted; all other queued messages are consumed and returned. Returns an empty array if none are queued.",
+        "Consume up to 8 queued agent messages FIFO, with bounded bodies/artifact refs and reply correlation. Unobserved automatic child completions are included and acknowledged only on presentation; only already observed automatic notices are skipped. Returns [] when empty.",
         json!({}),
         &[],
         true,

@@ -142,6 +142,7 @@ pub(crate) async fn dispatch(
 ) -> DispatchResult {
     let result = execute(state, runtime, input).await;
     DispatchResult {
+        observations: Default::default(),
         result: result.unwrap_or_else(tools::ToolResult::error),
         terminal: Terminal::Continue,
     }

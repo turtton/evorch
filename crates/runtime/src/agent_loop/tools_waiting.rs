@@ -1,5 +1,7 @@
 //! Batch-aware wait checkpointing. No external operation is replayed here.
 #[cfg(test)]
+mod legacy_fixtures_tests;
+#[cfg(test)]
 mod tests;
 use super::LoopState;
 use crate::quiesce::{
@@ -8,17 +10,8 @@ use crate::quiesce::{
 use providers::ContentBlock;
 use std::collections::HashSet;
 
-pub(crate) fn unix_ms() -> Result<u64, String> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_millis()
-        .try_into()
-        .map_err(|_| "wait timestamp overflow".into())
-}
-
 impl LoopState {
-    fn pending_waits(&self, reply: Option<(&str, u64)>) -> Result<Vec<DurableWait>, String> {
+    fn pending_waits(&self) -> Result<Vec<DurableWait>, String> {
         let runtime = self.runtime().ok_or("runtime disappeared")?;
         let results: HashSet<_> = self
             .context
@@ -49,7 +42,16 @@ impl LoopState {
             let (targets, mode, legacy_result, consume_mailbox, kind) = match name.as_str() {
                 "wait" => {
                     let (targets, mode, legacy) = crate::restore::waiting::wait_targets(input)?;
-                    (targets, mode, legacy, true, WaitKind::Runs)
+                    if targets.is_empty() {
+                        let targets = runtime
+                            .wait_runs(self.task.run_id, &[])?
+                            .into_iter()
+                            .map(|r| r.id)
+                            .collect();
+                        (targets, mode, legacy, true, WaitKind::Events)
+                    } else {
+                        (targets, mode, legacy, true, WaitKind::Runs)
+                    }
                 }
                 "delegate"
                     if self
@@ -66,33 +68,6 @@ impl LoopState {
                         WaitKind::Delegates { calls },
                     )
                 }
-                "wait_reply" => {
-                    let message_id = input
-                        .get("message_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or("missing message_id")?;
-                    let deadline_unix_ms = reply
-                        .filter(|(call, _)| *call == id)
-                        .map(|(_, deadline)| deadline)
-                        .ok_or("unstarted reply wait cannot be checkpointed")?;
-                    let target = runtime
-                        .reply_wait_target(self.task.run_id, message_id)
-                        .map_err(|e| e.to_string())?;
-                    let mut delivered_answer_ids: Vec<_> =
-                        self.delivered_answer_ids().into_iter().collect();
-                    delivered_answer_ids.sort();
-                    (
-                        vec![target],
-                        DurableWaitMode::Any,
-                        false,
-                        true,
-                        WaitKind::Reply {
-                            message_id: message_id.into(),
-                            deadline_unix_ms,
-                            delivered_answer_ids,
-                        },
-                    )
-                }
                 _ => {
                     return Err(
                         "unfinished batch contains an unconfirmed or unexecuted non-wait tool"
@@ -101,15 +76,15 @@ impl LoopState {
                 }
             };
             let mut completions = Vec::new();
-            for target in &targets {
-                let output = runtime
-                    .run_output(self.task.run_id, *target)
-                    .map_err(|e| e.to_string())?;
-                if let Some(notice) = output.completion_notice
+            for source in runtime.wait_runs(self.task.run_id, &targets)? {
+                if source.parent {
+                    continue;
+                }
+                if let Some(notice) = source.notice
                     && notice.observed()
                 {
                     completions.push(ObservedGeneration {
-                        id: target.to_string(),
+                        id: source.id.to_string(),
                         generation: notice.generation,
                     });
                 }
@@ -163,14 +138,14 @@ impl LoopState {
 
     /// Called only while an observation future is alive. A failed proof parks
     /// fail-closed; it never returns a successful safety acknowledgement.
-    pub(crate) async fn quiesce_tools_waiting(&mut self, reply: Option<(&str, u64)>) {
+    pub(crate) async fn quiesce_tools_waiting(&mut self) {
         let Some(runtime) = self.runtime() else {
             return;
         };
         if runtime.shared.quiesce.running() {
             return;
         }
-        match self.pending_waits(reply) {
+        match self.pending_waits() {
             Ok(waits) => self.recovery_waits = waits,
             Err(_) => {
                 // Keep the original observation future live. An unfinished batch
@@ -198,9 +173,11 @@ impl LoopState {
             self.meta_call_id = Some(wait.tool_call_id.clone());
             let results = Box::pin(crate::meta::resume_wait(self, &runtime, &wait)).await;
             self.meta_call_id = None;
-            for (id, result) in results {
+            for (id, dispatch) in results {
+                let result = dispatch.result;
                 self.ledger_tool_completed(&wait.continuation.tool_name, &id, &result);
                 self.context.push_tool_result(id.clone(), result);
+                dispatch.observations.presented(self);
                 self.recovery_waits.retain(|w| w.tool_call_id != id);
                 self.publish_message_count();
             }

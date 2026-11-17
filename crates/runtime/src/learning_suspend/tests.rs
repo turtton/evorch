@@ -16,10 +16,10 @@ async fn learning_cohort_deadline_does_not_drop_owned_cleanup_or_restart_per_ent
     let (release, returned) = tokio::sync::oneshot::channel();
     let owner = registry.clone();
     let owned = last.clone();
-    registry.own(tokio::spawn(async move {
+    registry.tasks.spawn(async move {
         returned.await.unwrap();
         owner.returned(&owned);
-    }));
+    });
     let wait =
         suspension.wait_until(tokio::time::Instant::now() + std::time::Duration::from_secs(5));
     tokio::pin!(wait);

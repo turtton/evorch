@@ -75,6 +75,183 @@ fn kept(file: &Path) {
     assert_eq!(std::fs::read(file).unwrap(), b"keep\0bytes");
 }
 
+fn checkpointed(f: &Fixture, thread: &str, run: &str, terminal: bool) -> super::super::OwnerPermit {
+    let mut permit = f.host.start(thread).unwrap();
+    permit.run_id = Some(run.into());
+    permit.begin_turn().unwrap();
+    permit
+        .checkpoint_metadata(
+            if terminal {
+                super::super::CheckpointBoundary::Terminal
+            } else {
+                super::super::CheckpointBoundary::TurnEnd
+            },
+            super::super::SnapshotReference::RunContext {
+                receipt: storage::RunContextReceipt {
+                    updated_at_ns: 1,
+                    messages_end: 1,
+                    sha256: "0".repeat(64),
+                },
+            },
+        )
+        .unwrap();
+    permit
+}
+
+#[test]
+fn captured_hold_separates_live_and_checkpointed_parked_membership_and_claims_both() {
+    use crate::ownership::{CapturedThreadRuns, ExpectedCapturedRuns};
+    let f = Fixture::new();
+    let parked = checkpointed(&f, "thread", "parked", false);
+    let mut active = parked.clone();
+    active.run_id = Some("live".into());
+    active.begin_turn().unwrap();
+    f.host.start("idle").unwrap();
+    let expected = ExpectedCapturedRuns::from([(
+        "thread".into(),
+        CapturedThreadRuns {
+            generation: parked.lease.generation,
+            captured_runs: BTreeSet::from(["live".into(), "parked".into()]),
+        },
+    )]);
+    let holds = f
+        .host
+        .hold_captured_for_restart("tx", "capture", &expected)
+        .unwrap();
+    assert_eq!(holds.len(), 2);
+    let hold = holds.iter().find(|h| h.thread_id == "thread").unwrap();
+    assert_eq!(hold.active_runs, BTreeSet::from(["live".into()]));
+    assert_eq!(hold.parked_runs, BTreeSet::from(["parked".into()]));
+    let read = f.host.attach("thread").unwrap();
+    assert_eq!(read.active_runs, hold.active_runs);
+    assert_eq!(read.handoff_hold.as_deref(), Some(hold));
+    let next = f.successor();
+    next.claim_planned(hold, &Evidence(holds.clone())).unwrap();
+    let adopted = next.attach("thread").unwrap();
+    assert_eq!(adopted.lease.generation, parked.lease.generation + 1);
+    assert!(adopted.active_runs.is_empty());
+    assert_eq!(adopted.planned_claim.as_deref(), Some(hold));
+}
+
+#[test]
+fn reclaimed_idle_owner_holds_despite_previous_generation_release_marker() {
+    let f = Fixture::new();
+    let old = f.host.start("idle").unwrap();
+    assert!(!f.host.quiesce().unwrap());
+    assert_eq!(f.host.attach("idle").unwrap().state, OwnerState::Released);
+    let next = f.successor();
+    let current = next.claim(&next.attach("idle").unwrap()).unwrap();
+    assert!(current.lease.generation > old.lease.generation);
+    assert_ne!(current.lease.owner_id, old.lease.owner_id);
+    let holds = next
+        .hold_captured_for_restart("tx", "capture", &Default::default())
+        .unwrap();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0].owner_id, current.lease.owner_id);
+    assert_eq!(holds[0].generation, current.lease.generation);
+    assert!(holds[0].active_runs.is_empty());
+    assert!(holds[0].parked_runs.is_empty());
+    assert_eq!(
+        next.restart_inventory().unwrap()[0].handoff_hold.as_deref(),
+        Some(&holds[0])
+    );
+    next.clear_planned_hold(&holds[0]).unwrap();
+}
+
+#[test]
+fn previous_generation_run_checkpoint_is_not_parked_provenance_for_a_new_owner() {
+    use crate::ownership::{CapturedThreadRuns, ExpectedCapturedRuns};
+    let f = Fixture::new();
+    let old = checkpointed(&f, "thread", "parked", false);
+    assert!(!f.host.quiesce().unwrap());
+    assert_eq!(f.host.attach("thread").unwrap().state, OwnerState::Released);
+    let next = f.successor();
+    let current = next.claim(&next.attach("thread").unwrap()).unwrap();
+    assert!(current.lease.generation > old.lease.generation);
+    assert_ne!(current.lease.owner_id, old.lease.owner_id);
+    let expected = ExpectedCapturedRuns::from([(
+        "thread".into(),
+        CapturedThreadRuns {
+            generation: current.lease.generation,
+            captured_runs: BTreeSet::from(["parked".into()]),
+        },
+    )]);
+    assert!(matches!(
+        next.hold_captured_for_restart("tx", "capture", &expected),
+        Err(RegistryError::Ownership(OwnershipError::PlannedMismatch))
+    ));
+    assert!(next.attach("thread").unwrap().handoff_hold.is_none());
+    // The old run is not a current member. With no parked evidence requested,
+    // that stale checkpoint also must not prevent holding this idle owner.
+    let holds = next
+        .hold_captured_for_restart("idle-tx", "capture", &Default::default())
+        .unwrap();
+    assert_eq!(holds.len(), 1);
+    assert!(holds[0].active_runs.is_empty());
+    assert!(holds[0].parked_runs.is_empty());
+    next.clear_planned_hold(&holds[0]).unwrap();
+}
+
+#[test]
+fn captured_hold_rejects_missing_foreign_stale_terminal_and_one_sided_membership() {
+    use crate::ownership::{CapturedThreadRuns, ExpectedCapturedRuns};
+    for case in [
+        "missing",
+        "foreign",
+        "stale",
+        "terminal",
+        "capture-only",
+        "checkpoint-only",
+        "live-only",
+    ] {
+        let f = Fixture::new();
+        let terminal = case == "terminal";
+        let permit = if case == "missing" {
+            f.host.start("thread").unwrap()
+        } else {
+            checkpointed(&f, "thread", "parked", terminal)
+        };
+        if case == "live-only" {
+            let mut active = permit.clone();
+            active.run_id = Some("not-captured".into());
+            active.begin_turn().unwrap();
+        }
+        let foreign = f.successor();
+        let thread = if case == "foreign" {
+            foreign.start("foreign").unwrap();
+            "foreign"
+        } else {
+            "thread"
+        };
+        let expected = ExpectedCapturedRuns::from([(
+            thread.into(),
+            CapturedThreadRuns {
+                generation: permit.lease.generation + u64::from(case == "stale"),
+                captured_runs: if case == "checkpoint-only" {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([if case == "capture-only" {
+                        "unknown"
+                    } else {
+                        "parked"
+                    }
+                    .into()])
+                },
+            },
+        )]);
+        assert!(
+            f.host
+                .hold_captured_for_restart("tx", "capture", &expected)
+                .is_err(),
+            "{case}"
+        );
+        for owner in f.host.restart_inventory().unwrap() {
+            assert!(owner.handoff_hold.is_none(), "atomic rollback: {case}");
+            assert_eq!(owner.state, OwnerState::Running);
+        }
+    }
+}
+
 #[test]
 fn start_cannot_reset_a_held_thread() {
     let f = Fixture::new();

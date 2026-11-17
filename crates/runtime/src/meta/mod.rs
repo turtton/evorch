@@ -15,8 +15,10 @@ mod lane_verification;
 mod lanes;
 mod ledger;
 mod messaging;
+mod observations;
+pub(crate) use observations::Observations;
 mod wait_resume;
-pub(crate) use wait_resume::resume_wait;
+pub(crate) use wait_resume::{RETIRED_REPLY_WAIT, resume_wait};
 mod questions;
 mod registry;
 pub use registry::META_OPS;
@@ -54,6 +56,7 @@ pub(crate) enum Terminal {
 pub(crate) struct DispatchResult {
     pub(crate) result: ToolResult,
     pub(crate) terminal: Terminal,
+    pub(crate) observations: Observations,
 }
 
 #[derive(Deserialize)]
@@ -76,7 +79,7 @@ pub(crate) async fn dispatch(
     let Some(op) = MetaOp::from_name(name) else {
         return error(format!("unknown meta-op: {name}"));
     };
-    if matches!(op, MetaOp::Wait | MetaOp::WaitReply | MetaOp::Delegate) {
+    if matches!(op, MetaOp::Wait | MetaOp::Delegate) {
         state.activity(event_bus::RunActivity::Children);
     }
     let mut dispatch = op.handle(state, &runtime, input).await;
@@ -120,6 +123,7 @@ fn finish(
         Err(reason) => return error(reason),
     }
     DispatchResult {
+        observations: Observations::default(),
         result: ToolResult::success(&args.result),
         terminal: Terminal::Finish(args.result),
     }
@@ -171,6 +175,7 @@ pub(super) fn serialize(value: &impl serde::Serialize) -> DispatchResult {
 
 pub(super) fn success(content: impl Into<String>) -> DispatchResult {
     DispatchResult {
+        observations: Observations::default(),
         result: ToolResult::success(content),
         terminal: Terminal::Continue,
     }
@@ -178,6 +183,7 @@ pub(super) fn success(content: impl Into<String>) -> DispatchResult {
 
 pub(super) fn error(content: impl Into<String>) -> DispatchResult {
     DispatchResult {
+        observations: Observations::default(),
         result: ToolResult::error(content),
         terminal: Terminal::Continue,
     }

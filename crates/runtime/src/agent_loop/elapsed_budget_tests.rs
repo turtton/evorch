@@ -16,7 +16,7 @@ impl AgentModel for StartedModel {
         _: &[providers::Message],
         _: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, crate::RuntimeError> {
-        self.0.send(()).unwrap();
+        let _ = self.0.send(());
         std::future::pending().await
     }
 
@@ -192,62 +192,94 @@ async fn trusted_child_input_is_parent_equivalent_but_internal_and_root_input_ar
 }
 
 #[tokio::test(start_paused = true)]
-async fn inbox_delivery_renews_only_when_a_parent_message_is_consumed() {
-    let (_cancel, runtime, mut state) = child_fixture().await;
-    let parent = state.task.parent.unwrap();
-    tokio::time::advance(Duration::from_secs(10)).await;
-    let dispatch = crate::meta::dispatch(&mut state, "inbox", json!({})).await;
-    assert!(!dispatch.result.is_error);
-    assert_eq!(elapsed_ms(&mut state, 50), 10_000);
-    runtime
-        .send_agent_message(
-            parent,
-            state.task.run_id,
+async fn message_receipts_renew_only_when_presented_not_when_snapshotted_or_dropped() {
+    for (tool, explicit) in [("inbox", false), ("wait", false), ("wait", true)] {
+        for kind in [
+            AgentMessageKind::Send,
+            AgentMessageKind::Reply,
             AgentMessageKind::Steering,
-            "new work",
-            None,
-        )
-        .unwrap();
-    assert_eq!(elapsed_ms(&mut state, 100), 10_000);
-    let dispatch = crate::meta::dispatch(&mut state, "inbox", json!({})).await;
-    assert!(!dispatch.result.is_error);
-    assert_eq!(elapsed_ms(&mut state, 150), 0);
+        ] {
+            let (_cancel, runtime, mut state) = child_fixture().await;
+            let parent = state.task.parent.unwrap();
+            let caller = state.task.run_id;
+            tokio::time::advance(Duration::from_secs(10)).await;
+            let reply_to = (kind == AgentMessageKind::Reply).then(|| {
+                runtime
+                    .send_agent_message(caller, parent, AgentMessageKind::Send, "scope?", None)
+                    .unwrap()
+            });
+            assert_eq!(elapsed_ms(&mut state, 50), 10_000);
+            runtime
+                .send_agent_message(parent, caller, kind, "scope", reply_to)
+                .unwrap();
+            let input = if explicit {
+                json!({"run_ids": [parent.to_string()]})
+            } else {
+                json!({})
+            };
+            tokio::time::advance(Duration::from_secs(5)).await;
+            let dropped = crate::meta::dispatch(&mut state, tool, input.clone()).await;
+            assert!(!dropped.result.is_error, "{}", dropped.result.content);
+            assert!(dropped.result.content.contains("scope"));
+            assert_eq!(elapsed_ms(&mut state, 100), 15_000);
+            drop(dropped);
+
+            tokio::time::advance(Duration::from_secs(7)).await;
+            let shown = crate::meta::dispatch(&mut state, tool, input).await;
+            assert!(!shown.result.is_error, "{}", shown.result.content);
+            assert!(shown.result.content.contains("scope"));
+            assert_eq!(elapsed_ms(&mut state, 150), 22_000);
+            state.context.push_tool_result("receive", shown.result);
+            shown.observations.presented(&mut state);
+            assert_eq!(elapsed_ms(&mut state, 200), 0);
+            assert!(state.task.mailbox.is_empty());
+            tokio::time::advance(Duration::from_secs(3)).await;
+            state.inject_parent_messages();
+            assert_eq!(elapsed_ms(&mut state, 250), 3_000);
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]
-async fn output_bearing_waits_renew_when_they_consume_parent_messages() {
-    for tool in ["wait", "wait_reply"] {
+async fn bounded_pages_of_grandchild_messages_do_not_renew_or_consume_the_omitted_parent() {
+    for tool in ["inbox", "wait"] {
         let (_cancel, runtime, mut state) = child_fixture().await;
         let parent = state.task.parent.unwrap();
         let caller = state.task.run_id;
+        let grandchild = runtime
+            .delegate_background_as_child(
+                caller,
+                Role::Explorer,
+                "grandchild",
+                RunConfig::default(),
+            )
+            .unwrap();
+        for _ in 0..8 {
+            runtime
+                .send_agent_message(grandchild, caller, AgentMessageKind::Send, "finding", None)
+                .unwrap();
+        }
+        runtime
+            .send_agent_message(parent, caller, AgentMessageKind::Send, "new scope", None)
+            .unwrap();
         tokio::time::advance(Duration::from_secs(10)).await;
-        let input = if tool == "wait_reply" {
-            let sent = runtime
-                .send_agent_message(caller, parent, AgentMessageKind::Send, "scope?", None)
-                .unwrap();
-            // Sending a request is not consuming parent input.
-            assert_eq!(elapsed_ms(&mut state, 50), 10_000);
-            runtime
-                .send_agent_message(
-                    parent,
-                    caller,
-                    AgentMessageKind::Reply,
-                    "scope",
-                    Some(sent.clone()),
-                )
-                .unwrap();
-            json!({"message_id": sent, "timeout_ms": 60_000})
-        } else {
-            runtime
-                .send_agent_message(parent, caller, AgentMessageKind::Send, "scope", None)
-                .unwrap();
-            json!({"run_ids": [parent.to_string()]})
-        };
-        let dispatch = crate::meta::dispatch(&mut state, tool, input).await;
-        assert!(!dispatch.result.is_error, "{}", dispatch.result.content);
-        assert!(dispatch.result.content.contains("scope"));
-        assert_eq!(elapsed_ms(&mut state, 100), 0);
-        assert!(runtime.take_inbox(caller).unwrap().is_empty());
+        let page = crate::meta::dispatch(&mut state, tool, json!({})).await;
+        assert!(!page.result.is_error, "{}", page.result.content);
+        assert!(!page.result.content.contains("new scope"));
+        state.context.push_tool_result("grandchildren", page.result);
+        page.observations.presented(&mut state);
+        assert_eq!(elapsed_ms(&mut state, 50), 10_000);
+        assert_eq!(state.task.mailbox.recovery_messages().len(), 1);
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let page = crate::meta::dispatch(&mut state, tool, json!({})).await;
+        assert!(!page.result.is_error, "{}", page.result.content);
+        assert!(page.result.content.contains("new scope"));
+        assert_eq!(elapsed_ms(&mut state, 100), 15_000);
+        state.context.push_tool_result("parent", page.result);
+        page.observations.presented(&mut state);
+        assert_eq!(elapsed_ms(&mut state, 150), 0);
+        assert!(state.task.mailbox.is_empty());
     }
 }
 

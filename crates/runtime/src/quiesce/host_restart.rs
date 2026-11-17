@@ -10,6 +10,7 @@ pub enum HostRestartPhase {
     Preparing,
     Sealing,
     Sealed,
+    Capturing,
     Cancelling,
     FailedClosed,
     ShuttingDown,
@@ -49,6 +50,9 @@ impl Default for HostRestartGate {
     }
 }
 impl HostRestartGate {
+    pub fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     fn changed(&self) {
         self.0.changed.send_modify(|v| *v = v.wrapping_add(1));
     }

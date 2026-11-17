@@ -70,6 +70,21 @@ pub(crate) fn validate_wait_messages(
             }
         }
         match &payload.kind {
+            WaitKind::Events => {
+                let (targets, mode, legacy) = wait_targets(input)?;
+                if *name != "wait"
+                    || !targets.is_empty()
+                    || mode != DurableWaitMode::Any
+                    || legacy
+                    || wait.mode != DurableWaitMode::Any
+                    || wait.continuation.legacy_result
+                    || !wait.continuation.consume_mailbox
+                    || wait.targets.iter().collect::<HashSet<_>>().len() != wait.targets.len()
+                    || wait.targets.contains(&run)
+                {
+                    return Err("own-event wait contract mismatch".into());
+                }
+            }
             WaitKind::Runs => {
                 let (targets, mode, legacy) = wait_targets(input)?;
                 if *name != "wait"

@@ -21,6 +21,7 @@ async fn reset_elapsed_preserves_non_time_budgets_and_latched_breaches() {
     counters.read(path);
     counters.read(path);
     counters.mark_spawned("child");
+    counters.observe_wait_event("parent:terminated");
     counters.lane_observations.insert([1; 32]);
     counters.finish_round();
     counters.finish_round();

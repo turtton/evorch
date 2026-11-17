@@ -116,6 +116,7 @@ mod linux {
                             old_owner_id: hold.owner_id,
                             old_generation: hold.generation,
                             active_runs: hold.active_runs,
+                            parked_runs: hold.parked_runs,
                             hold_saved: true,
                             hold_read_back: true,
                             worker_joined: false,

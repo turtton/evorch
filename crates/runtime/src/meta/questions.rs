@@ -153,15 +153,16 @@ pub(super) fn subagent_questions(
     };
     match runtime.subagent_questions(state.caller_run_id(), child) {
         Ok(questions) => {
-            runtime.observe_questions(questions.iter().map(|question| question.id.clone()));
-            // Listing a question reports it, so a later wait does not wake for it.
-            state.reported_questions.extend(
-                questions
-                    .iter()
-                    .filter(|question| question.answer.is_none())
-                    .map(|question| question.id.clone()),
-            );
-            serialize(&listing_window(questions))
+            let questions = listing_window(questions);
+            let ids = questions
+                .iter()
+                .map(|question| question.id.clone())
+                .collect();
+            let mut result = serialize(&questions);
+            if !result.result.is_error {
+                result.observations.questions = ids;
+            }
+            result
         }
         Err(e) => error(e),
     }

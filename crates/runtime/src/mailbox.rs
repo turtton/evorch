@@ -104,6 +104,13 @@ impl RunMailbox {
         drop(self.pending());
     }
 
+    /// Remove only messages included in a context result, preserving every other
+    /// FIFO entry and its typed receipt.
+    pub(crate) fn consume_ids(&self, ids: &std::collections::HashSet<&str>) {
+        self.pending()
+            .retain(|queued| !ids.contains(queued.message.message_id.as_str()));
+    }
+
     /// 新規メッセージの受け入れを停止する。閉じた後の `try_push` は
     /// [`PushError::Closed`] を返す。既存メッセージは取得可能なまま残る。
     ///
@@ -225,6 +232,7 @@ impl RunMailbox {
     }
 
     /// 自動完了通知以外の未読メッセージを FIFO 順で取り出し、完了通知は残す。
+    #[cfg(test)]
     pub(crate) fn drain_interrupting(&self) -> Vec<AgentMessage> {
         let mut queue = self.pending();
         let (taken, kept): (VecDeque<_>, VecDeque<_>) =

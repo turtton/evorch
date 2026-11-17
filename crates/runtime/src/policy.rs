@@ -736,7 +736,7 @@ mod tests {
     }
 
     // Given: Orchestrator のポリシー (委譲系・メッセージ系メタ操作を許可)
-    // When: delegate 系と send/wait_reply/inbox のメタ操作名を authorize する
+    // When: delegate 系と send/wait/inbox のメタ操作名を authorize する
     // Then: capability 集合に含まれるため許可される
     #[test]
     fn orchestrator_authorizes_delegation_and_messaging_meta_ops() {
@@ -746,7 +746,6 @@ mod tests {
             "delegate",
             "send_message",
             "send",
-            "wait_reply",
             "inbox",
             "wait",
             "cancel",

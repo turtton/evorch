@@ -1,7 +1,14 @@
 use super::*;
+mod finalization;
+mod learning;
+mod preparing;
+mod shutdown;
 use workbench_host::bootstrap::{BootstrapOptions, TestSeams};
 #[derive(Default)]
-struct Model(std::sync::atomic::AtomicUsize);
+struct Model(
+    std::sync::atomic::AtomicUsize,
+    Mutex<std::collections::BTreeMap<String, runtime::quiesce::ProviderInput>>,
+);
 #[async_trait::async_trait]
 impl runtime::AgentModel for Model {
     fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
@@ -9,6 +16,9 @@ impl runtime::AgentModel for Model {
     }
     fn requires_admission(&self) -> bool {
         false
+    }
+    fn checkpoint_provider_input(&self, run: &str) -> Option<runtime::quiesce::ProviderInput> {
+        self.1.lock().unwrap().get(run).cloned()
     }
     async fn admit(
         &self,
@@ -19,12 +29,37 @@ impl runtime::AgentModel for Model {
     }
     async fn complete(
         &self,
-        _: &runtime::AgentInvocationContext,
+        invocation: &runtime::AgentInvocationContext,
         _: runtime::Role,
-        _: &[providers::Message],
-        _: &[providers::ToolSpec],
+        messages: &[providers::Message],
+        tools: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, RuntimeError> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Live idle fixtures checkpoint the actual input seen by this model,
+        // including run affinity; never fabricate a fresh request at capture.
+        self.1.lock().unwrap().insert(
+            invocation.run_id.clone(),
+            runtime::quiesce::ProviderInput {
+                profile: "restart-fixture".into(),
+                protocol: model::ApiProtocol::OpenAiCompletions,
+                edit_tool: config::EditToolConfig::Edit,
+                affinity_key: invocation.run_id.clone(),
+                replay: None,
+                request: providers::ChatRequest {
+                    model: "restart-fixture".into(),
+                    messages: messages.to_vec(),
+                    tools: tools.to_vec(),
+                    tool_choice: None,
+                    temperature: None,
+                    max_tokens: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                    output_schema: None,
+                    observation: None,
+                    responses_replay: None,
+                },
+            },
+        );
         Ok(providers::ChatResponse {
             message: providers::Message {
                 role: providers::Role::Assistant,
@@ -37,6 +72,43 @@ impl runtime::AgentModel for Model {
             finish_reason: providers::FinishReason::Stop,
         })
     }
+}
+// These fixtures explicitly reach an idle safe point before restart. PreparingDrains
+// intentionally permits provider work, so scheduling request immediately after
+// delegate is no longer evidence that a live loop was parked.
+async fn waiting(run: RunId, mut events: event_bus::EventReceiver) {
+    loop {
+        if matches!(events.recv().await.unwrap().kind, event_bus::EventKind::Lifecycle(
+            event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Waiting, .. }
+        ) if run_id == run.to_string())
+        {
+            break;
+        }
+    }
+}
+async fn idle_run(runtime: &AgentRuntime, role: runtime::Role, prompt: &str) -> RunId {
+    let events = runtime.event_bus().subscribe();
+    let run = runtime.delegate_background(
+        role,
+        prompt.into(),
+        runtime::RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    waiting(run, events).await;
+    run
+}
+async fn resume_idle(runtime: &AgentRuntime, run: RunId) {
+    let events = runtime.event_bus().subscribe();
+    runtime.send_message(run, "after resume".into()).unwrap();
+    waiting(run, events).await;
+    runtime.stop(run, StopScope::SelfOnly).unwrap();
+    assert_eq!(
+        runtime.wait(run).await.unwrap(),
+        event_bus::AgentRunPhase::Stopped
+    );
 }
 struct Direct;
 impl runtime::SandboxFactory for Direct {
@@ -100,9 +172,16 @@ fn assert_owner_socket_paths(root: &std::path::Path) {
 async fn phase(core: &RestartCoordinator, expected: RestartPhase) {
     let mut changes = core.subscribe();
     loop {
-        if core.snapshot().phase == expected {
+        let snapshot = core.snapshot();
+        if snapshot.phase == expected {
             return;
         }
+        assert_ne!(
+            snapshot.phase,
+            RestartPhase::FailedClosed,
+            "waiting for {expected:?}: {:?}",
+            core.0.runtime.quiesce_state()
+        );
         changes.changed().await.unwrap();
     }
 }
@@ -133,25 +212,9 @@ async fn shared_request_survives_waiter_drop_and_stale_cancel_cannot_reopen() {
     let second = core.request().unwrap();
     assert_ne!(first, second);
     assert!(core.cancel(first).is_err());
-    assert!(producer.try_enter().is_none());
     core.wait_sealed(second).await.unwrap();
+    assert!(producer.try_enter().is_none());
     core.cancel(second).unwrap();
-    host.shutdown().await.unwrap();
-}
-#[tokio::test]
-async fn shutdown_closes_pending_producers_without_resuming_restart() {
-    let (_dir, mut host) = boot().await;
-    let core = RestartCoordinator::new(&host);
-    let producer = host.runtime.producer_gate();
-    let accepted = producer.try_enter().unwrap();
-    let id = core.request().unwrap();
-    phase(&core, RestartPhase::WaitingSafePoint).await;
-    core.transition_to_shutdown();
-    drop(accepted);
-    assert!(core.wait_sealed(id).await.is_err());
-    assert!(core.cancel(id).is_err());
-    assert!(producer.enter().await.is_none());
-    assert_eq!(core.snapshot().phase, RestartPhase::ShuttingDown);
     host.shutdown().await.unwrap();
 }
 #[tokio::test]
@@ -239,36 +302,40 @@ fn dto_bounds_blockers_and_omits_internal_incarnations() {
 }
 
 #[tokio::test]
-async fn preparing_stop_joins_same_attempt_without_reopening_producers() {
-    let (_dir, mut host) = boot().await;
-    let core = RestartCoordinator::new(&host);
-    let gate = host.runtime.producer_gate();
-    let producer = gate.try_enter().unwrap();
-    let run = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "never call provider".into(),
-        runtime::RunConfig {
-            keep_alive: true,
-            ..Default::default()
-        },
-    );
-    let id = core.request().unwrap();
-    // Stop an actually parked LoopState, not a never-polled finalizer fixture.
-    host.runtime.wait_quiesced().await.unwrap();
-    core.stop(run, runtime::StopScope::SelfOnly).unwrap();
-    host.runtime.wait(run).await.unwrap();
-    assert_eq!(id, core.request().unwrap());
-    assert!(gate.try_enter().is_none());
-    drop(producer);
-    core.wait_sealed(id).await.unwrap_or_else(|error| {
-        panic!(
-            "{error:?}; {:?}; {:?}",
-            core.snapshot(),
-            host.runtime.quiesce_state()
-        )
-    });
-    core.cancel(id).unwrap();
-    host.shutdown().await.unwrap();
+async fn stop_before_sealing_cancels_attempt_and_resumes_queued_work() {
+    for direct in [false, true] {
+        let model = Arc::new(Model::default());
+        let (_dir, mut host) = boot_with_model(model.clone()).await;
+        let core = RestartCoordinator::new(&host);
+        let target = idle_run(&host.runtime, runtime::Role::Worker, "Stop target").await;
+        let gate = host.runtime.producer_gate();
+        let producer = gate.try_enter().unwrap();
+        let (id, queued) = request_with_queued_run(&core).await;
+        assert_eq!(core.snapshot().phase, RestartPhase::WaitingSafePoint);
+        if direct {
+            host.runtime.stop(target, StopScope::SelfOnly).unwrap();
+        } else {
+            core.stop(target, StopScope::SelfOnly).unwrap();
+        }
+        assert_eq!(core.snapshot().phase, RestartPhase::Running);
+        assert!(core.cancel(id).is_err());
+        assert!(gate.try_enter().is_some());
+        assert_eq!(
+            host.runtime.wait(target).await.unwrap(),
+            event_bus::AgentRunPhase::Stopped
+        );
+        assert_eq!(
+            host.runtime.wait(queued).await.unwrap(),
+            event_bus::AgentRunPhase::Done
+        );
+        assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let next = core.request().unwrap();
+        assert_ne!(id, next);
+        drop(producer);
+        core.wait_sealed(next).await.unwrap();
+        core.cancel(next).unwrap();
+        host.shutdown().await.unwrap();
+    }
 }
 #[tokio::test]
 async fn checkpoint_write_failure_remains_failed_closed_even_after_stop() {
@@ -394,17 +461,11 @@ async fn sealed_stop_retains_real_terminal_tail_until_next_attempt_drains_it() {
     let model = Arc::new(Model::default());
     let (_dir, mut host) = boot_with_model(model.clone()).await;
     let core = RestartCoordinator::new(&host);
-    let target = host.runtime.delegate_background(
-        runtime::Role::Orchestrator,
-        "target".into(),
-        runtime::RunConfig::default(),
-    );
-    let other = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "unaffected".into(),
-        runtime::RunConfig::default(),
-    );
+    let target = idle_run(&host.runtime, runtime::Role::Orchestrator, "target").await;
+    let other = idle_run(&host.runtime, runtime::Role::Worker, "unaffected").await;
+    let accepted = host.runtime.producer_gate().try_enter().unwrap();
     let a = core.request().unwrap();
+    phase(&core, RestartPhase::WaitingSafePoint).await;
     // This queued child has no provider admission; subtree Stop must never start it.
     let child = host
         .runtime
@@ -415,8 +476,9 @@ async fn sealed_stop_retains_real_terminal_tail_until_next_attempt_drains_it() {
             runtime::RunConfig::default(),
         )
         .unwrap();
+    drop(accepted);
     let proof = core.wait_sealed(a).await.unwrap();
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     host.runtime
         .set_terminal_registered_probe(move |run, lease| {
@@ -437,12 +499,9 @@ async fn sealed_stop_retains_real_terminal_tail_until_next_attempt_drains_it() {
         host.runtime.wait(child).await,
         Err(RuntimeError::RunTerminated { .. })
     ));
-    // Only the unaffected live future resumes and reaches its provider result.
-    assert_eq!(
-        host.runtime.wait(other).await.unwrap(),
-        event_bus::AgentRunPhase::Done
-    );
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // The unaffected idle loop accepts another real provider turn after resume.
+    resume_idle(&host.runtime, other).await;
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 3);
     // Duplicate Stop must neither create a new run nor discard the held tail.
     core.stop(target, runtime::StopScope::Subtree).unwrap();
     let b = core.request().unwrap();
@@ -460,6 +519,38 @@ async fn sealed_stop_retains_real_terminal_tail_until_next_attempt_drains_it() {
     host.shutdown().await.unwrap();
 }
 
+// Hold a real accepted producer until the runtime attempt has gated new work.
+// Unlike a keep-alive idle loop, this run would call the provider if reopened.
+async fn request_with_queued_run(core: &RestartCoordinator) -> (RestartId, RunId) {
+    let producer = core.0.runtime.producer_gate();
+    let accepted = producer.try_enter().unwrap();
+    let id = core.request().unwrap();
+    phase(core, RestartPhase::WaitingSafePoint).await;
+    let run = core.0.runtime.delegate_background(
+        runtime::Role::Worker,
+        "must not execute while failed closed".into(),
+        Default::default(),
+    );
+    drop(accepted);
+    (id, run)
+}
+#[tokio::test]
+async fn queued_failure_fixture_executes_if_preparation_is_cancelled() {
+    let model = Arc::new(Model::default());
+    let (_dir, mut host) = boot_with_model(model.clone()).await;
+    let core = RestartCoordinator::new(&host);
+    let (id, run) = request_with_queued_run(&core).await;
+    core.wait_sealed(id).await.unwrap();
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    core.cancel(id).unwrap();
+    assert_eq!(
+        host.runtime.wait(run).await.unwrap(),
+        event_bus::AgentRunPhase::Done
+    );
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    host.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn host_seal_failure_after_marker_keeps_stop_terminal_only() {
     let model = Arc::new(Model::default());
@@ -469,17 +560,8 @@ async fn host_seal_failure_after_marker_keeps_stop_terminal_only() {
     let accepted = gate
         .enter(workbench_host::bootstrap::restart::CommandAccess::ExistingInput)
         .unwrap();
-    let target = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "stop target".into(),
-        Default::default(),
-    );
-    let other = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "must stay parked".into(),
-        Default::default(),
-    );
-    let id = core.request().unwrap();
+    let target = idle_run(&host.runtime, runtime::Role::Worker, "stop target").await;
+    let (id, other) = request_with_queued_run(&core).await;
     phase(&core, RestartPhase::Sealing).await;
     // Inject a host-side sealing refusal after the synchronous runtime marker.
     // No runtime failure exists yet: drive must propagate this refusal to runtime.
@@ -506,38 +588,10 @@ async fn host_seal_failure_after_marker_keeps_stop_terminal_only() {
             .is_pending()
     );
     drop(waiting);
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     core.transition_to_shutdown();
     assert!(host.shutdown().await.is_err());
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn shutdown_during_host_permit_drain_never_reopens_or_calls_provider() {
-    let model = Arc::new(Model::default());
-    let (_dir, mut host) = boot_with_model(model.clone()).await;
-    let core = RestartCoordinator::new(&host);
-    let gate = host.host.lock().unwrap().service().restart_gate();
-    let accepted = gate
-        .enter(workbench_host::bootstrap::restart::CommandAccess::ExistingInput)
-        .unwrap();
-    let run = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "parked".into(),
-        Default::default(),
-    );
-    let id = core.request().unwrap();
-    phase(&core, RestartPhase::Sealing).await;
-    core.transition_to_shutdown();
-    assert_eq!(gate.phase(), HostRestartPhase::ShuttingDown);
-    drop(accepted);
-    assert!(core.wait_sealed(id).await.is_err());
-    host.shutdown().await.unwrap();
-    assert_eq!(
-        host.runtime.wait(run).await.unwrap(),
-        event_bus::AgentRunPhase::Stopped
-    );
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[derive(Default)]
@@ -628,6 +682,7 @@ async fn accepted_saved_compaction_retains_its_ingress_permit_until_persisted() 
             runtime.clone(),
             gate.clone(),
             vec![runtime.producer_gate()],
+            Default::default(),
         );
         let provenance = workbench_host::provenance::local_desktop();
         if protocol {
@@ -685,23 +740,21 @@ async fn direct_runtime_stop_reconciles(sealing: bool) {
         gate.enter(workbench_host::bootstrap::restart::CommandAccess::ExistingInput)
             .unwrap()
     });
-    let target = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "target".into(),
-        Default::default(),
-    );
-    let other =
-        host.runtime
-            .delegate_background(runtime::Role::Worker, "other".into(), Default::default());
+    let target = idle_run(&host.runtime, runtime::Role::Worker, "target").await;
+    let other = idle_run(&host.runtime, runtime::Role::Worker, "other").await;
     let id = core.request().unwrap();
-    let attempt = core.0.state.lock().unwrap().attempt.clone().unwrap();
     let proof = if sealing {
         phase(&core, RestartPhase::Sealing).await;
         None
     } else {
-        Some(core.wait_sealed(id).await.unwrap())
+        Some(
+            core.wait_sealed(id)
+                .await
+                .unwrap_or_else(|error| panic!("{error:?}: {:?}", host.runtime.quiesce_state())),
+        )
     };
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let attempt = core.0.state.lock().unwrap().attempt.clone().unwrap();
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     host.runtime.stop(target, StopScope::SelfOnly).unwrap();
     phase(&core, RestartPhase::Running).await;
     assert_eq!(
@@ -723,11 +776,8 @@ async fn direct_runtime_stop_reconciles(sealing: bool) {
         host.runtime.wait(target).await.unwrap(),
         event_bus::AgentRunPhase::Stopped
     );
-    assert_eq!(
-        host.runtime.wait(other).await.unwrap(),
-        event_bus::AgentRunPhase::Done
-    );
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    resume_idle(&host.runtime, other).await;
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 3);
     drop(input);
     let next = core.request().unwrap();
     core.wait_sealed(next).await.unwrap();
@@ -755,15 +805,9 @@ async fn direct_runtime_stop_invalidation_failure_does_not_reopen_host_or_produc
     let model = Arc::new(Model::default());
     let (_dir, mut host) = boot_with_model(model.clone()).await;
     let core = RestartCoordinator::new(&host);
-    let target = host.runtime.delegate_background(
-        runtime::Role::Worker,
-        "target".into(),
-        Default::default(),
-    );
-    let other =
-        host.runtime
-            .delegate_background(runtime::Role::Worker, "other".into(), Default::default());
-    let id = core.request().unwrap();
+    let target = idle_run(&host.runtime, runtime::Role::Worker, "target").await;
+    let other = idle_run(&host.runtime, runtime::Role::Worker, "other").await;
+    let (id, queued) = request_with_queued_run(&core).await;
     core.wait_sealed(id).await.unwrap();
     let db = rusqlite::Connection::open(&host.composition.storage.db_path).unwrap();
     db.execute_batch("CREATE TRIGGER reject_cancel BEFORE UPDATE ON resume_intents BEGIN SELECT RAISE(ABORT, 'cancel failed'); END;").unwrap();
@@ -774,8 +818,13 @@ async fn direct_runtime_stop_invalidation_failure_does_not_reopen_host_or_produc
         host.host.lock().unwrap().service().restart_gate().phase(),
         HostRestartPhase::FailedClosed
     );
-    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
-    // Parking retains the public Running phase; completion/provider execution must stay blocked.
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // Preserve the live parked-loop contract too. The new runnable queue is
+    // rejected on failed checkpoint invalidation, never dispatched to a provider.
+    assert!(matches!(
+        host.runtime.wait(queued).await,
+        Err(RuntimeError::Model { reason }) if reason.contains("cancel failed")
+    ));
     let mut waiting = Box::pin(host.runtime.wait(other));
     assert!(
         std::future::poll_fn(|cx| std::task::Poll::Ready(waiting.as_mut().poll(cx).is_pending()))
@@ -788,6 +837,7 @@ async fn direct_runtime_stop_invalidation_failure_does_not_reopen_host_or_produc
     drop(waiting);
     db.execute_batch("DROP TRIGGER reject_cancel;").unwrap();
     assert!(host.shutdown().await.is_err());
+    assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

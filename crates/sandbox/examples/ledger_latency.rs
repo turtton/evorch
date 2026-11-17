@@ -11,7 +11,8 @@
 //! with the environment (kernel, CPU, parallelism) and prints the normal and
 //! the deliberately-stuck shapes (TERM ignored, grandchild, pipe held)
 //! separately. Children use a self-STOP, so they are provably alive and
-//! configured before the stop starts (a pipe receipt confirms fixture setup);
+//! configured before the stop starts (a pipe receipt identifies the stopping PID,
+//! then a non-consuming process-state observation confirms SIGSTOP delivery);
 //! nothing sleeps to synchronize.
 
 use std::time::{Duration, Instant};
@@ -32,18 +33,18 @@ fn command(script: &str) -> tokio::process::Command {
 
 /// What a child does while the core stops it.
 const SHAPES: [(&str, &str); 4] = [
-    ("plain", "printf 'ready\n'; kill -STOP $$"),
+    ("plain", "printf '%s\n' $$; kill -STOP $$"),
     (
         "term-ignoring",
-        "trap '' TERM; printf 'ready\n'; kill -STOP $$",
+        "trap '' TERM; printf '%s\n' $$; kill -STOP $$",
     ),
     (
         "grandchild",
-        "sh -c 'printf \"ready\\n\"; kill -STOP $$' & wait",
+        "sh -c 'printf \"%s\\n\" $$; kill -STOP $$' & wait",
     ),
     (
         "pipe-holder",
-        "(exec sleep 3600) & printf 'ready\n'; kill -STOP $$",
+        "(exec sleep 3600) & printf '%s\n' $$; kill -STOP $$",
     ),
 ];
 
@@ -53,6 +54,56 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 }
 
 static RAW: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+async fn stopped(pid: u32) -> bool {
+    // Observing status never consumes wait status, unlike waitpid/waitid. This also
+    // works for the grandchild, whose wait status belongs to the fixture shell.
+    #[cfg(target_os = "linux")]
+    let state = {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("State:\t"))
+            .and_then(|state| state.chars().next())
+            .unwrap()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let state = {
+        let output = tokio::process::Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "fixture process disappeared");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .chars()
+            .next()
+            .unwrap()
+    };
+    assert!(
+        !matches!(state, 'Z' | 'X'),
+        "fixture exited before stopping"
+    );
+    state == 'T'
+}
+
+async fn ready(child: &mut sandbox::process::GroupChild) -> u32 {
+    let mut line = String::new();
+    BufReader::new(child.take_stdout().unwrap())
+        .read_line(&mut line)
+        .await
+        .unwrap();
+    let pid: u32 = line.trim_end().parse().unwrap();
+    assert!(pid > 0);
+    // A stopped process cannot send an acknowledgement itself. Poll only its
+    // non-consuming kernel status; no sleep or speed assertion defines readiness.
+    while !stopped(pid).await {
+        tokio::task::yield_now().await;
+    }
+    pid
+}
 
 fn environment() {
     let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
@@ -113,17 +164,31 @@ async fn start(
         );
     }
     // Registration only proves spawn, not that traps/descendants are installed.
-    // Each pipe's receipt comes from the child after its fixture setup. No timing
-    // assertion or delay is used, and measurement starts only after every receipt.
+    // The PID receipt alone precedes SIGSTOP. Measurement starts only after the
+    // kernel reports that every identified process has actually stopped.
     for child in &mut owned {
-        let mut line = String::new();
-        BufReader::new(child.take_stdout().unwrap())
-            .read_line(&mut line)
-            .await
-            .unwrap();
-        assert_eq!(line.trim_end(), "ready");
+        ready(child).await;
     }
     owned
+}
+
+#[tokio::test]
+async fn readiness_observes_stop_without_stealing_owner_wait() {
+    for (_, script) in SHAPES {
+        let ledger = SpawnLedger::new();
+        let mut command = command(script);
+        let mut child = ledger
+            .admit()
+            .unwrap()
+            .spawn_group(ChildKind::Other, Some("readiness-test"), &mut command)
+            .unwrap();
+        let pid = ready(&mut child).await;
+        assert!(stopped(pid).await);
+        ledger.close_fence();
+        ledger.stop_all_children();
+        child.wait().await.unwrap();
+        ledger.reap_all_children().await.unwrap();
+    }
 }
 
 async fn stop_to_reap(script: &str, children: usize) -> Duration {

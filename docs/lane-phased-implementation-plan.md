@@ -2,6 +2,10 @@
 
 本文書は [ADR 0044: lane を独立した Orchestrator thread として管理する](../intents/evorch/decisions/0044-lane-threads.md) の段階的実装計画である。
 
+> **進捗・統合状況（単一コア化・イベント待機一本化）**:
+> - **4b-D-2a（PR #627）マージ済み**: core 経路への単一 ledger 注入、checked shutdown、ready 同期、bwrap 絶対パス canonicalize、cold learning cleanup を反映。D-2b（predecessor coordinator / finalization）は後続。
+> - **wait 一本化（PR #630）マージ済み**: 返信専用の `wait_reply` を廃止し、一般ロール向けに引数なし `wait()`、新しい待機元（lane、review、shell job、親）、提示時 ACK、未読優先の即時戻り `no_wait_sources` への一本化を完了。
+
 ## 1. Phase とレビュー境界
 
 | 段階 | 内容 | レビュー境界・公開契約 |

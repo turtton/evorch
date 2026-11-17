@@ -22,6 +22,8 @@ bench = false
 
 [dependencies]
 core-instance = { path = "../core-instance" }
+core-launcher = { path = "../core-launcher" }
+sha2 = { workspace = true }
 workbench-host = { path = "../workbench-host" }
 workbench-protocol = { path = "../workbench-protocol" }
 workbench-web = { path = "../workbench-web" }

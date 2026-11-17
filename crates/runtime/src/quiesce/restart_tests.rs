@@ -2,7 +2,7 @@ use super::fixture::Fixture;
 use super::*;
 use crate::RuntimeError;
 use crate::runtime::HookPoint;
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
 
 #[tokio::test]
 async fn preflight_failure_does_not_park_or_clear_storage_health() {
@@ -74,35 +74,55 @@ async fn failed_checkpoint_invalidation_keeps_park_and_failure_sticky() {
 
 #[tokio::test]
 async fn capturing_rejects_stop_without_receipt_but_failed_closed_allows_terminal_only() {
-    let f = Fixture::new(0);
-    let target = f.start();
-    let other = f.start();
-    let attempt = f.runtime.begin_restart_quiesce().unwrap();
-    let fence = f.runtime.fence_dispatch_restart().await.unwrap();
-    f.runtime.drain_dispatch_tails(&fence).await.unwrap();
-    f.runtime.begin_recovery_capture(&fence).unwrap();
-    let before = f.intent(target);
-    assert!(matches!(
-        f.runtime.stop(target, crate::StopScope::SelfOnly),
-        Err(RuntimeError::RestartBusy)
-    ));
-    assert_eq!(f.intent(target), before);
-    assert!(f.runtime.shared.dispatch_tails.capture_valid());
-    f.runtime
-        .shared
-        .quiesce
-        .fail("independent post-capture failure");
-    f.runtime.stop(target, crate::StopScope::SelfOnly).unwrap();
-    f.runtime.wait(target).await.unwrap();
-    assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
-    assert!(!f.runtime.shared.quiesce.running());
-    assert!(f.intent(other).checkpoint.is_some());
-    assert!(f.runtime.cancel_restart_quiesce(&attempt).is_err());
-    assert!(!f.runtime.shared.dispatch_tails.capture_valid());
-    assert!(f.runtime.recovery_plan().is_err());
-    assert!(f.runtime.begin_recovery_capture(&fence).is_err());
-    assert!(f.runtime.save_recovery_graph("invalidated", &[]).is_err());
-    f.cleanup(other).await;
+    struct ForwardStop(std::sync::atomic::AtomicUsize);
+    impl StopBoundary for ForwardStop {
+        fn stop(&self, delivery: StopDelivery<'_>) -> Result<(), RuntimeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            delivery.deliver()
+        }
+    }
+    for installed in [false, true] {
+        let boundary = Arc::new(ForwardStop(Default::default()));
+
+        let f = Fixture::new(0);
+        if installed {
+            f.runtime.install_stop_boundary(boundary.clone()).unwrap();
+            assert!(f.runtime.install_stop_boundary(boundary.clone()).is_err());
+        }
+        let target = f.start();
+        let other = f.start();
+        let attempt = f.runtime.begin_restart_quiesce().unwrap();
+        let fence = f.runtime.fence_dispatch_restart().await.unwrap();
+        f.runtime.drain_dispatch_tails(&fence).await.unwrap();
+        f.runtime.begin_recovery_capture(&fence).unwrap();
+        let before = f.intent(target);
+        assert!(matches!(
+            f.runtime.stop(target, crate::StopScope::SelfOnly),
+            Err(RuntimeError::RestartBusy)
+        ));
+        assert_eq!(f.intent(target), before);
+        assert!(f.runtime.shared.dispatch_tails.capture_valid());
+        f.runtime
+            .shared
+            .quiesce
+            .fail("independent post-capture failure");
+        f.runtime.stop(target, crate::StopScope::SelfOnly).unwrap();
+        f.runtime.wait(target).await.unwrap();
+        assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
+        assert!(!f.runtime.shared.quiesce.running());
+        assert!(f.intent(other).checkpoint.is_some());
+        assert!(f.runtime.cancel_restart_quiesce(&attempt).is_err());
+        assert!(!f.runtime.shared.dispatch_tails.capture_valid());
+        assert!(f.runtime.recovery_plan().is_err());
+        assert!(f.runtime.begin_recovery_capture(&fence).is_err());
+        assert!(f.runtime.save_recovery_graph("invalidated", &[]).is_err());
+        f.cleanup(other).await;
+
+        assert_eq!(
+            boundary.0.load(Ordering::SeqCst),
+            if installed { 2 } else { 0 }
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1,6 +1,5 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use config::{EvalBudgetConfig, RoleBindingConfig};
 use event_bus::{Event, EventKind, LifecycleEvent, MessageEvent, ToolEvent};
@@ -50,6 +49,7 @@ struct Fixture {
     host: Arc<RecordingHost>,
     notices: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(String, String)>>>,
     tools: Vec<Arc<dyn Tool>>,
+    service: EvaluationService,
 }
 
 impl Fixture {
@@ -64,7 +64,7 @@ impl Fixture {
             notices: sender,
             reloads: AtomicUsize::new(0),
         });
-        let tools = tools(EvaluatorContext {
+        let (tools, _, service) = tools_with_service(EvaluatorContext {
             database: recorded.config.db_path.clone(),
             storage: recorded.storage.handle(),
             user_config_dir: user.path().to_path_buf(),
@@ -81,6 +81,7 @@ impl Fixture {
             host,
             notices: Mutex::new(Some(notices)),
             tools,
+            service,
         }
     }
 
@@ -91,13 +92,10 @@ impl Fixture {
             call_id: Some(format!("call-{name}")),
             ..Default::default()
         };
-        tokio::time::timeout(
-            Duration::from_secs(20),
-            self.tool(name).execute_with_context(&ctx, args),
-        )
-        .await
-        .expect("the tool answers without waiting for an approval nobody gives")
-        .unwrap()
+        self.tool(name)
+            .execute_with_context(&ctx, args)
+            .await
+            .unwrap()
     }
 
     /// Answer the next approval request and return what it showed.
@@ -125,10 +123,7 @@ impl Fixture {
 
     async fn notice(&self) -> (String, String) {
         let mut notices = self.notices.lock().unwrap().take().unwrap();
-        let notice = tokio::time::timeout(Duration::from_secs(20), notices.recv())
-            .await
-            .expect("a completion notice")
-            .unwrap();
+        let notice = notices.recv().await.unwrap();
         *self.notices.lock().unwrap() = Some(notices);
         notice
     }

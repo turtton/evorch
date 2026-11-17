@@ -1,5 +1,6 @@
 //! One process-local lifecycle owner. There is deliberately no wire/production request handler.
-//! Lock order: coordinator -> host gate / runtime. Runtime never calls back into this owner.
+//! Lock order: coordinator -> host gate / runtime. Direct runtime Stop enters the
+//! installed boundary before taking any runtime lock; runtime never calls back while locked.
 use runtime::{
     AgentRuntime, RunId, RuntimeError, StopScope,
     producer::{ProducerGate, ProducerPause},
@@ -12,13 +13,22 @@ use workbench_host::bootstrap::{
     restart::{HostRestartGate, HostRestartPhase, RestartStopHandler, SealedRestart},
 };
 
+mod finalization;
+pub use finalization::FinalizationTarget;
+mod preparing;
+mod stop;
+const PREPARATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartPhase {
     Running,
     Requested,
+    PreparingDrains,
     WaitingSafePoint,
     Sealing,
     Sealed,
+    Capturing,
+    Finalizing,
     Cancelling,
     FailedClosed,
     ShuttingDown,
@@ -53,16 +63,48 @@ struct State {
     generation: u64,
     attempt: Option<RestartAttempt>,
     pauses: Vec<ProducerPause>,
-    sealed: Option<Arc<SealedRestart>>,
+    sealed: Option<SealedRestart>,
+    recipes: Option<std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>>,
+    finalization:
+        Option<Arc<tokio::sync::Mutex<workbench_host::bootstrap::planned_exit::PlannedExit>>>,
+    capture_started: bool,
+    finalization_id: Option<RestartId>,
+    finalization_done: bool,
+    completed_stage: Option<workbench_host::bootstrap::planned_exit::ExitStage>,
     worker: Option<tokio::task::AbortHandle>,
+    learning_pause: Option<runtime::learning_suspend::LearningPause>,
+    suspension: Option<Arc<runtime::learning_suspend::LearningSuspension>>,
+    evaluation_pause: Option<ProducerPause>,
+    preparation_deadline: Option<tokio::time::Instant>,
 }
 struct Inner {
     owner: uuid::Uuid,
     runtime: AgentRuntime,
     gate: HostRestartGate,
     producers: Vec<ProducerGate>,
+    preparing: workbench_host::bootstrap::restart::PreparingServices,
     state: Mutex<State>,
     changed: watch::Sender<u64>,
+}
+/// A revocable observation, NOT the consumable capture capability. Keeping any
+/// number of waiters alive cannot delay the coordinator's capture boundary.
+pub struct SealedObservation {
+    owner: std::sync::Weak<Inner>,
+    id: RestartId,
+}
+impl SealedObservation {
+    pub fn validate(&self, runtime: &AgentRuntime) -> Result<(), RuntimeError> {
+        let inner = self.owner.upgrade().ok_or(RuntimeError::RestartBusy)?;
+        let state = inner.state.lock().unwrap();
+        if state.id != Some(self.id) {
+            return Err(RuntimeError::RestartBusy);
+        }
+        state
+            .sealed
+            .as_ref()
+            .ok_or(RuntimeError::RestartBusy)?
+            .validate(runtime)
+    }
 }
 #[derive(Clone)]
 pub struct RestartCoordinator(Arc<Inner>);
@@ -82,6 +124,7 @@ impl RestartCoordinator {
             host.runtime.clone(),
             command_host.service().restart_gate(),
             producers,
+            host.restart_preparing_services(),
         );
         command_host
             .service_mut()
@@ -92,12 +135,14 @@ impl RestartCoordinator {
         runtime: AgentRuntime,
         gate: HostRestartGate,
         producers: Vec<ProducerGate>,
+        preparing: workbench_host::bootstrap::restart::PreparingServices,
     ) -> Self {
-        Self(Arc::new(Inner {
+        let coordinator = Self(Arc::new(Inner {
             owner: uuid::Uuid::new_v4(),
             runtime,
             gate,
             producers,
+            preparing,
             state: Mutex::new(State {
                 id: None,
                 phase: RestartPhase::Running,
@@ -106,10 +151,28 @@ impl RestartCoordinator {
                 attempt: None,
                 pauses: vec![],
                 sealed: None,
+                recipes: None,
+                finalization: None,
+                capture_started: false,
+                finalization_id: None,
+                finalization_done: false,
+                completed_stage: None,
                 worker: None,
+                learning_pause: None,
+                suspension: None,
+                evaluation_pause: None,
+                preparation_deadline: None,
             }),
             changed: watch::channel(0).0,
-        }))
+        }));
+        coordinator
+            .0
+            .runtime
+            .install_stop_boundary(Arc::new(stop::CoreStopBoundary(Arc::downgrade(
+                &coordinator.0,
+            ))))
+            .expect("runtime already has another lifecycle owner");
+        coordinator
     }
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.changed.subscribe()
@@ -134,21 +197,40 @@ impl RestartCoordinator {
     }
     /// Joining or dropping a waiter never owns cancellation. The detached worker does.
     pub fn request(&self) -> Result<RestartId, RuntimeError> {
+        self.request_inner(None)
+    }
+    /// Internal planned path only: no wire handler/capability advertises restart.
+    pub fn request_planned(
+        &self,
+        recipes: std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>,
+    ) -> Result<RestartId, RuntimeError> {
+        self.0.runtime.preflight_restart_capture(&recipes)?;
+        self.request_inner(Some(recipes))
+    }
+    fn request_inner(
+        &self,
+        recipes: Option<std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>>,
+    ) -> Result<RestartId, RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
         if matches!(
             state.phase,
             RestartPhase::Requested
+                | RestartPhase::PreparingDrains
                 | RestartPhase::WaitingSafePoint
                 | RestartPhase::Sealing
                 | RestartPhase::Sealed
         ) {
+            // A caller cannot upgrade an existing reversible attempt to planned.
+            if recipes.is_some() {
+                return Err(RuntimeError::RestartBusy);
+            }
             return Ok(state.id.unwrap());
         }
         if state.phase != RestartPhase::Running {
             return Err(RuntimeError::RestartBusy);
         }
         // Runtime does its atomic storage-health preflight BEFORE any host gate changes.
-        let attempt = self.0.runtime.begin_restart_quiesce()?;
+        self.0.runtime.check_restart_preparation()?;
         state.generation = state
             .generation
             .checked_add(1)
@@ -158,16 +240,15 @@ impl RestartCoordinator {
             generation: state.generation,
         };
         state.id = Some(id);
-        state.attempt = Some(attempt.clone());
-        state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();
-        self.0
-            .gate
-            .transition(id.generation, HostRestartPhase::Preparing);
-        self.publish(&mut state, RestartPhase::Requested);
+        state.recipes = recipes;
+        state.learning_pause = Some(self.0.runtime.pause_learning());
+        state.evaluation_pause = Some(self.0.preparing.evaluations.producers.pause());
+        state.preparation_deadline = Some(tokio::time::Instant::now() + PREPARATION_LIMIT);
+        self.publish(&mut state, RestartPhase::PreparingDrains);
         let worker = self.clone();
         state.worker = Some(
             tokio::spawn(async move {
-                worker.drive(id, attempt).await;
+                worker.drive_preparing(id).await;
             })
             .abort_handle(),
         );
@@ -210,6 +291,12 @@ impl RestartCoordinator {
                 return Err(RuntimeError::RestartBusy);
             }
         }
+        self.0.runtime.drain_dispatch_tails(&fence).await?;
+        self.0
+            .runtime
+            .drain_learning_for_restart()
+            .await
+            .map_err(|reason| RuntimeError::Model { reason })?;
         self.0
             .gate
             .sealed(&self.0.runtime, id.generation, fence)
@@ -249,6 +336,8 @@ impl RestartCoordinator {
                 self.publish(state, RestartPhase::FailedClosed);
             }
             Status::ShuttingDown => {
+                self.0.runtime.learning_gate().close();
+                self.0.preparing.evaluations.producers.close();
                 state.worker = None;
                 state.sealed = None;
                 state.id = None;
@@ -264,13 +353,14 @@ impl RestartCoordinator {
         status
     }
     async fn drive(&self, id: RestartId, attempt: RestartAttempt) {
-        {
+        let deadline = {
             let mut state = self.0.state.lock().unwrap();
             if state.id != Some(id) {
                 return;
             }
             self.publish(&mut state, RestartPhase::WaitingSafePoint);
-        }
+            state.preparation_deadline.unwrap()
+        };
         let mut runtime_changes = self.0.runtime.subscribe_restart_state();
         let mut producer_changes: Vec<_> = self
             .0
@@ -281,6 +371,7 @@ impl RestartCoordinator {
         let prepare = self.prepare(id, &attempt);
         tokio::pin!(prepare);
         let mut prepared = false;
+        let mut expired = false;
         loop {
             {
                 let mut state = self.0.state.lock().unwrap();
@@ -296,6 +387,10 @@ impl RestartCoordinator {
                 }
             }
             tokio::select! {
+                _ = tokio::time::sleep_until(deadline), if !expired => {
+                    expired = true;
+                    let _ = self.cancel(id);
+                }
                 result = &mut prepare, if !prepared => {
                     prepared = true;
                     let mut state = self.0.state.lock().unwrap();
@@ -303,7 +398,7 @@ impl RestartCoordinator {
                     if self.synchronize_attempt(&mut state, &attempt) == runtime::quiesce::RestartAttemptState::Active {
                         match result {
                             Ok(sealed) => {
-                                state.sealed = Some(Arc::new(sealed));
+                                state.sealed = Some(sealed);
                                 self.publish(&mut state, RestartPhase::Sealed);
                             }
                             Err(error) => {
@@ -330,7 +425,7 @@ impl RestartCoordinator {
             // Remain alive after Sealed: direct runtime Stop is an existing API.
         }
     }
-    pub async fn wait_sealed(&self, id: RestartId) -> Result<Arc<SealedRestart>, RuntimeError> {
+    pub async fn wait_sealed(&self, id: RestartId) -> Result<SealedObservation, RuntimeError> {
         let mut changed = self.subscribe();
         loop {
             {
@@ -345,7 +440,10 @@ impl RestartCoordinator {
                 }
                 if let Some(sealed) = &state.sealed {
                     sealed.validate(&self.0.runtime)?;
-                    return Ok(sealed.clone());
+                    return Ok(SealedObservation {
+                        owner: Arc::downgrade(&self.0),
+                        id,
+                    });
                 }
             }
             changed
@@ -361,11 +459,42 @@ impl RestartCoordinator {
         state.sealed = None;
     }
     fn reopened(&self, state: &mut State) {
+        if self.0.runtime.check_restart_preparation().is_err() {
+            state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();
+            self.0
+                .gate
+                .transition(state.generation, HostRestartPhase::FailedClosed);
+            self.publish(state, RestartPhase::FailedClosed);
+            return;
+        }
+        if let Some(pause) = state.learning_pause.take() {
+            let restored = if let Some(suspension) = state.suspension.take() {
+                self.0
+                    .runtime
+                    .cancel_learning_suspension(pause, suspension)
+                    .is_ok()
+            } else {
+                self.0.runtime.resume_learning(pause)
+            };
+            if !restored {
+                state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();
+                self.0
+                    .gate
+                    .transition(state.generation, HostRestartPhase::FailedClosed);
+                self.publish(state, RestartPhase::FailedClosed);
+                return;
+            }
+        }
+        if let Some(pause) = state.evaluation_pause.take() {
+            self.0.preparing.evaluations.producers.resume(pause);
+        }
         for (producer, pause) in self.0.producers.iter().zip(state.pauses.drain(..)) {
             producer.resume(pause);
         }
         state.id = None;
         state.attempt = None;
+        state.recipes = None;
+        state.preparation_deadline = None;
         self.0
             .gate
             .transition(state.generation, HostRestartPhase::Open);
@@ -374,12 +503,22 @@ impl RestartCoordinator {
     pub fn cancel(&self, id: RestartId) -> Result<(), RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
         if state.id != Some(id)
+            || state.capture_started
             || matches!(
                 state.phase,
                 RestartPhase::FailedClosed | RestartPhase::ShuttingDown
             )
         {
             return Err(RuntimeError::RestartBusy);
+        }
+        if state.attempt.is_none() {
+            Self::abort_worker(&mut state);
+            self.reopened(&mut state);
+            return if state.phase == RestartPhase::Running {
+                Ok(())
+            } else {
+                Err(RuntimeError::RestartBusy)
+            };
         }
         self.0
             .gate
@@ -388,16 +527,23 @@ impl RestartCoordinator {
         let attempt = state.attempt.as_ref().unwrap().clone();
         let result = self.0.runtime.cancel_restart_quiesce(&attempt);
         self.synchronize_attempt(&mut state, &attempt);
+        if state.phase == RestartPhase::FailedClosed {
+            return Err(RuntimeError::RestartBusy);
+        }
         result.map(|_| ())
     }
     /// Only operator shutdown calls the destructive host drain; this just closes admission.
     pub fn transition_to_shutdown(&self) {
         let mut state = self.0.state.lock().unwrap();
-        Self::abort_worker(&mut state);
+        if !state.capture_started {
+            Self::abort_worker(&mut state);
+        }
         state.id = None;
         for producer in &self.0.producers {
             producer.close();
         }
+        self.0.runtime.learning_gate().close();
+        self.0.preparing.evaluations.producers.close();
         self.0
             .gate
             .transition(state.generation, HostRestartPhase::ShuttingDown);
@@ -406,14 +552,8 @@ impl RestartCoordinator {
 }
 impl RestartStopHandler for RestartCoordinator {
     fn stop(&self, run: RunId, scope: StopScope) -> Result<(), RuntimeError> {
-        let mut state = self.0.state.lock().unwrap();
-        // Do not publish Cancelling before runtime terminal admission accepts.
-        // Runtime prepares dispatch, delivers Stop, then durably resumes others.
-        let result = self.0.runtime.stop(run, scope);
-        if let Some(attempt) = state.attempt.clone() {
-            self.synchronize_attempt(&mut state, &attempt);
-        }
-        result
+        // Direct and host Stop share the runtime-installed outer boundary.
+        self.0.runtime.stop(run, scope)
     }
 }
 
@@ -424,9 +564,12 @@ impl RestartSnapshot {
         let phase = match self.phase {
             RestartPhase::Running => dto::RestartPhase::Running,
             RestartPhase::Requested => dto::RestartPhase::Requested,
+            RestartPhase::PreparingDrains => dto::RestartPhase::PreparingDrains,
             RestartPhase::WaitingSafePoint => dto::RestartPhase::WaitingSafePoint,
             RestartPhase::Sealing => dto::RestartPhase::Sealing,
             RestartPhase::Sealed => dto::RestartPhase::Sealed,
+            RestartPhase::Capturing => dto::RestartPhase::Capturing,
+            RestartPhase::Finalizing => dto::RestartPhase::Finalizing,
             RestartPhase::Cancelling => dto::RestartPhase::Cancelling,
             RestartPhase::FailedClosed => dto::RestartPhase::FailedClosed,
             RestartPhase::ShuttingDown => dto::RestartPhase::ShuttingDown,

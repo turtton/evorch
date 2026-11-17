@@ -72,6 +72,7 @@ impl AgentRuntime {
             .ok_or_else(|| LaneError::new("unknown_question", "question disappeared"))?;
         drop(_authority);
         drop(_completion);
+        self.cache_wait_question(&question);
         self.shared
             .bus
             .emit(Event::new(ToolEvent::UserQuestionUpdated { question }));

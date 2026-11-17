@@ -167,7 +167,6 @@ impl Role {
                     "send_message",
                     "skill_load",
                     "send",
-                    "wait_reply",
                     "inbox",
                     "wait",
                     "run_output",
@@ -197,7 +196,6 @@ impl Role {
                     "skill_load",
                     "git_diff",
                     "send",
-                    "wait_reply",
                     "inbox",
                     "handoff_to_lane",
                     "run_js",
@@ -240,6 +238,7 @@ impl Role {
                 "thread_read",
                 "ask_user",
                 "user_answers",
+                "wait",
             ]
             .map(String::from),
         );

@@ -182,6 +182,7 @@ pub(super) fn submit(state: &LoopState, runtime: &AgentRuntime, input: Value) ->
         crate::run_store::review_time_ns(),
     ) {
         Ok(_) => DispatchResult {
+            observations: Default::default(),
             result: tools::ToolResult::success(
                 json!({"submitted":true,"verification_ref":args.verification_ref}).to_string(),
             ),

@@ -19,6 +19,7 @@ pub mod learning;
 mod learning_tests;
 pub mod models;
 pub mod planned;
+pub mod planned_exit;
 mod project_models;
 pub mod recovery;
 #[cfg(test)]
@@ -117,6 +118,8 @@ pub struct BootstrappedHost {
     pub spawn_ledger: sandbox::SpawnLedger,
     pub owner: Arc<OwnerHost>,
     pub config: config::Config,
+    // The exact production DB configuration; composition inventory is test-only.
+    restart_storage: storage::StorageConfig,
     pub services: services::BackgroundServices,
     pub mcp: runtime::mcp::McpHostServices,
     pub recovery_diagnostics: Option<Arc<dyn core_startup::CoreStartupDiagnostics>>,
@@ -129,6 +132,7 @@ pub struct BootstrappedHost {
     #[cfg(any(test, feature = "test-support"))]
     pub composition: CompositionInventory,
     bridge: Option<OwnedStorageBridge>,
+    planned_exit: Option<Arc<tokio::sync::Mutex<planned_exit::PlannedExit>>>,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
     executor: Arc<tools::ToolExecutor>,
     _leases: storage::SharedLeases,
@@ -608,6 +612,7 @@ impl BootstrappedHost {
             host,
             runtime,
             owner,
+            restart_storage: storage_config.clone(),
             evaluator,
             evaluations: evaluations.clone(),
             config,
@@ -622,6 +627,7 @@ impl BootstrappedHost {
             #[cfg(any(test, feature = "test-support"))]
             composition,
             bridge: Some(bridge),
+            planned_exit: None,
             reclaim: None,
             executor,
             _leases: leases,
@@ -810,6 +816,12 @@ impl BootstrappedHost {
         gates
     }
 
+    pub fn restart_preparing_services(&self) -> restart::PreparingServices {
+        restart::PreparingServices {
+            evaluations: self.evaluations.clone(),
+        }
+    }
+
     /// Woken when an area operation that counts as work ends, so the idle
     /// decision is taken again (ADR 0045 §2, §3).
     pub fn area_work_notify(&self) -> Arc<tokio::sync::Notify> {
@@ -905,6 +917,9 @@ impl BootstrappedHost {
         }
         if let Some(mut bridge) = self.bridge.take() {
             lane_pr::remember(&mut failure, bridge.try_shutdown());
+        }
+        if let Some(resources) = &self.planned_exit {
+            lane_pr::remember(&mut failure, resources.lock().await.cleanup().await);
         }
         failure.map_or(Ok(()), Err)
     }

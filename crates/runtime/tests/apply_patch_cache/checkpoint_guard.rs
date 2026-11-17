@@ -26,7 +26,30 @@ struct Fixture {
     _store: crate::support::ReviewStorage,
 }
 
+async fn fixture_with_history(
+    script: Vec<ScriptedResponse>,
+    history_tokens: u64,
+    max_summary_bytes: u64,
+) -> Fixture {
+    // Preview the actual fallback Edit catalog, not the head ApplyPatch catalog.
+    // 512 history tokens fit the short protected checkpoint, but not the oversized
+    // D3 summary; the unchanged assertions still require both compactions.
+    let probe = fixture_for_model(Vec::new(), 1_000_000, max_summary_bytes, true);
+    let window = crate::window_with_history(&probe.runtime, history_tokens).await;
+    drop(probe);
+    fixture(script, window, max_summary_bytes)
+}
+
 fn fixture(script: Vec<ScriptedResponse>, target_window: u64, max_summary_bytes: u64) -> Fixture {
+    fixture_for_model(script, target_window, max_summary_bytes, false)
+}
+
+fn fixture_for_model(
+    script: Vec<ScriptedResponse>,
+    target_window: u64,
+    max_summary_bytes: u64,
+    preview_next: bool,
+) -> Fixture {
     let (workspace, root) = workspace();
     let head = StreamingMockOpenAi::spawn_with_prompt_cache_models(
         vec![
@@ -85,6 +108,9 @@ summarizer = "model"
     config.providers.get_mut("head").unwrap().models[0].edit_tool =
         Some(EditToolConfig::ApplyPatch);
     config.providers.get_mut("next").unwrap().models[0].edit_tool = Some(EditToolConfig::Edit);
+    if preview_next {
+        config.agents.worker.base.models.remove(0);
+    }
     let bus = Arc::new(EventBus::new(2048));
     let receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
@@ -189,18 +215,19 @@ async fn begin(fixture: &mut Fixture) -> runtime::RunId {
 
 #[tokio::test]
 async fn window_compaction_immediately_after_d3_never_reveals_old_calls() {
-    let mut fixture = fixture(
+    let mut fixture = fixture_with_history(
         vec![
             text(MODEL, "D3 summary"),
             text(MODEL, "window summary"),
             text(MODEL, "done"),
         ],
-        6_000,
+        512,
         256,
-    );
+    )
+    .await;
     let run = begin(&mut fixture).await;
     let (phase, events) = next_boundary(&mut fixture, run).await;
-    assert_eq!(phase, AgentRunPhase::Waiting);
+    assert_eq!(phase, AgentRunPhase::Waiting, "{events:?}");
     let reasons: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -229,18 +256,19 @@ async fn window_compaction_immediately_after_d3_never_reveals_old_calls() {
 
 #[tokio::test]
 async fn oversized_d3_summary_is_recompacted_to_fit_the_target_window() {
-    let mut fixture = fixture(
+    let mut fixture = fixture_with_history(
         vec![
             text(MODEL, &"summarizable evidence ".repeat(600)),
             text(MODEL, "small window summary"),
             text(MODEL, "done"),
         ],
-        6_000,
+        512,
         16_000,
-    );
+    )
+    .await;
     let run = begin(&mut fixture).await;
-    let (phase, _) = next_boundary(&mut fixture, run).await;
-    assert_eq!(phase, AgentRunPhase::Waiting);
+    let (phase, events) = next_boundary(&mut fixture, run).await;
+    assert_eq!(phase, AgentRunPhase::Waiting, "{events:?}");
     let requests = requests(&fixture.next);
     assert_eq!(requests.len(), 3);
     for request in &requests {

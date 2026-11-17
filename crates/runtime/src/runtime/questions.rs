@@ -275,6 +275,7 @@ impl AgentRuntime {
             question
         };
         drop(guard);
+        self.cache_wait_question(&question);
         self.queue_subagent_question(&question);
         self.shared
             .bus
@@ -593,6 +594,7 @@ impl AgentRuntime {
                 }
             }
             // A failed post-commit reflection may not have published the answer.
+            self.cache_wait_question(&question);
             if repaired {
                 self.shared
                     .bus
@@ -666,6 +668,7 @@ impl AgentRuntime {
             .user_question(id)
             .map_err(|e| e.to_string())?
             .ok_or("answered question disappeared")?;
+        self.cache_wait_question(&question);
         if trusted_user
             && let Some(route) = store
                 .handle
@@ -789,31 +792,20 @@ impl AgentRuntime {
     /// Models can inspect their own questions and explicitly inherited questions.
     pub fn user_answers(&self, run: RunId) -> Result<Vec<UserQuestion>, String> {
         self.entry(run).map_err(|e| e.to_string())?;
-        match self.shared.run_store.get() {
+        let questions = match self.shared.run_store.get() {
             Some(store) => self.filter_handoff_questions(
                 run,
                 store.user_questions(run).map_err(|e| e.to_string())?,
             ),
             None => Ok(Vec::new()),
-        }
-    }
-    /// IDs of `run`'s answered questions not in `delivered`, sorted. Waiting
-    /// tools use it to return when an answer for the caller arrives; the answer
-    /// text reaches the model through the loop's own answer flush.
-    pub(crate) fn undelivered_answer_ids(
-        &self,
-        run: RunId,
-        delivered: &std::collections::HashSet<String>,
-    ) -> Vec<String> {
-        let mut ids = self
-            .user_answers(run)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|question| question.answer.is_some() && !delivered.contains(&question.id))
-            .map(|question| question.id)
-            .collect::<Vec<_>>();
-        ids.sort();
-        ids
+        }?;
+        self.shared
+            .question_delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wait_questions
+            .insert(run, questions.clone());
+        Ok(questions)
     }
     pub(crate) fn has_pending_user_questions(&self, run: RunId) -> bool {
         self.user_answers(run)

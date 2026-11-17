@@ -1,7 +1,6 @@
 use crate::support;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use agents::Role;
 use event_bus::{
@@ -11,21 +10,19 @@ use providers::FinishReason;
 use runtime::{AgentRuntime, RunConfig, RunId, RuntimeError};
 use sandbox::DirectSandbox;
 use tokio::sync::Notify;
-use tokio::time::{Duration as TokioDuration, Instant as TokioInstant, timeout};
 use tools::ToolExecutor;
 
 use support::{ScriptedModel, collect_events, text_response};
 
-async fn wait_for_phase(runtime: &AgentRuntime, run_id: RunId, target: event_bus::AgentRunPhase) {
-    let deadline = TokioInstant::now() + TokioDuration::from_secs(3);
+async fn wait_for_phase(
+    runtime: &AgentRuntime,
+    bus: &EventBus,
+    run_id: RunId,
+    target: event_bus::AgentRunPhase,
+) {
+    let mut events = bus.subscribe();
     while runtime.inspect_agent(run_id).map(|info| info.phase) != Ok(target) {
-        if TokioInstant::now() > deadline {
-            panic!(
-                "run {run_id} did not reach phase {target:?} within 3s (current {:?})",
-                runtime.inspect_agent(run_id)
-            );
-        }
-        tokio::time::sleep(TokioDuration::from_millis(5)).await;
+        events.recv().await.expect("runtime phase event");
     }
 }
 
@@ -60,7 +57,7 @@ async fn send_returns_immediately_while_recipient_running() {
             RunConfig::default(),
         )
         .expect("子 run を生成できる");
-    wait_for_phase(&runtime, parent, event_bus::AgentRunPhase::Running).await;
+    wait_for_phase(&runtime, &_bus, parent, event_bus::AgentRunPhase::Running).await;
 
     // When: 親から子へメッセージを送る
     let result = runtime.send_agent_message(
@@ -78,147 +75,42 @@ async fn send_returns_immediately_while_recipient_running() {
         event_bus::AgentRunPhase::Running
     );
     gate.notify_waiters();
-    let _ = tokio::time::timeout(TokioDuration::from_secs(2), runtime.wait(child)).await;
+    runtime.cancel(child).ok();
+    runtime.wait(child).await.unwrap();
 }
 
 #[tokio::test]
-async fn wait_reply_returns_matching_reply_and_leaves_unrelated_unread() {
-    // Given: 親子 run と、子から親への返信＋無関係 Send イベント
-    let (runtime, _bus) = runtime_with(ScriptedModel::gated(
-        [Ok(text_response("done", FinishReason::Stop))],
-        Arc::new(Notify::new()),
-    ));
-    let parent = runtime.delegate_background(
-        Role::Orchestrator,
-        "PARENT".to_string(),
-        RunConfig::default(),
-    );
+async fn consuming_a_reply_preserves_correlation_for_a_second_reply() {
+    let (runtime, _bus) = runtime_with(ScriptedModel::gated([], Arc::new(Notify::new())));
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
     let child = runtime
-        .delegate_background_as_child(
-            parent,
-            Role::Worker,
-            "CHILD".to_string(),
-            RunConfig::default(),
-        )
-        .expect("子 run を生成できる");
-    wait_for_phase(&runtime, parent, event_bus::AgentRunPhase::Running).await;
-    wait_for_phase(&runtime, child, event_bus::AgentRunPhase::Running).await;
+        .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
+        .unwrap();
     let id = runtime
         .send_agent_message(parent, child, AgentMessageKind::Send, "ask", None)
-        .expect("送信成功");
-    runtime
-        .send_agent_message(
-            child,
-            parent,
-            AgentMessageKind::Reply,
-            "answer",
-            Some(id.clone()),
-        )
-        .expect("返信成功");
-    runtime
-        .send_agent_message(child, parent, AgentMessageKind::Send, "unrelated", None)
-        .expect("無関係メッセージ成功");
-
-    // When: 親で待ち受ける
-    let reply = timeout(
-        TokioDuration::from_millis(500),
-        runtime.wait_reply(parent, &id, Duration::from_millis(400)),
-    )
-    .await
-    .expect("待機がタイムアウトしない")
-    .expect("返信を受け取る");
-
-    // Then: 一致する返信だけが返り、無関係な Send は inbox に残る
-    assert_eq!(reply.content, "answer".to_string());
-    assert_eq!(reply.kind, AgentMessageKind::Reply);
-    assert_eq!(reply.reply_to, Some(id));
-    let inbox = runtime.take_inbox(parent).expect("inbox を取得できる");
-    assert_eq!(inbox.len(), 1);
-    assert_eq!(inbox[0].content, "unrelated".to_string());
-    assert_eq!(inbox[0].kind, AgentMessageKind::Send);
-}
-
-#[tokio::test]
-async fn wait_reply_times_out_with_typed_error() {
-    // Given: 親子 run を作り、子は即座に終端しないゲート付き
-    let gate = Arc::new(Notify::new());
-    let (runtime, _bus) = runtime_with(ScriptedModel::gated(
-        [Ok(text_response("done", FinishReason::Stop))],
-        Arc::clone(&gate),
-    ));
-    let parent = runtime.delegate_background(
-        Role::Orchestrator,
-        "PARENT".to_string(),
-        RunConfig::default(),
-    );
-    let child = runtime
-        .delegate_background_as_child(
-            parent,
-            Role::Worker,
-            "CHILD".to_string(),
-            RunConfig::default(),
-        )
-        .expect("子 run を生成できる");
-    let id = runtime
-        .send_agent_message(parent, child, AgentMessageKind::Send, "ask", None)
-        .expect("送信成功");
-
-    // When: 返信なしで 50ms 待つ
-    let start = TokioInstant::now();
-    let result = runtime
-        .wait_reply(parent, &id, Duration::from_millis(50))
-        .await;
-    let elapsed = start.elapsed();
-
-    // Then: ReplyTimeout 型付きエラーで迅速に返る（100ms 未満）
-    assert!(elapsed < TokioDuration::from_millis(100));
-    assert_eq!(
-        result,
-        Err(RuntimeError::ReplyTimeout {
-            message_id: id.clone(),
-        })
-    );
-    gate.notify_waiters();
-    let _ = tokio::time::timeout(TokioDuration::from_secs(2), runtime.wait(child)).await;
-}
-
-#[tokio::test]
-async fn wait_reply_returns_run_terminated_when_recipient_finishes_without_reply() {
-    // Given: 子 run が即座に終了するスクリプト
-    let (runtime, _bus) = runtime_with(ScriptedModel::new([Ok(text_response(
-        "done",
-        FinishReason::Stop,
-    ))]));
-    let parent = runtime.delegate_background(
-        Role::Orchestrator,
-        "PARENT".to_string(),
-        RunConfig::default(),
-    );
-    let child = runtime
-        .delegate_background_as_child(
-            parent,
-            Role::Worker,
-            "CHILD".to_string(),
-            RunConfig::default(),
-        )
-        .expect("子 run を生成できる");
-    let id = runtime
-        .send_agent_message(parent, child, AgentMessageKind::Send, "ask", None)
-        .expect("送信成功");
-
-    // When: 子が終端してから返信を待つ
-    runtime.wait(child).await.expect("子が終端する");
-    let result = runtime
-        .wait_reply(parent, &id, Duration::from_millis(100))
-        .await;
-
-    // Then: 相手が終端しているため RunTerminated
-    assert_eq!(
-        result,
-        Err(RuntimeError::RunTerminated {
-            run_id: child.to_string(),
-        })
-    );
+        .unwrap();
+    for content in ["first answer", "second answer"] {
+        runtime
+            .send_agent_message(
+                child,
+                parent,
+                AgentMessageKind::Reply,
+                content,
+                Some(id.clone()),
+            )
+            .unwrap();
+        let inbox = runtime.take_inbox(parent).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].kind, AgentMessageKind::Reply);
+        assert_eq!(inbox[0].reply_to.as_deref(), Some(id.as_str()));
+        assert_eq!(inbox[0].content, content);
+        assert!(runtime.take_inbox(parent).unwrap().is_empty());
+    }
+    runtime.cancel(child).unwrap();
+    runtime.cancel(parent).unwrap();
+    runtime.wait(child).await.unwrap();
+    runtime.wait(parent).await.unwrap();
 }
 
 #[tokio::test]
@@ -260,7 +152,8 @@ async fn take_inbox_returns_delivery_order_and_never_rereturns() {
     assert!(second.is_empty());
 
     gate.notify_waiters();
-    let _ = tokio::time::timeout(TokioDuration::from_secs(2), runtime.wait(child)).await;
+    runtime.cancel(child).ok();
+    runtime.wait(child).await.unwrap();
 }
 
 #[tokio::test]
@@ -459,7 +352,7 @@ async fn restored_delivery_consumes_one_id_before_next_live_delivery() {
             ..RunConfig::default()
         },
     );
-    wait_for_phase(&runtime, parent, event_bus::AgentRunPhase::Waiting).await;
+    wait_for_phase(&runtime, &_bus, parent, event_bus::AgentRunPhase::Waiting).await;
     let child1 = runtime
         .delegate_background_as_child(
             parent,
@@ -480,7 +373,7 @@ async fn restored_delivery_consumes_one_id_before_next_live_delivery() {
             },
         )
         .expect("子2 run を生成できる");
-    wait_for_phase(&runtime, child2, event_bus::AgentRunPhase::Waiting).await;
+    wait_for_phase(&runtime, &_bus, child2, event_bus::AgentRunPhase::Waiting).await;
 
     // When: restore the terminal child.
     let failed =
@@ -494,9 +387,11 @@ async fn restored_delivery_consumes_one_id_before_next_live_delivery() {
     );
 
     let _ = runtime.cancel(parent);
-    let _ = tokio::time::timeout(TokioDuration::from_secs(2), runtime.wait(parent)).await;
+    runtime.cancel(parent).ok();
+    runtime.wait(parent).await.unwrap();
     let _ = runtime.cancel(child2);
-    let _ = tokio::time::timeout(TokioDuration::from_secs(2), runtime.wait(child2)).await;
+    runtime.cancel(child2).ok();
+    runtime.wait(child2).await.unwrap();
 }
 
 #[tokio::test]
@@ -582,7 +477,8 @@ async fn send_fails_when_mailbox_full() {
         })
     );
     gate.notify_waiters();
-    let _ = tokio::time::timeout(TokioDuration::from_secs(2), runtime.wait(child)).await;
+    runtime.cancel(child).ok();
+    runtime.wait(child).await.unwrap();
 }
 
 #[tokio::test]
@@ -606,7 +502,7 @@ async fn message_delivery_emits_agent_message_event_and_no_lifecycle_completion(
             RunConfig::default(),
         )
         .expect("子 run を生成できる");
-    wait_for_phase(&runtime, child, event_bus::AgentRunPhase::Running).await;
+    wait_for_phase(&runtime, &bus, child, event_bus::AgentRunPhase::Running).await;
     let mut receiver = bus.subscribe();
 
     // When: send + reply を行う（子は Running のまま）
@@ -669,5 +565,6 @@ async fn message_delivery_emits_agent_message_event_and_no_lifecycle_completion(
     assert!(!has_terminal);
 
     gate.notify_waiters();
-    let _ = tokio::time::timeout(TokioDuration::from_secs(2), runtime.wait(child)).await;
+    runtime.cancel(child).ok();
+    runtime.wait(child).await.unwrap();
 }

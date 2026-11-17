@@ -35,7 +35,7 @@ impl RestoredState {
                 content: vec![ContentBlock::ToolResult {
                     tool_call_id: wait.tool_call_id.clone(),
                     content: vec![providers::ToolResultContent::Text {
-                        text: "Wait aborted by explicit human Continue. The tool was not replayed and child output was not observed; unread messages and notices remain unread.".into(),
+                        text: if wait.continuation.payload.as_ref().is_some_and(|p| matches!(p.kind, crate::quiesce::WaitKind::Reply { .. })) { crate::meta::RETIRED_REPLY_WAIT.into() } else { "Wait aborted by explicit human Continue. The tool was not replayed and child output was not observed; unread messages and notices remain unread.".into() },
                     }],
                     is_error: true,
                 }],

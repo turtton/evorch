@@ -1,0 +1,165 @@
+[
+  {
+    "name": "wait",
+    "description": "Wait for direct children or a parent to terminate, or for interactive direct children to complete a turn and idle. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. There is no deadline: besides terminal or previously unobserved idle-turn completion per mode, it returns when a target asks a question not yet reported to you (including nonblocking questions), an agent message arrives, or user input arrives, or one of your own questions is answered (answer_ready, question_ids; the text arrives in the next model input). Returns {messages, user_input_ready, completed_run_ids, attention_run_ids, runs}: messages are explicit agent messages that arrived, consumed as by inbox; automatic completion notices are not included as messages. Returning terminal or idle-turn child output in runs acknowledges that completion and removes its still-queued automatic notice; unobserved and other-generation notices remain; attention_run_ids are the targets with newly reported questions. User input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal: a successfully completed interactive turn without unanswered questions has status=turn_completed, output and turn_generation and is included in completed_run_ids once per generation. Output-bearing wait, delegate or run_output acknowledges that idle generation; repeating wait then waits for a new turn or other event instead of spinning. Ordinary Waiting (including nested wait, question or review waits) alone does not wake wait. needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error/Stopped on completion with nothing else to report, otherwise the object (always for an idle-turn result). A phase-only response does not acknowledge the output and leaves its automatic notice queued. A target that already finished returns at once, so leave finished targets out. For a snapshot without waiting, use run_output. Does not cancel targets. Caller cancellation interrupts immediately.",
+    "input_schema": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "run_ids"
+            ]
+          },
+          "required": [
+            "run_id"
+          ]
+        },
+        {
+          "not": {
+            "required": [
+              "run_id"
+            ]
+          },
+          "required": [
+            "run_ids"
+          ]
+        }
+      ],
+      "properties": {
+        "mode": {
+          "default": "any",
+          "description": "any returns when one target terminates; all waits for every target. Both return early for new questions, agent messages and user input.",
+          "enum": [
+            "any",
+            "all"
+          ],
+          "type": "string"
+        },
+        "run_id": {
+          "description": "Runtime run ID exactly as reported, such as run-01k6z3x2q4w8e9r0t1y2u3i4o5.",
+          "pattern": "^run-([0-9]+|[0-9a-hjkmnp-tv-z]{26})$",
+          "type": "string"
+        },
+        "run_ids": {
+          "items": {
+            "description": "Runtime run ID exactly as reported, such as run-01k6z3x2q4w8e9r0t1y2u3i4o5.",
+            "pattern": "^run-([0-9]+|[0-9a-hjkmnp-tv-z]{26})$",
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "wait_reply",
+    "description": "Wait for and consume a reply to this run's sent message, leaving unrelated messages queued. Your own new answer or host input ends the wait early with {status: answer_ready|user_input_ready, message_id}; the text follows in the next model input and the message_id stays waitable. Timeout returns ReplyTimeout; recipient termination returns RunTerminated. Unknown message IDs or invalid ownership fail.",
+    "input_schema": {
+      "additionalProperties": true,
+      "properties": {
+        "message_id": {
+          "description": "ID returned by send or send_message.",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Maximum wait in milliseconds.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message_id",
+        "timeout_ms"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "run_output",
+    "description": "Read a direct child's or parent's phase/status, terminal or idle-turn output, or failure/cancellation/stop reason without waiting or restoring terminal runs. An interactive turn that successfully ends without unanswered questions has phase=Waiting, status=turn_completed, output and turn_generation. Returning a direct child's idle-turn output acknowledges that generation, so wait will not wake again for it; snapshots remain readable. Ordinary Waiting (nested waits, questions or reviews) is not a completed turn. Returning a terminal child's result acknowledges that completion and removes its still-queued automatic notice; explicit agent messages and other completion generations are not consumed. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use has_pending_question from wait and subagent_questions to identify unanswered questions.",
+    "input_schema": {
+      "properties": {
+        "run_id": {
+          "description": "Runtime run ID exactly as reported, such as run-01k6z3x2q4w8e9r0t1y2u3i4o5.",
+          "pattern": "^run-([0-9]+|[0-9a-hjkmnp-tv-z]{26})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "inbox",
+    "description": "Consume this run's queued agent messages, including unobserved automatic child completion notices, and return a JSON array with IDs, sender, kind, content and reply correlation. Only automatic notices already acknowledged by output-bearing wait or terminal run_output are omitted; all other queued messages are consumed and returned. Returns an empty array if none are queued.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "send",
+    "description": "Deliver a message to a direct child or parent and return message_id without waiting for a reply. A finished direct child resumes with its saved context under your current authority; a child's message to a finished parent is held until the parent continues. Runs the user stopped or that were cancelled are not resumed; other refusals return the restore error. Self, sibling and unrelated recipients are denied.",
+    "input_schema": {
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "reply"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "reply_to"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "kind": {
+          "default": "send",
+          "description": "send delivers a message; reply correlates via required reply_to; steering supplies a parent instruction at the recipient's next safe boundary.",
+          "enum": [
+            "send",
+            "reply",
+            "steering"
+          ],
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "reply_to": {
+          "description": "Original message_id, required for kind=reply.",
+          "type": "string"
+        },
+        "run_id": {
+          "description": "Runtime run ID exactly as reported, such as run-01k6z3x2q4w8e9r0t1y2u3i4o5.",
+          "pattern": "^run-([0-9]+|[0-9a-hjkmnp-tv-z]{26})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "message"
+      ],
+      "type": "object"
+    }
+  }
+]

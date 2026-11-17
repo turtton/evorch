@@ -14,6 +14,7 @@ mod tests;
 pub(crate) const QUESTION_WAKE_LIMIT: u32 = 20;
 #[derive(Default)]
 pub(crate) struct QuestionDelivery {
+    pub(crate) wait_questions: HashMap<RunId, Vec<UserQuestion>>,
     notices: HashMap<String, Arc<QuestionNotice>>,
     reported: HashSet<String>,
     recovered_parents: HashSet<RunId>,
@@ -43,6 +44,38 @@ impl QuestionDelivery {
 }
 
 impl AgentRuntime {
+    /// Refreshed at durable question mutations and run admission, not on wakes.
+    pub(crate) fn cache_wait_question(&self, question: &UserQuestion) {
+        let mut state = self
+            .shared
+            .question_delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for questions in state.wait_questions.values_mut() {
+            if let Some(old) = questions.iter_mut().find(|q| q.id == question.id) {
+                *old = question.clone();
+            }
+        }
+        if let Ok(run) = question.run_id.parse() {
+            let questions = state.wait_questions.entry(run).or_default();
+            if let Some(old) = questions.iter_mut().find(|q| q.id == question.id) {
+                *old = question.clone();
+            } else {
+                questions.push(question.clone());
+            }
+        }
+    }
+    pub(crate) fn wait_questions(&self, run: RunId) -> Vec<UserQuestion> {
+        self.shared
+            .question_delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wait_questions
+            .get(&run)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub(crate) fn close_question_mailbox(&self, parent: RunId, mailbox: &crate::RunMailbox) {
         #[cfg(test)]
         if let Ok(execution) = self.execution_snapshot(parent) {

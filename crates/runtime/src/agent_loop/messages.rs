@@ -142,9 +142,12 @@ impl LoopState {
             if let Some(notice) = queued.question_notice() {
                 self.reported_questions.insert(notice.id.clone());
             }
-            let message = queued.into_message();
-            self.observe_parent_input(&message.sender_run_id);
-            self.context.push_user(&format_agent_message(&message));
+            self.context
+                .push_user(&format_agent_message(&queued.message));
+            self.observe_parent_input(&queued.message.sender_run_id);
+            if let Some(runtime) = self.runtime() {
+                runtime.observe_queued_message(&queued);
+            }
         }
         self.publish_message_count();
     }

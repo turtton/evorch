@@ -182,7 +182,7 @@ pub fn tool_header(
                 });
             header
         }
-        _ => super::orchestration::header(tool_name, input, agents)
+        _ => super::orchestration::header(tool_name, input, result, agents)
             .unwrap_or_else(|| header(icons::WRENCH, tool_name)),
     }
 }

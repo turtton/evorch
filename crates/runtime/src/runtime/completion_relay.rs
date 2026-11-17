@@ -148,6 +148,9 @@ impl AgentRuntime {
                 }));
         }
         child.phase_tx.send_replace(to);
+        self.shared
+            .turn_version
+            .send_modify(|v| *v = v.wrapping_add(1));
         self.shared.bus.emit(Event::new(event));
         if child.completion_relayed {
             return;

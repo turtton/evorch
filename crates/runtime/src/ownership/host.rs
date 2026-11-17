@@ -330,6 +330,18 @@ impl OwnerHost {
         Arc::clone(&self.scratch)
     }
 
+    /// Fresh, complete unreleased inventory, including idle threads. Never uses
+    /// cached owner state: planned hold save/readback must observe owners.db.
+    pub fn restart_inventory(&self) -> Result<Vec<ThreadOwner>, RegistryError> {
+        Ok(Registry::open_readonly(&self.db())?
+            .list()?
+            .into_iter()
+            .filter(|owner| {
+                owner.lease.owner_id == self.owner_id && owner.state != OwnerState::Released
+            })
+            .collect())
+    }
+
     /// Call after admission fencing and before Armed. Includes idle threads.
     pub fn hold_for_restart(
         &self,
@@ -339,6 +351,23 @@ impl OwnerHost {
     ) -> Result<Vec<super::PlannedHold>, RegistryError> {
         self.release_deferred.store(true, Ordering::SeqCst);
         Registry::open_existing(&self.db())?.hold_owned(&self.owner_id, tx, capture, expected)
+    }
+
+    /// Dedicated capture binding: live runs must be captured, while parked runs
+    /// require a same-generation nonterminal owner checkpoint in the same DB TX.
+    pub fn hold_captured_for_restart(
+        &self,
+        tx: &str,
+        capture: &str,
+        expected: &super::ExpectedCapturedRuns,
+    ) -> Result<Vec<super::PlannedHold>, RegistryError> {
+        self.release_deferred.store(true, Ordering::SeqCst);
+        Registry::open_existing(&self.db())?.hold_captured_owned(
+            &self.owner_id,
+            tx,
+            capture,
+            expected,
+        )
     }
 
     /// FailedClosed cleanup, independent of the reason for failure. Does not

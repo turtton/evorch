@@ -177,6 +177,10 @@ pub(super) async fn delegate(
     if result.result.is_error && state.interrupted() != Some(InterruptKind::Stop) {
         cleanup_delegates(runtime, std::iter::once(child)).await;
     }
+    project_direct_wait_result(result)
+}
+
+fn project_direct_wait_result(result: DispatchResult) -> DispatchResult {
     // Direct dispatch goes through this handler rather than wait_delegates;
     // both paths return the same output-bearing idle-turn snapshot.
     if !result.result.is_error
@@ -184,8 +188,25 @@ pub(super) async fn delegate(
         && let Some(run) = snapshot["runs"].as_array().and_then(|runs| runs.first())
         && run["status"] == "turn_completed"
     {
-        let mut dispatch = super::serialize(run);
+        let mut value = run.clone();
+        // Keep every global observation paired with the fields actually shown.
+        // A simultaneous shell/lane/question event must not be silently ACKed
+        // when the direct delegate flattens its child's idle-turn result.
+        for field in [
+            "inbox_ready",
+            "messages",
+            "user_input_ready",
+            "answer_ready",
+            "question_ids",
+            "attention_question_ids",
+            "events",
+            "shell_jobs",
+        ] {
+            value[field] = snapshot[field].clone();
+        }
+        let mut dispatch = super::serialize(&value);
         dispatch.result.progress = result.result.progress;
+        dispatch.observations = result.observations;
         return dispatch;
     }
     result
@@ -275,7 +296,7 @@ pub(crate) async fn wait_delegates(
     }
     // One wait covers the whole wave and returns when any child needs a
     // decision, while preserving each delegate call's own tool result.
-    let waited = super::runs::waiting::wait_for_delegates(
+    let mut waited = super::runs::waiting::wait_for_delegates(
         state,
         runtime,
         serde_json::json!({"run_ids":run_ids, "mode":"all"}),
@@ -310,6 +331,7 @@ pub(crate) async fn wait_delegates(
                 .collect();
         }
     };
+    let mut first = true;
     children
         .into_iter()
         .map(|child| match child {
@@ -318,16 +340,39 @@ pub(crate) async fn wait_delegates(
                 let run = snapshot["runs"]
                     .as_array()
                     .and_then(|runs| runs.iter().find(|run| run["run_id"] == run_id.to_string()));
-                match run {
+                let interrupted = snapshot["events"].as_array().is_some_and(|events| {
+                    events
+                        .iter()
+                        .any(|e| e["kind"] != "run_completed" && e["kind"] != "turn_completed")
+                }) || snapshot["inbox_ready"] == true
+                    || snapshot["user_input_ready"] == true;
+                let mut dispatch = match run {
                     Some(run)
                         if matches!(
                             run["status"].as_str(),
                             Some("completed" | "cancelled" | "stopped" | "failed")
-                        ) && run["has_pending_question"] != true =>
+                        ) && run["has_pending_question"] != true
+                            && !interrupted =>
                     {
                         success(run["phase"].as_str().unwrap_or("Error"))
                     }
-                    Some(run) if run["status"] == "turn_completed" => super::serialize(run),
+                    Some(run) if run["status"] == "turn_completed" => {
+                        let mut value = run.clone();
+                        if interrupted {
+                            for field in [
+                                "inbox_ready",
+                                "user_input_ready",
+                                "answer_ready",
+                                "question_ids",
+                                "attention_question_ids",
+                                "events",
+                                "shell_jobs",
+                            ] {
+                                value[field] = snapshot[field].clone();
+                            }
+                        }
+                        super::serialize(&value)
+                    }
                     Some(run) => super::serialize(&serde_json::json!({
                         "run_id": run_id.to_string(),
                         "phase": run["phase"],
@@ -335,9 +380,40 @@ pub(crate) async fn wait_delegates(
                         "has_pending_question": run["has_pending_question"],
                         "inbox_ready": snapshot["inbox_ready"],
                         "user_input_ready": snapshot["user_input_ready"],
+                        "answer_ready": snapshot["answer_ready"],
+                        "question_ids": snapshot["question_ids"],
+                        "attention_question_ids": snapshot["attention_question_ids"],
+                        "events": snapshot["events"],
+                        "shell_jobs": snapshot["shell_jobs"],
                     })),
                     None => error(format!("missing child wait result for {run_id}")),
+                };
+                if !dispatch.result.is_error {
+                    dispatch.observations.child_progress = waited
+                        .observations
+                        .child_progress
+                        .iter()
+                        .filter(|progress| progress.run_id == run_id.to_string())
+                        .cloned()
+                        .collect();
                 }
+                if run.is_some_and(|r| r["status"] == "turn_completed") {
+                    dispatch.observations.completions = waited
+                        .observations
+                        .completions
+                        .iter()
+                        .filter(|n| n.child == run_id)
+                        .cloned()
+                        .collect();
+                }
+                if first && interrupted && !dispatch.result.is_error {
+                    dispatch.observations.questions =
+                        std::mem::take(&mut waited.observations.questions);
+                    dispatch.observations.events = std::mem::take(&mut waited.observations.events);
+                    dispatch.observations.shell = std::mem::take(&mut waited.observations.shell);
+                    first = false;
+                }
+                dispatch
             }
         })
         .collect()
@@ -361,4 +437,67 @@ pub(crate) async fn cleanup_delegates(
         })
         .collect();
     futures_util::future::join_all(waits).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_idle_projection_keeps_global_payload_with_its_receipts() {
+        let snapshot = serde_json::json!({
+            "runs": [{"run_id":"child", "status":"turn_completed", "output":"child body", "turn_generation":7}],
+            "inbox_ready":true, "user_input_ready":true, "answer_ready":true,
+            "messages":[{"message_id":"message", "sender_run_id":"parent", "recipient_run_id":"caller",
+                         "kind":"send", "content":"ordinary message", "reply_to":null}],
+            "question_ids":["answer"], "attention_question_ids":["question"],
+            "events":[{"kind":"shell", "job_id":"job"}, {"kind":"lane", "notification_id":"notice"}],
+            "shell_jobs":[{"job_id":"job", "call_id":"original-shell", "content":"shell body"}]
+        });
+        let mut waited = super::super::serialize(&snapshot);
+        waited.result.progress = Some(tools::Progress::Advanced);
+        waited
+            .observations
+            .messages
+            .push(crate::mailbox::QueuedMessage::explicit(
+                serde_json::from_value(snapshot["messages"][0].clone()).unwrap(),
+            ));
+        waited.observations.questions.push("question".into());
+        waited.observations.events.push("lane:notice".into());
+        waited
+            .observations
+            .child_progress
+            .push(crate::meta::observations::ChildProgress::new(
+                "child",
+                Some(7),
+            ));
+        let projected = project_direct_wait_result(waited);
+        let value: serde_json::Value = serde_json::from_str(&projected.result.content).unwrap();
+        assert_eq!(value["output"], "child body");
+        assert_eq!(value["turn_generation"], 7);
+        for field in [
+            "inbox_ready",
+            "messages",
+            "user_input_ready",
+            "answer_ready",
+            "question_ids",
+            "attention_question_ids",
+            "events",
+            "shell_jobs",
+        ] {
+            assert_eq!(
+                value[field], snapshot[field],
+                "lost global payload: {field}"
+            );
+        }
+        assert_eq!(projected.result.progress, Some(tools::Progress::Advanced));
+        assert_eq!(projected.observations.messages.len(), 1);
+        assert_eq!(
+            projected.observations.messages[0].message.message_id,
+            "message"
+        );
+        assert_eq!(projected.observations.questions, ["question"]);
+        assert_eq!(projected.observations.events, ["lane:notice"]);
+        assert_eq!(projected.observations.child_progress[0].run_id, "child");
+    }
 }
