@@ -11,13 +11,34 @@ fn retired_tool() -> ToolSpec {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
+/// `create_goal` as c40fbf71 described it: it pointed at `todo_write`, which this build
+/// replaced with `plan_update`. Written out rather than derived from the successor.
+const PREDECESSOR_CREATE_GOAL: &str = "Track an objective when the user clearly requests sustained iteration until an evidence-checked outcome is achieved. Routine edits, research, verification, or the number of steps alone do not warrant a goal; optionally use todo_write to manage procedure instead. Never add scope or permissions. One unfinished objective per thread. Completion requires an end-of-turn self-check; optional independent review is controlled by the user. Only the trusted thread root may create a goal.";
+
+/// The predecessor's catalog: `todo_write` where the successor has `plan_read` (the
+/// registry listed it ahead of the goal tools), no `plan_update`, and the earlier
+/// `create_goal` description.
 pub(super) fn old_tools(successor: &[ToolSpec]) -> Vec<ToolSpec> {
-    let mut old = successor
-        .iter()
-        .filter(|t| !["plan_read", "plan_update"].contains(&t.name.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    old.push(retired_tool());
+    let mut old = Vec::new();
+    let mut retired_placed = false;
+    for tool in successor {
+        match tool.name.as_str() {
+            "plan_read" => {
+                old.push(retired_tool());
+                retired_placed = true;
+            }
+            "plan_update" => {}
+            "create_goal" => {
+                let mut tool = tool.clone();
+                tool.description = PREDECESSOR_CREATE_GOAL.into();
+                old.push(tool);
+            }
+            _ => old.push(tool.clone()),
+        }
+    }
+    if !retired_placed {
+        old.push(retired_tool());
+    }
     old
 }
 
@@ -70,18 +91,36 @@ pub(super) fn assert_transition(
         assert!(!old.iter().any(|t| t.name == name));
         assert!(new.iter().any(|t| t.name == name));
     }
-    // Full definitions and order of every unrelated tool must be identical.
-    let unchanged_old = old
+    // The retired tool sat where `plan_read` now is, ahead of the goal tools.
+    let names = |tools: &[ToolSpec]| tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+    let swapped = |name: &str| {
+        if name == "plan_read" {
+            retired_tool().name
+        } else {
+            name.to_owned()
+        }
+    };
+    let new_names: Vec<_> = names(new)
         .iter()
-        .filter(|t| t.name != retired_tool().name)
-        .cloned()
-        .collect::<Vec<_>>();
-    let unchanged_new = new
-        .iter()
-        .filter(|t| !["plan_read", "plan_update"].contains(&t.name.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    assert_eq!(unchanged_old, unchanged_new);
+        .filter(|name| *name != "plan_update")
+        .map(|name| swapped(name))
+        .collect();
+    assert_eq!(names(old), new_names, "tool order");
+    // Every unrelated tool has the same full definition; `create_goal` only changed
+    // its description (it names the replacement tool).
+    for tool in new {
+        let Some(before) = old.iter().find(|t| t.name == tool.name) else {
+            continue;
+        };
+        if tool.name == "create_goal" {
+            assert_eq!(before.description, PREDECESSOR_CREATE_GOAL);
+            assert_ne!(before.description, tool.description);
+            assert!(tool.description.contains("plan_update"));
+            assert_eq!(before.input_schema, tool.input_schema);
+        } else {
+            assert_eq!(before, tool, "{} changed", tool.name);
+        }
+    }
     let history = if matches!(wire, Wire::ChatCompletions) {
         "messages"
     } else {
