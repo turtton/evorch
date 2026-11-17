@@ -84,7 +84,7 @@ expect fail "pr15 does not own the pr17c cache target" "$central" --scope pr15 -
 files crates/eval/src/evaluator/groups.rs crates/eval/src/evaluator/tests/start.rs
 expect ok "pr17c owns the Evaluator's spawn of eval run and its test" "$central" --scope pr17c --files-from "$work/files"
 expect fail "pr15 does not own the Evaluator's spawn of eval run" "$central" --scope pr15 --files-from "$work/files"
-files crates/eval/src/runner.rs
+files crates/eval/src/lib.rs
 expect fail "pr17c does not own the rest of the eval crate" "$central" --scope pr17c --files-from "$work/files"
 
 # Every binary the cache gate names is a test target that exists: nextest rejects
