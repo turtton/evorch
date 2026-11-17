@@ -1,6 +1,14 @@
-//! Host service of the `improvement` area, read side (PR 13): the
-//! self-improvement candidates of a project. PR 14 adds the update side here,
-//! with the identity, revision and action rules below.
+//! Host service of the `improvement` area: the self-improvement candidates of
+//! a project, read (PR 13) and updated (PR 14) with the identity, revision and
+//! action rules below.
+//!
+//! An update is one call of the storage's conditional update
+//! ([`storage::StorageHandle::update_improvement`]) quoting the revision the
+//! client read; see [`super::memory::update`] for the task around it. Triage
+//! names no path: the core renders the candidate into a file it names itself
+//! (from the candidate id, in its own draft directory) and the only write it
+//! makes to the candidate is attaching that file name. Nothing is sent
+//! anywhere.
 //!
 //! Reads are operations of [`read_ops`](super::diagnostics::read_ops) (see the
 //! `memory` area for the shape): the database is opened read-only on a blocking
@@ -11,6 +19,10 @@
 //! seen, reopening, draft); it is a content digest, to be compared for
 //! equality only. The draft is named by its file name; its directory (which may
 //! be an absolute host path) never leaves the core.
+use super::memory::{
+    refusal_failure,
+    update::{Done, Failure, Settled, Submitted, UpdateHook, UpdateView, Updates},
+};
 use super::{
     AreaHandles, AreaTasks, ProjectionSource,
     diagnostics::read_ops::{
@@ -18,15 +30,19 @@ use super::{
     },
 };
 use crate::bootstrap::BootstrapError;
+use crate::bootstrap::restart::HostCommandPermit;
 use crate::queries::{Pager, error, storage_error};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use storage::{
     Database,
     improvement::{
         ImprovementCandidate, ImprovementSeverity as StoredSeverity,
         ImprovementSource as StoredSource, ImprovementStatus as StoredStatus,
     },
-    management::{ImprovementOp, improvement_denial, improvement_revision},
+    management::{
+        CasOutcome, ImprovementOp, ImprovementUpdate, improvement_denial, improvement_revision,
+    },
 };
 use workbench_protocol::{
     errors::{ErrorCode, WorkbenchError},
@@ -38,9 +54,9 @@ use workbench_protocol::{
     namespaces::{
         diagnostics::ReadOutcome,
         improvement::{
-            GetImprovement, ImprovementDetail, ImprovementEvent, ImprovementList,
-            ImprovementSeverity, ImprovementSource, ImprovementSummary, ListImprovement,
-            MAX_RECENT_RUNS,
+            GetImprovement, ImprovementCommand, ImprovementDetail, ImprovementEvent,
+            ImprovementList, ImprovementSeverity, ImprovementSource, ImprovementSummary,
+            ImprovementUpdateView, ListImprovement, MAX_RECENT_RUNS,
         },
     },
     operation::OperationView,
@@ -67,6 +83,10 @@ pub struct ImprovementArea {
     reads: ReadOps<ImprovementRead>,
     pager: Pager,
     wired: Option<Wired>,
+    updates: Option<Arc<Updates<ImprovementUpdateView>>>,
+    storage: Option<storage::StorageHandle>,
+    draft_dir: Option<PathBuf>,
+    publish_gate: Option<PublishGate>,
 }
 
 #[derive(Clone)]
@@ -74,6 +94,38 @@ struct Wired {
     slug: SlugOf,
     database: PathBuf,
     enabled: bool,
+    tasks: AreaTasks,
+    source: ProjectionSource,
+}
+
+impl UpdateView for ImprovementUpdateView {
+    fn settle(&mut self, outcome: &Settled) {
+        super::memory::update::settle_operation(&mut self.operation, outcome);
+        match outcome {
+            Settled::Done(done) => {
+                self.revision = Some(Revision(done.revision));
+                self.changed = Some(done.changed);
+                self.draft_file.clone_from(&done.draft_file);
+            }
+            Settled::Failed(failure) => {
+                self.denial = failure.denial;
+                self.message = Some(failure.message.clone());
+            }
+            Settled::Cancelled(_) => {
+                self.message = Some(super::memory::update::cancelled_message());
+            }
+        }
+    }
+}
+
+impl crate::areas::settings::operations::Tracked for ImprovementUpdateView {
+    fn operation(&self) -> &OperationView {
+        &self.operation
+    }
+
+    fn operation_mut(&mut self) -> &mut OperationView {
+        &mut self.operation
+    }
 }
 
 impl ImprovementArea {
@@ -87,6 +139,11 @@ impl ImprovementArea {
             handles.database.clone(),
             runtime_slug(handles.runtime.clone()),
             handles.config.self_improvement.enabled,
+        )
+        .with_writer(
+            handles.storage.clone(),
+            crate::bootstrap::learning::draft_dir(&handles.config, &handles.database),
+            None,
         ))
     }
 
@@ -101,18 +158,64 @@ impl ImprovementArea {
         enabled: bool,
     ) -> Self {
         Self {
-            reads: ReadOps::new(tasks, move |view| {
-                let _ = source.publish(UiEvent::Improvement(
-                    ImprovementEvent::ImprovementOperationChanged { view },
-                ));
+            reads: ReadOps::new(tasks.clone(), {
+                let source = source.clone();
+                move |view| {
+                    let _ = source.publish(UiEvent::Improvement(
+                        ImprovementEvent::ImprovementOperationChanged { view },
+                    ));
+                }
             }),
             pager: Pager::default(),
             wired: Some(Wired {
                 slug,
                 database,
                 enabled,
+                tasks,
+                source,
             }),
+            updates: None,
+            storage: None,
+            draft_dir: None,
+            publish_gate: None,
         }
+    }
+
+    /// Let the service update candidates through the storage writer `storage`
+    /// (the one conditional update). `draft_dir` is where triage saves drafts
+    /// (`None` while the feature is off: triage is then refused). `hook` is a
+    /// test seam awaited at each stage of every update.
+    #[must_use]
+    pub fn with_writer(
+        mut self,
+        storage: storage::StorageHandle,
+        draft_dir: Option<PathBuf>,
+        hook: Option<UpdateHook>,
+    ) -> Self {
+        if let Some(wired) = &self.wired {
+            let source = wired.source.clone();
+            self.updates = Some(Updates::new(
+                wired.tasks.clone(),
+                move |update| {
+                    let _ = source.publish(UiEvent::Improvement(
+                        ImprovementEvent::ImprovementUpdateCompleted { update },
+                    ));
+                },
+                hook,
+            ));
+            self.storage = Some(storage);
+            self.draft_dir = draft_dir;
+        }
+        self
+    }
+
+    /// A test seam: called after a triage's conditional update applied and
+    /// before its draft file is placed, on the blocking thread that runs it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_publish_gate(mut self, gate: PublishGate) -> Self {
+        self.publish_gate = Some(gate);
+        self
     }
 
     fn wired(&self) -> Result<&Wired, WorkbenchError> {
@@ -206,6 +309,106 @@ impl ImprovementArea {
         })
     }
 
+    /// Accept an update of a candidate of the project in `root` (see the
+    /// `memory` area's `submit` for the rules; the same ones apply).
+    ///
+    /// # Errors
+    /// `Conflict` for an id used by a different request, `LimitExceeded` while
+    /// every retained update is running, `Draining` once the host stops,
+    /// `UnsupportedCapability` for the unwired form.
+    pub(crate) fn submit(
+        &self,
+        command: &ImprovementCommand,
+        root: PathBuf,
+        accepted: HostCommandPermit,
+    ) -> Result<Submitted<ImprovementUpdateView>, WorkbenchError> {
+        let wired = self.wired()?.clone();
+        let (Some(updates), Some(storage)) = (&self.updates, &self.storage) else {
+            return Err(error(
+                ErrorCode::UnsupportedCapability,
+                "improvement cannot be changed in this host",
+            ));
+        };
+        let action = command.action();
+        let candidate = command.candidate().clone();
+        let id = candidate.as_str().to_owned();
+        let expected = command.expected_revision().0;
+        let storage = storage.clone();
+        let draft_dir = self.draft_dir.clone();
+        let gate = self.publish_gate.clone();
+        let request = serde_json::to_vec(command).unwrap_or_default();
+        let project = command.project().clone();
+        let pending_candidate = candidate.clone();
+        updates.submit(
+            command.operation_id(),
+            &request,
+            move |operation| ImprovementUpdateView {
+                operation,
+                project,
+                candidate: pending_candidate,
+                action,
+                revision: None,
+                changed: None,
+                draft_file: None,
+                denial: None,
+                message: None,
+            },
+            Box::new(move || {
+                let slug = (wired.slug)(&root);
+                let database =
+                    Database::open_read_only(&wired.database).map_err(|_| Failure::storage())?;
+                // Membership is the one thing read (the project of a candidate
+                // never changes); its state is the conditional update's to judge.
+                let stored = match database.improvement_candidate(&id) {
+                    Ok(Some(stored)) if stored.project == slug => stored,
+                    Ok(_) => return Err(Failure::not_found("unknown candidate")),
+                    Err(_) => return Err(Failure::storage()),
+                };
+                drop(database);
+                let update = match action {
+                    ImprovementAction::MarkReviewed => {
+                        Prepared::Plain(ImprovementUpdate::MarkReviewed)
+                    }
+                    ImprovementAction::Dismiss => Prepared::Plain(ImprovementUpdate::Dismiss),
+                    ImprovementAction::Triage => {
+                        let dir = draft_dir.ok_or_else(|| {
+                            Failure::new(
+                                ErrorCode::UnsupportedCapability,
+                                "self-improvement drafts are switched off in the settings",
+                            )
+                        })?;
+                        Prepared::Draft {
+                            name: draft_file_name(&id),
+                            text: runtime::self_improvement::render_issue_draft(&stored),
+                            dir,
+                        }
+                    }
+                };
+                Ok(Box::new(move || {
+                    commit(&storage, &id, expected, update, gate.as_ref())
+                }))
+            }),
+            accepted,
+        )
+    }
+
+    /// An update the core accepted, whatever its state.
+    ///
+    /// # Errors
+    /// `NotFound` for an update the core does not hold (never accepted, or the
+    /// core restarted since): the outcome is unknown, read the candidate instead.
+    pub fn update_of(&self, id: &OperationId) -> Result<ImprovementUpdateView, WorkbenchError> {
+        self.updates
+            .as_ref()
+            .and_then(|updates| updates.get(id))
+            .ok_or_else(|| {
+                error(
+                    ErrorCode::NotFound,
+                    "unknown update; if it was sent before a restart, read the candidate to see whether it applied",
+                )
+            })
+    }
+
     /// The view of an operation of this area.
     ///
     /// # Errors
@@ -213,6 +416,177 @@ impl ImprovementArea {
     pub fn operation(&self, id: &OperationId) -> Result<OperationView, WorkbenchError> {
         self.reads.view(id)
     }
+}
+
+/// A seam for tests: see [`ImprovementArea::with_publish_gate`]. Production
+/// installs none.
+#[doc(hidden)]
+pub type PublishGate = Arc<dyn Fn() + Send + Sync>;
+
+/// What the write step of an update does.
+enum Prepared {
+    Plain(ImprovementUpdate),
+    /// Save `text` as `dir/name`, then attach `name`.
+    Draft {
+        dir: PathBuf,
+        name: String,
+        text: String,
+    },
+}
+
+/// The file a candidate's draft is saved as: the candidate id with every
+/// character outside `[A-Za-z0-9._-]` replaced, so it cannot leave the draft
+/// directory. The same name the passive collector uses for the same candidate.
+pub fn draft_file_name(candidate_id: &str) -> String {
+    let id: String = candidate_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{id}.issue.md")
+}
+
+/// The write step of an update.
+///
+/// A triage never touches the file the candidate points at before the writer
+/// has judged it: the draft is staged in a temporary file only this operation
+/// owns (unique name, created exclusively), and the writer's conditional update
+/// decides what happens to it.
+///
+/// * `Applied` and `Unchanged`: the staged file is hard-linked to the draft's
+///   name, which creates the name when it is free and never replaces a file
+///   that is there. An `Applied` update may run late: another triage may have
+///   found the draft attached (`Unchanged`), filled the name and the person
+///   may have edited the file since. Whatever is at the name then is the draft
+///   and stays as it is. A link that fails for another reason is a failure of
+///   the update, not a success.
+/// * refused or failed: nothing is placed, nothing else is touched.
+///
+/// The staged file is removed in every case. Two triages of one candidate
+/// share the draft's name but never a file they delete: each deletes only its
+/// own staged file, and none replaces the name.
+fn commit(
+    storage: &storage::StorageHandle,
+    id: &str,
+    expected: u64,
+    prepared: Prepared,
+    gate: Option<&PublishGate>,
+) -> Result<Done, Failure> {
+    let (update, staged) = match prepared {
+        Prepared::Plain(update) => (update, None),
+        Prepared::Draft { dir, name, text } => {
+            let staged = stage_draft(&dir, &name, text.as_bytes()).map_err(|_| {
+                Failure::new(
+                    ErrorCode::StorageUnavailable,
+                    "the draft could not be saved",
+                )
+            })?;
+            (
+                ImprovementUpdate::AttachDraft { draft_path: name },
+                Some(staged),
+            )
+        }
+    };
+    let draft_file = match &update {
+        ImprovementUpdate::AttachDraft { draft_path } => Some(draft_path.clone()),
+        _ => None,
+    };
+    let outcome = storage.update_improvement(id, expected, update);
+    let result = match outcome {
+        Ok(CasOutcome::Applied { revision }) => {
+            if let (Some(gate), Some(_)) = (gate, &staged) {
+                gate();
+            }
+            place(&staged).map(|()| Done {
+                revision,
+                changed: true,
+                draft_file,
+            })
+        }
+        Ok(CasOutcome::Unchanged { revision }) => place(&staged).map(|()| Done {
+            revision,
+            changed: false,
+            draft_file,
+        }),
+        Ok(CasOutcome::Refused(refusal)) => Err(refusal_failure(refusal, "candidate")),
+        Err(_) => Err(Failure::storage()),
+    };
+    // Whatever happened, the staged file is this operation's own: it is gone
+    // now (after a rename it no longer exists).
+    if let Some(staged) = staged {
+        staged.discard();
+    }
+    result
+}
+
+/// Put the staged draft, if there is one, at its name.
+fn place(staged: &Option<StagedDraft>) -> Result<(), Failure> {
+    match staged {
+        Some(staged) => staged.place().map_err(|_| {
+            Failure::new(
+                ErrorCode::StorageUnavailable,
+                "the draft is attached but its file could not be placed; read the candidate",
+            )
+        }),
+        None => Ok(()),
+    }
+}
+
+/// A draft written to a file only its operation owns, not yet at its name.
+struct StagedDraft {
+    temp: PathBuf,
+    target: PathBuf,
+}
+
+impl StagedDraft {
+    /// Create the name when it is free; never replace a file that is there.
+    ///
+    /// # Errors
+    /// Any failure but `AlreadyExists`, which is the expected answer when the
+    /// draft is in place: the file at the name wins.
+    fn place(&self) -> std::io::Result<()> {
+        match std::fs::hard_link(&self.temp, &self.target) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Remove the staged file if it is still there.
+    fn discard(self) {
+        let _ = std::fs::remove_file(&self.temp);
+    }
+}
+
+/// Write `bytes` to an exclusive, owner-only temporary file next to `name`.
+fn stage_draft(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<StagedDraft> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let target = dir.join(name);
+    // A random part, so that a name is never used twice, not even by a core
+    // that started after a crash left a staged file behind.
+    let temp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(StagedDraft { temp, target })
 }
 
 fn open(path: &Path) -> Result<Database, WorkbenchError> {
@@ -235,8 +609,8 @@ fn wire_status(status: StoredStatus) -> ImprovementStatus {
     }
 }
 
-/// What may be done to a candidate now. PR 14's commands refuse exactly what is
-/// denied here.
+/// What may be done to a candidate now. The update commands refuse exactly what
+/// is denied here.
 ///
 /// The rule itself lives in [`storage::management::improvement_denial`], the one
 /// the writer's conditional update judges with.

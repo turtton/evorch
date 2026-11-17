@@ -1,4 +1,4 @@
-//! Samples of the `improvement` area (PR 13, read side).
+//! Samples of the `improvement` area (PR 13 reads, PR 14 updates).
 use super::AreaSamples;
 use serde_json::{Value, json};
 use workbench_protocol::{
@@ -26,6 +26,19 @@ fn summary() -> Value {
     })
 }
 
+fn command(operation: &str, payload: Value) -> Command {
+    de(json!({"type": "improvement", "payload": {"type": operation, "payload": payload}}))
+}
+
+fn update_view(state: Value, extra: Value) -> Value {
+    let mut view = json!({"operation": {"operation_id": "op-3", "state": state, "revision": "5"},
+        "project": "project-1", "candidate": "cand-1", "action": "triage"});
+    for (key, value) in extra.as_object().unwrap() {
+        view[key] = value.clone();
+    }
+    view
+}
+
 fn query(operation: &str, payload: Value) -> Query {
     de(json!({"type": "improvement", "payload": {"type": operation, "payload": payload}}))
 }
@@ -37,7 +50,23 @@ fn reply(kind: &str, payload: Value) -> QueryReply {
 pub fn samples() -> AreaSamples {
     AreaSamples {
         name: "improvement",
-        commands: Vec::<Command>::new(),
+        commands: vec![
+            command(
+                "mark_improvement_reviewed",
+                json!({"operation_id": "op-3", "project": "project-1",
+                       "candidate": "cand-1", "expected_revision": "4"}),
+            ),
+            command(
+                "dismiss_improvement",
+                json!({"operation_id": "op-3", "project": "project-1",
+                       "candidate": "cand-1", "expected_revision": "4"}),
+            ),
+            command(
+                "triage_improvement",
+                json!({"operation_id": "op-3", "project": "project-1",
+                       "subject": {"candidate": "cand-1", "expected_revision": "4"}}),
+            ),
+        ],
         queries: vec![
             query(
                 "list_improvement",
@@ -48,9 +77,16 @@ pub fn samples() -> AreaSamples {
                 json!({"operation_id": "op-2", "project": "project-1", "candidate": "cand-1"}),
             ),
             query("get_improvement_operation", json!({"operation_id": "op-1"})),
+            query("get_improvement_update", json!({"operation_id": "op-3"})),
         ],
-        ui_events: vec![de::<UiEvent>(json!({"type": "improvement", "payload": {
-            "type": "improvement_operation_changed", "payload": {"view": view(json!({"type": "ready"}))}}}))],
+        ui_events: vec![
+            de::<UiEvent>(json!({"type": "improvement", "payload": {
+                "type": "improvement_operation_changed", "payload": {"view": view(json!({"type": "ready"}))}}})),
+            de::<UiEvent>(json!({"type": "improvement", "payload": {
+                "type": "improvement_update_completed", "payload": {"update": update_view(
+                    json!({"type": "ready"}),
+                    json!({"revision": "5", "changed": true, "draft_file": "cand-1.issue.md"}))}}})),
+        ],
         query_replies: vec![
             reply(
                 "list",
@@ -69,6 +105,13 @@ pub fn samples() -> AreaSamples {
             reply(
                 "operation",
                 view(json!({"type": "failed", "code": "storage_unavailable"})),
+            ),
+            reply(
+                "update",
+                update_view(
+                    json!({"type": "failed", "code": "stale_revision"}),
+                    json!({"message": "the candidate changed since it was read; read it again and decide again"}),
+                ),
             ),
         ],
     }
