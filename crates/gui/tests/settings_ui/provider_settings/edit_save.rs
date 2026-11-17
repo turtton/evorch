@@ -73,7 +73,10 @@ fn replaces_profile_when_renaming_with_existing_token() {
     assert_eq!(store.get("B").unwrap().unwrap().expose(), "old-token");
     assert!(store.get("acct-A").unwrap().is_none());
     assert!(harness.state().provider_settings().error.is_none());
-    assert!(harness.state().provider_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Providers)
+    );
     assert!(harness.state().provider_settings().editor.is_none());
     assert!(harness.has_label("B"));
     assert!(!harness.has_label("A"));
@@ -93,7 +96,10 @@ fn failed_edit_save_keeps_editor_open() {
     harness.click_label("Save");
     finish_save(&mut harness);
     // Then: the error and editable settings stay visible, and config is unchanged.
-    assert!(harness.state().provider_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Providers)
+    );
     assert!(harness.state().provider_settings().editor.is_some());
     let error = harness
         .state()
@@ -217,7 +223,10 @@ fn replaces_profile_when_renaming_codex_profile() {
     finish_save(&mut harness);
     // Then: the refreshed provider list remains open with the renamed profile.
     assert!(harness.state().provider_settings().error.is_none());
-    assert!(harness.state().provider_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Providers)
+    );
     assert!(harness.state().provider_settings().editor.is_none());
     assert!(harness.has_label("Provider settings"));
     assert!(harness.has_label("B"));

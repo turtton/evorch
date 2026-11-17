@@ -14,7 +14,7 @@ fn capture_both_settings_tabs() {
     frame
         .save_png(std::path::Path::new("/tmp/opencode/w-b-openai.png"))
         .unwrap();
-    harness.click_label("Close");
+    harness.click_label("Back to list");
     harness.run();
     harness.click_label("+ Add Codex subscription");
     harness.run();
@@ -48,7 +48,7 @@ fn codex_tab_hides_openai_grid_and_shows_login() {
     let mut harness = workbench_with_config_path(temp.path());
     open_valid_settings(&mut harness);
     // When
-    harness.click_label("Close");
+    harness.click_label("Back to list");
     harness.run();
     harness.click_label("+ Add Codex subscription");
     harness.run();
@@ -93,8 +93,10 @@ fn api_key_field_is_password_and_saves_to_credential_store() {
         .with_provider_settings_path(config::project_main_config_path(temp.path()))
         .with_credential_store(store.clone());
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness
+        .state_mut()
+        .open_provider_settings_with(Default::default());
     let model = harness.state_mut().provider_settings_mut();
-    model.open = true;
     model.add(gui::model::provider_settings::ProviderKind::OpenAiCompatible);
     let model = model.openai_mut().unwrap();
     model.base_url = "https://example.com/v1".into();

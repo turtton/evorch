@@ -162,7 +162,10 @@ fn reviewer_categories_inherit_role_status_without_materializing_overrides() {
     assert!(harness.has_label("Undefined (no route)"));
     harness.click_label("Create route");
     harness.run();
-    assert!(harness.state().routing_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     assert!(
         harness
             .state()

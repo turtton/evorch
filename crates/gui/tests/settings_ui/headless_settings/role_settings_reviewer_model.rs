@@ -116,10 +116,6 @@ fn reviewer_category_rejects_blank_models_and_invalid_generation_before_save() {
         );
         let binding = editor.agents.reviewer.categories.get_mut(category).unwrap();
         binding.generation.temperature = None;
-        binding.generation.top_p = Some(-0.1);
-        assert!(editor.validate().is_err());
-        let binding = editor.agents.reviewer.categories.get_mut(category).unwrap();
-        binding.generation.top_p = None;
         binding.generation.max_tokens = Some(0);
         assert!(editor.validate().is_err());
     }

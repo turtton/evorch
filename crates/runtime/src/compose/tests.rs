@@ -178,7 +178,6 @@ fn routed_model_with_effort(
                     generation: GenerationOverridesConfig {
                         temperature: Some(0.25),
                         max_tokens: Some(321),
-                        ..GenerationOverridesConfig::default()
                     },
                     ..RoleBindingConfig::default()
                 },

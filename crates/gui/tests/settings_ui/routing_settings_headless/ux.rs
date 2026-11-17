@@ -28,12 +28,21 @@ fn routing_prefill_save_returns_to_fresh_role_settings() {
     harness.run();
     harness.click_label("Save routing");
     harness.step();
-    assert!(!harness.state().routing_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     finish(&mut harness);
     // Then: return to a fresh role draft with a resolved preview and no warning.
     assert_eq!(harness.state().routing_settings().validation_error, None);
-    assert!(harness.state().role_settings().open);
-    assert!(!harness.state().routing_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
+    assert_ne!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     assert_eq!(
         harness.state().role_settings().agents.explorer.head_route(),
         Some("legacy")
@@ -64,10 +73,16 @@ fn routing_invalid_save_keeps_modal_and_draft_open() {
     harness.click_label("Save routing");
     harness.run();
     // Then: the draft and its error stay visible, without returning to roles.
-    assert!(harness.state().routing_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     assert!(harness.state().routing_settings().origin_role_settings);
     assert!(!harness.state().routing_settings().is_saving());
-    assert!(!harness.state().role_settings().open);
+    assert_ne!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
     assert!(
         harness
             .state()
@@ -127,18 +142,23 @@ fn routing_expanded_route_can_edit_save_and_close() {
     harness.run();
     harness.click_label("Save routing");
     harness.step();
-    assert!(!harness.state().routing_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     finish(&mut harness);
-    // Then: saving closes routing and does not reopen either settings modal on success.
-    assert!(!harness.state().routing_settings().open);
-    assert!(!harness.state().role_settings().open);
+    // Then: a successful save keeps the modal on the Routing tab.
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     assert_eq!(
         harness.state().routing_settings().routes["registered"][0]
             .model
             .as_deref(),
         Some("fast")
     );
-    assert!(!harness.has_label("registered candidate 1 model override"));
+    assert!(harness.has_label("registered candidate 1 model override"));
     assert!(
         harness
             .state()
@@ -209,8 +229,7 @@ fn model_fixture() -> HeadlessWorkbench<DemoSource> {
         "candidate",
     );
     model.routes.get_mut("candidate").expect("route")[0].profile = "custom-a".into();
-    model.open = true;
-    *state.routing_settings_mut() = model;
+    state.open_routing_settings_with(model);
     HeadlessWorkbench::new(state, [1200.0, 900.0])
 }
 

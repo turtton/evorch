@@ -45,24 +45,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn open_provider_settings(&mut self) {
-        if self.settings_save_in_progress() {
-            return;
-        }
-        self.routing_settings.open = false;
-        self.sandbox_settings.open = false;
-        self.agent_features.open = false;
-        self.self_improvement_settings.open = false;
-        self.close_theme_settings();
-        self.role_settings.open = false;
-        self.provider_settings.error = None;
-        self.provider_settings.editor = None;
-        self.provider_settings.open = true;
+        self.open_settings_tab(crate::panes::settings::SettingsTab::Providers, None);
     }
 
+    /// Leaves the profile being edited for the list; the modal stays open.
     pub fn close_provider_settings(&mut self) {
-        if self.provider_settings.editor.take().is_none() {
-            self.provider_settings.open = false;
-        }
+        self.provider_settings.editor = None;
         self.provider_settings.error = None;
     }
 
@@ -349,12 +337,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(crate) fn receive_provider_save(&mut self, timeout: std::time::Duration) {
-        let close_after_save = match &self.provider_settings.editor {
-            Some(ProfileEditor::OpenAiCompatible(editor)) => editor.original_name.is_none(),
-            Some(ProfileEditor::Codex(editor)) => editor.original_name.is_none(),
-            Some(ProfileEditor::Subscription(editor)) => editor.models.original_name.is_none(),
-            None => false,
-        };
         let Some(rx) = self.provider_save_rx.take() else {
             return;
         };
@@ -377,7 +359,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             self.provider_settings =
                                 ProviderSettingsModel::seed_from_config(&config);
                             self.provider_settings.catalog = catalog;
-                            self.provider_settings.open = !close_after_save;
                         }
                         Err(error) => {
                             self.provider_settings.error = Some(error.to_string());
@@ -387,6 +368,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 self.push_notice("Provider settings updated");
                 self.apply_auto_group_outcome(outcome);
+                self.refresh_settings_tabs_after_save();
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => self.provider_save_rx = Some(rx),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {

@@ -12,7 +12,6 @@ fn capture_codex_model_editor() {
     for (width, height) in [(1200_u16, 900_u16), (800, 600)] {
         for state_name in ["idle", "loaded", "failed"] {
             let mut settings = ProviderSettingsModel::default();
-            settings.open = true;
             settings.add(ProviderKind::CodexSubscription);
             let editor = settings.codex_mut().unwrap();
             match state_name {
@@ -36,7 +35,7 @@ fn capture_codex_model_editor() {
                 &workspace_ui::UiSettings::default(),
             )
             .unwrap()
-            .with_provider_settings(settings);
+            .with_open_provider_settings(settings);
             let mut harness =
                 gui::headless::HeadlessWorkbench::new(state, [f32::from(width), f32::from(height)]);
             // When
@@ -62,8 +61,8 @@ fn editor() -> Harness<'static, ProviderSettingsModel> {
             |ui, model| {
                 let ctx = ui.ctx();
                 gui::theme::install(ctx);
-                gui::panes::provider_settings::provider_settings_modal(
-                    ctx,
+                gui::panes::provider_settings::provider_settings_body(
+                    ui,
                     model,
                     &CodexAuthModel::default(),
                 );
@@ -180,8 +179,8 @@ fn refresh_reports_failure_when_store_is_unavailable() {
         .build_ui_state(
             |ui, settings| {
                 gui::theme::install(ui.ctx());
-                if gui::panes::provider_settings::provider_settings_modal(
-                    ui.ctx(),
+                if gui::panes::provider_settings::provider_settings_body(
+                    ui,
                     settings,
                     &CodexAuthModel::default(),
                 ) == Some(gui::panes::provider_settings::ProviderSettingsAction::RefreshModels)

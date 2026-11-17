@@ -62,7 +62,6 @@ pub enum ProfileEditor {
 
 #[derive(Debug, Default)]
 pub struct ProviderSettingsModel {
-    pub open: bool,
     pub profiles: Vec<ProfileSummary>,
     pub editor: Option<ProfileEditor>,
     pub error: Option<String>,

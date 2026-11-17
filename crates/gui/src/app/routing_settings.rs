@@ -5,6 +5,7 @@ use crate::model::{
     routing_settings::RoutingSettingsModel,
     tasks::AgentRunSource,
 };
+use crate::panes::settings::SettingsTab;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub const fn routing_settings(&self) -> &RoutingSettingsModel {
@@ -30,70 +31,46 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn open_routing_settings(&mut self) {
-        if self.settings_save_in_progress() {
-            return;
-        }
+        self.open_settings_tab(SettingsTab::Routing, None);
+        // A direct entry has nothing to return to.
         self.routing_settings.origin_role_settings = false;
-        match self.load_profile_settings(None) {
-            Ok((config, picker)) => {
-                self.routing_settings = RoutingSettingsModel::seed_from_config(&config);
-                self.routing_settings.profiles = picker;
-            }
-            Err(error) => self.routing_settings.validation_error = Some(error),
-        }
-        self.show_routing_settings();
     }
 
     /// Opens routing on the profile being edited in role settings, with `logical` added.
+    /// The role draft stays untouched; a route of that name already in the draft is shown
+    /// instead of duplicated.
     pub fn open_routing_settings_prefill(&mut self, logical: &str) {
         if self.settings_save_in_progress() {
             return;
         }
-        self.routing_settings.origin_role_settings = true;
-        let profile = self.role_settings.profiles.selected.clone();
-        match self.load_profile_settings(Some(&profile)) {
-            Ok((config, picker)) => {
-                self.routing_settings =
-                    RoutingSettingsModel::seed_from_config_prefill(&config, logical);
-                self.routing_settings.profiles = picker;
-            }
-            Err(error) => self.routing_settings.validation_error = Some(error),
+        let profile = self.session_profile();
+        if self.settings.tab.is_none() {
+            self.begin_settings_session();
         }
-        self.show_routing_settings();
-    }
-
-    fn show_routing_settings(&mut self) {
-        self.provider_settings.open = false;
-        self.sandbox_settings.open = false;
-        self.agent_features.open = false;
-        self.self_improvement_settings.open = false;
-        self.close_theme_settings();
-        self.role_settings.open = false;
-        self.routing_settings.open = true;
-    }
-
-    /// Re-seeds the open modal from `config`, keeping where it was opened from.
-    fn reseed_routing(&mut self, config: &config::Config, preferred: Option<&str>) {
-        let origin = self.routing_settings.origin_role_settings;
-        let (view, picker) = self.profile_settings_from(config, preferred);
-        self.routing_settings = RoutingSettingsModel::seed_from_config(&view);
-        self.routing_settings.profiles = picker;
-        self.routing_settings.origin_role_settings = origin;
+        if !self.settings.routing_seeded {
+            self.seed_routing_tab(profile.as_deref());
+        }
+        self.settings.tab = Some(SettingsTab::Routing);
+        if !self.settings.routing_seeded {
+            return;
+        }
+        let agents = if self.settings.roles_seeded {
+            self.role_settings.agents.clone()
+        } else {
+            self.routing_settings.agents.clone()
+        };
+        self.routing_settings.add_prefill_route(logical, &agents);
     }
 
     pub fn apply_routing_profile_action(&mut self, action: RoleProfileAction) {
-        if self.settings_save_in_progress() {
+        if self.settings_save_in_progress() || self.settings_has_unsaved_edits() {
             return;
         }
         let (job, write): (RoleProfileJob, Box<SettingsWrite>) = match action {
             RoleProfileAction::Select(name) => {
-                match config::Config::load_unresolved(&self.user_settings_options()) {
-                    Ok(config) => self.reseed_routing(&config, Some(&name)),
-                    Err(error) => {
-                        self.routing_settings.validation_error = Some(error.to_string());
-                    }
+                if let Err(error) = self.select_settings_profile(&name) {
+                    self.routing_settings.validation_error = Some(error);
                 }
-                self.routing_settings.open = true;
                 return;
             }
             RoleProfileAction::Create(name) => {
@@ -129,22 +106,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn start_routing_job(&mut self, job: RoleProfileJob, write: Box<SettingsWrite>) {
-        let closes = job == RoleProfileJob::Save;
         match self.spawn_settings_job(write) {
             Ok(rx) => {
                 self.routing_settings.validation_error = None;
                 self.routing_settings.job = job;
                 self.routing_settings.save_rx = Some(rx);
-                if closes {
-                    self.routing_settings.open = false;
-                }
             }
             Err(error) => self.routing_settings.validation_error = Some(error),
         }
     }
 
     pub fn submit_routing_settings(&mut self) {
-        if self.settings_save_in_progress() {
+        if self.settings_save_in_progress() || self.routing_settings.conflict.is_some() {
             return;
         }
         let routing = match self.routing_settings.validated_routing() {
@@ -177,52 +150,65 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Ok(Ok(config)) => {
                 let job = std::mem::take(&mut self.routing_settings.job);
                 match job {
-                    RoleProfileJob::Save => {
-                        let return_to_roles = self.routing_settings.origin_role_settings;
-                        let profile = self.routing_settings.profiles.selected.clone();
-                        let expanded = self
-                            .routing_settings
-                            .expanded
-                            .iter()
-                            .map(|name| {
-                                self.routing_settings
-                                    .route_name_edits
-                                    .get(name)
-                                    .unwrap_or(name)
-                                    .clone()
-                            })
-                            .collect();
-                        self.reseed_routing(&config, Some(&profile));
-                        self.routing_settings.origin_role_settings = false;
-                        self.routing_settings.expanded = expanded;
-                        if return_to_roles {
-                            self.open_role_settings_profile(Some(&profile));
-                        }
-                        self.push_notice("Routing settings updated");
-                    }
+                    RoleProfileJob::Save => self.finish_routing_save(&config),
                     RoleProfileJob::Created(name) => {
-                        self.reseed_routing(&config, Some(&name));
-                        self.routing_settings.open = true;
+                        self.reseed_settings_tabs(&config, Some(&name), Some(SettingsTab::Routing));
                         self.push_notice(format!("Role profile '{name}' created"));
                     }
                     RoleProfileJob::Deleted(name) => {
-                        self.reseed_routing(&config, None);
-                        self.routing_settings.open = true;
+                        self.reseed_settings_tabs(&config, None, Some(SettingsTab::Routing));
                         self.push_notice(format!("Role profile '{name}' deleted"));
                     }
                 }
             }
-            Ok(Err(error)) => {
-                self.routing_settings.validation_error = Some(error);
-                self.routing_settings.open = true;
-            }
+            Ok(Err(error)) => self.routing_settings.validation_error = Some(error),
             Err(std::sync::mpsc::TryRecvError::Empty) => self.routing_settings.save_rx = Some(rx),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.routing_settings.validation_error =
                     Some("Routing settings worker stopped without a result".into());
-                self.routing_settings.open = true;
             }
         }
+    }
+
+    /// Routing was written: the routing draft becomes the saved state, the roles tab learns
+    /// the new routes and renames (its draft is otherwise untouched), and a modal that came
+    /// from roles goes back to them.
+    fn finish_routing_save(&mut self, config: &config::Config) {
+        let return_to_roles = self.routing_settings.origin_role_settings;
+        let profile = self.routing_settings.profiles.selected.clone();
+        let renames = self.routing_settings.route_renames();
+        let expanded = self
+            .routing_settings
+            .expanded
+            .iter()
+            .map(|name| {
+                self.routing_settings
+                    .route_name_edits
+                    .get(name)
+                    .unwrap_or(name)
+                    .clone()
+            })
+            .collect();
+        let (view, picker) = self.profile_settings_from(config, Some(&profile));
+        self.routing_settings = RoutingSettingsModel::seed_from_config(&view);
+        self.routing_settings.profiles = picker;
+        self.routing_settings.expanded = expanded;
+        if self.settings.roles_seeded {
+            if !renames.is_empty() {
+                config::types::agents::rename_route_refs(&mut self.role_settings.agents, &renames);
+                config::types::agents::rename_route_refs(
+                    &mut self.role_settings.base_agents,
+                    &renames,
+                );
+            }
+            self.role_settings.refresh_references(&view);
+            self.refresh_role_previews();
+        }
+        if return_to_roles && self.settings.tab == Some(SettingsTab::Routing) {
+            self.settings.tab = Some(SettingsTab::AgentRoles);
+            self.ensure_tab_seeded(SettingsTab::AgentRoles);
+        }
+        self.push_notice("Routing settings updated");
     }
 }
 

@@ -100,8 +100,8 @@ fn settings_harness(
         .build_ui_state(
             |ui, state| {
                 gui::theme::install(ui.ctx());
-                if let Some(action) = gui::panes::provider_settings::provider_settings_modal(
-                    ui.ctx(),
+                if let Some(action) = gui::panes::provider_settings::provider_settings_body(
+                    ui,
                     &mut state.0,
                     &gui::model::codex_auth::CodexAuthModel::default(),
                 ) {

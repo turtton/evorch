@@ -133,8 +133,8 @@ fn provider_save_recomposes_live_model() {
         .with_provider_settings_path(config::project_main_config_path(temp.path()))
         .with_credential_store(store)
         .with_production_model(context, model.clone());
+    state.open_provider_settings_with(Default::default());
     let settings = state.provider_settings_mut();
-    settings.open = true;
     settings.add(gui::model::provider_settings::ProviderKind::OpenAiCompatible);
     let settings = settings.openai_mut().unwrap();
     settings.name = "live".into();

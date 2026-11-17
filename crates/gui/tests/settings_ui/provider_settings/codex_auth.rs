@@ -17,14 +17,13 @@ use workspace_ui::UiSettings;
 fn workbench(backend: Arc<dyn CodexAuthBackend>) -> HeadlessWorkbench<DemoSource> {
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("workbench")
-        .with_provider_settings(codex_settings())
+        .with_open_provider_settings(codex_settings())
         .with_codex_auth(CodexAuthModel::with_backend(backend, "codex"));
     HeadlessWorkbench::new(state, [1200.0, 900.0])
 }
 
 fn codex_settings() -> ProviderSettingsModel {
     let mut model = ProviderSettingsModel::default();
-    model.open = true;
     model.add(gui::model::provider_settings::ProviderKind::CodexSubscription);
     model
 }
@@ -176,13 +175,17 @@ fn open_provider_settings_refreshes_codex_state_from_store() {
     // Given
     let (backend, _gate) = ScriptedCodexAuthBackend::gated();
     let mut harness = workbench(backend.clone());
-    harness.state_mut().provider_settings_mut().open = false;
+    harness.state_mut().close_settings_modal();
     harness.run();
     backend.set_stored(Ok(Some(CodexAuthSummary {
         expires_at_unix: None,
     })));
     // When
-    harness.state_mut().provider_settings_mut().open = true;
+    harness
+        .state_mut()
+        .open_provider_settings_with(codex_settings());
+    // Closing the modal dropped the editor together with its backend; attach it again.
+    *harness.state_mut().codex_auth_mut() = CodexAuthModel::with_backend(backend.clone(), "codex");
     harness.state_mut().codex_auth_mut().refresh_from_store();
     harness.step();
     // Then
@@ -195,7 +198,7 @@ fn login_without_backend_fails_closed_in_ui() {
     // Given
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("workbench")
-        .with_provider_settings(codex_settings());
+        .with_open_provider_settings(codex_settings());
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     harness.run();
     // When

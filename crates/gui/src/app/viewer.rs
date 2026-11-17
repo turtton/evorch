@@ -7,7 +7,6 @@ use crate::panes::{
     agents::AgentsAction,
     composer::ComposerAction,
     notifications::NotificationsAction,
-    provider_settings::{ProviderSettingsAction, provider_settings_modal},
     requests::RequestAction,
     sidebar::{SidebarAction, set_sidebar_error},
     tasks::TasksAction,
@@ -429,43 +428,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.render_agent_features(ui.ctx());
         self.render_self_improvement_settings(ui.ctx());
         self.render_storage_settings(ui.ctx());
-        if self.routing_settings.open {
-            use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_modal};
-            match routing_settings_modal(ui.ctx(), &mut self.routing_settings) {
-                Some(RoutingSettingsAction::Save) => self.submit_routing_settings(),
-                Some(RoutingSettingsAction::Cancel) => self.routing_settings.open = false,
-                Some(RoutingSettingsAction::Profile(action)) => {
-                    self.apply_routing_profile_action(action)
-                }
-                None => {}
-            }
-        }
-        self.render_role_settings(ui.ctx());
-        if self.provider_settings.open
-            && !self.role_settings.open
-            && !self.routing_settings.open
-            && let Some(action) =
-                provider_settings_modal(ui.ctx(), &mut self.provider_settings, &self.codex_auth)
-        {
-            match action {
-                ProviderSettingsAction::Save => self.submit_provider_settings(),
-                ProviderSettingsAction::Delete(name) => self.delete_provider_settings(name),
-                ProviderSettingsAction::Cancel => self.close_provider_settings(),
-                ProviderSettingsAction::StartCodexLogin => self.start_codex_login(),
-                ProviderSettingsAction::StartSubscriptionLogin => self.start_subscription_login(),
-                ProviderSettingsAction::CompleteSubscriptionLogin => {
-                    self.complete_subscription_login()
-                }
-                ProviderSettingsAction::CancelSubscriptionLogin => {
-                    if let Some(editor) = self.provider_settings.subscription_mut() {
-                        editor.cancel_login();
-                    }
-                }
-                ProviderSettingsAction::RefreshModels => self
-                    .provider_settings
-                    .start_models_fetch_with_store(self.credential_store.clone()),
-            }
-        }
+        self.render_settings_modal(ui.ctx());
         // Drawn last so the prompt stays above the settings modal that triggered it.
         self.render_auto_group_conflicts(ui.ctx());
     }

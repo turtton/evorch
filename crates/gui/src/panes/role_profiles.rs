@@ -7,6 +7,7 @@ pub const PROFILE_LABEL: &str = "Role profile";
 pub const NEW_NAME_LABEL: &str = "New profile name";
 pub const NEW_BUTTON: &str = "New profile";
 pub const DELETE_BUTTON: &str = "Delete profile";
+pub const PROFILE_LOCKED_NOTICE: &str = "Profile changes are disabled while edits are unsaved. Save them, or close settings to discard.";
 
 pub fn role_profile_bar(
     ui: &mut egui::Ui,

@@ -19,9 +19,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Ok(config) => self.agent_features = AgentFeaturesSettings::seed_from_config(&config),
             Err(error) => self.agent_features.error = Some(error.to_string()),
         }
-        self.provider_settings.open = false;
-        self.routing_settings.open = false;
-        self.role_settings.open = false;
+        self.dismiss_settings_modal();
         self.sandbox_settings.open = false;
         self.self_improvement_settings.open = false;
         self.storage_settings.open = false;

@@ -132,6 +132,7 @@ pub struct WorkbenchState<S> {
     pub(super) provider_settings: ProviderSettingsModel,
     pub(super) role_settings: crate::model::role_settings::RoleSettingsModel,
     pub(super) routing_settings: crate::model::routing_settings::RoutingSettingsModel,
+    pub(super) settings: super::settings::SettingsSession,
     pub(super) sandbox_settings: super::sandbox_settings::SandboxSettings,
     pub(super) agent_features: crate::model::agent_features::AgentFeaturesSettings,
     pub(super) self_improvement_settings:
@@ -291,6 +292,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             provider_settings: ProviderSettingsModel::default(),
             role_settings: crate::model::role_settings::RoleSettingsModel::default(),
             routing_settings: crate::model::routing_settings::RoutingSettingsModel::default(),
+            settings: super::settings::SettingsSession::default(),
             sandbox_settings: super::sandbox_settings::SandboxSettings::default(),
             agent_features: crate::model::agent_features::AgentFeaturesSettings::default(),
             self_improvement_settings:

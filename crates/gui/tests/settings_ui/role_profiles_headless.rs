@@ -144,7 +144,10 @@ fn new_profile_copies_selection_and_saves_and_deletes_only_that_profile() {
     finish(&mut harness);
     // Then: it copies default's routes, stays open, and becomes the edited profile.
     assert_eq!(harness.state().role_settings().error, None);
-    assert!(harness.state().role_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
     assert_eq!(harness.state().role_settings().profiles.selected, "cheap");
     let saved = config::Config::load_unresolved(&user_options(temp.path())).expect("saved");
     assert_eq!(saved.role_profiles["cheap"].routing, saved.routing);
@@ -156,6 +159,7 @@ fn new_profile_copies_selection_and_saves_and_deletes_only_that_profile() {
         .worker
         .base
         .models = vec![config::ChainEntryConfig::route("fast")];
+    harness.run();
     harness.click_label("Save role settings");
     harness.step();
     finish(&mut harness);

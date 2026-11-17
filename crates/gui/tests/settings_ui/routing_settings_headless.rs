@@ -172,8 +172,14 @@ fn prefilled_route_row_from_role_settings_is_editable() {
     let (mut state, _) = fixture(temp.path());
     state.open_role_settings();
     state.open_routing_settings_prefill("new-role-model");
-    assert!(!state.role_settings().open);
-    assert!(!state.provider_settings().open);
+    assert_ne!(
+        state.settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
+    assert_ne!(
+        state.settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Providers)
+    );
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
     // When: プリフィルされた候補のモデルをドロップダウンで選択する。
@@ -241,13 +247,16 @@ fn menu_add_reorder_save_rebuilds_runtime() {
     assert_eq!(saved.routing.routes["worker"][0].profile, "local");
     assert_eq!(saved.routing.routes["worker"][1].profile, "accelerated");
     assert_eq!(model.selected_model(Role::Worker, None), "local/base");
-    // A successful save closes the routing settings rather than reopening them.
-    assert!(!harness.state().routing_settings().open);
-    assert!(!harness.has_label("Save routing"));
+    // A successful save keeps the modal open on the Routing tab.
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
+    assert!(harness.has_label("Save routing"));
 }
 
 #[test]
-fn invalid_save_keeps_disk_and_cancel_reloads() {
+fn invalid_save_keeps_disk_and_close_discards_draft() {
     // Given: 未知プロファイルを含む編集内容。
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
@@ -274,9 +283,9 @@ fn invalid_save_keeps_disk_and_cancel_reloads() {
         std::fs::read(config::project_main_config_path(temp.path())).expect("read"),
         before
     );
-    harness.click_label("Cancel");
+    harness.click_label("Close");
     harness.run();
-    assert!(!harness.state().routing_settings().open);
+    assert_eq!(harness.state().settings_tab(), None);
     harness.state_mut().open_routing_settings();
     assert!(harness.state().routing_settings().routes.is_empty());
 }
@@ -289,15 +298,30 @@ fn settings_are_mutually_exclusive() {
     state.open_routing_settings();
     // When: 別の設定を順に開く。
     state.open_provider_settings();
-    assert!(!state.routing_settings().open);
+    assert_ne!(
+        state.settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     state.open_routing_settings();
     state.open_role_settings();
-    assert!(!state.routing_settings().open);
+    assert_ne!(
+        state.settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     state.open_routing_settings();
     // Then: 最後に開いた設定だけが表示される。
-    assert!(!state.role_settings().open);
-    assert!(!state.provider_settings().open);
-    assert!(state.routing_settings().open);
+    assert_ne!(
+        state.settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
+    assert_ne!(
+        state.settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Providers)
+    );
+    assert_eq!(
+        state.settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
 }
 
 #[test]
@@ -327,7 +351,7 @@ fn many_candidates_fit_geometry_matrix() {
             harness.scroll_label_into_view("Move candidate 20 up");
             harness.run();
             // Then: 最終行と固定フッターが画面内に収まる。
-            for label in ["Move candidate 20 up", "Save routing", "Cancel"] {
+            for label in ["Move candidate 20 up", "Save routing", "Close"] {
                 let rects = harness.label_rects(label);
                 assert!(!rects.is_empty(), "{label}");
                 assert!(

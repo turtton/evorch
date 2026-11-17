@@ -2,9 +2,9 @@ use crate::model::codex_auth::CodexAuthModel;
 use crate::model::provider_settings::{
     CredentialMode, OpenAiEditorModel, ProfileEditor, ProviderKind, ProviderSettingsModel,
 };
-use crate::theme::text::{h3, muted};
+use crate::theme::text::muted;
 use crate::theme::tokens::*;
-use crate::theme::widgets::{primary_button, surface_frame};
+use crate::theme::widgets::primary_button;
 
 #[path = "provider_codex_editor.rs"]
 mod codex_editor;
@@ -21,20 +21,18 @@ pub enum ProviderSettingsAction {
     Delete(String),
 }
 
-pub fn provider_settings_modal(
-    ctx: &egui::Context,
+/// The Providers tab of the settings modal. Closing the modal is the modal's own action;
+/// `Cancel` here only leaves the editor for the profile list.
+pub fn provider_settings_body(
+    ui: &mut egui::Ui,
     model: &mut ProviderSettingsModel,
     _codex: &CodexAuthModel,
 ) -> Option<ProviderSettingsAction> {
     let mut action = None;
-    let width = (ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0;
-    egui::Modal::new(egui::Id::new("provider-settings"))
-        .backdrop_color(palette().OVERLAY)
-        .frame(surface_frame(palette().SURFACE_RAISED))
-        .show(ctx, |ui| {
-            ui.set_width(width);
+    let ctx = ui.ctx().clone();
+    {
+        {
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
-            ui.label(h3("Provider settings"));
             super::model_metadata::catalog_toolbar(ui, &mut model.catalog);
             let sources = crate::model::model_metadata::MetadataSources {
                 presets: &model.model_presets,
@@ -46,8 +44,8 @@ pub fn provider_settings_modal(
                         .id_salt("openai-editor")
                         .auto_shrink([false, false])
                         // Break the sizing feedback loop with the modal's previous-frame height.
-                        .min_scrolled_height((ctx.viewport_rect().height() - 160.0).max(100.0))
-                        .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
+                        .min_scrolled_height((ctx.viewport_rect().height() - 240.0).max(100.0))
+                        .max_height((ctx.viewport_rect().height() - 240.0).max(100.0))
                         .show(ui, |ui| {
                             action = openai_body(ui, editor, &sources);
                         });
@@ -56,8 +54,8 @@ pub fn provider_settings_modal(
                     egui::ScrollArea::vertical()
                         .id_salt("subscription-editor")
                         .auto_shrink([false, false])
-                        .min_scrolled_height((ctx.viewport_rect().height() - 160.0).max(100.0))
-                        .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
+                        .min_scrolled_height((ctx.viewport_rect().height() - 240.0).max(100.0))
+                        .max_height((ctx.viewport_rect().height() - 240.0).max(100.0))
                         .show(ui, |ui| {
                             action = super::subscription_provider::subscription_body(
                                 ui, editor, &sources,
@@ -68,7 +66,7 @@ pub fn provider_settings_modal(
                     egui::ScrollArea::vertical()
                         .id_salt("codex-editor")
                         .auto_shrink([false, false])
-                        .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
+                        .max_height((ctx.viewport_rect().height() - 240.0).max(100.0))
                         .show(ui, |ui| {
                             if let Some(editor_action) = codex_editor::codex_body(ui, editor) {
                                 action = Some(editor_action);
@@ -160,11 +158,12 @@ pub fn provider_settings_modal(
                         if primary_button(ui, "Save").clicked() { action = Some(ProviderSettingsAction::Save); }
                     });
                 }
-                if ui.button("Close").clicked() {
+                if model.editor.is_some() && ui.button("Back to list").clicked() {
                     action = Some(ProviderSettingsAction::Cancel);
                 }
             });
-        });
+        }
+    }
     action
 }
 

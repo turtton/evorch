@@ -10,11 +10,8 @@ pub(super) fn freeze(
         .model
         .as_deref()
         .is_none_or(str::is_empty)
-        || settings.generation.top_p.is_some()
     {
-        return Err(unsupported(
-            "explicit model required; top_p is not supported by provider requests",
-        ));
+        return Err(unsupported("explicit model required"));
     }
     let invocation = AgentInvocationContext {
         attempts: None,
@@ -57,7 +54,7 @@ pub(super) fn freeze(
             ));
         }
         // OpenAI Responses keeps temperature, max_output_tokens, reasoning effort and
-        // service_tier; top_p is rejected above for every protocol.
+        // service_tier.
         _ => {}
     }
     let (model_id, _) = config::types::provider::parse_model_speed(&route.model_id);

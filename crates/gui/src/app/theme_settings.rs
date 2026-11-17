@@ -82,9 +82,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.settings_save_in_progress() {
             return;
         }
-        self.provider_settings.open = false;
-        self.role_settings.open = false;
-        self.routing_settings.open = false;
+        self.dismiss_settings_modal();
         self.sandbox_settings.open = false;
         self.agent_features.open = false;
         self.self_improvement_settings.open = false;

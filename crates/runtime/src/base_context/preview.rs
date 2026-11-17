@@ -245,7 +245,6 @@ impl AgentRuntime {
             shared: &shared,
             request: &request,
             active_root: active_root.as_deref(),
-            binding: binding.as_ref(),
             available_skills: available_skills.len(),
         });
         Ok(BaseContextReport {
@@ -360,7 +359,6 @@ struct ExclusionInputs<'a> {
     shared: &'a LoopShared,
     request: &'a BaseContextRequest,
     active_root: Option<&'a Path>,
-    binding: Option<&'a config::types::agents::ResolvedAgentBinding>,
     available_skills: usize,
 }
 
@@ -398,15 +396,6 @@ fn exclusions(inputs: &ExclusionInputs<'_>) -> Vec<ContextExclusion> {
         push(
             "Compaction policy",
             "Compaction guidance is not configured on this runtime.".into(),
-        );
-    }
-    if inputs
-        .binding
-        .is_some_and(|binding| binding.generation.top_p.is_some())
-    {
-        push(
-            "top_p",
-            "Configured, but not forwarded to provider requests.".into(),
         );
     }
     if matches!(inputs.request.role, Role::Orchestrator | Role::Worker) {

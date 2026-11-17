@@ -3,48 +3,49 @@ use std::collections::BTreeMap;
 use crate::model::role_settings::{RoleSettingsModel, categories_for_role};
 mod binding_status;
 use crate::theme::{
-    text::{badge, h3, muted},
+    icons,
+    text::{badge, muted},
     tokens::*,
-    widgets::{primary_button, surface_frame},
+    widgets::{icon_button, primary_button, surface_frame},
 };
 use binding_status::binding_status;
 
 pub enum RoleSettingsAction {
     Save,
-    Cancel,
     CreateRoute(String),
     Profile(crate::model::role_profiles::RoleProfileAction),
 }
 
-pub fn role_settings_modal(
-    ctx: &egui::Context,
+/// The Agent roles tab. `profile_locked` disables profile changes while any settings tab
+/// holds unsaved edits.
+pub fn role_settings_body(
+    ui: &mut egui::Ui,
     model: &mut RoleSettingsModel,
+    profile_locked: bool,
 ) -> Option<RoleSettingsAction> {
     let mut action = None;
     let busy = model.is_saving();
-    egui::Modal::new(egui::Id::new("role-settings"))
-        .backdrop_color(palette().OVERLAY)
-        .frame(surface_frame(palette().SURFACE_RAISED))
-        .show(ctx, |ui| {
-            ui.set_width(
-                (ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0,
-            );
+    let ctx = ui.ctx().clone();
+    {
+        {
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
-            ui.label(h3("Agent role settings"));
             ui.label(muted(
                 "Worker and reviewer categories take precedence over their role defaults; other roles use their role model.",
             ));
-            ui.add_enabled_ui(!busy, |ui| {
+            ui.add_enabled_ui(!busy && !profile_locked, |ui| {
                 if let Some(profile) =
                     crate::panes::role_profiles::role_profile_bar(ui, "role", &mut model.profiles)
                 {
                     action = Some(RoleSettingsAction::Profile(profile));
                 }
             });
+            if profile_locked {
+                ui.label(muted(crate::panes::role_profiles::PROFILE_LOCKED_NOTICE));
+            }
             ui.add_enabled_ui(!busy, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("role-bindings")
-                    .max_height((ctx.viewport_rect().height() - TOPBAR * 4.0).max(TOPBAR))
+                    .max_height((ctx.viewport_rect().height() - TOPBAR * 7.0).max(TOPBAR))
                     .show(ui, |ui| {
                         if model.routes_empty {
                             surface_frame(palette().WARNING_SURFACE).show(ui, |ui| {
@@ -218,16 +219,12 @@ pub fn role_settings_modal(
                 ui.label(muted("Saving and reloading runtime..."));
             }
             ui.add_enabled_ui(!busy, |ui| {
-                ui.horizontal(|ui| {
-                    if primary_button(ui, "Save role settings").clicked() {
-                        action = Some(RoleSettingsAction::Save);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        action = Some(RoleSettingsAction::Cancel);
-                    }
-                })
+                if primary_button(ui, "Save role settings").clicked() {
+                    action = Some(RoleSettingsAction::Save);
+                }
             });
-        });
+        }
+    }
     action
 }
 
@@ -310,19 +307,16 @@ fn chain_editor(
                 .labelled_by(label.id);
             entry_effort(ui, entry, efforts, &entry_name);
             ui.horizontal_wrapped(|ui| {
-                if ui.button(format!("Move {entry_name} up")).clicked() {
+                if icon_button(ui, icons::ARROW_UP, &format!("Move {entry_name} up")).clicked() {
                     movement = Some((index, index - 1));
                 }
-                if ui
-                    .add_enabled(
-                        index + 1 < count,
-                        egui::Button::new(format!("Move {entry_name} down")),
-                    )
-                    .clicked()
-                {
+                let down = ui.add_enabled_ui(index + 1 < count, |ui| {
+                    icon_button(ui, icons::ARROW_DOWN, &format!("Move {entry_name} down"))
+                });
+                if down.inner.clicked() {
                     movement = Some((index, index + 1));
                 }
-                if ui.button(format!("Remove {entry_name}")).clicked() {
+                if icon_button(ui, icons::TRASH, &format!("Remove {entry_name}")).clicked() {
                     removal = Some(index);
                 }
             });
@@ -345,11 +339,11 @@ fn chain_editor(
     let next = existing
         .iter()
         .find(|route| !models.iter().any(|entry| &entry.route == *route));
-    if ui
-        .add_enabled(
-            !models.is_empty() && next.is_some(),
-            egui::Button::new(format!("Add {name} fallback")),
-        )
+    let add = ui.add_enabled_ui(!models.is_empty() && next.is_some(), |ui| {
+        icon_button(ui, icons::PLUS, &format!("Add {name} fallback"))
+    });
+    if add
+        .inner
         .on_disabled_hover_text("Choose the first route, and define another route to fall back to")
         .clicked()
         && let Some(route) = next
@@ -446,7 +440,6 @@ fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
 
 fn generation(ui: &mut egui::Ui, value: &mut config::GenerationOverridesConfig) {
     optional_number(ui, "Temperature", (&mut value.temperature, 0.0..=2.0));
-    optional_number(ui, "Top p", (&mut value.top_p, 0.0..=1.0));
     optional_number(ui, "Max tokens", (&mut value.max_tokens, 1..=u32::MAX));
 }
 

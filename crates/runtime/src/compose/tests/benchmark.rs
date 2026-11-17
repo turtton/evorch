@@ -138,8 +138,6 @@ async fn benchmark_rejects_generation_fields_omitted_by_wire_adapters() {
     for protocol in [
         model::ApiProtocol::OpenAiCodexResponses,
         model::ApiProtocol::AnthropicMessages,
-        model::ApiProtocol::OpenAiCompletions,
-        model::ApiProtocol::OpenAiResponses,
     ] {
         let (mut model, requests) = routed_model(Ok(response()), "custom", None);
         model
@@ -153,19 +151,25 @@ async fn benchmark_rejects_generation_fields_omitted_by_wire_adapters() {
             .benchmark_settings(&AgentInvocationContext::default(), Role::Worker, &[])
             .await
             .unwrap();
-        match protocol {
-            model::ApiProtocol::AnthropicMessages => {
-                settings.preference.reasoning_effort = Some("high".into())
-            }
-            model::ApiProtocol::OpenAiCompletions | model::ApiProtocol::OpenAiResponses => {
-                settings.generation.top_p = Some(0.5)
-            }
-            // Fixture already has temperature/max_tokens, neither reaches Codex wire.
-            _ => {}
+        // Fixture already has temperature/max_tokens, neither reaches Codex wire.
+        if protocol == model::ApiProtocol::AnthropicMessages {
+            settings.preference.reasoning_effort = Some("high".into());
         }
         assert!(model.freeze_for_benchmark(settings).is_err());
         assert!(requests.lock().unwrap().is_empty());
     }
+}
+
+#[test]
+fn benchmark_generation_settings_reject_retired_top_p_at_the_type_boundary() {
+    // Given: a checkpoint-style generation payload that still carries top_p.
+    // When: it is decoded as the generation settings a benchmark can freeze.
+    let error = serde_json::from_str::<config::GenerationOverridesConfig>(
+        r#"{"temperature":0.2,"top_p":0.5}"#,
+    )
+    .expect_err("top_p is no longer a generation field");
+    // Then: the unknown field is rejected before any request could be built.
+    assert!(error.to_string().contains("top_p"), "{error}");
 }
 
 #[tokio::test]

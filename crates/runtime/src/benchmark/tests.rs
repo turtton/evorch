@@ -31,7 +31,6 @@ fn settings(model: &str) -> BenchmarkModelSettings {
         generation: config::GenerationOverridesConfig {
             temperature: Some(0.25),
             max_tokens: Some(321),
-            ..Default::default()
         },
         service_tier: Some(providers::ServiceTier::Priority),
     }

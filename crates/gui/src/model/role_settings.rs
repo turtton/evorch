@@ -10,8 +10,9 @@ pub fn categories_for_role(
 
 #[derive(Debug, Default)]
 pub struct RoleSettingsModel {
-    pub open: bool,
     pub agents: config::AgentsConfig,
+    /// The agents as last seeded or saved: edits are the difference from it.
+    pub base_agents: config::AgentsConfig,
     pub logical_models: Vec<String>,
     pub route_names: BTreeSet<String>,
     /// route ごとに、チェーン要素で選べる推論強度。
@@ -58,9 +59,37 @@ impl RoleSettingsModel {
                 .collect(),
             routes_empty: config.routing.routes.is_empty(),
             agents: config.agents.clone(),
+            base_agents: config.agents.clone(),
             logical_models: names.into_iter().collect(),
             ..Self::default()
         }
+    }
+
+    /// Whether the draft differs from what was seeded or last saved.
+    pub fn is_dirty(&self) -> bool {
+        self.agents != self.base_agents
+    }
+
+    /// Takes the route and provider fields of `config` (a profile view) and leaves the
+    /// agent draft alone.
+    pub fn refresh_references(&mut self, config: &config::Config) {
+        let fresh = Self::seed_from_config(config);
+        self.route_names = fresh.route_names;
+        self.routes = fresh.routes;
+        self.providers = fresh.providers;
+        self.route_efforts = fresh.route_efforts;
+        self.routes_empty = fresh.routes_empty;
+        let names: BTreeSet<String> = self
+            .route_names
+            .iter()
+            .cloned()
+            .chain(
+                config::types::agents::explicit_refs(&self.agents)
+                    .into_iter()
+                    .map(|(_, name)| name),
+            )
+            .collect();
+        self.logical_models = names.into_iter().collect();
     }
 
     pub const fn is_saving(&self) -> bool {
@@ -187,12 +216,6 @@ fn validate_generation(
             value
                 .temperature
                 .is_none_or(|v| v.is_finite() && (0.0..=2.0).contains(&v)),
-        ),
-        (
-            "top_p",
-            value
-                .top_p
-                .is_none_or(|v| v.is_finite() && (0.0..=1.0).contains(&v)),
         ),
         ("max_tokens", value.max_tokens != Some(0)),
     ] {

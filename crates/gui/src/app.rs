@@ -55,6 +55,7 @@ mod role_settings;
 mod routing_settings;
 mod sandbox_settings;
 mod self_improvement_settings;
+mod settings;
 mod shared_feed;
 mod shared_sidebar;
 pub mod splash;

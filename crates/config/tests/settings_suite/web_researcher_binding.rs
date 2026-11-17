@@ -47,7 +47,6 @@ models = [{ route = "research-model" }]
 preset = "research-preset"
 [agents.roles.web_researcher.generation]
 temperature = 0.25
-top_p = 0.8
 max_tokens = 1024
 [agents.roles.web_researcher.categories.research]
 models = [{ route = "deep-model" }]

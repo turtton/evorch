@@ -5,7 +5,7 @@ use crate::model::{
     role_settings::{RoleSettingsModel, categories_for_role},
     tasks::AgentRunSource,
 };
-use crate::panes::role_settings::{RoleSettingsAction, role_settings_modal};
+use crate::panes::settings::SettingsTab;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub const fn role_settings(&self) -> &RoleSettingsModel {
@@ -19,44 +19,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.open_role_settings_profile(None);
     }
 
-    /// Opens the modal on `profile`, or the active project's profile when absent.
+    /// Opens the Agent roles tab on `profile`, or the active project's profile when absent.
     pub fn open_role_settings_profile(&mut self, profile: Option<&str>) {
-        if self.settings_save_in_progress() {
-            return;
-        }
-        match self.load_profile_settings(profile) {
-            Ok((config, picker)) => self.seed_role_settings(&config, picker),
-            Err(error) => self.role_settings.error = Some(error),
-        }
-        self.provider_settings.open = false;
-        self.close_theme_settings();
-        self.routing_settings.open = false;
-        self.sandbox_settings.open = false;
-        self.agent_features.open = false;
-        self.self_improvement_settings.open = false;
-        self.role_settings.open = true;
-    }
-
-    pub(super) fn render_role_settings(&mut self, ctx: &egui::Context) {
-        if self.role_settings.open && !self.routing_settings.open {
-            match role_settings_modal(ctx, &mut self.role_settings) {
-                Some(RoleSettingsAction::Save) => self.submit_role_settings(),
-                Some(RoleSettingsAction::Cancel) => self.role_settings.open = false,
-                Some(RoleSettingsAction::CreateRoute(logical)) => {
-                    self.open_routing_settings_prefill(&logical)
-                }
-                Some(RoleSettingsAction::Profile(action)) => self.apply_role_profile_action(action),
-                None => {}
-            }
-        }
+        self.open_settings_tab(SettingsTab::AgentRoles, profile);
     }
 
     pub fn apply_role_profile_action(&mut self, action: RoleProfileAction) {
-        if self.settings_save_in_progress() {
+        if self.settings_save_in_progress() || self.settings_has_unsaved_edits() {
             return;
         }
         let (job, write): (RoleProfileJob, Box<SettingsWrite>) = match action {
-            RoleProfileAction::Select(name) => return self.open_role_settings_profile(Some(&name)),
+            RoleProfileAction::Select(name) => {
+                if let Err(error) = self.select_settings_profile(&name) {
+                    self.role_settings.error = Some(error);
+                }
+                return;
+            }
             RoleProfileAction::Create(name) => {
                 let name = match self.role_settings.profiles.validate_new_name(&name) {
                     Ok(name) => name,
@@ -100,13 +78,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    fn seed_role_settings(&mut self, config: &config::Config, profiles: RoleProfilePicker) {
-        use runtime::Role;
-        let edits_effective = profiles.edits_effective();
+    pub(super) fn seed_role_settings(
+        &mut self,
+        config: &config::Config,
+        profiles: RoleProfilePicker,
+    ) {
         self.role_settings = RoleSettingsModel::seed_from_config(config);
         self.role_settings.profiles = profiles;
-        if !edits_effective {
+        self.refresh_role_previews();
+    }
+
+    /// Recomputes which model each role binding resolves to right now.
+    pub(super) fn refresh_role_previews(&mut self) {
+        use runtime::Role;
+        if !self.role_settings.profiles.edits_effective() {
             // The runtime resolves the project's profile, not the one being edited.
+            self.role_settings.resolved_previews.clear();
             return;
         }
         let roles = [
@@ -174,31 +161,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         match rx.try_recv() {
-            Ok(Ok(config)) => {
-                let job = std::mem::take(&mut self.role_settings.job);
-                let preferred = match &job {
-                    RoleProfileJob::Save => Some(self.role_settings.profiles.selected.clone()),
-                    RoleProfileJob::Created(name) => Some(name.clone()),
-                    RoleProfileJob::Deleted(_) => None,
-                };
-                let (view, picker) = self.profile_settings_from(&config, preferred.as_deref());
-                self.seed_role_settings(&view, picker);
-                self.role_settings.open = job != RoleProfileJob::Save;
-                match job {
-                    RoleProfileJob::Save => self.push_notice("Agent role settings updated"),
-                    RoleProfileJob::Created(name) => {
-                        self.push_notice(format!("Role profile '{name}' created"));
+            Ok(Ok(config)) => match std::mem::take(&mut self.role_settings.job) {
+                RoleProfileJob::Save => {
+                    let selected = self.role_settings.profiles.selected.clone();
+                    let (view, picker) = self.profile_settings_from(&config, Some(&selected));
+                    self.seed_role_settings(&view, picker);
+                    if self.settings.routing_seeded {
+                        self.routing_settings.refresh_references(&view);
                     }
-                    RoleProfileJob::Deleted(name) => {
-                        self.push_notice(format!("Role profile '{name}' deleted"));
-                    }
+                    self.push_notice("Agent role settings updated");
                 }
-            }
+                RoleProfileJob::Created(name) => {
+                    self.reseed_settings_tabs(&config, Some(&name), Some(SettingsTab::AgentRoles));
+                    self.push_notice(format!("Role profile '{name}' created"));
+                }
+                RoleProfileJob::Deleted(name) => {
+                    self.reseed_settings_tabs(&config, None, Some(SettingsTab::AgentRoles));
+                    self.push_notice(format!("Role profile '{name}' deleted"));
+                }
+            },
             Ok(Err(error)) => self.role_settings.error = Some(error),
             Err(std::sync::mpsc::TryRecvError::Empty) => self.role_settings.save_rx = Some(rx),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.role_settings.error =
-                    Some("Role settings worker stopped without a result".into())
+                    Some("Role settings worker stopped without a result".into());
             }
         }
     }
