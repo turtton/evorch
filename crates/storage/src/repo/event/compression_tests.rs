@@ -412,3 +412,98 @@ fn a_run_lookup_decodes_only_the_compressed_rows_of_that_run() {
     assert_eq!(many[0].event, target);
     assert_eq!((few_decodes, many_decodes), (1, 1));
 }
+
+/// A compressed `ThreadTodoUpdated` row as an older build stored it, with its columns.
+fn insert_retired_todo(connection: &Connection) {
+    let payload = serde_json::json!({"kind": "Orchestrator", "payload": {
+        "kind": "ThreadTodoUpdated", "payload": {"snapshot": {
+            "list_id": "procedures-1", "thread_id": "thread-1", "revision": 1,
+            "items": [{"content": big("retired"), "status": "pending"}]}}}})
+    .to_string();
+    let encoded = crate::codec::encode(&payload);
+    assert!(matches!(encoded, crate::codec::Encoded::Compressed(_)));
+    connection
+        .execute(
+            "INSERT INTO events (session_id, schema_version, monotonic_ns, wall_clock_ns, \
+             kind, subkind, payload) VALUES ('other', ?1, 0, 0, 'Orchestrator', \
+             'ThreadTodoUpdated', ?2)",
+            rusqlite::params![event_bus::SCHEMA_VERSION, encoded],
+        )
+        .unwrap();
+}
+
+#[test]
+fn retired_todo_rows_are_passed_over_by_the_log_follower_without_decoding_them() {
+    // Given: a retired todo row between two live events and one after them.
+    let connection = fixture();
+    let mut accounting = EventAccounting::default();
+    let first = event_at(
+        MessageEvent::MessageCompleted {
+            run_id: "r".into(),
+            text: "a".into(),
+        },
+        1,
+    );
+    append(&connection, &mut accounting, &first);
+    insert_retired_todo(&connection);
+    let last = event_at(
+        MessageEvent::MessageCompleted {
+            run_id: "r".into(),
+            text: "b".into(),
+        },
+        2,
+    );
+    append(&connection, &mut accounting, &last);
+    insert_retired_todo(&connection);
+
+    // When: pages of two rows are read from the start.
+    let (pages, decodes) = decoded_blobs_during(|| {
+        let first_page = super::list_after(&connection, 0, 2, None).unwrap();
+        let second_page = super::list_after(&connection, first_page.last_id, 2, None).unwrap();
+        (first_page, second_page)
+    });
+
+    // Then: no retired payload was fetched, and the cursor moved over the excluded rows,
+    // including a page made of them alone.
+    assert_eq!(decodes, 0);
+    assert_eq!(pages.0.events.len(), 1);
+    assert_eq!((pages.0.scanned, pages.0.last_id), (2, 2));
+    assert_eq!(pages.1.events.len(), 1);
+    assert_eq!((pages.1.scanned, pages.1.last_id), (2, 4));
+    let only_retired = super::list_after(&connection, 3, 5, None).unwrap();
+    assert!(only_retired.events.is_empty());
+    assert_eq!((only_retired.scanned, only_retired.last_id), (1, 4));
+}
+
+#[test]
+fn orchestrator_reads_do_not_fetch_retired_todo_rows() {
+    // Given: a retired todo row beside a live Orchestrator event.
+    let connection = fixture();
+    let mut accounting = EventAccounting::default();
+    insert_retired_todo(&connection);
+    let progressed = event_at(
+        event_bus::OrchestratorEvent::TaskProgressed {
+            task_id: "t".into(),
+            run_id: "r".into(),
+            progress: serde_json::json!({"status": "running"}),
+            reason: "started".into(),
+        },
+        3,
+    );
+    let id = append(&connection, &mut accounting, &progressed);
+
+    // When: the Orchestrator events and the goal lookup are read.
+    let (events, decodes) =
+        decoded_blobs_during(|| super::list_orchestrator_ordered(&connection).unwrap());
+    let (recorded, goal_decodes) =
+        decoded_blobs_during(|| super::thread_goal_recorded(&connection, "thread-1").unwrap());
+
+    // Then: only the live event comes back and the retired payload was never decoded.
+    assert_eq!(
+        events.iter().map(|stored| stored.id).collect::<Vec<_>>(),
+        [id]
+    );
+    assert_eq!(decodes, 0);
+    assert!(!recorded);
+    assert_eq!(goal_decodes, 0);
+}

@@ -3,6 +3,10 @@
 # each test process, including providers' process-global cache tests.
 # cache_preservation_e2e includes approval_cache::approved_tool_preserves_next_provider_prefix
 # (Chat Completions, Responses and Codex; approval is not a cache boundary).
+# The entire cache_preservation_e2e binary also registers plan_cache,
+# plan_boundary_cache and recovery_activation_cache::plan_schema (including
+# planned catalog switch and non-handoff restart). Do not select just their
+# names: the other scenarios in that binary remain cache contracts too.
 # core_settings_cache is the baseline the integration PR S0 registered; PR 10 adds
 # scenarios to it. nextest rejects a binary name that matches nothing, so the
 # integration PR that precedes a feature PR registers its new cache binary (for

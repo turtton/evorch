@@ -1,4 +1,4 @@
-//! Host service of the `execution` area: runs, goals, todo lists and ledgers.
+//! Host service of the `execution` area: runs, goals and ledgers.
 //!
 //! The read side composes two sources into one answer. The runtime knows the
 //! runs it still holds (with their model and live phase); storage knows every
@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use event_bus::RecvError;
-use event_bus::{AgentRunPhase, EventKind, OrchestratorEvent, ThreadGoalPhase, ThreadTodoStatus};
+use event_bus::{AgentRunPhase, EventKind, OrchestratorEvent, ThreadGoalPhase};
 use runtime::AgentRuntime;
 use workbench_protocol::errors::{ErrorCode, WorkbenchError};
 use workbench_protocol::events::UiEvent;
@@ -16,7 +16,7 @@ use workbench_protocol::ids::{GoalId, RunId, ThreadId};
 use workbench_protocol::namespaces::execution::{
     GoalCheckView, GoalPhase, GoalView, LedgerView, MAX_EXECUTION_ITEMS, MAX_ITEM_TEXT_BYTES,
     MAX_LEDGER_BYTES, RunDetail, RunDetailsQuery, RunLifecycle, RunRef, RunScope, RunSource,
-    RunTerminalReason, ThreadExecution, TodoItemView, TodoStatus, TodoView,
+    RunTerminalReason, ThreadExecution,
 };
 use workbench_protocol::namespaces::{ExecutionEvent, ExecutionQuery, ExecutionReply};
 use workbench_protocol::queries::{Query, QueryReply};
@@ -184,10 +184,7 @@ fn publish_change(runtime: &AgentRuntime, source: &ProjectionSource, kind: &Even
         EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) => {
             snapshot.thread_id.clone()
         }
-        EventKind::Orchestrator(OrchestratorEvent::ThreadTodoUpdated { snapshot }) => {
-            snapshot.thread_id.clone()
-        }
-        // A working note changes neither goal nor todo; the thread that owns the run is
+        // A working note does not change the goal; the thread that owns the run is
         // told that its execution view (which carries the latest note) changed.
         EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
             let Some(thread) = thread_of_run(runtime, run_id) else {
@@ -205,7 +202,6 @@ fn publish_change(runtime: &AgentRuntime, source: &ProjectionSource, kind: &Even
         goal: runtime
             .thread_goal(&thread)
             .and_then(|goal| goal_view(&goal)),
-        todo: runtime.thread_todo(&thread).map(|todo| todo_view(&todo)),
     };
     if let Err(error) = source.publish(UiEvent::Execution(event)) {
         tracing::warn!(?error.code, "execution event was not published");
@@ -459,27 +455,6 @@ fn goal_view(goal: &event_bus::ThreadGoalSnapshot) -> Option<GoalView> {
     })
 }
 
-fn todo_view(todo: &event_bus::ThreadTodoSnapshot) -> TodoView {
-    TodoView {
-        list_id: text(&todo.list_id, 256),
-        revision: Revision(todo.revision),
-        items: todo
-            .items
-            .iter()
-            .take(MAX_EXECUTION_ITEMS)
-            .map(|item| TodoItemView {
-                content: text(&item.content, MAX_ITEM_TEXT_BYTES),
-                status: match item.status {
-                    ThreadTodoStatus::Pending => TodoStatus::Pending,
-                    ThreadTodoStatus::InProgress => TodoStatus::InProgress,
-                    ThreadTodoStatus::Completed => TodoStatus::Completed,
-                    ThreadTodoStatus::Interrupted => TodoStatus::Interrupted,
-                },
-            })
-            .collect(),
-    }
-}
-
 fn thread_execution(
     runtime: &AgentRuntime,
     thread: &ThreadId,
@@ -512,9 +487,6 @@ fn thread_execution(
         goal: runtime
             .thread_goal(thread.as_str())
             .and_then(|goal| goal_view(&goal)),
-        todo: runtime
-            .thread_todo(thread.as_str())
-            .map(|todo| todo_view(&todo)),
         ledger,
     })
 }

@@ -4,7 +4,17 @@ use runtime::quiesce::{RecoveryRecipe, ResumePolicy};
 use runtime::{AgentModel, CurrentRecoveryAuthority};
 use std::collections::BTreeMap;
 
+mod plan_schema;
 mod wait_schema;
+
+#[derive(Clone, Copy)]
+enum SchemaCase {
+    None,
+    Wait,
+    Plan,
+    PlanUnchanged,
+    PlanRetry,
+}
 
 fn settings(h: &Harness) -> Config {
     let root = h._directory.path();
@@ -119,7 +129,7 @@ async fn recover(changed_settings: bool) {
         false,
         false,
         Wire::ChatCompletions,
-        false,
+        SchemaCase::None,
     )
     .await;
 }
@@ -135,7 +145,7 @@ async fn planned_tool_schema_boundary_preserves_sent_history_and_reuses_the_new_
             different_build,
             changed_tool,
             Wire::ChatCompletions,
-            false,
+            SchemaCase::None,
         )
         .await;
     }
@@ -180,8 +190,16 @@ async fn recover_case(
     different_build: bool,
     changed_tool: bool,
     wire: Wire,
-    wait_schema: bool,
+    schema_case: SchemaCase,
 ) {
+    let wait_schema = matches!(schema_case, SchemaCase::Wait);
+    let plan_schema = matches!(
+        schema_case,
+        SchemaCase::Plan | SchemaCase::PlanUnchanged | SchemaCase::PlanRetry
+    );
+    let retry_boundary = matches!(schema_case, SchemaCase::PlanRetry);
+    let schema_change =
+        wait_schema || matches!(schema_case, SchemaCase::Plan | SchemaCase::PlanRetry);
     let mut script = if tools_case {
         vec![
             read_response(0),
@@ -214,6 +232,20 @@ async fn recover_case(
             ),
         );
     }
+    let (response_gate, response_arrived) = mock_openai::ResponseGate::new();
+    if plan_schema {
+        if schema_change {
+            script.insert(0, plan_schema::legacy_call());
+        }
+        let boundary = if schema_change { 3 } else { 2 };
+        script[boundary] = super::plan_cache::read("boundary-plan-read");
+        if retry_boundary {
+            script.insert(
+                boundary,
+                super::plan_cache::read("boundary-plan-read").with_gate(response_gate.clone()),
+            );
+        }
+    }
     let h = harness_with_wire(
         wire,
         script,
@@ -230,7 +262,12 @@ async fn recover_case(
         ..Default::default()
     };
     let storage = storage::Storage::open(config.clone()).unwrap();
-    let predecessor = wait_schema.then(|| Arc::new(wait_schema::PredecessorCatalog::default()));
+    let predecessor = schema_change.then(|| {
+        Arc::new(wait_schema::PredecessorCatalog {
+            plan: plan_schema,
+            ..Default::default()
+        })
+    });
     let (old, old_model, mut events) = process_with_catalog(
         &h,
         &current,
@@ -245,13 +282,14 @@ async fn recover_case(
     let run = old
         .delegate_chat(
             "wire-recovery-thread",
-            if wait_schema {
+            if schema_change {
                 Role::Orchestrator
             } else {
                 Role::Worker
             },
             prompt.clone(),
             RunConfig {
+                conversation: plan_schema,
                 interactive: true,
                 keep_alive: true,
                 ..RunConfig::default()
@@ -259,7 +297,7 @@ async fn recover_case(
         )
         .unwrap();
     let pin = runtime::RoutePinRecord {
-        chain: if wait_schema {
+        chain: if schema_change {
             "orchestrator"
         } else {
             "worker"
@@ -273,6 +311,23 @@ async fn recover_case(
     // covered by compose::tests::checkpoint::recovery_validates_fallback_pin… .
     old_model.restore_route_pins(&run.to_string(), std::slice::from_ref(&pin));
     let mut all_events = through_phase(&mut events, run, AgentRunPhase::Waiting).await;
+    if plan_schema {
+        old.stop(run, runtime::StopScope::SelfOnly).unwrap();
+        all_events.extend(through_phase(&mut events, run, AgentRunPhase::Stopped).await);
+        old.wait(run).await.unwrap();
+        super::plan_cache::age_record(&config, run);
+        old.resume_chat(
+            run,
+            RunConfig {
+                conversation: true,
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        all_events.extend(through_phase(&mut events, run, AgentRunPhase::Waiting).await);
+    }
     use storage::recovery::restart::RestartMutation;
     let recipes = BTreeMap::from([(
         run,
@@ -349,7 +404,7 @@ async fn recover_case(
         .collect::<Vec<_>>();
     assert_eq!(
         before.len(),
-        if wait_schema {
+        if schema_change {
             3
         } else if tools_case {
             2
@@ -362,7 +417,7 @@ async fn recover_case(
     if changed_settings {
         current.agents.worker.base.generation.temperature = Some(0.75);
     }
-    let (restarted, model, mut events) = process_with_read(
+    let (mut restarted, model, mut events) = process_with_read(
         &h,
         &current,
         &storage,
@@ -409,7 +464,7 @@ async fn recover_case(
             &candidate.request.tools,
             "fixture-permissions",
         );
-        if (changed_tool || wait_schema) && !different_build {
+        if (changed_tool || schema_change) && !different_build {
             assert!(comparison.is_err());
             assert!(restarted.list_agents().is_empty());
             assert_eq!(
@@ -423,11 +478,14 @@ async fn recover_case(
             return;
         }
         let evidence = comparison.unwrap();
-        assert_eq!(evidence.boundary, changed_tool || wait_schema);
+        assert_eq!(evidence.boundary, changed_tool || schema_change);
         if wait_schema {
             wait_schema::assert_evidence(&evidence);
         }
-        if changed_tool || wait_schema {
+        if plan_schema && schema_change {
+            plan_schema::assert_evidence(&evidence);
+        }
+        if changed_tool || schema_change {
             assert!(
                 restarted
                     .consume_restart_tool_boundary(evidence.clone(), candidate.clone())
@@ -450,7 +508,7 @@ async fn recover_case(
         let boundary = restarted
             .consume_restart_tool_boundary(evidence.clone(), candidate.clone())
             .unwrap();
-        let permitted = if changed_tool || wait_schema {
+        let permitted = if changed_tool || schema_change {
             let permitted = boundary.unwrap().apply(&old_input).unwrap();
             assert_eq!(permitted, candidate);
             assert!(
@@ -465,12 +523,17 @@ async fn recover_case(
             candidate.clone()
         };
         expected_wire_tools = wait_schema::wire_tools(h.wire, &permitted.request.tools);
-        if wait_schema {
+        if schema_change {
             let (saved, consumed) = fixture_db
                 .restart_tools_evidence("routed-wire", &run.to_string(), incarnation)
                 .unwrap()
                 .unwrap();
-            wait_schema::assert_evidence(&saved);
+            if wait_schema {
+                wait_schema::assert_evidence(&saved);
+            }
+            if plan_schema {
+                plan_schema::assert_evidence(&saved);
+            }
             assert!(
                 consumed,
                 "schema boundary evidence must be durably consumed"
@@ -527,12 +590,20 @@ async fn recover_case(
             run,
             RunConfig {
                 ownership: Some(owner.start("wire-recovery-thread").unwrap()),
+                conversation: plan_schema,
                 interactive: true,
                 keep_alive: true,
                 ..Default::default()
             },
         )]),
     };
+    if plan_schema {
+        // The core renews the trusted thread binding before activation
+        // (recovery_startup.rs); a current permit alone is not that binding.
+        restarted
+            .bind_thread_root("wire-recovery-thread", run)
+            .unwrap();
+    }
     let result = restarted.activate_component(paused, authority);
     if changed_settings {
         assert!(
@@ -565,8 +636,45 @@ async fn recover_case(
     restarted
         .send_message(run, "Actual followup".into())
         .unwrap();
+    if retry_boundary {
+        tokio::task::spawn_blocking(move || response_arrived.recv().unwrap())
+            .await
+            .unwrap();
+        restarted.stop(run, runtime::StopScope::SelfOnly).unwrap();
+        all_events.extend(through_phase(&mut events, run, AgentRunPhase::Stopped).await);
+        restarted.wait(run).await.unwrap();
+        response_gate.release();
+        let saved = storage::Database::open(&config)
+            .unwrap()
+            .run_context(&run.to_string())
+            .unwrap()
+            .unwrap();
+        let descriptor: Value = serde_json::from_str(&saved.config_json).unwrap();
+        assert_eq!(descriptor["plan_notice"], "deferred");
+        let (fresh, _, fresh_events) = process_with_read(
+            &h,
+            &current,
+            &storage,
+            &config,
+            Arc::new(RecoveryRead {
+                path: attachment.path.clone(),
+                changed: changed_tool,
+            }),
+        );
+        restarted = fresh;
+        events = fresh_events;
+        restarted
+            .resume_chat(
+                run,
+                RunConfig {
+                    conversation: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
     all_events.extend(through_phase(&mut events, run, AgentRunPhase::Waiting).await);
-    if tools_case {
+    if tools_case && !plan_schema {
         restarted
             .send_message(run, "After schema boundary".into())
             .unwrap();
@@ -583,7 +691,7 @@ async fn recover_case(
     all_events.extend(through_phase(&mut events, run, AgentRunPhase::Waiting).await);
     restarted.cancel(run).unwrap();
     restarted.wait(run).await.unwrap();
-    let requests = h
+    let mut requests = h
         .mock
         .recorded_requests()
         .into_iter()
@@ -592,8 +700,16 @@ async fn recover_case(
         .collect::<Vec<_>>();
     assert_eq!(
         requests.len(),
-        after_index + if tools_case { 2 } else { 1 } + 3
+        after_index + if tools_case { 2 } else { 1 } + 3 + usize::from(retry_boundary)
     );
+    if retry_boundary {
+        assert_eq!(
+            requests[after_index],
+            requests[after_index + 1],
+            "interrupted boundary must retry without adding a notice"
+        );
+        requests.remove(after_index);
+    }
     for request in &requests[after_index..] {
         assert_eq!(
             request["tools"], expected_wire_tools,
@@ -601,7 +717,7 @@ async fn recover_case(
         );
     }
     let after = &requests[after_index];
-    if changed_tool || wait_schema {
+    if changed_tool || schema_change {
         assert_ne!(original["tools"], after["tools"]);
     } else {
         assert_append_only(h.wire.protocol(), &original, after).unwrap();
@@ -652,7 +768,27 @@ async fn recover_case(
             &requests,
             after_index,
             &old_input.request.tools,
-            &predecessor.unwrap().successor_tools.lock().unwrap(),
+            &predecessor
+                .as_ref()
+                .unwrap()
+                .successor_tools
+                .lock()
+                .unwrap(),
+        );
+    }
+    if plan_schema && schema_change {
+        plan_schema::assert_transition(
+            h.wire,
+            &requests,
+            after_index,
+            &old_input.request.tools,
+            &predecessor
+                .as_ref()
+                .unwrap()
+                .successor_tools
+                .lock()
+                .unwrap(),
+            true,
         );
     }
     for key in [
@@ -666,6 +802,9 @@ async fn recover_case(
         "service_tier",
     ] {
         assert_eq!(after[key], original[key], "changed {key}");
+    }
+    if plan_schema && !schema_change {
+        plan_schema::assert_same_build_notice(h.wire, &requests, after_index);
     }
     let usage: Vec<_> = all_events
         .iter()
@@ -683,7 +822,11 @@ async fn recover_case(
     for pair in usage[..after_index].windows(2) {
         assert_eq!(pair[1].1, pair[0].0);
     }
-    if changed_tool || wait_schema {
+    if retry_boundary {
+        // The input-derived mock has seen the interrupted boundary request,
+        // so its identical replay reuses that new-schema prefix in full.
+        assert_eq!(usage[after_index].1, usage[after_index].0);
+    } else if changed_tool || schema_change {
         assert!(usage[after_index].1 < usage[after_index - 1].0);
     } else {
         assert_eq!(usage[after_index].1, usage[after_index - 1].0);

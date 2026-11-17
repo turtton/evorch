@@ -46,6 +46,8 @@ pub struct EventPump {
     in_flight: bool,
     repaint: Repaint,
     task: tokio::task::JoinHandle<()>,
+    /// Set when the bus overwrote events this subscriber had not read yet.
+    lagged: Arc<AtomicBool>,
 }
 
 impl EventPump {
@@ -80,6 +82,8 @@ impl EventPump {
         let worker_handoff = Arc::clone(&handoff);
         let worker_validator = validator.clone();
         let worker_repaint = continuation.clone();
+        let lagged = Arc::new(AtomicBool::new(false));
+        let task_lagged = Arc::clone(&lagged);
         // A long-lived blocking task would make Runtime::drop wait for the GUI
         // to drop its pump first. A dedicated thread owns this independent queue.
         std::thread::Builder::new()
@@ -92,7 +96,13 @@ impl EventPump {
             loop {
                 let event = match receiver.recv().await {
                     Ok(event) => event,
-                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Lagged(_)) => {
+                        // The skipped events are gone: say so, so state that
+                        // folds only notifications can read its source again.
+                        task_lagged.store(true, Ordering::Release);
+                        request_repaint(&arrival);
+                        continue;
+                    }
                     Err(RecvError::Closed) => break,
                 };
                 if tx.send(event).is_err() {
@@ -108,8 +118,16 @@ impl EventPump {
             in_flight: false,
             repaint: continuation,
             task,
+            lagged,
             validator,
         }
+    }
+
+    /// Whether events were lost to a lagging subscription since the last call.
+    /// A consumer that folds only change notifications must read its source
+    /// again, as the lost notifications can never be replayed.
+    pub fn take_lagged(&self) -> bool {
+        self.lagged.swap(false, Ordering::AcqRel)
     }
 
     /// Take at most one validated batch without waiting for ownership I/O.

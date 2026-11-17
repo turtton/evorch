@@ -1,5 +1,5 @@
 //! Desktop feature of the `execution` area: the runs of the selected thread
-//! (roots, then the children of one run), its goal, todo list and ledger.
+//! (roots, then the children of one run), its goal and ledger.
 //!
 //! Everything shown is read from the core with a typed query; an event only
 //! says that something changed, and the answer is asked for again, so an event
@@ -20,7 +20,7 @@ use workbench_protocol::{
         ExecutionCommand, ExecutionEvent, ExecutionQuery, ExecutionReply,
         execution::{
             GoalPhase, GoalView, RunDetail, RunDetailsQuery, RunLifecycle, RunScope, RunSource,
-            ThreadExecution, TodoStatus,
+            ThreadExecution,
         },
     },
     queries::{PageRequest, Query, QueryReply},
@@ -32,6 +32,7 @@ enum Pending {
     Runs { thread: ThreadId, path: Vec<RunId> },
     Execution { thread: ThreadId },
     Command(&'static str),
+    Plan { thread: ThreadId },
 }
 
 /// A cursor chain is read serially and published as one prefix. Keeping the old
@@ -64,6 +65,7 @@ pub struct ExecutionFeature {
     runs_stale: bool,
     execution_stale: bool,
     more_requested: bool,
+    plan: plan::PlanLine,
 }
 
 impl ExecutionFeature {
@@ -79,6 +81,7 @@ impl ExecutionFeature {
         self.clear_runs();
         self.execution = None;
         self.execution_stale = self.thread.is_some();
+        self.plan.switch(self.thread.is_some());
     }
 
     /// Show the children of `run`: a new level below the current one.
@@ -289,18 +292,10 @@ impl ExecutionFeature {
         }
     }
 
-    fn draw_todo_and_ledger(&self, ui: &mut egui::Ui) {
+    fn draw_ledger(&self, ui: &mut egui::Ui) {
         let Some(execution) = &self.execution else {
             return;
         };
-        if let Some(todo) = &execution.todo {
-            ui.strong("Todo");
-            bounded_list(ui, "execution-todo", |ui| {
-                for item in &todo.items {
-                    ui.label(format!("{} {}", todo_mark(item.status), item.content));
-                }
-            });
-        }
         if let Some(ledger) = &execution.ledger {
             ui.collapsing("台帳 (ledger)", |ui| {
                 bounded_list(ui, "execution-ledger", |ui| {
@@ -377,15 +372,6 @@ pub(crate) fn goal_phase_label(phase: GoalPhase) -> &'static str {
     }
 }
 
-fn todo_mark(status: TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::Pending => "☐",
-        TodoStatus::InProgress => "▶",
-        TodoStatus::Completed => "☑",
-        TodoStatus::Interrupted => "⏸",
-    }
-}
-
 impl Feature for ExecutionFeature {
     fn id(&self) -> FeatureId {
         FeatureId::Execution
@@ -409,6 +395,7 @@ impl Feature for ExecutionFeature {
         self.loaded_pages = loaded_pages;
         self.execution = None;
         self.execution_stale = self.thread.is_some();
+        self.plan.reset(self.thread.is_some());
     }
 
     fn event(&mut self, event: &UiEvent) {
@@ -425,15 +412,16 @@ impl Feature for ExecutionFeature {
             match event {
                 ExecutionEvent::RunChanged { run } => {
                     self.runs_stale = true;
-                    // The ledger, goal and todo shown belong to the thread's current root:
+                    // The ledger and goal shown belong to the thread's current root:
                     // a root that appears or ends may have changed which one that is.
                     if run.parent_run.is_none() {
                         self.execution_stale = true;
                     }
                 }
                 ExecutionEvent::ThreadExecutionChanged { .. } => self.execution_stale = true,
-                // Plan consumers are connected only at the public cutover.
-                ExecutionEvent::ConversationPlanChanged { .. } => {}
+                ExecutionEvent::ConversationPlanChanged { revision, .. } => {
+                    self.plan.changed(*revision);
+                }
             }
         }
     }
@@ -497,7 +485,17 @@ impl Feature for ExecutionFeature {
                     self.status = error.message;
                 }
             }
-            (Pending::Execution { .. }, FeatureReply::Query(Err(error))) => {
+            (
+                Pending::Plan { thread },
+                FeatureReply::Query(Ok(QueryReply::Execution(ExecutionReply::ConversationPlan(
+                    summary,
+                )))),
+            ) => {
+                if self.thread.as_ref() == Some(&thread) {
+                    self.plan.answered(*summary);
+                }
+            }
+            (Pending::Execution { .. } | Pending::Plan { .. }, FeatureReply::Query(Err(error))) => {
                 self.status = error.message;
             }
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
@@ -524,7 +522,7 @@ impl Feature for ExecutionFeature {
             self.switch_thread(selected);
         }
         let Some(thread) = self.thread.clone() else {
-            ui.label("会話を選択すると run・ゴール・Todo を表示します。");
+            ui.label("会話を選択すると run・ゴール・台帳を表示します。");
             return;
         };
         self.request_runs(ctx);
@@ -540,13 +538,25 @@ impl Feature for ExecutionFeature {
                 })),
             );
         }
+        if self.plan.take_stale() {
+            let tag = self.tag(Pending::Plan {
+                thread: thread.clone(),
+            });
+            ctx.query(
+                tag,
+                Query::Execution(ExecutionQuery::GetConversationPlan(ThreadTarget {
+                    thread: thread.clone(),
+                })),
+            );
+        }
         if !self.status.is_empty() {
             ui.label(&self.status);
         }
         self.draw_runs(ui, ctx, &thread);
         ui.separator();
         self.draw_goal(ui, ctx, &thread);
-        self.draw_todo_and_ledger(ui);
+        self.plan.draw(ui);
+        self.draw_ledger(ui);
     }
 }
 
@@ -557,6 +567,8 @@ fn command_failure(label: &str, error: &FeatureError) -> String {
         format!("{label}: {}", error.message)
     }
 }
+
+mod plan;
 
 #[cfg(test)]
 pub(crate) mod tests;

@@ -42,14 +42,24 @@ fn every_registered_meta_operation_has_a_complete_valid_contract() {
             "missing description for {name}"
         );
         assert_eq!(spec.input_schema["type"], "object");
-        assert!(
-            spec.input_schema["properties"].is_object(),
-            "missing properties for {name}"
-        );
-        assert!(
-            spec.input_schema["required"].is_array(),
-            "missing required list for {name}"
-        );
+        // A tagged-union schema (`oneOf`) without top-level fields carries them per variant.
+        let variants = match spec.input_schema["oneOf"].as_array() {
+            Some(variants) if !spec.input_schema["properties"].is_object() => {
+                variants.iter().collect::<Vec<_>>()
+            }
+            _ => vec![&spec.input_schema],
+        };
+        assert!(!variants.is_empty(), "empty oneOf for {name}");
+        for variant in variants {
+            assert!(
+                variant["properties"].is_object(),
+                "missing properties for {name}"
+            );
+            assert!(
+                variant["required"].is_array(),
+                "missing required list for {name}"
+            );
+        }
         jsonschema::validator_for(&spec.input_schema)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
     }

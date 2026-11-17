@@ -968,7 +968,6 @@ fn a_committed_handoff_moves_the_plan_to_the_escalation_thread_without_an_event(
         request_json: "request".into(),
         state: HandoffState::Preparing,
         goal_json: None,
-        todo_json: None,
     })
     .unwrap();
     h.advance_handoff(
@@ -976,7 +975,6 @@ fn a_committed_handoff_moves_the_plan_to_the_escalation_thread_without_an_event(
         "incarnation".into(),
         HandoffState::Preparing,
         HandoffState::Prepared,
-        None,
         None,
     )
     .unwrap();
@@ -988,7 +986,6 @@ fn a_committed_handoff_moves_the_plan_to_the_escalation_thread_without_an_event(
         "incarnation".into(),
         HandoffState::Prepared,
         HandoffState::Committed,
-        None,
         None,
     )
     .unwrap();
@@ -1182,7 +1179,6 @@ fn a_handoff_to_a_deleted_escalation_thread_fails_whole_and_the_plan_stays() {
         request_json: "request".into(),
         state: HandoffState::Preparing,
         goal_json: None,
-        todo_json: None,
     })
     .unwrap();
     h.advance_handoff(
@@ -1190,7 +1186,6 @@ fn a_handoff_to_a_deleted_escalation_thread_fails_whole_and_the_plan_stays() {
         "incarnation".into(),
         HandoffState::Preparing,
         HandoffState::Prepared,
-        None,
         None,
     )
     .unwrap();
@@ -1201,7 +1196,6 @@ fn a_handoff_to_a_deleted_escalation_thread_fails_whole_and_the_plan_stays() {
             "incarnation".into(),
             HandoffState::Prepared,
             HandoffState::Committed,
-            None,
             None,
         )
         .unwrap_err();

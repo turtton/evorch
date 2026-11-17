@@ -414,7 +414,7 @@ impl LoopState {
     /// Called with the procedure context, so an interrupted request still
     /// retries its exact saved input first. Existing history is never edited.
     pub(crate) fn append_scratch_context(&mut self) {
-        if self.todo_context_deferred {
+        if self.boundary_context_deferred {
             return;
         }
         if let Some(text) = self.scratch.as_mut().and_then(RunScratch::take_pending) {

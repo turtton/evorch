@@ -644,13 +644,13 @@ async fn a_working_note_written_or_cleared_alone_reaches_every_client() {
         client.execution_changed(LEAD).await;
     }
     let written = core.execution(LEAD);
-    assert!(written.goal.is_none() && written.todo.is_none());
+    assert!(written.goal.is_none());
     assert_eq!(
         written.ledger.as_ref().map(|ledger| ledger.body.as_str()),
         Some("first working note")
     );
 
-    // Clearing is a note too: the view follows it although goal and todo never changed.
+    // Clearing is a note too: the view follows it although the goal never changed.
     let mut clients = [core.client(), core.client()];
     core.script(
         lead,

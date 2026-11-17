@@ -848,8 +848,7 @@ async fn preparation_interrupted(cancel: &mut tokio::sync::watch::Receiver<crate
 
 fn committed_context(state: &mut LoopState, events: Vec<Event>) -> Vec<String> {
     if !events.is_empty() {
-        state.todo_context_pending = true;
-        state.todo_context_deferred = false;
+        state.boundary_context_deferred = false;
     }
     state.last_usage = None;
     state.compaction.last_usage_estimated_tokens = None;

@@ -1,5 +1,5 @@
 //! Execution namespace: stopping runs, goal operations, execution settings and
-//! the read models of runs, goals, todo lists and ledgers (ADR 0045).
+//! the read models of runs, goals and ledgers (ADR 0045).
 use crate::{
     commands::{
         SetAgentWebToolsEnabled, SetGoalChecksPaused, SetGoalReview, StopRun, SubmitGoal,
@@ -42,11 +42,11 @@ pub const EVENT_TYPES: &[&str] = &[
 /// Tagged choices inside a command's payload that classification names (none).
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
-/// Most criteria, findings, checks or todo items one goal or list shows.
+/// Most criteria, findings or checks one goal shows.
 pub const MAX_EXECUTION_ITEMS: usize = 32;
 /// Most bytes of a run ledger body a [`LedgerView`] carries.
 pub const MAX_LEDGER_BYTES: usize = 16 * 1024;
-/// Most bytes of one criterion, finding, evidence or todo text.
+/// Most bytes of one criterion, finding or evidence text.
 pub const MAX_ITEM_TEXT_BYTES: usize = MAX_TITLE_BYTES * 2;
 
 /// Where a run stands, as far as the core can tell. A run that left the
@@ -214,42 +214,6 @@ impl GoalView {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TodoStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Interrupted,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TodoItemView {
-    pub content: String,
-    pub status: TodoStatus,
-}
-
-/// A thread's todo list. Read only: nothing here edits it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TodoView {
-    pub list_id: String,
-    pub revision: Revision,
-    pub items: Vec<TodoItemView>,
-}
-
-impl TodoView {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        check_bytes("list_id", &self.list_id, MAX_NAME_BYTES, true)?;
-        check_count("items", self.items.len(), MAX_EXECUTION_ITEMS)?;
-        for item in &self.items {
-            check_bytes("content", &item.content, MAX_ITEM_TEXT_BYTES, true)?;
-        }
-        Ok(())
-    }
-}
-
 /// The latest working-note revision of a run (its ledger), cut to
 /// [`MAX_LEDGER_BYTES`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,7 +231,7 @@ impl LedgerView {
     }
 }
 
-/// Goal, todo list and ledger of a thread, read together.
+/// Goal and ledger of a thread, read together.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadExecution {
@@ -277,15 +241,12 @@ pub struct ThreadExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub todo: Option<TodoView>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger: Option<LedgerView>,
 }
 
 impl ThreadExecution {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.goal.as_ref().map_or(Ok(()), GoalView::validate)?;
-        self.todo.as_ref().map_or(Ok(()), TodoView::validate)?;
         self.ledger.as_ref().map_or(Ok(()), LedgerView::validate)
     }
 }
@@ -338,7 +299,7 @@ pub enum ExecutionQuery {
     /// The roots of a thread, or the children of one run, with details.
     ListRunDetails(RunDetailsQuery),
     GetRun(RunRef),
-    /// Goal, todo list and ledger of a thread.
+    /// Goal and ledger of a thread.
     GetThreadExecution(ThreadTarget),
     GetConversationPlan(ThreadTarget),
     ReadConversationPlanTree(plan::PlanTreeQuery),
@@ -417,13 +378,11 @@ pub enum ExecutionEvent {
     RunChanged {
         run: RunSummary,
     },
-    /// The goal or the todo list of a thread changed; absent means none now.
+    /// The goal of a thread changed; absent means none now.
     ThreadExecutionChanged {
         thread: ThreadId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal: Option<GoalView>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        todo: Option<TodoView>,
     },
 }
 
@@ -431,9 +390,8 @@ impl ExecutionEvent {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::RunChanged { .. } | Self::ConversationPlanChanged { .. } => Ok(()),
-            Self::ThreadExecutionChanged { goal, todo, .. } => {
-                goal.as_ref().map_or(Ok(()), GoalView::validate)?;
-                todo.as_ref().map_or(Ok(()), TodoView::validate)
+            Self::ThreadExecutionChanged { goal, .. } => {
+                goal.as_ref().map_or(Ok(()), GoalView::validate)
             }
         }
     }

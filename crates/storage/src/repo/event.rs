@@ -424,7 +424,8 @@ pub struct EventPage {
 }
 
 /// Up to `limit` events with `id > after_id` in ID order. Rows of
-/// `exclude_session` are passed over without reading their payload.
+/// `exclude_session` and the retired `ThreadTodoUpdated` rows are passed over
+/// without reading their payload; the cursor still moves past them.
 pub fn list_after(
     conn: &Connection,
     after_id: i64,
@@ -434,7 +435,9 @@ pub fn list_after(
     let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
     let mut statement = conn.prepare_cached(
         "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
-         CASE WHEN session_id = ?3 THEN NULL ELSE payload END, body_format \
+         CASE WHEN session_id = ?3 \
+         OR (kind = 'Orchestrator' AND subkind = 'ThreadTodoUpdated') \
+         THEN NULL ELSE payload END, body_format \
          FROM events WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
     )?;
     let mut rows = statement.query(params![after_id, limit, exclude_session])?;
@@ -485,7 +488,8 @@ pub fn thread_goal_recorded(conn: &Connection, thread_id: &str) -> Result<bool, 
     let goals = list_events(
         conn,
         "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, body_format \
-         FROM events WHERE kind = 'Orchestrator' AND instr(payload, 'ThreadGoalUpdated') > 0",
+         FROM events WHERE kind = 'Orchestrator' AND subkind IS NOT 'ThreadTodoUpdated' \
+         AND instr(payload, 'ThreadGoalUpdated') > 0",
         [],
     )?;
     Ok(goals.iter().any(|stored| {

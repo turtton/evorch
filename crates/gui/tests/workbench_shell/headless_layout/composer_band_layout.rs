@@ -1,9 +1,9 @@
-//! The composer input keeps priority over the goal/procedure band: it grows
+//! The composer input keeps priority over the goal band: it grows
 //! with typed and soft-wrapped lines and stays fully visible above the status
 //! strip even when expanded band details compete for a short pane.
 use egui::Rect;
 use egui_kittest::{Harness, kittest::Queryable};
-use event_bus::{Event, ThreadGoalPhase, ThreadGoalSnapshot, ThreadTodoSnapshot};
+use event_bus::{Event, ThreadGoalPhase, ThreadGoalSnapshot};
 use gui::model::{
     composer::ComposerModel, model_picker::ModelPickerState, transcript::TranscriptModel,
 };
@@ -35,25 +35,6 @@ fn goal() -> ThreadGoalSnapshot {
     }
 }
 
-fn todo() -> ThreadTodoSnapshot {
-    use event_bus::{ThreadTodoItem, ThreadTodoStatus::*};
-    ThreadTodoSnapshot {
-        list_id: "procedures-A".into(),
-        thread_id: "A".into(),
-        revision: 1,
-        items: (0..12)
-            .map(|index| ThreadTodoItem {
-                content: format!("Procedure step {index}"),
-                status: match index {
-                    0..=2 => Completed,
-                    3 => InProgress,
-                    _ => Pending,
-                },
-            })
-            .collect(),
-    }
-}
-
 type State = (ComposerModel, ModelPickerState);
 
 fn harness(size: egui::Vec2, input: &str) -> Harness<'static, State> {
@@ -62,7 +43,7 @@ fn harness(size: egui::Vec2, input: &str) -> Harness<'static, State> {
         delta: "AI response".into(),
         run_id: None,
     }));
-    let (goal, todo) = (goal(), todo());
+    let goal = goal();
     Harness::builder().with_size(size).build_ui_state(
         move |ui, state: &mut State| {
             gui::theme::install(ui.ctx());
@@ -71,7 +52,6 @@ fn harness(size: egui::Vec2, input: &str) -> Harness<'static, State> {
                 &transcript,
                 None,
                 gui::panes::agent::ConversationContext {
-                    todo: Some(&todo),
                     goal: Some(&goal),
                     requests: None,
                     task_rows: &[],
@@ -95,6 +75,7 @@ fn harness(size: egui::Vec2, input: &str) -> Harness<'static, State> {
                     branch: None,
                     pull_request: None,
                     pull_request_chips: None,
+                    plan: None,
                 },
                 &mut state.0,
                 &mut state.1,
@@ -119,7 +100,7 @@ fn rect(harness: &Harness<'_, State>, label: &str) -> Rect {
 fn assert_input_fully_visible(harness: &Harness<'_, State>, height: f32, context: &str) {
     let input = rect(harness, INPUT);
     let status = rect(harness, STATUS);
-    let band = rect(harness, "Procedures: Procedure step 3");
+    let band = rect(harness, "Goal: Investigate the slow operation");
     let reply = rect(harness, "AI response");
     assert!(
         band.bottom() <= input.top() + 0.5,
@@ -144,7 +125,7 @@ fn assert_input_fully_visible(harness: &Harness<'_, State>, height: f32, context
 }
 
 #[test]
-fn input_grows_with_lines_while_todo_band_is_visible() {
+fn input_grows_with_lines_while_goal_band_is_visible() {
     let size = egui::vec2(800.0, 400.0);
     let mut harness = harness(size, "first");
     harness.run();
@@ -161,14 +142,14 @@ fn input_grows_with_lines_while_todo_band_is_visible() {
 }
 
 #[test]
-fn input_keeps_priority_over_expanded_procedure_details_in_a_short_pane() {
+fn input_keeps_priority_over_expanded_goal_details_in_a_short_pane() {
     let size = egui::vec2(800.0, 400.0);
     let mut harness = harness(size, "first");
     harness.run();
     let one_line = rect(&harness, INPUT);
-    harness.get_by_label("Show procedure details").click();
+    harness.get_by_label("Show goal details").click();
     harness.run();
-    harness.get_by_label("Procedure step 0");
+    harness.get_by_label("Original request: Explain the cause");
     harness.state_mut().0.input = "first\nsecond\nthird\nfourth\nfifth\nsixth".into();
     harness.run();
     let six_lines = rect(&harness, INPUT);
@@ -177,7 +158,7 @@ fn input_keeps_priority_over_expanded_procedure_details_in_a_short_pane() {
         "{six_lines:?} vs {one_line:?}"
     );
     assert_input_fully_visible(&harness, size.y, "expanded details");
-    harness.get_by_label("Hide procedure details");
+    harness.get_by_label("Hide goal details");
     harness.state_mut().0.input = "short".into();
     harness.run();
     assert!(rect(&harness, INPUT).top() > six_lines.top());

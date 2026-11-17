@@ -308,17 +308,7 @@
           "truncated": false
         },
         "root_run": "run-1",
-        "thread": "thread-1",
-        "todo": {
-          "items": [
-            {
-              "content": "write tests",
-              "status": "in_progress"
-            }
-          ],
-          "list_id": "list-1",
-          "revision": "2"
-        }
+        "thread": "thread-1"
       },
       "type": "thread_execution"
     },
@@ -360,17 +350,7 @@
           "root_run": "run-1",
           "work_stopped": false
         },
-        "thread": "thread-1",
-        "todo": {
-          "items": [
-            {
-              "content": "write tests",
-              "status": "in_progress"
-            }
-          ],
-          "list_id": "list-1",
-          "revision": "2"
-        }
+        "thread": "thread-1"
       },
       "type": "thread_execution_changed"
     },

@@ -20,7 +20,6 @@ pub(crate) const RECOVERY_HINT: &str =
 #[derive(Default)]
 pub(crate) struct ThreadGoals {
     pub(crate) roots: HashMap<RunId, String>,
-    pub(crate) todos: HashMap<String, event_bus::ThreadTodoSnapshot>,
     requests: HashMap<RunId, String>,
     goals: HashMap<String, GoalEntry>,
     // Only descendants alive at a handoff retain its budget. Reusing the old
@@ -577,7 +576,6 @@ impl AgentRuntime {
             let goals = self.goal_lock();
             if goals.roots.contains_key(&target)
                 || goals.goals.contains_key(&child_thread)
-                || goals.todos.contains_key(&child_thread)
                 || goals.roots.values().any(|thread| thread == &child_thread)
             {
                 return Err("escalation target thread already exists".into());
@@ -593,14 +591,6 @@ impl AgentRuntime {
                 && entry.snapshot.related_root_run_ids.len() >= 128
             {
                 return Err("goal root handoff limit reached".into());
-            }
-            if goals
-                .roots
-                .get(&source)
-                .and_then(|thread| goals.todos.get(thread))
-                .is_some_and(|snapshot| snapshot.revision == u64::MAX)
-            {
-                return Err("procedure revision limit reached".into());
             }
             Ok(goals)
         };
@@ -664,14 +654,8 @@ impl AgentRuntime {
         if let Some(request) = goals.requests.remove(&source) {
             goals.requests.insert(target, request);
         }
-        if let Some(thread) = &source_thread {
+        if source_thread.is_some() {
             goals.roots.remove(&source);
-            if let Some(mut snapshot) = goals.todos.remove(thread) {
-                snapshot.thread_id = child_thread.clone();
-                snapshot.revision += 1;
-                self.publish_thread_todo(&snapshot);
-                goals.todos.insert(child_thread.clone(), snapshot);
-            }
         }
         if let Some(thread) = source_thread
             && let Some(mut entry) = goals.goals.remove(&thread)
@@ -754,14 +738,6 @@ impl AgentRuntime {
             snapshot.checks.clear();
             snapshot
         });
-        let todo = source_thread
-            .and_then(|t| goals.todos.get(t))
-            .cloned()
-            .map(|mut snapshot| {
-                snapshot.thread_id = thread;
-                snapshot.revision += 1;
-                snapshot
-            });
         use storage::handoffs::HandoffState;
         if receipt.state == HandoffState::Preparing {
             store
@@ -771,7 +747,6 @@ impl AgentRuntime {
                     receipt.source_incarnation.clone(),
                     HandoffState::Preparing,
                     HandoffState::Prepared,
-                    None,
                     None,
                 )
                 .map_err(|e| e.to_string())?;
@@ -785,9 +760,6 @@ impl AgentRuntime {
                 HandoffState::Prepared,
                 HandoffState::Committed,
                 goal.as_ref().map(encode).transpose()?,
-                todo.as_ref()
-                    .map(|s| serde_json::to_string(s).map_err(|e| e.to_string()))
-                    .transpose()?,
             )
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -854,17 +826,6 @@ impl AgentRuntime {
                     review_result: None,
                 },
             );
-        }
-        if !goals.todos.contains_key(&thread)
-            && let Some(json) = receipt.todo_json
-        {
-            let snapshot: event_bus::ThreadTodoSnapshot =
-                serde_json::from_str(&json).map_err(|e| e.to_string())?;
-            if snapshot.thread_id != thread {
-                return Err("handoff procedure belongs to a different target".into());
-            }
-            self.publish_thread_todo(&snapshot);
-            goals.todos.insert(thread.clone(), snapshot);
         }
         goals.roots.insert(target, thread);
         Ok(())

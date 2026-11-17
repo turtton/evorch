@@ -2,7 +2,6 @@
 
 use event_bus::{
     Event, LifecycleEvent, OrchestratorEvent, ThreadGoalPhase, ThreadGoalSnapshot, ThreadGoalUsage,
-    ThreadTodoItem, ThreadTodoSnapshot, ThreadTodoStatus,
 };
 use rusqlite::{Connection, params};
 use storage::entity::TaskStatus;
@@ -63,16 +62,12 @@ fn goal() -> ThreadGoalSnapshot {
     }
 }
 
-fn todo() -> ThreadTodoSnapshot {
-    ThreadTodoSnapshot {
-        list_id: "procedures-1".into(),
-        thread_id: "thread-1".into(),
-        revision: 1,
-        items: vec![ThreadTodoItem {
-            content: "Restore the procedure".into(),
-            status: ThreadTodoStatus::InProgress,
-        }],
-    }
+/// A `ThreadTodoUpdated` row as an older build stored it (the plan replaced the todo list).
+fn retired_todo(thread: &str) -> String {
+    serde_json::json!({"kind": "Orchestrator", "payload": {"kind": "ThreadTodoUpdated",
+        "payload": {"snapshot": {"list_id": "procedures-1", "thread_id": thread, "revision": 1,
+            "items": [{"content": "Restore the procedure", "status": "in_progress"}]}}}})
+    .to_string()
 }
 
 fn insert_raw(config: &StorageConfig, kind: &str, payload: &str) {
@@ -117,7 +112,6 @@ fn rows_of_removed_variants_are_skipped_with_a_warning_count() {
         session_id: "session-1".into(),
     });
     let goal = Event::new(OrchestratorEvent::ThreadGoalUpdated { snapshot: goal() });
-    let todo = Event::new(OrchestratorEvent::ThreadTodoUpdated { snapshot: todo() });
     let task = Event::new(OrchestratorEvent::TaskProgressed {
         task_id: "task-1".into(),
         run_id: "run-1".into(),
@@ -130,9 +124,7 @@ fn rows_of_removed_variants_are_skipped_with_a_warning_count() {
             .expect("event must append");
     }
     insert_raw(&config, "Snapshot", REMOVED_SNAPSHOT);
-    handle
-        .append_event(Some("session-1"), &todo)
-        .expect("todo event must append");
+    insert_raw(&config, "Orchestrator", &retired_todo("thread-1"));
     insert_raw(&config, "Lifecycle", REMOVED_WORKSPACE_WAIT);
     insert_raw(&config, "Orchestrator", REMOVED_GOAL_CREATED);
     handle
@@ -162,11 +154,11 @@ fn rows_of_removed_variants_are_skipped_with_a_warning_count() {
     });
 
     // Then: every decodable event and its projection survive, and each read reports the skip count
-    let expected = vec![started, goal, todo, task];
+    let expected = vec![started, goal, task];
     assert_eq!(events(all), expected);
     assert_eq!(events(by_session), expected);
     assert_eq!(events(streamed), expected);
-    assert_eq!(logs.matches("skipped=3").count(), 3, "{logs}");
+    assert_eq!(logs.matches("skipped=4").count(), 3, "{logs}");
     assert!(logs.contains("skipped stored events that no longer decode"));
     let tasks = database.durable_tasks().expect("durable tasks must read");
     assert_eq!(tasks.len(), 1);
@@ -188,22 +180,15 @@ fn thread_goal_lookup_matches_only_threads_a_goal_was_bound_to() {
         ..StorageConfig::default()
     };
     let storage = Storage::open(config.clone()).expect("storage must open");
-    let other_todo = ThreadTodoSnapshot {
-        thread_id: "thread-2".into(),
-        ..todo()
-    };
-    for event in [
-        Event::new(OrchestratorEvent::ThreadGoalUpdated { snapshot: goal() }),
-        Event::new(OrchestratorEvent::ThreadTodoUpdated {
-            snapshot: other_todo,
-        }),
-    ] {
-        storage
-            .handle()
-            .append_event(Some("session-1"), &event)
-            .expect("event must append");
-    }
+    storage
+        .handle()
+        .append_event(
+            Some("session-1"),
+            &Event::new(OrchestratorEvent::ThreadGoalUpdated { snapshot: goal() }),
+        )
+        .expect("event must append");
     storage.close();
+    insert_raw(&config, "Orchestrator", &retired_todo("thread-2"));
 
     // When: each thread is looked up.
     let database = Database::open(&config).expect("database must open");

@@ -69,8 +69,11 @@ define_meta_ops! {
     LaneAnswer => "lane_answer" => lanes::answer_spec => |state, runtime, input| { lanes::answer(state, runtime, input) },
     LaneForwardQuestion => "lane_forward_question" => questions::forward_spec => |state, runtime, input| { questions::forward(state, runtime, input) },
     LaneReport => "lane_report" => lanes::report_spec => |state, runtime, input| { lanes::report(state, runtime, input) },
-    TodoWrite => "todo_write" => crate::thread_todos::spec => |state, runtime, input| {
-        crate::thread_todos::dispatch(state, runtime, input)
+    PlanRead => "plan_read" => crate::conversation_plan::tools::read_spec => |state, runtime, input| {
+        crate::conversation_plan::tools::dispatch_read(state, runtime, input)
+    },
+    PlanUpdate => "plan_update" => crate::conversation_plan::tools::update_spec => |state, runtime, input| {
+        crate::conversation_plan::tools::dispatch_update(state, runtime, input)
     },
     CreateGoal => "create_goal" => crate::thread_goals::tools::spec => |state, runtime, input| {
         crate::thread_goals::tools::dispatch(state, runtime, "create_goal", input)

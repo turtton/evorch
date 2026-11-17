@@ -76,7 +76,6 @@ pub enum LaneAction {
 
 /// 会話ペインが描画される文脈です。
 pub struct ConversationContext<'a> {
-    pub todo: Option<&'a event_bus::ThreadTodoSnapshot>,
     pub goal: Option<&'a event_bus::ThreadGoalSnapshot>,
     pub requests: Option<super::requests::ConversationRequests<'a>>,
     pub task_rows: &'a [crate::model::tasks::TaskRow],
@@ -102,6 +101,8 @@ pub struct ConversationContext<'a> {
     pub pull_request: Option<PullRequestBarContext<'a>>,
     /// Candidate chips by the tool call that produced them, drawn under its card.
     pub pull_request_chips: Option<(&'a str, &'a crate::panes::pull_request_chip::ChipsByCall)>,
+    /// The thread's plan progress band; `None` hides it (no plan reader).
+    pub plan: Option<crate::panes::conversation_plan::PlanBand<'a>>,
 }
 
 /// Agent 会話ペインから発生するアクションです。
@@ -1286,7 +1287,6 @@ mod tests {
                 .build_ui(move |ui| {
                     crate::theme::install(ui.ctx());
                     let ctx = ConversationContext {
-                        todo: None,
                         goal: None,
                         requests: None,
                         task_rows: &[],
@@ -1310,6 +1310,7 @@ mod tests {
                         branch: None,
                         pull_request: None,
                         pull_request_chips: None,
+                        plan: None,
                     };
                     header_strip(ui, &None, &ctx, &mut None);
                 });
@@ -1389,7 +1390,6 @@ mod tests {
             .build_ui(move |ui| {
                 crate::theme::install(ui.ctx());
                 let ctx = ConversationContext {
-                    todo: None,
                     goal: None,
                     requests: None,
                     task_rows: &[],
@@ -1417,6 +1417,7 @@ mod tests {
                     branch: None,
                     pull_request: None,
                     pull_request_chips: None,
+                    plan: None,
                 };
                 header_strip(ui, &None, &ctx, &mut None);
             });
@@ -1450,7 +1451,6 @@ mod tests {
             .build_ui(move |ui| {
                 crate::theme::install(ui.ctx());
                 let ctx = ConversationContext {
-                    todo: None,
                     goal: None,
                     requests: None,
                     task_rows: &[],
@@ -1482,6 +1482,7 @@ mod tests {
                     branch: None,
                     pull_request: None,
                     pull_request_chips: None,
+                    plan: None,
                 };
                 let mut action = None;
                 header_strip(ui, &None, &ctx, &mut action);

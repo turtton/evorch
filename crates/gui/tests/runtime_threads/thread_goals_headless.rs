@@ -65,32 +65,6 @@ fn state(root: &std::path::Path) -> WorkbenchState<DemoSource> {
     state.apply_events([event(goal("A")), event(goal("B"))]);
     state
 }
-fn todo(thread: &str, revision: u64) -> event_bus::ThreadTodoSnapshot {
-    use event_bus::{ThreadTodoItem, ThreadTodoStatus::*};
-    event_bus::ThreadTodoSnapshot {
-        list_id: "procedures-A".into(),
-        thread_id: thread.into(),
-        revision,
-        items: vec![
-            ThreadTodoItem {
-                content: "Collect observations".into(),
-                status: Completed,
-            },
-            ThreadTodoItem {
-                content: "Analyze the captured observations and determine the cause".into(),
-                status: InProgress,
-            },
-            ThreadTodoItem {
-                content: "Repeat measurements".into(),
-                status: Pending,
-            },
-        ],
-    }
-}
-fn todo_event(snapshot: event_bus::ThreadTodoSnapshot) -> Event {
-    Event::new(OrchestratorEvent::ThreadTodoUpdated { snapshot })
-}
-
 #[test]
 fn controls_are_named_single_line_and_scoped_to_the_selected_thread() {
     let dir = tempfile::tempdir().unwrap();
@@ -207,406 +181,17 @@ fn capture_thread_goal_composer() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn shared_band_switches_one_readonly_detail_area_without_hiding_summaries() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut workbench = HeadlessWorkbench::new(state(dir.path()), [1000.0, 800.0]);
-    workbench
-        .state_mut()
-        .apply_events([todo_event(todo("A", 1))]);
-    workbench.run();
-    let procedures = "Procedures: Analyze the captured observations and determine the cause";
-    let goal_label = format!("Goal: {}", goal("A").objective);
-    let goal_rect = workbench.label_rects(&goal_label)[0];
-    let procedure_rect = workbench.label_rects(procedures)[0];
-    assert!(goal_rect.bottom() <= procedure_rect.top());
-    assert!(procedure_rect.bottom() <= workbench.label_rects("Message or /command")[0].top());
-    assert!(workbench.has_label("1/3"));
-    workbench.state_mut().composer_mut().input = "Unsent procedure question".into();
-    workbench.click_label("Show goal details");
-    workbench.run();
-    assert!(workbench.has_label("Profiling report: artifacts/profile.txt"));
-    workbench.click_label("Show procedure details");
-    workbench.run();
-    assert!(!workbench.has_label("Profiling report: artifacts/profile.txt"));
-    assert!(workbench.has_label("Collect observations"));
-    assert!(workbench.has_label("Repeat measurements"));
-    assert!(
-        workbench.label_rects("Repeat measurements")[0].bottom()
-            < workbench.label_rects("Message or /command")[0].top()
-    );
-    assert!(workbench.has_label("Pending"));
-    assert!(workbench.has_label("Completed"));
-    assert!(workbench.has_label(&goal_label));
-    assert!(workbench.has_label(procedures));
-    assert!(workbench.state().issued().is_empty());
-    workbench.click_label("Show goal details");
-    workbench.run();
-    assert!(workbench.has_label("Profiling report: artifacts/profile.txt"));
-    assert!(!workbench.has_label("Repeat measurements"));
-    assert_eq!(
-        workbench.state().composer().input,
-        "Unsent procedure question"
-    );
-    workbench
-        .state_mut()
-        .switch_thread(ThreadId::new("B"))
-        .unwrap();
-    workbench.run();
-    assert!(!workbench.has_label(procedures));
-    assert!(!workbench.has_label("Hide goal details"));
-}
-
-#[test]
-fn todo_only_completed_clear_and_stopped_states_do_not_dispatch_work() {
-    use event_bus::ThreadTodoStatus;
-    let dir = tempfile::tempdir().unwrap();
-    let mut workbench = HeadlessWorkbench::new(bare_state(dir.path()), [1000.0, 800.0]);
-    workbench.run();
-    assert!(!workbench.has_label("Show procedure details"));
-    assert!(!workbench.has_label("Show goal details"));
-    let mut snapshot = todo("A", 1);
-    snapshot.items[1].status = ThreadTodoStatus::Pending;
-    workbench
-        .state_mut()
-        .apply_events([todo_event(snapshot.clone())]);
-    workbench.run();
-    assert!(workbench.has_label("Procedures pending"));
-    assert!(!workbench.has_label("Pause goal checks"));
-    // Bind an actual conversation run before stopping it.
-    workbench.state_mut().apply_events([
-        Event::new(event_bus::LifecycleEvent::AgentRunStarted {
-            run_id: "run-1".into(),
-            parent_run_id: None,
-            agent_name: "chat:Worker:A".into(),
-            role: "Worker".into(),
-        }),
-        Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
-            run_id: "run-1".into(),
-            from: event_bus::AgentRunPhase::Pending,
-            to: event_bus::AgentRunPhase::Running,
-            reason: None,
-        }),
-    ]);
-    // Stopping a working run does not rewrite the stored procedure status.
-    snapshot.revision = 2;
-    snapshot.items[1].status = ThreadTodoStatus::InProgress;
-    workbench.state_mut().apply_events([
-        todo_event(snapshot.clone()),
-        Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
-            run_id: "run-1".into(),
-            from: event_bus::AgentRunPhase::Running,
-            to: event_bus::AgentRunPhase::Stopped,
-            reason: Some("user stop".into()),
-        }),
-    ]);
-    workbench.run();
-    assert!(workbench.has_label("Procedures in progress (stored status)"));
-    snapshot.revision = 3;
-    for item in &mut snapshot.items {
-        item.status = ThreadTodoStatus::Completed;
-    }
-    workbench
-        .state_mut()
-        .apply_events([todo_event(snapshot.clone())]);
-    workbench.run();
-    assert!(workbench.has_label("3/3"));
-    assert!(workbench.has_label("Procedures: All procedures completed"));
-    workbench.click_label("Show procedure details");
-    workbench.run();
-    snapshot.revision = 4;
-    snapshot.items.clear();
-    workbench
-        .state_mut()
-        .apply_events([todo_event(snapshot), todo_event(todo("A", 2))]);
-    workbench.run();
-    assert!(!workbench.has_label("Show procedure details"));
-    workbench
-        .state_mut()
-        .apply_events([todo_event(todo("A", 5))]);
-    workbench.run();
-    assert!(workbench.has_label("Show procedure details"));
-    assert!(!workbench.has_label("Hide procedure details"));
-    assert!(workbench.state().issued().is_empty());
-}
-
-#[test]
-fn procedure_replay_preserves_transfer_clear_and_current_sidebar_authority() {
-    use gui::model::commands::{CommandSink, LoopEvent};
-    use std::sync::{Arc, Mutex};
-    #[derive(Default)]
-    struct Observed {
-        snapshots: Vec<event_bus::ThreadTodoSnapshot>,
-        roots: usize,
-    }
-    struct Sink(Arc<Mutex<Observed>>);
-    impl CommandSink for Sink {
-        fn bind_thread_todo(&mut self, snapshot: &event_bus::ThreadTodoSnapshot) {
-            self.0.lock().unwrap().snapshots.push(snapshot.clone());
-        }
-        fn bind_goal_context(&mut self, _: &str, _: &str, _: &str) {
-            self.0.lock().unwrap().roots += 1;
-        }
-        fn submit(&mut self, _: WorkbenchCommand) -> Vec<LoopEvent> {
-            panic!("restoration cannot dispatch work")
-        }
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let config = storage::StorageConfig {
-        db_path: dir.path().join("procedures.sqlite"),
-        ..Default::default()
-    };
-    let storage = storage::Storage::open(config.clone()).unwrap();
-    let mut cleared = todo("B", 3);
-    cleared.items.clear();
-    let events = [
-        todo_event(todo("A", 1)),
-        todo_event(todo("B", 2)),
-        todo_event(cleared),
-        todo_event(todo("A", 1)),
-        todo_event(event_bus::ThreadTodoSnapshot {
-            list_id: "deleted-list".into(),
-            ..todo("deleted", 1)
-        }),
-    ];
-    for event in &events {
-        storage.handle().append_event(None, event).unwrap();
-    }
-    storage.close();
-    let mut live = HeadlessWorkbench::new(bare_state(dir.path()), [1000.0, 800.0]);
-    live.state_mut()
-        .apply_events([todo_event(todo("A", 1)), todo_event(todo("B", 2))]);
-    live.run();
-    assert!(!live.has_label("Show procedure details"));
-    live.state_mut().switch_thread(ThreadId::new("B")).unwrap();
-    live.run();
-    assert!(live.has_label("Show procedure details"));
-    assert!(live.has_label("1/3"));
-    let observed = Arc::new(Mutex::new(Observed::default()));
-    let mut state = bare_state(dir.path()).with_command_sink(Box::new(Sink(observed.clone())));
-    state
-        .restore_history(&storage::Database::open(&config).unwrap())
-        .unwrap();
-    let observed = observed.lock().unwrap();
-    assert_eq!(observed.roots, 0);
-    assert_eq!(observed.snapshots.last().unwrap().thread_id, "B");
-    assert!(observed.snapshots.last().unwrap().items.is_empty());
-    assert!(
-        !observed
-            .snapshots
-            .iter()
-            .any(|snapshot| snapshot.thread_id == "deleted")
-    );
-    let mut workbench = HeadlessWorkbench::new(state, [1000.0, 800.0]);
-    workbench.run();
-    assert!(!workbench.has_label("Show procedure details"));
-    workbench
-        .state_mut()
-        .switch_thread(ThreadId::new("B"))
-        .unwrap();
-    workbench.run();
-    assert!(!workbench.has_label("Show procedure details"));
-}
-
-type PaneState = (
-    gui::model::composer::ComposerModel,
-    gui::model::model_picker::ModelPickerState,
-);
-
-fn band_harness(
-    goal: Option<ThreadGoalSnapshot>,
-    todo: event_bus::ThreadTodoSnapshot,
-    width: f32,
-) -> egui_kittest::Harness<'static, PaneState> {
-    let model = gui::model::transcript::TranscriptModel::new();
-    egui_kittest::Harness::builder()
-        .with_size(egui::vec2(width, 600.0))
-        .build_ui_state(
-            move |ui, state: &mut PaneState| {
-                gui::theme::install(ui.ctx());
-                gui::panes::agent::agent_pane(
-                    ui,
-                    &model,
-                    None,
-                    gui::panes::agent::ConversationContext {
-                        goal: goal.as_ref(),
-                        todo: Some(&todo),
-                        requests: None,
-                        task_rows: &[],
-                        phase_unread: false,
-                        has_project: true,
-                        active_thread_title: Some("A"),
-                        extra_read_dirs: &[],
-                        parent_thread: None,
-                        child_threads: Vec::new(),
-                        lane: None,
-                        lead: None,
-                        thread_metrics: None,
-                        phase: None,
-                        model_picker: gui::panes::model_picker::ModelPickerContext {
-                            profiles: &[],
-                            preference: None,
-                            default_model: None,
-                            enabled: false,
-                        },
-                        sandbox_picker: Default::default(),
-                        branch: None,
-                        pull_request: None,
-                        pull_request_chips: None,
-                    },
-                    &mut state.0,
-                    &mut state.1,
-                );
-            },
-            PaneState::default(),
-        )
-}
-
-/// Colors of every painted text run whose content equals `text`.
-fn painted_colors(
-    harness: &egui_kittest::Harness<'_, PaneState>,
-    text: &str,
-) -> Vec<egui::Color32> {
-    harness
-        .output()
-        .shapes
-        .iter()
-        .filter_map(|shape| match &shape.shape {
-            egui::epaint::Shape::Text(shape) if shape.galley.text() == text => {
-                Some(shape.galley.job.sections[0].format.color)
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-#[test]
-fn narrow_band_retains_controls_and_parallel_count() {
-    use egui_kittest::kittest::Queryable;
-    let goal = goal("A");
-    let mut snapshot = todo("A", 1);
-    snapshot.items[2].status = event_bus::ThreadTodoStatus::InProgress;
-    for width in [240.0, 329.0, 480.0] {
-        let mut harness = band_harness(Some(goal.clone()), snapshot.clone(), width);
-        harness.run_steps(16);
-        for label in [
-            "Show goal details",
-            "Pause goal checks",
-            "Enable independent review before completion",
-            "Show procedure details",
-            "1/3",
-            "2 procedures in progress",
-        ] {
-            let rect = harness.get_by_label(label).rect();
-            assert!(
-                rect.left() >= 0.0 && rect.right() <= width,
-                "{label} at {width}: {rect:?}"
-            );
-        }
-        assert!(harness.query_by_label("Procedures: Analyze the captured observations and determine the cause · +1 in progress").is_some());
-    }
-}
-
-#[test]
-fn only_in_progress_procedures_read_as_normal_text_with_a_distinct_icon() {
-    use egui_kittest::kittest::Queryable;
-    use gui::theme::{icons, tokens::palette};
-    let mut harness = band_harness(None, todo("A", 1), 800.0);
-    harness.run();
-    harness.get_by_label("Show procedure details").click();
-    harness.run();
-    let current = "Analyze the captured observations and determine the cause";
-    let colors = painted_colors(&harness, current);
-    assert_eq!(colors.len(), 2, "summary title and detail row");
-    assert!(
-        colors.iter().all(|color| *color == palette().TEXT),
-        "{colors:?}"
-    );
-    for done_or_waiting in ["Collect observations", "Repeat measurements"] {
-        assert_eq!(
-            painted_colors(&harness, done_or_waiting),
-            vec![palette().TEXT_MUTED]
-        );
-    }
-    assert_eq!(
-        painted_colors(&harness, icons::CIRCLE_HALF).len(),
-        2,
-        "band and row icon"
-    );
-    assert_eq!(
-        painted_colors(&harness, icons::CIRCLE),
-        vec![palette().TEXT_MUTED]
-    );
-    for status in ["In progress", "Pending", "Completed"] {
-        assert!(
-            harness.query_all_by_label(status).next().is_some(),
-            "{status}"
-        );
-    }
-
-    let mut waiting = todo("A", 2);
-    waiting.items[1].status = event_bus::ThreadTodoStatus::Pending;
-    let mut harness = band_harness(None, waiting, 800.0);
-    harness.run();
-    assert!(harness.query_by_label("Procedures pending").is_some());
-    assert_eq!(
-        painted_colors(&harness, current),
-        vec![palette().TEXT_MUTED]
-    );
-}
-
-#[test]
-#[ignore = "Capture the combined composer band using an offscreen adapter"]
-fn capture_goal_procedure_composer() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let output = std::env::var_os("EVORCH_TODO_EVIDENCE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| "/tmp/evorch-todo-evidence".into());
-    std::fs::create_dir_all(&output)?;
-    for (name, preset) in [
-        ("graphite", gui::theme::style::ThemePreset::Graphite),
-        ("tokyo-night", gui::theme::style::ThemePreset::TokyoNight),
-    ] {
-        for width in [1280.0, 760.0] {
-            let mut workbench = HeadlessWorkbench::new(state(dir.path()), [width, 900.0]);
-            workbench
-                .state_mut()
-                .apply_events([todo_event(todo("A", 1))]);
-            workbench.reload_theme(preset);
-            workbench.run();
-            let Some(frame) = gui::evidence::capture_or_skip(&mut workbench) else {
-                return Ok(());
-            };
-            let path = output.join(format!("goal-procedures-{name}-{width:.0}.png"));
-            frame.save_png(&path)?;
-            println!("{}", path.display());
-            workbench.click_label("Show procedure details");
-            workbench.run();
-            let frame =
-                gui::evidence::capture_or_skip(&mut workbench).ok_or("adapter unavailable")?;
-            let path = output.join(format!("goal-procedures-{name}-{width:.0}-details.png"));
-            frame.save_png(&path)?;
-            println!("{}", path.display());
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn replay_skips_rows_of_removed_variants_and_restores_goal_and_procedure() {
+fn replay_skips_rows_of_removed_variants_and_restores_the_goal() {
     use gui::model::commands::{CommandSink, LoopEvent};
     use std::sync::{Arc, Mutex};
     #[derive(Default)]
     struct Observed {
         goals: Vec<String>,
-        todos: Vec<event_bus::ThreadTodoSnapshot>,
     }
     struct Sink(Arc<Mutex<Observed>>);
     impl CommandSink for Sink {
         fn bind_thread_goal(&mut self, snapshot: &ThreadGoalSnapshot, _: &str) {
             self.0.lock().unwrap().goals.push(snapshot.goal_id.clone());
-        }
-        fn bind_thread_todo(&mut self, snapshot: &event_bus::ThreadTodoSnapshot) {
-            self.0.lock().unwrap().todos.push(snapshot.clone());
         }
         fn submit(&mut self, _: WorkbenchCommand) -> Vec<LoopEvent> {
             panic!("restoration cannot dispatch work")
@@ -624,7 +209,8 @@ fn replay_skips_rows_of_removed_variants_and_restores_goal_and_procedure() {
         .handle()
         .append_event(None, &event(snapshot))
         .unwrap();
-    // Rows of variants removed in #223, in the format they were stored with.
+    // Rows of removed variants, in the format they were stored with. The retired
+    // ThreadTodoUpdated row must neither fail replay nor restore any procedure.
     let connection = rusqlite::Connection::open(&config.db_path).unwrap();
     for (kind, payload) in [
         (
@@ -634,6 +220,10 @@ fn replay_skips_rows_of_removed_variants_and_restores_goal_and_procedure() {
         (
             "Lifecycle",
             r#"{"kind":"Lifecycle","payload":{"kind":"WorkspaceWaitChanged","payload":{"run_id":"run-1","call_id":"call-1","waiting":null}}}"#,
+        ),
+        (
+            "Orchestrator",
+            r#"{"kind":"Orchestrator","payload":{"kind":"ThreadTodoUpdated","payload":{"snapshot":{"list_id":"list","thread_id":"A","revision":1,"items":[{"content":"old step","status":"in_progress"}]}}}}"#,
         ),
     ] {
         connection
@@ -646,10 +236,6 @@ fn replay_skips_rows_of_removed_variants_and_restores_goal_and_procedure() {
             .unwrap();
     }
     drop(connection);
-    storage
-        .handle()
-        .append_event(None, &todo_event(todo("A", 1)))
-        .unwrap();
     storage.close();
     let observed = Arc::new(Mutex::new(Observed::default()));
     let mut state = bare_state(dir.path()).with_command_sink(Box::new(Sink(observed.clone())));
@@ -658,10 +244,9 @@ fn replay_skips_rows_of_removed_variants_and_restores_goal_and_procedure() {
         .unwrap();
     let observed = observed.lock().unwrap();
     assert_eq!(observed.goals, ["goal-A"]);
-    assert_eq!(observed.todos, [todo("A", 1)]);
     drop(observed);
     let mut workbench = HeadlessWorkbench::new(state, [1000.0, 800.0]);
     workbench.run();
     assert!(workbench.has_label("Resume goal checks"));
-    assert!(workbench.has_label("Show procedure details"));
+    assert!(!workbench.has_label("Show procedure details"));
 }

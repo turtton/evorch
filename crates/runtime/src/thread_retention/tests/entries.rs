@@ -73,7 +73,6 @@ fn table() -> BTreeMap<&'static str, Guard> {
             ),
         ),
         ("thread_goals.rs::restore_thread_goal", Guarded { via: &[] }),
-        ("thread_todos.rs::restore_thread_todo", Guarded { via: &[] }),
         (
             "thread_read_dirs.rs::set_thread_read_only_directories",
             Guarded { via: &[] },
@@ -261,7 +260,7 @@ fn every_public_identity_entry_is_guarded_or_exempt_with_a_reason() {
     )
     .unwrap();
     let identity = Regex::new(
-        r"thread_id|thread:|ThreadGoalSnapshot|ThreadTodoSnapshot|RunId|run_id|run:|child:|parent:|recipient|ThreadOwner|\bid: &str",
+        r"thread_id|thread:|ThreadGoalSnapshot|RunId|run_id|run:|child:|parent:|recipient|ThreadOwner|\bid: &str",
     )
     .unwrap();
     let entry =

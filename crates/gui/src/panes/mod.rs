@@ -10,6 +10,7 @@ pub mod artifact_card;
 pub mod codex_auth;
 pub mod composer;
 pub mod context_inspector;
+pub mod conversation_plan;
 pub mod diff;
 pub mod evaluations;
 pub mod file_viewer;

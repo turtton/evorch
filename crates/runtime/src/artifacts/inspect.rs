@@ -93,7 +93,7 @@ struct Args {
 }
 
 fn may_inspect(state: &LoopState) -> bool {
-    crate::thread_todos::conversation_root(state)
+    crate::conversation_plan::conversation_root(state)
         || super::may_render(
             state.run_role(),
             state.run_config(),

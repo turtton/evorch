@@ -94,9 +94,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             .map(crate::model::pull_requests::chips_by_call);
         let ctx = ConversationContext {
             pull_request_chips: thread_id.as_deref().zip(chips.as_ref()),
-            todo: thread_id
-                .as_deref()
-                .and_then(|id| self.thread_todos.get(id)),
+            plan: self.conversation_plan.band(),
             goal: thread_id
                 .as_deref()
                 .and_then(|id| self.thread_goals.get(id)),

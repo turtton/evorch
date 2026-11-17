@@ -66,7 +66,7 @@ mod tests {
             "delegate",
             "send_message",
             "handoff_to_lane",
-            "todo_write",
+            "plan_update",
             "get_goal",
         ] {
             assert!(is_visible_op(name), "{name}");

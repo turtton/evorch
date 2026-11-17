@@ -521,7 +521,6 @@ fn pane(model: TranscriptModel) -> Harness<'static, PaneState> {
                     &state.model,
                     None,
                     gui::panes::agent::ConversationContext {
-                        todo: None,
                         goal: None,
                         requests: None,
                         task_rows: &[],
@@ -545,6 +544,7 @@ fn pane(model: TranscriptModel) -> Harness<'static, PaneState> {
                         branch: None,
                         pull_request: None,
                         pull_request_chips: None,
+                        plan: None,
                     },
                     &mut state.composer,
                     &mut state.picker,

@@ -11,7 +11,7 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 66;
+const LATEST_SCHEMA: u32 = 67;
 
 const EXPECTED_TABLES: [&str; 121] = [
     "restart_learning_inventory",
@@ -286,6 +286,29 @@ fn fresh_open_applies_latest_schema() {
     assert!(triggers.contains("run_ledger_no_replace"));
     assert!(triggers.contains("thread_start_untracked_replayable"));
     assert!(triggers.contains("eval_samples_replayable"));
+}
+
+#[test]
+fn v67_drops_the_retired_todo_column_from_lane_handoffs() {
+    // Given: a fresh database at the latest schema
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let path = database_path(&temp_dir);
+    Database::open(&config_for(&path)).expect("fresh database must open");
+
+    // Then: the handoff row no longer has a place for a todo list
+    let connection = Connection::open(path).expect("migrated database must reopen");
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('lane_handoffs')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!columns.is_empty());
+    assert!(
+        !columns.iter().any(|name| name == "todo_json"),
+        "{columns:?}"
+    );
 }
 
 #[test]
@@ -1222,6 +1245,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v67.sql"),
                 include_str!("../../undo/undo_v66.sql"),
                 include_str!("../../undo/undo_v65.sql"),
                 include_str!("../../undo/undo_v64.sql"),

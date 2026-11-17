@@ -515,27 +515,6 @@ fn restore_thread_goals(
     }
 }
 
-/// Restore procedures for current sidebar conversations without binding old run authority.
-fn restore_thread_todos(
-    todos: std::collections::BTreeMap<String, event_bus::ThreadTodoSnapshot>,
-    runtime: &runtime::AgentRuntime,
-    sidebar: &workspace_ui::SidebarState,
-    _guarded: &RuntimeGuarded,
-) {
-    for snapshot in todos.into_values() {
-        if sidebar.threads.iter().any(|thread| {
-            thread.id.to_string() == snapshot.thread_id
-                && sidebar
-                    .projects
-                    .iter()
-                    .any(|project| project.id == thread.project_id)
-        }) && let Err(error) = runtime.restore_thread_todo(snapshot)
-        {
-            tracing::warn!(%error, "failed to restore thread procedures");
-        }
-    }
-}
-
 fn detected_provider_status(
     loaded: &Result<config::Config, config::ConfigError>,
 ) -> ProviderStatus {
@@ -1168,12 +1147,12 @@ fn build_workbench(
             .as_ref()
             .map(|drafts| drafts.join("crash-spool")),
     )?;
-    let restore = gui::restore_metrics::RestoreTimer::new("runtime_goals_todos_total");
+    let restore = gui::restore_metrics::RestoreTimer::new("runtime_goals_total");
     let stage = gui::restore_metrics::RestoreTimer::new("runtime_orchestrator_read");
     let snapshots = Database::open(&storage_config)
         .and_then(|db| gui::startup_restore::ThreadSnapshots::read(&db))
         .unwrap_or_else(|error| {
-            tracing::warn!(%error, "failed to read thread goals and procedures");
+            tracing::warn!(%error, "failed to read thread goals");
             gui::startup_restore::ThreadSnapshots::default()
         });
     stage.finish();
@@ -1200,9 +1179,6 @@ fn build_workbench(
             reload_index_settings(&handle, &options)
         })
     });
-    stage.finish();
-    let stage = gui::restore_metrics::RestoreTimer::new("runtime_todos");
-    restore_thread_todos(snapshots.todos, &runtime, &sidebar, &runtime_guarded);
     stage.finish();
     restore.finish();
 
@@ -1315,6 +1291,11 @@ fn build_workbench(
                 ))),
             None => gui::model::evaluations::EvaluationsModel::default(),
         })
+        .with_conversation_plan(
+            gui::model::conversation_plan::ConversationPlanModel::default().with_reader(Arc::new(
+                gui::model::conversation_plan::HostPlanReader::new(runtime.clone()),
+            )),
+        )
         .with_pump(pump)
         .with_terminal_spawner(Arc::new(ShellSpawner::from_env()))
         .with_ownership(Arc::clone(&ownership))

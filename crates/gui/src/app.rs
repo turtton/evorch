@@ -12,6 +12,7 @@ pub mod btw;
 mod composer;
 mod composer_draft;
 mod conversation;
+mod conversation_plan;
 mod deferred_bodies;
 #[cfg(test)]
 mod deferred_bodies_tests;

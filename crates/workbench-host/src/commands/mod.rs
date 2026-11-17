@@ -356,13 +356,6 @@ impl CommandService {
         }
     }
 
-    /// Restore procedure data only; this cannot authorize or wake a root run.
-    pub fn bind_thread_todo(&mut self, snapshot: &event_bus::ThreadTodoSnapshot) {
-        if let Err(error) = self.runtime.restore_thread_todo(snapshot.clone()) {
-            tracing::warn!(%error, "failed to restore thread procedures");
-        }
-    }
-
     pub fn bind_thread_goal(&mut self, snapshot: &event_bus::ThreadGoalSnapshot, project: &str) {
         self.bindings
             .goal_projects

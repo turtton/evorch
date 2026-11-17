@@ -54,6 +54,8 @@ pub enum PanelKind {
     AgentBrowser,
     /// Evaluations the Evaluator launched: groups, trials, reports and replays.
     Evaluations,
+    /// The active conversation's plan: task tree, task details and change history.
+    ConversationPlan,
 }
 
 impl PanelKind {
@@ -78,6 +80,7 @@ impl PanelKind {
             Self::ShellJobs => "Shell jobs",
             Self::AgentBrowser => "Browser",
             Self::Evaluations => "Evaluations",
+            Self::ConversationPlan => "Plan",
         }
     }
 }

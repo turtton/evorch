@@ -14,10 +14,14 @@ use storage::recovery::restart::tools::RestartToolsEvidence;
 #[derive(Default)]
 pub(super) struct PredecessorCatalog {
     pub successor_tools: Mutex<Vec<ToolSpec>>,
+    pub plan: bool,
 }
 impl PredecessorCatalog {
     fn tools(&self, successor: &[ToolSpec]) -> Vec<ToolSpec> {
         *self.successor_tools.lock().unwrap() = successor.to_vec();
+        if self.plan {
+            return super::plan_schema::old_tools(successor);
+        }
         let path = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
             .join("tests/recovery_activation_cache/predecessor-wait-tools.json");
         let old: Vec<ToolSpec> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -93,7 +97,7 @@ async fn codex_planned_wait_schema_boundary_keeps_history_and_reuses_prefix() {
 }
 async fn check(wire: Wire) {
     for different_build in [false, true] {
-        recover_case(false, true, different_build, false, wire, true).await;
+        recover_case(false, true, different_build, false, wire, SchemaCase::Wait).await;
     }
 }
 

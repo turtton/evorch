@@ -1,5 +1,6 @@
 //! Exercise the actual private handlers without advertising them to the model.
 mod boundaries;
+mod switch;
 mod writer;
 use super::*;
 use crate::{AgentInvocationContext, AgentModel, AgentRunPhase, Role, RunConfig, RuntimeError};
@@ -218,12 +219,12 @@ async fn private_handlers_cas_paging_and_runtime_only_status() {
     assert!(tools::read(&f.runtime, &caller, json!({"view":"tree","cursor":cursor})).is_err());
     assert_eq!(read(&f, run)["revision"], 3);
     assert_eq!(read(&f, run)["nodes"], json!([]));
-    assert!(f.model.schemas.lock().unwrap()[0].contains(&"todo_write".into()));
-    assert!(
-        !f.model.schemas.lock().unwrap()[0]
-            .iter()
-            .any(|n| n == "plan_read" || n == "plan_update")
-    );
+    {
+        let schemas = f.model.schemas.lock().unwrap();
+        assert!(schemas[0].contains(&"plan_read".into()));
+        assert!(schemas[0].contains(&"plan_update".into()));
+        assert!(!schemas[0].contains(&"todo_write".into()));
+    }
     f.stop(run).await;
 }
 

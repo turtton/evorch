@@ -30,7 +30,6 @@ impl AgentRuntime {
                 request_json: serde_json::to_string(memo).map_err(|e| e.to_string())?,
                 state: HandoffState::Preparing,
                 goal_json: None,
-                todo_json: None,
             })
             .map_err(|e| e.to_string())?;
         let target: RunId = receipt
@@ -114,7 +113,7 @@ impl AgentRuntime {
         )
         .map_err(|e| e.to_string())?;
         // Reserve outside Q. Goal transfer prepares ownership before taking Q,
-        // then commits the receipt with the exact goal/todo snapshots under Q.
+        // then commits the receipt with the exact goal snapshot under Q.
         let execution = self.reserve_handoff_admission(source, target);
         let committed = publication.commit(|| {
             self.handoff_thread_goal_prepared(

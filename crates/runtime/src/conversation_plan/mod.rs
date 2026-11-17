@@ -1,10 +1,15 @@
-//! Private plan handlers; PR3 alone registers them. No prompt, goal or wake integration.
+//! Plan handlers registered as the `plan_read`/`plan_update` catalog entries. No goal or wake integration.
 //! Lock order: per-thread authority gate -> registry mutation guard -> short goal/runs
 //! reads. DB round trips retain only the authority guards. No projection cache exists.
+pub(crate) mod notice;
 #[cfg(test)]
 mod tests;
 pub(crate) mod tools;
-/// Shared eligibility predicate; independent of the retiring todo state.
+/// Name of the retired todo tool, outside every catalog.
+pub(crate) const RETIRED_TODO_TOOL: &str = "todo_write";
+/// Fixed answer to a call of the retired tool from a saved history; it changes nothing.
+pub(crate) const RETIRED_TODO_WRITE: &str = "`todo_write`は廃止されました。現在の計画には`plan_read`と`plan_update`を使用してください。旧Todoデータは引き継がれず、この呼出しによる変更はありません。";
+/// Shared eligibility predicate.
 pub(crate) fn conversation_root(state: &crate::agent_loop::LoopState) -> bool {
     state.task.parent.is_none()
         && state.run_config().conversation
@@ -96,7 +101,6 @@ impl AgentRuntime {
         // The DB transaction checks tombstones/binding; no goal/runs lock is held here.
         action(self.plan_store().map_err(storage_error)?, &thread)
     }
-    #[allow(dead_code)] // Invoked by the private handlers until PR3 registers them.
     pub(crate) fn apply_plan(
         &self,
         caller: &Caller<'_>,
@@ -211,6 +215,18 @@ fn storage_error(error: StorageError) -> String {
 }
 
 impl crate::agent_loop::LoopState {
+    /// A turn that ended without a blocking question pending ended this root's
+    /// work period: mark unfinished tasks. A change reaches the model only through
+    /// `plan_read`, never as a request of its own.
+    pub(crate) fn reconcile_finished_turn(&self) {
+        let Some(runtime) = self.runtime() else {
+            return;
+        };
+        if runtime.has_pending_user_questions(self.caller_run_id()) {
+            return;
+        }
+        self.reconcile_root_plan();
+    }
     pub(crate) fn reconcile_root_plan(&self) {
         if let Some(runtime) = self.runtime() {
             runtime.reconcile_plan_or_report(&Caller {
@@ -221,6 +237,3 @@ impl crate::agent_loop::LoopState {
         }
     }
 }
-// These are deliberately not referenced by catalog/registry until PR3.
-#[allow(unused_imports)]
-pub(crate) use tools::{dispatch_read, dispatch_update, read_spec, update_spec};

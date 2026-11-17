@@ -35,11 +35,6 @@ fn goal() -> Value {
     })
 }
 
-fn todo() -> Value {
-    json!({"list_id": "list-1", "revision": "2",
-           "items": [{"content": "write tests", "status": "in_progress"}]})
-}
-
 fn page(items: Vec<Value>) -> Value {
     json!({"items": items, "snapshot_revision": "9"})
 }
@@ -87,7 +82,7 @@ pub fn samples() -> AreaSamples {
             ),
             de::<UiEvent>(json!({"type": "execution", "payload": {
             "type": "thread_execution_changed", "payload": {
-                "thread": "thread-1", "goal": goal(), "todo": todo()}}})),
+                "thread": "thread-1", "goal": goal()}}})),
         ],
         query_replies: vec![
             de::<QueryReply>(
@@ -110,7 +105,7 @@ pub fn samples() -> AreaSamples {
             ),
             de::<QueryReply>(
                 json!({"type": "execution", "payload": {"type": "thread_execution", "payload": {
-                "thread": "thread-1", "root_run": "run-1", "goal": goal(), "todo": todo(),
+                "thread": "thread-1", "root_run": "run-1", "goal": goal(),
                 "ledger": {"run": "run-1", "seq": "3", "body": "notes", "truncated": false}}}}),
             ),
         ],

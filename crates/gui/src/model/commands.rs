@@ -349,7 +349,6 @@ pub trait CommandSink: Send {
     }
     fn bind_thread_goal(&mut self, _snapshot: &event_bus::ThreadGoalSnapshot, _project: &str) {}
     /// Restore procedure data only; this cannot authorize or wake a root run.
-    fn bind_thread_todo(&mut self, _snapshot: &event_bus::ThreadTodoSnapshot) {}
     /// Refresh counts on lifecycle events, including descendants that just settled.
     fn observe_lifecycle(&mut self, _event: &event_bus::Event) {}
     /// Live count for the stopped banner; None leaves fixture/event state intact.

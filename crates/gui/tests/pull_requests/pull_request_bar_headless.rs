@@ -143,7 +143,6 @@ fn harness(bar: Bar) -> (Harness<'static>, Clicked) {
                 &TranscriptModel::default(),
                 identity,
                 ConversationContext {
-                    todo: None,
                     goal: None,
                     requests: None,
                     task_rows: &[],
@@ -165,6 +164,7 @@ fn harness(bar: Bar) -> (Harness<'static>, Clicked) {
                         now_ns: gui::model::pull_requests::now_ns(),
                     }),
                     pull_request_chips: None,
+                    plan: None,
                     model_picker: gui::panes::model_picker::ModelPickerContext {
                         profiles: &[],
                         preference: None,
@@ -611,7 +611,6 @@ fn merged_is_purple_in_both_themes_with_a_word() {
                     &TranscriptModel::default(),
                     None,
                     ConversationContext {
-                        todo: None,
                         goal: None,
                         requests: None,
                         task_rows: &[],
@@ -633,6 +632,7 @@ fn merged_is_purple_in_both_themes_with_a_word() {
                             now_ns: gui::model::pull_requests::now_ns(),
                         }),
                         pull_request_chips: None,
+                        plan: None,
                         model_picker: gui::panes::model_picker::ModelPickerContext {
                             profiles: &[],
                             preference: None,

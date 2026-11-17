@@ -15,7 +15,6 @@ mod management;
 mod monitor;
 mod questions;
 mod renewed_lease;
-mod todo;
 
 #[tokio::test]
 async fn delayed_report_hook_cannot_reset_newer_progress_or_wake_count() {

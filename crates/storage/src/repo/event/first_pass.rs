@@ -338,7 +338,8 @@ const SESSION_SUBKINDS: &str = "'Started', 'Completed', 'Failed'";
 /// The payload is selected only for rows the pass reads inside. SQLite
 /// evaluates `CASE` lazily, so the other rows' payloads, including their
 /// overflow pages, are never loaded. `?1` is whether some thread is tombstoned,
-/// which makes thread goal and todo rows need a look at their thread.
+/// which makes thread goal rows need a look at their thread. Retired `ThreadTodoUpdated`
+/// rows are never read: they are neither decoded nor probed.
 fn columns_sql(read_payloads: bool) -> String {
     let payload = if read_payloads {
         "payload".to_owned()
@@ -348,8 +349,7 @@ fn columns_sql(read_payloads: bool) -> String {
                 OR (kind = 'Lifecycle' AND subkind IN ({TASK_SUBKINDS}, {SESSION_SUBKINDS})) \
                 OR (kind = 'Message' AND subkind = 'MessagePart') \
                 OR (subkind = '' AND kind NOT IN ('Diagnostic', 'Ownership')) \
-                OR (?1 AND ((kind = 'Orchestrator' \
-                    AND subkind IN ('ThreadGoalUpdated', 'ThreadTodoUpdated')) \
+                OR (?1 AND ((kind = 'Orchestrator' AND subkind = 'ThreadGoalUpdated') \
                     OR kind IN ('PullRequest', 'ConversationPlan'))) \
              THEN payload END"
         )
@@ -472,8 +472,7 @@ fn classify(kind: &str, subkind: Option<&str>, probe_threads: bool) -> Reading {
         }
         ("Lifecycle", "Started" | "Completed" | "Failed") => Reading::SessionMarker,
         ("Message", "MessagePart") => Reading::Part,
-        ("Orchestrator", "ThreadGoalUpdated" | "ThreadTodoUpdated")
-        | ("PullRequest" | "ConversationPlan", _)
+        ("Orchestrator", "ThreadGoalUpdated") | ("PullRequest" | "ConversationPlan", _)
             if probe_threads =>
         {
             Reading::Decode(Decoding::ThreadProbe)

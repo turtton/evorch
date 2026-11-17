@@ -1698,21 +1698,6 @@ async fn the_conversation_controls_stay_reachable_below_a_screenful_of_features(
             (0..8).map(|n| format!("criterion {n}")).collect(),
         )
         .unwrap();
-    world
-        .boot
-        .runtime
-        .restore_thread_todo(event_bus::ThreadTodoSnapshot {
-            list_id: "list-1".into(),
-            thread_id: LEAD.into(),
-            revision: 1,
-            items: (0..8)
-                .map(|n| event_bus::ThreadTodoItem {
-                    content: format!("step {n}"),
-                    status: event_bus::ThreadTodoStatus::Pending,
-                })
-                .collect(),
-        })
-        .unwrap();
     // The page the window draws: every feature has a long list, and the controls of the
     // conversation sit below the features. Each is reached by the wheel and the pointer.
     let mut desktop = Desktop::page(
@@ -1723,7 +1708,6 @@ async fn the_conversation_controls_stay_reachable_below_a_screenful_of_features(
     );
     desktop.until(|d| d.shows("task-000")).await;
     desktop.until(|d| d.shows_part("criterion 7")).await;
-    desktop.until(|d| d.shows_part("step 7")).await;
     let anchors = [
         "再接続 / 再同期",
         "履歴更新",

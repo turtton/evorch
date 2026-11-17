@@ -487,7 +487,7 @@ async fn b3_preparation_cancel_and_snapshot_failure_leave_replay_and_protection_
 }
 
 #[tokio::test]
-async fn b3_failed_candidate_does_not_commit_usage_todo_or_success_event() {
+async fn b3_failed_candidate_does_not_commit_usage_or_success_event() {
     let (dir, _storage, runtime, mut state) = stored_fixture().await;
     let run = state.caller_run_id();
     crate::restore::persist_prepared_context(&state, &state.context).unwrap();
@@ -495,8 +495,7 @@ async fn b3_failed_candidate_does_not_commit_usage_todo_or_success_event() {
         input_tokens: 900,
         ..Default::default()
     });
-    state.todo_context_pending = false;
-    state.todo_context_deferred = true;
+    state.boundary_context_deferred = true;
     let mut events = state.shared.bus.subscribe();
     let original = state.context.clone();
     let connection = rusqlite::Connection::open(dir.path().join("continuity.db")).unwrap();
@@ -512,8 +511,7 @@ async fn b3_failed_candidate_does_not_commit_usage_todo_or_success_event() {
         Some(900),
         "failed candidate must not clear previous usage"
     );
-    assert!(!state.todo_context_pending);
-    assert!(state.todo_context_deferred);
+    assert!(state.boundary_context_deferred);
     for event in events.drain_pending_snapshot() {
         assert!(
             !matches!(

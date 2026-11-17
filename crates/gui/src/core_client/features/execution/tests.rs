@@ -101,8 +101,6 @@ fn runs_reply(items: Vec<Value>, more: bool) -> FeatureReply {
 
 fn execution_reply(goal: bool) -> FeatureReply {
     let mut body = json!({"thread": "t1", "root_run": "run-a",
-        "todo": {"list_id": "l", "revision": "1",
-                 "items": [{"content": "write tests", "status": "in_progress"}]},
         "ledger": {"run": "run-a", "seq": "1", "body": "ledger-body", "truncated": false}});
     if goal {
         body["goal"] = json!({"goal": "g1", "root_run": "run-a", "objective": "ship it",
@@ -555,7 +553,11 @@ fn the_four_ends_of_a_run_and_history_only_are_told_apart() {
 fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
     let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
     let first = asked(&mut screen);
-    assert_eq!(first.len(), 2, "the runs and the thread execution");
+    assert_eq!(
+        first.len(),
+        3,
+        "the runs, the thread execution and the plan"
+    );
     assert_eq!(scope_of(&first[0]), RunScope::Roots);
     let roots_tag = runs_tag(&first);
     answer(
@@ -664,7 +666,6 @@ fn the_goal_review_and_the_checks_pause_send_their_own_commands() {
     screen.get_by_label("ゴール: ship it");
     screen.get_by_label("✔ tests pass");
     screen.get_by_label("指摘: fix the docs");
-    screen.get_by_label("▶ write tests");
 
     screen.get_by_label("ゴールレビュー").click();
     let sent = asked(&mut screen);
@@ -709,13 +710,13 @@ fn a_changed_thread_starts_over_and_a_reset_asks_again_without_losing_tags() {
     // A new snapshot drops what came from the core and asks for it again.
     screen.state_mut().feature.reset();
     let again = asked(&mut screen);
-    assert_eq!(again.len(), 2);
+    assert_eq!(again.len(), 3);
     assert!(screen.query_by_label("name-run-a").is_none());
 
     // A lost reply keeps its tag: the resolved reply later still lands.
     screen.state_mut().selection.thread = Some(ThreadId::new("t2").unwrap());
     let other = asked(&mut screen);
-    assert_eq!(other.len(), 2);
+    assert_eq!(other.len(), 3);
     assert!(screen.query_by_label("name-run-a").is_none());
     answer(
         &mut screen,

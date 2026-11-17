@@ -181,6 +181,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 shell_jobs: &mut self.shell_jobs,
                 evaluations: &mut self.evaluations,
                 agent_browser: &mut self.agent_browser,
+                conversation_plan: &mut self.conversation_plan,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
                 telemetry: &self.telemetry,
@@ -205,7 +206,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 composer_action: &mut composer_action,
                 thread_goals: &self.thread_goals,
                 lane_details: &self.lanes.details,
-                thread_todos: &self.thread_todos,
                 goal_action: &mut goal_action,
                 focus_request: &mut focus_request,
                 dock_tab_style: &tab_style,
@@ -239,7 +239,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.restore_status = None;
         }
         if let Some(id) = focus_request {
-            self.focus_panel(id);
+            if id == super::conversation_plan::PANEL {
+                self.open_conversation_plan_tab();
+            } else {
+                self.focus_panel(id);
+            }
         }
         if let Some(action) = goal_action {
             self.submit_command(action.into_command());

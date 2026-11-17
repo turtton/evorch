@@ -530,7 +530,7 @@ impl LoopState {
     /// Called with the procedure context, so an interrupted request still
     /// retries its exact saved input first. Existing history is never edited.
     pub(crate) fn append_allowed_directories_context(&mut self) {
-        if self.todo_context_deferred {
+        if self.boundary_context_deferred {
             return;
         }
         if self.allowed_directories.is_none() && self.thread_read_dirs.is_empty() {

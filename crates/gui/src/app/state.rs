@@ -153,7 +153,6 @@ pub struct WorkbenchState<S> {
     /// Models of projects other than the startup one, shared with the runtime.
     pub(super) project_models: Option<crate::model::production::ProjectModels>,
     pub(super) thread_goals: BTreeMap<String, event_bus::ThreadGoalSnapshot>,
-    pub(super) thread_todos: BTreeMap<String, event_bus::ThreadTodoSnapshot>,
     pub(super) sink: Box<dyn CommandSink>,
     /// Project trust last declared to the sink, so only changes are re-sent.
     pub(super) declared_trust: std::collections::BTreeMap<PathBuf, workspace_ui::TrustState>,
@@ -184,6 +183,7 @@ pub struct WorkbenchState<S> {
     pub(super) tombstones: storage::thread_retention::TombstoneSet,
     pub(super) retention: super::thread_retention::RetentionState,
     pub(super) agent_browser: super::agent_browser::AgentBrowserTabs,
+    pub(super) conversation_plan: super::conversation_plan::ConversationPlanPane,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -306,7 +306,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             production_model: None,
             project_models: None,
             thread_goals: BTreeMap::new(),
-            thread_todos: BTreeMap::new(),
             sink: Box::new(FixtureLoopAdapter::default()),
             declared_trust: std::collections::BTreeMap::new(),
             declared_allowed: std::collections::BTreeMap::new(),
@@ -328,6 +327,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             tombstones: Default::default(),
             retention: Default::default(),
             agent_browser: super::agent_browser::AgentBrowserTabs::default(),
+            conversation_plan: Default::default(),
         };
         // Older saved layouts can contain Arena tabs; the Arena pane no longer exists.
         let arenas: Vec<PanelId> = state
@@ -343,6 +343,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             state.panels.remove(&arena);
         }
         state.drop_saved_agent_browser();
+        state.drop_saved_conversation_plan();
         state.tasks.refresh();
         state.register_work_panels();
         Ok(state)

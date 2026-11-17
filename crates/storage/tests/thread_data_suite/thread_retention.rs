@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use event_bus::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, Event, EventKind,
-    OrchestratorEvent, ThreadTodoItem, ThreadTodoSnapshot, ThreadTodoStatus,
+    OrchestratorEvent,
 };
 use rusqlite::{Connection, params};
 use storage::inspect::EventScope;
@@ -282,19 +282,7 @@ impl Fixture {
     }
 
     fn todo_event(&self, session: &str, thread: &str) {
-        let snapshot = ThreadTodoSnapshot {
-            list_id: "list".into(),
-            thread_id: thread.into(),
-            revision: 1,
-            items: vec![ThreadTodoItem {
-                content: "item".into(),
-                status: ThreadTodoStatus::Pending,
-            }],
-        };
-        let payload = serde_json::to_string(
-            &Event::new(OrchestratorEvent::ThreadTodoUpdated { snapshot }).kind,
-        )
-        .unwrap();
+        let payload = retired_todo_payload(thread);
         self.conn
             .execute(
                 "INSERT INTO events(session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
@@ -1468,18 +1456,6 @@ fn appends_for_deleted_runs_are_refused_without_side_effects() {
         f.count("SELECT total_event_bytes FROM sessions WHERE id = 'session-1'") > session_before
     );
     assert!(f.count("SELECT COALESCE(SUM(payload_bytes), 0) FROM event_day_bytes") > day_before);
-    let todo = Event::new(OrchestratorEvent::ThreadTodoUpdated {
-        snapshot: ThreadTodoSnapshot {
-            list_id: "l".into(),
-            thread_id: "P".into(),
-            revision: 2,
-            items: vec![],
-        },
-    });
-    assert!(matches!(
-        handle.append_event(None, &todo),
-        Err(StorageError::Tombstoned { thread_id: Some(thread), .. }) if thread == "P"
-    ));
     let pull_request = Event::new(event_bus::PullRequestEvent::Unlinked {
         thread_id: "P".into(),
         link_revision: 2,
@@ -1496,7 +1472,7 @@ fn appends_for_deleted_runs_are_refused_without_side_effects() {
         handle.append_event(None, &pull_request),
         Err(StorageError::Tombstoned { thread_id: Some(thread), .. }) if thread == "P"
     ));
-    assert_eq!(handle.statistics().unwrap().events_rejected_tombstoned, 3);
+    assert_eq!(handle.statistics().unwrap().events_rejected_tombstoned, 2);
     assert_eq!(handle.statistics().unwrap().event_write_failures, 0);
 
     // And: a host mirror of a deleted thread is skipped while the rest is stored.
@@ -1583,10 +1559,6 @@ fn readers_do_not_see_tombstoned_threads_and_runs() {
         seen.iter()
             .all(|stored| stored.event.kind.primary_run_id() != Some("rp"))
     );
-    assert!(database.orchestrator_events_ordered().unwrap().iter().all(|stored| !matches!(
-        &stored.event.kind,
-        event_bus::EventKind::Orchestrator(OrchestratorEvent::ThreadTodoUpdated { snapshot }) if snapshot.thread_id != "X"
-    )));
     assert_eq!(database.tombstones().unwrap().threads.len(), 3);
 }
 
@@ -1707,6 +1679,19 @@ fn a_failed_step_resumes_from_the_cursor_without_repeating_or_skipping() {
     assert_eq!(family_residue(&f), vec![]);
 }
 
+/// The payload a retired `ThreadTodoUpdated` row still carries: the type no longer exists, so
+/// the row is written as raw JSON, exactly as an older build left it.
+fn retired_todo_payload(thread: &str) -> String {
+    serde_json::json!({
+        "kind": "Orchestrator",
+        "payload": {"kind": "ThreadTodoUpdated", "payload": {"snapshot": {
+            "list_id": "list", "thread_id": thread, "revision": 1,
+            "items": [{"content": "item", "status": "pending"}]
+        }}}
+    })
+    .to_string()
+}
+
 fn orchestrator_row(f: &Fixture, event: OrchestratorEvent, subkind: &str) -> i64 {
     let payload = serde_json::to_string(&Event::new(event).kind).unwrap();
     f.conn
@@ -1765,18 +1750,8 @@ fn the_second_backfill_target_attributes_orchestrator_events_without_rewriting_p
         },
         "ThreadGoalUpdated",
     );
-    let todo = orchestrator_row(
-        &f,
-        OrchestratorEvent::ThreadTodoUpdated {
-            snapshot: ThreadTodoSnapshot {
-                list_id: "l".into(),
-                thread_id: "t".into(),
-                revision: 1,
-                items: vec![],
-            },
-        },
-        "ThreadTodoUpdated",
-    );
+    f.todo_event("session-1", "t");
+    let todo = f.conn.last_insert_rowid();
     f.sql(
         "INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind) \
          VALUES (1, 1, 1, 'Orchestrator', '{', 'TaskProgressed');

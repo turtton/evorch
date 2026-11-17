@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 #[derive(Clone)]
 enum Step {
     Create,
-    Todo(bool),
+    Plan(bool),
     Escalate,
     Stop,
     Finish,
@@ -96,9 +96,13 @@ impl AgentModel for Model {
                 "handoff_to_lane",
                 json!({"original_request":"Compare the requested options", "escalation_reason":"Need coordinated verification"}),
             )),
-            Step::Todo(clear) => Some((
-                "todo_write",
-                json!({"items":if clear {json!([])} else {json!([{"content":"Report","status":"completed"}])}}),
+            Step::Plan(clear) => Some((
+                "plan_update",
+                if clear {
+                    json!({"expected_revision":1,"operations":[{"op":"clear"}]})
+                } else {
+                    json!({"expected_revision":0,"operations":[{"op":"add","client_ref":"report","title":"Report","status":"completed"}]})
+                },
             )),
             Step::Create => Some((
                 "create_goal",
@@ -1428,8 +1432,8 @@ async fn procedure_bookkeeping_preserves_submitted_goal_evidence() {
             Step::Create,
             Step::Stop,
             Step::Check(true),
-            Step::Todo(false),
-            Step::Todo(true),
+            Step::Plan(false),
+            Step::Plan(true),
             Step::Stop,
         ],
         vec![],
@@ -1440,7 +1444,8 @@ async fn procedure_bookkeeping_preserves_submitted_goal_evidence() {
     assert_eq!(goal.phase, ThreadGoalPhase::Complete);
     assert_eq!(goal.checks.len(), 1);
     assert_eq!(model.requests.lock().unwrap().len(), 6);
-    assert!(runtime.thread_todo("thread").unwrap().items.is_empty());
+    let plan = runtime.conversation_plan_summary("thread").unwrap();
+    assert_eq!((plan.revision, plan.progress.node_count), (2, 0));
 }
 
 #[tokio::test]
@@ -1451,7 +1456,7 @@ async fn completing_a_procedure_does_not_complete_a_goal_with_paused_checks() {
         vec![
             Step::Create,
             Step::Hold(entered.clone(), release.clone()),
-            Step::Todo(false),
+            Step::Plan(false),
             Step::Stop,
         ],
         vec![],
@@ -1469,8 +1474,13 @@ async fn completing_a_procedure_does_not_complete_a_goal_with_paused_checks() {
         .unwrap();
     phase(&mut events, root, AgentRunPhase::Waiting).await;
     assert_eq!(
-        runtime.thread_todo("thread").unwrap().items[0].status,
-        event_bus::ThreadTodoStatus::Completed
+        runtime
+            .conversation_plan_summary("thread")
+            .unwrap()
+            .progress
+            .leaf_counts
+            .completed,
+        1
     );
     let goal = runtime.thread_goal("thread").unwrap();
     assert_ne!(goal.phase, ThreadGoalPhase::Complete);

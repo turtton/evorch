@@ -101,8 +101,7 @@ pub(super) fn event_runs(event: &Event) -> Vec<&str> {
         EventKind::Orchestrator(event) => match event {
             OrchestratorEvent::TaskProgressed { run_id, .. }
             | OrchestratorEvent::TaskCheckpoint { run_id, .. } => runs.push(run_id),
-            OrchestratorEvent::ThreadGoalUpdated { .. }
-            | OrchestratorEvent::ThreadTodoUpdated { .. } => {}
+            OrchestratorEvent::ThreadGoalUpdated { .. } => {}
         },
         EventKind::Usage(event) => match event {
             UsageEvent::Usage { .. } | UsageEvent::CacheStats { .. } => {}

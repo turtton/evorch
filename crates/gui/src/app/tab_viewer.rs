@@ -55,6 +55,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) context_inspector: &'a mut crate::panes::context_inspector::ContextInspectorPane,
     pub(super) shell_jobs: &'a mut crate::panes::shell_jobs::ShellJobsPane,
     pub(super) evaluations: &'a mut crate::model::evaluations::EvaluationsModel,
+    pub(super) conversation_plan: &'a mut super::conversation_plan::ConversationPlanPane,
     pub(super) agent_browser: &'a mut super::agent_browser::AgentBrowserTabs,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) self_improvement: &'a mut crate::panes::self_improvement::SelfImprovementPane,
@@ -84,7 +85,6 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) composer: &'a mut ComposerModel,
     pub(super) thread_goals: &'a BTreeMap<String, event_bus::ThreadGoalSnapshot>,
     pub(super) lane_details: &'a std::collections::HashMap<String, crate::model::lanes::LaneDetail>,
-    pub(super) thread_todos: &'a BTreeMap<String, event_bus::ThreadTodoSnapshot>,
     pub(super) goal_action: &'a mut Option<crate::panes::agent::GoalAction>,
     pub(super) composer_action: &'a mut Option<ComposerAction>,
     pub(super) focus_request: &'a mut Option<&'static str>,
@@ -179,6 +179,7 @@ fn panel_icon(kind: PanelKind) -> &'static str {
         PanelKind::ShellJobs => icons::TERMINAL,
         PanelKind::AgentBrowser => icons::BROWSER,
         PanelKind::Evaluations => icons::FLASK,
+        PanelKind::ConversationPlan => icons::LIST_CHECKS,
     }
 }
 
@@ -258,6 +259,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                         | PanelKind::ShellJobs
                         | PanelKind::AgentBrowser
                         | PanelKind::Evaluations
+                        | PanelKind::ConversationPlan
                 )
             })
     }
@@ -474,6 +476,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             PanelKind::Evaluations => {
                 crate::panes::evaluations::evaluations_pane(ui, self.evaluations);
             }
+            PanelKind::ConversationPlan => self.conversation_plan.render(ui),
             PanelKind::AgentBrowser => {
                 let thread = self.sidebar.active_thread.as_ref().map(ToString::to_string);
                 let (rows, threads, transcripts) =

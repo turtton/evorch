@@ -631,7 +631,7 @@ pub(crate) fn render(state: &LoopState, runtime: &AgentRuntime, input: Value) ->
 
 pub(crate) fn present(state: &LoopState, runtime: &AgentRuntime, input: Value) -> DispatchResult {
     finish((|| {
-        if !crate::thread_todos::conversation_root(state) {
+        if !crate::conversation_plan::conversation_root(state) {
             return Err(
                 "only the conversation's root Worker or Orchestrator may present artifacts".into(),
             );
@@ -686,7 +686,7 @@ pub(crate) fn present(state: &LoopState, runtime: &AgentRuntime, input: Value) -
             caption: args.caption,
             artifacts,
         };
-        // Match todo_write: keep the ownership generation fixed until the event is emitted.
+        // Match plan_update: keep the ownership generation fixed until the event is emitted.
         let _guard = state
             .run_config()
             .ownership

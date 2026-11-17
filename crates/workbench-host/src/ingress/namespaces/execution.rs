@@ -43,7 +43,7 @@ impl CommandHost {
 
 impl CommandHost {
     /// The plain run listing is read from the projection; the detail queries
-    /// (roots and children, one run, goal, todo and ledger) are answered by the
+    /// (roots and children, one run, goal and ledger) are answered by the
     /// execution area, which composes live and persisted runs.
     pub(in crate::ingress) fn execution_query(
         &self,
