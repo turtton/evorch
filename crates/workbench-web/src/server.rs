@@ -48,6 +48,7 @@ pub struct WebApp {
     router: Router,
     shutdown: ShutdownSignal,
     tasks: crate::RestartTasks,
+    observer: crate::restart_observer::Observer,
 }
 
 impl WebApp {
@@ -67,6 +68,7 @@ impl WebApp {
         let policy = config.policy()?;
         let shutdown = ShutdownSignal::new();
         let tasks = crate::RestartTasks::default();
+        let observer = crate::restart_observer::Observer::default();
         let shared = Arc::new(Shared {
             policy,
             in_flight: Arc::new(Semaphore::new(config.max_in_flight_requests)),
@@ -74,6 +76,7 @@ impl WebApp {
             sse_slots: Arc::new(Semaphore::new(config.max_sse_streams)),
             shutdown: shutdown.clone(),
             tasks: tasks.clone(),
+            observer: observer.clone(),
         });
         let output_backend = Arc::clone(&backend);
         let state = Arc::new(AppState::new(backend, Arc::clone(&shared), config, assets));
@@ -101,6 +104,7 @@ impl WebApp {
             router,
             shutdown,
             tasks,
+            observer,
         })
     }
 
@@ -123,6 +127,7 @@ pub struct WebServer {
     shutdown: ShutdownSignal,
     task: Option<JoinHandle<io::Result<()>>>,
     tasks: crate::RestartTasks,
+    observer: crate::restart_observer::Observer,
     backend_drain: Pin<
         Box<dyn Future<Output = Result<(), workbench_protocol::errors::WorkbenchError>> + Send>,
     >,
@@ -177,8 +182,15 @@ impl WebServer {
             shutdown,
             task: Some(task),
             tasks: app.tasks.clone(),
+            observer: app.observer.clone(),
             backend_drain,
         }))
+    }
+
+    /// Observe drain milestones in composition tests; absent in production.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_restart_observer(&self, callback: Arc<dyn Fn(&'static str) + Send + Sync>) {
+        self.observer.set(callback);
     }
 
     /// The address actually bound (useful with port 0).
@@ -197,15 +209,23 @@ impl WebServer {
     /// backend-owned delivery work. The caller must enforce its fixed restart
     /// deadline; cancellation never aborts an already accepted backend command.
     pub async fn shutdown_for_restart(mut self) -> Result<(), WebServerError> {
+        self.observer.record("web_connections_begin");
         self.stop_connections().await?;
+        self.observer.record("web_connections_end");
+        self.observer.record("web_api_sse_begin");
         self.tasks
             .drain()
             .await
             .map_err(|e| WebServerError::RestartDrain(e.to_string()))?;
-        self.backend_drain
+        self.observer.record("web_api_sse_end");
+        self.observer.record("web_backend_begin");
+        let result = self
+            .backend_drain
             .as_mut()
             .await
-            .map_err(|e| WebServerError::RestartDrain(format!("{e:?}")))
+            .map_err(|e| WebServerError::RestartDrain(format!("{e:?}")));
+        self.observer.record("web_backend_end");
+        result
     }
 
     async fn stop_connections(&mut self) -> Result<(), WebServerError> {

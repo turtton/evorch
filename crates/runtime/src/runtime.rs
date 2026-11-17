@@ -975,11 +975,21 @@ impl AgentRuntime {
         self
     }
 
-    pub(crate) fn with_model_resolution(
+    /// Catalog cache selected by composition, if metadata resolution is configured.
+    /// Inspecting its identity does not acquire or alter a catalog.
+    pub fn codex_catalog_cache(&self) -> Option<&Arc<providers::CodexCatalogCache>> {
+        self.shared
+            .model_resolution
+            .get()
+            .map(|resolution| &resolution.catalog_cache)
+    }
+
+    pub(crate) fn with_model_resolution_and_catalog_cache(
         self,
         config: &config::Config,
         credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
         catalog_dir: Option<std::path::PathBuf>,
+        cache: Arc<providers::CodexCatalogCache>,
     ) -> Self {
         let _ = self
             .shared
@@ -1004,6 +1014,7 @@ impl AgentRuntime {
                 config,
                 credential_store,
                 catalog_dir,
+                cache,
             ));
         let _ = self
             .shared

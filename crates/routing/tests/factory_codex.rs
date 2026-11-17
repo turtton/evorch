@@ -155,6 +155,7 @@ async fn factory_builds_codex_client_from_profile() {
     );
     profile.base_url = server.uri();
     let options = FactoryOptions {
+        codex_catalog_cache: Some(Arc::new(providers::CodexCatalogCache::new())),
         auth_base_url_override: Some(server.uri()),
         ..FactoryOptions::default()
     };
@@ -349,4 +350,21 @@ fn credential_store_token_store_round_trip() {
 #[test]
 fn factory_default_auth_base_url_is_openai() {
     assert_eq!(DEFAULT_AUTH_BASE_URL, "https://auth.openai.com");
+}
+
+#[test]
+fn codex_adapters_share_only_the_same_accounts_refresh_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FileCredentialStore::open(dir.path()).unwrap());
+    let first = CredentialStoreTokenStore::new(store.clone(), "quota-chat".into());
+    let second = CredentialStoreTokenStore::new(store.clone(), "quota-chat".into());
+    let other = CredentialStoreTokenStore::new(store, "other-account".into());
+    let lock = first.refresh_lock();
+    assert!(Arc::ptr_eq(&lock, &first.refresh_lock()));
+    assert!(Arc::ptr_eq(&lock, &second.refresh_lock()));
+    assert!(!Arc::ptr_eq(&lock, &other.refresh_lock()));
+    assert!(!Arc::ptr_eq(
+        &lock,
+        &routing::factory::subscription_refresh_lock("claude", "quota-chat")
+    ));
 }

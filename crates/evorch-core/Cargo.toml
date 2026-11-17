@@ -11,7 +11,7 @@ test = false
 bench = false
 
 [features]
-bootstrap-test-support = ["core-instance/recovery-test-support", "storage/recovery-test-support"]
+bootstrap-test-support = ["core-instance/recovery-test-support", "storage/recovery-test-support", "workbench-web/test-support"]
 
 [[bin]]
 name = "core-bootstrap-harness"

@@ -228,6 +228,7 @@ impl RestartCoordinator {
         // owns the checked target and the exact read-back tx/revision/nonce.
         // CString backing, pointer arrays, ticket and FD rollback data are owned
         // by PreparedExec. No preparation is repeated after owner stop.
+        tracing::debug!(target: "restart_drain", phase = "fd_prepare_begin");
         let _prepared = environment
             .instance
             .prepare_exec_handoff(
@@ -245,6 +246,7 @@ impl RestartCoordinator {
                 },
             )
             .map_err(text)?;
+        tracing::debug!(target: "restart_drain", phase = "fd_prepare_end");
         writer.barrier().map_err(text)?;
         check_deadline(deadline)?;
         #[cfg(test)]
@@ -254,7 +256,9 @@ impl RestartCoordinator {
         self.finalization_checkpoint(id, Some(ExitStage::ExecPrepared))?;
 
         target.observe(ExitStage::SignalsStopped);
+        tracing::debug!(target: "restart_drain", phase = "signal_transfer_begin");
         let stopped = environment.signals.stop().map_err(text)?;
+        tracing::debug!(target: "restart_drain", phase = "signal_transfer_end");
         stopped.check_pending().map_err(text)?;
         #[cfg(test)]
         if let Some(after) = &target.after {
@@ -272,6 +276,7 @@ impl RestartCoordinator {
             core: self,
             owner: &owner,
         };
+        tracing::debug!(target: "restart_drain", phase = "owner_stop_begin");
         let result = owner.stop_worker_for_exec().map_err(text);
         // NO await / DB / allocation-heavy work on the successful side of this
         // boundary. D-3 will insert only pending/latch check + prepared raw call.
@@ -281,6 +286,8 @@ impl RestartCoordinator {
         } else {
             None
         });
+        // Failed branch only; do not insert tracing/allocation in the future raw-exec window.
+        tracing::debug!(target: "restart_drain", phase = "owner_stop_end", ok = result.is_ok());
         drop(recovery); // failed branch only: heartbeat/diagnostic restoration
         #[cfg(test)]
         if result.is_ok()

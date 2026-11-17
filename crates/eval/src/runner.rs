@@ -49,6 +49,8 @@ pub struct EvalArgs {
     pub verify: Option<String>,
     /// `None` uses [`verify::DEFAULT_TIMEOUT`].
     pub verify_timeout: Option<Duration>,
+    /// Preserve clones on both success and failure for manual inspection.
+    pub keep_workspace: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +142,19 @@ struct Context {
 pub async fn run(
     args: EvalArgs,
     deps: RunnerDeps,
+    on_run: impl FnMut(&RunReport),
+) -> Result<Evaluation, EvalError> {
+    run_with_cleanup(args, deps, on_run, |_, _| {}).await
+}
+
+/// Like [run], with a typed cleanup report delivered while the runner lock is
+/// still held. Callers choose how to display failures without changing the
+/// evaluation's original result. No report is delivered with --keep-workspace.
+pub async fn run_with_cleanup(
+    args: EvalArgs,
+    deps: RunnerDeps,
     mut on_run: impl FnMut(&RunReport),
+    mut on_cleanup: impl FnMut(&Path, &crate::cleanup::Report),
 ) -> Result<Evaluation, EvalError> {
     let user_config_dir = args
         .user_config_dir
@@ -189,7 +203,6 @@ pub async fn run(
         (None, Some(user)) => output::default_dir(user, &thread.thread_id, SystemTime::now()),
         (None, None) => return Err(needs_user_dir("the output directory")),
     };
-    output::create_dir(&dir)?;
     let credentials = match &deps.credentials {
         Some(store) => Arc::clone(store),
         None => {
@@ -224,65 +237,80 @@ pub async fn run(
         finished_at: None,
         runs: Vec::new(),
     };
-    let manifest_path = dir.join(output::MANIFEST_FILE);
-    output::write_json(&manifest_path, &manifest)?;
-    let context = Context {
-        trust: mirrored_trust(user_config_dir.as_deref(), &thread.project_root),
-        identity: CommitIdentity::from_host(&thread.source_toplevel),
-        thread,
-        user_config_dir,
-        budget: base.eval.budget.clone(),
-        verify: args.verify,
-        verify_timeout: args.verify_timeout.unwrap_or(verify::DEFAULT_TIMEOUT),
-        simulator,
-        credentials,
-        deps,
-    };
-    let mut runs = Vec::new();
-    let preflight = preflight::check(&context, &configurations, &dir).await;
-    let preflight_path = dir.join(preflight::REPORT_FILE);
-    output::write_json(&preflight_path, &preflight)?;
-    if let Some(reason) = preflight.failure() {
+    // Do all fallible setup that does not use workspaces before creating the lock.
+    output::create_dir(&dir)?;
+    let guard = crate::cleanup::RunnerGuard::acquire(&dir)?;
+    let keep_workspace = args.keep_workspace;
+    let result = async {
+        let manifest_path = dir.join(output::MANIFEST_FILE);
+        output::write_json(&manifest_path, &manifest)?;
+        let context = Context {
+            trust: mirrored_trust(user_config_dir.as_deref(), &thread.project_root),
+            identity: CommitIdentity::from_host(&thread.source_toplevel),
+            thread,
+            user_config_dir,
+            budget: base.eval.budget.clone(),
+            verify: args.verify,
+            verify_timeout: args.verify_timeout.unwrap_or(verify::DEFAULT_TIMEOUT),
+            simulator,
+            credentials,
+            deps,
+        };
+        let mut runs = Vec::new();
+        let preflight = preflight::check(&context, &configurations, &dir).await;
+        let preflight_path = dir.join(preflight::REPORT_FILE);
+        output::write_json(&preflight_path, &preflight)?;
+        if let Some(reason) = preflight.failure() {
+            manifest.finished_at = Some(output::timestamp(SystemTime::now()));
+            output::write_json(&manifest_path, &manifest)?;
+            return Err(EvalError::Preflight {
+                reason,
+                report: preflight_path,
+            });
+        }
+        for (label, overlay) in configurations {
+            for index in 1..=repeat {
+                let run_dir = dir.join("runs").join(format!("{label}-{index}"));
+                let nonce = nonce()?;
+                manifest.runs.push(RunEntry {
+                    label: label.to_owned(),
+                    index,
+                    dir: format!("runs/{label}-{index}"),
+                    nonce: nonce.clone(),
+                    started_at: output::timestamp(SystemTime::now()),
+                    finished_at: None,
+                    status: None,
+                });
+                output::write_json(&manifest_path, &manifest)?;
+                let outcome = replay_once(&context, overlay, &run_dir, &nonce).await?;
+                if let Some(entry) = manifest.runs.last_mut() {
+                    entry.finished_at = Some(output::timestamp(SystemTime::now()));
+                    entry.status = Some(outcome.status);
+                }
+                output::write_json(&manifest_path, &manifest)?;
+                let report = RunReport {
+                    label: label.to_owned(),
+                    index,
+                    dir: run_dir,
+                    outcome,
+                };
+                on_run(&report);
+                runs.push(report);
+            }
+        }
         manifest.finished_at = Some(output::timestamp(SystemTime::now()));
         output::write_json(&manifest_path, &manifest)?;
-        return Err(EvalError::Preflight {
-            reason,
-            report: preflight_path,
-        });
+        Ok(Evaluation {
+            dir: dir.clone(),
+            runs,
+        })
     }
-    for (label, overlay) in configurations {
-        for index in 1..=repeat {
-            let run_dir = dir.join("runs").join(format!("{label}-{index}"));
-            let nonce = nonce()?;
-            manifest.runs.push(RunEntry {
-                label: label.to_owned(),
-                index,
-                dir: format!("runs/{label}-{index}"),
-                nonce: nonce.clone(),
-                started_at: output::timestamp(SystemTime::now()),
-                finished_at: None,
-                status: None,
-            });
-            output::write_json(&manifest_path, &manifest)?;
-            let outcome = replay_once(&context, overlay, &run_dir, &nonce).await?;
-            if let Some(entry) = manifest.runs.last_mut() {
-                entry.finished_at = Some(output::timestamp(SystemTime::now()));
-                entry.status = Some(outcome.status);
-            }
-            output::write_json(&manifest_path, &manifest)?;
-            let report = RunReport {
-                label: label.to_owned(),
-                index,
-                dir: run_dir,
-                outcome,
-            };
-            on_run(&report);
-            runs.push(report);
-        }
+    .await;
+    if !keep_workspace {
+        on_cleanup(&dir, &guard.cleanup());
     }
-    manifest.finished_at = Some(output::timestamp(SystemTime::now()));
-    output::write_json(&manifest_path, &manifest)?;
-    Ok(Evaluation { dir, runs })
+    // Cleanup warnings must not hide the original evaluation result/error.
+    result
 }
 
 pub(crate) fn load_config(

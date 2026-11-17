@@ -53,6 +53,9 @@ async fn client_for(body: String) -> (MockServer, Arc<EventBus>, CodexClient) {
         },
         store,
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .unwrap();
     (server, bus, client)
 }

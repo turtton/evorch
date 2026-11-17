@@ -1,23 +1,39 @@
-//! Desktop feature of the `improvement` area, read side (PR 13): the
-//! self-improvement candidates of the selected project, filtered by status, and
-//! one candidate opened for its evidence. PR 14 adds the updates to this file.
+//! Desktop feature of the `improvement` area: the self-improvement candidates of
+//! the selected project, filtered by status, one candidate opened for its
+//! evidence (PR 13), and its updates (PR 14): reviewed, dismiss, triage.
 //!
 //! Shows whether the feature is switched on in the settings, and names a draft by
-//! its file name only: the directory it lives in stays in the core.
-use std::collections::BTreeMap;
+//! its file name only: the directory it lives in stays in the core. A triage
+//! only makes a draft and names it; nothing is sent. An update is sent with the
+//! revision the shown candidate had; a refusal is worded and the candidate is
+//! read again, never resent, and an update of unknown outcome is asked for by
+//! its operation id (see the memory feature, which words them the same way).
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::diagnostics::read::{Phase, Read, phase_line};
 use super::layout::paged_list;
+use super::memory::{UNKNOWN_LINE, denial_label, update_line};
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
 use workbench_protocol::{
+    commands::{Command, CommandResult},
+    errors::ErrorCode,
     events::UiEvent,
     handshake::Capability,
-    ids::{ImprovementCandidateId, PageCursor, ProjectId},
-    management::ImprovementStatus,
-    namespaces::improvement::{
-        GetImprovement, ImprovementDetail, ImprovementEvent, ImprovementQuery, ImprovementReply,
-        ImprovementSeverity, ImprovementSource, ImprovementSummary, ListImprovement,
+    ids::{ImprovementCandidateId, OperationId, PageCursor, ProjectId},
+    management::{
+        ActionAvailability, ActionState, ImprovementAction, ImprovementState, ImprovementStatus,
+        TriageSubject,
     },
+    namespaces::{
+        diagnostics::OperationTarget,
+        improvement::{
+            GetImprovement, ImprovementCommand, ImprovementDetail, ImprovementEvent,
+            ImprovementQuery, ImprovementReply, ImprovementResult, ImprovementSeverity,
+            ImprovementSource, ImprovementSummary, ImprovementUpdateView, ListImprovement,
+            TriageImprovement, UpdateImprovement,
+        },
+    },
+    operation::OperationState,
     queries::{PageRequest, Query, QueryReply},
 };
 
@@ -28,10 +44,19 @@ const STATUSES: [(Option<ImprovementStatus>, &str); 4] = [
     (Some(ImprovementStatus::Dismissed), "却下"),
 ];
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Pending {
-    List { generation: u64, append: bool },
-    Detail { generation: u64 },
+    List {
+        generation: u64,
+        append: bool,
+    },
+    Detail {
+        generation: u64,
+    },
+    /// An update sent; its answer is the operation, not the end.
+    Command(OperationId),
+    /// An update asked for by its operation id.
+    Update(OperationId),
 }
 
 #[derive(Default)]
@@ -52,6 +77,23 @@ pub struct ImprovementFeature {
     detail_request: Option<GetImprovement>,
     detail: Option<ImprovementDetail>,
     detail_due: bool,
+    /// The updates sent whose end is not known yet.
+    in_flight: BTreeSet<OperationId>,
+    /// The updates whose outcome is unknown, asked for at the next frame.
+    to_check: BTreeSet<OperationId>,
+    update_line: String,
+}
+
+fn new_operation() -> OperationId {
+    OperationId::new(format!("gui-improvement-{}", uuid::Uuid::new_v4())).expect("a uuid fits")
+}
+
+fn action_label(action: ImprovementAction) -> &'static str {
+    match action {
+        ImprovementAction::MarkReviewed => "確認済みにする",
+        ImprovementAction::Dismiss => "却下する",
+        ImprovementAction::Triage => "下書きを作る",
+    }
 }
 
 fn status_label(status: ImprovementStatus) -> &'static str {
@@ -81,6 +123,79 @@ impl ImprovementFeature {
         self.next_tag += 1;
         self.pending.insert(self.next_tag, pending);
         self.next_tag
+    }
+
+    /// An update ended or changed. Ours is worded (a triage names its draft by
+    /// file); anyone's makes the shown project's candidates stale.
+    fn update_arrived(&mut self, view: &ImprovementUpdateView) {
+        if !view.operation.state.is_final() {
+            return;
+        }
+        let id = &view.operation.operation_id;
+        let ours = self.in_flight.remove(id);
+        self.to_check.remove(id);
+        if ours {
+            let mut line = update_line(
+                view.operation.state,
+                view.changed,
+                view.denial,
+                view.message.as_deref(),
+            );
+            if view.operation.state == OperationState::Ready
+                && let Some(draft) = &view.draft_file
+            {
+                line = format!("{line} 下書き: {draft}（送信はされません）");
+            }
+            self.update_line = line;
+        }
+        if self.project.as_ref() == Some(&view.project) {
+            self.list_due = true;
+            self.detail_due = self.selected.is_some();
+        }
+    }
+
+    /// The outcome of an update is not known: asked for, never resent.
+    fn outcome_lost(&mut self, id: &OperationId) {
+        self.in_flight.remove(id);
+        self.to_check.remove(id);
+        UNKNOWN_LINE.clone_into(&mut self.update_line);
+        self.list_due = true;
+        self.detail_due = self.selected.is_some();
+    }
+
+    fn send(
+        &mut self,
+        ctx: &mut FeatureContext<'_>,
+        project: ProjectId,
+        state: &ImprovementState,
+        action: ImprovementAction,
+    ) {
+        let operation_id = new_operation();
+        let update = || UpdateImprovement {
+            operation_id: operation_id.clone(),
+            project: project.clone(),
+            candidate: state.id.clone(),
+            // What the read said, as it said it.
+            expected_revision: state.revision,
+        };
+        let command = match action {
+            ImprovementAction::MarkReviewed => {
+                ImprovementCommand::MarkImprovementReviewed(update())
+            }
+            ImprovementAction::Dismiss => ImprovementCommand::DismissImprovement(update()),
+            ImprovementAction::Triage => ImprovementCommand::TriageImprovement(TriageImprovement {
+                operation_id: operation_id.clone(),
+                project: project.clone(),
+                subject: TriageSubject {
+                    candidate: state.id.clone(),
+                    expected_revision: state.revision,
+                },
+            }),
+        };
+        self.in_flight.insert(operation_id.clone());
+        "更新中…".clone_into(&mut self.update_line);
+        let tag = self.tag(Pending::Command(operation_id));
+        ctx.command(tag, Command::Improvement(command));
     }
 
     fn switch_project(&mut self, project: Option<ProjectId>) {
@@ -176,7 +291,19 @@ impl Feature for ImprovementFeature {
     }
 
     fn reset(&mut self) {
-        self.pending.clear();
+        // A command in flight keeps its tag: its reply, or the loss of it, says
+        // what became of the update. The others are asked for by operation id.
+        self.pending
+            .retain(|_, pending| matches!(pending, Pending::Command(_)));
+        for id in &self.in_flight {
+            let sent = self
+                .pending
+                .values()
+                .any(|pending| matches!(pending, Pending::Command(sent) if sent == id));
+            if !sent {
+                self.to_check.insert(id.clone());
+            }
+        }
         self.list_read.forget();
         self.detail_read.forget();
         self.enabled = None;
@@ -188,21 +315,78 @@ impl Feature for ImprovementFeature {
     }
 
     fn event(&mut self, event: &UiEvent) {
-        let UiEvent::Improvement(ImprovementEvent::ImprovementOperationChanged { view }) = event
-        else {
-            return;
-        };
-        self.list_read.event(view);
-        self.detail_read.event(view);
+        match event {
+            UiEvent::Improvement(ImprovementEvent::ImprovementOperationChanged { view }) => {
+                self.list_read.event(view);
+                self.detail_read.event(view);
+            }
+            UiEvent::Improvement(ImprovementEvent::ImprovementUpdateCompleted { update }) => {
+                self.update_arrived(update);
+            }
+            _ => {}
+        }
     }
 
     fn reply(&mut self, tag: u64, reply: FeatureReply) {
         let Some(pending) = self.pending.remove(&tag) else {
             return;
         };
-        let FeatureReply::Query(result) = reply else {
-            return;
+        let result = match reply {
+            FeatureReply::Command(result) => {
+                let Pending::Command(id) = pending else {
+                    return;
+                };
+                match result {
+                    Ok(reply) => {
+                        if let Some(CommandResult::Improvement(ImprovementResult::Operation(
+                            view,
+                        ))) = reply.result.map(|boxed| *boxed)
+                        {
+                            self.update_arrived(&view);
+                        }
+                    }
+                    Err(error) if error.outcome_unknown => {
+                        // It may have been applied: asked for, not sent again.
+                        "更新の結果を確認しています…".clone_into(&mut self.update_line);
+                        self.to_check.insert(id);
+                    }
+                    Err(error) => {
+                        self.in_flight.remove(&id);
+                        self.update_line = if error.code == Some(ErrorCode::StaleRevision) {
+                            update_line(
+                                OperationState::Failed {
+                                    code: ErrorCode::StaleRevision,
+                                },
+                                None,
+                                None,
+                                None,
+                            )
+                        } else {
+                            format!("更新できませんでした: {}", error.message)
+                        };
+                        self.list_due = true;
+                        self.detail_due = self.selected.is_some();
+                    }
+                }
+                return;
+            }
+            FeatureReply::Query(result) => result,
         };
+        if let Pending::Update(id) = &pending {
+            match result {
+                Ok(QueryReply::Improvement(ImprovementReply::Update(view))) => {
+                    self.update_arrived(&view);
+                }
+                Ok(_) => {}
+                // The core does not know it: it restarted, or never took it.
+                Err(error) if error.code == Some(ErrorCode::NotFound) => self.outcome_lost(id),
+                Err(error) => {
+                    self.outcome_lost(id);
+                    self.update_line = format!("{} ({})", self.update_line, error.message);
+                }
+            }
+            return;
+        }
         let reply = match result {
             Ok(QueryReply::Improvement(reply)) => reply,
             Ok(_) => return,
@@ -214,6 +398,7 @@ impl Feature for ImprovementFeature {
                     Pending::Detail { generation } => {
                         self.detail_read.fail(generation, error.message);
                     }
+                    Pending::Command(_) | Pending::Update(_) => {}
                 }
                 return;
             }
@@ -254,6 +439,15 @@ impl Feature for ImprovementFeature {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+        for id in std::mem::take(&mut self.to_check) {
+            let tag = self.tag(Pending::Update(id.clone()));
+            ctx.query(
+                tag,
+                Query::Improvement(ImprovementQuery::GetImprovementUpdate(OperationTarget {
+                    operation_id: id,
+                })),
+            );
+        }
         let selected_project = ctx.selection().project.clone();
         if selected_project != self.project {
             self.switch_project(selected_project);
@@ -376,7 +570,34 @@ impl Feature for ImprovementFeature {
                         detail.evidence.total_bytes
                     ));
                 }
+                let busy = !self.in_flight.is_empty();
+                let mut chosen = None;
+                ui.horizontal_wrapped(|ui| {
+                    for ActionAvailability { action, state } in &summary.state.actions {
+                        match state {
+                            ActionState::Allowed => {
+                                if ui
+                                    .add_enabled(!busy, egui::Button::new(action_label(*action)))
+                                    .clicked()
+                                {
+                                    chosen = Some(*action);
+                                }
+                            }
+                            ActionState::Denied { reason } => {
+                                ui.add_enabled(false, egui::Button::new(action_label(*action)))
+                                    .on_disabled_hover_text(denial_label(*reason));
+                            }
+                        }
+                    }
+                });
+                if let Some(action) = chosen {
+                    let state = summary.state.clone();
+                    self.send(ctx, project.clone(), &state, action);
+                }
             }
+        }
+        if !self.update_line.is_empty() {
+            ui.label(&self.update_line);
         }
     }
 }

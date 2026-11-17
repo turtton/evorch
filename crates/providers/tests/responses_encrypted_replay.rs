@@ -231,6 +231,9 @@ async fn b3_same_account_new_token_preserves_scope_different_account_does_not() 
             },
             store.clone(),
         )
+        .map(|client| {
+            client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+        })
         .unwrap()
     };
     let auth = ProviderAuth::new("");
@@ -301,6 +304,8 @@ fn b3_secret_bearing_endpoint_components_cannot_alias_a_replay_scope() {
                 },
                 contract_support::seeded_store()
             )
+            .map(|client| client
+                .with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new())))
             .is_err()
         );
     }

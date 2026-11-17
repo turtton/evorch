@@ -196,6 +196,9 @@ fn codex_client(
         },
         store,
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .expect("Codex client を構築できる")
 }
 

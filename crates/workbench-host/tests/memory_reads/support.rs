@@ -24,6 +24,8 @@ pub struct Parts {
     pub database: PathBuf,
     pub runtime: AgentRuntime,
     pub dir: PathBuf,
+    /// The storage writer of the database: what an updating area writes through.
+    pub storage: storage::StorageHandle,
 }
 
 pub struct World {
@@ -83,6 +85,7 @@ pub fn world(areas: impl FnOnce(Parts) -> Areas) -> World {
         database,
         runtime: runtime.clone(),
         dir: dir.path().to_path_buf(),
+        storage: store.handle(),
     });
     let host = host.with_areas(areas);
     World {

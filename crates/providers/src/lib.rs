@@ -37,7 +37,8 @@ pub use message::{
     RequestTurnContext, Role, ServiceTier, ToolChoice, ToolResultContent, ToolSpec, Usage,
 };
 pub use models::{
-    CODEX_CLIENT_VERSION, CodexModelCapabilities, CodexModelInfo, list_codex_models, list_models,
+    CODEX_CLIENT_VERSION, CodexCatalogCache, CodexModelCapabilities, CodexModelInfo,
+    default_codex_catalog_cache, list_codex_models, list_codex_models_with_cache, list_models,
     verify_connectivity,
 };
 pub use responses_replay::{

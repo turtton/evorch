@@ -5,6 +5,8 @@ mod apply_patch_cache;
 #[path = "approval_cache/mod.rs"]
 mod approval_cache;
 mod btw_cache;
+#[path = "cache_preservation_e2e/codex_catalog.rs"]
+mod codex_catalog_cache;
 mod codex_run_identity_cache;
 mod delegation_question_cache;
 #[path = "encrypted_reasoning_cache/mod.rs"]
@@ -333,6 +335,37 @@ fn harness_with_catalog_and_executor(
     configure: impl FnOnce(&mut Config),
     configure_executor: impl FnOnce(&mut ToolExecutor, &Arc<EventBus>),
 ) -> Harness {
+    harness_with_catalog_executor_and_cache(
+        wire,
+        model,
+        catalog_capabilities,
+        script,
+        window,
+        read,
+        extra_tools,
+        checker,
+        threshold,
+        configure,
+        configure_executor,
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn harness_with_catalog_executor_and_cache(
+    wire: Wire,
+    model: &str,
+    catalog_capabilities: Option<Value>,
+    script: Vec<ScriptedResponse>,
+    window: u64,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
+    threshold: f64,
+    configure: impl FnOnce(&mut Config),
+    configure_executor: impl FnOnce(&mut ToolExecutor, &Arc<EventBus>),
+    catalog_cache: Arc<providers::CodexCatalogCache>,
+) -> Harness {
     let directory = test_socket_dir::SplitDir::new();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(script, vec![model.into()]);
     let mock = match catalog_capabilities {
@@ -405,25 +438,29 @@ summarizer = "structural"
         Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
     let env = Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")]));
     let model_source = match wire {
-        Wire::Codex => ModelSource::Fixed(codex_model(
+        Wire::Codex => ModelSource::Fixed(codex_model_with_cache(
             &config,
             &credential_store,
             &bus,
             &mock.codex_base_url(),
+            catalog_cache.clone(),
         )),
         Wire::ChatCompletions | Wire::Responses => ModelSource::Configured,
     };
-    let runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(directory.path().join("empty-user-config")),
-        config: &config,
-        bus,
-        executor: Arc::new(executor),
-        credential_store,
-        env,
-        model_source,
-        workspace: None,
-    })
+    let runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(directory.path().join("empty-user-config")),
+            config: &config,
+            bus,
+            executor: Arc::new(executor),
+            credential_store,
+            env,
+            model_source,
+            workspace: None,
+        },
+        catalog_cache,
+    )
     .unwrap()
     .runtime
     .with_sequential_run_ids()
@@ -449,6 +486,22 @@ fn codex_model(
     bus: &Arc<EventBus>,
     base_url: &str,
 ) -> Arc<dyn runtime::AgentModel> {
+    codex_model_with_cache(
+        config,
+        store,
+        bus,
+        base_url,
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
+}
+
+fn codex_model_with_cache(
+    config: &Config,
+    store: &Arc<FileCredentialStore>,
+    bus: &Arc<EventBus>,
+    base_url: &str,
+    catalog_cache: Arc<providers::CodexCatalogCache>,
+) -> Arc<dyn runtime::AgentModel> {
     use sandbox::credential::{CredentialStore, Secret};
 
     store
@@ -468,6 +521,7 @@ fn codex_model(
             env: Arc::new(MapEnv::default()),
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions {
+                codex_catalog_cache: Some(catalog_cache),
                 auth_base_url_override: Some(base_url.into()),
                 ..Default::default()
             },
@@ -1553,17 +1607,22 @@ fn recompose_runtime(
     harness.receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(Arc::new(BulkRead)).unwrap();
-    let runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(root.join("empty-user-config")),
-        config: &current,
-        bus,
-        executor: Arc::new(executor),
-        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
-        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-        model_source: ModelSource::Configured,
-        workspace: None,
-    })
+    let runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(root.join("empty-user-config")),
+            config: &current,
+            bus,
+            executor: Arc::new(executor),
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            model_source: ModelSource::Configured,
+            workspace: None,
+        },
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
     .unwrap()
     .runtime
     .with_compaction(current.compaction.clone());
@@ -1580,6 +1639,20 @@ async fn resume_unfinished_model_request(
     restart: bool,
     above_threshold: bool,
     convert: Option<u32>,
+) {
+    resume_unfinished_model_request_with(compacted, restart, above_threshold, convert, false).await;
+}
+
+/// `through_management`: the lesson that arrives while the run is stopped is
+/// validated and promoted by the management screens' conditional update (the
+/// one the core's `memory` commands call, quoting the revision read) instead
+/// of the learning queue's own writes.
+async fn resume_unfinished_model_request_with(
+    compacted: bool,
+    restart: bool,
+    above_threshold: bool,
+    convert: Option<u32>,
+    through_management: bool,
 ) {
     let (gate, arrived) = mock_openai::ResponseGate::new();
     let mut script = vec![read_response(2)];
@@ -1663,11 +1736,26 @@ async fn resume_unfinished_model_request(
         scope: storage::memory::LessonScope::Project,
     };
     storage.handle().append_lesson(&lesson).unwrap();
-    storage
-        .handle()
-        .validate_lesson(&lesson.id, &lesson.evidence)
-        .unwrap();
-    storage.handle().promote_lesson(&lesson.id).unwrap();
+    if through_management {
+        use storage::management::{CasOutcome, MemoryOp};
+        for op in [MemoryOp::Validate, MemoryOp::Promote] {
+            let revision = storage::Database::open(&config)
+                .unwrap()
+                .memory_revision(&lesson.id)
+                .unwrap();
+            let outcome = storage
+                .handle()
+                .update_memory(&lesson.id, revision, op)
+                .unwrap();
+            assert!(matches!(outcome, CasOutcome::Applied { .. }), "{outcome:?}");
+        }
+    } else {
+        storage
+            .handle()
+            .validate_lesson(&lesson.id, &lesson.evidence)
+            .unwrap();
+        storage.handle().promote_lesson(&lesson.id).unwrap();
+    }
     let memory = runtime::memory::MemoryBoundary::capture(&config, "project").unwrap();
     assert_eq!(memory.entries().len(), 1);
     let (storage, restart) = if let Some(source) = convert {
@@ -1742,6 +1830,16 @@ async fn resume_unfinished_model_request(
     assert!(events[restored_from..].iter().any(|event| matches!(&event.kind,
         EventKind::Provider(ProviderEvent::RequestCompleted { cache_read_tokens, run_id: Some(id), .. })
         if id == &run.to_string() && *cache_read_tokens > 0)));
+}
+
+/// A lesson promoted by a person through the management update reaches the tasks
+/// created afterwards (the boundary captured above holds it), but not a run that
+/// already exists: its resume sends exactly the input it was interrupted with.
+#[tokio::test]
+async fn promoting_a_lesson_through_the_management_update_keeps_an_existing_runs_resume_prefix() {
+    for compacted in [false, true] {
+        resume_unfinished_model_request_with(compacted, true, false, None, true).await;
+    }
 }
 
 #[tokio::test]
@@ -2020,17 +2118,22 @@ fn restart_runtime(harness: &mut Harness, config: &storage::StorageConfig, db: &
     harness.receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(Arc::new(BulkRead)).unwrap();
-    harness.runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(root.join("empty-user-config")),
-        config: &current,
-        bus,
-        executor: Arc::new(executor),
-        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
-        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-        model_source: ModelSource::Configured,
-        workspace: None,
-    })
+    harness.runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(root.join("empty-user-config")),
+            config: &current,
+            bus,
+            executor: Arc::new(executor),
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            model_source: ModelSource::Configured,
+            workspace: None,
+        },
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
     .unwrap()
     .runtime
     .with_compaction(current.compaction.clone())
@@ -2899,17 +3002,22 @@ fn restart_saved_compaction_harness(
     harness.receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(Arc::new(BulkRead)).unwrap();
-    harness.runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(root.join("empty-user-config")),
-        config: &current,
-        bus,
-        executor: Arc::new(executor),
-        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
-        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-        model_source: ModelSource::Configured,
-        workspace: None,
-    })
+    harness.runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(root.join("empty-user-config")),
+            config: &current,
+            bus,
+            executor: Arc::new(executor),
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            model_source: ModelSource::Configured,
+            workspace: None,
+        },
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
     .unwrap()
     .runtime
     .with_system_prompts(contract_prompts())

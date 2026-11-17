@@ -225,6 +225,7 @@ impl EventQueue {
         let permits = match self.try_reserve(bytes) {
             Some(permits) => permits,
             None => {
+                tracing::debug!(target: "restart_drain", phase = "backpressure", capacity = WRITE_QUEUE_CAPACITY);
                 // Pending reasoning owns permits too. Send it before waiting so
                 // the writer can release capacity, avoiding a partial-batch deadlock.
                 self.flush().await?;
@@ -262,6 +263,7 @@ impl EventQueue {
             byte_permit: permits.1,
             registration: self.monitor.register(serialized_bytes),
         };
+        tracing::trace!(target: "restart_drain", phase = "queue_pending", pending = self.monitor.snapshot().pending_events, capacity = WRITE_QUEUE_CAPACITY);
         let Some(run) = delta_run else {
             return self.send(next).await;
         };

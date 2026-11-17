@@ -30,7 +30,7 @@ use crate::stream::{DeltaStream, StreamEvent};
 use crate::wire::codex::{CodexResponsesRequest, CodexStreamInterpreter};
 
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
+pub(super) const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const COMPACTION_TIMEOUT: Duration = Duration::from_secs(600);
 const COMPACTION_READ_TIMEOUT: Duration = Duration::from_secs(300);
@@ -102,8 +102,8 @@ fn catalog_failure(error: &ProviderError) -> String {
     .into()
 }
 
-/// client の生存期間に 1 回だけ取得した catalog の結果。途中で要求の形状が変わって
-/// prefix が壊れないよう、成功も失敗も固定する。失敗は能力不明 (従来の形状) として扱う。
+/// Immutable wire snapshot. A discovery failure alone does not establish it.
+#[derive(Clone)]
 struct CatalogOutcome {
     models: Result<Vec<CodexModelInfo>, ProviderError>,
 }
@@ -190,8 +190,12 @@ pub struct CodexClient {
     session: CodexSessionManager,
     /// クライアントの生存期間を通じて維持するセッション識別子。
     session_id: String,
-    /// 生存期間中 1 回だけ取得する model catalog。要求の形状と `list_models` が共有する。
-    catalog: tokio::sync::OnceCell<CatalogOutcome>,
+    /// Once established, wire capabilities never change under a sent prefix.
+    catalog: std::sync::OnceLock<Arc<CatalogOutcome>>,
+    /// First nonempty listing, including recovery after wire fixed legacy fallback.
+    discovery: std::sync::OnceLock<Arc<CatalogOutcome>>,
+    catalog_gate: tokio::sync::Mutex<()>,
+    catalog_cache: Arc<crate::CodexCatalogCache>,
 }
 
 impl CodexClient {
@@ -214,7 +218,10 @@ impl CodexClient {
             profile: None,
             session,
             session_id: Uuid::new_v4().to_string(),
-            catalog: tokio::sync::OnceCell::new(),
+            catalog: std::sync::OnceLock::new(),
+            discovery: std::sync::OnceLock::new(),
+            catalog_gate: tokio::sync::Mutex::new(()),
+            catalog_cache: crate::default_codex_catalog_cache(),
         })
     }
 
@@ -245,7 +252,10 @@ impl CodexClient {
             profile: None,
             session,
             session_id: Uuid::new_v4().to_string(),
-            catalog: tokio::sync::OnceCell::new(),
+            catalog: std::sync::OnceLock::new(),
+            discovery: std::sync::OnceLock::new(),
+            catalog_gate: tokio::sync::Mutex::new(()),
+            catalog_cache: crate::default_codex_catalog_cache(),
         })
     }
 
@@ -253,6 +263,17 @@ impl CodexClient {
     pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
         self.profile = Some(profile.into());
         self
+    }
+
+    /// Selects an independent cache without changing configuration or the wire contract.
+    pub fn with_catalog_cache(mut self, cache: Arc<crate::CodexCatalogCache>) -> Self {
+        self.catalog_cache = cache;
+        self
+    }
+
+    /// The cache identity; inspecting it does not read or mutate saved catalogs.
+    pub fn catalog_cache(&self) -> &Arc<crate::CodexCatalogCache> {
+        &self.catalog_cache
     }
 
     fn observer(&self, request: &ChatRequest, streaming: bool) -> AttemptObserver {
@@ -337,8 +358,8 @@ impl CodexClient {
     }
 
     /// The wire body of one request. The model's catalog capabilities decide its shape
-    /// (Responses Lite, reasoning, verbosity, service tier); the catalog is fetched once
-    /// per client so the shape never changes under an established prompt-cache prefix.
+    /// (Responses Lite, reasoning, verbosity, service tier); the immutable wire snapshot
+    /// keeps that shape stable under an established prompt-cache prefix.
     async fn scoped_wire_request(
         &self,
         request: &ChatRequest,
@@ -360,50 +381,48 @@ impl CodexClient {
         )
     }
 
-    /// Fetches the catalog on first use and keeps the outcome for the client's lifetime,
-    /// failure included (the requests then keep the legacy shape). Only a missing session
-    /// leaves it unfetched, since that is not an answer from the catalog. The flag tells
-    /// whether this call performed the fetch. A failed fetch always emits one diagnostic;
-    /// a successful one only when `announce_success` (catalog discovery asked for it).
-    async fn catalog_outcome(
-        &self,
-        announce_success: bool,
-    ) -> Result<(&CatalogOutcome, bool), ProviderError> {
-        let fetched = std::sync::atomic::AtomicBool::new(false);
-        let outcome = self
-            .catalog
-            .get_or_try_init(|| async {
-                fetched.store(true, std::sync::atomic::Ordering::Relaxed);
-                let token = self.session.current().await?;
-                Ok(self.fetch_catalog(&token, announce_success).await)
-            })
-            .await?;
-        Ok((outcome, fetched.into_inner()))
-    }
-
-    async fn ensure_catalog(&self) -> Result<&CatalogOutcome, ProviderError> {
-        self.catalog_outcome(false)
-            .await
-            .map(|(outcome, _)| outcome)
-    }
-
-    async fn fetch_catalog(
-        &self,
-        token: &AuthorizedCodexToken,
-        announce_success: bool,
-    ) -> CatalogOutcome {
-        let started = std::time::Instant::now();
-        let models = crate::list_codex_models(
-            &self.catalog_base_url,
-            &ProviderAuth::new(token.access_token.clone()),
-            &token.chatgpt_account_id,
-        )
-        .await;
-        let outcome = CatalogOutcome { models };
-        if announce_success || outcome.models.is_err() {
-            self.emit_catalog_diagnostic(&outcome, false, started.elapsed());
+    /// Discovery retries failures/empty lists. Wire use freezes any outcome, including
+    /// legacy fallback, while the first nonempty discovery also freezes capabilities.
+    async fn catalog_outcome(&self, for_wire: bool) -> Result<Arc<CatalogOutcome>, ProviderError> {
+        let _gate = self.catalog_gate.lock().await;
+        let snapshot = if for_wire {
+            self.catalog.get()
+        } else {
+            self.discovery.get()
+        };
+        if let Some(outcome) = snapshot {
+            if !for_wire && outcome.models.is_ok() {
+                self.emit_catalog_diagnostic(outcome, true, Duration::ZERO);
+            }
+            return Ok(outcome.clone());
         }
-        outcome
+        // A missing session is not a catalog outcome and never establishes a snapshot.
+        let token = self.session.current().await?;
+        let started = std::time::Instant::now();
+        let (models, cache_hit) = self
+            .catalog_cache
+            .fetch(
+                &self.catalog_base_url,
+                &ProviderAuth::new(token.access_token.clone()),
+                &token.chatgpt_account_id,
+            )
+            .await;
+        let outcome = Arc::new(CatalogOutcome { models });
+        if !for_wire || outcome.models.is_err() {
+            self.emit_catalog_diagnostic(&outcome, cache_hit, started.elapsed());
+        }
+        let nonempty = outcome.models.as_ref().is_ok_and(|m| !m.is_empty());
+        if nonempty {
+            let _ = self.discovery.set(outcome.clone());
+        }
+        if for_wire || nonempty {
+            let _ = self.catalog.set(outcome.clone());
+        }
+        Ok(outcome)
+    }
+
+    async fn ensure_catalog(&self) -> Result<Arc<CatalogOutcome>, ProviderError> {
+        self.catalog_outcome(true).await
     }
 
     fn emit_catalog_diagnostic(
@@ -635,10 +654,7 @@ impl ProviderClient for CodexClient {
     /// Discovery goes through the request session so an idle profile refreshes its token,
     /// and uses the client version its requests send.
     async fn list_models(&self, _: &ProviderAuth) -> Result<Option<Vec<String>>, ProviderError> {
-        let (outcome, fetched) = self.catalog_outcome(true).await?;
-        if !fetched && outcome.models.is_ok() {
-            self.emit_catalog_diagnostic(outcome, true, Duration::ZERO);
-        }
+        let outcome = self.catalog_outcome(false).await?;
         outcome
             .models
             .as_ref()

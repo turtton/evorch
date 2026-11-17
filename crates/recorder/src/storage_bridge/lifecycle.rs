@@ -80,11 +80,12 @@ impl OwnedStorageBridge {
     /// snapshot. Reports the first write failure since the preceding barrier.
     /// This synchronous method waits for SQLite writes and usage flush to finish.
     pub fn flush(&mut self) -> io::Result<()> {
+        tracing::debug!(target: "restart_drain", phase = "flush_begin", pending = self.monitor.snapshot().pending_events);
         let (reply, completed) = std::sync::mpsc::channel();
         self.flush_requests
             .send(reply)
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "storage bridge is closed"))?;
-        completed
+        let result = completed
             .recv()
             .map_err(|_| {
                 io::Error::new(
@@ -92,7 +93,9 @@ impl OwnedStorageBridge {
                     "storage bridge flush was interrupted",
                 )
             })?
-            .map_err(io::Error::other)
+            .map_err(io::Error::other);
+        tracing::debug!(target: "restart_drain", phase = "flush_ack", ok = result.is_ok());
+        result
     }
 
     /// Drain accepted events and the snapshot pending when the stop is observed,
@@ -131,13 +134,18 @@ impl OwnedStorageBridge {
         if let Some(result) = &self.stopped_result {
             return Ok(result.clone());
         }
+        if self.thread.is_some() {
+            tracing::debug!(target: "restart_drain", phase = "subscriber_join_begin");
+        }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
         let Some(thread) = self.thread.take() else {
             return Ok(Ok(()));
         };
-        match thread.join() {
+        let joined = thread.join();
+        tracing::debug!(target: "restart_drain", phase = "subscriber_join_end", ok = joined.as_ref().is_ok_and(|r| r.is_ok()));
+        match joined {
             Ok(result) => {
                 self.stopped_result = Some(result.clone());
                 Ok(result)

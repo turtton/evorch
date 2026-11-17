@@ -39,6 +39,9 @@ pub fn client(server: &MockServer, store: Arc<dyn CodexTokenStore>) -> CodexClie
         },
         store,
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .expect("Codex client can be built")
 }
 

@@ -1,4 +1,42 @@
 {
+  "command/improvement/dismiss_improvement": {
+    "payload": {
+      "payload": {
+        "candidate": "cand-1",
+        "expected_revision": "4",
+        "operation_id": "op-3",
+        "project": "project-1"
+      },
+      "type": "dismiss_improvement"
+    },
+    "type": "improvement"
+  },
+  "command/improvement/mark_improvement_reviewed": {
+    "payload": {
+      "payload": {
+        "candidate": "cand-1",
+        "expected_revision": "4",
+        "operation_id": "op-3",
+        "project": "project-1"
+      },
+      "type": "mark_improvement_reviewed"
+    },
+    "type": "improvement"
+  },
+  "command/improvement/triage_improvement": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-3",
+        "project": "project-1",
+        "subject": {
+          "candidate": "cand-1",
+          "expected_revision": "4"
+        }
+      },
+      "type": "triage_improvement"
+    },
+    "type": "improvement"
+  },
   "query/improvement/get_improvement": {
     "payload": {
       "payload": {
@@ -16,6 +54,15 @@
         "operation_id": "op-1"
       },
       "type": "get_improvement_operation"
+    },
+    "type": "improvement"
+  },
+  "query/improvement/get_improvement_update": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-3"
+      },
+      "type": "get_improvement_update"
     },
     "type": "improvement"
   },
@@ -168,6 +215,26 @@
     },
     "type": "improvement"
   },
+  "query_reply/improvement/update": {
+    "payload": {
+      "payload": {
+        "action": "triage",
+        "candidate": "cand-1",
+        "message": "the candidate changed since it was read; read it again and decide again",
+        "operation": {
+          "operation_id": "op-3",
+          "revision": "5",
+          "state": {
+            "code": "stale_revision",
+            "type": "failed"
+          }
+        },
+        "project": "project-1"
+      },
+      "type": "update"
+    },
+    "type": "improvement"
+  },
   "ui_event/improvement/improvement_operation_changed": {
     "payload": {
       "payload": {
@@ -180,6 +247,29 @@
         }
       },
       "type": "improvement_operation_changed"
+    },
+    "type": "improvement"
+  },
+  "ui_event/improvement/improvement_update_completed": {
+    "payload": {
+      "payload": {
+        "update": {
+          "action": "triage",
+          "candidate": "cand-1",
+          "changed": true,
+          "draft_file": "cand-1.issue.md",
+          "operation": {
+            "operation_id": "op-3",
+            "revision": "5",
+            "state": {
+              "type": "ready"
+            }
+          },
+          "project": "project-1",
+          "revision": "5"
+        }
+      },
+      "type": "improvement_update_completed"
     },
     "type": "improvement"
   }

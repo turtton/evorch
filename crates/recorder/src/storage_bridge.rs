@@ -336,7 +336,14 @@ async fn run_subscribed(
             let mut failure = None;
             while let Some(request) = pending.blocking_recv() {
                 let result = match request {
-                    WriteRequest::Event(queued) => bridge.handle_event(&queued.event),
+                    WriteRequest::Event(queued) => {
+                        tracing::trace!(target: "restart_drain", phase = "persist_begin", monotonic_ns = queued.event.meta.monotonic.as_nanos() as u64);
+                        let monotonic_ns = queued.event.meta.monotonic.as_nanos() as u64;
+                        let result = bridge.handle_event(&queued.event);
+                        drop(queued);
+                        tracing::trace!(target: "restart_drain", phase = "persist_end", monotonic_ns, pending = bridge.monitor.snapshot().pending_events);
+                        result
+                    }
                     WriteRequest::FlushUsage => bridge.flush_usage_checked(),
                     WriteRequest::Barrier(reply) => {
                         if let Err(error) = bridge.flush_usage_checked() {
@@ -345,6 +352,7 @@ async fn run_subscribed(
                         // This FIFO barrier runs only after preceding appends
                         // return from SQLite. Keep the subscriber alive for the
                         // final ownership Released event before shutdown.
+                        tracing::debug!(target: "restart_drain", phase = "flush_reply", ok = failure.is_none());
                         let _ = reply.send(failure.take().map_or(Ok(()), Err));
                         continue;
                     }
@@ -358,12 +366,14 @@ async fn run_subscribed(
             }
             // What failed after the last barrier (a barrier reports and clears
             // its own interval), and the final usage flush, are the stop's.
+            tracing::debug!(target: "restart_drain", phase = "final_flush_begin");
             if let Err(error) = bridge.flush_usage_checked() {
                 bridge
                     .monitor
                     .warn(&format!("failed to flush usage metrics: {error}"));
                 failure.get_or_insert_with(|| error.to_string());
             }
+            tracing::debug!(target: "restart_drain", phase = "final_flush_end", ok = failure.is_none());
             failure
         })
     });
@@ -410,6 +420,7 @@ async fn run_subscribed(
                 queue.barrier(reply).await
             }
             BridgeInput::Shutdown => {
+                tracing::debug!(target: "restart_drain", phase = "subscriber_drain_begin");
                 // Capture before awaiting any writes: later emissions cannot
                 // keep an application close waiting forever on live producers.
                 for event in subscriber.drain_pending_snapshot() {
@@ -443,9 +454,11 @@ async fn run_subscribed(
             break;
         }
     }
+    tracing::debug!(target: "restart_drain", phase = "queue_drain_begin");
     if queue.flush().await.is_err() {
         stop_failure.get_or_insert("the final flush could not reach the writer");
     }
+    tracing::debug!(target: "restart_drain", phase = "queue_drain_end");
     drop(queue);
     let written = match writer.await {
         Ok(failure) => failure,
@@ -454,6 +467,7 @@ async fn run_subscribed(
             Some(format!("the storage bridge writer failed to join: {error}"))
         }
     };
+    tracing::debug!(target: "restart_drain", phase = "bridge_worker_joined", ok = written.is_none() && stop_failure.is_none());
     match (written, stop_failure) {
         (Some(failure), _) => Err(failure),
         (None, Some(failure)) => Err(failure.to_owned()),

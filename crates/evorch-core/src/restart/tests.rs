@@ -126,6 +126,12 @@ async fn boot() -> (tempfile::TempDir, BootstrappedHost) {
 async fn boot_with_model(
     model: Arc<dyn runtime::AgentModel>,
 ) -> (tempfile::TempDir, BootstrappedHost) {
+    boot_composition(model, false).await
+}
+async fn boot_composition(
+    model: Arc<dyn runtime::AgentModel>,
+    core: bool,
+) -> (tempfile::TempDir, BootstrappedHost) {
     let dir = tempfile::tempdir_in("/tmp").unwrap();
     let root = dir.path().canonicalize().unwrap();
     let mut sidebar = workspace_state::SidebarState::default();
@@ -137,18 +143,25 @@ async fn boot_with_model(
         serde_json::to_vec(&sidebar).unwrap(),
     )
     .unwrap();
-    let boot = BootstrappedHost::open_with_test_seams(
-        BootstrapOptions {
-            config_dir: root.clone(),
-            project_root: root.clone(),
-            ownership_root: root.join("o"),
-        },
-        TestSeams {
-            model,
-            sandbox: Arc::new(Direct),
-        },
-    )
-    .await
+    let options = BootstrapOptions {
+        config_dir: root.clone(),
+        project_root: root.clone(),
+        ownership_root: root.join("o"),
+    };
+    let seams = TestSeams {
+        model,
+        sandbox: Arc::new(Direct),
+    };
+    let boot = if core {
+        BootstrappedHost::open_for_core_with_test_seams(
+            options,
+            seams,
+            &crate::recovery_service::CoreGraphRecovery,
+        )
+        .await
+    } else {
+        BootstrappedHost::open_with_test_seams(options, seams).await
+    }
     .unwrap();
     assert_owner_socket_paths(&root.join("o"));
     (dir, boot)
