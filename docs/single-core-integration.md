@@ -249,17 +249,23 @@ only its own commands, queries and DTO handling on top.
 | Connect-or-start is the launcher's (`core_launcher::Launcher`), never a second implementation: racing clients, a core that exits with "already running" and the single cold-start attempt stay there. The module only says how the client got attached (`Attach::{Existing, Started, Joined}`). A failed launch is `CliError::Unavailable` and the command ends: there is no embedded fallback and the configuration database is not opened by the CLI | `core_client::connect_core` | `core_client` unit tests (a scripted connector: started, existing, joined after a wait or an `AlreadyRunning`, two racing launches, a launch that gives up) |
 | The CLI sends no provenance; the core attaches it from the connection (`Surface::Cli` is the core's to set). The client introduces itself as `evorch-cli` with a per-process id | `core_client::client_config` | `core_client` unit tests |
 | A command whose reply is lost is `CliError::OutcomeUnknown` and is **never** sent again; the caller reads the operation (or says the outcome is unknown) | `core_client::send` (the client has no retry) | `core_client` unit tests (exactly one request written) |
-| An operation is waited for with no clock: `wait_settled` opens the subscription before the first read, reads again after each event the caller names, and re-subscribes when a subscription ends on a live connection. A lost connection, or an operation the core no longer knows (`Step::Unknown`), is an unknown outcome, not a failure and not a success | `core_client::wait_settled` | `core_client` unit tests (read again after each relevant event, an unnamed event wakes nothing, a closed connection, an unknown operation) |
+| An operation is waited for with no clock: `wait_settled` opens the subscription before the first read, reads again after each event the caller names, and re-subscribes when a subscription ends on a live connection. A lost connection (a clean close, or a frame cut off in the middle), or an operation the core no longer knows (`Step::Unknown`), is an unknown outcome, not a failure and not a success | `core_client::wait_settled` | `core_client` unit tests (read again after each relevant event, an unnamed event wakes nothing, a closed connection, a connection cut off mid-frame while reading or subscribing, an unknown operation) |
 | Exit codes of ADR 0045 §10 (0, 1, 3, 130) | `core_client::exit` | `core_client` unit tests |
 
-- The integration PR also adds three dependencies to `crates/evorch`
+- The integration PR also adds five dependencies to `crates/evorch`
   (`core-launcher`, `core-instance` for the configuration identity, and
-  `workbench-client`/`workbench-protocol`), registers the module in `cli/mod.rs`
+  `workbench-client`, `workbench-protocol` and `uuid` for the client id),
+  registers the module in `cli/mod.rs`
   and registers the cache target `core_eval_cache` of PR 17c (a placeholder
   file, in `CACHE_CONTRACT_FILTER`). The scope `pr17d` already covers 17d-2.
 - `scripts/workbench-boundary-allowlist.txt` keeps `evorch eval normal 17c`
   until 19b: `eval clean` stays outside the core (ADR 0045 §10 names run, report
   and rejudge) and still uses the `eval` crate.
+- This PR is the client side only. The core still records every Unix-socket
+  connection as `Surface::Desktop` (`crates/evorch-core/src/unix.rs`, where the
+  provenance is fixed), so a CLI connection is not yet recorded as
+  `Surface::Cli` as ADR 0045 §6 requires. Making the core record the surface
+  the connection declares is done in 17c or later, not here.
 
 ## Reserved migration numbers
 

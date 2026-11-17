@@ -280,12 +280,21 @@ pub enum Step<T> {
     Unknown,
 }
 
+/// A failure of reading or following an operation. Whatever ended the
+/// connection (a clean close, a reply lost, a frame cut off in the middle, a
+/// frame the client refuses) says nothing about whether the operation ran, so
+/// all of them are an unknown outcome. Only the core's own refusal and a
+/// request this client built wrongly are failures of the command. A full
+/// request queue closes nothing: it is a failure to retry later, not a loss.
 fn lost(error: ClientError) -> CliError {
-    match CliError::from(error) {
-        CliError::Disconnected | CliError::OutcomeUnknown { .. } => CliError::unknown(
-            "the connection ended while the operation was running; the core may still be running it",
-        ),
-        other => other,
+    match error {
+        ClientError::Transport(
+            TransportError::QueueFull | TransportError::OutcomeUnknown { .. },
+        ) => CliError::from(error),
+        ClientError::Transport(cause) => CliError::unknown(format!(
+            "the connection ended while the operation was running ({cause}); the core may still be running it"
+        )),
+        other => CliError::from(other),
     }
 }
 
@@ -660,6 +669,67 @@ mod tests {
             "{error:?}"
         );
         assert!(error.to_string().contains("was not sent again"));
+    }
+
+    /// What a core that dies in the middle of writing a reply leaves on the wire.
+    fn cut_off_reply(server: &mut FakeServer) {
+        let mut cut = 64u32.to_be_bytes().to_vec();
+        cut.extend_from_slice(b"{\"reply\"");
+        server.send_raw(cut);
+        server.close();
+    }
+
+    #[tokio::test]
+    async fn a_connection_cut_off_in_the_middle_of_a_frame_is_an_unknown_outcome() {
+        // The connection is lost with a read in flight: the client reports a
+        // protocol violation for the half frame, but whether the operation ran
+        // is exactly as unknown as after a clean close.
+        let (client, mut server) = connected().await;
+        let waiting = wait_settled(&client, SubscriptionScope::All, is_status, || async {
+            client
+                .query(Query::Lifecycle(
+                    workbench_protocol::namespaces::LifecycleQuery::GetCoreStatus,
+                ))
+                .await
+                .map(|_| Step::<()>::Pending)
+        });
+        let core = async {
+            serve_subscribe(&mut server, "sub-1").await;
+            let request = server.recv_request().await.expect("the read");
+            assert!(matches!(request.body, RequestBody::Query(_)));
+            cut_off_reply(&mut server);
+        };
+        let (outcome, ()) = tokio::join!(waiting, core);
+        let error = outcome.unwrap_err();
+        assert!(
+            matches!(error, CliError::OutcomeUnknown { request: None, .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.exit_code(), ExitCode::from(1));
+    }
+
+    #[tokio::test]
+    async fn a_connection_cut_off_while_subscribing_is_an_unknown_outcome() {
+        let (client, mut server) = connected().await;
+        let waiting = wait_settled(&client, SubscriptionScope::All, is_status, || async {
+            Ok(Step::<()>::Pending)
+        });
+        let core = async {
+            let request = server.recv_request().await.expect("subscribe request");
+            assert!(matches!(request.body, RequestBody::Control(_)));
+            cut_off_reply(&mut server);
+        };
+        let (outcome, ()) = tokio::join!(waiting, core);
+        assert!(matches!(
+            outcome,
+            Err(CliError::OutcomeUnknown { request: None, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_full_request_queue_is_a_failure_not_a_lost_connection() {
+        let error = lost(ClientError::Transport(TransportError::QueueFull));
+        assert!(matches!(error, CliError::Failed(_)), "{error:?}");
     }
 
     #[tokio::test]
