@@ -12,6 +12,7 @@ use egui_kittest::{
 };
 use workbench_protocol::{
     commands::CommandReply,
+    errors::RetryAdvice,
     namespaces::pull_requests::{AutoFixView, LinkOrigin, LinkView, PullRequestRef},
     wire::{Sequence, UnixMillis},
 };
@@ -168,6 +169,55 @@ fn a_refused_command_says_it_is_stale_and_reads_the_thread_again() {
         query_of(&again[0]),
         Query::PullRequests(PullRequestsQuery::GetThreadPullRequest { .. })
     ));
+}
+
+/// Sends an unlink and answers it with a refusal for a limit that carries `retry`.
+fn refused_for_a_limit(retry: RetryAdvice) -> Harness<'static, Screen> {
+    let mut screen = loaded(view(true, true));
+    screen.get_by_label("リンク解除").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::new("limit")
+            .with_code(ErrorCode::LimitExceeded)
+            .with_retry(retry))),
+    );
+    screen
+}
+
+/// Nothing but a read of the thread follows a refusal: the command is never sent again.
+fn assert_only_a_read_follows(screen: &mut Harness<'static, Screen>) {
+    let after = asked(screen);
+    assert!(
+        after.iter().all(|action| matches!(
+            query_of(action),
+            Query::PullRequests(PullRequestsQuery::GetThreadPullRequest { .. })
+        )),
+        "a refused command is not resent: {after:?}"
+    );
+}
+
+#[test]
+fn a_full_memory_of_commands_says_a_restart_clears_it_and_is_not_resent() {
+    let mut screen = refused_for_a_limit(RetryAdvice::Never);
+    screen.get_by_label(limit_label(Some(RetryAdvice::Never)));
+    assert!(limit_label(Some(RetryAdvice::Never)).contains("再起動"));
+    assert_only_a_read_follows(&mut screen);
+}
+
+#[test]
+fn too_many_running_operations_reads_differently_and_is_not_resent() {
+    let mut screen = refused_for_a_limit(RetryAdvice::UserActionRequired);
+    screen.get_by_label(limit_label(Some(RetryAdvice::UserActionRequired)));
+    assert_ne!(
+        limit_label(Some(RetryAdvice::UserActionRequired)),
+        limit_label(Some(RetryAdvice::Never)),
+        "the two limits are told apart"
+    );
+    assert!(!limit_label(Some(RetryAdvice::UserActionRequired)).contains("再起動"));
+    assert_only_a_read_follows(&mut screen);
 }
 
 #[test]

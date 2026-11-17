@@ -201,16 +201,41 @@ may be sent.
 | Events name the thread and the pull request and never carry the facts; the client reads the thread again | `translate` in the area | the protocol golden files |
 | Cache: the commands and one automatic fix notice on the production wire keep the sent prefix and the affinity key (input-derived mock cache, independent wire assertions); the GUI path is covered by `pull_requests_cache` | `evorch-core/tests/core_pr_cache.rs` | the same, in `CACHE_CONTRACT_FILTER` |
 
-### Hand-over to part B (not done here)
+### Hand-over to part B (done in part B as far as the scope allows)
 
-Part B switches the GUI to the core client. Two direct paths remain until then:
+The old GUI keeps two direct paths: `gui/src/runtime_sink/pull_requests.rs`
+calls `PullRequestService` directly and `gui/src/app/pull_requests.rs`
+(`StoragePullRequestReader`, the limit-notice claim) reads and claims in the
+database directly. The scope of `pr15` does not cover these files, and ADR 0045
+§12 removes them with the old GUI (stage 20, boundary allowlist zeroed in 19b),
+not by rewriting it. The boundary allowlists hold no entry specific to pull
+requests, so nothing is dropped from them here.
 
-- `gui/src/runtime_sink/pull_requests.rs` calls `PullRequestService` directly;
-- `gui/src/app/pull_requests.rs` (`StoragePullRequestReader`) reads the
-  database directly.
+## PR 15 (part B): the `core_client` pull request screen
 
-Part B also moves the `app`, `model` and `panes` pull request code to the
-`core_client` feature. The scope of `pr15` does not cover those files.
+Part B closes what the screen needed before 19a can make the core client the
+default:
+
+- A `limit_exceeded` refusal is shown by its advice. `RetryAdvice::Never` (the
+  area's memory of accepted commands is full) says only a restart of the core
+  clears it; `UserActionRequired` (every kept operation is still running) says
+  to wait for them. Neither is sent again. `FeatureError` carries the server's
+  `retry` for this (`connection.rs` sets it; additive, other constructors
+  leave it `None`).
+- The reason an automatic fix stopped (other than the spent budget) is shown.
+- The restart test in `pull_requests_core.rs` says what it checks: the restart
+  gate driven directly, not the coordinator. The coordinator's order (producers
+  drain, Sealing, host gate drain) is covered by the M2 drain tests.
+
+Gaps of the `core_client` screen against the old GUI, to close before 19a:
+sidebar badge and CI glyph; inline candidate chips by tool call; the harness
+card; notifications pane and OS notifications; CI summary with a check list;
+mismatch warnings (local checkout against the pull request); stale and
+cooldown status lines (the cooldown time is read but not shown); hover reasons
+on disabled controls; fork/rewind link inheritance display; a dialog for
+linking (the screen has an inline field). Link, unlink, refresh, candidate
+confirm/dismiss, the auto-fix toggle, budget reset, destination change with
+confirmation, the manual notice and the limit notice from the event are present.
 
 ## Reserved migration numbers
 

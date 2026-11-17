@@ -418,7 +418,7 @@ async fn reconcile_uncertain(
 fn feature_error(error: &ClientError) -> FeatureError {
     let refused = FeatureError::new(error.to_string());
     match error {
-        ClientError::Server(server) => refused.with_code(server.code),
+        ClientError::Server(server) => refused.with_code(server.code).with_retry(server.retry),
         _ => refused,
     }
 }
