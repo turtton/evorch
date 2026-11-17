@@ -368,7 +368,7 @@ impl PullRequestService {
     ///
     /// # Errors
     /// Storage failures.
-    pub fn claim_limit_notification(&self, thread: &str) -> Result<Option<LimitNotice>> {
+    pub fn take_limit_notification(&self, thread: &str) -> Result<Option<LimitNotice>> {
         let storage = &self.inner.storage;
         let Some(link) = storage.pull_request_thread_state(thread)?.active_link else {
             return Ok(None);

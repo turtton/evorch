@@ -980,7 +980,7 @@ async fn a_limit_stop_is_claimed_once_however_many_callers_ask() {
     let t = target(&p);
     enable(&p, &t).await;
     assert_eq!(
-        p.service.claim_limit_notification("t").unwrap(),
+        p.service.take_limit_notification("t").unwrap(),
         None,
         "no stop, nothing to tell"
     );
@@ -993,7 +993,7 @@ async fn a_limit_stop_is_claimed_once_however_many_callers_ask() {
             let (service, barrier) = (p.service.clone(), barrier.clone());
             std::thread::spawn(move || {
                 barrier.wait();
-                service.claim_limit_notification("t").unwrap()
+                service.take_limit_notification("t").unwrap()
             })
         })
         .collect();
@@ -1009,7 +1009,7 @@ async fn a_limit_stop_is_claimed_once_however_many_callers_ask() {
     assert_eq!(claimed[0].key, key(1));
     assert_eq!(claimed[0].link_revision, 1);
     assert_eq!(
-        p.service.claim_limit_notification("t").unwrap(),
+        p.service.take_limit_notification("t").unwrap(),
         None,
         "the stop is told once"
     );
@@ -1023,5 +1023,5 @@ async fn a_limit_stop_is_not_told_in_a_thread_that_is_not_the_destination() {
     let t = target(&p);
     enable(&p, &t).await;
     stop_at_limit(&w, "other");
-    assert_eq!(p.service.claim_limit_notification("t").unwrap(), None);
+    assert_eq!(p.service.take_limit_notification("t").unwrap(), None);
 }

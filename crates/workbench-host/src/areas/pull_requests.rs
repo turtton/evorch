@@ -692,7 +692,7 @@ impl Inner {
         let Some(service) = self.runtime.pull_requests() else {
             return;
         };
-        match service.claim_limit_notification(thread) {
+        match service.take_limit_notification(thread) {
             Ok(Some(notice)) => {
                 let Ok(thread) = ThreadId::new(thread) else {
                     return;
