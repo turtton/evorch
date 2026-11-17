@@ -78,6 +78,14 @@ expect fail "pr14 does not own the pr15 cache target" "$central" --scope pr14 --
 files crates/evorch-core/tests/core_eval_cache.rs
 expect ok "pr17c owns its cache target" "$central" --scope pr17c --files-from "$work/files"
 expect fail "pr15 does not own the pr17c cache target" "$central" --scope pr15 --files-from "$work/files"
+# The Evaluator's eval_start spawns `evorch eval run` with `--db`, which 17c
+# removes from the CLI: pr17c owns the spawn site and its test, and not the rest
+# of the eval crate.
+files crates/eval/src/evaluator/groups.rs crates/eval/src/evaluator/tests/start.rs
+expect ok "pr17c owns the Evaluator's spawn of eval run and its test" "$central" --scope pr17c --files-from "$work/files"
+expect fail "pr15 does not own the Evaluator's spawn of eval run" "$central" --scope pr15 --files-from "$work/files"
+files crates/eval/src/runner.rs
+expect fail "pr17c does not own the rest of the eval crate" "$central" --scope pr17c --files-from "$work/files"
 
 # Every binary the cache gate names is a test target that exists: nextest rejects
 # a binary name that matches nothing, and a registered placeholder is a file.

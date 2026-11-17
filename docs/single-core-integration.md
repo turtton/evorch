@@ -267,6 +267,16 @@ only its own commands, queries and DTO handling on top.
   `Surface::Cli` as ADR 0045 §6 requires. Making the core record the surface
   the connection declares is done in 17c or later, not here.
 
+### The Evaluator's spawn of `evorch eval run` (scope of pr17c)
+
+`eval_start` (`crates/eval/src/evaluator/groups.rs`) launches one
+`evorch eval run` child per sample and passes `--db`. 17c removes `--db` from
+the CLI (ADR 0045 §10: the CLI never opens the configuration database), so the
+spawn site and its test (`crates/eval/src/evaluator/tests/start.rs`) belong to
+the scope `pr17c`; the rest of the eval crate does not. The child stays a CLI:
+it connects to the core of the same configuration directory and the evaluation
+runs there, so the group's completion is still the child's exit.
+
 ## Reserved migration numbers
 
 Storage migrations are numbered from one shared ledger kept by the
