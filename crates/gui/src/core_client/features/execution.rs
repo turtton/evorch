@@ -32,6 +32,7 @@ enum Pending {
     Runs { thread: ThreadId, path: Vec<RunId> },
     Execution { thread: ThreadId },
     Command(&'static str),
+    Plan { thread: ThreadId },
 }
 
 /// A cursor chain is read serially and published as one prefix. Keeping the old
@@ -64,6 +65,7 @@ pub struct ExecutionFeature {
     runs_stale: bool,
     execution_stale: bool,
     more_requested: bool,
+    plan: plan::PlanLine,
 }
 
 impl ExecutionFeature {
@@ -79,6 +81,7 @@ impl ExecutionFeature {
         self.clear_runs();
         self.execution = None;
         self.execution_stale = self.thread.is_some();
+        self.plan.switch(self.thread.is_some());
     }
 
     /// Show the children of `run`: a new level below the current one.
@@ -392,6 +395,7 @@ impl Feature for ExecutionFeature {
         self.loaded_pages = loaded_pages;
         self.execution = None;
         self.execution_stale = self.thread.is_some();
+        self.plan.reset(self.thread.is_some());
     }
 
     fn event(&mut self, event: &UiEvent) {
@@ -415,8 +419,9 @@ impl Feature for ExecutionFeature {
                     }
                 }
                 ExecutionEvent::ThreadExecutionChanged { .. } => self.execution_stale = true,
-                // Plan consumers are connected only at the public cutover.
-                ExecutionEvent::ConversationPlanChanged { .. } => {}
+                ExecutionEvent::ConversationPlanChanged { revision, .. } => {
+                    self.plan.changed(*revision);
+                }
             }
         }
     }
@@ -480,7 +485,17 @@ impl Feature for ExecutionFeature {
                     self.status = error.message;
                 }
             }
-            (Pending::Execution { .. }, FeatureReply::Query(Err(error))) => {
+            (
+                Pending::Plan { thread },
+                FeatureReply::Query(Ok(QueryReply::Execution(ExecutionReply::ConversationPlan(
+                    summary,
+                )))),
+            ) => {
+                if self.thread.as_ref() == Some(&thread) {
+                    self.plan.answered(*summary);
+                }
+            }
+            (Pending::Execution { .. } | Pending::Plan { .. }, FeatureReply::Query(Err(error))) => {
                 self.status = error.message;
             }
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
@@ -523,12 +538,24 @@ impl Feature for ExecutionFeature {
                 })),
             );
         }
+        if self.plan.take_stale() {
+            let tag = self.tag(Pending::Plan {
+                thread: thread.clone(),
+            });
+            ctx.query(
+                tag,
+                Query::Execution(ExecutionQuery::GetConversationPlan(ThreadTarget {
+                    thread: thread.clone(),
+                })),
+            );
+        }
         if !self.status.is_empty() {
             ui.label(&self.status);
         }
         self.draw_runs(ui, ctx, &thread);
         ui.separator();
         self.draw_goal(ui, ctx, &thread);
+        self.plan.draw(ui);
         self.draw_ledger(ui);
     }
 }
@@ -540,6 +567,8 @@ fn command_failure(label: &str, error: &FeatureError) -> String {
         format!("{label}: {}", error.message)
     }
 }
+
+mod plan;
 
 #[cfg(test)]
 pub(crate) mod tests;
