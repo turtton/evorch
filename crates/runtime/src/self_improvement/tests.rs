@@ -114,6 +114,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("EvaluationFinished", Ignored),
         ("NestedOrchestratorRejected", Ignored),
         ("ThreadTodoReconcileFailed", Ignored),
+        ("conversation_plan_reconcile_failed", Ignored),
         ("chat_resume_failed", Ignored),
         ("escalation_review", Ignored),
         ("escalation_review_manifest", Ignored),

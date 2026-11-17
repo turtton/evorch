@@ -23,6 +23,7 @@ use workbench_protocol::queries::{Query, QueryReply};
 use workbench_protocol::views::{Page, RunPhase, RunRole, RunSummary};
 use workbench_protocol::wire::{Revision, Sequence, UnixMillis};
 
+mod plan;
 use super::{AreaHandles, ProjectionSource};
 use crate::bootstrap::BootstrapError;
 use crate::queries::{Pager, error, revision, storage_error, text};
@@ -84,6 +85,11 @@ impl ExecutionArea {
     /// belongs to another query or snapshot, `StorageUnavailable`.
     pub fn query(&self, query: &Query, q: &ExecutionQuery) -> Result<QueryReply, WorkbenchError> {
         let runtime = self.runtime()?;
+        q.validate(&workbench_protocol::handshake::WireLimits::default())
+            .map_err(WorkbenchError::from)?;
+        if let Some(reply) = plan::query(runtime, q)? {
+            return Ok(QueryReply::Execution(reply));
+        }
         let reply = match q {
             ExecutionQuery::ListRuns(_) => {
                 return Err(error(
@@ -105,6 +111,12 @@ impl ExecutionArea {
             ExecutionQuery::GetThreadExecution(target) => ExecutionReply::ThreadExecution(
                 Box::new(thread_execution(runtime, &target.thread)?),
             ),
+            ExecutionQuery::GetConversationPlan(_)
+            | ExecutionQuery::ReadConversationPlanTree(_)
+            | ExecutionQuery::GetConversationPlanTask(_)
+            | ExecutionQuery::ReadConversationPlanHistory(_) => {
+                unreachable!("plan queries handled above")
+            }
         };
         Ok(QueryReply::Execution(reply))
     }
@@ -156,6 +168,18 @@ fn thread_of_run(runtime: &AgentRuntime, run_id: &str) -> Option<String> {
 }
 
 fn publish_change(runtime: &AgentRuntime, source: &ProjectionSource, kind: &EventKind) {
+    if let EventKind::ConversationPlan(change) = kind {
+        if let Ok(thread) = ThreadId::new(change.thread_id()) {
+            let event = ExecutionEvent::ConversationPlanChanged {
+                thread,
+                revision: Revision(change.revision()),
+            };
+            if let Err(error) = source.publish(UiEvent::Execution(event)) {
+                tracing::warn!(?error.code, "plan invalidation was not published");
+            }
+        }
+        return;
+    }
     let thread = match kind {
         EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) => {
             snapshot.thread_id.clone()

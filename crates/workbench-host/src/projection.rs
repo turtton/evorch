@@ -1042,7 +1042,10 @@ fn thread_of(event: &UiEvent) -> Option<&ThreadId> {
     match event {
         UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) => Some(&thread.id),
         UiEvent::Execution(ExecutionEvent::RunChanged { run }) => Some(&run.thread),
-        UiEvent::Execution(ExecutionEvent::ThreadExecutionChanged { thread, .. }) => Some(thread),
+        UiEvent::Execution(
+            ExecutionEvent::ThreadExecutionChanged { thread, .. }
+            | ExecutionEvent::ConversationPlanChanged { thread, .. },
+        ) => Some(thread),
         UiEvent::Teams(workbench_protocol::namespaces::teams::TeamsEvent::TeamChanged { team }) => {
             Some(&team.thread)
         }
