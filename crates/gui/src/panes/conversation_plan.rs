@@ -16,7 +16,7 @@ use crate::theme::icons;
 use crate::theme::tokens::{
     FONT_SMALL, R_MD, ROW_DENSE, SP_1, SP_2, SP_3, palette, text_style_badge,
 };
-use crate::theme::widgets::{accessible, icon_button};
+use crate::theme::widgets::icon_button;
 
 /// What the band above the composer shows. `summary` is `None` until the
 /// first read answered, which looks the same as a conversation without a plan.
@@ -528,7 +528,8 @@ fn history(ui: &mut Ui, state: &PlanState, nodes: &[PlanNodeView]) -> Option<u32
             let position = format!("{}/{}", current + 1, pages);
             let response = ui.label(small(&position, palette().TEXT_MUTED));
             let hover = format!("History page {position}");
-            accessible(&response, &hover);
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &hover));
             let newer = ui.add_enabled_ui(current > 0, |ui| {
                 icon_button(ui, icons::CARET_LEFT, "Newer changes")
             });
@@ -696,3 +697,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod render_tests;

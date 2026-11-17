@@ -224,8 +224,8 @@ fn nodes() -> Vec<PlanNodeView> {
 fn detail(node: PlanNodeView, long: bool) -> PlanNodeDetail {
     let (description, result, blocker) = if long && node.task_id == BLOCKED_TASK {
         (
-            "Capture the composer band and the plan panel in the Graphite, Light and \
-             Paper themes, once for a conversation without a plan, once for a plan in \
+            "Capture the composer band and the plan panel in the Graphite, High Contrast \
+             and Tokyo Night themes, once for a conversation without a plan, once for a plan in \
              mixed progress and once with a long selected task and its change history. \
              Each capture must keep the band on one line at the default window width and \
              the detail sections readable without horizontal scrolling."
@@ -233,7 +233,7 @@ fn detail(node: PlanNodeView, long: bool) -> PlanNodeDetail {
             "Six of the nine captures are done; the band and the tree read the same \
              figures as the server's summary."
                 .to_owned(),
-            "The capture host lost its display while rendering the Paper theme; the \
+            "The capture host lost its display while rendering the Tokyo Night theme; the \
              remaining captures wait until the display is back."
                 .to_owned(),
         )
