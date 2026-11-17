@@ -728,7 +728,12 @@ async fn lane_unlimited_quantities_preserve_configured_runtime_runaway_threshold
     config.budget.max_no_progress_rounds = 7;
     config.budget.max_identical_tool_call_repeats = 3;
     config.budget.max_file_rereads = 11;
-    f.runtime = f.runtime.with_model_resolution(&config, None, None);
+    f.runtime = f.runtime.with_model_resolution_and_catalog_cache(
+        &config,
+        None,
+        None,
+        Arc::new(providers::CodexCatalogCache::new()),
+    );
     let lead = f.lead().await;
     let lane = f
         .runtime

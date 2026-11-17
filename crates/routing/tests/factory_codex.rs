@@ -155,6 +155,7 @@ async fn factory_builds_codex_client_from_profile() {
     );
     profile.base_url = server.uri();
     let options = FactoryOptions {
+        codex_catalog_cache: Some(Arc::new(providers::CodexCatalogCache::new())),
         auth_base_url_override: Some(server.uri()),
         ..FactoryOptions::default()
     };

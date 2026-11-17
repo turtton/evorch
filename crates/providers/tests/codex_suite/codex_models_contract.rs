@@ -23,7 +23,8 @@ async fn lists_new_slugs_using_resolved_catalog_version() {
         .mount(&server)
         .await;
     // When
-    let models = providers::list_codex_models(
+    let models = providers::list_codex_models_with_cache(
+        &providers::CodexCatalogCache::new(),
         &format!("{}/backend-api/codex/", server.uri()),
         &ProviderAuth::new("oauth-access"),
         "catalog-account",
@@ -55,10 +56,14 @@ async fn catalog_advertises_fast_support_leniently() {
         .expect(1)
         .mount(&server).await;
     // When: カタログを取得する。
-    let models =
-        providers::list_codex_models(&server.uri(), &ProviderAuth::new("token"), "account")
-            .await
-            .expect("catalog");
+    let models = providers::list_codex_models_with_cache(
+        &providers::CodexCatalogCache::new(),
+        &server.uri(),
+        &ProviderAuth::new("token"),
+        "account",
+    )
+    .await
+    .expect("catalog");
     // Then: 広告されたpriorityまたはfastだけが対応扱いになる。
     let actual: Vec<_> = models
         .iter()
@@ -95,7 +100,8 @@ async fn rejects_invalid_codex_response_when_schema_is_wrong() {
             .mount(&server)
             .await;
         // When
-        let result = providers::list_codex_models(
+        let result = providers::list_codex_models_with_cache(
+            &providers::CodexCatalogCache::new(),
             &server.uri(),
             &ProviderAuth::new("token"),
             "catalog-account",
@@ -115,7 +121,8 @@ async fn returns_empty_when_codex_catalog_is_empty() {
         .mount(&server)
         .await;
     // When
-    let result = providers::list_codex_models(
+    let result = providers::list_codex_models_with_cache(
+        &providers::CodexCatalogCache::new(),
         &server.uri(),
         &ProviderAuth::new("token"),
         "catalog-account",
@@ -134,7 +141,8 @@ async fn returns_http_error_when_oauth_is_rejected() {
         .mount(&server)
         .await;
     // When
-    let result = providers::list_codex_models(
+    let result = providers::list_codex_models_with_cache(
+        &providers::CodexCatalogCache::new(),
         &server.uri(),
         &ProviderAuth::new("token"),
         "catalog-account",
@@ -173,7 +181,8 @@ async fn returns_http_error_when_strict_catalog_rejects_client_headers() {
         .mount(&server)
         .await;
     // When
-    let result = providers::list_codex_models(
+    let result = providers::list_codex_models_with_cache(
+        &providers::CodexCatalogCache::new(),
         &server.uri(),
         &ProviderAuth::new("oauth-access"),
         "catalog-account",
@@ -193,9 +202,14 @@ async fn fetch(body: serde_json::Value) -> Vec<providers::CodexModelInfo> {
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(&server)
         .await;
-    providers::list_codex_models(&server.uri(), &ProviderAuth::new("token"), "account")
-        .await
-        .expect("catalog")
+    providers::list_codex_models_with_cache(
+        &providers::CodexCatalogCache::new(),
+        &server.uri(),
+        &ProviderAuth::new("token"),
+        "account",
+    )
+    .await
+    .expect("catalog")
 }
 
 #[tokio::test]

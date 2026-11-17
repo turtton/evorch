@@ -213,6 +213,9 @@ async fn built_in_version_reaches_catalog_and_inference_headers_without_lookup()
         },
         seeded_store(),
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .expect("Codex client can be built");
 
     // When: the catalog is fetched and two inference turns are sent.
@@ -255,6 +258,9 @@ async fn send_sets_codex_headers_and_aggregates_stream() {
         },
         seeded_store(),
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .expect("Codex client can be built")
     .send(&ProviderAuth::new(""), &request())
     .await
@@ -386,6 +392,9 @@ async fn stream_parallel_tool_calls_recover_final_arguments() {
         },
         seeded_store(),
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .expect("Codex client can be built");
     let events = client
         .stream(&ProviderAuth::new(""), &request())

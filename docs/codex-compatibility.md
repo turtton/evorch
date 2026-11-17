@@ -75,14 +75,27 @@ from the same normalized base URL as `/responses` (`https://chatgpt.com/backend-
 for a bare host or a base ending in `/responses`). The usable context window is `context_window`
 or, when that is missing or zero, `max_context_window`.
 
-A `CodexClient` reads the catalog **once for its lifetime**, on first use by a
-generation, a compaction or `list_models`, and fixes the result. A failed read (HTTP
-error, timeout, invalid JSON) is fixed too: every later request uses the default
-capabilities, which produce the same bytes as before the catalog was consulted, and a
-single `ProviderCatalogFetch` warning diagnostic reports it. The shape therefore never
-changes under an established prompt-cache prefix. A model missing from the catalog also
-gets the default capabilities. Only a new client reads the
-catalog again. `list_models` reports the stored outcome, failure included.
+Catalog HTTP reads share a process-local, non-persistent cache across clients,
+compositions, context-window resolution and settings Fetch. Identity is the actual
+catalog URL, ChatGPT account ID, SHA-256 of the access token, and client version
+(not the profile name). Nonempty successes expire **five minutes after completion**;
+access does not extend TTL. At most 128 completed entries are retained, without stale
+fallback or eviction of in-progress flights. Concurrent callers share one flight.
+Cancellation/runtime teardown releases ownership so a waiter can drive HTTP on its
+own runtime; no runtime-owned HTTP task is kept in the cache.
+
+| Layer | Success | Failure or empty catalog | Recovery |
+| --- | --- | --- | --- |
+| Shared cache | Retains nonempty results until TTL/capacity eviction | Shares only within the current flight, never retains | Next independent acquisition tries again; no automatic retry/backoff |
+| Client discovery (`list_models`) | First nonempty result fixes the wire snapshot only if unset; later listings retain the first nonempty result | Returns the error or `Ok([])` without establishing a wire snapshot | Next listing acquires again |
+| Client wire snapshot | Immutable after discovery or first generation/compaction/capability use | First wire use fixes legacy capabilities on failure/empty, with a warning on failure | New client (provider update/reload); later successful discovery cannot change an existing wire snapshot |
+| `verify_candidates` | Retains verification per composition | Retains failure per composition, unchanged | Provider update/reload reconstructs composition |
+
+A model missing from the snapshot gets default capabilities. Catalog TTL refresh
+is **not** a prompt-cache boundary: an established client never changes request
+shape, instructions, tool order, already-sent input or cache affinity. Successful
+listing diagnostics remain visible; `catalog_cache_hit=false` means this call
+performed HTTP, while reuse and flight join report `true`.
 
 ### SSE
 

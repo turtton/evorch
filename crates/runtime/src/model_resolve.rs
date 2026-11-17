@@ -333,6 +333,7 @@ pub(crate) async fn load_catalog(cache_dir: &Path) -> Option<ModelCatalog> {
 async fn load_codex_windows(
     config: &Config,
     store: &Arc<dyn CredentialStore>,
+    cache: &providers::CodexCatalogCache,
 ) -> BTreeMap<String, u64> {
     let mut windows = BTreeMap::new();
     let codex_profiles: Vec<_> = config
@@ -364,7 +365,8 @@ async fn load_codex_windows(
                 continue;
             }
         };
-        match providers::list_codex_models(
+        match providers::list_codex_models_with_cache(
+            cache,
             &profile.base_url,
             &providers::ProviderAuth::new(tokens.access_token),
             &claims.chatgpt_account_id,
@@ -397,6 +399,7 @@ async fn load_codex_windows(
 }
 
 pub(crate) struct ModelResolution {
+    pub(crate) catalog_cache: Arc<providers::CodexCatalogCache>,
     config: Config,
     catalog: tokio::sync::OnceCell<Option<ModelCatalog>>,
     credential_store: Option<Arc<dyn CredentialStore>>,
@@ -410,9 +413,11 @@ impl ModelResolution {
         config: &Config,
         credential_store: Option<Arc<dyn CredentialStore>>,
         catalog_dir: Option<std::path::PathBuf>,
+        catalog_cache: Arc<providers::CodexCatalogCache>,
     ) -> Self {
         Self {
             config: config.clone(),
+            catalog_cache,
             catalog: tokio::sync::OnceCell::new(),
             credential_store,
             provider_windows: tokio::sync::OnceCell::new(),
@@ -445,7 +450,7 @@ impl ModelResolution {
                             profile.provider_type == config::ProviderTypeConfig::OpenAiCodex
                         }) =>
                     {
-                        load_codex_windows(&self.config, store).await
+                        load_codex_windows(&self.config, store, &self.catalog_cache).await
                     }
                     Some(_) | None => BTreeMap::new(),
                 }

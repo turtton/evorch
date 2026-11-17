@@ -958,17 +958,20 @@ async fn restore_and_wait_again_with_count(f: &mut WaitingShell, presented: usiz
         )),
         _ => ModelSource::Configured,
     };
-    f.h.runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(root.join("empty-user-config")),
-        config: &current,
-        bus,
-        executor: Arc::new(executor),
-        credential_store: credentials,
-        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-        model_source: source,
-        workspace: None,
-    })
+    f.h.runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(root.join("empty-user-config")),
+            config: &current,
+            bus,
+            executor: Arc::new(executor),
+            credential_store: credentials,
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            model_source: source,
+            workspace: None,
+        },
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
     .unwrap()
     .runtime
     .with_system_prompts(contract_prompts())

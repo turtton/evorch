@@ -5,6 +5,8 @@ mod apply_patch_cache;
 #[path = "approval_cache/mod.rs"]
 mod approval_cache;
 mod btw_cache;
+#[path = "cache_preservation_e2e/codex_catalog.rs"]
+mod codex_catalog_cache;
 mod codex_run_identity_cache;
 mod delegation_question_cache;
 #[path = "encrypted_reasoning_cache/mod.rs"]
@@ -324,6 +326,37 @@ fn harness_with_catalog_and_executor(
     configure: impl FnOnce(&mut Config),
     configure_executor: impl FnOnce(&mut ToolExecutor, &Arc<EventBus>),
 ) -> Harness {
+    harness_with_catalog_executor_and_cache(
+        wire,
+        model,
+        catalog_capabilities,
+        script,
+        window,
+        read,
+        extra_tools,
+        checker,
+        threshold,
+        configure,
+        configure_executor,
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn harness_with_catalog_executor_and_cache(
+    wire: Wire,
+    model: &str,
+    catalog_capabilities: Option<Value>,
+    script: Vec<ScriptedResponse>,
+    window: u64,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
+    threshold: f64,
+    configure: impl FnOnce(&mut Config),
+    configure_executor: impl FnOnce(&mut ToolExecutor, &Arc<EventBus>),
+    catalog_cache: Arc<providers::CodexCatalogCache>,
+) -> Harness {
     let directory = test_socket_dir::SplitDir::new();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(script, vec![model.into()]);
     let mock = match catalog_capabilities {
@@ -396,25 +429,29 @@ summarizer = "structural"
         Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
     let env = Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")]));
     let model_source = match wire {
-        Wire::Codex => ModelSource::Fixed(codex_model(
+        Wire::Codex => ModelSource::Fixed(codex_model_with_cache(
             &config,
             &credential_store,
             &bus,
             &mock.codex_base_url(),
+            catalog_cache.clone(),
         )),
         Wire::ChatCompletions | Wire::Responses => ModelSource::Configured,
     };
-    let runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(directory.path().join("empty-user-config")),
-        config: &config,
-        bus,
-        executor: Arc::new(executor),
-        credential_store,
-        env,
-        model_source,
-        workspace: None,
-    })
+    let runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(directory.path().join("empty-user-config")),
+            config: &config,
+            bus,
+            executor: Arc::new(executor),
+            credential_store,
+            env,
+            model_source,
+            workspace: None,
+        },
+        catalog_cache,
+    )
     .unwrap()
     .runtime
     .with_sequential_run_ids()
@@ -440,6 +477,22 @@ fn codex_model(
     bus: &Arc<EventBus>,
     base_url: &str,
 ) -> Arc<dyn runtime::AgentModel> {
+    codex_model_with_cache(
+        config,
+        store,
+        bus,
+        base_url,
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
+}
+
+fn codex_model_with_cache(
+    config: &Config,
+    store: &Arc<FileCredentialStore>,
+    bus: &Arc<EventBus>,
+    base_url: &str,
+    catalog_cache: Arc<providers::CodexCatalogCache>,
+) -> Arc<dyn runtime::AgentModel> {
     use sandbox::credential::{CredentialStore, Secret};
 
     store
@@ -459,6 +512,7 @@ fn codex_model(
             env: Arc::new(MapEnv::default()),
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions {
+                codex_catalog_cache: Some(catalog_cache),
                 auth_base_url_override: Some(base_url.into()),
                 ..Default::default()
             },
@@ -1544,17 +1598,22 @@ fn recompose_runtime(
     harness.receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(Arc::new(BulkRead)).unwrap();
-    let runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(root.join("empty-user-config")),
-        config: &current,
-        bus,
-        executor: Arc::new(executor),
-        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
-        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-        model_source: ModelSource::Configured,
-        workspace: None,
-    })
+    let runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(root.join("empty-user-config")),
+            config: &current,
+            bus,
+            executor: Arc::new(executor),
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            model_source: ModelSource::Configured,
+            workspace: None,
+        },
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
     .unwrap()
     .runtime
     .with_compaction(current.compaction.clone());
@@ -2011,17 +2070,22 @@ fn restart_runtime(harness: &mut Harness, config: &storage::StorageConfig, db: &
     harness.receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(Arc::new(BulkRead)).unwrap();
-    harness.runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(root.join("empty-user-config")),
-        config: &current,
-        bus,
-        executor: Arc::new(executor),
-        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
-        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-        model_source: ModelSource::Configured,
-        workspace: None,
-    })
+    harness.runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(root.join("empty-user-config")),
+            config: &current,
+            bus,
+            executor: Arc::new(executor),
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            model_source: ModelSource::Configured,
+            workspace: None,
+        },
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
     .unwrap()
     .runtime
     .with_compaction(current.compaction.clone())
@@ -2890,17 +2954,22 @@ fn restart_saved_compaction_harness(
     harness.receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(Arc::new(BulkRead)).unwrap();
-    harness.runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(root.join("empty-user-config")),
-        config: &current,
-        bus,
-        executor: Arc::new(executor),
-        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
-        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-        model_source: ModelSource::Configured,
-        workspace: None,
-    })
+    harness.runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(root.join("empty-user-config")),
+            config: &current,
+            bus,
+            executor: Arc::new(executor),
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            model_source: ModelSource::Configured,
+            workspace: None,
+        },
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
     .unwrap()
     .runtime
     .with_system_prompts(contract_prompts())

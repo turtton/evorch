@@ -290,7 +290,7 @@ async fn codex_models_response_supplies_runtime_window_for_base_and_fast() {
         },
     );
     let store: std::sync::Arc<dyn CredentialStore> = store;
-    let windows = load_codex_windows(&config, &store).await;
+    let windows = load_codex_windows(&config, &store, &providers::CodexCatalogCache::new()).await;
     assert_eq!(windows["codex/gpt-6-astra"], 272_000);
     assert_eq!(windows["codex/gpt-6-astra+fast"], 272_000);
     let mut settings = CompactionSettings::default();

@@ -138,6 +138,9 @@ impl Default for CodexModelCapabilities {
     }
 }
 
+mod codex_catalog_cache;
+pub use codex_catalog_cache::{CodexCatalogCache, default_codex_catalog_cache};
+
 /// Codexカタログに広告されたモデルとfast対応情報。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexModelInfo {
@@ -166,8 +169,28 @@ pub async fn list_codex_models(
     auth: &ProviderAuth,
     account_id: &str,
 ) -> Result<Vec<CodexModelInfo>, ProviderError> {
+    list_codex_models_with_cache(&default_codex_catalog_cache(), base_url, auth, account_id).await
+}
+
+/// Uses an explicitly scoped cache for isolated compositions.
+/// # Errors
+/// Returns the same HTTP, transport and format errors as [`list_codex_models`].
+pub async fn list_codex_models_with_cache(
+    cache: &CodexCatalogCache,
+    base_url: &str,
+    auth: &ProviderAuth,
+    account_id: &str,
+) -> Result<Vec<CodexModelInfo>, ProviderError> {
+    cache.fetch(base_url, auth, account_id).await.0
+}
+
+async fn fetch_codex_models(
+    url: &str,
+    auth: &ProviderAuth,
+    account_id: &str,
+) -> Result<Vec<CodexModelInfo>, ProviderError> {
     let request = build_http_client(Some(std::time::Duration::from_secs(10)))?
-        .get(format!("{}/models", base_url.trim_end_matches('/')))
+        .get(url)
         .query(&[("client_version", CODEX_CLIENT_VERSION)])
         .header("version", CODEX_CLIENT_VERSION)
         .header("chatgpt-account-id", account_id)

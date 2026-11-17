@@ -137,7 +137,17 @@ pub struct ComposedRuntime {
 /// # Errors
 /// configured source の provider 構成が失敗した場合に返す。
 pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime, CompositionError> {
-    compose_runtime_inner(input, None)
+    compose_runtime_with_catalog_cache(input, providers::default_codex_catalog_cache())
+}
+
+/// Composes clients and metadata resolution with the same explicitly scoped cache.
+/// # Errors
+/// Returns the same configuration errors as [`compose_runtime`].
+pub fn compose_runtime_with_catalog_cache(
+    input: RuntimeComposition<'_>,
+    cache: Arc<providers::CodexCatalogCache>,
+) -> Result<ComposedRuntime, CompositionError> {
+    compose_runtime_inner(input, None, cache)
 }
 
 /// Producer-free seed for DB Adopt and owner claims. Promotion retains the same
@@ -180,12 +190,13 @@ impl StartupRuntime {
         {
             return Err(CompositionError::InvalidStartup);
         }
-        compose_runtime_inner(input, Some(self))
+        compose_runtime_inner(input, Some(self), providers::default_codex_catalog_cache())
     }
 }
 fn compose_runtime_inner(
     input: RuntimeComposition<'_>,
     mut seed: Option<StartupRuntime>,
+    catalog_cache: Arc<providers::CodexCatalogCache>,
 ) -> Result<ComposedRuntime, CompositionError> {
     let repo_root = input
         .workspace
@@ -236,6 +247,7 @@ fn compose_runtime_inner(
                     env: input.env,
                     catalog: ModelCatalog::new(),
                     factory: FactoryOptions {
+                        codex_catalog_cache: Some(catalog_cache.clone()),
                         claude_installation_id_path: user_dir.as_ref().map(|directory| {
                             directory.join(providers::provider::claude::CLAUDE_INSTALLATION_ID_FILE)
                         }),
@@ -255,10 +267,11 @@ fn compose_runtime_inner(
             }
         }
     };
-    let runtime = composed.runtime.with_model_resolution(
+    let runtime = composed.runtime.with_model_resolution_and_catalog_cache(
         input.config,
         Some(input.credential_store),
         input.model_catalog_dir,
+        catalog_cache,
     );
     let runtime = runtime.with_project_rules(Arc::new(RulesSource::new(
         ProjectTrust::Unapproved,

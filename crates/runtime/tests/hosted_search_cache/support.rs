@@ -76,6 +76,7 @@ pub(super) async fn model(
             env: Arc::new(routing::MapEnv::default()),
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions {
+                codex_catalog_cache: Some(Arc::new(providers::CodexCatalogCache::new())),
                 auth_base_url_override: Some(server.uri()),
                 ..Default::default()
             },

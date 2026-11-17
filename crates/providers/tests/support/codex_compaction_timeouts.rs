@@ -129,6 +129,9 @@ impl Exchange {
             },
             seeded_store(),
         )
+        .map(|client| {
+            client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+        })
         .unwrap();
         let (checkpoints, mut checkpoint_rx) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
         let polled = Arc::new(Notify::new());
