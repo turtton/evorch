@@ -186,16 +186,16 @@ impl AgentRuntime {
                 (actor, Some(config))
             }
         };
-        let authority = config
+        let permits = config
             .as_ref()
             .and_then(|c| c.ownership.as_ref())
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|e| LaneError::new("ownership_lost", e))?;
-        let host_authority = permits
-            .iter()
-            .map(|permit| permit.mutation_guard())
-            .collect::<Result<Vec<_>, _>>()
+            .into_iter()
+            .chain(permits)
+            .cloned()
+            .collect::<Vec<_>>();
+        // One snapshot per registry: a heartbeat's PENDING commit between two
+        // read connections otherwise waits on the first while blocking the second.
+        let authority = crate::ownership::OwnerPermit::mutation_guards(&permits)
             .map_err(|e| LaneError::new("ownership_lost", e))?;
         let operation = store
             .handle
@@ -206,7 +206,6 @@ impl AgentRuntime {
                 crate::run_store::review_time_ns(),
             )
             .map_err(management_error)?;
-        drop(host_authority);
         drop(authority);
         // Do not turn a committed mutation into a retryable write failure. Pending
         // projections are durable; a lost event is repaired by re-reading the ledger.

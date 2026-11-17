@@ -10,6 +10,84 @@ use crate::{Database, StorageConfig};
 
 const V23: usize = 23;
 
+#[test]
+fn thread_upserts_admit_the_writer_before_reading_membership() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    use crate::threads::{ThreadUpsert, ThreadWriter};
+
+    for writer in [ThreadWriter::Host, ThreadWriter::Runtime] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("threads.db");
+        let database = Database::open(&config(&path)).unwrap();
+        let competitor = Connection::open(&path).unwrap();
+        competitor.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let competitor = Arc::new(Mutex::new(competitor));
+        let other = competitor.clone();
+        let attempted = Arc::new(AtomicBool::new(false));
+        let attempted_in_read = attempted.clone();
+        // At the membership read, a second writer tries to enter. With a deferred
+        // transaction it gets the write reservation and our read-to-write upgrade
+        // fails immediately (busy_timeout cannot resolve that lock ordering).
+        // SQLite's authorizer places the interleaving without threads or timing.
+        database
+            .conn
+            .authorizer(Some(move |ctx: AuthContext<'_>| {
+                if matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "thread_tombstones",
+                        ..
+                    }
+                ) {
+                    attempted_in_read.store(true, Ordering::SeqCst);
+                    let other = other.lock().unwrap();
+                    if other.is_autocommit()
+                        && let Err(error) = other.execute_batch("BEGIN IMMEDIATE")
+                    {
+                        assert_eq!(
+                            error.sqlite_error_code(),
+                            Some(rusqlite::ErrorCode::DatabaseBusy)
+                        );
+                    }
+                }
+                Authorization::Allow
+            }))
+            .unwrap();
+        let result = super::upsert(
+            &database.conn,
+            writer,
+            &[ThreadUpsert {
+                thread_id: "live".into(),
+                title: Some("mirrored title".into()),
+                ..Default::default()
+            }],
+        );
+        database
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        let other = competitor.lock().unwrap();
+        if !other.is_autocommit() {
+            other.execute_batch("ROLLBACK").unwrap();
+        }
+        assert!(attempted.load(Ordering::SeqCst), "the competing writer ran");
+        assert_eq!(result.unwrap(), 0);
+        let title: String = database
+            .conn
+            .query_row(
+                "SELECT title FROM threads WHERE thread_id = 'live'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "mirrored title");
+    }
+}
+
 fn config(path: &Path) -> StorageConfig {
     StorageConfig {
         db_path: path.to_path_buf(),
