@@ -651,8 +651,16 @@ async fn recover_case(
             .unwrap();
         let descriptor: Value = serde_json::from_str(&saved.config_json).unwrap();
         assert_eq!(descriptor["plan_notice"], "deferred");
-        let (fresh, _, fresh_events) =
-            process_with_read(&h, &current, &storage, &config, Arc::new(BulkRead));
+        let (fresh, _, fresh_events) = process_with_read(
+            &h,
+            &current,
+            &storage,
+            &config,
+            Arc::new(RecoveryRead {
+                path: attachment.path.clone(),
+                changed: changed_tool,
+            }),
+        );
         restarted = fresh;
         events = fresh_events;
         restarted
