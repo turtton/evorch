@@ -63,7 +63,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    pub(super) fn footer_ui(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn footer_content_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.menu_button("⚙", |ui| {
                 if ui.button("Theme").clicked() {

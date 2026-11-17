@@ -1,0 +1,354 @@
+//! CPU, memory and storage readings for the footer.
+//!
+//! A background thread samples the machine every [`SAMPLE_INTERVAL`] and hands each reading
+//! over a channel, so the UI thread never waits on the operating system. The thread wakes the
+//! UI once per reading and stops when its [`SystemSampler`] is dropped.
+
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::Duration;
+
+use sysinfo::{Disks, MINIMUM_CPU_UPDATE_INTERVAL, System};
+
+/// How often the machine is read.
+pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(3);
+
+/// A used amount out of a total, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    pub used: u64,
+    pub total: u64,
+}
+
+impl Usage {
+    /// The used share in `0.0..=1.0`; an empty total reads as unused.
+    #[must_use]
+    pub fn ratio(self) -> f64 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = self.used as f64 / self.total as f64;
+        ratio.clamp(0.0, 1.0)
+    }
+}
+
+/// The filesystem that holds the evorch data directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageUsage {
+    /// The directory the reading is about (the one holding the database).
+    pub directory: PathBuf,
+    /// Where the filesystem that holds `directory` is mounted.
+    pub mount: PathBuf,
+    pub usage: Usage,
+}
+
+/// One reading of the machine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemSnapshot {
+    /// Average load over all cores, in percent.
+    pub cpu_percent: f32,
+    pub memory: Usage,
+    /// `None` when no data directory is known or no mounted filesystem holds it.
+    pub storage: Option<StorageUsage>,
+}
+
+impl SystemSnapshot {
+    /// The CPU load as a share in `0.0..=1.0`.
+    #[must_use]
+    pub fn cpu_ratio(&self) -> f64 {
+        f64::from(self.cpu_percent / 100.0).clamp(0.0, 1.0)
+    }
+}
+
+/// Binary-unit size, such as `7.8 GiB`.
+#[must_use]
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    #[allow(clippy::cast_precision_loss)]
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// The mount whose filesystem holds `path`: the deepest mount point that is a prefix of it.
+/// Mounts reporting no space (pseudo filesystems) are skipped.
+pub fn mount_holding<'a>(
+    path: &Path,
+    mounts: impl IntoIterator<Item = (&'a Path, Usage)>,
+) -> Option<(&'a Path, Usage)> {
+    mounts
+        .into_iter()
+        .filter(|(mount, usage)| usage.total > 0 && path.starts_with(mount))
+        .max_by_key(|(mount, _)| mount.components().count())
+}
+
+/// Reads the machine with `sysinfo`.
+struct SysinfoSource {
+    system: System,
+    disks: Disks,
+    /// Resolved once, so the mount lookup compares real paths.
+    storage_directory: Option<PathBuf>,
+    primed: bool,
+}
+
+impl SysinfoSource {
+    fn new(storage_directory: Option<PathBuf>) -> Self {
+        let storage_directory = storage_directory
+            .map(|directory| std::fs::canonicalize(&directory).unwrap_or(directory));
+        Self {
+            system: System::new(),
+            disks: Disks::new(),
+            storage_directory,
+            primed: false,
+        }
+    }
+
+    fn sample(&mut self) -> SystemSnapshot {
+        self.system.refresh_cpu_usage();
+        if !self.primed {
+            // The first CPU reading is meaningless without an earlier one to compare with.
+            self.primed = true;
+            std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
+            self.system.refresh_cpu_usage();
+        }
+        self.system.refresh_memory();
+        SystemSnapshot {
+            cpu_percent: self.system.global_cpu_usage(),
+            memory: Usage {
+                used: self.system.used_memory(),
+                total: self.system.total_memory(),
+            },
+            storage: self.storage(),
+        }
+    }
+
+    fn storage(&mut self) -> Option<StorageUsage> {
+        let directory = self.storage_directory.clone()?;
+        self.disks.refresh(true);
+        let (mount, usage) = mount_holding(
+            &directory,
+            self.disks.list().iter().map(|disk| {
+                let total = disk.total_space();
+                (
+                    disk.mount_point(),
+                    Usage {
+                        used: total.saturating_sub(disk.available_space()),
+                        total,
+                    },
+                )
+            }),
+        )?;
+        Some(StorageUsage {
+            mount: mount.to_path_buf(),
+            directory,
+            usage,
+        })
+    }
+}
+
+/// Owns the sampling thread and the latest reading it produced.
+pub struct SystemSampler {
+    updates: Receiver<SystemSnapshot>,
+    latest: Option<SystemSnapshot>,
+    /// Dropping it disconnects the thread's wait, which ends the thread at once.
+    _stop: Sender<()>,
+}
+
+impl SystemSampler {
+    /// Starts sampling the machine; `wake` is called after each reading arrives.
+    /// `storage_directory` selects the filesystem to report, when known.
+    pub fn start(
+        storage_directory: Option<PathBuf>,
+        wake: impl Fn() + Send + 'static,
+    ) -> Option<Self> {
+        Self::spawn(SAMPLE_INTERVAL, wake, move || {
+            let mut source = SysinfoSource::new(storage_directory);
+            move || source.sample()
+        })
+    }
+
+    /// `make_source` runs on the new thread and returns the function taking one reading.
+    fn spawn<F>(
+        interval: Duration,
+        wake: impl Fn() + Send + 'static,
+        make_source: impl FnOnce() -> F + Send + 'static,
+    ) -> Option<Self>
+    where
+        F: FnMut() -> SystemSnapshot,
+    {
+        let (updates_tx, updates) = mpsc::channel();
+        let (stop, stop_rx) = mpsc::channel::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("system-stats".into())
+            .spawn(move || {
+                let mut sample = make_source();
+                loop {
+                    if updates_tx.send(sample()).is_err() {
+                        break;
+                    }
+                    wake();
+                    match stop_rx.recv_timeout(interval) {
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not start the system stats sampler");
+            return None;
+        }
+        Some(Self {
+            updates,
+            latest: None,
+            _stop: stop,
+        })
+    }
+
+    /// The newest reading received so far; never blocks.
+    pub fn latest(&mut self) -> Option<&SystemSnapshot> {
+        while let Ok(snapshot) = self.updates.try_recv() {
+            self.latest = Some(snapshot);
+        }
+        self.latest.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    fn usage(used: u64, total: u64) -> Usage {
+        Usage { used, total }
+    }
+
+    fn snapshot(cpu_percent: f32) -> SystemSnapshot {
+        SystemSnapshot {
+            cpu_percent,
+            memory: usage(1, 2),
+            storage: None,
+        }
+    }
+
+    // Given: usages that are empty, partial, full and over-full
+    // When: the ratio is taken / Then: it stays inside 0..=1 and an empty total reads as unused
+    #[test]
+    fn usage_ratio_is_clamped_and_total_free() {
+        assert!(usage(5, 0).ratio().abs() < f64::EPSILON);
+        assert!((usage(1, 4).ratio() - 0.25).abs() < f64::EPSILON);
+        assert!((usage(4, 4).ratio() - 1.0).abs() < f64::EPSILON);
+        assert!((usage(9, 4).ratio() - 1.0).abs() < f64::EPSILON);
+    }
+
+    // Given: CPU readings below, inside and above the percent range
+    // When: converted to a share / Then: it is clamped to 0..=1
+    #[test]
+    fn cpu_ratio_follows_percent_and_clamps() {
+        assert!((snapshot(50.0).cpu_ratio() - 0.5).abs() < 1e-6);
+        assert!(snapshot(-3.0).cpu_ratio().abs() < f64::EPSILON);
+        assert!((snapshot(180.0).cpu_ratio() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sizes_use_binary_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(5 * 1024 * 1024 * 1024 / 2), "2.5 GiB");
+        assert_eq!(format_bytes(3 * 1024_u64.pow(4)), "3.0 TiB");
+        assert_eq!(format_bytes(2048 * 1024_u64.pow(4)), "2048.0 TiB");
+    }
+
+    // Given: nested mounts, a pseudo mount with no space, and an unrelated mount
+    // When: the mount holding a path is looked up / Then: the deepest real prefix wins
+    #[test]
+    fn mount_holding_picks_the_deepest_real_prefix() {
+        let mounts = [
+            (Path::new("/"), usage(10, 100)),
+            (Path::new("/home"), usage(20, 200)),
+            (Path::new("/home/user/data"), usage(0, 0)),
+            (Path::new("/homework"), usage(30, 300)),
+        ];
+        let found = |path: &str| {
+            mount_holding(Path::new(path), mounts.iter().copied()).map(|(mount, _)| mount)
+        };
+        assert_eq!(found("/home/user/data/db"), Some(Path::new("/home")));
+        assert_eq!(found("/homework/db"), Some(Path::new("/homework")));
+        assert_eq!(found("/var/lib/db"), Some(Path::new("/")));
+        assert_eq!(
+            mount_holding(Path::new("/var"), [(Path::new("/home"), usage(1, 2))]),
+            None
+        );
+    }
+
+    // Given: a sampler whose source takes readings on its own thread
+    // When: the thread signals each reading / Then: `latest` returns the newest one and wakes the UI per reading
+    #[test]
+    fn sampler_delivers_readings_without_the_caller_waiting() {
+        let readings = Arc::new(AtomicUsize::new(0));
+        let woken = Arc::new(AtomicUsize::new(0));
+        // The sampler waits `interval` between readings; the wake of the second reading is the
+        // signal that the first two are both queued.
+        let barrier = Arc::new(Barrier::new(2));
+        let mut sampler = SystemSampler::spawn(
+            Duration::ZERO,
+            {
+                let woken = Arc::clone(&woken);
+                let barrier = Arc::clone(&barrier);
+                move || {
+                    if woken.fetch_add(1, Ordering::SeqCst) == 1 {
+                        barrier.wait();
+                    }
+                }
+            },
+            {
+                let readings = Arc::clone(&readings);
+                move || {
+                    move || {
+                        let count = readings.fetch_add(1, Ordering::SeqCst);
+                        #[allow(clippy::cast_precision_loss)]
+                        snapshot(count as f32)
+                    }
+                }
+            },
+        )
+        .expect("the sampler thread starts");
+        barrier.wait();
+        let newest = sampler.latest().expect("a reading arrived").cpu_percent;
+        assert!(newest >= 1.0, "the second reading was delivered: {newest}");
+    }
+
+    // Given: a running sampler / When: it is dropped / Then: the thread ends, which closes the wake
+    #[test]
+    fn dropping_the_sampler_stops_the_thread() {
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let sampler = SystemSampler::spawn(
+            Duration::from_secs(3600),
+            || {},
+            move || {
+                // Dropped when the thread's loop ends.
+                let done = done_tx;
+                move || {
+                    let _ = &done;
+                    snapshot(0.0)
+                }
+            },
+        )
+        .expect("the sampler thread starts");
+        drop(sampler);
+        assert!(
+            done_rx.recv().is_err(),
+            "the thread dropped its source and ended"
+        );
+    }
+}

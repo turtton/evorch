@@ -36,6 +36,7 @@ pub mod routing_settings;
 pub mod self_improvement;
 pub mod shell_jobs;
 pub mod sidebar;
+pub mod system_footer;
 pub mod tasks;
 pub mod team;
 pub mod terminal;
