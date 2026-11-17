@@ -698,3 +698,104 @@ fn plan_ids_are_stable_per_thread_and_differ_between_threads() {
     assert_ne!(first, plan_id_for_thread("thread-b"));
     assert!(first.starts_with("plan-") && first.len() == 5 + 16);
 }
+
+#[test]
+fn the_largest_accepted_task_still_fits_a_tool_result_with_its_envelope() {
+    // The reserve is what is left of a tool result once the task is at its limit.
+    assert_eq!(
+        PLAN_NODE_DETAIL_MAX_BYTES + PLAN_TASK_RESULT_RESERVE_BYTES,
+        PLAN_TOOL_RESULT_MAX_BYTES
+    );
+    // Given: a task grown (a quote takes two bytes) until it is the largest one accepted.
+    let task = |result_bytes: usize| {
+        vec![
+            PlanOperation::Add {
+                client_ref: "a".into(),
+                parent: None,
+                position: None,
+                title: "t".into(),
+                description: Some("\"".repeat(PLAN_DESCRIPTION_MAX_BYTES)),
+                weight: None,
+                status: Some(PlanTaskStatus::Pending),
+            },
+            PlanOperation::Update {
+                task: TaskRef::Ref("a".into()),
+                title: None,
+                description: None,
+                result: Some("\"".repeat(result_bytes)),
+                blocker: None,
+                weight: None,
+                status: None,
+            },
+        ]
+    };
+    let accepted = (0..=PLAN_RESULT_MAX_BYTES)
+        .rev()
+        .find_map(|bytes| {
+            let (next, _) = tree().apply(&task(bytes), false).ok()?;
+            next.finalize().ok().map(|_| next)
+        })
+        .expect("a task within the limit exists");
+    let flat = accepted.flatten().0;
+    let detail = accepted.detail(&flat[0]);
+    let size = serde_json::to_string(&detail).unwrap().len();
+    assert!(size <= PLAN_NODE_DETAIL_MAX_BYTES);
+    assert!(
+        size + 2 > PLAN_NODE_DETAIL_MAX_BYTES,
+        "not the largest: {size}"
+    );
+    // When: the task is wrapped as a `plan_read` task result, with the widest identifiers.
+    let wrapped = serde_json::to_string(&serde_json::json!({
+        "plan_id": plan_id_for_thread("thread"),
+        "revision": u64::MAX,
+        "node": detail,
+    }))
+    .unwrap();
+    // Then: the wrapper takes little, and a reply envelope of 1 KiB still fits.
+    assert!(wrapped.len() <= PLAN_NODE_DETAIL_MAX_BYTES + 128);
+    assert!(wrapped.len() + 1024 <= PLAN_TOOL_RESULT_MAX_BYTES);
+}
+
+#[test]
+fn a_reconciliation_may_name_every_task_while_a_model_batch_stops_at_its_own_limit() {
+    // Given: a plan of the most leaves, all in progress (added in batches of the model's size).
+    let mut plan = tree();
+    for batch in 0..PLAN_MAX_NODES / PLAN_MAX_OPERATIONS {
+        let operations: Vec<_> = (0..PLAN_MAX_OPERATIONS)
+            .map(|n| {
+                add_with(
+                    &format!("t{batch}-{n}"),
+                    None,
+                    1,
+                    PlanTaskStatus::InProgress,
+                )
+            })
+            .collect();
+        plan = run(&plan, &operations);
+    }
+    assert_eq!(plan.nodes.len(), PLAN_MAX_NODES);
+    let operations = plan.interrupt_operations();
+    assert_eq!(operations.len(), PLAN_MAX_RECONCILE_OPERATIONS);
+    // The runtime applies them all at once.
+    let (next, applied) = plan.apply(&operations, true).unwrap();
+    assert_eq!(applied.changes.len(), PLAN_MAX_NODES);
+    assert!(next.interrupt_operations().is_empty());
+    // A model batch of the same operations is over its limit; so is one more than the plan
+    // can hold for the runtime.
+    assert!(matches!(
+        plan.apply(&operations, false),
+        Err(PlanRejection::TooManyOperations {
+            actual: PLAN_MAX_NODES,
+            max: PLAN_MAX_OPERATIONS
+        })
+    ));
+    let mut too_many = operations.clone();
+    too_many.push(operations[0].clone());
+    assert!(matches!(
+        plan.apply(&too_many, true),
+        Err(PlanRejection::TooManyOperations {
+            max: PLAN_MAX_RECONCILE_OPERATIONS,
+            ..
+        })
+    ));
+}

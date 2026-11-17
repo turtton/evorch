@@ -10,9 +10,11 @@ use event_bus::{
 };
 use rusqlite::Connection;
 use storage::conversation_plan::{
-    PLAN_MAX_NODES, PlanApplied, PlanOperation, PlanRejection, PlanUpdate, TaskRef,
+    PLAN_MAX_NODES, PLAN_MAX_OPERATIONS, PlanApplied, PlanOperation, PlanRejection, PlanUpdate,
+    TaskRef,
 };
 use storage::handoffs::{HandoffReceipt, HandoffState};
+use storage::plan_write_gate::{PlanWriteGate, PlanWritePoint, PlanWriteResolution};
 use storage::{HardLimits, Storage, StorageConfig, StorageError, StorageHandle};
 
 const THREAD: &str = "thread-a";
@@ -913,4 +915,316 @@ fn a_task_cannot_be_read_through_another_threads_plan() {
         .conversation_plan_task("thread-b", &id_of(&first, "a"))
         .unwrap_err();
     assert!(matches!(rejection(&error), PlanRejection::ForeignTask(_)));
+}
+
+/// `count` leaves in progress, added in model-sized batches; returns the revision reached.
+fn fill_in_progress(handle: &StorageHandle, count: usize) -> u64 {
+    let mut revision = 0;
+    for (batch, chunk) in (0..count)
+        .collect::<Vec<_>>()
+        .chunks(PLAN_MAX_OPERATIONS)
+        .enumerate()
+    {
+        let operations = chunk
+            .iter()
+            .map(|n| PlanOperation::Add {
+                client_ref: format!("t{batch}-{n}"),
+                parent: None,
+                position: None,
+                title: format!("task {n}"),
+                description: None,
+                weight: None,
+                status: Some(PlanTaskStatus::InProgress),
+            })
+            .collect();
+        revision = handle
+            .update_conversation_plan(update(THREAD, revision, operations))
+            .unwrap()
+            .revision;
+    }
+    revision
+}
+
+#[test]
+fn a_reconciliation_interrupts_32_33_and_128_leaves_in_one_revision_and_one_event() {
+    for leaves in [32, 33, PLAN_MAX_NODES] {
+        // Given: that many leaves in progress.
+        let f = Fixture::new();
+        let h = f.handle();
+        let before = fill_in_progress(&h, leaves);
+        let events = f.plan_events();
+        // When: the runtime reconciles.
+        let applied = h
+            .reconcile_conversation_plan(THREAD, Some("run-2"))
+            .unwrap();
+        // Then: all of them are interrupted at once, in one revision with one event.
+        assert!(applied.changed, "{leaves}");
+        assert_eq!(applied.revision, before + 1, "{leaves}");
+        assert_eq!(applied.progress.leaf_counts.interrupted, leaves as u32);
+        assert_eq!(applied.progress.leaf_counts.in_progress, 0);
+        assert_eq!(f.plan_events(), events + 1, "{leaves}");
+        match changed(&applied) {
+            ConversationPlanEvent::Changed { changes, cause, .. } => {
+                assert_eq!(changes.len(), leaves);
+                assert_eq!(*cause, PlanChangeCause::RuntimeInterrupt);
+            }
+        }
+        assert!(!h.reconcile_conversation_plan(THREAD, None).unwrap().changed);
+    }
+}
+
+#[test]
+fn a_model_batch_is_still_limited_to_32_operations_while_reconciliation_is_not() {
+    let f = Fixture::new();
+    let h = f.handle();
+    fill_in_progress(&h, 33);
+    let tree = h.conversation_plan_tree(THREAD, None, Some(64)).unwrap();
+    let to_pending: Vec<_> = tree
+        .nodes
+        .iter()
+        .map(|node| set_status(&node.task_id, PlanTaskStatus::Pending))
+        .collect();
+    assert_eq!(to_pending.len(), 33);
+    let error = h
+        .update_conversation_plan(update(THREAD, 2, to_pending))
+        .unwrap_err();
+    assert!(matches!(
+        rejection(&error),
+        PlanRejection::TooManyOperations {
+            actual: 33,
+            max: 32
+        }
+    ));
+}
+
+fn tombstone(f: &Fixture, thread: &str) {
+    f.sql()
+        .execute(
+            "INSERT INTO thread_tombstones(thread_id, family_key, deleted_at_ns) \
+             VALUES (?1, 'family', 1)",
+            [thread],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_rebind_from_or_to_a_deleted_thread_is_refused_and_moves_nothing() {
+    let gone = |error: &StorageError| matches!(error, StorageError::Tombstoned { .. });
+    // To a deleted thread.
+    let f = Fixture::new();
+    let h = f.handle();
+    seed(&h);
+    tombstone(&f, "thread-deleted");
+    let error = h
+        .rebind_conversation_plan(THREAD, "thread-deleted")
+        .unwrap_err();
+    assert!(gone(&error), "{error:?}");
+    assert_eq!(h.conversation_plan_summary(THREAD).unwrap().revision, 1);
+    // From a deleted thread.
+    let f = Fixture::new();
+    let h = f.handle();
+    seed(&h);
+    tombstone(&f, THREAD);
+    let error = h
+        .rebind_conversation_plan(THREAD, "thread-live")
+        .unwrap_err();
+    assert!(gone(&error), "{error:?}");
+    assert_eq!(f.plan_rows(), (1, 4, 1, 1));
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM conversation_plans WHERE thread_id = 'thread-live'"),
+        0
+    );
+}
+
+#[test]
+fn a_handoff_to_a_deleted_escalation_thread_fails_whole_and_the_plan_stays() {
+    let f = Fixture::new();
+    let h = f.handle();
+    seed(&h);
+    f.sql()
+        .execute(
+            "INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth) \
+             VALUES ('source', ?1, 'source', 0)",
+            [THREAD],
+        )
+        .unwrap();
+    h.reserve_handoff(HandoffReceipt {
+        source_run_id: "source".into(),
+        source_incarnation: "incarnation".into(),
+        target_run_id: "target".into(),
+        lane_id: "lane-target".into(),
+        request_json: "request".into(),
+        state: HandoffState::Preparing,
+        goal_json: None,
+        todo_json: None,
+    })
+    .unwrap();
+    h.advance_handoff(
+        "source".into(),
+        "incarnation".into(),
+        HandoffState::Preparing,
+        HandoffState::Prepared,
+        None,
+        None,
+    )
+    .unwrap();
+    tombstone(&f, &event_bus::escalation_thread_id("target"));
+    let error = h
+        .advance_handoff(
+            "source".into(),
+            "incarnation".into(),
+            HandoffState::Prepared,
+            HandoffState::Committed,
+            None,
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, StorageError::Tombstoned { .. }),
+        "{error:?}"
+    );
+    // The state did not advance and the plan did not move: one transaction.
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM lane_handoffs WHERE state = 'prepared'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM lane_handoffs WHERE state = 'committed'"),
+        0
+    );
+    assert_eq!(h.conversation_plan_summary(THREAD).unwrap().revision, 1);
+}
+
+/// What a plan owns agrees with itself: every history row has its event, and the
+/// projection's revision is the newest history row.
+fn assert_consistent(f: &Fixture, plans: i64, revision: i64) {
+    assert_eq!(f.plan_rows().0, plans);
+    assert_eq!(
+        f.plan_rows().2,
+        f.plan_events(),
+        "one event per history row"
+    );
+    assert_eq!(
+        f.count(
+            "SELECT COUNT(*) FROM conversation_plan_history h \
+             JOIN events e ON e.id = h.event_id WHERE e.kind = 'ConversationPlan'"
+        ),
+        f.plan_events()
+    );
+    assert_eq!(
+        f.count("SELECT COALESCE(MAX(revision), 0) FROM conversation_plan_history"),
+        revision
+    );
+    assert_eq!(
+        f.count("SELECT COALESCE(MAX(revision), 0) FROM conversation_plans"),
+        revision
+    );
+}
+
+/// A writer held at `point` by a test gate while a plan write is in flight on another
+/// thread. The SQL connection of the fixture observes the database meanwhile.
+fn hold_write_at(
+    f: &Fixture,
+    point: PlanWritePoint,
+) -> (
+    Arc<PlanWriteGate>,
+    thread::JoinHandle<Result<PlanApplied, StorageError>>,
+) {
+    let gate = PlanWriteGate::new();
+    let handle = f.handle();
+    handle.install_plan_write_gate(gate.clone()).unwrap();
+    gate.arm(point);
+    let writer = thread::spawn(move || {
+        handle.update_conversation_plan(update(THREAD, 0, vec![add("a", None, "task")]))
+    });
+    assert_eq!(gate.wait_reached(), point);
+    (gate, writer)
+}
+
+#[test]
+fn a_stop_before_the_commit_leaves_nothing_and_a_restart_reads_the_old_revision() {
+    let f = Fixture::new();
+    let (gate, writer) = hold_write_at(&f, PlanWritePoint::BeforeCommit);
+    // While held, nothing of the write is visible to another connection.
+    assert_consistent(&f, 0, 0);
+    assert_eq!(f.plan_rows(), (0, 0, 0, 0));
+    // When: the process "stops" before the commit.
+    gate.resolve(PlanWriteResolution::Stop);
+    assert!(writer.join().unwrap().is_err());
+    // Then: after a restart the plan is still unwritten, and the same request is
+    // accepted afresh as revision 1, with one event.
+    let Fixture {
+        _dir,
+        config,
+        storage,
+    } = f;
+    storage.close();
+    let f = Fixture {
+        storage: Storage::open(config.clone()).unwrap(),
+        config,
+        _dir,
+    };
+    assert_consistent(&f, 0, 0);
+    let h = f.handle();
+    assert_eq!(h.conversation_plan_summary(THREAD).unwrap().revision, 0);
+    let applied = h
+        .update_conversation_plan(update(THREAD, 0, vec![add("a", None, "task")]))
+        .unwrap();
+    assert_eq!(applied.revision, 1);
+    assert_consistent(&f, 1, 1);
+    assert_eq!(f.plan_rows(), (1, 1, 1, 1));
+}
+
+#[test]
+fn a_stop_after_the_commit_keeps_the_change_whole_and_a_reread_shows_it() {
+    let f = Fixture::new();
+    let (gate, writer) = hold_write_at(&f, PlanWritePoint::AfterCommit);
+    // While held, the commit is already complete and consistent on disk.
+    assert_consistent(&f, 1, 1);
+    assert_eq!(f.plan_rows(), (1, 1, 1, 1));
+    // When: the caller never gets the success (the reply is lost).
+    gate.resolve(PlanWriteResolution::Stop);
+    assert!(writer.join().unwrap().is_err());
+    // Then: re-reading, also after a restart, shows revision 1 exactly once; the caller
+    // that retries its old request is told the revision moved instead of applying it twice.
+    let Fixture {
+        _dir,
+        config,
+        storage,
+    } = f;
+    storage.close();
+    let f = Fixture {
+        storage: Storage::open(config.clone()).unwrap(),
+        config,
+        _dir,
+    };
+    let h = f.handle();
+    assert_eq!(h.conversation_plan_summary(THREAD).unwrap().revision, 1);
+    assert_eq!(
+        h.conversation_plan_tree(THREAD, None, None)
+            .unwrap()
+            .nodes
+            .len(),
+        1
+    );
+    let error = h
+        .update_conversation_plan(update(THREAD, 0, vec![add("a", None, "task")]))
+        .unwrap_err();
+    assert!(
+        matches!(error, StorageError::StaleRevision { .. }),
+        "{error:?}"
+    );
+    assert_consistent(&f, 1, 1);
+    assert_eq!(f.plan_rows(), (1, 1, 1, 1));
+}
+
+#[test]
+fn a_held_write_that_is_let_go_completes_as_if_it_was_never_held() {
+    for point in [PlanWritePoint::BeforeCommit, PlanWritePoint::AfterCommit] {
+        let f = Fixture::new();
+        let (gate, writer) = hold_write_at(&f, point);
+        gate.resolve(PlanWriteResolution::Continue);
+        assert_eq!(writer.join().unwrap().unwrap().revision, 1);
+        assert_consistent(&f, 1, 1);
+    }
 }

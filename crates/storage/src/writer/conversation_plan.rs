@@ -69,6 +69,22 @@ impl StorageHandle {
         })
     }
 
+    /// Installs the gate that holds this writer's plan writes at a point the test arms.
+    /// Only in builds with the `plan-write-gate` feature.
+    ///
+    /// # Errors
+    /// A closed writer.
+    #[cfg(feature = "plan-write-gate")]
+    pub fn install_plan_write_gate(
+        &self,
+        gate: std::sync::Arc<crate::plan_write_gate::PlanWriteGate>,
+    ) -> Result<(), StorageError> {
+        self.lane_job(false, move |_| {
+            crate::plan_write_gate::install(gate);
+            Ok(())
+        })
+    }
+
     /// The plan's revision and progress (revision 0, no plan ID: never created).
     ///
     /// # Errors

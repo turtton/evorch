@@ -135,6 +135,10 @@ pub use writer::{
     ThreadIndexJobStatus, WalWaitStatus,
 };
 
+/// A pause point in the conversation plan write, for tests of a stop around the commit.
+#[cfg(feature = "plan-write-gate")]
+pub mod plan_write_gate;
+
 /// Full-body read instrumentation, available only to test consumers.
 #[cfg(feature = "test-support")]
 pub mod test_support;

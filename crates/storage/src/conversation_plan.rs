@@ -37,13 +37,23 @@ use sha2::{Digest, Sha256};
 pub const PLAN_MAX_NODES: usize = 128;
 /// Deepest nesting; a top-level task has depth 1.
 pub const PLAN_MAX_DEPTH: usize = 8;
-/// Most operations in one `plan_update` batch.
+/// Most operations in one model `plan_update` batch.
 pub const PLAN_MAX_OPERATIONS: usize = 32;
+/// Most operations in one runtime reconciliation: one per leaf, so as many as the plan has
+/// tasks. The model's [`PLAN_MAX_OPERATIONS`] does not apply to it.
+pub const PLAN_MAX_RECONCILE_OPERATIONS: usize = PLAN_MAX_NODES;
 /// Most bytes of the plan as the sum of its tasks' serialized details.
 pub const PLAN_MAX_BYTES: usize = 128 * 1024;
-/// Most bytes of one task's serialized detail: what a `plan_read` task view returns, and
-/// so what must fit in a 16 KiB tool result.
-pub const PLAN_NODE_DETAIL_MAX_BYTES: usize = 16 * 1024;
+/// The size a tool result is held to.
+pub const PLAN_TOOL_RESULT_MAX_BYTES: usize = 16 * 1024;
+/// What a `plan_read` task result carries besides the task: its `plan_id` and `revision`
+/// (about 80 bytes at their widest), the workbench reply envelope around the tool result,
+/// and a margin. A task whose detail is at most [`PLAN_NODE_DETAIL_MAX_BYTES`] therefore
+/// still fits in [`PLAN_TOOL_RESULT_MAX_BYTES`] once wrapped.
+pub const PLAN_TASK_RESULT_RESERVE_BYTES: usize = 2 * 1024;
+/// Most bytes of one task's serialized detail, checked when the task is written.
+pub const PLAN_NODE_DETAIL_MAX_BYTES: usize =
+    PLAN_TOOL_RESULT_MAX_BYTES - PLAN_TASK_RESULT_RESERVE_BYTES;
 /// The serialized size a tree page stops at (at least one task is always returned).
 pub const PLAN_PAGE_MAX_BYTES: usize = 12 * 1024;
 /// Tasks in a tree page when the caller names no limit.
@@ -564,10 +574,16 @@ impl PlanTree {
         if operations.is_empty() {
             return Err(PlanRejection::EmptyBatch);
         }
-        if operations.len() > PLAN_MAX_OPERATIONS {
+        // Only the runtime's reconciliation may name more tasks than a model batch may.
+        let max_operations = if allow_interrupted {
+            PLAN_MAX_RECONCILE_OPERATIONS
+        } else {
+            PLAN_MAX_OPERATIONS
+        };
+        if operations.len() > max_operations {
             return Err(PlanRejection::TooManyOperations {
                 actual: operations.len(),
-                max: PLAN_MAX_OPERATIONS,
+                max: max_operations,
             });
         }
         if operations.len() > 1

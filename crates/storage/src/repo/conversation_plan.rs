@@ -349,9 +349,11 @@ pub(crate) fn write(
         "INSERT INTO conversation_plan_history(plan_id, revision, event_id) VALUES (?1,?2,?3)",
         params![new.plan_id, to_i64(revision, "plan revision")?, stored.id],
     )?;
+    plan_gate(PlanWritePoint::BeforeCommit)?;
     tx.commit()?;
     let bytes = next_accounting.last_event_bytes;
     *accounting = next_accounting;
+    plan_gate(PlanWritePoint::AfterCommit)?;
     Ok((
         PlanApplied {
             plan_id: Some(new.plan_id.clone()),
@@ -364,6 +366,28 @@ pub(crate) fn write(
         1,
         bytes,
     ))
+}
+
+#[cfg(feature = "plan-write-gate")]
+use crate::plan_write_gate::PlanWritePoint;
+
+/// A point of the write a test can hold; nothing in a build without the feature.
+#[cfg(feature = "plan-write-gate")]
+fn plan_gate(point: PlanWritePoint) -> Result<(), StorageError> {
+    crate::plan_write_gate::reached(point)
+}
+
+#[cfg(not(feature = "plan-write-gate"))]
+#[derive(Clone, Copy)]
+enum PlanWritePoint {
+    BeforeCommit,
+    AfterCommit,
+}
+
+#[cfg(not(feature = "plan-write-gate"))]
+#[allow(clippy::unnecessary_wraps)]
+fn plan_gate(_point: PlanWritePoint) -> Result<(), StorageError> {
+    Ok(())
 }
 
 fn unchanged(row: Option<&PlanRow>, revision: u64, progress: PlanProgress) -> PlanApplied {
@@ -388,6 +412,10 @@ pub(crate) fn rebind_thread(
     if from_thread == to_thread {
         return Ok(false);
     }
+    // Both ends are checked in the caller's transaction, so a thread deleted before the
+    // commit can neither give up nor receive a plan.
+    ensure_live_thread(conn, from_thread)?;
+    ensure_live_thread(conn, to_thread)?;
     if plan_row(conn, to_thread)?.is_some() {
         return Err(reject(PlanRejection::BindingConflict));
     }
