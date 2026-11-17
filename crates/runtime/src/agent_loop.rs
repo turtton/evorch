@@ -1403,6 +1403,7 @@ impl LoopState {
                 }
             };
             self.boundary_context_deferred = false;
+            self.plan_notice.response_received();
             // A provider may omit usage (Codex does). The placeholder zero is not a
             // measurement: it must not reach the rules budget, the context baseline or
             // the cumulative budgets as "nothing used". Charge an estimate from the

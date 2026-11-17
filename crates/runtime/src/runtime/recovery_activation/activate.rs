@@ -166,7 +166,28 @@ impl AgentRuntime {
                 {
                     return Err(error("intent/continuation ToolsWaiting boundary mismatch"));
                 }
-                let restored = RestoredState::from_recovery_bundle(bundle, &source.record.waits)?;
+                let mut restored =
+                    RestoredState::from_recovery_bundle(bundle, &source.record.waits)?;
+                if restored.plan_notice == crate::conversation_plan::notice::PlanNotice::Pending
+                    && self.has_planned_restart_handoff()
+                {
+                    let tx = self.read_adopted_restart(true)?;
+                    let evidence = store
+                        .with_database(|db| {
+                            db.restart_tools_evidence(
+                                &tx.metadata.restart_id,
+                                &id.to_string(),
+                                &source.intent.incarnation,
+                            )
+                        })
+                        .map_err(error)?;
+                    if evidence.is_some_and(|(evidence, consumed)| consumed && evidence.boundary) {
+                        // Only the plan notice is delayed: compaction and other
+                        // boundary context retain their existing semantics.
+                        restored.plan_notice =
+                            crate::conversation_plan::notice::PlanNotice::Deferred;
+                    }
+                }
                 RunContinuation::Resume {
                     restored: Box::new(restored),
                     handoff: None,

@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum PlanNotice {
     Pending,
+    /// A verified tools-only restart boundary still owes its first response.
+    /// Persisting this state keeps an interrupted boundary retry notice-free.
+    Deferred,
     #[default]
     Done,
 }
@@ -18,6 +21,12 @@ pub enum PlanNotice {
 impl PlanNotice {
     pub(crate) const fn pending() -> Self {
         Self::Pending
+    }
+
+    pub(crate) fn response_received(&mut self) {
+        if *self == Self::Deferred {
+            *self = Self::Pending;
+        }
     }
 }
 

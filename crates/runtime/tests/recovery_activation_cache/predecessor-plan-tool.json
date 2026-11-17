@@ -1,0 +1,67 @@
+{
+  "name": "todo_write",
+  "description": "Optionally maintain the current conversation's working procedure when explicit steps help manage the work. Send exactly one operation. items replaces the entire list; omit obsolete steps instead of marking them completed, and an empty list clears it. advance (true, with expected_revision) completes the single in_progress step and starts the first pending one. update ({index, status}, 0-based, with expected_revision) sets one step's status; use items to change text. Use advance or update as progress is made. expected_revision is the revision from your last result. Multiple in_progress items are allowed for parallel work. interrupted is set only by the runtime when a work period ended before completion was recorded; you cannot write it, but update can change it to another status. This is procedure memory, not a goal, acceptance check, execution permission, or instruction to continue automatically. Only the trusted conversation root may write it; delegated agents report to that root.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "items": {
+        "type": "array",
+        "maxItems": 32,
+        "items": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "in_progress",
+                "completed"
+              ]
+            }
+          },
+          "required": [
+            "content",
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "advance": {
+        "type": "boolean"
+      },
+      "update": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed"
+            ]
+          }
+        },
+        "required": [
+          "index",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "expected_revision": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "additionalProperties": false,
+    "required": []
+  }
+}
