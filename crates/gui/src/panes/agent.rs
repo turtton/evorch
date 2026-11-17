@@ -29,11 +29,14 @@ pub use pull_request_bar::{
 mod lane;
 use header::header_strip;
 pub(crate) mod async_layout;
+mod perf;
 mod queue;
 mod sandbox_review;
 mod thinking;
 mod unreadable;
 mod virtual_list;
+#[doc(hidden)]
+pub use perf::{TranscriptPerf, set_transcript_perf_enabled, take_transcript_perf};
 pub(crate) use virtual_list::mark_async_layout;
 #[doc(hidden)]
 pub use virtual_list::{set_transcript_virtualization_for_tests, transcript_layout_for_tests};
@@ -384,6 +387,7 @@ fn run_detail_body(
                 branch::start_versions(ui, model, branch, branch_action);
             }
             let entries = model.visible_entries();
+            let prep_clock = perf::Clock::start(perf::enabled());
             let mut list =
                 virtual_list::VirtualList::load(ui, cache_key, model.visible_entry_ids());
             use std::hash::{Hash, Hasher};
@@ -402,6 +406,12 @@ fn run_detail_body(
             let layout_revision = layout_revision.finish();
             let latest_job_entry = latest_shell_job_entries(entries, model.shell_jobs());
             let nesting = crate::panes::transcript_tool::RunJsNesting::new(entries);
+            // shell-job map, run_js nesting and the row loop each walk every entry.
+            list.perf.passes += 1;
+            list.perf.projection_rebuilds += 1;
+            list.perf.entries_enumerated += 3 * entries.len() as u64;
+            list.perf.prep_ns += prep_clock.elapsed_ns();
+            let loop_clock = perf::Clock::start(list.perf_on());
             let mut folded_until = 0;
             for (entry_idx, entry) in entries.iter().enumerate() {
                 if entry_idx < folded_until || nesting.is_nested(entry_idx) {
@@ -422,6 +432,7 @@ fn run_detail_body(
                             model.shell_jobs(),
                         );
                 }
+                let revision_clock = perf::Clock::start(list.perf_on());
                 let revision = row_revision(
                     model,
                     (entry_idx..folded_until.max(entry_idx + 1))
@@ -429,6 +440,8 @@ fn run_detail_body(
                     &latest_job_entry,
                     layout_revision,
                 );
+                list.perf.revisions += u64::from(list.perf_on());
+                list.perf.revision_ns += revision_clock.elapsed_ns();
                 let row_top = ui.cursor().top();
                 if previous_anchor.is_some_and(|anchor| anchor.entry == entry_id) {
                     anchored_entry_y = Some(row_top - content_top);
@@ -651,6 +664,8 @@ fn run_detail_body(
                     first_visible = Some((entry_id, row_top - content_top));
                 }
             }
+            list.perf.loop_ns += loop_clock.elapsed_ns();
+            list.publish_perf();
             list.store(ui, cache_key);
             corrected_offset = anchor_correction(
                 ui,

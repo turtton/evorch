@@ -101,6 +101,16 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.ctx.pixels_per_point()
     }
 
+    /// 描画に使う [`egui::Context`] を返します（計測・検証用 hook の設定先）。
+    pub fn context(&self) -> &egui::Context {
+        &self.harness.ctx
+    }
+
+    /// 論理ポイント単位の画面サイズを変更します（幅変更後の再 layout 計測用）。
+    pub fn resize(&mut self, size: [f32; 2]) {
+        self.harness.set_size(vec2(size[0], size[1]));
+    }
+
     /// 画面全体の矩形を論理ポイント単位で返します。
     pub fn screen_rect(&self) -> egui::Rect {
         self.harness.ctx.viewport_rect()
