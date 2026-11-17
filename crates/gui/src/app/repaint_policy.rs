@@ -131,9 +131,13 @@ mod tests {
             .create_thread(ThreadId::new("t"), project, "t")
             .unwrap();
         sidebar.switch_thread(&ThreadId::new("t")).unwrap();
-        WorkbenchState::new(DemoSource(vec![]), &UiSettings::default())
+        let mut state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default())
             .unwrap()
-            .with_sidebar(sidebar)
+            .with_sidebar(sidebar);
+        // A system reading wakes the real footer with a 50 ms coalesced repaint,
+        // even in an idle window. Its arrival must not race this fixture's frames.
+        state.system_footer = super::super::system_footer::SystemFooter::without_sampling();
+        state
     }
 
     /// What egui reports for a request: it takes the frame time the pass predicted off the delay.
@@ -148,8 +152,21 @@ mod tests {
 
     /// One `ui` pass; the delay egui reports for the next frame.
     fn ui_delay(state: &mut State, ctx: &egui::Context) -> Duration {
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ui_delay_with(state, ctx, |_| {})
+    }
+
+    fn ui_delay_with(
+        state: &mut State,
+        ctx: &egui::Context,
+        notify: impl Fn(&egui::Context),
+    ) -> Duration {
+        let input = egui::RawInput {
+            time: Some(ctx.cumulative_frame_nr() as f64 / 60.0),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
             state.ui(ui, &mut eframe::Frame::_new_kittest());
+            notify(ui.ctx());
         });
         output.textures_delta.clear();
         output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
@@ -158,11 +175,19 @@ mod tests {
     /// A fresh context owes a few immediate frames; pass through them to reach rest.
     fn settled(state: &mut State) -> (egui::Context, Duration) {
         let ctx = egui::Context::default();
-        let mut delay = Duration::ZERO;
-        for _ in 0..4 {
-            delay = ui_delay(state, &ctx);
-        }
+        let delay = settle_on(state, &ctx);
         (ctx, delay)
+    }
+
+    fn settle_on(state: &mut State, ctx: &egui::Context) -> Duration {
+        loop {
+            let delay = ui_delay(state, ctx);
+            // Only drain egui's immediate layout/echo passes, never wait for the
+            // expected policy delay: a wrong nonzero delay must fail the assertion.
+            if !delay.is_zero() {
+                return delay;
+            }
+        }
     }
 
     #[test]
@@ -171,6 +196,20 @@ mod tests {
         assert!(!state.polled_work_pending());
         let (_, delay) = settled(&mut state);
         assert_requested(delay, IDLE_POLL);
+    }
+
+    #[test]
+    fn a_background_reading_can_wake_an_idle_window_before_its_poll() {
+        let mut state = state();
+        let (ctx, delay) = settled(&mut state);
+        assert_requested(delay, IDLE_POLL);
+
+        // The system sampler's notification, delivered during a known pass.
+        assert_requested(
+            ui_delay_with(&mut state, &ctx, crate::repaint::coalesced),
+            crate::repaint::COALESCE,
+        );
+        assert_requested(settle_on(&mut state, &ctx), IDLE_POLL);
     }
 
     #[test]
@@ -183,10 +222,7 @@ mod tests {
 
         // The recomposition finishes: the next pass collects it and the floor returns.
         hold.send(Ok(())).unwrap();
-        let mut delay = Duration::ZERO;
-        for _ in 0..4 {
-            delay = ui_delay(&mut state, &ctx);
-        }
+        let delay = settle_on(&mut state, &ctx);
         assert!(!state.polled_work_pending());
         assert_requested(delay, IDLE_POLL);
     }

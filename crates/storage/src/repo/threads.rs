@@ -153,7 +153,10 @@ pub(crate) fn upsert(
     if threads.is_empty() {
         return Ok(0);
     }
-    let transaction = conn.unchecked_transaction()?;
+    // Reserve the writer before the tombstone/archive reads. A deferred
+    // read-to-write upgrade can return BUSY without invoking busy_timeout.
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let skipped = upsert_in(&transaction, writer, threads)?;
     transaction.commit()?;
     Ok(skipped)

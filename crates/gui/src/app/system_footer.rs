@@ -15,6 +15,15 @@ pub(super) struct SystemFooter {
 }
 
 impl SystemFooter {
+    /// Repaint-policy fixtures must not start the machine's periodic sampler.
+    #[cfg(test)]
+    pub(super) fn without_sampling() -> Self {
+        Self {
+            started: true,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn set_storage_directory(&mut self, directory: Option<PathBuf>) {
         self.storage_directory = directory;
     }
