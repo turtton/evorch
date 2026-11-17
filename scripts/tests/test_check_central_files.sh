@@ -63,6 +63,44 @@ files Cargo.lock crates/workbench-host/src/areas/mod.rs
 expect ok "an integration PR may change central files" "$central" --scope integration --files-from "$work/files"
 expect fail "an unknown scope" "$central" --scope nonsense --files-from "$work/files"
 
+# I-14: pr14 owns the storage's management module and its tests, and nothing else
+# of the storage; the writer stays central to no one but an integration PR.
+files crates/storage/src/management.rs crates/storage/tests/management_cas.rs \
+  crates/workbench-host/tests/management_cas_parity.rs crates/workbench-host/src/areas/memory.rs
+expect ok "pr14 owns the management module and its tests" "$central" --scope pr14 --files-from "$work/files"
+files crates/storage/src/writer.rs
+expect fail "pr14 does not own the writer" "$central" --scope pr14 --files-from "$work/files"
+files crates/storage/src/management.rs
+expect fail "pr10 does not own the management module" "$central" --scope pr10 --files-from "$work/files"
+files crates/evorch-core/tests/core_pr_cache.rs
+expect ok "pr15 owns its cache target" "$central" --scope pr15 --files-from "$work/files"
+expect fail "pr14 does not own the pr15 cache target" "$central" --scope pr14 --files-from "$work/files"
+
+# Every binary the cache gate names is a test target that exists: nextest rejects
+# a binary name that matches nothing, and a registered placeholder is a file.
+# `filter_binaries <file>` prints the `binary(=...)` names of a filter file's
+# CACHE_CONTRACT_FILTER; `missing_targets` prints those without a target.
+filter_binaries() {
+  (
+    # shellcheck disable=SC1090
+    . "$1"
+    printf '%s\n' "$CACHE_CONTRACT_FILTER" | grep -o 'binary(=[^)]*)' | sed -e 's/^binary(=//' -e 's/)$//' | sort -u
+  )
+}
+missing_targets() {
+  local name found
+  while IFS= read -r name; do
+    found=$(git ls-files --cached --others --exclude-standard "crates/*/tests/$name.rs" "crates/*/tests/$name/main.rs")
+    [[ -n "$found" ]] || echo "$name"
+  done < <(filter_binaries "$1")
+}
+no_missing_targets() { [[ -z "$(missing_targets "$1")" ]]; }
+expect ok "the cache gate names core_pr_cache" bash -c "grep -q 'binary(=core_pr_cache)' scripts/contract-test-filters.sh"
+expect ok "core_pr_cache has a test target" test -f crates/evorch-core/tests/core_pr_cache.rs
+expect ok "every binary of the cache gate has a test target" no_missing_targets scripts/contract-test-filters.sh
+printf "CACHE_CONTRACT_FILTER='package(=x) & binary(=no_such_cache_target)'\n" > "$work/bad-filter.sh"
+expect fail "a binary without a target is detected" no_missing_targets "$work/bad-filter.sh"
+
 # A scope pattern is not expanded against the files that exist. The sandbox is a
 # git repository with real files under the patterns: an unquoted loop would
 # replace `offline*` with the names it finds and refuse the nested ones.

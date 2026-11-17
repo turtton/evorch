@@ -187,15 +187,7 @@ impl Database {
 
     /// The current projection of one lesson, or `None` when it does not exist.
     pub fn memory_entry(&self, id: &str) -> Result<Option<MemoryEntry>, StorageError> {
-        self.conn
-            .query_row(
-                "SELECT id, project, task_id, content, evidence, status, scope, favorite FROM memory_entries WHERE id = ?1",
-                [id],
-                entry_row,
-            )
-            .optional()?
-            .map(decode)
-            .transpose()
+        entry_in(&self.conn, id)
     }
 
     /// Promoted lessons a task in `project` may see: that project's own project
@@ -246,6 +238,22 @@ impl Database {
             })
             .collect()
     }
+}
+
+/// One lesson's projection as `conn` sees it: the read of [`Database::memory_entry`] and of
+/// the conditional updates of [`crate::management`], inside their transaction.
+pub(crate) fn entry_in(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<MemoryEntry>, StorageError> {
+    conn.query_row(
+        "SELECT id, project, task_id, content, evidence, status, scope, favorite FROM memory_entries WHERE id = ?1",
+        [id],
+        entry_row,
+    )
+    .optional()?
+    .map(decode)
+    .transpose()
 }
 
 /// Row of `id, project, task_id, content, evidence, status, scope, favorite` in that order.

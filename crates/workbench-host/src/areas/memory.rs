@@ -24,6 +24,7 @@ use crate::queries::{Pager, error, storage_error};
 use std::path::{Path, PathBuf};
 use storage::{
     Database,
+    management::{Denial, MemoryOp, memory_denial},
     memory::{MemoryEntry, MemoryFilter, MemoryStatus as StoredStatus},
 };
 use workbench_protocol::{
@@ -244,57 +245,48 @@ fn literal_words(text: &str) -> String {
 
 /// What may be done to a lesson now. PR 14's commands refuse exactly what is
 /// denied here.
+///
+/// The rule itself lives in [`storage::management::memory_denial`], the one the
+/// writer's conditional update judges with, so what is listed here is exactly
+/// what that update accepts.
 pub fn actions(status: MemoryStatus, favorite: bool) -> Vec<ActionAvailability<MemoryAction>> {
-    let rejected = status == MemoryStatus::Rejected;
-    let allowed_if = |ok: bool, otherwise: DenialReason| {
-        if ok {
-            ActionState::Allowed
-        } else {
-            ActionState::Denied { reason: otherwise }
-        }
-    };
-    let settled = |ok: bool| {
-        allowed_if(
-            ok,
-            if rejected {
-                DenialReason::AlreadyResolved
-            } else {
-                DenialReason::NotApplicableInState
-            },
-        )
-    };
+    let status = stored_status(status);
     [
-        (MemoryAction::SetFavorite, settled(!rejected && !favorite)),
-        (MemoryAction::ClearFavorite, settled(!rejected && favorite)),
-        (
-            MemoryAction::Validate,
-            settled(status == MemoryStatus::Candidate),
-        ),
-        (
-            MemoryAction::Promote,
-            settled(status == MemoryStatus::Validated),
-        ),
-        (
-            MemoryAction::Reject,
-            if favorite && !rejected {
-                ActionState::Denied {
-                    reason: DenialReason::FavoriteMustBeCleared,
-                }
-            } else {
-                settled(!rejected)
-            },
-        ),
+        (MemoryAction::SetFavorite, MemoryOp::SetFavorite),
+        (MemoryAction::ClearFavorite, MemoryOp::ClearFavorite),
+        (MemoryAction::Validate, MemoryOp::Validate),
+        (MemoryAction::Promote, MemoryOp::Promote),
+        (MemoryAction::Reject, MemoryOp::Reject),
     ]
     .into_iter()
-    .map(|(action, state)| ActionAvailability { action, state })
+    .map(|(action, op)| ActionAvailability {
+        action,
+        state: match memory_denial(op, status, favorite) {
+            None => ActionState::Allowed,
+            Some(denial) => ActionState::Denied {
+                reason: denial_reason(denial),
+            },
+        },
+    })
     .collect()
 }
 
-/// The revision of a lesson: status rows plus favorite changes.
+/// The wire form of a storage denial (shared with the improvement area).
+pub(crate) fn denial_reason(denial: Denial) -> DenialReason {
+    match denial {
+        Denial::NotApplicableInState => DenialReason::NotApplicableInState,
+        Denial::FavoriteMustBeCleared => DenialReason::FavoriteMustBeCleared,
+        Denial::AlreadyResolved => DenialReason::AlreadyResolved,
+    }
+}
+
+/// The revision of a lesson: status rows plus favorite changes, counted by the
+/// storage (the value the conditional update compares).
 fn revision(database: &Database, id: &str) -> Result<Revision, WorkbenchError> {
-    let rows = database.memory_history(id).map_err(storage_error)?.len();
-    let favorites = database.favorite_history(id).map_err(storage_error)?.len();
-    Ok(Revision((rows + favorites) as u64))
+    database
+        .memory_revision(id)
+        .map(Revision)
+        .map_err(storage_error)
 }
 
 fn state(database: &Database, entry: &MemoryEntry) -> Result<MemoryState, WorkbenchError> {
