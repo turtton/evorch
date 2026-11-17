@@ -719,10 +719,20 @@ async fn a_full_memory_of_accepted_commands_refuses_new_ids_and_still_answers_kn
     core.shutdown().await.unwrap();
 }
 
-/// A planned restart seals the host's admission: a command already accepted keeps
-/// the restart permit until its outcome is settled (even before its task was
-/// polled), new work is refused, and a fetch that is still held when the core
-/// stops is never adopted afterwards.
+/// What the host's restart gate does with pull request commands, driven by hand.
+///
+/// This test moves the gate itself (`transition`, `drained`); it does not run the
+/// restart coordinator, and it drains no producer. It checks only the gate's
+/// contract toward this area: a command already accepted keeps its restart permit
+/// until its outcome is settled (even before its task was polled), new work is
+/// refused once the gate leaves normal operation (`Preparing`, and `Sealing`
+/// too), and a fetch that is still held when the core stops is never adopted
+/// afterwards.
+///
+/// The coordinator's own order is: drain the producers, enter `Sealing`, then wait
+/// for the host gate to drain. Here the gate is drained *before* `Sealing`, which
+/// is not that order; the coordinator's ordering is proved by the restart tests of
+/// `evorch-core` (the production M2 drain tests), not by this one.
 #[tokio::test(flavor = "current_thread")]
 async fn a_planned_restart_waits_for_accepted_commands_and_never_adopts_a_cut_off_fetch() {
     use workbench_host::bootstrap::restart::HostRestartPhase;
@@ -742,7 +752,9 @@ async fn a_planned_restart_waits_for_accepted_commands_and_never_adopts_a_cut_of
         local_desktop(),
     )
     .unwrap();
-    // The order the restart coordinator takes: Preparing while it drains, then Sealing.
+    // The gate is moved directly: `Preparing` closes admission to new work while the
+    // gate waits for what it already accepted. (The coordinator reaches `Sealing`
+    // before it waits for the host gate; this test does not follow that order.)
     assert!(restart.transition(1, HostRestartPhase::Preparing));
     let refused = send(&core, refresh("refresh-late"), web())
         .expect_err("new work is refused while the host prepares to restart");
@@ -754,10 +766,12 @@ async fn a_planned_restart_waits_for_accepted_commands_and_never_adopts_a_cut_of
         "the accepted command still holds the restart permit"
     );
 
-    // Its outcome settles, and only then does the host drain.
+    // Its outcome settles, and only then does the gate drain.
     let ended = settled(&mut events, &["link-1"]).await;
     assert_eq!(ended[0].operation.state, OperationState::Ready);
     drained.await;
+    // `Sealing` after the drain (the coordinator seals first): only the refusal of
+    // new work in this phase is checked here.
     assert!(restart.transition(1, HostRestartPhase::Sealing));
     let refused = send(&core, refresh("refresh-sealed"), web())
         .expect_err("a sealed host takes no new work either");

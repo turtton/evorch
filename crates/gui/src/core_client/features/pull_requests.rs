@@ -21,7 +21,7 @@ use super::layout::bounded_list;
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
 use workbench_protocol::{
     commands::{Command, CommandResult},
-    errors::ErrorCode,
+    errors::{ErrorCode, RetryAdvice},
     events::UiEvent,
     handshake::Capability,
     ids::{OperationId, ThreadId},
@@ -102,7 +102,25 @@ fn failure_label(code: ErrorCode, unknown: bool) -> &'static str {
         ErrorCode::Conflict => "現在の状態では実行できません。",
         ErrorCode::UnsupportedCapability => "PR の追跡は無効です。",
         ErrorCode::Draining => "コアが停止または再起動中です。",
+        ErrorCode::LimitExceeded => limit_label(None),
         _ => "操作に失敗しました。",
+    }
+}
+
+/// A refusal for a limit, as the person reads it. The core says which limit by its
+/// advice: `Never` is the memory of accepted commands being full, which only a
+/// restart of the core empties; `UserActionRequired` is the table of running
+/// operations being full, which clears as they finish. Neither is sent again by
+/// the screen.
+fn limit_label(retry: Option<RetryAdvice>) -> &'static str {
+    match retry {
+        Some(RetryAdvice::Never) => {
+            "このコアが受け付け済みの操作の記憶が上限に達したため、新しい操作は受け付けられません。コアを再起動すると解消します。操作は再送されません。"
+        }
+        Some(RetryAdvice::UserActionRequired) => {
+            "実行中の操作が多すぎます。実行中の操作が終わってから、もう一度操作してください。操作は自動では再送されません。"
+        }
+        _ => "上限に達したため操作を受け付けられませんでした。操作は再送されません。",
     }
 }
 
@@ -366,6 +384,7 @@ impl Feature for PullRequestsFeature {
                         self.to_check.insert(id);
                     } else {
                         self.status = match error.code {
+                            Some(ErrorCode::LimitExceeded) => limit_label(error.retry).to_owned(),
                             Some(code) => failure_label(code, false).to_owned(),
                             None => error.message.clone(),
                         };
@@ -503,6 +522,8 @@ impl Feature for PullRequestsFeature {
                             ui.visuals().warn_fg_color,
                             "上限に達しました。再開には予算のリセットが必要です。",
                         );
+                    } else if let Some(reason) = &auto_fix.stop_reason {
+                        ui.label(format!("自動修正の停止理由: {reason}"));
                     }
                     let link_revision = link.link_revision;
                     let policy_revision = auto_fix.policy_revision;
