@@ -11,6 +11,7 @@ impl AgentRuntime {
         &self,
         run_id: RunId,
         panic: CaughtPanic,
+        plan_authority: (Arc<RunMailbox>, Option<crate::ownership::OwnerPermit>),
     ) -> Option<crate::quiesce::dispatch::DispatchGuard> {
         let id = run_id.to_string();
         // Panic is never a safe-point checkpoint, even after successful cleanup.
@@ -101,6 +102,11 @@ impl AgentRuntime {
                 .get(&run_id)
                 .and_then(|entry| entry.config.ownership.clone());
             self.reconcile_todo_or_report(run_id, ownership.as_ref());
+            self.reconcile_plan_or_report(&crate::conversation_plan::Caller {
+                run: run_id,
+                mailbox: &plan_authority.0,
+                permit: plan_authority.1.as_ref(),
+            });
             let first_line = panic.message.lines().next().unwrap_or_default();
             if let Ok(mailbox) = self.run_mailbox(run_id) {
                 self.close_question_mailbox(run_id, &mailbox);

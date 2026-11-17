@@ -60,6 +60,10 @@ impl AgentRuntime {
 
     /// Register trusted host thread ownership before starting the reserved root.
     pub fn bind_thread_root(&self, thread_id: &str, run_id: RunId) -> Result<(), String> {
+        let plan_gate = self.shared.plan_authority.get(thread_id);
+        let _plan_authority = plan_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if thread_id.is_empty() {
             return Err("thread_id must not be empty".into());
         }
@@ -300,6 +304,10 @@ impl AgentRuntime {
 
     /// Rehydrate event-sourced state without starting work or granting new authority.
     pub fn restore_thread_goal(&self, mut snapshot: ThreadGoalSnapshot) -> Result<(), String> {
+        let plan_gate = self.shared.plan_authority.get(&snapshot.thread_id);
+        let _plan_authority = plan_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.deny_deleted_thread(&snapshot.thread_id)
             .and_then(|()| self.deny_deleted_run(&snapshot.root_run_id))
             .map_err(|deleted| deleted.to_string())?;
@@ -545,8 +553,26 @@ impl AgentRuntime {
         incarnation: Option<&str>,
         before_transfer: impl FnOnce(&Option<crate::ownership::OwnerPermit>),
     ) -> Result<Option<crate::ownership::OwnerPermit>, String> {
-        let descendants = self.live_descendants(source);
+        // Authority before Q; never wait for a plan gate while holding Q/runs.
+        // Sorted two-thread acquisition also permits opposite handoffs without ABBA.
+        let expected_source = self.goal_thread(source);
         let child_thread = event_bus::escalation_thread_id(&target.to_string());
+        let mut threads = vec![child_thread.clone()];
+        threads.extend(expected_source.iter().cloned());
+        threads.sort();
+        threads.dedup();
+        let gates: Vec<_> = threads
+            .iter()
+            .map(|t| self.shared.plan_authority.get(t))
+            .collect();
+        let _authority_gates: Vec<_> = gates
+            .iter()
+            .map(|g| g.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+            .collect();
+        if self.goal_thread(source) != expected_source {
+            return Err("conversation root changed before handoff".into());
+        }
+        let descendants = self.live_descendants(source);
         let prepare = || -> Result<_, String> {
             let goals = self.goal_lock();
             if goals.roots.contains_key(&target)
@@ -604,6 +630,23 @@ impl AgentRuntime {
             None => (None, prepare()?),
         };
         let source_thread = goals.roots.get(&source).cloned();
+        if incarnation.is_none()
+            && let (Some(store), Some(from)) =
+                (self.shared.run_store.get(), source_thread.as_deref())
+        {
+            // Non-durable/test handoffs use the same binding move. Production's
+            // durable receipt commit moves it in its transaction (PR1).
+            drop(goals);
+            let _registry = source_owner
+                .map(|p| p.mutation_guard())
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            store
+                .handle
+                .rebind_conversation_plan(from, &child_thread)
+                .map_err(|e| e.to_string())?;
+            goals = self.goal_lock();
+        }
         self.commit_handoff_receipt(
             source,
             target,
@@ -782,8 +825,12 @@ impl AgentRuntime {
         if receipt.state == storage::handoffs::HandoffState::Started {
             return Ok(());
         }
-        let mut goals = self.goal_lock();
         let thread = event_bus::escalation_thread_id(&target.to_string());
+        let plan_gate = self.shared.plan_authority.get(&thread);
+        let _plan_authority = plan_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut goals = self.goal_lock();
         if !goals.goals.contains_key(&thread)
             && let Some(json) = receipt.goal_json
         {

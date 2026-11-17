@@ -1,4 +1,23 @@
 {
+  "query/execution/get_conversation_plan": {
+    "payload": {
+      "payload": {
+        "thread": "thread-1"
+      },
+      "type": "get_conversation_plan"
+    },
+    "type": "execution"
+  },
+  "query/execution/get_conversation_plan_task": {
+    "payload": {
+      "payload": {
+        "task_id": "task-1",
+        "thread": "thread-1"
+      },
+      "type": "get_conversation_plan_task"
+    },
+    "type": "execution"
+  },
   "query/execution/get_run": {
     "payload": {
       "payload": {
@@ -30,6 +49,180 @@
         "thread": "thread-1"
       },
       "type": "list_run_details"
+    },
+    "type": "execution"
+  },
+  "query/execution/read_conversation_plan_history": {
+    "payload": {
+      "payload": {
+        "after_revision": null,
+        "limit": 1,
+        "thread": "thread-1"
+      },
+      "type": "read_conversation_plan_history"
+    },
+    "type": "execution"
+  },
+  "query/execution/read_conversation_plan_tree": {
+    "payload": {
+      "payload": {
+        "cursor": null,
+        "limit": 1,
+        "thread": "thread-1"
+      },
+      "type": "read_conversation_plan_tree"
+    },
+    "type": "execution"
+  },
+  "query_reply/execution/conversation_plan": {
+    "payload": {
+      "payload": {
+        "plan_id": "plan-1",
+        "progress": {
+          "leaf_count": 1,
+          "leaf_counts": {
+            "blocked": 0,
+            "completed": 0,
+            "in_progress": 0,
+            "interrupted": 0,
+            "pending": 1
+          },
+          "node_count": 1,
+          "weighted_ppm": {
+            "blocked": 0,
+            "completed": 0,
+            "in_progress": 0,
+            "interrupted": 0,
+            "pending": 1000000
+          }
+        },
+        "revision": "1",
+        "thread": "thread-1"
+      },
+      "type": "conversation_plan"
+    },
+    "type": "execution"
+  },
+  "query_reply/execution/conversation_plan_history": {
+    "payload": {
+      "payload": {
+        "entries": [
+          {
+            "change": {
+              "cause": "model_update",
+              "changes": [
+                {
+                  "change": "cleared",
+                  "removed": 0
+                }
+              ],
+              "progress": {
+                "leaf_count": 1,
+                "leaf_counts": {
+                  "blocked": 0,
+                  "completed": 0,
+                  "in_progress": 0,
+                  "interrupted": 0,
+                  "pending": 1
+                },
+                "node_count": 1,
+                "weighted_ppm": {
+                  "blocked": 0,
+                  "completed": 0,
+                  "in_progress": 0,
+                  "interrupted": 0,
+                  "pending": 1000000
+                }
+              },
+              "source_run_id": "run-1"
+            },
+            "event_id": "7",
+            "revision": "1"
+          }
+        ],
+        "next_after_revision": null,
+        "plan_id": "plan-1",
+        "revision": "1"
+      },
+      "type": "conversation_plan_history"
+    },
+    "type": "execution"
+  },
+  "query_reply/execution/conversation_plan_task": {
+    "payload": {
+      "payload": {
+        "node": {
+          "blocker": "",
+          "child_ids": [],
+          "depth": 1,
+          "description": "detail",
+          "parent_id": null,
+          "position": 0,
+          "progress_ppm": {
+            "blocked": 0,
+            "completed": 0,
+            "in_progress": 0,
+            "interrupted": 0,
+            "pending": 1000000
+          },
+          "result": "",
+          "status": "pending",
+          "task_id": "task-1",
+          "title": "test",
+          "weight": 1
+        },
+        "plan_id": "plan-1",
+        "revision": "1"
+      },
+      "type": "conversation_plan_task"
+    },
+    "type": "execution"
+  },
+  "query_reply/execution/conversation_plan_tree": {
+    "payload": {
+      "payload": {
+        "next_cursor": null,
+        "nodes": [
+          {
+            "child_count": 0,
+            "depth": 1,
+            "parent_id": null,
+            "position": 0,
+            "progress_ppm": {
+              "blocked": 0,
+              "completed": 0,
+              "in_progress": 0,
+              "interrupted": 0,
+              "pending": 1000000
+            },
+            "status": "pending",
+            "task_id": "task-1",
+            "title": "test",
+            "weight": 1
+          }
+        ],
+        "plan_id": "plan-1",
+        "progress": {
+          "leaf_count": 1,
+          "leaf_counts": {
+            "blocked": 0,
+            "completed": 0,
+            "in_progress": 0,
+            "interrupted": 0,
+            "pending": 1
+          },
+          "node_count": 1,
+          "weighted_ppm": {
+            "blocked": 0,
+            "completed": 0,
+            "in_progress": 0,
+            "interrupted": 0,
+            "pending": 1000000
+          }
+        },
+        "revision": "1"
+      },
+      "type": "conversation_plan_tree"
     },
     "type": "execution"
   },
@@ -126,6 +319,16 @@
         }
       },
       "type": "thread_execution"
+    },
+    "type": "execution"
+  },
+  "ui_event/execution/conversation_plan_changed": {
+    "payload": {
+      "payload": {
+        "revision": "1",
+        "thread": "thread-1"
+      },
+      "type": "conversation_plan_changed"
     },
     "type": "execution"
   },

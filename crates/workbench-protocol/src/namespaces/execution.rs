@@ -14,6 +14,7 @@ use crate::{
     wire::{Revision, Sequence, UnixMillis},
 };
 use serde::{Deserialize, Serialize};
+pub mod plan;
 
 pub const COMMAND_OPERATIONS: &[&str] = &[
     "stop_chat",
@@ -28,8 +29,16 @@ pub const QUERY_OPERATIONS: &[&str] = &[
     "list_run_details",
     "get_run",
     "get_thread_execution",
+    "get_conversation_plan",
+    "read_conversation_plan_tree",
+    "get_conversation_plan_task",
+    "read_conversation_plan_history",
 ];
-pub const EVENT_TYPES: &[&str] = &["run_changed", "thread_execution_changed"];
+pub const EVENT_TYPES: &[&str] = &[
+    "run_changed",
+    "thread_execution_changed",
+    "conversation_plan_changed",
+];
 /// Tagged choices inside a command's payload that classification names (none).
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
@@ -331,6 +340,10 @@ pub enum ExecutionQuery {
     GetRun(RunRef),
     /// Goal, todo list and ledger of a thread.
     GetThreadExecution(ThreadTarget),
+    GetConversationPlan(ThreadTarget),
+    ReadConversationPlanTree(plan::PlanTreeQuery),
+    GetConversationPlanTask(plan::PlanTaskQuery),
+    ReadConversationPlanHistory(plan::PlanHistoryQuery),
 }
 
 impl ExecutionQuery {
@@ -342,7 +355,15 @@ impl ExecutionQuery {
         match self {
             Self::ListRuns(q) => q.page.validate(),
             Self::ListRunDetails(q) => q.page.validate(),
-            Self::GetRun(_) | Self::GetThreadExecution(_) => Ok(()),
+            Self::GetRun(_) | Self::GetThreadExecution(_) | Self::GetConversationPlan(_) => Ok(()),
+            Self::ReadConversationPlanTree(q) => {
+                plan::limit(q.limit, 100)?;
+                q.cursor
+                    .as_ref()
+                    .map_or(Ok(()), |c| check_bytes("cursor", c, 4096, false))
+            }
+            Self::GetConversationPlanTask(q) => crate::ids::validate_id("task_id", &q.task_id),
+            Self::ReadConversationPlanHistory(q) => plan::limit(q.limit, 20),
         }
     }
 }
@@ -359,6 +380,10 @@ pub enum ExecutionReply {
     RunDetails(Page<RunDetail>),
     Run(Box<RunDetail>),
     ThreadExecution(Box<ThreadExecution>),
+    ConversationPlan(Box<plan::PlanSummary>),
+    ConversationPlanTree(Box<plan::PlanTreePage>),
+    ConversationPlanTask(Box<plan::PlanTaskRead>),
+    ConversationPlanHistory(Box<plan::PlanHistoryPage>),
 }
 
 impl ExecutionReply {
@@ -368,6 +393,10 @@ impl ExecutionReply {
             Self::RunDetails(page) => page.validate_with(RunDetail::validate),
             Self::Run(run) => run.validate(),
             Self::ThreadExecution(execution) => execution.validate(),
+            Self::ConversationPlan(v) => v.validate(),
+            Self::ConversationPlanTree(v) => v.validate(),
+            Self::ConversationPlanTask(v) => v.validate(),
+            Self::ConversationPlanHistory(v) => v.validate(),
         }
     }
 }
@@ -380,6 +409,11 @@ impl ExecutionReply {
     deny_unknown_fields
 )]
 pub enum ExecutionEvent {
+    /// Invalidation only. Always re-read the projection; never replace state with this event.
+    ConversationPlanChanged {
+        thread: ThreadId,
+        revision: Revision,
+    },
     RunChanged {
         run: RunSummary,
     },
@@ -396,7 +430,7 @@ pub enum ExecutionEvent {
 impl ExecutionEvent {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
-            Self::RunChanged { .. } => Ok(()),
+            Self::RunChanged { .. } | Self::ConversationPlanChanged { .. } => Ok(()),
             Self::ThreadExecutionChanged { goal, todo, .. } => {
                 goal.as_ref().map_or(Ok(()), GoalView::validate)?;
                 todo.as_ref().map_or(Ok(()), TodoView::validate)

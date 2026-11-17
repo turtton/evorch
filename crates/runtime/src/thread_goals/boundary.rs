@@ -251,6 +251,8 @@ impl AgentRuntime {
                 | "submit_goal_check"
                 | "submit_goal_review"
                 | "todo_write"
+                | "plan_read"
+                | "plan_update"
         ) {
             return;
         }

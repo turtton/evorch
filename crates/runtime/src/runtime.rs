@@ -128,6 +128,7 @@ pub(crate) struct Shared {
     pub(crate) dispatch_tails: Arc<crate::quiesce::dispatch::DispatchTails>,
     pub(crate) stop_boundary: OnceLock<Arc<dyn crate::quiesce::StopBoundary>>,
     pub(crate) thread_goals: Mutex<crate::thread_goals::ThreadGoals>,
+    pub(crate) plan_authority: crate::conversation_plan::AuthorityGates,
     /// Pull request tracking (ADR 0043), once the host started it.
     pub(crate) pull_requests: OnceLock<crate::pull_requests::PullRequestService>,
     pub(crate) benchmark_recording: OnceLock<crate::benchmark::Recording>,
@@ -378,7 +379,7 @@ pub(crate) struct RunEntry {
     result_rx: watch::Receiver<Option<String>>,
     /// 実行中の圧縮を loop 側と共有するフラグ (compact() の in-flight 拒否判定用)。
     compaction_busy: Arc<AtomicBool>,
-    mailbox: Arc<RunMailbox>,
+    pub(crate) mailbox: Arc<RunMailbox>,
     _join: Option<JoinHandle<()>>,
 }
 
@@ -798,6 +799,7 @@ impl AgentRuntime {
         Self {
             shared: Arc::new(Shared {
                 thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
+                plan_authority: crate::conversation_plan::AuthorityGates::default(),
                 pull_requests: OnceLock::new(),
                 benchmark_recording: OnceLock::new(),
                 benchmark_replays: Mutex::new(HashMap::new()),
@@ -1201,6 +1203,7 @@ impl AgentRuntime {
         Self {
             shared: Arc::new(Shared {
                 thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
+                plan_authority: crate::conversation_plan::AuthorityGates::default(),
                 pull_requests: OnceLock::new(),
                 benchmark_recording: OnceLock::new(),
                 benchmark_replays: Mutex::new(HashMap::new()),
@@ -2347,6 +2350,7 @@ impl AgentRuntime {
         learning: Option<crate::memory_lifecycle::PendingLearning>,
     ) -> Option<Arc<crate::learning_suspend::LearningExecution>> {
         let run_id = task.run_id;
+        let plan_authority = (task.mailbox.clone(), task.config.ownership.clone());
         match crate::panic_capture::catch_panic(run_agent(weak.clone(), task, channels)).await {
             Ok(dispatch) => {
                 if let Some(learning) = learning {
@@ -2358,7 +2362,9 @@ impl AgentRuntime {
             }
             Err(panic) => {
                 if let Some(shared) = weak.upgrade() {
-                    let _dispatch = AgentRuntime { shared }.run_panicked(run_id, panic).await;
+                    let _dispatch = AgentRuntime { shared }
+                        .run_panicked(run_id, panic, plan_authority)
+                        .await;
                 }
             }
         }

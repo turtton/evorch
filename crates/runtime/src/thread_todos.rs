@@ -1,6 +1,7 @@
 //! Optional conversation procedures share trusted thread ownership with goals.
 //! They never participate in continuation, completion, review, or budget gates.
-use crate::{AgentRuntime, Role, RunId, RunPurpose, agent_loop::LoopState};
+pub(crate) use crate::conversation_plan::conversation_root;
+use crate::{AgentRuntime, RunId, agent_loop::LoopState};
 use event_bus::{Event, OrchestratorEvent, ThreadTodoItem, ThreadTodoSnapshot, ThreadTodoStatus};
 use providers::ToolSpec;
 use serde::Deserialize;
@@ -451,14 +452,6 @@ pub(crate) fn spec(name: &str) -> ToolSpec {
     }
 }
 
-/// The trusted root Worker or Orchestrator of a user-facing conversation.
-pub(crate) fn conversation_root(state: &LoopState) -> bool {
-    state.task.parent.is_none()
-        && state.run_config().conversation
-        && state.run_config().purpose == RunPurpose::General
-        && matches!(state.run_role(), Role::Worker | Role::Orchestrator)
-}
-
 fn outcome(applied: &Applied) -> Value {
     let items = &applied.snapshot.items;
     let running: Vec<Value> = items
@@ -509,6 +502,7 @@ impl LoopState {
     /// Mark this root's in-progress items interrupted at the end of a work
     /// period. Returns whether the list changed.
     pub(crate) fn reconcile_root_todo(&self) -> bool {
+        self.reconcile_root_plan();
         self.runtime().is_some_and(|runtime| {
             runtime.reconcile_todo_or_report(
                 self.caller_run_id(),

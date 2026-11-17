@@ -44,6 +44,7 @@ pub mod learning;
 pub mod learning_jobs;
 pub mod learning_suspend;
 pub use memory_lifecycle::ResumedLearning;
+mod conversation_plan;
 pub mod mailbox;
 pub mod mcp;
 pub mod memory;
