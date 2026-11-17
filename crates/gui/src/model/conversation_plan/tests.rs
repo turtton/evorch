@@ -31,6 +31,7 @@ fn summary(id: &str, revision: u64, completed_ppm: u32) -> ExecutionReply {
         plan_id: Some("plan-1".into()),
         revision: Revision(revision),
         progress: progress(2, completed_ppm),
+        updated_at_unix_ms: None,
     }))
 }
 
@@ -88,6 +89,7 @@ fn history(revision: u64, revisions: std::ops::RangeInclusive<u64>) -> Execution
                 revision: Revision(revision),
                 event_id: Sequence(revision),
                 change: None,
+                updated_at_unix_ms: None,
             })
             .collect(),
         next_after_revision: None,

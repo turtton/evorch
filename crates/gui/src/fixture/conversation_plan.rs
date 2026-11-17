@@ -62,6 +62,12 @@ impl PlanScenario {
 
 const PLAN_ID: &str = "plan-demo";
 const HISTORY_LEN: u64 = 14;
+/// 2026-10-09 13:00 UTC; revisions are saved three minutes apart.
+const FIRST_SAVE_MS: i64 = 1_791_550_800_000;
+
+fn saved_at(revision: u64) -> i64 {
+    FIRST_SAVE_MS + (revision as i64 - 1) * 180_000
+}
 const BLOCKED_TASK: &str = "verify-capture";
 
 type Row = (
@@ -334,6 +340,7 @@ fn history() -> Vec<PlanHistoryEntry> {
                 changes,
                 progress: progress(),
             }),
+            updated_at_unix_ms: Some(saved_at(revision)),
         })
         .collect()
 }
@@ -369,6 +376,7 @@ impl PlanReader for FixturePlanReader {
                     plan_id,
                     revision,
                     progress,
+                    updated_at_unix_ms: (revision.0 > 0).then(|| saved_at(revision.0)),
                 })))
             }
             ExecutionQuery::ReadConversationPlanTree(_) => Ok(

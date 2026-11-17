@@ -313,6 +313,9 @@ fn legend_row(ui: &mut Ui, state: &PlanState, progress: Option<&PlanProgress>) {
             if let Some(revision) = revision.filter(|r| r.0 > 0) {
                 meta.push(format!("r{}", revision.0));
             }
+            if let Some(time) = state.summary().and_then(|s| clock(s.updated_at_unix_ms)) {
+                meta.push(time);
+            }
             if let Some(run) = run {
                 meta.push(run.to_owned());
             }
@@ -497,6 +500,12 @@ fn previous_status(
     })
 }
 
+/// Local `HH:MM` of a saved change; `None` when the time is unknown.
+pub fn clock(unix_ms: Option<i64>) -> Option<String> {
+    let at = chrono::DateTime::from_timestamp_millis(unix_ms?)?;
+    Some(at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+}
+
 /// The change history with its pager; returns a page to show.
 fn history(ui: &mut Ui, state: &PlanState, nodes: &[PlanNodeView]) -> Option<u32> {
     let mut page = None;
@@ -559,12 +568,20 @@ fn history_row(
                 .find(|node| node.task_id == task)
                 .map(|node| node.title.as_str())
         });
+        let time = clock(entry.updated_at_unix_ms);
         let mut label = format!("Revision {}, {kind}", entry.revision.0);
+        if let Some(time) = &time {
+            label.push_str(&format!(" at {time}"));
+        }
         ui.horizontal(|ui| {
             ui.label(small(
                 format!("r{}", entry.revision.0),
                 palette().TEXT_MUTED,
             ));
+            if let Some(time) = &time {
+                ui.label(small("·", palette().TEXT_MUTED));
+                ui.label(small(time, palette().TEXT_MUTED));
+            }
             ui.label(small("·", palette().TEXT_MUTED));
             let (cause_icon, cause) = match change.cause {
                 PlanChangeCause::ModelUpdate => (icon, kind),
@@ -634,6 +651,7 @@ mod tests {
             plan_id: Some("p".into()),
             revision: workbench_protocol::wire::Revision(3),
             progress: progress(3, 2, 1, 1, 8),
+            updated_at_unix_ms: None,
         };
         assert_eq!(
             band_label(Some(&summary)),
@@ -648,6 +666,7 @@ mod tests {
             plan_id: None,
             revision: workbench_protocol::wire::Revision(0),
             progress: PlanProgress::default(),
+            updated_at_unix_ms: None,
         };
         assert_eq!(band_label(Some(&summary)), NOT_PLANNED);
         assert_eq!(band_label(None), NOT_PLANNED);
