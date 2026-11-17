@@ -1198,6 +1198,8 @@ impl LoopState {
                         self.team_tool(&name, input.clone()).await
                     } else if let Err(error) = self.guard_team_artifact(&name, &input) {
                         ToolResult::error(error)
+                    } else if name == "todo_write" {
+                        ToolResult::error(crate::conversation_plan::RETIRED_TODO_WRITE)
                     } else if let Err(error) = self.policy.authorize(&name) {
                         ToolResult::error(error.to_string())
                     } else if is_meta_op(&name) {

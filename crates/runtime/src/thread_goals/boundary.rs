@@ -250,7 +250,6 @@ impl AgentRuntime {
                 | "create_goal"
                 | "submit_goal_check"
                 | "submit_goal_review"
-                | "todo_write"
                 | "plan_read"
                 | "plan_update"
         ) {

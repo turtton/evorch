@@ -30,7 +30,6 @@ impl AgentRuntime {
                 request_json: serde_json::to_string(memo).map_err(|e| e.to_string())?,
                 state: HandoffState::Preparing,
                 goal_json: None,
-                todo_json: None,
             })
             .map_err(|e| e.to_string())?;
         let target: RunId = receipt

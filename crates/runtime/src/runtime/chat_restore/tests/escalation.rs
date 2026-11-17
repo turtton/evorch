@@ -178,8 +178,8 @@ async fn restored_thread_tools(resume_first: bool) {
         ),
         Step::Tool("get_goal", json!({})),
         Step::Tool(
-            "todo_write",
-            json!({"items":[{"content":"Gather evidence","status":"pending"}]}),
+            "plan_update",
+            json!({"expected_revision":0,"operations":[{"op":"add","client_ref":"evidence","title":"Gather evidence"}]}),
         ),
         Step::Tool("present", json!({"artifact_ids":[artifact.artifact_id]})),
         Step::Hold(entered.clone()),
@@ -257,7 +257,14 @@ async fn restored_thread_tools(resume_first: bool) {
     let goal: Value = serde_json::from_str(&results[1].2).unwrap();
     assert_eq!(goal["thread_id"], thread);
     assert_eq!(goal["root_run_id"], escalated.to_string());
-    assert_eq!(runtime.thread_todo(&thread).unwrap().items.len(), 1);
+    assert_eq!(
+        runtime
+            .conversation_plan_summary(&thread)
+            .unwrap()
+            .progress
+            .node_count,
+        1
+    );
     assert_eq!(
         runtime.goal_thread(escalated).as_deref(),
         Some(thread.as_str())

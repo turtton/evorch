@@ -1,4 +1,4 @@
-//! Bottom panel holding the goal/procedure band, composer and status strip.
+//! Bottom panel holding the goal band, composer and status strip.
 //!
 //! The panel is sized from measured parts instead of last frame's total so the
 //! input claims room before expanded band details: a growing message shrinks
@@ -59,13 +59,13 @@ pub(super) fn composer_panel(
             let strip = ui.scope(|ui| {
                 let vertical_spacing = ui.spacing().item_spacing.y;
                 let mut band = goal::BandOutput::default();
-                if ctx.goal.is_some() || ctx.todo.is_some() || !composer.queued.is_empty() {
+                if ctx.goal.is_some() || !composer.queued.is_empty() {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let queue = super::queue::QueueBand {
                         items: &composer.queued,
                         next_turn_requested: composer.follow_ups.next_turn_requested,
                     };
-                    band = goal::progress_strip(ui, ctx.goal, ctx.todo, queue, details);
+                    band = goal::progress_strip(ui, ctx.goal, queue, details);
                 }
                 let strip = ui
                     .push_id("composer-strip", |ui| {

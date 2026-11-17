@@ -1222,6 +1222,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v67.sql"),
                 include_str!("../../undo/undo_v66.sql"),
                 include_str!("../../undo/undo_v65.sql"),
                 include_str!("../../undo/undo_v64.sql"),

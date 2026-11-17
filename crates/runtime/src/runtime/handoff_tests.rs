@@ -1023,7 +1023,7 @@ async fn handoff_copies_authentic_question_answers_without_sharing_review_author
             .review_attachment_acceptances_for_lineage(&[target.to_string()])
             .unwrap()
             .len(),
-        2
+        1
     );
     runtime.stop(source, StopScope::SelfOnly).unwrap();
     runtime.wait(source).await.unwrap();
@@ -1135,17 +1135,6 @@ async fn started_target_restores_initial_control_state_when_recorder_was_stopped
     goal.usage.output_tokens = 777;
     goal.max_tokens = Some(654_321);
     runtime.restore_thread_goal(goal).unwrap();
-    runtime
-        .restore_thread_todo(event_bus::ThreadTodoSnapshot {
-            list_id: "procedure".into(),
-            thread_id: "source".into(),
-            revision: 7,
-            items: vec![event_bus::ThreadTodoItem {
-                content: "retain this procedure".into(),
-                status: event_bus::ThreadTodoStatus::Pending,
-            }],
-        })
-        .unwrap();
     // Join the real recorder before preparation. No initial target event can
     // reach SQLite through EventBus, regardless of runner scheduling.
     recorder.shutdown();
@@ -1160,8 +1149,6 @@ async fn started_target_restores_initial_control_state_when_recorder_was_stopped
     let target: RunId = receipt.target_run_id.parse().unwrap();
     let expected_goal: event_bus::ThreadGoalSnapshot =
         serde_json::from_str(receipt.goal_json.as_ref().unwrap()).unwrap();
-    let expected_todo: event_bus::ThreadTodoSnapshot =
-        serde_json::from_str(receipt.todo_json.as_ref().unwrap()).unwrap();
     let task = lock_runs(&runtime.shared.runs)
         .get_mut(&target)
         .unwrap()
@@ -1189,7 +1176,6 @@ async fn started_target_restores_initial_control_state_when_recorder_was_stopped
     runtime.restore_committed_handoff(target).unwrap();
     assert!(runtime.thread_goal(&thread).is_none());
     let mut restored_goal = None;
-    let mut restored_todo = None;
     for row in storage::Database::open(&config)
         .unwrap()
         .orchestrator_events_ordered()
@@ -1199,16 +1185,11 @@ async fn started_target_restores_initial_control_state_when_recorder_was_stopped
             event_bus::EventKind::Orchestrator(
                 event_bus::OrchestratorEvent::ThreadGoalUpdated { snapshot },
             ) if snapshot.thread_id == thread => restored_goal = Some(snapshot),
-            event_bus::EventKind::Orchestrator(
-                event_bus::OrchestratorEvent::ThreadTodoUpdated { snapshot },
-            ) if snapshot.thread_id == thread => restored_todo = Some(snapshot),
             _ => {}
         }
     }
     assert_eq!(restored_goal.as_ref(), Some(&expected_goal));
-    assert_eq!(restored_todo.as_ref(), Some(&expected_todo));
     runtime.restore_thread_goal(restored_goal.unwrap()).unwrap();
-    runtime.restore_thread_todo(restored_todo.unwrap()).unwrap();
     let goal = runtime.thread_goal(&thread).unwrap();
     assert_eq!(goal.phase, event_bus::ThreadGoalPhase::Blocked);
     assert_eq!(goal.reason.as_deref(), Some("blocked before handoff"));
@@ -1219,7 +1200,6 @@ async fn started_target_restores_initial_control_state_when_recorder_was_stopped
     );
     assert_eq!(goal.max_tokens, Some(654_321));
     assert_eq!(goal.original_request, "Keep original restrictions");
-    assert_eq!(runtime.thread_todo(&thread).unwrap(), expected_todo);
 }
 
 #[tokio::test]
@@ -1249,18 +1229,10 @@ async fn initial_control_event_failure_rolls_back_commit_and_keeps_source_runnin
     let goal = runtime
         .create_thread_goal("source", source, "goal".into(), vec!["evidence".into()])
         .unwrap();
-    runtime
-        .restore_thread_todo(event_bus::ThreadTodoSnapshot {
-            list_id: "procedure".into(),
-            thread_id: "source".into(),
-            revision: 1,
-            items: vec![],
-        })
-        .unwrap();
     let conn = rusqlite::Connection::open(&config.db_path).unwrap();
-    // Fail the second event, after the goal INSERT succeeded inside the same
-    // transaction. Neither an initial goal nor responsibility may leak out.
-    conn.execute_batch("CREATE TRIGGER fail_initial_todo BEFORE INSERT ON events WHEN NEW.subkind='ThreadTodoUpdated' BEGIN SELECT RAISE(ABORT,'initial procedure event injection'); END;").unwrap();
+    // Fail the initial goal event inside the commit transaction. Neither an
+    // initial goal nor responsibility may leak out.
+    conn.execute_batch("CREATE TRIGGER fail_initial_goal BEFORE INSERT ON events WHEN NEW.subkind='ThreadGoalUpdated' BEGIN SELECT RAISE(ABORT,'initial goal event injection'); END;").unwrap();
     let publication = runtime.execution_snapshot(source).unwrap().publication();
     assert!(
         runtime
@@ -1291,7 +1263,7 @@ async fn initial_control_event_failure_rolls_back_commit_and_keeps_source_runnin
             .unwrap()
             .is_empty()
     );
-    conn.execute_batch("DROP TRIGGER fail_initial_todo")
+    conn.execute_batch("DROP TRIGGER fail_initial_goal")
         .unwrap();
     let target = runtime
         .prepare_handoff_to_lane(

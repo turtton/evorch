@@ -89,7 +89,6 @@ mod thread_lineage;
 pub mod thread_read_dirs;
 pub mod thread_retention;
 mod thread_start;
-mod thread_todos;
 pub mod topology;
 pub use topology::CoordinationTopology;
 pub mod benchmark;

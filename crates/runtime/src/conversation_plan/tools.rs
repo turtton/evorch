@@ -1,5 +1,4 @@
-//! Tool definitions and direct handlers. Nothing in this module registers a tool.
-#![allow(dead_code)] // PR2 is intentionally private until PR3's single catalog switch.
+//! Tool definitions and direct handlers for `plan_read` and `plan_update`.
 use super::*;
 use crate::agent_loop::LoopState;
 use serde::Deserialize;

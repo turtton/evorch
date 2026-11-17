@@ -365,6 +365,9 @@ fn events_run(
 }
 
 /// The (kind, subkind) pairs whose rows name a thread but no run.
+///
+/// `ThreadTodoUpdated` is a retired event: nothing writes or decodes it any more, but rows
+/// written before the plan took over stay until their thread is reclaimed, here.
 fn thread_event_kinds() -> impl Iterator<Item = (&'static str, &'static str)> {
     std::iter::once(("Orchestrator", "ThreadTodoUpdated"))
         .chain(

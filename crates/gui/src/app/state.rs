@@ -153,7 +153,6 @@ pub struct WorkbenchState<S> {
     /// Models of projects other than the startup one, shared with the runtime.
     pub(super) project_models: Option<crate::model::production::ProjectModels>,
     pub(super) thread_goals: BTreeMap<String, event_bus::ThreadGoalSnapshot>,
-    pub(super) thread_todos: BTreeMap<String, event_bus::ThreadTodoSnapshot>,
     pub(super) sink: Box<dyn CommandSink>,
     /// Project trust last declared to the sink, so only changes are re-sent.
     pub(super) declared_trust: std::collections::BTreeMap<PathBuf, workspace_ui::TrustState>,
@@ -306,7 +305,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             production_model: None,
             project_models: None,
             thread_goals: BTreeMap::new(),
-            thread_todos: BTreeMap::new(),
             sink: Box::new(FixtureLoopAdapter::default()),
             declared_trust: std::collections::BTreeMap::new(),
             declared_allowed: std::collections::BTreeMap::new(),

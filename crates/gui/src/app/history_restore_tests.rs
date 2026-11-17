@@ -204,7 +204,6 @@ fn assert_same(old: &WorkbenchState<DemoSource>, new: &WorkbenchState<DemoSource
         );
     }
     assert_eq!(old.thread_goals, new.thread_goals);
-    assert_eq!(old.thread_todos, new.thread_todos);
     assert_eq!(format!("{:?}", old.ledger), format!("{:?}", new.ledger));
 }
 

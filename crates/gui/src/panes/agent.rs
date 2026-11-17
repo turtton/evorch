@@ -76,7 +76,6 @@ pub enum LaneAction {
 
 /// 会話ペインが描画される文脈です。
 pub struct ConversationContext<'a> {
-    pub todo: Option<&'a event_bus::ThreadTodoSnapshot>,
     pub goal: Option<&'a event_bus::ThreadGoalSnapshot>,
     pub requests: Option<super::requests::ConversationRequests<'a>>,
     pub task_rows: &'a [crate::model::tasks::TaskRow],
@@ -1286,7 +1285,6 @@ mod tests {
                 .build_ui(move |ui| {
                     crate::theme::install(ui.ctx());
                     let ctx = ConversationContext {
-                        todo: None,
                         goal: None,
                         requests: None,
                         task_rows: &[],
@@ -1389,7 +1387,6 @@ mod tests {
             .build_ui(move |ui| {
                 crate::theme::install(ui.ctx());
                 let ctx = ConversationContext {
-                    todo: None,
                     goal: None,
                     requests: None,
                     task_rows: &[],
@@ -1450,7 +1447,6 @@ mod tests {
             .build_ui(move |ui| {
                 crate::theme::install(ui.ctx());
                 let ctx = ConversationContext {
-                    todo: None,
                     goal: None,
                     requests: None,
                     task_rows: &[],

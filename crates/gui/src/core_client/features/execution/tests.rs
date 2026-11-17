@@ -101,8 +101,6 @@ fn runs_reply(items: Vec<Value>, more: bool) -> FeatureReply {
 
 fn execution_reply(goal: bool) -> FeatureReply {
     let mut body = json!({"thread": "t1", "root_run": "run-a",
-        "todo": {"list_id": "l", "revision": "1",
-                 "items": [{"content": "write tests", "status": "in_progress"}]},
         "ledger": {"run": "run-a", "seq": "1", "body": "ledger-body", "truncated": false}});
     if goal {
         body["goal"] = json!({"goal": "g1", "root_run": "run-a", "objective": "ship it",

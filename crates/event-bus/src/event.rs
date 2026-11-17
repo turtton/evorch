@@ -68,8 +68,8 @@ impl Event {
     /// diagnostic events, the requesting run of a user question, the session
     /// of a fallback (which names the run), and the recipient of an agent
     /// message. Events with no single owning run — approvals and denials
-    /// (attributed through their call ID), faults, ownership, thread todo
-    /// snapshots and usage events — have none. Task progress and checkpoints
+    /// (attributed through their call ID), faults, ownership
+    /// and usage events — have none. Task progress and checkpoints
     /// belong to the reporting run, and a thread goal to its root run.
     #[must_use]
     pub fn primary_run_id(&self) -> Option<&str> {
@@ -156,7 +156,6 @@ impl EventKind {
             },
             Self::Orchestrator(event) => match event {
                 OrchestratorEvent::ThreadGoalUpdated { .. } => "ThreadGoalUpdated",
-                OrchestratorEvent::ThreadTodoUpdated { .. } => "ThreadTodoUpdated",
                 OrchestratorEvent::TaskProgressed { .. } => "TaskProgressed",
                 OrchestratorEvent::TaskCheckpoint { .. } => "TaskCheckpoint",
             },
@@ -248,13 +247,11 @@ impl EventKind {
                 Some(&message.recipient_run_id)
             }
             // Task events name the run that reported them, and a goal snapshot
-            // its conversation root. A todo snapshot belongs to the thread
-            // only, so it has no run.
+            // its conversation root.
             Self::Orchestrator(event) => match event {
                 OrchestratorEvent::TaskProgressed { run_id, .. }
                 | OrchestratorEvent::TaskCheckpoint { run_id, .. } => Some(run_id),
                 OrchestratorEvent::ThreadGoalUpdated { snapshot } => Some(&snapshot.root_run_id),
-                OrchestratorEvent::ThreadTodoUpdated { .. } => None,
             },
             Self::Usage(_)
             | Self::Fault(_)
@@ -506,10 +503,6 @@ pub mod diagnostic_codes {
     /// The original snapshot is kept untouched as evidence.
     pub const NESTED_ORCHESTRATOR_REJECTED: &str = "NestedOrchestratorRejected";
 
-    /// The runtime could not mark a stopped work period's in-progress procedure
-    /// items as interrupted. The list stays as it was; nothing continues.
-    pub const THREAD_TODO_RECONCILE_FAILED: &str = "ThreadTodoReconcileFailed";
-
     /// Plan interruption reconciliation could not be confirmed; the run outcome is unchanged.
     pub const CONVERSATION_PLAN_RECONCILE_FAILED: &str = "conversation_plan_reconcile_failed";
 
@@ -579,7 +572,6 @@ pub mod diagnostic_codes {
         BROWSER_SCREENSHOT,
         EVALUATION_FINISHED,
         NESTED_ORCHESTRATOR_REJECTED,
-        THREAD_TODO_RECONCILE_FAILED,
         CONVERSATION_PLAN_RECONCILE_FAILED,
     ];
 }

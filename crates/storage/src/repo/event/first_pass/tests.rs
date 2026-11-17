@@ -6,8 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use event_bus::{
     AgentRunPhase, DiagnosticEvent, DiagnosticSeverity, Event, EventKind, LifecycleEvent,
-    MessageEvent, MessagePartAssembler, OrchestratorEvent, ProviderEvent, ThreadTodoSnapshot,
-    ToolEvent,
+    MessageEvent, MessagePartAssembler, OrchestratorEvent, ProviderEvent, ToolEvent,
 };
 use rusqlite::Connection;
 
@@ -409,20 +408,24 @@ fn rows_of_a_deleted_run_neither_move_the_replay_end_nor_are_reported() {
 }
 
 #[test]
-fn a_deleted_threads_todo_snapshot_does_not_move_the_replay_end() {
+fn a_deleted_threads_goal_snapshot_does_not_move_the_replay_end() {
     let db = Database::open_in_memory().unwrap();
     append(&db.conn, &at(10, phase("kept", AgentRunPhase::Waiting)));
     append(
         &db.conn,
         &at(
             90,
-            Event::new(OrchestratorEvent::ThreadTodoUpdated {
-                snapshot: ThreadTodoSnapshot {
-                    list_id: "list".into(),
-                    thread_id: "gone-thread".into(),
-                    revision: 1,
-                    items: vec![],
-                },
+            Event::new(OrchestratorEvent::ThreadGoalUpdated {
+                snapshot: serde_json::from_value(serde_json::json!({
+                    "goal_id": "g", "thread_id": "gone-thread", "root_run_id": "root",
+                    "related_root_run_ids": [], "objective": "o", "criteria": [], "checks": [],
+                    "phase": "working", "review_enabled": false, "checks_paused": false,
+                    "work_stopped": false, "epoch": 1, "review_round": 0, "findings": [],
+                    "reason": null,
+                    "usage": {"model_requests": 0, "input_tokens": 0, "output_tokens": 0},
+                    "max_review_rounds": 1, "max_tokens": null, "original_request": "r"
+                }))
+                .unwrap(),
             }),
         ),
     );
@@ -652,8 +655,10 @@ fn only_the_documented_rows_are_decoded() {
         ("Provider", "RequestStarted", false, "columns"),
         ("Diagnostic", "", false, "columns"),
         ("Tool", "", false, "unclassified"),
-        ("Orchestrator", "ThreadTodoUpdated", false, "columns"),
-        ("Orchestrator", "ThreadTodoUpdated", true, "probe"),
+        ("Orchestrator", "ThreadGoalUpdated", false, "columns"),
+        ("Orchestrator", "ThreadGoalUpdated", true, "probe"),
+        // A retired event is never probed: nothing reads its thread any more.
+        ("Orchestrator", "ThreadTodoUpdated", true, "columns"),
         ("PullRequest", "Changed", false, "columns"),
         ("PullRequest", "Changed", true, "probe"),
     ] {

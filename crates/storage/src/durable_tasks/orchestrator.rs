@@ -52,8 +52,7 @@ impl DurableTasksModel {
                     );
                 }
             }
-            OrchestratorEvent::ThreadGoalUpdated { .. }
-            | OrchestratorEvent::ThreadTodoUpdated { .. } => {}
+            OrchestratorEvent::ThreadGoalUpdated { .. } => {}
         }
     }
 }

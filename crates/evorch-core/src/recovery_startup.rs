@@ -399,7 +399,7 @@ impl<'a> StartupCoordinator<'a> {
         .resolve(&records, &resume)?;
         // This trusted binding comes from the current host directory/permit,
         // never from a saved recipe. Install it before the run loop freezes its
-        // tools, or a restored conversation silently loses todo_write.
+        // tools, or a restored conversation silently loses plan_read and plan_update.
         for record in records.iter().filter(|record| record.parent.is_none()) {
             if let Some(config) = authority.members.get(&record.run_id) {
                 let permit = config

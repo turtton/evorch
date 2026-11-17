@@ -29,10 +29,9 @@ pub struct HandoffReceipt {
     pub request_json: String,
     pub state: HandoffState,
     pub goal_json: Option<String>,
-    pub todo_json: Option<String>,
 }
 const COLUMNS: &str =
-    "source_run_id,source_incarnation,target_run_id,lane_id,request_json,state,goal_json,todo_json";
+    "source_run_id,source_incarnation,target_run_id,lane_id,request_json,state,goal_json";
 fn decode(r: &rusqlite::Row<'_>) -> rusqlite::Result<HandoffReceipt> {
     Ok(HandoffReceipt {
         source_run_id: r.get(0)?,
@@ -44,7 +43,6 @@ fn decode(r: &rusqlite::Row<'_>) -> rusqlite::Result<HandoffReceipt> {
             rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
         })?,
         goal_json: r.get(6)?,
-        todo_json: r.get(7)?,
     })
 }
 fn operation(
@@ -82,7 +80,7 @@ impl StorageHandle {
                 return Ok(existing);
             }
             if operation(&tx,&receipt.source_run_id,&receipt.source_incarnation)?.is_some() {
-                tx.execute("UPDATE lane_handoffs SET request_json=?3,state='preparing',goal_json=NULL,todo_json=NULL WHERE source_run_id=?1 AND source_incarnation=?2",params![receipt.source_run_id,receipt.source_incarnation,receipt.request_json])?;
+                tx.execute("UPDATE lane_handoffs SET request_json=?3,state='preparing',goal_json=NULL WHERE source_run_id=?1 AND source_incarnation=?2",params![receipt.source_run_id,receipt.source_incarnation,receipt.request_json])?;
             } else {
                 tx.execute("INSERT INTO lane_handoffs(source_run_id,source_incarnation,target_run_id,lane_id,request_json,state) VALUES(?1,?2,?3,?4,?5,'preparing')",params![receipt.source_run_id,receipt.source_incarnation,receipt.target_run_id,receipt.lane_id,receipt.request_json])?;
             }
@@ -209,7 +207,6 @@ impl StorageHandle {
         expected: HandoffState,
         next: HandoffState,
         goal_json: Option<String>,
-        todo_json: Option<String>,
     ) -> Result<HandoffReceipt, StorageError> {
         self.write_handoff_transition(HandoffTransition {
             source,
@@ -217,7 +214,6 @@ impl StorageHandle {
             expected,
             next,
             goal_json,
-            todo_json,
         })
     }
 }
@@ -228,7 +224,6 @@ pub(crate) struct HandoffTransition {
     pub expected: HandoffState,
     pub next: HandoffState,
     pub goal_json: Option<String>,
-    pub todo_json: Option<String>,
 }
 
 pub(crate) fn advance(
@@ -243,7 +238,6 @@ pub(crate) fn advance(
         expected,
         next,
         goal_json,
-        todo_json,
     } = change;
     if !matches!(
         (expected, next),
@@ -255,13 +249,8 @@ pub(crate) fn advance(
         ));
     }
     let guard = crate::entity::SecretGuard::from_env();
-    for (field, text) in [
-        ("goal", goal_json.as_deref()),
-        ("todo", todo_json.as_deref()),
-    ] {
-        if let Some(text) = text {
-            guard.check_text("handoff", field, text)?;
-        }
+    if let Some(text) = goal_json.as_deref() {
+        guard.check_text("handoff", "goal", text)?;
     }
     let label = |state| match state {
         HandoffState::Preparing => "preparing",
@@ -271,7 +260,7 @@ pub(crate) fn advance(
         HandoffState::RecoverableStartFailure => "recoverable_start_failure",
     };
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    let changed = tx.execute("UPDATE lane_handoffs SET state=?4,goal_json=COALESCE(?5,goal_json),todo_json=COALESCE(?6,todo_json) WHERE source_run_id=?1 AND source_incarnation=?2 AND state=?3",params![source,incarnation,label(expected),label(next),goal_json,todo_json])?;
+    let changed = tx.execute("UPDATE lane_handoffs SET state=?4,goal_json=COALESCE(?5,goal_json) WHERE source_run_id=?1 AND source_incarnation=?2 AND state=?3",params![source,incarnation,label(expected),label(next),goal_json])?;
     if changed != 1 {
         return Err(StorageError::Serialization(
             "stale handoff incarnation or state".into(),
@@ -294,16 +283,6 @@ pub(crate) fn advance(
                 ));
             }
             events.push(event_bus::OrchestratorEvent::ThreadGoalUpdated { snapshot });
-        }
-        if let Some(json) = &result.todo_json {
-            let snapshot: event_bus::ThreadTodoSnapshot = serde_json::from_str(json)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            if snapshot.thread_id != thread {
-                return Err(StorageError::Serialization(
-                    "handoff procedure belongs to a different target".into(),
-                ));
-            }
-            events.push(event_bus::OrchestratorEvent::ThreadTodoUpdated { snapshot });
         }
         for kind in events {
             crate::repo::event::append_event_in_transaction(

@@ -41,7 +41,6 @@ pub mod system_stats;
 pub mod tasks;
 pub mod telemetry;
 pub mod thread_search;
-pub mod thread_todos;
 pub mod transcript;
 pub mod transcript_registry;
 pub mod usage_stats;

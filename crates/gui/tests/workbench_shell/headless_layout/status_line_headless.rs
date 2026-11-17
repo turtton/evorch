@@ -21,7 +21,6 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                 &TranscriptModel::default(),
                 None,
                 ConversationContext {
-                    todo: None,
                     goal: None,
                     requests: None,
                     task_rows: &[],

@@ -333,7 +333,8 @@ fn composer_chats_offer_procedures_with_worker_only_conversation_category() {
                 invocation.tools.iter().any(|tool| tool == "web_search"),
                 role == Role::Worker
             );
-            assert!(invocation.tools.iter().any(|tool| tool == "todo_write"));
+            assert!(invocation.tools.iter().any(|tool| tool == "plan_update"));
+            assert!(!invocation.tools.iter().any(|tool| tool == "todo_write"));
             assert!(invocation.tools.iter().any(|tool| tool == "web_fetch"));
             assert_eq!(
                 invocation.tools.iter().any(|tool| tool == "edit"),
@@ -472,7 +473,8 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
                     invocation.tools.iter().any(|tool| tool == "web_search"),
                     role == Role::Worker
                 );
-                assert!(invocation.tools.iter().any(|tool| tool == "todo_write"));
+                assert!(invocation.tools.iter().any(|tool| tool == "plan_update"));
+                assert!(!invocation.tools.iter().any(|tool| tool == "todo_write"));
                 assert!(invocation.tools.iter().any(|tool| tool == "web_fetch"));
                 assert_eq!(
                     invocation.tools.iter().any(|tool| tool == "edit"),

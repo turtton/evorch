@@ -97,8 +97,13 @@ impl ExecutionPolicy {
                     && matches!(self.role_name.as_str(), "Worker" | "Orchestrator")
                 {
                     self.capabilities.allowed_tools.extend(
-                        ["todo_write", "present", crate::artifacts::INSPECT_ARTIFACT]
-                            .map(str::to_owned),
+                        [
+                            "plan_read",
+                            "plan_update",
+                            "present",
+                            crate::artifacts::INSPECT_ARTIFACT,
+                        ]
+                        .map(str::to_owned),
                     );
                 }
                 if Role::from_name(&self.role_name)
@@ -397,7 +402,8 @@ mod tests {
             [
                 "web_search",
                 "web_fetch",
-                "todo_write",
+                "plan_read",
+                "plan_update",
                 "present",
                 "render_artifact",
                 "inspect_artifact",
@@ -467,10 +473,9 @@ mod tests {
                     .extend(["create_goal", "get_goal", "submit_goal_check"].map(str::to_owned));
             }
             if config.conversation && is_root {
-                expected
-                    .capabilities
-                    .allowed_tools
-                    .extend(["todo_write", "present", "inspect_artifact"].map(str::to_owned));
+                expected.capabilities.allowed_tools.extend(
+                    ["plan_read", "plan_update", "present", "inspect_artifact"].map(str::to_owned),
+                );
             }
             assert_eq!(policy, expected);
             for tool in ["web_search", "web_fetch"] {
@@ -507,7 +512,8 @@ mod tests {
             if role == Role::Orchestrator {
                 expected.capabilities.allowed_tools.extend(
                     [
-                        "todo_write",
+                        "plan_read",
+                        "plan_update",
                         "present",
                         "inspect_artifact",
                         "lane_open",

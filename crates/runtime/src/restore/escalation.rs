@@ -83,6 +83,7 @@ pub(crate) fn persist_escalation_seed(
         route_pins: vec![],
         allowed_directories: Default::default(),
         allowed_instructions: Default::default(),
+        plan_notice: Default::default(),
         loaded_skills: runtime.review_skill_refs_of(source_run_id),
     };
     let mut messages = vec![providers::Message {

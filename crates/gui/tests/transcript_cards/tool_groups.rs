@@ -521,7 +521,6 @@ fn pane(model: TranscriptModel) -> Harness<'static, PaneState> {
                     &state.model,
                     None,
                     gui::panes::agent::ConversationContext {
-                        todo: None,
                         goal: None,
                         requests: None,
                         task_rows: &[],

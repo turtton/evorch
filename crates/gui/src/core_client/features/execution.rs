@@ -1,5 +1,5 @@
 //! Desktop feature of the `execution` area: the runs of the selected thread
-//! (roots, then the children of one run), its goal, todo list and ledger.
+//! (roots, then the children of one run), its goal and ledger.
 //!
 //! Everything shown is read from the core with a typed query; an event only
 //! says that something changed, and the answer is asked for again, so an event
@@ -20,7 +20,7 @@ use workbench_protocol::{
         ExecutionCommand, ExecutionEvent, ExecutionQuery, ExecutionReply,
         execution::{
             GoalPhase, GoalView, RunDetail, RunDetailsQuery, RunLifecycle, RunScope, RunSource,
-            ThreadExecution, TodoStatus,
+            ThreadExecution,
         },
     },
     queries::{PageRequest, Query, QueryReply},
@@ -289,18 +289,10 @@ impl ExecutionFeature {
         }
     }
 
-    fn draw_todo_and_ledger(&self, ui: &mut egui::Ui) {
+    fn draw_ledger(&self, ui: &mut egui::Ui) {
         let Some(execution) = &self.execution else {
             return;
         };
-        if let Some(todo) = &execution.todo {
-            ui.strong("Todo");
-            bounded_list(ui, "execution-todo", |ui| {
-                for item in &todo.items {
-                    ui.label(format!("{} {}", todo_mark(item.status), item.content));
-                }
-            });
-        }
         if let Some(ledger) = &execution.ledger {
             ui.collapsing("台帳 (ledger)", |ui| {
                 bounded_list(ui, "execution-ledger", |ui| {
@@ -377,15 +369,6 @@ pub(crate) fn goal_phase_label(phase: GoalPhase) -> &'static str {
     }
 }
 
-fn todo_mark(status: TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::Pending => "☐",
-        TodoStatus::InProgress => "▶",
-        TodoStatus::Completed => "☑",
-        TodoStatus::Interrupted => "⏸",
-    }
-}
-
 impl Feature for ExecutionFeature {
     fn id(&self) -> FeatureId {
         FeatureId::Execution
@@ -425,7 +408,7 @@ impl Feature for ExecutionFeature {
             match event {
                 ExecutionEvent::RunChanged { run } => {
                     self.runs_stale = true;
-                    // The ledger, goal and todo shown belong to the thread's current root:
+                    // The ledger and goal shown belong to the thread's current root:
                     // a root that appears or ends may have changed which one that is.
                     if run.parent_run.is_none() {
                         self.execution_stale = true;
@@ -524,7 +507,7 @@ impl Feature for ExecutionFeature {
             self.switch_thread(selected);
         }
         let Some(thread) = self.thread.clone() else {
-            ui.label("会話を選択すると run・ゴール・Todo を表示します。");
+            ui.label("会話を選択すると run・ゴール・台帳を表示します。");
             return;
         };
         self.request_runs(ctx);
@@ -546,7 +529,7 @@ impl Feature for ExecutionFeature {
         self.draw_runs(ui, ctx, &thread);
         ui.separator();
         self.draw_goal(ui, ctx, &thread);
-        self.draw_todo_and_ledger(ui);
+        self.draw_ledger(ui);
     }
 }
 

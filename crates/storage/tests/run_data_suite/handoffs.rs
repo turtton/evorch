@@ -14,7 +14,6 @@ fn reservation(incarnation: &str, target: &str) -> HandoffReceipt {
         request_json: "original request".into(),
         state: HandoffState::Preparing,
         goal_json: None,
-        todo_json: None,
     }
 }
 #[test]
@@ -59,7 +58,6 @@ fn incomplete_intents_never_start_and_committed_receipts_keep_the_same_target() 
         HandoffState::Preparing,
         HandoffState::Prepared,
         Some("goal".into()),
-        None,
     )
     .unwrap();
     assert!(h.unstarted_lanes(100).unwrap().is_empty());
@@ -76,7 +74,6 @@ fn incomplete_intents_never_start_and_committed_receipts_keep_the_same_target() 
             HandoffState::Prepared,
             HandoffState::Committed,
             None,
-            None
         )
         .is_err()
     );
@@ -85,7 +82,6 @@ fn incomplete_intents_never_start_and_committed_receipts_keep_the_same_target() 
         "incarnation-a".into(),
         HandoffState::Preparing,
         HandoffState::Prepared,
-        None,
         None,
     )
     .unwrap();
@@ -98,7 +94,6 @@ fn incomplete_intents_never_start_and_committed_receipts_keep_the_same_target() 
             HandoffState::Prepared,
             HandoffState::Committed,
             None,
-            None
         )
         .is_err()
     );
@@ -116,7 +111,6 @@ fn incomplete_intents_never_start_and_committed_receipts_keep_the_same_target() 
         "incarnation-a".into(),
         HandoffState::Prepared,
         HandoffState::Committed,
-        None,
         None,
     )
     .unwrap();
@@ -202,15 +196,8 @@ fn transfer_receipt_outlives_either_side_and_is_collected_after_both_are_gone() 
             (HandoffState::Preparing, HandoffState::Prepared),
             (HandoffState::Prepared, HandoffState::Committed),
         ] {
-            h.advance_handoff(
-                "source".into(),
-                "incarnation-a".into(),
-                before,
-                after,
-                None,
-                None,
-            )
-            .unwrap();
+            h.advance_handoff("source".into(), "incarnation-a".into(), before, after, None)
+                .unwrap();
         }
         let conn = rusqlite::Connection::open(&config.db_path).unwrap();
         let source_delete = "INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES('source','source-thread','source-thread')";

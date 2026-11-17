@@ -114,7 +114,7 @@ async fn every_entry_refuses_a_deleted_thread_or_run() {
 }
 
 // Given: a guard listing a deleted thread and run
-// When: the host restores goal or todo state, creates a goal, declares read-only
+// When: the host restores goal state, creates a goal, declares read-only
 // directories, answers a question of the deleted run, or compacts it / Then: every one
 // is refused before any state, event or answer changes, and the same calls work for a
 // surviving thread.
@@ -128,15 +128,6 @@ async fn state_restores_goals_and_answers_cannot_revive_a_deleted_thread() {
     let goal = runtime
         .create_thread_goal("kept-thread", kept, "objective".into(), vec!["done".into()])
         .unwrap();
-    let todo = event_bus::ThreadTodoSnapshot {
-        list_id: "list".into(),
-        thread_id: "kept-thread".into(),
-        revision: 1,
-        items: vec![event_bus::ThreadTodoItem {
-            content: "item".into(),
-            status: event_bus::ThreadTodoStatus::Pending,
-        }],
-    };
     let question = event_bus::UserQuestion {
         responder: None,
         routing_revision: 0,
@@ -177,11 +168,6 @@ async fn state_restores_goals_and_answers_cannot_revive_a_deleted_thread() {
             .is_err()
     );
     assert!(runtime.thread_goal("gone-thread").is_none());
-    // Todos.
-    let mut deleted_todo = todo.clone();
-    deleted_todo.thread_id = "gone-thread".into();
-    assert!(runtime.restore_thread_todo(deleted_todo).is_err());
-    assert!(runtime.thread_todo("gone-thread").is_none());
     // Declared directories are not kept for it.
     let dir = tempfile::tempdir().unwrap();
     runtime.set_thread_read_only_directories("gone-thread", vec![dir.path().to_path_buf()]);
@@ -216,7 +202,6 @@ async fn state_restores_goals_and_answers_cannot_revive_a_deleted_thread() {
 
     // The same entries work for the surviving thread.
     runtime.restore_thread_goal(goal).unwrap();
-    runtime.restore_thread_todo(todo).unwrap();
     runtime.set_thread_read_only_directories("kept-thread", vec![dir.path().to_path_buf()]);
     assert_eq!(runtime.thread_read_only_directories("kept-thread").len(), 1);
 }

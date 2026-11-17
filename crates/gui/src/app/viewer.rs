@@ -205,7 +205,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 composer_action: &mut composer_action,
                 thread_goals: &self.thread_goals,
                 lane_details: &self.lanes.details,
-                thread_todos: &self.thread_todos,
                 goal_action: &mut goal_action,
                 focus_request: &mut focus_request,
                 dock_tab_style: &tab_style,

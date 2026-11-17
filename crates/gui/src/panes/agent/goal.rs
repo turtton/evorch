@@ -47,10 +47,9 @@ impl GoalAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Detail {
     Goal,
-    Procedures,
 }
 
-/// Tallest the expanded goal/procedure details grow before scrolling.
+/// Tallest the expanded goal details grow before scrolling.
 const DETAILS_MAX_HEIGHT: f32 = 180.0;
 
 #[derive(Debug, Default)]
@@ -64,31 +63,23 @@ pub(super) struct BandOutput {
     pub details_wanted: f32,
 }
 
-/// Queued follow-ups, then goal controls and optional procedure tracking,
-/// share one inset composer band. Expanded details scroll within
+/// Queued follow-ups, then goal controls, share one inset composer band. Expanded details scroll within
 /// `details_max` so the composer input below keeps its room.
 pub(super) fn progress_strip(
     ui: &mut egui::Ui,
     goal: Option<&ThreadGoalSnapshot>,
-    todo: Option<&event_bus::ThreadTodoSnapshot>,
     queue: super::queue::QueueBand<'_>,
     details_max: f32,
 ) -> BandOutput {
     let mut output = BandOutput::default();
-    let thread = goal
-        .map(|goal| goal.thread_id.as_str())
-        .or_else(|| todo.map(|todo| todo.thread_id.as_str()))
-        .unwrap_or_default();
+    let thread = goal.map(|goal| goal.thread_id.as_str()).unwrap_or_default();
     let expanded_id = ui.id().with(("progress-details", thread));
-    let todo = todo.filter(|todo| !todo.items.is_empty());
-    if goal.is_none() && todo.is_none() && queue.items.is_empty() {
+    if goal.is_none() && queue.items.is_empty() {
         ui.data_mut(|data| data.remove::<Detail>(expanded_id));
         return output;
     }
     let mut expanded = ui.data(|data| data.get_temp::<Detail>(expanded_id));
-    if matches!(expanded, Some(Detail::Goal)) && goal.is_none()
-        || matches!(expanded, Some(Detail::Procedures)) && todo.is_none()
-    {
+    if matches!(expanded, Some(Detail::Goal)) && goal.is_none() {
         expanded = None;
     }
     ui.horizontal(|ui| {
@@ -107,15 +98,12 @@ pub(super) fn progress_strip(
                 ui.vertical(|ui| {
                     if !queue.items.is_empty() {
                         output.queue_action = super::queue::rows(ui, queue);
-                        if goal.is_some() || todo.is_some() {
+                        if goal.is_some() {
                             ui.separator();
                         }
                     }
                     if let Some(goal) = goal {
                         output.action = goal_row(ui, goal, &mut expanded);
-                    }
-                    if let Some(todo) = todo {
-                        procedure_row(ui, todo, &mut expanded);
                     }
                     if let Some(detail) = expanded {
                         ui.separator();
@@ -126,9 +114,6 @@ pub(super) fn progress_strip(
                             .max_height(height)
                             .show(ui, |ui| match detail {
                                 Detail::Goal => goal_details(ui, goal.expect("visible goal")),
-                                Detail::Procedures => {
-                                    procedure_details(ui, todo.expect("visible procedures"))
-                                }
                             });
                         output.details_viewport = details.inner_rect.height();
                         output.details_wanted = details.content_size.y.min(DETAILS_MAX_HEIGHT);
@@ -276,156 +261,6 @@ fn goal_row(
         });
     });
     action
-}
-
-fn procedure_row(
-    ui: &mut egui::Ui,
-    todo: &event_bus::ThreadTodoSnapshot,
-    expanded: &mut Option<Detail>,
-) {
-    use event_bus::ThreadTodoStatus;
-    let completed = todo
-        .items
-        .iter()
-        .filter(|item| item.status == ThreadTodoStatus::Completed)
-        .count();
-    let active = todo
-        .items
-        .iter()
-        .filter(|item| item.status == ThreadTodoStatus::InProgress)
-        .count();
-    let current = representative_procedure(todo);
-    let text = current
-        .map(|item| item.content.as_str())
-        .unwrap_or("All procedures completed");
-    let title_color = current.map_or(palette().TEXT_MUTED, |item| procedure_status(item.status).2);
-    let accessible_text = if active > 1 {
-        format!("{text} · +{} in progress", active - 1)
-    } else if current.is_some_and(|item| item.status == ThreadTodoStatus::Interrupted) {
-        format!("{text} · interrupted: a work period ended before completion was recorded")
-    } else {
-        text.to_string()
-    };
-    ui.horizontal(|ui| {
-        let (icon, status, color) = if completed == todo.items.len() {
-            (
-                icons::CHECK_CIRCLE,
-                "Procedures completed",
-                palette().SUCCESS,
-            )
-        } else if active > 0 {
-            (
-                icons::CIRCLE_HALF,
-                "Procedures in progress (stored status)",
-                palette().ACCENT_FG,
-            )
-        } else if current.is_some_and(|item| item.status == ThreadTodoStatus::Interrupted) {
-            (
-                icons::WARNING_CIRCLE,
-                INTERRUPTED_MEANING,
-                palette().WARNING,
-            )
-        } else {
-            (icons::CIRCLE, "Procedures pending", palette().TEXT_MUTED)
-        };
-        let response = ui.label(egui::RichText::new(icon).color(color));
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status));
-        response.on_hover_text(status);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            details_button(ui, expanded, Detail::Procedures, "procedure");
-            // Counts and controls keep their intrinsic width; only the procedure title truncates.
-            if active > 1 {
-                let response = ui.label(
-                    egui::RichText::new(format!("+{}", active - 1))
-                        .size(FONT_SMALL)
-                        .color(palette().TEXT_MUTED),
-                );
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Label,
-                        true,
-                        format!("{active} procedures in progress"),
-                    )
-                });
-                response.on_hover_text(format!("{active} procedures in progress"));
-            }
-            ui.label(
-                egui::RichText::new(format!("{completed}/{}", todo.items.len()))
-                    .size(FONT_SMALL)
-                    .color(palette().TEXT_MUTED),
-            );
-            let response = ui.add_sized(
-                [ui.available_width().max(0.0), ROW_DENSE - SP_1],
-                egui::Label::new(egui::RichText::new(text).color(title_color)).truncate(),
-            );
-            response.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Label,
-                    true,
-                    format!("Procedures: {accessible_text}"),
-                )
-            });
-            response.on_hover_text(accessible_text);
-        });
-    });
-}
-
-/// What the runtime-set interrupted status says, and does not say.
-const INTERRUPTED_MEANING: &str = "Procedures interrupted: a work period ended before completion was recorded. This does not mean another lane stopped";
-
-/// The summary line's item: in progress, else interrupted, else pending.
-/// A list holding only completed items has none.
-fn representative_procedure(
-    todo: &event_bus::ThreadTodoSnapshot,
-) -> Option<&event_bus::ThreadTodoItem> {
-    use event_bus::ThreadTodoStatus;
-    [
-        ThreadTodoStatus::InProgress,
-        ThreadTodoStatus::Interrupted,
-        ThreadTodoStatus::Pending,
-    ]
-    .into_iter()
-    .find_map(|status| todo.items.iter().find(|item| item.status == status))
-}
-
-/// Icon, status text and color of one procedure; only in-progress work reads
-/// as normal text so the current step stands out from pending and done ones.
-fn procedure_status(
-    status: event_bus::ThreadTodoStatus,
-) -> (&'static str, &'static str, egui::Color32) {
-    use event_bus::ThreadTodoStatus;
-    match status {
-        ThreadTodoStatus::Pending => (icons::CIRCLE, "Pending", palette().TEXT_MUTED),
-        ThreadTodoStatus::InProgress => (icons::CIRCLE_HALF, "In progress", palette().TEXT),
-        ThreadTodoStatus::Completed => (icons::CHECK_CIRCLE, "Completed", palette().TEXT_MUTED),
-        ThreadTodoStatus::Interrupted => (
-            icons::WARNING_CIRCLE,
-            "Interrupted (not completed)",
-            palette().WARNING,
-        ),
-    }
-}
-
-fn procedure_details(ui: &mut egui::Ui, todo: &event_bus::ThreadTodoSnapshot) {
-    for item in &todo.items {
-        let (icon, status, color) = procedure_status(item.status);
-        ui.horizontal_top(|ui| {
-            let response = ui.label(egui::RichText::new(icon).color(color));
-            response
-                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status));
-            if item.status == event_bus::ThreadTodoStatus::Interrupted {
-                response.on_hover_text(INTERRUPTED_MEANING);
-            }
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new(&item.content).color(color));
-                ui.label(
-                    egui::RichText::new(status)
-                        .size(FONT_SMALL)
-                        .color(palette().TEXT_MUTED),
-                );
-            });
-        });
-    }
 }
 
 fn goal_details(ui: &mut egui::Ui, goal: &ThreadGoalSnapshot) {

@@ -263,10 +263,6 @@ impl CommandSink for RuntimeCommandSink {
         self.host.service_mut().observe_lifecycle(event);
     }
 
-    fn bind_thread_todo(&mut self, snapshot: &event_bus::ThreadTodoSnapshot) {
-        self.host.service_mut().bind_thread_todo(snapshot);
-    }
-
     fn bind_thread_goal(&mut self, snapshot: &event_bus::ThreadGoalSnapshot, project: &str) {
         self.host.service_mut().bind_thread_goal(snapshot, project);
     }

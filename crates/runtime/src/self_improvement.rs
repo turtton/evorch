@@ -136,9 +136,6 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         ESCALATION_HANDOFF_FAILED => HarnessImprovement,
         // The durable panic spool, ingested on the next start rather than emitted on the bus.
         CRASH_RECOVERED => HarnessImprovement,
-        // thread_todos: end-of-work marking was skipped (fenced owner, exhausted revision);
-        // the list is left as it was and no run behaves differently.
-        THREAD_TODO_RECONCILE_FAILED => Ignored,
         // conversation_plan: fenced ownership or failed optional reconciliation is
         // diagnostic only; it does not establish a model/harness improvement.
         CONVERSATION_PLAN_RECONCILE_FAILED => Ignored,

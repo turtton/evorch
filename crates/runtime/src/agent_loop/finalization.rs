@@ -212,7 +212,7 @@ impl LoopState {
         // The work period is over, whatever ended it. After a completed
         // escalation the source root no longer owns a list, so this is a no-op.
         // It must precede the terminal event and never changes how the run ended.
-        self.reconcile_root_todo();
+        self.reconcile_root_plan();
         self.record_intent_terminal();
         self.publish_terminal();
     }

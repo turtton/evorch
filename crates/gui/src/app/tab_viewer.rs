@@ -84,7 +84,6 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) composer: &'a mut ComposerModel,
     pub(super) thread_goals: &'a BTreeMap<String, event_bus::ThreadGoalSnapshot>,
     pub(super) lane_details: &'a std::collections::HashMap<String, crate::model::lanes::LaneDetail>,
-    pub(super) thread_todos: &'a BTreeMap<String, event_bus::ThreadTodoSnapshot>,
     pub(super) goal_action: &'a mut Option<crate::panes::agent::GoalAction>,
     pub(super) composer_action: &'a mut Option<ComposerAction>,
     pub(super) focus_request: &'a mut Option<&'static str>,

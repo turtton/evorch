@@ -196,8 +196,8 @@ pub(crate) struct LoopState {
     /// The run's own prompt while it waits to be appended at setup.
     initial_prompt_pending: Option<String>,
     pub(crate) goal_wake_pending: bool,
-    pub(crate) todo_context_pending: bool,
-    pub(crate) todo_context_deferred: bool,
+    pub(crate) plan_notice: crate::conversation_plan::notice::PlanNotice,
+    pub(crate) boundary_context_deferred: bool,
     /// Model switches prepared since the last response; bounds a switch that never settles.
     model_switches: u32,
     /// Whether this run's turn on its thread owner is open: begun at the loop head and
@@ -304,8 +304,8 @@ impl LoopState {
             )),
             initial_prompt_pending: None,
             goal_wake_pending: false,
-            todo_context_pending: true,
-            todo_context_deferred: false,
+            plan_notice: Default::default(),
+            boundary_context_deferred: false,
             model_switches: 0,
             owner_turn_open: false,
             current_activity: std::sync::Mutex::new(event_bus::RunActivity::Idle),
@@ -371,7 +371,8 @@ pub(crate) async fn run_agent(
     // Trusted host binding is checked once for the fixed tool set, and again
     // on every dispatch in case this conversation hands off its ownership.
     if runtime.goal_thread(task.run_id).is_none() {
-        policy.capabilities.allowed_tools.remove("todo_write");
+        policy.capabilities.allowed_tools.remove("plan_read");
+        policy.capabilities.allowed_tools.remove("plan_update");
     }
     let thread_id = runtime.thread_of_live_run(task.run_id);
     drop(runtime);
@@ -430,6 +431,10 @@ pub(crate) async fn run_agent(
         .as_ref()
         .map(|restored| (*restored.allowed_directories).clone())
         .unwrap_or_default();
+    let plan_notice = restored
+        .as_ref()
+        .map(|restored| restored.plan_notice)
+        .unwrap_or_default();
     let allowed_instructions = restored
         .as_ref()
         .map(|restored| (*restored.allowed_instructions).clone())
@@ -442,7 +447,7 @@ pub(crate) async fn run_agent(
     // An interrupted provider request retries its exact saved input. Restore
     // procedure context only after that response, or a new compaction boundary.
     // A pending handoff seed has never reached its provider and needs it now.
-    let todo_context_deferred = history_only
+    let boundary_context_deferred = history_only
         && !boundary_pending
         && task.handoff.is_none()
         && restored.as_ref().is_some_and(|state| !state.turn_completed);
@@ -523,9 +528,10 @@ pub(crate) async fn run_agent(
     state.completed_turn_end = completed_turn_end;
     state.host_input_ledger =
         std::sync::Mutex::new(host_inputs::HostInputLedger::restored(restored_host_inputs));
-    state.todo_context_deferred = todo_context_deferred;
+    state.boundary_context_deferred = boundary_context_deferred;
     state.told_directories = told_directories;
     state.allowed_instructions = allowed_instructions;
+    state.plan_notice = plan_notice;
     // The run's own host prompt: already in a restored context (and committed
     // there when the same run resumed), or appended by setup below.
     if let Some(prompt_id) = state.task.initial_prompt_id.clone() {
@@ -1180,7 +1186,7 @@ impl LoopState {
                 }
             }
             let requested_gen = *self.channels.compact_rx.borrow();
-            if !self.todo_context_deferred && requested_gen > self.compaction.last_handled_gen {
+            if !self.boundary_context_deferred && requested_gen > self.compaction.last_handled_gen {
                 if self.benchmark.is_some() {
                     self.finish_error(
                         "benchmark unsupported: selected leaf requested manual compaction".into(),
@@ -1191,7 +1197,7 @@ impl LoopState {
                 if let Err(error) = compaction::compact_now(self, CompactionReason::Manual).await {
                     tracing::warn!(%error, "manual compaction failed");
                 }
-            } else if !self.todo_context_deferred {
+            } else if !self.boundary_context_deferred {
                 let visible = self.context.visible_messages();
                 let estimated = self.estimated_context_tokens(&visible);
                 let (window, _) = self.resolved_context_window();
@@ -1241,7 +1247,7 @@ impl LoopState {
             let mut estimated = self.estimated_context_tokens(&visible_messages);
             // A cooldown or the post-compaction latch must not terminate a run
             // when one more compaction can still make the next request fit.
-            while estimated >= window && !self.todo_context_deferred {
+            while estimated >= window && !self.boundary_context_deferred {
                 if self.benchmark.is_some() {
                     self.finish_error(
                         "benchmark unsupported: selected leaf requires context compaction".into(),
@@ -1396,7 +1402,7 @@ impl LoopState {
                     return;
                 }
             };
-            self.todo_context_deferred = false;
+            self.boundary_context_deferred = false;
             // A provider may omit usage (Codex does). The placeholder zero is not a
             // measurement: it must not reach the rules budget, the context baseline or
             // the cumulative budgets as "nothing used". Charge an estimate from the
@@ -1993,7 +1999,7 @@ impl LoopState {
     /// provider input, so the already-sent prefix is never edited.
     fn append_boundary_context(&mut self) {
         let raw_start = self.context.messages.len();
-        self.append_todo_context();
+        self.append_plan_notice();
         self.append_scratch_context();
         self.append_allowed_directories_context();
         self.context

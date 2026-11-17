@@ -143,7 +143,6 @@ fn harness(bar: Bar) -> (Harness<'static>, Clicked) {
                 &TranscriptModel::default(),
                 identity,
                 ConversationContext {
-                    todo: None,
                     goal: None,
                     requests: None,
                     task_rows: &[],
@@ -611,7 +610,6 @@ fn merged_is_purple_in_both_themes_with_a_word() {
                     &TranscriptModel::default(),
                     None,
                     ConversationContext {
-                        todo: None,
                         goal: None,
                         requests: None,
                         task_rows: &[],
