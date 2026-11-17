@@ -4,7 +4,23 @@ use super::LoopState;
 
 const AGENT_MESSAGE_PREFIX: &str = "agent-message";
 
+#[cfg(test)]
+#[path = "elapsed_budget_tests.rs"]
+mod elapsed_budget_tests;
+
 impl LoopState {
+    /// Arrival alone is not parent involvement: call only when delivering input
+    /// to the model, either as an injected message or an output-bearing tool result.
+    pub(crate) fn observe_parent_input(&mut self, sender: &str) {
+        if self
+            .task
+            .parent
+            .is_some_and(|parent| parent.to_string() == sender)
+        {
+            self.budget.reset_elapsed();
+        }
+    }
+
     pub(crate) fn begin_internal_input(&mut self) {
         self.turn = crate::request_turn::internal(self.task.ancestry);
     }
@@ -128,6 +144,7 @@ impl LoopState {
             }
             self.context
                 .push_user(&format_agent_message(&queued.message));
+            self.observe_parent_input(&queued.message.sender_run_id);
             if let Some(runtime) = self.runtime() {
                 runtime.observe_queued_message(&queued);
             }

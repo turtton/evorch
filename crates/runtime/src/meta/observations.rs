@@ -56,6 +56,7 @@ impl Observations {
             mailbox.consume_ids(&ids);
         }
         for queued in self.messages {
+            state.observe_parent_input(&queued.message.sender_run_id);
             runtime.observe_queued_message(&queued);
         }
         if !self.shell.is_empty() {

@@ -94,6 +94,11 @@ impl LoopState {
         let (text, images, trusted_user, prompt_id, _) = input;
         self.accept_input_identity(trusted_user, prompt_id);
         self.append_user_message(&text, images, tracked);
+        // Authenticated human input to a child is parent-equivalent involvement.
+        // Internal wakes and root input do not renew the subagent activity window.
+        if trusted_user && self.task.parent.is_some() {
+            self.budget.reset_elapsed();
+        }
         true
     }
 

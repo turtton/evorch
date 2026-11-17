@@ -7,6 +7,76 @@ fn assert_no_event(receiver: &mut event_bus::EventReceiver) {
 }
 
 #[tokio::test(start_paused = true)]
+async fn reset_elapsed_preserves_non_time_budgets_and_latched_breaches() {
+    let bus = EventBus::new(16);
+    let settings = BudgetSettings::default();
+    let context = context(&bus, &settings);
+    let path = Path::new("budget-reset-test-file");
+    let mut counters = BudgetCounters::default();
+    counters.usage(Usage {
+        input_tokens: 31,
+        output_tokens: 17,
+        ..Default::default()
+    });
+    counters.read(path);
+    counters.read(path);
+    counters.mark_spawned("child");
+    counters.observe_wait_event("parent:terminated");
+    counters.lane_observations.insert([1; 32]);
+    counters.finish_round();
+    counters.finish_round();
+    counters.warned = true;
+    let credits = counters.spawn_credits.clone();
+    tokio::time::advance(Duration::from_secs(100)).await;
+    counters.exclude_idle(Duration::from_secs(20));
+    assert_eq!(counters.publish(50, &context), BudgetDecision::Continue);
+
+    counters.reset_elapsed();
+    assert_eq!(counters.active_elapsed(), Duration::ZERO);
+    assert_eq!(counters.paused_total, Duration::ZERO);
+    assert_eq!(counters.cumulative_input_tokens, 31);
+    assert_eq!(counters.cumulative_output_tokens, 17);
+    assert_eq!(counters.file_reads.values().next().unwrap().count(), 2);
+    assert_eq!(counters.no_progress_rounds, 1);
+    assert_eq!(counters.last_checkpoint_at, 50);
+    assert!(counters.warned);
+    assert!(!counters.round_changed);
+    assert_eq!(counters.spawn_credits, credits);
+    assert!(counters.lane_observations.contains(&[1; 32]));
+    // Tool usage is supplied by the escalation detector, not reset by the clock.
+    let breach = counters.publish(400, &context);
+    assert!(
+        matches!(&breach, BudgetDecision::Exhausted(b) if b.detail.contains("max_tool_calls=400"))
+    );
+    counters.reset_elapsed();
+    assert_eq!(counters.publish(0, &context), breach);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reset_elapsed_while_waiting_reanchors_pause_and_preserves_wait_exclusion() {
+    let mut counters = BudgetCounters::default();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    counters.pause();
+    tokio::time::advance(Duration::from_secs(20)).await;
+    counters.resume();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    counters.pause();
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    counters.reset_elapsed();
+    assert_eq!(counters.active_elapsed(), Duration::ZERO);
+    tokio::time::advance(Duration::from_secs(40)).await;
+    assert_eq!(counters.active_elapsed(), Duration::ZERO);
+    counters.resume();
+    tokio::time::advance(Duration::from_secs(7)).await;
+    assert_eq!(counters.active_elapsed(), Duration::from_secs(7));
+    counters.pause();
+    tokio::time::advance(Duration::from_secs(50)).await;
+    counters.resume();
+    assert_eq!(counters.active_elapsed(), Duration::from_secs(7));
+}
+
+#[tokio::test(start_paused = true)]
 async fn elapsed_budget_excludes_waiting_and_resumes_active_accounting() {
     // Given: 上限より短い実行時間の後に待機する。
     let bus = EventBus::new(16);
