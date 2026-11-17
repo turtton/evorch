@@ -335,7 +335,7 @@ async fn scenario(manual: bool) {
             composer_role: ComposerRole::Worker,
             text: cache::GOAL.into(),
             skills: vec![],
-            images: vec![],
+            attachments: vec![],
             model_preference: None,
             fork_seed: None,
         };

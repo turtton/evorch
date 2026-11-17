@@ -10,3 +10,7 @@ The first commit that added each crate is the unmodified crates.io release, so
 `git log -p vendor/` shows the local patch on its own. Remove the crate and its
 `[patch.crates-io]` entry in the root `Cargo.toml` once upstream ships an
 equivalent hook.
+
+The shared `depsOnlyArgs.extraDummyScript` in `flake.nix` preserves this vendor
+tree in Crane’s dependency-only source. Registry crates such as `eframe` need
+the patched crates’ real public APIs; empty workspace stubs cannot satisfy them.
