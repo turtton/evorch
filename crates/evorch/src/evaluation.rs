@@ -46,8 +46,8 @@ change role_profiles.<name> rather than agents or routing. It cannot change eval
 comment_checker. --problem describes what went wrong in the thread and is judged as its own aspect.
 --verify runs a command in each replay's final workspace, without network, failing after
 --verify-timeout (default 600) s. The core reads its own database; there is no --db.
-The output is a directory of <user-config-dir>/eval, named by --output (a plain name, or a path
-directly inside that directory); it must be missing or empty. The default is
+The output is a directory of <user-config-dir>/eval, named by --output (a bare name, or an
+absolute path that is a direct child of that directory: no `..`, no links); it must be missing or empty. The default is
 <UTC YYYYmmdd-HHMMSS>-<thread-id>. Workspaces are removed after finish/verification, including on
 failure; --keep-workspace preserves them. Interrupting this command does not stop the job: it
 runs on in the core, and an interrupted or cancelled one leaves workspaces for eval clean.
@@ -229,7 +229,8 @@ fn parse_run(mut argv: impl Iterator<Item = String>) -> Result<Command, String> 
             "--output" => request.output = Some(PathBuf::from(value)),
             "--db" => {
                 return Err(format!(
-                    "--db is not accepted: the evorch core reads its own database\n{USAGE}"
+                    "--db is not accepted: the evorch core reads its own database from the user config \
+                     directory (--user-config); drop --db\n{USAGE}"
                 ));
             }
             "--user-config" => request.user_config_dir = Some(PathBuf::from(value)),
@@ -285,9 +286,16 @@ fn eval_root(user_config_dir: Option<&Path>) -> Result<PathBuf, String> {
 /// The name of the directory `value` stands for under `root`. The core takes
 /// names only, so a path is accepted when it is a directory directly inside
 /// the evaluation root (after resolving links on the way to it); a link at the
-/// end is refused, never followed.
+/// end is refused, never followed. A relative path is only a name, and no path
+/// may contain `..`.
 fn target_name(root: &Path, value: &Path) -> Result<String, String> {
     let shown = value.display();
+    if value
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(format!("{shown} must not contain `..`"));
+    }
     let mut parts = value.components();
     let single = match (parts.next(), parts.next()) {
         (Some(std::path::Component::Normal(name)), None) => Some(name),
@@ -295,6 +303,10 @@ fn target_name(root: &Path, value: &Path) -> Result<String, String> {
     };
     let name = if let Some(name) = single {
         name.to_owned()
+    } else if !value.is_absolute() {
+        return Err(format!(
+            "{shown} is not a name; pass a name or an absolute path directly inside the evaluation directory"
+        ));
     } else {
         let name = value
             .file_name()
@@ -319,13 +331,11 @@ fn target_name(root: &Path, value: &Path) -> Result<String, String> {
                 root.display()
             ));
         }
-        if std::fs::symlink_metadata(parent.join(&name))
-            .is_ok_and(|meta| meta.file_type().is_symlink())
-        {
-            return Err(format!("{shown} is a link, not a directory"));
-        }
         name
     };
+    if std::fs::symlink_metadata(root.join(&name)).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(format!("{shown} is a link, not a directory"));
+    }
     let name = name
         .into_string()
         .map_err(|_| format!("{shown} is not a name the core accepts"))?;
@@ -786,6 +796,15 @@ mod tests {
             temp.path().join("elsewhere"),
             root.join("link"),
             root.join("run-a").join("deeper"),
+            // `..` anywhere, even where it would lead back into the root.
+            root.join("..").join("eval").join("run-a"),
+            root.join("..").join("elsewhere"),
+            PathBuf::from("../run-a"),
+            // A relative path is a name or nothing.
+            PathBuf::from("sub/run-a"),
+            // A directory that is a link out of the root, and a path through it.
+            root.join("link").join("inside"),
+            temp.path().join("elsewhere").join("run-a"),
             root.join(".groups"),
             root.join("bad name"),
             PathBuf::from(".."),

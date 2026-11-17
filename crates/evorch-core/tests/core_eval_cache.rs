@@ -427,23 +427,10 @@ async fn a_bootstrapped_core_runs_an_evaluation_job_and_names_why_it_failed() {
     core.shutdown().await.unwrap();
 }
 
-/// A candidate that names a model the provider does not offer ends the job
-/// before any replay or judge request, with the evidence kept in the output
-/// directory and the report written (the contract the CLI had when it ran the
-/// replay itself).
-#[tokio::test(flavor = "multi_thread")]
-async fn a_failed_preflight_through_the_core_reports_and_sends_no_inference() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
-    let config_dir = root.join("config");
-    let database = root.join("events.db");
-    record_thread(&root, &database);
-    let provider = StreamingMockOpenAi::spawn_with_models(
-        vec![],
-        mock_openai::WriteMode::default(),
-        vec!["gpt-4o".into()],
-    );
-    configure(&config_dir, &provider.base_url());
+/// The user's configuration for the preflight scenarios: the provider offers
+/// `gpt-4o` only, and the reviewer route may name a model it does not.
+fn configure_preflight(config_dir: &Path, base_url: &str) {
+    configure(config_dir, base_url);
     std::fs::write(
         config_dir.join("config.toml"),
         format!(
@@ -460,23 +447,17 @@ worker = [{{ profile = "local" }}]
 reviewer = [{{ profile = "local" }}]
 "#,
             version = config::CURRENT_VERSION,
-            base_url = provider.base_url(),
         ),
     )
     .unwrap();
-    let (mut host, tasks) = job_host(&root, &config_dir, &database);
-    let mut events = subscribe(&host);
-    let mut start = run_of("preflight", THREAD);
-    start.candidate =
-        Some("[routing.routes]\nreviewer = [{ profile = 'local', model = 'missing' }]\n".into());
-    start.report = true;
-    start.output = Some("out".into());
-    host.handle_command(
-        Command::Evaluation(EvaluationCommand::StartEvaluationRun(Box::new(start))),
-        local_desktop(),
-    )
-    .unwrap();
-    let done = settled(&mut events, "preflight").await;
+}
+
+const MISSING_MODEL_OVERLAY: &str =
+    "[routing.routes]\nreviewer = [{ profile = 'local', model = 'missing' }]\n";
+
+/// What a preflight that failed leaves in `out`: the failure named, no replay,
+/// the report written with the warning.
+fn assert_preflight_evidence(out: &Path, done: &EvaluationJobView) {
     assert!(
         matches!(done.operation.state, OperationState::Failed { .. }),
         "{done:?}"
@@ -485,8 +466,6 @@ reviewer = [{{ profile = "local" }}]
     assert!(message.contains("evaluation preflight failed"), "{message}");
     assert!(message.contains("missing"), "{message}");
     assert!(done.runs.is_empty(), "no replay ran: {done:?}");
-
-    let out = config_dir.join("eval").join("out");
     let manifest: Value =
         serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["runs"], serde_json::json!([]));
@@ -501,6 +480,38 @@ reviewer = [{{ profile = "local" }}]
         "{report}"
     );
     assert!(out.join("report.md").exists());
+}
+
+/// A candidate that names a model the provider does not offer ends the job
+/// before any replay or judge request, with the evidence kept in the output
+/// directory and the report written (the contract the CLI had when it ran the
+/// replay itself).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_preflight_through_the_core_reports_and_sends_no_inference() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let config_dir = root.join("config");
+    let database = root.join("events.db");
+    record_thread(&root, &database);
+    let provider = StreamingMockOpenAi::spawn_with_models(
+        vec![],
+        mock_openai::WriteMode::default(),
+        vec!["gpt-4o".into()],
+    );
+    configure_preflight(&config_dir, &provider.base_url());
+    let (mut host, tasks) = job_host(&root, &config_dir, &database);
+    let mut events = subscribe(&host);
+    let mut start = run_of("preflight", THREAD);
+    start.candidate = Some(MISSING_MODEL_OVERLAY.into());
+    start.report = true;
+    start.output = Some("out".into());
+    host.handle_command(
+        Command::Evaluation(EvaluationCommand::StartEvaluationRun(Box::new(start))),
+        local_desktop(),
+    )
+    .unwrap();
+    let done = settled(&mut events, "preflight").await;
+    assert_preflight_evidence(&config_dir.join("eval").join("out"), &done);
     assert!(
         provider
             .recorded_requests()
@@ -509,4 +520,113 @@ reviewer = [{{ profile = "local" }}]
         "no replay or judge inference"
     );
     idle(&tasks).await;
+}
+
+/// The real `evorch-core` process, as the CLI meets it: a candidate the
+/// provider cannot serve ends the job in the core before any inference, and
+/// the client reads the same settled view from the wire. The core reads the
+/// database of its own configuration directory; nothing but the command
+/// reaches it from the client.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_real_core_process_fails_a_preflight_without_inference() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
+    use workbench_protocol::handshake::BuildInfo;
+    use workbench_protocol::ids::ClientId;
+
+    let dir = test_socket_dir::SplitDir::new();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config_dir = dir.path().canonicalize().unwrap();
+    record_thread(&config_dir, &config_dir.join("evorch-events.db"));
+    let provider = StreamingMockOpenAi::spawn_with_models(
+        vec![],
+        mock_openai::WriteMode::default(),
+        vec!["gpt-4o".into()],
+    );
+    configure_preflight(&config_dir, &provider.base_url());
+    // The core process has no keyring entry of this test: it reads the key from its environment.
+    let config_file = config_dir.join("config.toml");
+    let keyring = format!(
+        r#"credential = {{ type = "keyring", service = "evorch", account = "{ACCOUNT}" }}"#
+    );
+    let text = std::fs::read_to_string(&config_file).unwrap();
+    assert!(text.contains(&keyring));
+    std::fs::write(
+        &config_file,
+        text.replace(
+            &keyring,
+            r#"credential = { type = "env", var = "EVAL_CACHE_E2E_KEY" }"#,
+        ),
+    )
+    .unwrap();
+
+    let mut child = tokio::process::Command::new(
+        std::env::var_os("CARGO_BIN_EXE_evorch-core").expect("CARGO_BIN_EXE_evorch-core"),
+    )
+    .args(["--config-dir", config_dir.to_str().unwrap(), "--foreground"])
+    .env("XDG_STATE_HOME", dir.sockets().join("state"))
+    .env("XDG_RUNTIME_DIR", dir.sockets())
+    .env("EVAL_CACHE_E2E_KEY", "fixture-key")
+    .current_dir(&config_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .kill_on_drop(true)
+    .spawn()
+    .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let ready: Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().expect("readiness line")).unwrap();
+    assert_eq!(ready["status"], "ready");
+    let client = WorkbenchClient::connect(
+        UnixTransport::connect(ready["socket"].as_str().unwrap())
+            .await
+            .unwrap(),
+        ClientConfig::new(
+            ClientId::new("eval-cache-e2e").unwrap(),
+            BuildInfo {
+                name: "test".into(),
+                version: "1".into(),
+                revision: None,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let mut events = client
+        .subscribe(Subscribe {
+            scope: SubscriptionScope::All,
+            after: None,
+        })
+        .await
+        .unwrap();
+
+    let mut start = run_of("real-core-preflight", THREAD);
+    start.candidate = Some(MISSING_MODEL_OVERLAY.into());
+    start.report = true;
+    start.output = Some("out".into());
+    client
+        .command(Command::Evaluation(EvaluationCommand::StartEvaluationRun(
+            Box::new(start),
+        )))
+        .await
+        .unwrap();
+    let done = loop {
+        let envelope = events.next().await.expect("the subscription stays open");
+        if let UiEvent::Evaluation(EvaluationEvent::EvaluationJobSettled { view }) = envelope.event
+            && view.operation.operation_id.as_str() == "real-core-preflight"
+        {
+            break *view;
+        }
+    };
+    assert_preflight_evidence(&config_dir.join("eval").join("out"), &done);
+    assert!(
+        provider
+            .recorded_requests()
+            .iter()
+            .all(|request| request.method == "GET"),
+        "no replay or judge inference"
+    );
+    child.kill().await.unwrap();
 }
