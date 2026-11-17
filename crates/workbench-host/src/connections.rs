@@ -18,6 +18,7 @@
 //!   itself: a connection that ends without an area that registered a hook
 //!   changes nothing (a GUI that leaves does not stop its runs).
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use workbench_protocol::ids::ClientId;
@@ -74,8 +75,13 @@ impl ConnectionHooks {
             state.open.remove(client);
             state.hooks.clone()
         };
+        // This runs in a guard's drop, possibly while another panic unwinds: a
+        // hook that panics must neither escape nor keep the later hooks from
+        // running, so each one is isolated and a failure is only logged.
         for hook in hooks {
-            hook(client);
+            if std::panic::catch_unwind(AssertUnwindSafe(|| hook(client))).is_err() {
+                tracing::warn!(client = %client.as_str(), "a connection-closed hook panicked");
+            }
         }
     }
 }
@@ -176,6 +182,22 @@ mod tests {
 
         // Then: the hook ran to its end and its connection is open.
         assert_eq!(hooks.connections_of(&client("cli-c")), 1);
+    }
+
+    #[test]
+    fn a_hook_that_panics_neither_escapes_nor_stops_the_later_hooks() {
+        // Given: a hook that panics, registered before one that records.
+        let hooks = Arc::new(ConnectionHooks::default());
+        hooks.register(Arc::new(|_| panic!("a hook failed")));
+        let seen = recording(&hooks);
+        let connection = hooks.open(client("cli-a"));
+
+        // When: the client leaves.
+        drop(connection);
+
+        // Then: the drop returned, the later hook ran, and the client is gone.
+        assert_eq!(*seen.lock().unwrap(), ["cli-a"]);
+        assert_eq!(hooks.connections_of(&client("cli-a")), 0);
     }
 
     #[test]
