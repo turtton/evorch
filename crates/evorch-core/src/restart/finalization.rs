@@ -1,10 +1,12 @@
-//! Irreversible capture and M2 stages 1–8. Nothing here can exec.
+//! Irreversible capture and M2 stages 1–11. Raw exec remains disconnected.
 #[cfg(target_os = "linux")]
 mod later;
 #[cfg(not(target_os = "linux"))]
 #[path = "finalization/unsupported.rs"]
 mod later;
 use super::*;
+#[cfg(target_os = "linux")]
+pub use later::FinalizationEnvironment;
 pub use later::FinalizationTarget;
 use storage::recovery::restart::RestartTransaction;
 use workbench_host::bootstrap::planned_exit::ExitStage;
@@ -15,7 +17,7 @@ impl RestartCoordinator {
     /// Internal wiring point, not a transport operation. The prepared transaction
     /// is created/read back through the existing writer BEFORE calling this.
     /// Returns only acceptance; use wait_finalization for completion (currently
-    /// always FailedClosed because stages 9..11 and raw exec are not connected).
+    /// always FailedClosed because raw exec (stage 12) is not connected).
     pub fn start_finalization(
         &self,
         id: RestartId,
@@ -111,9 +113,10 @@ impl RestartCoordinator {
         let mut state = self.0.state.lock().unwrap();
         state.finalization = Some(resources.clone());
         let core = self.clone();
+        let owner_host = host.owner.clone();
         state.worker = Some(
             tokio::spawn(async move {
-                core.drive_finalization(id, resources, begun.0, tx, target)
+                core.drive_finalization(id, resources, begun.0, tx, target, owner_host)
                     .await;
             })
             .abort_handle(),
@@ -158,6 +161,7 @@ impl RestartCoordinator {
         session: Result<runtime::RestartCaptureSession, RuntimeError>,
         tx: RestartTransaction,
         target: Option<FinalizationTarget>,
+        owner_host: Arc<runtime::ownership::OwnerHost>,
     ) {
         let runtime = self.0.runtime.clone();
         // The coordinator mutex is NOT held while SQLite or graph capture runs.
@@ -212,10 +216,18 @@ impl RestartCoordinator {
             }
             Err(error) => Err(error),
         };
-        // 9..11 and raw exec remain absent; never return an armable transaction.
+        let result = match result {
+            Ok(armed) => {
+                self.nine_to_eleven(id, armed, owner_host, resources.writer())
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        // The D-3 raw boundary is deliberately not connected. All successful
+        // preparation paths have already entered synchronous FailedClosed recovery.
         let reason = result
             .err()
-            .unwrap_or_else(|| "M2 stages 9..11 are not connected; exec prohibited".into());
+            .unwrap_or_else(|| "raw exec is prohibited until D-3".into());
         {
             let mut state = self.0.state.lock().unwrap();
             if let Some(attempt) = &state.attempt {

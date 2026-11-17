@@ -47,7 +47,8 @@ HOST=workbench-host
 WEB=workbench-web
 PROTOCOL_EXTERNAL_ALLOW="serde serde_json thiserror"
 CLIENT_EXTERNAL_ALLOW="serde thiserror tokio"
-WEB_EXTERNAL_ALLOW="axum futures-core http http-body-util hyper hyper-util serde serde_json thiserror tokio"
+# TaskTracker (rt) proves detached work has exited even after handle/waiter drop.
+WEB_EXTERNAL_ALLOW="axum futures-core http http-body-util hyper hyper-util serde serde_json thiserror tokio tokio-util"
 # workbench-host is the core side of the protocol. It may use core crates and
 # the protocol, but nothing that draws or that speaks as a client.
 HOST_FORBIDDEN_WORKSPACE="gui workspace-ui workbench-client browser-cef evorch"

@@ -379,14 +379,57 @@ mod linux {
         if scenario == "exec-failure" {
             install();
             let before = unsafe { libc::fcntl(extra.as_raw_fd(), libc::F_GETFD) };
-            let result = unsafe {
-                instance.exec_handoff(
+            // Preparation must reject a replaced entry disposition, not
+            // silently switch handlers or consume pending shutdown signals.
+            let rejected = instance.prepare_exec_handoff(
+                &signals,
+                Path::new("/definitely-no-evorch-core"),
+                &[],
+                record(&config, round),
+            );
+            assert!(matches!(rejected, Err(ref error) if error.kind() == io::ErrorKind::Other));
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            unsafe {
+                assert_eq!(
+                    libc::sigaction(libc::SIGINT, std::ptr::null(), &mut action),
+                    0
+                );
+            }
+            assert_eq!(action.sa_sigaction, signal as *const () as usize);
+            assert_eq!(
+                unsafe { libc::fcntl(extra.as_raw_fd(), libc::F_GETFD) },
+                before
+            );
+            unsafe {
+                libc::raise(libc::SIGINT);
+                libc::raise(libc::SIGTERM);
+            }
+            let inbox = signals.inbox().unwrap();
+            assert_eq!(inbox.read_pending().unwrap().len(), 2);
+            assert_eq!(SIGNALS.load(Ordering::SeqCst), 0);
+            drop(inbox);
+            // Exercise the actual raw-syscall failure separately, under the
+            // production blocked/default entry policy.
+            action.sa_sigaction = libc::SIG_DFL;
+            for sig in [libc::SIGINT, libc::SIGTERM] {
+                assert_eq!(
+                    unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) },
+                    0
+                );
+            }
+            let prepared = instance
+                .prepare_exec_handoff(
                     &signals,
                     Path::new("/definitely-no-evorch-core"),
                     &[],
                     record(&config, round),
                 )
-            };
+                .unwrap();
+            assert_eq!(
+                unsafe { libc::fcntl(extra.as_raw_fd(), libc::F_GETFD) },
+                before
+            );
+            let result = unsafe { prepared.raw_exec() };
             assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::ENOENT));
             assert_eq!(
                 unsafe { libc::fcntl(extra.as_raw_fd(), libc::F_GETFD) },
@@ -396,11 +439,10 @@ mod linux {
                 libc::raise(libc::SIGINT);
                 libc::raise(libc::SIGTERM);
             }
-            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
             unsafe {
                 libc::sigaction(libc::SIGINT, std::ptr::null(), &mut action);
             }
-            assert_eq!(action.sa_sigaction, signal as *const () as usize);
+            assert_eq!(action.sa_sigaction, libc::SIG_DFL);
             let inbox = signals.inbox().unwrap();
             assert_eq!(inbox.read_pending().unwrap().len(), 2);
             assert_eq!(SIGNALS.load(Ordering::SeqCst), 0);

@@ -62,6 +62,13 @@ pub struct BackendSubscription {
 ///
 /// Futures must be `Send` because the adapter runs on a multi-threaded runtime.
 pub trait WorkbenchBackend: Send + Sync + 'static {
+    /// After the adapter has joined its requests and SSE pumps, join any
+    /// backend-owned detached delivery work. Override when the backend spawns
+    /// such work. This is NOT called by ordinary connection-only shutdown.
+    fn drain_for_restart(&self) -> impl Future<Output = Result<(), WorkbenchError>> + Send {
+        async { Ok(()) }
+    }
+
     /// Final egress protection, including output synthesized by the adapter.
     ///
     /// Production backends apply secret masking to string values and object

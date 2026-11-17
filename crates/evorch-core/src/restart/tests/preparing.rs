@@ -270,3 +270,116 @@ async fn stop_boundary_does_not_keep_a_released_lifecycle_owner_alive() {
     ));
     host.shutdown().await.unwrap();
 }
+
+// The blocking DB-preflight worker is held, not the coordinator. No timing
+// assumption: its entry and return are acknowledged by explicit channels.
+#[tokio::test]
+async fn pending_db_preflight_allows_stop_cancel_shutdown_and_new_generation() {
+    for action in 0..4 {
+        let (_dir, mut host) = boot().await;
+        let core = RestartCoordinator::new(&host);
+        let events = host.runtime.event_bus().subscribe();
+        let run = host
+            .runtime
+            .delegate_chat(
+                "preflight",
+                runtime::Role::Orchestrator,
+                "stop".into(),
+                runtime::RunConfig {
+                    ownership: Some(host.owner.start("preflight").unwrap()),
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        waiting(run, events).await;
+        let (entered, mut entry) = tokio::sync::mpsc::unbounded_channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let blocked = Arc::new(Mutex::new(blocked));
+        let (returned, mut returns) = tokio::sync::mpsc::unbounded_channel();
+        *core.0.preflight_hook.lock().unwrap() = Some(Arc::new(move |id| {
+            entered.send(id).unwrap();
+            blocked.lock().unwrap().recv().unwrap();
+            returned.send(()).unwrap();
+        }));
+        let id = core
+            .request_planned(std::collections::BTreeMap::from([(
+                run,
+                runtime::quiesce::RecoveryRecipe {
+                    settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                    policy: runtime::quiesce::ResumePolicy::CoreOwned,
+                    goal_id: None,
+                    team: None,
+                    lane: None,
+                    descriptor: None,
+                },
+            )]))
+            .unwrap();
+        assert_eq!(entry.recv().await, Some(id));
+        assert!(core.0.state.lock().unwrap().attempt.is_none());
+        match action {
+            0 => {
+                host.runtime.stop(run, StopScope::SelfOnly).unwrap();
+            }
+            1 | 3 => {
+                core.cancel(id).unwrap();
+            }
+            2 => core.transition_to_shutdown(),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            core.snapshot().phase,
+            if action == 2 {
+                RestartPhase::ShuttingDown
+            } else {
+                RestartPhase::Running
+            }
+        );
+        assert!(core.0.state.lock().unwrap().attempt.is_none());
+        *core.0.preflight_hook.lock().unwrap() = None;
+        let next = if action == 3 {
+            Some(core.request().unwrap())
+        } else {
+            None
+        };
+        release.send(()).unwrap();
+        returns.recv().await.unwrap();
+        if let Some(next) = next {
+            core.wait_sealed(next).await.unwrap();
+            assert_ne!(id, next);
+            core.cancel(next).unwrap();
+        }
+        assert_ne!(core.snapshot().phase, RestartPhase::FailedClosed);
+        host.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline_cancels_while_db_preflight_is_pending_without_starting_an_attempt() {
+    let (_dir, mut host) = boot().await;
+    let core = RestartCoordinator::new(&host);
+    let (entered, pending) = tokio::sync::oneshot::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let barrier = Mutex::new(Some((entered, blocked)));
+    let (returned, complete) = tokio::sync::oneshot::channel();
+    let returned = Mutex::new(Some(returned));
+    *core.0.preflight_hook.lock().unwrap() = Some(Arc::new(move |_| {
+        let (entered, blocked) = barrier.lock().unwrap().take().unwrap();
+        entered.send(()).unwrap();
+        blocked.recv().unwrap();
+        returned.lock().unwrap().take().unwrap().send(()).unwrap();
+    }));
+    let id = core
+        .request_planned(std::collections::BTreeMap::new())
+        .unwrap();
+    pending.await.unwrap();
+    tokio::time::advance(PREPARATION_LIMIT).await;
+    phase(&core, RestartPhase::Running).await;
+    assert!(core.wait_sealed(id).await.is_err());
+    assert!(core.0.state.lock().unwrap().attempt.is_none());
+    release.send(()).unwrap();
+    complete.await.unwrap();
+    assert!(host.runtime.learning_gate().is_open());
+    host.shutdown().await.unwrap();
+}

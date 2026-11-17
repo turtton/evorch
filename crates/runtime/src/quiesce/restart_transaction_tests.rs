@@ -430,3 +430,48 @@ async fn restart_preflight_preserves_durable_snapshot_free_admission_queue() {
     f.runtime.cancel_restart_quiesce(&attempt).unwrap();
     f.cleanup(run).await;
 }
+
+#[tokio::test]
+async fn preflight_proof_rejects_foreign_changed_and_unhealthy_runtime_before_attempt() {
+    let f = Fixture::new(0);
+    let other = Fixture::new(0);
+    let proof = f.runtime.prepare_restart_quiesce(&BTreeMap::new()).unwrap();
+    assert!(
+        other
+            .runtime
+            .begin_preflighted_restart_quiesce(proof)
+            .is_err()
+    );
+    assert!(other.runtime.shared.quiesce.running());
+    let proof = f.runtime.prepare_restart_quiesce(&BTreeMap::new()).unwrap();
+    let run = chat(&f);
+    f.model.entered.notified().await;
+    assert!(f.runtime.begin_preflighted_restart_quiesce(proof).is_err());
+    assert!(f.runtime.shared.quiesce.running());
+    f.cleanup(run).await;
+    let proof = other
+        .runtime
+        .prepare_restart_quiesce(&BTreeMap::new())
+        .unwrap();
+    other
+        .runtime
+        .shared
+        .quiesce
+        .fail("health changed after DB preflight");
+    assert!(
+        other
+            .runtime
+            .begin_preflighted_restart_quiesce(proof)
+            .is_err()
+    );
+    let healthy = Fixture::new(0);
+    let proof = healthy
+        .runtime
+        .prepare_restart_quiesce(&BTreeMap::new())
+        .unwrap();
+    let attempt = healthy
+        .runtime
+        .begin_preflighted_restart_quiesce(proof)
+        .unwrap();
+    healthy.runtime.cancel_restart_quiesce(&attempt).unwrap();
+}

@@ -493,3 +493,55 @@ mod linux {
         assert_stops(helper);
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ordinary_children_do_not_inherit_core_shutdown_signal_mask() {
+    struct Restore(libc::sigset_t);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            assert_eq!(
+                unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut()) },
+                0
+            );
+        }
+    }
+    let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+    let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigemptyset(&mut blocked);
+        libc::sigaddset(&mut blocked, libc::SIGINT);
+        libc::sigaddset(&mut blocked, libc::SIGTERM);
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut old),
+            0
+        );
+    }
+    let _restore = Restore(old);
+    fn child_mask(policy: bool) -> u64 {
+        let mut child = Command::new("cat");
+        child.arg("/proc/self/status");
+        if policy {
+            apply_launch_policy(&mut child);
+        }
+        let output = child.output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|s| s.strip_prefix("SigBlk:"))
+            .map(|s| u64::from_str_radix(s.trim(), 16).unwrap())
+            .unwrap()
+    }
+    let shutdown = (1 << (libc::SIGINT - 1)) | (1 << (libc::SIGTERM - 1));
+    assert_eq!(
+        child_mask(false) & shutdown,
+        shutdown,
+        "positive control inherits the blocked mask"
+    );
+    assert_eq!(
+        child_mask(true) & shutdown,
+        0,
+        "ordinary child can receive INT/TERM"
+    );
+}

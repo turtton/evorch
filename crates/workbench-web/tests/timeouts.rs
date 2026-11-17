@@ -229,3 +229,47 @@ async fn shutdown_stops_waiting_for_a_stuck_backend_but_not_for_its_command() {
     done.recv().await.unwrap();
     assert_eq!(backend.seen_count(), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn restart_shutdown_joins_accepted_backend_even_after_connection_grace() {
+    use std::future::{Future, poll_fn};
+    let (backend, mut entered, mut done) = FakeBackend::gated();
+    let backend = Arc::new(backend);
+    let server = WebServer::start(
+        enabled(WebServerConfig {
+            shutdown_grace: Duration::from_secs(5),
+            ..Default::default()
+        }),
+        backend.clone(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let addr = server.local_addr();
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let body = command_request("restart-held").to_string();
+    client.write_all(format!(
+        "POST /api/v1/request HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()
+    ).as_bytes()).await.unwrap();
+    entered.recv().await.unwrap();
+    let mut drain = Box::pin(server.shutdown_for_restart());
+    let mut closed = Box::pin(read_to_end(&mut client));
+    // Drive shutdown and the explicit socket EOF together. Virtual time only
+    // advances the production connection grace, never a test completion bound.
+    let response = poll_fn(|cx| {
+        assert!(drain.as_mut().poll(cx).is_pending());
+        closed.as_mut().poll(cx)
+    })
+    .await;
+    assert!(!response.contains("200 OK"));
+    assert!(
+        poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    assert_eq!(backend.seen_count(), 0);
+    backend.release(1);
+    drain.await.unwrap();
+    done.recv().await.unwrap();
+    assert_eq!(backend.seen_count(), 1);
+}

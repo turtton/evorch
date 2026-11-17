@@ -17,6 +17,12 @@ pub struct RestartCaptureSession {
     pub(super) revision: u64,
     expected_persisted: bool,
 }
+/// One-use read-only DB preflight, bound to this runtime and the inspected live set.
+/// Consuming it performs memory checks only; it is not capture/exec authority.
+pub struct RestartPreflight {
+    runtime: Weak<Shared>,
+    intents: BTreeMap<RunId, ResumeIntent>,
+}
 /// Failed adoption retains the physical proof, including on readback failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartAdoptionFailure {
@@ -185,6 +191,16 @@ impl AgentRuntime {
         &self,
         recipes: &BTreeMap<RunId, RecoveryRecipe>,
     ) -> Result<RestartAttempt, RuntimeError> {
+        let preflight = self.prepare_restart_quiesce(recipes)?;
+        self.begin_preflighted_restart_quiesce(preflight)
+    }
+    /// Blocking DB work. Call outside the lifecycle mutex, before the final
+    /// generation/cancellation/deadline check.
+    pub fn prepare_restart_quiesce(
+        &self,
+        recipes: &BTreeMap<RunId, RecoveryRecipe>,
+    ) -> Result<RestartPreflight, RuntimeError> {
+        let intents = self.shared.quiesce.live_capture_intents();
         self.preflight_restart_capture(recipes)?;
         if let Some(store) = self.shared.run_store.get()
             && store
@@ -195,6 +211,26 @@ impl AgentRuntime {
                 "previous adopted restart has RetryPending components",
             ));
         }
+        if intents != self.shared.quiesce.live_capture_intents() {
+            return Err(error("restart preflight live set changed"));
+        }
+        Ok(RestartPreflight {
+            runtime: Arc::downgrade(&self.shared),
+            intents,
+        })
+    }
+    /// Synchronous memory-only boundary. DB preflight is never run under the
+    /// host coordinator mutex. Capture independently repeats durable validation.
+    pub fn begin_preflighted_restart_quiesce(
+        &self,
+        preflight: RestartPreflight,
+    ) -> Result<RestartAttempt, RuntimeError> {
+        if !Weak::ptr_eq(&preflight.runtime, &Arc::downgrade(&self.shared))
+            || preflight.intents != self.shared.quiesce.live_capture_intents()
+        {
+            return Err(error("stale or foreign restart preflight"));
+        }
+        self.check_restart_preparation()?;
         self.begin_restart_quiesce_mode(true)
     }
     /// Production capture consumes the capability minted by the host drain gate.

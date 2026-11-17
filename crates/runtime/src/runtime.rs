@@ -33,7 +33,7 @@ pub use recovery_activation::{
 };
 pub use restart_handoff::{PlannedToolSchemaBoundary, RestartOwnershipEvidence};
 pub use restart_transaction::{
-    RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession,
+    RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession, RestartPreflight,
 };
 mod nested_orchestrator;
 mod output;

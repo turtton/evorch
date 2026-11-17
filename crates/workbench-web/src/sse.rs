@@ -317,14 +317,28 @@ pub(crate) async fn events<B: WorkbenchBackend>(
         name: "subscription_started",
         data,
     });
-    tokio::spawn(pump(
-        Arc::clone(&state.backend),
-        events,
-        queue,
-        CursorTracker::new(started.high_water),
-        started.subscription_id.clone(),
-        state.shared.shutdown.clone(),
-    ));
+    if state
+        .shared
+        .tasks
+        .spawn(pump(
+            Arc::clone(&state.backend),
+            events,
+            queue,
+            CursorTracker::new(started.high_water),
+            started.subscription_id.clone(),
+            state.shared.shutdown.clone(),
+        ))
+        .is_err()
+    {
+        return error_response(
+            WorkbenchError::new(
+                ErrorCode::Draining,
+                "restart task admission closed",
+                workbench_protocol::errors::RetryAdvice::Never,
+            ),
+            None,
+        );
+    }
 
     let stream = SseStream {
         rx,

@@ -32,6 +32,8 @@ fn main() -> std::process::ExitCode {
     }
 }
 fn run() -> Result<(), BootstrapError> {
+    #[cfg(target_os = "linux")]
+    let mask = core_instance::handoff::BlockedShutdownSignals::at_entry()?;
     let mut config_dir = config::user_config_dir();
     let mut web = false;
     let mut launch_fd = None;
@@ -62,9 +64,20 @@ fn run() -> Result<(), BootstrapError> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(identity.config_dir().to_path_buf(), web, launch))
+        .block_on(serve(
+            identity.config_dir().to_path_buf(),
+            web,
+            launch,
+            #[cfg(target_os = "linux")]
+            mask,
+        ))
 }
-async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<(), BootstrapError> {
+async fn serve(
+    config_dir: PathBuf,
+    web: bool,
+    launch: LaunchGuard,
+    #[cfg(target_os = "linux")] mask: core_instance::handoff::BlockedShutdownSignals,
+) -> Result<(), BootstrapError> {
     let instance = Instance::acquire_default(&launch)?;
     let state_dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -85,6 +98,9 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
         host.host.clone(),
         instance.identity.clone(),
     ));
+    #[cfg(target_os = "linux")]
+    let signals = OperatorSignals::new(&mask)?;
+    #[cfg(not(target_os = "linux"))]
     let signals = OperatorSignals::new()?;
     let mut lifecycle = LifecycleDriver::new(&host);
     let web_config = WebServerConfig {
@@ -130,17 +146,12 @@ async fn serve(config_dir: PathBuf, web: bool, launch: LaunchGuard) -> Result<()
         serde_json::json!({"status":"ready", "socket":instance.socket, "core":instance.identity, "web":server.as_ref().map(|s| s.local_addr().to_string())})
     );
     let outcome = lifecycle
-        .run(&host, backend.clone(), listener, web_enabled, signals)
+        .run_with_web(&host, backend.clone(), listener, server, signals)
         .await;
-    let web_result = match server {
-        Some(s) => s.shutdown().await,
-        None => Ok(()),
-    };
     host.shutdown().await?;
     drop(backend);
     drop(host); // storage leases before the lifetime lock
     drop(instance);
-    web_result?;
     outcome?;
     Ok(())
 }
