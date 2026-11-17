@@ -178,6 +178,40 @@ Notes for stage 14:
   file, in `CACHE_CONTRACT_FILTER`). `scripts/tests/test_check_central_files.sh`
   checks that every binary named in the cache filter has a test target.
 
+## PR 15 (part A): pull requests in the core
+
+Stage 15 is **not complete**. This part moves the pull request operations of
+the `pull_requests` namespace into the core (protocol, host area and ingress
+adapter, the desktop `core_client` feature, `core_pr_cache`). The GUI screens
+still reach the pull request service and the database directly; switching them
+is part B (below).
+
+The pull request service of the runtime stays the only writer. The area
+(`workbench-host/src/areas/pull_requests.rs`) only translates: it never runs
+`gh`, never writes the database and never decides whether an automatic notice
+may be sent.
+
+| Contract | Where it is held | Where it is tested |
+|---|---|---|
+| Link, unlink, refresh, candidate confirm/dismiss, auto-fix policy, budget reset, destination change and the manual notice are commands answered at once with a pending operation; the work runs as a counted area task that keeps the restart permit it was accepted with until the outcome is settled. A handler never waits | `areas/pull_requests.rs`, `ingress/namespaces/pull_requests.rs` | `workbench-protocol/tests` (golden, contract), `evorch-core/tests/pull_requests_core.rs` |
+| Races and resends: a link or unlink quotes the lifecycle revision, a policy change quotes the link and the policy revision, and the service compares them inside its writer, so two clients that read the same revision end as one success and one `stale_revision`. The same operation id with the same request joins the operation (applied once); the same id with another request is a `conflict`. A refresh sent again while a fetch runs joins one follow-up | the service's writer; `areas/settings/operations.rs` (shared operation table) | `pull_requests_core.rs` (two clients racing to link and unlink; a command sent again; a refresh joining one follow-up) |
+| An outcome that is not known is never a success: a failure after the effect may have been written, and an operation cut off by a panic or by the host stopping, settle as `outcome_unknown`. A client whose reply was lost asks for the operation; when the restarted core no longer knows it, the screen shows "unknown" and reads the thread again | `areas/pull_requests.rs` (`Failure::unknown`, the task guard), `core_client/features/pull_requests.rs` | `core_client/features/pull_requests/tests.rs` (a lost reply is checked by operation id and never shown as done; a stale command reads the thread again) |
+| A fetch cut off by the core stopping is never committed: the answer that arrives after the drain has nowhere to go, and after a restart the link is still there with no facts from the cut-off fetch. The existing drain contract is unchanged | the service's fetch commit, the area's counted operation tasks | `pull_requests_core.rs` (`a_fetch_cut_off_by_the_core_stopping_is_never_committed`) |
+| The auto-fix budget and the one notification of a limit stop are decided in the core only. The notification is claimed through the storage writer's compare-and-set before the event is published, so several clients (and several cores on one database) tell the person once, and none starts a second automatic fix | `areas/pull_requests.rs` (`announce_limit`), `storage::pull_request_auto_fix` | `pull_requests_core.rs` (`the_limit_stop_is_announced_once_for_every_client_together`) |
+| Events name the thread and the pull request and never carry the facts; the client reads the thread again | `translate` in the area | the protocol golden files |
+| Cache: the commands and one automatic fix notice on the production wire keep the sent prefix and the affinity key (input-derived mock cache, independent wire assertions); the GUI path is covered by `pull_requests_cache` | `evorch-core/tests/core_pr_cache.rs` | the same, in `CACHE_CONTRACT_FILTER` |
+
+### Hand-over to part B (not done here)
+
+Part B switches the GUI to the core client. Two direct paths remain until then:
+
+- `gui/src/runtime_sink/pull_requests.rs` calls `PullRequestService` directly;
+- `gui/src/app/pull_requests.rs` (`StoragePullRequestReader`) reads the
+  database directly.
+
+Part B also moves the `app`, `model` and `panes` pull request code to the
+`core_client` feature. The scope of `pr15` does not cover those files.
+
 ## Reserved migration numbers
 
 Storage migrations are numbered from one shared ledger kept by the
