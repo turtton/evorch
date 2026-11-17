@@ -74,39 +74,62 @@ async fn target(dir: &Path) -> (FinalizationTarget, RestartMetadata) {
     (FinalizationTarget::new(current, checked), metadata)
 }
 async fn owned_chat(host: &BootstrappedHost, core: &RestartCoordinator) -> (RunId, RestartId) {
+    let (runs, id) = owned_chats(host, core, 1).await;
+    (runs[0], id)
+}
+async fn owned_chats(
+    host: &BootstrappedHost,
+    core: &RestartCoordinator,
+    count: usize,
+) -> (Vec<RunId>, RestartId) {
     let permit = host.owner.start("active").unwrap();
     host.owner.start("idle").unwrap();
-    let events = host.runtime.event_bus().subscribe();
-    let run = host
-        .runtime
-        .delegate_chat(
-            "active",
-            runtime::Role::Orchestrator,
-            "park".into(),
-            runtime::RunConfig {
-                ownership: Some(permit),
-                interactive: true,
-                keep_alive: true,
-                ..Default::default()
-            },
+    let mut runs = Vec::new();
+    for index in 0..count {
+        let events = host.runtime.event_bus().subscribe();
+        let config = runtime::RunConfig {
+            ownership: Some(permit.clone()),
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        };
+        // A thread admits one root chat at a time; further runs of the same
+        // owner are its descendants under the same permit.
+        let run = if index == 0 {
+            host.runtime
+                .delegate_chat("active", runtime::Role::Orchestrator, "park".into(), config)
+                .unwrap()
+        } else {
+            host.runtime
+                .delegate_background_as_child(runs[0], runtime::Role::Worker, "park", config)
+                .unwrap()
+        };
+        waiting(run, events).await;
+        runs.push(run);
+    }
+    let id = core
+        .request_planned(
+            runs.iter()
+                .take(1)
+                .map(|run| {
+                    (
+                        *run,
+                        runtime::quiesce::RecoveryRecipe {
+                            settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE
+                                .into(),
+                            policy: runtime::quiesce::ResumePolicy::CoreOwned,
+                            goal_id: None,
+                            team: None,
+                            lane: None,
+                            descriptor: None,
+                        },
+                    )
+                })
+                .collect(),
         )
         .unwrap();
-    waiting(run, events).await;
-    let id = core
-        .request_planned(BTreeMap::from([(
-            run,
-            runtime::quiesce::RecoveryRecipe {
-                settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
-                policy: runtime::quiesce::ResumePolicy::CoreOwned,
-                goal_id: None,
-                team: None,
-                lane: None,
-                descriptor: None,
-            },
-        )]))
-        .unwrap();
     core.wait_sealed(id).await.unwrap();
-    (run, id)
+    (runs, id)
 }
 fn create(host: &BootstrappedHost, metadata: RestartMetadata) -> RestartTransaction {
     host.composition
@@ -149,10 +172,19 @@ async fn reclaimed(host: &BootstrappedHost, core: &RestartCoordinator, held: boo
 
 #[tokio::test]
 async fn stages_six_to_eight_hold_active_and_idle_read_back_arm_then_invalidate_without_exec() {
+    six_to_eight_with_parked_runs(1).await;
+}
+
+#[tokio::test]
+async fn stages_six_to_eight_hold_several_parked_runs_of_one_owner() {
+    six_to_eight_with_parked_runs(3).await;
+}
+
+async fn six_to_eight_with_parked_runs(count: usize) {
     let (dir, mut host) = boot().await;
     let (mut target, metadata) = target(dir.path()).await;
     let core = RestartCoordinator::new(&host);
-    let (run, id) = owned_chat(&host, &core).await;
+    let (runs, id) = owned_chats(&host, &core, count).await;
     let order = Arc::new(Mutex::new(Vec::new()));
     let record = order.clone();
     target.observe = Some(Arc::new(move |stage| record.lock().unwrap().push(stage)));
@@ -184,7 +216,7 @@ async fn stages_six_to_eight_hold_active_and_idle_read_back_arm_then_invalidate_
             .starts_with("sha256:")
     );
     assert_eq!(tx.owner_progress.len(), 2);
-    assert_eq!(tx.expected.len(), 1);
+    assert_eq!(tx.expected.len(), count);
     let active = tx
         .owner_progress
         .iter()
@@ -194,7 +226,12 @@ async fn stages_six_to_eight_hold_active_and_idle_read_back_arm_then_invalidate_
         active.active_runs.is_empty(),
         "the live owner turn really checkpointed"
     );
-    assert_eq!(active.parked_runs, BTreeSet::from([run.to_string()]));
+    assert_eq!(
+        active.parked_runs,
+        runs.iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>()
+    );
     assert!(
         tx.owner_progress
             .iter()
@@ -212,8 +249,10 @@ async fn stages_six_to_eight_hold_active_and_idle_read_back_arm_then_invalidate_
         std::fs::read_to_string(dir.path().join("probes")).unwrap(),
         "probe\nprobe\n"
     );
-    host.runtime.stop(run, StopScope::SelfOnly).unwrap();
-    host.runtime.wait(run).await.unwrap();
+    for run in runs {
+        host.runtime.stop(run, StopScope::SelfOnly).unwrap();
+        host.runtime.wait(run).await.unwrap();
+    }
     core.transition_to_shutdown();
     assert!(host.shutdown().await.is_err());
 }

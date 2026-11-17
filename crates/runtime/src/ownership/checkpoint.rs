@@ -45,8 +45,6 @@ impl OwnerCheckpoint {
             });
         row.boundary = boundary;
         if let Some(run) = &permit.run_id {
-            row.runs
-                .retain(|id, _| owner.active_runs.contains(id) || id == run);
             row.runs.insert(
                 run.clone(),
                 RunCheckpoint {
@@ -55,17 +53,29 @@ impl OwnerCheckpoint {
                     checkpointed_at_ms: super::permit::now_ms(),
                 },
             );
-        } else {
-            // Idle is valid only after all runs have drained. Keep at most the
-            // most recently completed run as an advisory reference.
-            let latest = row
-                .runs
-                .iter()
-                .max_by_key(|(_, run)| run.checkpointed_at_ms)
-                .map(|(id, _)| id.clone());
-            row.runs.retain(|id, _| Some(id) == latest.as_ref());
         }
+        row.prune_terminal(permit.run_id.as_deref());
         row
+    }
+
+    /// A non-terminal checkpoint of this generation proves its run is parked.
+    /// Only that run's own terminal checkpoint replaces it, and a new
+    /// generation starts from an empty row. Terminal records prove nothing, so
+    /// one stays as an advisory reference (the written run, else the latest).
+    fn prune_terminal(&mut self, written: Option<&str>) {
+        let is_terminal = |saved: &RunCheckpoint| saved.boundary == CheckpointBoundary::Terminal;
+        let keep = written
+            .filter(|run| self.runs.get(*run).is_some_and(is_terminal))
+            .map(str::to_owned)
+            .or_else(|| {
+                self.runs
+                    .iter()
+                    .filter(|(_, saved)| is_terminal(saved))
+                    .max_by_key(|(id, saved)| (saved.checkpointed_at_ms, id.as_str()))
+                    .map(|(id, _)| id.clone())
+            });
+        self.runs
+            .retain(|id, saved| !is_terminal(saved) || Some(id) == keep.as_ref());
     }
 }
 

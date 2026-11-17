@@ -133,6 +133,250 @@ fn captured_hold_separates_live_and_checkpointed_parked_membership_and_claims_bo
     assert_eq!(adopted.planned_claim.as_deref(), Some(hold));
 }
 
+fn run_snapshot() -> super::super::SnapshotReference {
+    super::super::SnapshotReference::RunContext {
+        receipt: storage::RunContextReceipt {
+            updated_at_ns: 1,
+            messages_end: 1,
+            sha256: "0".repeat(64),
+        },
+    }
+}
+
+/// Another run of the same owner/generation, started and checkpointed.
+fn checkpoint_run(
+    permit: &super::super::OwnerPermit,
+    run: &str,
+    boundary: super::super::CheckpointBoundary,
+) -> super::super::OwnerPermit {
+    let mut permit = permit.clone();
+    permit.run_id = Some(run.into());
+    permit.begin_turn().unwrap();
+    permit
+        .checkpoint_metadata(boundary, run_snapshot())
+        .unwrap();
+    permit
+}
+
+fn stored_checkpoint(f: &Fixture, thread: &str) -> super::super::OwnerCheckpoint {
+    let payload: String = rusqlite::Connection::open(f.host.db())
+        .unwrap()
+        .query_row(
+            "SELECT payload FROM owner_checkpoints WHERE thread_id=?1",
+            [thread],
+            |row| row.get(0),
+        )
+        .unwrap();
+    super::super::OwnerCheckpoint::decode(&payload).unwrap()
+}
+
+fn captured(
+    permit: &super::super::OwnerPermit,
+    thread: &str,
+    runs: &[&str],
+) -> crate::ownership::ExpectedCapturedRuns {
+    crate::ownership::ExpectedCapturedRuns::from([(
+        thread.into(),
+        crate::ownership::CapturedThreadRuns {
+            generation: permit.lease.generation,
+            captured_runs: runs.iter().map(|run| run.to_string()).collect(),
+        },
+    )])
+}
+
+#[test]
+fn several_parked_runs_of_one_owner_all_hold_read_back_and_adopt() {
+    use super::super::CheckpointBoundary::{Idle, TurnEnd};
+    // Every order of checkpoints, with and without idle checkpoints in between
+    // and afterwards, must keep each parked run's proof.
+    for (first, second) in [("a", "b"), ("b", "a")] {
+        for idle in [false, true] {
+            let f = Fixture::new();
+            let permit = f.host.start("thread").unwrap();
+            checkpoint_run(&permit, first, TurnEnd);
+            if idle {
+                permit.checkpoint_metadata(Idle, run_snapshot()).unwrap();
+            }
+            checkpoint_run(&permit, second, TurnEnd);
+            if idle {
+                permit.checkpoint_metadata(Idle, run_snapshot()).unwrap();
+            }
+            let row = stored_checkpoint(&f, "thread");
+            assert_eq!(
+                row.runs.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["a", "b"],
+                "{first}->{second} idle={idle}"
+            );
+            let holds = f
+                .host
+                .hold_captured_for_restart(
+                    "tx",
+                    "capture",
+                    &captured(&permit, "thread", &["a", "b"]),
+                )
+                .unwrap();
+            let hold = &holds[0];
+            assert!(hold.active_runs.is_empty());
+            assert_eq!(hold.parked_runs, BTreeSet::from(["a".into(), "b".into()]));
+            // The hold is durable: a fresh reader sees the same inventory.
+            assert_eq!(
+                f.host.restart_inventory().unwrap()[0]
+                    .handoff_hold
+                    .as_deref(),
+                Some(hold)
+            );
+            let next = f.successor();
+            next.claim_planned(hold, &Evidence(holds.clone())).unwrap();
+            let adopted = next.attach("thread").unwrap();
+            assert_eq!(adopted.planned_claim.as_deref(), Some(hold));
+            assert!(adopted.active_runs.is_empty());
+        }
+    }
+}
+
+#[test]
+fn live_run_does_not_erase_other_parked_runs_and_resumed_parked_run_stays_proven() {
+    use super::super::CheckpointBoundary::TurnEnd;
+    let f = Fixture::new();
+    let permit = f.host.start("thread").unwrap();
+    checkpoint_run(&permit, "a", TurnEnd);
+    checkpoint_run(&permit, "b", TurnEnd);
+    // "a" resumes (live) and "b" stays parked.
+    let mut live = permit.clone();
+    live.run_id = Some("a".into());
+    live.begin_turn().unwrap();
+    // A new run "c" parks while "a" is live: this write must neither erase
+    // the parked proof of "b" nor the record of the live "a".
+    checkpoint_run(&permit, "c", TurnEnd);
+    let row = stored_checkpoint(&f, "thread");
+    assert_eq!(
+        row.runs.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    let holds = f
+        .host
+        .hold_captured_for_restart(
+            "tx",
+            "capture",
+            &captured(&permit, "thread", &["a", "b", "c"]),
+        )
+        .unwrap();
+    assert_eq!(holds[0].active_runs, BTreeSet::from(["a".into()]));
+    assert_eq!(
+        holds[0].parked_runs,
+        BTreeSet::from(["b".into(), "c".into()])
+    );
+}
+
+#[test]
+fn terminal_run_drops_only_its_own_parked_proof_and_one_advisory_terminal_remains() {
+    use super::super::CheckpointBoundary::{Terminal, TurnEnd};
+    let f = Fixture::new();
+    let permit = f.host.start("thread").unwrap();
+    checkpoint_run(&permit, "a", TurnEnd);
+    checkpoint_run(&permit, "b", TurnEnd);
+    checkpoint_run(&permit, "c", TurnEnd);
+    // A parked run finishes without ever becoming live again.
+    checkpoint_run(&permit, "b", Terminal);
+    let row = stored_checkpoint(&f, "thread");
+    assert_eq!(row.runs["b"].boundary, Terminal);
+    assert_eq!(row.runs["a"].boundary, TurnEnd);
+    assert_eq!(row.runs["c"].boundary, TurnEnd);
+    checkpoint_run(&permit, "c", Terminal);
+    let row = stored_checkpoint(&f, "thread");
+    assert_eq!(
+        row.runs.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["a", "c"],
+        "only the latest terminal record is advisory; parked proof is untouched"
+    );
+    // The surviving parked run is accepted; a finished run is not a member.
+    assert!(
+        f.host
+            .hold_captured_for_restart("tx", "capture", &captured(&permit, "thread", &["a", "c"]))
+            .is_err()
+    );
+    assert!(
+        f.host
+            .hold_captured_for_restart("tx", "capture", &captured(&permit, "thread", &["a", "b"]))
+            .is_err()
+    );
+    let holds = f
+        .host
+        .hold_captured_for_restart("tx", "capture", &captured(&permit, "thread", &["a"]))
+        .unwrap();
+    assert_eq!(holds[0].parked_runs, BTreeSet::from(["a".into()]));
+}
+
+#[test]
+fn set_differences_with_several_parked_runs_are_rejected_atomically() {
+    use super::super::CheckpointBoundary::TurnEnd;
+    for case in [
+        "capture-misses-parked",
+        "capture-extra",
+        "foreign-thread",
+        "stale-generation",
+    ] {
+        let f = Fixture::new();
+        let permit = f.host.start("thread").unwrap();
+        checkpoint_run(&permit, "a", TurnEnd);
+        checkpoint_run(&permit, "b", TurnEnd);
+        let foreign = f.successor();
+        foreign.start("foreign").unwrap();
+        let expected = match case {
+            "capture-misses-parked" => captured(&permit, "thread", &["a"]),
+            "capture-extra" => captured(&permit, "thread", &["a", "b", "c"]),
+            "foreign-thread" => captured(&permit, "foreign", &["a", "b"]),
+            _ => {
+                let mut stale = permit.clone();
+                stale.lease.generation += 1;
+                captured(&stale, "thread", &["a", "b"])
+            }
+        };
+        assert!(
+            f.host
+                .hold_captured_for_restart("tx", "capture", &expected)
+                .is_err(),
+            "{case}"
+        );
+        for owner in f.host.restart_inventory().unwrap() {
+            assert!(owner.handoff_hold.is_none(), "{case}");
+        }
+    }
+}
+
+#[test]
+fn a_new_generation_does_not_inherit_parked_proof_from_the_previous_one() {
+    use super::super::CheckpointBoundary::TurnEnd;
+    let f = Fixture::new();
+    let old = f.host.start("thread").unwrap();
+    checkpoint_run(&old, "a", TurnEnd);
+    checkpoint_run(&old, "b", TurnEnd);
+    assert!(!f.host.quiesce().unwrap());
+    let next = f.successor();
+    let current = next.claim(&next.attach("thread").unwrap()).unwrap();
+    checkpoint_run(&current, "c", TurnEnd);
+    let row = stored_checkpoint(&f, "thread");
+    assert_eq!(row.generation, current.lease.generation);
+    assert_eq!(
+        row.runs.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["c"]
+    );
+    assert!(
+        next.hold_captured_for_restart(
+            "tx",
+            "capture",
+            &captured(&current, "thread", &["a", "b", "c"])
+        )
+        .is_err()
+    );
+    assert_eq!(
+        next.hold_captured_for_restart("tx", "capture", &captured(&current, "thread", &["c"]))
+            .unwrap()[0]
+            .parked_runs,
+        BTreeSet::from(["c".into()])
+    );
+}
+
 #[test]
 fn reclaimed_idle_owner_holds_despite_previous_generation_release_marker() {
     let f = Fixture::new();

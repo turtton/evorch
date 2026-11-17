@@ -113,11 +113,31 @@ fn metadata_multiple_active_runs_terminal_refresh_and_pruning() {
     parent
         .checkpoint_metadata(Boundary::TurnEnd, Reference::none(Reason::NoRunStore))
         .unwrap();
-    assert_eq!(row(&parent).runs.len(), 1);
+    // The child is parked at its TurnEnd checkpoint, which is the proof a
+    // planned hold needs: another run's write must not erase it.
+    let kept = row(&parent);
+    assert_eq!(kept.runs.len(), 2);
+    assert_eq!(kept.runs["child"].boundary, Boundary::TurnEnd);
+    assert_eq!(
+        kept.runs["child"].snapshot,
+        Reference::none(Reason::WriteFailed)
+    );
     parent
         .checkpoint_metadata(Boundary::Terminal, Reference::none(Reason::NoRunStore))
         .unwrap();
-    assert_eq!(row(&parent).runs["parent"].boundary, Boundary::Terminal);
+    let ended = row(&parent);
+    assert_eq!(ended.runs["parent"].boundary, Boundary::Terminal);
+    assert_eq!(ended.runs["child"].boundary, Boundary::TurnEnd);
+    child
+        .checkpoint_metadata(Boundary::Terminal, Reference::none(Reason::NoRunStore))
+        .unwrap();
+    let both_terminal = row(&parent);
+    assert_eq!(
+        both_terminal.runs.len(),
+        1,
+        "only one advisory terminal remains once no run is parked"
+    );
+    assert_eq!(both_terminal.runs["child"].boundary, Boundary::Terminal);
     idle.checkpoint(&[]).unwrap();
     let mut registry = Registry::open_existing(&parent.registry_path).unwrap();
     registry
