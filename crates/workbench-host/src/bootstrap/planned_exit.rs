@@ -1,6 +1,8 @@
 //! Planned exit deliberately does not use operator shutdown, release owners, or
 //! stop the SQLite writer. The coordinator retains this object even on failure.
 use super::*;
+mod holds;
+pub use holds::RestartHolds;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
@@ -15,6 +17,9 @@ pub enum ExitStage {
     ChildrenReaped = 3,
     WorkersJoined = 4,
     StorageDrained = 5,
+    TargetChecked = 6,
+    OwnersHeld = 7,
+    Armed = 8,
 }
 struct Workers {
     services: services::BackgroundServices,
@@ -37,6 +42,7 @@ pub struct PlannedExit {
     failure: Option<String>,
     workers_result: Option<Result<(), String>>,
     cleanup_result: Option<Result<(), String>>,
+    holds: Arc<RestartHolds>,
 }
 impl BootstrappedHost {
     /// Validate before the coordinator mutex: host Stop takes host -> coordinator,
@@ -94,11 +100,16 @@ impl BootstrappedHost {
             fence: None,
             bridge: Some(bridge),
             flushing: None,
-            writer,
+            writer: writer.clone(),
             completed: None,
             failure: None,
             workers_result: None,
             cleanup_result: None,
+            holds: Arc::new(RestartHolds::new(
+                self.owner.clone(),
+                self.restart_storage.clone(),
+                writer,
+            )),
         }));
         self.planned_exit = Some(resources.clone());
         Ok(resources)
@@ -131,12 +142,19 @@ impl PlannedExit {
     /// No business resume. A timed-out M2 join is awaited to actual completion.
     /// The host and coordinator share this owner, including its sticky result.
     pub async fn cleanup(&mut self) -> Result<(), String> {
+        // Retry uncertain durable invalidation/hold removal even when ordinary
+        // resource cleanup has a sticky result. Never reopen business work.
+        let holds = self.holds.clone();
+        let holds_result = tokio::task::spawn_blocking(move || holds.cleanup())
+            .await
+            .map_err(|_| "hold cleanup worker panicked".to_owned())
+            .and_then(|r| r);
         if let Some(result) = &self.cleanup_result {
-            return result.clone();
+            return result.clone().and(holds_result);
         }
         self.failure
             .get_or_insert_with(|| "resource cleanup has begun; M2 prohibited".into());
-        let mut failure = None;
+        let mut failure = holds_result.err();
         // Stop producers first even when capture failed before stage 1.
         remember(
             &mut failure,
@@ -157,8 +175,14 @@ impl PlannedExit {
         self.cleanup_result = Some(result.clone());
         result
     }
+    pub fn restart_holds(&self) -> Arc<RestartHolds> {
+        self.holds.clone()
+    }
     async fn run_stage(&mut self, stage: ExitStage, bounded: bool) -> Result<(), String> {
         match stage {
+            ExitStage::TargetChecked | ExitStage::OwnersHeld | ExitStage::Armed => {
+                return Err("later stages belong to the coordinator".into());
+            }
             ExitStage::SpawnFenceClosed => {
                 let ledger = self.ledger.clone();
                 let task = self.fence.get_or_insert_with(|| {

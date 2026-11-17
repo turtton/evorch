@@ -5,7 +5,8 @@ async fn start(host: &mut BootstrappedHost, core: &RestartCoordinator) -> Restar
     let id = core.request_planned(BTreeMap::new()).unwrap();
     core.wait_sealed(id).await.unwrap();
     let tx = transaction(host);
-    core.start_finalization(id, host, tx).unwrap();
+    core.start_finalization_without_target(id, host, tx)
+        .unwrap();
     id
 }
 
@@ -202,7 +203,8 @@ async fn shutdown_while_spawn_fence_waits_is_terminal_only_and_preserves_cleanup
     let admitted = ledger.admit().unwrap();
     let mut fence = ledger.watch_fence();
     let tx = transaction(&host);
-    core.start_finalization(id, &mut host, tx).unwrap();
+    core.start_finalization_without_target(id, &mut host, tx)
+        .unwrap();
     fence
         .wait_for(|state| *state == sandbox::ledger::FenceState::Closing)
         .await
@@ -386,7 +388,10 @@ async fn busy_writer_barrier_stays_failed_closed_after_the_snapshot_is_released(
         Some(ExitStage::WorkersJoined)
     );
     let tx = saved(&host);
-    assert!(core.start_finalization(id, &mut host, tx).is_err());
+    assert!(
+        core.start_finalization_without_target(id, &mut host, tx)
+            .is_err()
+    );
     core.transition_to_shutdown();
     assert!(host.shutdown().await.is_err());
 }
@@ -412,7 +417,7 @@ async fn atomic_boundary_does_not_take_the_host_stop_mutex_and_shutdown_cannot_s
         core.transition_to_shutdown();
         begun
     };
-    core.own_finalizer(id, &mut host, begun, tx);
+    core.own_finalizer(id, &mut host, begun, tx, None);
     assert!(core.wait_finalization(id).await.is_err());
     assert_eq!(core.snapshot().phase, RestartPhase::ShuttingDown);
     assert_eq!(core.0.state.lock().unwrap().completed_stage, None);

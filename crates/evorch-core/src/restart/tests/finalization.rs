@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "linux")]
+mod later;
 mod m2;
 use std::collections::{BTreeMap, BTreeSet};
 use storage::recovery::restart::{RestartMetadata, RestartMutation, RestartTransaction};
@@ -80,7 +82,8 @@ async fn atomic_capture_owns_sealed_rejects_both_stop_entries_and_never_grants_e
     let observation = core.wait_sealed(id).await.unwrap();
     let another = core.wait_sealed(id).await.unwrap();
     let tx = transaction(&host);
-    core.start_finalization(id, &mut host, tx).unwrap();
+    core.start_finalization_without_target(id, &mut host, tx)
+        .unwrap();
     // No await: the memory boundary and Capturing are one synchronous action.
     assert_eq!(core.snapshot().phase, RestartPhase::Capturing);
     assert!(observation.validate(&host.runtime).is_err());
@@ -110,10 +113,16 @@ async fn atomic_capture_owns_sealed_rejects_both_stop_entries_and_never_grants_e
         "Commit really completed, but is not exec authority"
     );
     assert_eq!(tx.expected.len(), 1);
-    assert!(tx.owner_progress.is_empty(), "stage 7 is not connected");
+    assert!(
+        tx.owner_progress.is_empty(),
+        "the targetless fixture must not install holds"
+    );
     assert!(host.spawn_ledger.is_fenced());
     assert!(core.request().is_err());
-    assert!(core.start_finalization(id, &mut host, tx).is_err());
+    assert!(
+        core.start_finalization_without_target(id, &mut host, tx)
+            .is_err()
+    );
     assert!(host.restart_producers().iter().all(|gate| !gate.is_open()));
     assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     // FailedClosed permits terminal-only Stop, never replay/provider work.
@@ -138,7 +147,10 @@ async fn stop_before_atomic_capture_cancels_planned_attempt_and_stale_capture_is
     let tx = transaction(&host);
     host.runtime.stop(run, StopScope::SelfOnly).unwrap();
     phase(&core, RestartPhase::Running).await;
-    assert!(core.start_finalization(id, &mut host, tx).is_err());
+    assert!(
+        core.start_finalization_without_target(id, &mut host, tx)
+            .is_err()
+    );
     assert!(!core.0.state.lock().unwrap().capture_started);
     assert_eq!(
         saved(&host).phase,
@@ -161,7 +173,8 @@ async fn capture_commit_failure_is_failed_closed_before_any_m2_stage() {
     let tx = transaction(&host);
     let sql = rusqlite::Connection::open(&host.composition.storage.db_path).unwrap();
     sql.execute_batch("CREATE TRIGGER reject_commit BEFORE UPDATE OF phase ON restart_transactions WHEN NEW.phase='committed' BEGIN SELECT RAISE(ABORT,'commit rejected'); END;").unwrap();
-    core.start_finalization(id, &mut host, tx).unwrap();
+    core.start_finalization_without_target(id, &mut host, tx)
+        .unwrap();
     assert!(core.wait_finalization(id).await.is_err());
     assert_eq!(core.snapshot().phase, RestartPhase::FailedClosed);
     assert_eq!(core.0.state.lock().unwrap().completed_stage, None);
@@ -184,7 +197,8 @@ async fn shutdown_after_capture_retains_finalizer_and_prevents_m2_progress() {
     let id = core.request_planned(BTreeMap::new()).unwrap();
     core.wait_sealed(id).await.unwrap();
     let tx = transaction(&host);
-    core.start_finalization(id, &mut host, tx).unwrap();
+    core.start_finalization_without_target(id, &mut host, tx)
+        .unwrap();
     // Shutdown wins before the detached worker's first poll, not by a sleep.
     core.transition_to_shutdown();
     assert!(core.wait_finalization(id).await.is_err());

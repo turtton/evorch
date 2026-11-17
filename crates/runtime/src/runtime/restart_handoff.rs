@@ -158,6 +158,8 @@ impl AgentRuntime {
         if progress.old_owner_id != hold.owner_id
             || progress.old_generation != hold.generation
             || progress.active_runs != hold.active_runs
+            || progress.parked_runs != hold.parked_runs
+            || !hold.active_runs.is_disjoint(&hold.parked_runs)
             || !progress.hold_saved
             || !progress.hold_read_back
             || progress.hold_removed
@@ -173,7 +175,7 @@ impl AgentRuntime {
             .iter()
             .map(|m| m.run_id.clone())
             .collect::<BTreeSet<_>>()
-            != hold.active_runs
+            != hold.active_runs.union(&hold.parked_runs).cloned().collect()
             || members.iter().any(|m| {
                 m.owner_id.as_deref() != Some(&hold.owner_id)
                     || m.owner_generation != Some(hold.generation)

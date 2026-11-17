@@ -84,6 +84,7 @@ pub struct RestartOwnerProgress {
     pub old_owner_id: String,
     pub old_generation: u64,
     pub active_runs: BTreeSet<String>,
+    pub parked_runs: BTreeSet<String>,
     pub hold_saved: bool,
     pub hold_read_back: bool,
     pub worker_joined: bool,
@@ -570,16 +571,18 @@ pub(super) fn mutate(
             {
                 return Err(invalid("invalid owner progress ordering"));
             }
-            if p.active_runs.iter().any(|id| {
-                !tx.expected.iter().any(|e| {
-                    e.run_id == *id
-                        && e.thread_id.as_deref() == Some(&p.thread_id)
-                        && e.owner_id
-                            .as_deref()
-                            .is_none_or(|owner| owner == p.old_owner_id)
-                        && e.owner_generation.is_none_or(|g| g == p.old_generation)
+            if !p.active_runs.is_disjoint(&p.parked_runs)
+                || p.active_runs.union(&p.parked_runs).any(|id| {
+                    !tx.expected.iter().any(|e| {
+                        e.run_id == *id
+                            && e.thread_id.as_deref() == Some(&p.thread_id)
+                            && e.owner_id
+                                .as_deref()
+                                .is_none_or(|owner| owner == p.old_owner_id)
+                            && e.owner_generation.is_none_or(|g| g == p.old_generation)
+                    })
                 })
-            }) {
+            {
                 return Err(invalid("owner progress membership mismatch"));
             }
             if let Some(old) = tx
@@ -589,6 +592,7 @@ pub(super) fn mutate(
                 && (old.old_owner_id != p.old_owner_id
                     || old.old_generation != p.old_generation
                     || old.active_runs != p.active_runs
+                    || old.parked_runs != p.parked_runs
                     || (old.hold_saved && !p.hold_saved)
                     || (old.hold_read_back && !p.hold_read_back)
                     || (old.worker_joined && !p.worker_joined)
