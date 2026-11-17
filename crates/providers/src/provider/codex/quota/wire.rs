@@ -1,8 +1,11 @@
-use super::super::tokens::{CodexTokenStore, parse_jwt_claims};
+use super::super::{
+    session::AuthorizedCodexToken,
+    tokens::{CodexTokenStore, parse_jwt_claims},
+};
 use super::{CodexQuota, QuotaConfig, QuotaError, QuotaWindow};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,18 +111,26 @@ pub(super) async fn fetch_wham(
         .map_err(|_| QuotaError::Credentials)?
         .ok_or(QuotaError::Credentials)?;
     let claims = parse_jwt_claims(&token.id_token).map_err(|_| QuotaError::Credentials)?;
-    // A separate session manager would race the chat manager's refresh-token
-    // rotation/cache. Keep this reader passive until a shared manager is injected.
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| QuotaError::Credentials)?;
-    if claims.exp <= now.as_secs() {
-        return Err(QuotaError::ReauthenticationRequired);
-    }
+    fetch_authorized(
+        http,
+        config,
+        &AuthorizedCodexToken {
+            access_token: token.access_token,
+            chatgpt_account_id: claims.chatgpt_account_id,
+        },
+    )
+    .await
+}
+
+pub(super) async fn fetch_authorized(
+    http: &reqwest::Client,
+    config: &QuotaConfig,
+    token: &AuthorizedCodexToken,
+) -> Result<CodexQuota, QuotaError> {
     let response = http
         .get(&config.wham_endpoint)
         .bearer_auth(&token.access_token)
-        .header("chatgpt-account-id", claims.chatgpt_account_id)
+        .header("chatgpt-account-id", &token.chatgpt_account_id)
         .send()
         .await
         .map_err(|error| {

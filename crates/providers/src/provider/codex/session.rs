@@ -53,7 +53,11 @@ impl CodexSessionManager {
             }
         }
 
+        // Lock order: manager cache, then shared account refresh lock. Neither
+        // lock is held while callers send Responses/WHAM requests.
         let mut cache = self.cache.lock().await;
+        let refresh_lock = self.store.refresh_lock();
+        let _refresh_guard = refresh_lock.lock().await;
         let bundle = self.load_bundle()?;
         let (_, expiring) = inspect(&bundle, current_unix_time()?)?;
         let current = if expiring {
@@ -86,7 +90,11 @@ impl CodexSessionManager {
         &self,
         rejected: &AuthorizedCodexToken,
     ) -> Result<AuthorizedCodexToken, ProviderError> {
+        // Lock order: manager cache, then shared account refresh lock. Neither
+        // lock is held while callers send Responses/WHAM requests.
         let mut cache = self.cache.lock().await;
+        let refresh_lock = self.store.refresh_lock();
+        let _refresh_guard = refresh_lock.lock().await;
         let bundle = self.load_bundle()?;
         if bundle.access_token != rejected.access_token {
             return self.adopt(&mut cache, bundle);

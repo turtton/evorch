@@ -30,7 +30,7 @@ use crate::stream::{DeltaStream, StreamEvent};
 use crate::wire::codex::{CodexResponsesRequest, CodexStreamInterpreter};
 
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
+pub(super) const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const COMPACTION_TIMEOUT: Duration = Duration::from_secs(600);
 const COMPACTION_READ_TIMEOUT: Duration = Duration::from_secs(300);

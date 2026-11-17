@@ -47,6 +47,10 @@ impl CredentialStoreTokenStore {
 }
 
 impl CodexTokenStore for CredentialStoreTokenStore {
+    fn refresh_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        subscription_refresh_lock("codex", &self.key)
+    }
+
     fn load(&self) -> Result<Option<TokenBundle>, ProviderError> {
         let Some(secret) = self
             .store
