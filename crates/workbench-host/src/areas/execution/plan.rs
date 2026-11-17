@@ -122,3 +122,137 @@ pub(super) fn query(
         .map_err(WorkbenchError::from)?;
     Ok(Some(reply))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtime::{AgentInvocationContext, AgentModel, Role, RuntimeError};
+    use std::sync::Arc;
+    use workbench_protocol::events::{Subscribe, SubscriptionScope};
+
+    struct NoModel;
+    #[async_trait::async_trait]
+    impl AgentModel for NoModel {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "unused".into()
+        }
+        async fn complete(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            _: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, RuntimeError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_change_publishes_only_thread_revision_invalidation() {
+        let bus = Arc::new(event_bus::EventBus::new(32));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(tools::ToolExecutor::new(bus)),
+            Arc::new(NoModel),
+        );
+        let projection = crate::projection::Projection::new(
+            runtime.clone(),
+            &tokio::runtime::Handle::current(),
+            Default::default(),
+        );
+        let source = projection.source("execution").unwrap();
+        let mut subscription = projection
+            .subscribe_with_snapshot(&Subscribe {
+                scope: SubscriptionScope::All,
+                after: None,
+            })
+            .unwrap();
+        for revision in [2, 1, 1] {
+            let changed = EventKind::ConversationPlan(event_bus::ConversationPlanEvent::Changed {
+                plan_id: "plan".into(),
+                thread_id: "thread".into(),
+                revision,
+                source_run_id: Some("root".into()),
+                cause: event_bus::PlanChangeCause::ModelUpdate,
+                changes: vec![event_bus::PlanChange::Cleared { removed: 1 }],
+                progress: Default::default(),
+            });
+            super::super::publish_change(&runtime, &source, &changed);
+            let notification = subscription.recv().await.unwrap().event;
+            assert_eq!(
+                notification,
+                UiEvent::Execution(ExecutionEvent::ConversationPlanChanged {
+                    thread: ThreadId::new("thread").unwrap(),
+                    revision: Revision(revision),
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidations_are_delivered_only_to_the_subject_thread() {
+        use workbench_protocol::events::{Subscribe, SubscriptionScope, UiEvent};
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("plan.db"),
+            ..Default::default()
+        };
+        let db = storage::Storage::open(config.clone()).unwrap();
+        let bus = Arc::new(event_bus::EventBus::new(32));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(tools::ToolExecutor::new(bus)),
+            Arc::new(NoModel),
+        )
+        .with_run_store(runtime::RunStore::open(&config, db.handle()).unwrap());
+        db.handle()
+            .upsert_threads_host(
+                &["thread", "other"].map(|id| storage::threads::ThreadUpsert {
+                    thread_id: id.into(),
+                    project_id: Some("project".into()),
+                    project_root: Some(dir.path().to_string_lossy().into_owned()),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        let projection = crate::projection::Projection::new(
+            runtime,
+            &tokio::runtime::Handle::current(),
+            Default::default(),
+        );
+        projection
+            .configure_projects(
+                vec![(
+                    workbench_protocol::ids::ProjectId::new("project").unwrap(),
+                    dir.path().to_path_buf(),
+                )],
+                Default::default(),
+            )
+            .unwrap();
+        let subscribe = |id| {
+            projection
+                .subscribe_with_snapshot(&Subscribe {
+                    scope: SubscriptionScope::Thread {
+                        thread: ThreadId::new(id).unwrap(),
+                    },
+                    after: None,
+                })
+                .unwrap()
+        };
+        let mut subject = subscribe("thread");
+        let mut other = subscribe("other");
+        let source = projection.source("execution").unwrap();
+        let hint = |thread, revision| {
+            UiEvent::Execution(ExecutionEvent::ConversationPlanChanged {
+                thread: ThreadId::new(thread).unwrap(),
+                revision: Revision(revision),
+            })
+        };
+        source.publish(hint("thread", 1)).unwrap();
+        // A normal second-thread notification is an ordered sentinel, not a timeout
+        // or a terminal event that would discard incorrectly queued earlier hints.
+        source.publish(hint("other", 2)).unwrap();
+        assert_eq!(subject.recv().await.unwrap().event, hint("thread", 1));
+        assert_eq!(other.recv().await.unwrap().event, hint("other", 2));
+    }
+}

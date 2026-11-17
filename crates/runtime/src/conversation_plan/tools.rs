@@ -6,6 +6,21 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 const RESULT_BYTES: usize = 16 * 1024;
 
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+
+    #[test]
+    fn final_serialized_result_is_bounded_without_truncation() {
+        let exact = Value::String("a".repeat(RESULT_BYTES - 2));
+        let encoded = bounded(exact.clone()).unwrap();
+        assert_eq!(encoded.len(), RESULT_BYTES);
+        assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), exact);
+        assert!(bounded(Value::String("a".repeat(RESULT_BYTES - 1))).is_err());
+        assert!(bounded(Value::String("\u{0001}".repeat(4096))).is_err());
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "view", rename_all = "snake_case", deny_unknown_fields)]
 enum Read {

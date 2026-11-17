@@ -3,7 +3,7 @@
 //! reads. DB round trips retain only the authority guards. No projection cache exists.
 #[cfg(test)]
 mod tests;
-mod tools;
+pub(crate) mod tools;
 /// Shared eligibility predicate; independent of the retiring todo state.
 pub(crate) fn conversation_root(state: &crate::agent_loop::LoopState) -> bool {
     state.task.parent.is_none()
@@ -187,6 +187,12 @@ fn storage_error(error: StorageError) -> String {
             kind: "conversation_plan",
             ..
         } => "stale_revision: re-read the plan before retrying".into(),
+        StorageError::ConversationPlan(PlanRejection::StaleCursor { .. }) => {
+            "stale_cursor: plan changed; restart paging".into()
+        }
+        StorageError::ConversationPlan(PlanRejection::InvalidCursor) => {
+            "invalid_request: invalid plan cursor".into()
+        }
         StorageError::ConversationPlan(reason) => {
             // Rejections are bounded below; never return raw DB errors or paths.
             let detail = secret_guard::SecretRedactor::from_env()
@@ -198,7 +204,7 @@ fn storage_error(error: StorageError) -> String {
             )
         }
         StorageError::Tombstoned { .. } => "thread_deleted: this conversation was deleted".into(),
-        _ => "storage_unavailable: plan was not changed; re-read before retrying".into(),
+        _ => "storage_unavailable: update outcome may be unknown; re-read before retrying".into(),
     }
 }
 

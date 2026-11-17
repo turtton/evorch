@@ -27,7 +27,7 @@ impl Fixture {
         let db = storage::Storage::open(config.clone()).unwrap();
         let runtime = common::runtime()
             .with_run_store(runtime::RunStore::open(&config, db.handle()).unwrap());
-        let area = ExecutionArea::with_runtime(runtime.clone());
+        let area = ExecutionArea::with_runtime(runtime);
         Self {
             _dir: dir,
             db,

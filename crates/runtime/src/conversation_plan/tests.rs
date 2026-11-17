@@ -1,4 +1,6 @@
 //! Exercise the actual private handlers without advertising them to the model.
+mod boundaries;
+mod writer;
 use super::*;
 use crate::{AgentInvocationContext, AgentModel, AgentRunPhase, Role, RunConfig, RuntimeError};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec};
@@ -444,10 +446,9 @@ async fn completed_turn_reconciles_once_and_does_not_complete_goal_or_wake() {
             run_id,
             ..
         }) = events.recv().await.unwrap().kind
+            && run_id == run.to_string()
         {
-            if run_id == run.to_string() {
-                break;
-            }
+            break;
         }
     }
     let p = f.runtime.conversation_plan_summary("thread").unwrap();
@@ -503,10 +504,10 @@ async fn terminal_boundaries_reconcile_and_failure_is_only_diagnostic() {
         1
     );
     loop {
-        if let event_bus::EventKind::Diagnostic(d) = events.recv().await.unwrap().kind {
-            if d.code == "conversation_plan_reconcile_failed" {
-                break;
-            }
+        if let event_bus::EventKind::Diagnostic(d) = events.recv().await.unwrap().kind
+            && d.code == "conversation_plan_reconcile_failed"
+        {
+            break;
         }
     }
 }
@@ -548,17 +549,16 @@ async fn blocking_question_and_refused_finish_do_not_interrupt() {
             .revision,
         1
     );
-    f.respond(Action::Stop);
     let mut events = f.runtime.event_bus().subscribe();
+    f.respond(Action::Stop);
     loop {
         if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
             run_id,
             ..
         }) = events.recv().await.unwrap().kind
+            && run_id == run.to_string()
         {
-            if run_id == run.to_string() {
-                break;
-            }
+            break;
         }
     }
     assert_eq!(
@@ -657,10 +657,9 @@ async fn fork_and_rewind_history_seeds_start_unplanned_without_changing_source()
             run_id,
             context_len,
         }) = events.recv().await.unwrap().kind
+            && run_id == source.to_string()
         {
-            if run_id == source.to_string() {
-                break context_len;
-            }
+            break context_len;
         }
     };
     let revision = f
