@@ -158,6 +158,8 @@ pub struct FeatureError {
     pub outcome_unknown: bool,
     /// The code of the core's refusal, when the core answered with one.
     pub code: Option<workbench_protocol::errors::ErrorCode>,
+    /// What the core advised the client to do next, when it answered with a refusal.
+    pub retry: Option<workbench_protocol::errors::RetryAdvice>,
 }
 
 impl FeatureError {
@@ -166,6 +168,7 @@ impl FeatureError {
             message: message.into(),
             outcome_unknown: false,
             code: None,
+            retry: None,
         }
     }
 
@@ -174,11 +177,17 @@ impl FeatureError {
             message: message.into(),
             outcome_unknown: true,
             code: None,
+            retry: None,
         }
     }
 
     pub fn with_code(mut self, code: workbench_protocol::errors::ErrorCode) -> Self {
         self.code = Some(code);
+        self
+    }
+
+    pub fn with_retry(mut self, retry: workbench_protocol::errors::RetryAdvice) -> Self {
+        self.retry = Some(retry);
         self
     }
 }
