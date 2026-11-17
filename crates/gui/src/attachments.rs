@@ -449,6 +449,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clipboard_replacement_and_shutdown_join_before_backend_lifetime_ends() {
+        struct Backend(mpsc::Sender<()>);
+        impl ClipboardBackend for Backend {
+            fn image(&mut self) -> Result<ClipboardRgba, String> {
+                Ok(ClipboardRgba {
+                    width: 1,
+                    height: 1,
+                    bytes: vec![255; 4],
+                })
+            }
+        }
+        impl Drop for Backend {
+            fn drop(&mut self) {
+                self.0.send(()).unwrap();
+            }
+        }
+        let mut io = AttachmentIo::default();
+        let (first, released_first) = mpsc::channel();
+        let (second, released_second) = mpsc::channel();
+        io.set_clipboard_backend(Box::new(Backend(first)));
+        io.set_clipboard_backend(Box::new(Backend(second)));
+        // No waiting here: replacement and on_exit must return only after the
+        // worker has destroyed the backend borrowing eframe's foreign display.
+        released_first
+            .try_recv()
+            .expect("old backend joined before replacement returns");
+        io.shutdown_clipboard();
+        released_second
+            .try_recv()
+            .expect("backend joined before window teardown");
+        io.shutdown_clipboard();
+    }
+
+    #[test]
     fn four_k_clipboard_image_fits_the_read_image_contract() {
         let (width, height) = (3840, 2160);
         let mut seed = 0x1234abcd_u32;

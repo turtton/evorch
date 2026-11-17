@@ -911,6 +911,7 @@ pub fn message_with_paths(text: &str, paths: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod lifecycle;
 
     fn service() -> (tempfile::TempDir, AttachmentService) {
         let temp = tempfile::tempdir().unwrap();

@@ -24,6 +24,7 @@ impl AgentRuntime {
         &self,
         thread: &str,
     ) -> io::Result<Vec<ThreadReadDirectory>> {
+        self.deny_deleted_thread(thread).map_err(io::Error::other)?;
         let root = self.attachment_root()?;
         let mut result = vec![root.files(thread)?.read_identity()?];
         let mut visited = BTreeSet::from([thread.to_owned()]);

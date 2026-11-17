@@ -14,6 +14,8 @@
 //! service's execution entry points are crate-private, so this type is the only
 //! way to run a command and none of the steps can be skipped.
 
+#[cfg(test)]
+mod attachment_race;
 mod namespaces;
 mod restart;
 
@@ -257,10 +259,7 @@ impl CommandHost {
             };
             ids.push(reference.id);
         }
-        let lock = root
-            .lock_thread(&chat.thread_id)
-            .map_err(|_| reject_error(RejectKind::Unavailable, "attachment lock unavailable"))?;
-        self.check_attachment_thread_active(&chat.thread_id)?;
+        let lock = self.lock_active_attachment_thread(&root, &chat.thread_id)?;
         let committed = self
             .attachment_service()?
             .commit_locked(&project, &thread, &ids)?;
@@ -279,6 +278,18 @@ impl CommandHost {
         chat.text = crate::attachments::message_with_paths(&chat.text, &paths);
         chat.attachments.clear();
         Ok(Some(lock))
+    }
+
+    fn lock_active_attachment_thread(
+        &self,
+        root: &sandbox::attachments::AttachmentRoot,
+        thread: &str,
+    ) -> Result<std::fs::File, WorkbenchError> {
+        let lock = root
+            .lock_thread(thread)
+            .map_err(|_| reject_error(RejectKind::Unavailable, "attachment lock unavailable"))?;
+        self.check_attachment_thread_active(thread)?;
+        Ok(lock)
     }
 
     /// Reserve an absent thread for a new chat, after resolving its project.
@@ -1052,6 +1063,9 @@ impl CommandHost {
                     context_len: seed.context_len.get(),
                 }),
             };
+            self.service
+                .authorize(&HostCommand::SendChat(raw.clone()))
+                .map_err(refusal_error)?;
             let raw_fingerprint = chat_fingerprint(&raw);
             raw.attachments.clear();
             if fingerprint.rsplit_once(':').map(|(wire, _)| wire)

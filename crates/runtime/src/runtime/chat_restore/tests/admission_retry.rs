@@ -258,13 +258,7 @@ async fn rejected_followups_with_unknown_outcomes(failures: usize) {
     {
         assert_eq!(
             message.content,
-            vec![
-                ContentBlock::Text { text: text.into() },
-                ContentBlock::Image {
-                    media_type: "image/png".into(),
-                    data: "aW1hZ2U=".into()
-                },
-            ]
+            vec![ContentBlock::Text { text: text.into() }]
         );
     }
     assert_eq!(after.checkpoints_json, before.checkpoints_json);

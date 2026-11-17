@@ -51,6 +51,10 @@ fn table() -> BTreeMap<&'static str, Guard> {
             "ownership/registry.rs::attach",
             Exempt("low-level registry read; OwnerHost is the entry and guards"),
         ),
+        (
+            "attachments.rs::attachment_read_directories",
+            Guarded { via: &[] },
+        ),
         ("thread_goals.rs::bind_thread_root", Guarded { via: &[] }),
         (
             "thread_goals.rs::create_thread_goal",

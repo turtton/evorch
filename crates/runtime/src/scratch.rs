@@ -158,9 +158,7 @@ impl ThreadScratch {
     /// # Errors
     /// Propagates [`ScratchRoot::fixed`] failures.
     pub fn for_ownership_root(ownership_root: &Path) -> io::Result<Self> {
-        let canonical = ownership_root
-            .canonicalize()
-            .unwrap_or_else(|_| ownership_root.to_path_buf());
+        let canonical = ownership_root.canonicalize()?;
         let digest = hex_digest(canonical.as_os_str().as_bytes());
         let mut scratch = Self::new(ScratchRoot::fixed(&digest[..8], &digest)?);
         // Attachments use the complete ownership identity, not the scratch
@@ -463,6 +461,15 @@ impl AgentRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_scope_refuses_missing_and_symlink_loop_ownership_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(ThreadScratch::for_ownership_root(&temp.path().join("missing")).is_err());
+        let loop_path = temp.path().join("loop");
+        std::os::unix::fs::symlink(&loop_path, &loop_path).unwrap();
+        assert!(ThreadScratch::for_ownership_root(&loop_path).is_err());
+    }
 
     #[test]
     fn attachment_scope_is_the_full_canonical_ownership_root() {

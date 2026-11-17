@@ -626,7 +626,7 @@ fn confirm_families(
         // Attachments should already be absent after archive. Retry a failed archive
         // cleanup before confirming retention, never report deletion while they remain.
         let scratch = ThreadScratch::for_ownership_root(&paths.ownership_root)?;
-        let attachment_root = sandbox::attachments::AttachmentRoot::for_scope(scratch.parent());
+        let attachment_root = scratch.attachment_root();
         let _attachments = if attachment_root.path().try_exists()? {
             let guard =
                 crate::attachments::AttachmentArchive::lock(attachment_root, threads.clone())?;
@@ -719,7 +719,7 @@ fn remove_scratch(paths: &StartupPaths, threads: &[String], budget: &StartupBudg
             return;
         }
     };
-    let attachment_root = sandbox::attachments::AttachmentRoot::for_scope(scratch.parent());
+    let attachment_root = scratch.attachment_root();
     let mut dirs = 0;
     let mut entries_left = budget.scratch_entries;
     for thread in threads {

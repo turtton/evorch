@@ -35,7 +35,20 @@ fn assert_outside_state_untouched(world: &World) {
 // scratch directory of the deleted thread are gone; a second phase finds nothing to do.
 #[test]
 fn a_due_family_is_confirmed_and_its_outside_state_is_removed() {
+    use std::io::Write;
     let world = world_with_thread();
+    let attachments = crate::scratch::ThreadScratch::for_ownership_root(&world.root)
+        .unwrap()
+        .attachment_root();
+    let files = attachments.files("T").unwrap();
+    files
+        .file(
+            "left-after-failed-archive.txt",
+            rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL | rustix::fs::OFlags::WRONLY,
+        )
+        .unwrap()
+        .write_all(b"remaining attachment")
+        .unwrap();
     let input = world.input(&["T"], &[]);
 
     let report = world.phase(&policy(), &input);
@@ -49,6 +62,11 @@ fn a_due_family_is_confirmed_and_its_outside_state_is_removed() {
     assert!(report.tombstones.contains_run("rt"));
     assert!(world.owner_rows().is_empty());
     assert!(!world.scratch_exists("T"));
+    assert!(
+        !files.path().exists(),
+        "retention removes the canonical ownership attachment store, not a scratch-derived alias"
+    );
+    std::fs::remove_dir_all(attachments.path()).unwrap();
     assert!(world.root_binding_file().is_file());
     assert!(world.database().retention_binding().unwrap().is_some());
     assert_eq!(

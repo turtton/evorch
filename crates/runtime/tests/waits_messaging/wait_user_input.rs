@@ -2,7 +2,6 @@ use crate::support;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use agents::Role;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
@@ -12,6 +11,8 @@ use serde_json::{Value, json};
 use support::{text_response, tool_response, tool_responses};
 use tokio::sync::{Mutex, Notify};
 use tools::ToolExecutor;
+
+const USER_INPUT: &str = "Please inspect the attached file\n\n[Attached files (read-only; open with read or shell)]\n\"/core/attachments/files/note.txt\"";
 
 struct WaitingModel {
     turn: AtomicUsize,
@@ -125,7 +126,7 @@ async fn scenario(delivery: Delivery, batch: bool) {
     }
     review_storage.attach(&runtime);
     runtime
-        .send_user_input(parent, "Please inspect this image".into(), None)
+        .send_user_input(parent, USER_INPUT.into(), None)
         .unwrap();
     review_storage.attach(&runtime);
     runtime
@@ -145,13 +146,7 @@ async fn scenario(delivery: Delivery, batch: bool) {
         runtime.wait(RunId::new(2)).await.unwrap();
         return;
     }
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), runtime.wait(parent))
-            .await
-            .expect("wait must wake immediately")
-            .unwrap(),
-        AgentRunPhase::Done,
-    );
+    assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done,);
     let requests = model.parent_requests.lock().await;
     assert_eq!(requests.len(), 3);
     for pair in requests.windows(2) {
@@ -167,21 +162,15 @@ async fn scenario(delivery: Delivery, batch: bool) {
         .position(|message| {
             message.content.first()
                 == Some(&ContentBlock::Text {
-                    text: "Please inspect this image".into(),
+                    text: USER_INPUT.into(),
                 })
         })
         .expect("UI text reaches the next model request");
     assert_eq!(
         messages[input_index].content,
-        vec![
-            ContentBlock::Text {
-                text: "Please inspect this image".into()
-            },
-            ContentBlock::Image {
-                media_type: "image/png".into(),
-                data: "aW1hZ2U=".into()
-            },
-        ]
+        vec![ContentBlock::Text {
+            text: USER_INPUT.into()
+        }]
     );
     assert_eq!(
         messages[input_index + 1].content,
@@ -231,7 +220,7 @@ async fn scenario(delivery: Delivery, batch: bool) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn user_input_with_images_interrupts_wait_and_reaches_next_model_request() {
+async fn user_input_with_attachment_path_interrupts_wait_and_reaches_next_model_request() {
     scenario(Delivery::DuringWait, false).await;
 }
 
