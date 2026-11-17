@@ -92,7 +92,12 @@ pub struct Mount<'a> {
 /// The device id decides first, because a path prefix can name the wrong mount: on macOS
 /// `/Users/...` lives on the data volume mounted at `/System/Volumes/Data`, yet only `/`
 /// is a prefix of it. Among the mounts on that device the deepest prefix of `path` wins,
-/// else the deepest mount. Without a device match the deepest prefix is used.
+/// else the deepest mount.
+///
+/// A mount whose device is known and differs from `device` is never chosen: `sysinfo` omits
+/// some filesystems (tmpfs, NFS), and the prefix of a different filesystem would report the
+/// wrong numbers. When no mount matches, the result is `None`. The deepest prefix is used
+/// only among mounts whose device is unknown, or when `device` itself is unknown.
 /// Mounts reporting no space (pseudo filesystems) are skipped.
 pub fn mount_holding<'a>(
     path: &Path,
@@ -123,6 +128,10 @@ pub fn mount_holding<'a>(
     }
     deepest(
         real.into_iter()
+            .filter(|mount| match (device, mount.device) {
+                (Some(wanted), Some(actual)) => wanted == actual,
+                _ => true,
+            })
             .filter(|mount| path.starts_with(mount.point))
             .collect(),
     )
@@ -366,7 +375,19 @@ mod tests {
         assert_eq!(system.point, Path::new("/"));
     }
 
-    // Given: bind-like mounts sharing one device, and a device no mount reports
+    // Given: the data directory sits on a filesystem sysinfo does not list (a tmpfs, device 2), leaving only `/` (device 1)
+    // When: looked up / Then: nothing is chosen rather than the prefix of a different filesystem
+    #[test]
+    fn mount_holding_never_picks_a_known_different_device() {
+        let mounts = [mount("/", Some(1), 10, 100)];
+        assert!(mount_holding(Path::new("/tmp/evorch"), Some(2), mounts).is_none());
+        // An unknown mount device may still be matched by its path.
+        let unknown = [mount("/", None, 10, 100)];
+        let found = mount_holding(Path::new("/tmp/evorch"), Some(2), unknown).expect("a mount");
+        assert_eq!(found.point, Path::new("/"));
+    }
+
+    // Given: bind-like mounts sharing one device, and a data directory whose device is unknown
     // When: looked up / Then: the deepest prefix among the shared device wins, and an unknown device falls back to prefixes
     #[test]
     fn mount_holding_prefers_prefixes_on_a_shared_device_and_falls_back() {
@@ -377,7 +398,7 @@ mod tests {
         ];
         let found = mount_holding(Path::new("/srv/evorch"), Some(1), mounts).expect("a mount");
         assert_eq!(found.point, Path::new("/srv"));
-        let fallback = mount_holding(Path::new("/srv/evorch"), Some(77), mounts).expect("a mount");
+        let fallback = mount_holding(Path::new("/srv/evorch"), None, mounts).expect("a mount");
         assert_eq!(fallback.point, Path::new("/srv"));
     }
 
