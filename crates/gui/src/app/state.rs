@@ -72,6 +72,7 @@ pub struct WorkbenchState<S> {
     pub(super) transcripts: TranscriptRegistry,
     pub(super) ledger: crate::model::ledger::LedgerRegistry,
     pub(super) telemetry: TelemetryOverlay,
+    pub(super) system_footer: super::system_footer::SystemFooter,
     pub(super) tasks: TasksModel<S>,
     pub(super) durable_tasks: crate::model::durable_tasks::DurableTasksModel,
     pub(super) selected_task: Option<String>,
@@ -240,6 +241,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             transcripts: TranscriptRegistry::new(),
             ledger: crate::model::ledger::LedgerRegistry::default(),
             telemetry: TelemetryOverlay::new(),
+            system_footer: Default::default(),
             tasks: TasksModel::new(source),
             durable_tasks: crate::model::durable_tasks::DurableTasksModel::default(),
             selected_task: None,
@@ -415,6 +417,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         config: &storage::StorageConfig,
     ) -> Self {
         self.storage_settings.configure(handle, config);
+        self.system_footer
+            .set_storage_directory(config.db_path.parent().map(std::path::Path::to_path_buf));
         self
     }
 

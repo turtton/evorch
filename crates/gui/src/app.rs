@@ -61,6 +61,7 @@ pub mod splash;
 mod state;
 mod storage_settings;
 mod subagent_dock;
+mod system_footer;
 mod system_notifications;
 mod tab_viewer;
 mod theme_settings;

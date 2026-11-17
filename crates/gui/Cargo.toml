@@ -59,6 +59,8 @@ sandbox = { path = "../sandbox", features = ["keychain"] }
 serde = { workspace = true }
 storage = { path = "../storage" }
 serde_json = { workspace = true }
+# CPU / memory / disk readings for the footer; the other components stay off.
+sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
 thiserror = { workspace = true }
 toml = { workspace = true }
 tempfile = { workspace = true }
