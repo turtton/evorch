@@ -43,7 +43,7 @@ mod restart_observer;
 mod restart_tasks;
 mod security;
 mod server;
-pub use restart_tasks::RestartTasks;
+pub use restart_tasks::{ActivityObserver, RestartTasks};
 pub mod shutdown;
 pub mod sse;
 mod state;

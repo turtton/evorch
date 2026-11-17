@@ -77,9 +77,11 @@ async fn error_code(stream: &mut UnixStream, request: Value) -> ErrorCode {
 async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_offered() {
     let dir = test_socket_dir::SplitDir::new();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Namespace compatibility is independent of idle policy: Web enabled alone
+    // will no longer retain the core in stage 18a, so leave time for admission.
     std::fs::write(
         dir.path().join("config.toml"),
-        "[web]\nport = 0\n[core]\nidle_grace_secs = 0\n",
+        "[web]\nport = 0\n[core]\nidle_grace_secs = 3600\n",
     )
     .unwrap();
     let executable = std::env::var_os("CARGO_BIN_EXE_evorch-core").unwrap();
