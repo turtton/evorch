@@ -1,4 +1,4 @@
-//! `evorch eval run` and `evorch eval report`: replay a recorded thread under
+//! `evorch eval run/report/clean`: replay a recorded thread under
 //! the user's configuration and a candidate overlay, then judge, reprice and
 //! report the replays (ADR 0036).
 
@@ -9,7 +9,8 @@ use std::time::Duration;
 use eval::{EvalArgs, Isolation, ReportArgs, ReportDeps, RunReport, RunnerDeps};
 use routing::EnvLookup;
 
-pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--repeat <n>] [--output <dir>] [--db <path>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--report|--no-report]
+pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--repeat <n>] [--output <dir>] [--db <path>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--report|--no-report] [--keep-workspace]
+       evorch eval clean [--output <dir> ...] [--user-config <dir>] [--dry-run] [--include-unfinished]
        evorch eval report --output <dir> [--output <dir> ...] [--user-config <dir>] [--rejudge]
 `eval run` replays the thread <n> times (default eval.repeat_target) under the user's
 configuration, then <n> times with the candidate overlay merged over it. The overlay is a
@@ -19,18 +20,116 @@ went wrong in the thread and is judged as its own aspect. --verify runs a comman
 replay's final workspace, without network, failing after --verify-timeout (default 600) s.
 The default database is <user-config-dir>/evorch-events.db, the GUI's store. The default
 output is <user-config-dir>/eval/<UTC YYYYmmdd-HHMMSS>-<thread-id>; it must be missing or
-empty. Unless --no-report is given, the directory is then reported as by `eval report`.
+empty. Workspaces are removed after finish/verification, including on failure;
+--keep-workspace preserves them. SIGINT/SIGTERM/SIGKILL do not run cleanup: use eval clean
+after interruption (the OS releases the runner lock). Unless --no-report is given, the directory is then reported as by `eval report`.
 `eval report` reprices every run from one price table, judges each baseline/candidate pair
 in both orders (cached in <dir>/judgments; --rejudge asks again), and writes
-<dir>/report.json and <dir>/report.md. Several directories are also tabulated side by side.";
+<dir>/report.json and <dir>/report.md. Several directories are also tabulated side by side.
+`eval clean` removes only preflight-workspace and runs/<child>/workspace, never evidence.
+Without --output it scans immediate evaluations in <user-config-dir>/eval. --dry-run
+changes nothing. Busy locks are always skipped; unlocked interrupted evaluations are
+eligible. For unfinished legacy evaluations without a lock, --include-unfinished requires
+the user to confirm that the old evaluation is NOT running. Sizes are logical estimates,
+not actual disk space freed.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Run { args: EvalArgs, report: bool },
     Report(ReportArgs),
+    Clean(CleanArgs),
 }
 
-/// Parses everything after `evorch`, starting with `eval run` or `eval report`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CleanArgs {
+    pub outputs: Vec<PathBuf>,
+    pub user_config_dir: Option<PathBuf>,
+    pub dry_run: bool,
+    pub include_unfinished: bool,
+}
+
+fn parse_clean(mut argv: impl Iterator<Item = String>) -> Result<Command, String> {
+    let mut args = CleanArgs::default();
+    while let Some(flag) = argv.next() {
+        match flag.as_str() {
+            "--dry-run" => args.dry_run = true,
+            "--include-unfinished" => args.include_unfinished = true,
+            "--output" => args
+                .outputs
+                .push(argv.next().ok_or_else(|| USAGE.to_owned())?.into()),
+            "--user-config" => {
+                args.user_config_dir = Some(argv.next().ok_or_else(|| USAGE.to_owned())?.into())
+            }
+            _ => return Err(USAGE.into()),
+        }
+    }
+    Ok(Command::Clean(args))
+}
+
+fn clean(args: CleanArgs) -> Result<String, String> {
+    let home = if args.outputs.is_empty() {
+        Some(
+            args.user_config_dir
+                .or_else(config::user_config_dir)
+                .ok_or("cannot resolve user config directory; pass --user-config <dir>")?
+                .join("eval"),
+        )
+    } else {
+        None
+    };
+    let report = eval::cleanup::clean(
+        &args.outputs,
+        home.as_deref(),
+        eval::cleanup::Options {
+            dry_run: args.dry_run,
+            include_unfinished: args.include_unfinished,
+        },
+    );
+    format_cleanup(&report)
+}
+
+fn format_cleanup(report: &eval::cleanup::Report) -> Result<String, String> {
+    use eval::cleanup::{Action, Size};
+    let mut lines = Vec::new();
+    for path in &report.unfinished_legacy {
+        lines.push(format!("warning: {}: unfinished legacy evaluation; user must confirm the old evaluation is NOT running", path.display()));
+    }
+    let mut total = Some(0_u64);
+    let mut unknown = 0;
+    for entry in &report.entries {
+        let action = match &entry.action {
+            Action::WouldRemove => "would-remove".to_owned(),
+            Action::Removed => "removed".to_owned(),
+            Action::Skip(reason) => format!("skip ({reason})"),
+            Action::Failed(reason) => format!("failed ({reason})"),
+        };
+        let size = match &entry.size {
+            Size::Bytes(bytes) => {
+                total = total.and_then(|total| total.checked_add(*bytes));
+                format!("{bytes} bytes")
+            }
+            Size::Unknown(reason) => {
+                unknown += 1;
+                format!("unknown ({reason})")
+            }
+            Size::NotMeasured => {
+                unknown += 1;
+                "unknown (not measured)".into()
+            }
+        };
+        lines.push(format!("{action}: {}: {size}", entry.path.display()));
+    }
+    lines.push(format!("total: {} bytes known, {unknown} unknown; logical size estimate, not actual disk space freed",
+        total.map_or_else(|| "unknown (overflow)".into(), |bytes| bytes.to_string())));
+    let text = lines.join("\n");
+    if report.has_failures() {
+        Err(text)
+    } else {
+        Ok(text)
+    }
+}
+
+/// Parses everything after `evorch`, starting with `eval run`, `report` or `clean`.
 pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut argv = argv;
     if argv.next().as_deref() != Some("eval") {
@@ -39,6 +138,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<Command, String>
     match argv.next().as_deref() {
         Some("run") => parse_run(argv),
         Some("report") => parse_report(argv),
+        Some("clean") => parse_clean(argv),
         _ => Err(USAGE.into()),
     }
 }
@@ -50,6 +150,10 @@ fn parse_run(mut argv: impl Iterator<Item = String>) -> Result<Command, String> 
     while let Some(flag) = argv.next() {
         if matches!(flag.as_str(), "--report" | "--no-report") {
             report = flag == "--report";
+            continue;
+        }
+        if flag == "--keep-workspace" {
+            args.keep_workspace = true;
             continue;
         }
         let value = argv.next().ok_or_else(|| USAGE.to_owned())?;
@@ -108,6 +212,10 @@ fn parse_report(mut argv: impl Iterator<Item = String>) -> Result<Command, Strin
 
 /// Runs the command, printing one line per replay as it ends.
 pub async fn run(command: Command, env: Arc<dyn EnvLookup>) -> Result<String, String> {
+    // Maintenance must not load catalog, credentials or invoke a model.
+    if let Command::Clean(args) = command {
+        return clean(args);
+    }
     let catalog = match catalog::ModelCatalog::load_or_refresh(&catalog::default_cache_dir()).await
     {
         Ok(catalog) => Some(Arc::new(catalog)),
@@ -123,6 +231,7 @@ pub async fn run(command: Command, env: Arc<dyn EnvLookup>) -> Result<String, St
         catalog: catalog.clone(),
     };
     match command {
+        Command::Clean(_) => unreachable!("clean dispatched before catalog access"),
         Command::Run { args, report } => {
             let user_config_dir = args.user_config_dir.clone();
             let deps = RunnerDeps {
@@ -132,7 +241,17 @@ pub async fn run(command: Command, env: Arc<dyn EnvLookup>) -> Result<String, St
                 credentials: None,
                 catalog: catalog.clone(),
             };
-            let result = eval::run(args, deps, |report| println!("{}", summary(report))).await;
+            let result = eval::runner::run_with_cleanup(
+                args, deps,
+                |report| println!("{}", summary(report)),
+                |dir, cleanup| {
+                    for entry in &cleanup.entries {
+                        if let eval::cleanup::Action::Skip(reason) | eval::cleanup::Action::Failed(reason) = &entry.action {
+                            eprintln!("warning: workspace cleanup {}: {reason}; retry with evorch eval clean --output {:?}", entry.path.display(), dir);
+                        }
+                    }
+                },
+            ).await;
             let (dir, failure) = match result {
                 Ok(evaluation) => (evaluation.dir, None),
                 Err(error) => {
@@ -254,6 +373,7 @@ mod tests {
             "--verify-timeout",
             "120",
             "--no-report",
+            "--keep-workspace",
         ];
 
         // When: it is parsed.
@@ -273,6 +393,7 @@ mod tests {
                     problem: Some("the reviewer missed a bug".into()),
                     verify: Some("cargo test --offline".into()),
                     verify_timeout: Some(Duration::from_secs(120)),
+                    keep_workspace: true,
                 },
                 report: false,
             }
@@ -345,5 +466,67 @@ mod tests {
                 "{argv:?}: {error}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    #[tokio::test]
+    async fn clean_parses_all_flags_and_needs_no_catalog_or_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let command = parse_args(
+            [
+                "eval",
+                "clean",
+                "--output",
+                "a",
+                "--output",
+                "b",
+                "--user-config",
+                "user",
+                "--dry-run",
+                "--include-unfinished",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Clean(CleanArgs {
+                outputs: vec!["a".into(), "b".into()],
+                user_config_dir: Some("user".into()),
+                dry_run: true,
+                include_unfinished: true
+            })
+        );
+        let text = run(
+            Command::Clean(CleanArgs {
+                user_config_dir: Some(temp.path().into()),
+                ..Default::default()
+            }),
+            Arc::new(routing::MapEnv::default()),
+        )
+        .await
+        .unwrap();
+        assert!(text.contains("0 bytes known"));
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+    #[test]
+    fn clean_failure_and_unknown_sizes_are_not_reported_as_success_or_zero() {
+        use eval::cleanup::{Action, Entry, Report, Size};
+        let report = Report {
+            entries: vec![Entry {
+                path: "workspace".into(),
+                action: Action::Failed("permission denied".into()),
+                size: Size::Unknown("permission denied".into()),
+            }],
+            ..Default::default()
+        };
+        let text = format_cleanup(&report).unwrap_err();
+        assert!(text.contains("failed (permission denied)"));
+        assert!(text.contains("unknown (permission denied)"));
+        assert!(text.contains("1 unknown"));
     }
 }
