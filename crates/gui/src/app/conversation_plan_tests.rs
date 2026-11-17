@@ -96,6 +96,38 @@ fn opening_adds_one_tab_to_the_subagent_region_and_focuses_it() {
 }
 
 #[test]
+fn the_opened_tab_sits_right_after_subagents_with_the_bar_scrolled_back() {
+    // Given: a subagent region with transcripts after the Subagents tab, its
+    // tab bar scrolled toward the end as an overflowing bar can be.
+    let (mut state, _) = workbench();
+    let region = state
+        .dock
+        .find_tab(&PanelId::new("subagents-home"))
+        .unwrap();
+    {
+        let leaf = state.dock.leaf_mut(region.node_path()).unwrap();
+        leaf.tabs.extend(["agent-a", "agent-b"].map(PanelId::new));
+        leaf.scroll = -240.0;
+    }
+
+    // When: the plan is opened.
+    state.open_conversation_plan_tab();
+
+    // Then: the tab follows Subagents, ahead of the transcripts, and the bar
+    // starts at its beginning, so its title and close button are in view.
+    let path = state.dock.find_tab(&PanelId::new(PANEL)).unwrap();
+    assert_eq!(path.tab.0, region.tab.0 + 1);
+    let leaf = state.dock.leaf(path.node_path()).unwrap();
+    assert_eq!(leaf.active, path.tab);
+    assert_eq!(leaf.scroll, 0.0);
+
+    // Opening again after the bar scrolled away shows it again.
+    state.dock.leaf_mut(path.node_path()).unwrap().scroll = -240.0;
+    state.open_conversation_plan_tab();
+    assert_eq!(state.dock.leaf(path.node_path()).unwrap().scroll, 0.0);
+}
+
+#[test]
 fn plan_updates_neither_open_the_tab_nor_bring_a_closed_one_back() {
     let (mut state, recorder) = workbench();
     let ctx = egui::Context::default();

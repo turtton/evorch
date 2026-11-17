@@ -39,6 +39,24 @@ const NOT_PLANNED: &str = "Not planned";
 const BAR_WIDTH: f32 = 120.0;
 const MINI_BAR_WIDTH: f32 = 44.0;
 const BAR_HEIGHT: f32 = 6.0;
+const PANEL_BAR_HEIGHT: f32 = 10.0;
+/// Room the summary row keeps beside its bar for the percentage and count.
+const PANEL_BAR_TAIL: f32 = 96.0;
+/// The legend's five values need about this much on one line; narrower than
+/// that plus the meta, the meta moves into the bar's tooltip.
+const LEGEND_MIN_WIDTH: f32 = 260.0;
+/// From this width the tree and the selected task sit side by side.
+const SPLIT_MIN_WIDTH: f32 = 600.0;
+/// The tree's share of a side-by-side panel (1.15 : 1, as in the design).
+const TREE_SHARE: f32 = 1.15 / 2.15;
+/// The tree's share of the height when stacked above the selected task, so
+/// the task's text stays readable in a short region. The tree keeps at least
+/// two rows, but never more than [`STACKED_TREE_MAX_SHARE`] of a short panel.
+const STACKED_TREE_SHARE: f32 = 0.3;
+const STACKED_TREE_MAX_SHARE: f32 = 0.4;
+/// Without a selected task the tree is the content and the history follows.
+const STACKED_UNSELECTED_TREE_SHARE: f32 = 0.6;
+const EMPTY_ICON_SIZE: f32 = 28.0;
 
 /// A task state's glyph, name and color.
 pub fn status_style(status: PlanTaskStatus) -> (&'static str, &'static str, Color32) {
@@ -50,6 +68,15 @@ pub fn status_style(status: PlanTaskStatus) -> (&'static str, &'static str, Colo
         PlanTaskStatus::Blocked => (icons::PROHIBIT, "Blocked", palette().ERROR_FG),
     }
 }
+
+/// Order the legend lists states in.
+const LEGEND_ORDER: [PlanTaskStatus; 5] = [
+    PlanTaskStatus::Completed,
+    PlanTaskStatus::InProgress,
+    PlanTaskStatus::Interrupted,
+    PlanTaskStatus::Pending,
+    PlanTaskStatus::Blocked,
+];
 
 /// Order the bar paints states in, left to right.
 const BAR_ORDER: [PlanTaskStatus; 4] = [
@@ -83,6 +110,34 @@ pub fn overall_status(progress: &PlanProgress) -> PlanTaskStatus {
     } else {
         PlanTaskStatus::Pending
     }
+}
+
+/// A task's state; a parent has none of its own and shows the state that
+/// best describes its children's shares, in [`overall_status`]'s order.
+pub const fn node_status(status: Option<PlanTaskStatus>, ppm: &PlanStatusValues) -> PlanTaskStatus {
+    if let Some(status) = status {
+        return status;
+    }
+    if ppm.completed > 0
+        && ppm.pending == 0
+        && ppm.in_progress == 0
+        && ppm.blocked == 0
+        && ppm.interrupted == 0
+    {
+        PlanTaskStatus::Completed
+    } else if ppm.in_progress > 0 {
+        PlanTaskStatus::InProgress
+    } else if ppm.interrupted > 0 {
+        PlanTaskStatus::Interrupted
+    } else if ppm.blocked > 0 {
+        PlanTaskStatus::Blocked
+    } else {
+        PlanTaskStatus::Pending
+    }
+}
+
+const fn percent(ppm: u32) -> u32 {
+    if ppm > 1_000_000 { 100 } else { ppm / 10_000 }
 }
 
 /// The band's sentence for screen readers and its hover text.
@@ -122,10 +177,14 @@ fn small(text: impl Into<String>, color: Color32) -> RichText {
 }
 
 /// A bar split by the states' shares, or a dashed empty outline without a plan.
-fn progress_bar(ui: &mut Ui, width: f32, shares: Option<&PlanStatusValues>) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, BAR_HEIGHT), Sense::hover());
+fn progress_bar(
+    ui: &mut Ui,
+    size: egui::Vec2,
+    shares: Option<&PlanStatusValues>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter_at(rect);
-    let radius = CornerRadius::same((BAR_HEIGHT / 2.0) as u8);
+    let radius = CornerRadius::same((size.y / 2.0) as u8);
     let Some(shares) = shares else {
         let stroke = Stroke::new(1.0, palette().TEXT_MUTED);
         let r = rect.shrink(0.5);
@@ -166,7 +225,7 @@ pub fn band_row(ui: &mut Ui, band: PlanBand<'_>) -> bool {
         ui.set_min_height(ROW_DENSE - SP_1);
         let Some(progress) = progress else {
             labeled_icon(ui, icons::CIRCLE, palette().TEXT_MUTED, NOT_PLANNED);
-            progress_bar(ui, BAR_WIDTH, None);
+            progress_bar(ui, egui::vec2(BAR_WIDTH, BAR_HEIGHT), None);
             ui.label(small(NOT_PLANNED, palette().TEXT_MUTED));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(false, |ui| {
@@ -176,25 +235,29 @@ pub fn band_row(ui: &mut Ui, band: PlanBand<'_>) -> bool {
             return;
         };
         status_icon(ui, overall_status(progress));
-        progress_bar(ui, BAR_WIDTH, Some(&progress.weighted_ppm)).on_hover_text(&label);
+        progress_bar(
+            ui,
+            egui::vec2(BAR_WIDTH, BAR_HEIGHT),
+            Some(&progress.weighted_ppm),
+        )
+        .on_hover_text(&label);
         ui.label(small(
             format!("{}%", completed_percent(progress)),
             palette().TEXT,
         ));
+        completed_count(ui, progress);
         let leaves = &progress.leaf_counts;
-        let (icon, _, color) = status_style(PlanTaskStatus::Completed);
-        counted(
-            ui,
-            icon,
-            color,
-            &format!("{}/{}", leaves.completed, progress.leaf_count),
-            "Completed tasks",
-        );
         for status in [PlanTaskStatus::Blocked, PlanTaskStatus::Interrupted] {
             let count = value(leaves, status);
             if count > 0 {
                 let (icon, name, color) = status_style(status);
-                counted(ui, icon, color, &count.to_string(), name);
+                counted(
+                    ui,
+                    icon,
+                    color,
+                    &count.to_string(),
+                    &format!("{name}: {count}"),
+                );
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -206,18 +269,30 @@ pub fn band_row(ui: &mut Ui, band: PlanBand<'_>) -> bool {
     open
 }
 
-fn counted(ui: &mut Ui, icon: &str, color: Color32, count: &str, name: &str) {
-    // One unwrapped label, so the separator wraps together with its count.
+fn completed_count(ui: &mut Ui, progress: &PlanProgress) {
+    let (icon, _, color) = status_style(PlanTaskStatus::Completed);
+    let count = format!("{}/{}", progress.leaf_counts.completed, progress.leaf_count);
+    counted(
+        ui,
+        icon,
+        color,
+        &count,
+        &format!("Completed tasks: {count}"),
+    );
+}
+
+/// An icon and its value as one unwrapped label. Items are set apart by the
+/// layout's spacing, not by a separator glyph, so a wrapped line never starts
+/// with one.
+fn counted(ui: &mut Ui, icon: &str, color: Color32, count: &str, label: &str) {
     let font = egui::FontId::proportional(FONT_SMALL);
     let style = |color| egui::TextFormat::simple(font.clone(), color);
     let mut job = egui::text::LayoutJob::default();
-    job.append("·", 0.0, style(palette().TEXT_MUTED));
-    job.append(icon, ui.spacing().item_spacing.x, style(color));
+    job.append(icon, 0.0, style(color));
     job.append(count, 2.0, style(palette().TEXT));
     let response = ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
-    let text = format!("{name}: {count}");
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
-    let _ = response.on_hover_text(text);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
+    let _ = response.on_hover_text(label);
 }
 
 /// The ConversationPlan panel. Returns what the user asked for this frame.
@@ -230,105 +305,212 @@ pub fn plan_panel(ui: &mut Ui, state: &PlanState) -> Option<PlanPanelAction> {
     egui::Frame::new()
         .inner_margin(egui::Margin::same(SP_2 as i8))
         .show(ui, |ui| {
-            legend_row(ui, state, progress);
+            let planned = progress.filter(|p| is_planned(p));
+            summary(ui, state, planned);
             if let Some(error) = state.error() {
                 ui.label(small(error, palette().ERROR_FG));
             }
             ui.separator();
             let Some(tree) = state.tree().filter(|tree| !tree.nodes.is_empty()) else {
-                // The legend row already says when there is no plan.
+                if planned.is_none() {
+                    not_planned(ui);
+                }
                 return;
             };
-            let tree_height = (ui.available_height() * 0.45).max(ROW_DENSE * 3.0);
-            egui::ScrollArea::vertical()
-                .id_salt("plan-tree")
-                .max_height(tree_height)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for node in &tree.nodes {
-                        if node_row(ui, node, state.selected() == Some(node.task_id.as_str())) {
-                            action = Some(PlanPanelAction::Select(node.task_id.clone()));
+            let mut tree_rows = |ui: &mut Ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("plan-tree")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for node in &tree.nodes {
+                            if node_row(ui, node, state.selected() == Some(node.task_id.as_str())) {
+                                action = Some(PlanPanelAction::Select(node.task_id.clone()));
+                            }
                         }
-                    }
+                    });
+            };
+            let mut page = None;
+            let mut selected = |ui: &mut Ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("plan-detail")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if let Some(task) = state.task() {
+                            detail(ui, &task.node);
+                        }
+                        page = history(ui, state, &tree.nodes);
+                    });
+            };
+            let width = ui.available_width();
+            let height = ui.available_height();
+            if width >= SPLIT_MIN_WIDTH {
+                ui.horizontal_top(|ui| {
+                    let layout = egui::Layout::top_down(egui::Align::Min);
+                    let tree_width = (width - SP_3) * TREE_SHARE;
+                    ui.allocate_ui_with_layout(egui::vec2(tree_width, height), layout, |ui| {
+                        ui.set_min_height(height);
+                        tree_rows(ui);
+                    });
+                    ui.separator();
+                    let rest = egui::vec2(ui.available_width(), height);
+                    ui.allocate_ui_with_layout(rest, layout, |ui| {
+                        ui.set_min_height(height);
+                        selected(ui);
+                    });
                 });
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("plan-detail")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if let Some(task) = state.task() {
-                        detail(ui, &task.node);
-                    }
-                    if let Some(page) = history(ui, state, &tree.nodes) {
-                        action = Some(PlanPanelAction::HistoryPage(page));
-                    }
+            } else {
+                let tree_height = if state.task().is_some() {
+                    (height * STACKED_TREE_SHARE)
+                        .max(ROW_DENSE * 2.0)
+                        .min(height * STACKED_TREE_MAX_SHARE)
+                } else {
+                    height * STACKED_UNSELECTED_TREE_SHARE
+                };
+                let layout = egui::Layout::top_down(egui::Align::Min);
+                ui.allocate_ui_with_layout(egui::vec2(width, tree_height), layout, |ui| {
+                    ui.set_max_height(tree_height);
+                    tree_rows(ui);
                 });
+                ui.separator();
+                selected(ui);
+            }
+            if let Some(page) = page {
+                action = Some(PlanPanelAction::HistoryPage(page));
+            }
         });
     action
 }
 
-/// Wraps rather than overlapping when the panel sits in a narrow column.
-fn legend_row(ui: &mut Ui, state: &PlanState, progress: Option<&PlanProgress>) {
-    ui.horizontal_wrapped(|ui| {
-        let planned = progress.filter(|p| is_planned(p));
-        progress_bar(ui, BAR_WIDTH, planned.map(|p| &p.weighted_ppm));
-        if let Some(progress) = planned {
-            ui.label(small(
-                format!("{}%", completed_percent(progress)),
-                palette().TEXT,
-            ));
-            for status in [
-                PlanTaskStatus::Completed,
-                PlanTaskStatus::InProgress,
-                PlanTaskStatus::Interrupted,
-                PlanTaskStatus::Blocked,
-                PlanTaskStatus::Pending,
-            ] {
+/// The empty panel of a conversation without a plan.
+fn not_planned(ui: &mut Ui) {
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.3).max(SP_3));
+        let response = ui.label(
+            RichText::new(icons::LIST_CHECKS)
+                .size(EMPTY_ICON_SIZE)
+                .color(palette().TEXT_MUTED),
+        );
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, NOT_PLANNED));
+        let _ = response.on_hover_text(NOT_PLANNED);
+        ui.label(small(NOT_PLANNED, palette().TEXT_MUTED));
+    });
+}
+
+/// `r12 · 14:32 · run-7`: the revision shown, its time and the latest run.
+fn meta_text(state: &PlanState) -> Option<String> {
+    let revision = state
+        .tree()
+        .map(|t| t.revision)
+        .or_else(|| state.summary().map(|s| s.revision));
+    let run = state
+        .history()
+        .and_then(|h| h.entries.first())
+        .and_then(|entry| entry.change.as_ref())
+        .and_then(|change| change.source_run_id.as_deref());
+    let mut meta = Vec::new();
+    if let Some(revision) = revision.filter(|r| r.0 > 0) {
+        meta.push(format!("r{}", revision.0));
+    }
+    if let Some(time) = state.summary().and_then(|s| clock(s.updated_at_unix_ms)) {
+        meta.push(time);
+    }
+    if let Some(run) = run {
+        meta.push(run.to_owned());
+    }
+    (!meta.is_empty()).then(|| meta.join(" · "))
+}
+
+/// The summary: the bar with its share and count, then the legend of each
+/// state's share of the weight with the meta at its right end. The meta gives
+/// way to the legend when the panel is narrow and stays in the bar's tooltip.
+fn summary(ui: &mut Ui, state: &PlanState, planned: Option<&PlanProgress>) {
+    let meta = meta_text(state).map(|text| format!("Revision and last run: {text}"));
+    let Some(progress) = planned else {
+        let response = progress_bar(ui, egui::vec2(BAR_WIDTH, PANEL_BAR_HEIGHT), None);
+        let _ = response.on_hover_text(NOT_PLANNED);
+        return;
+    };
+    let band = band_label(state.summary());
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - PANEL_BAR_TAIL).max(BAR_WIDTH);
+        let bar = progress_bar(
+            ui,
+            egui::vec2(width, PANEL_BAR_HEIGHT),
+            Some(&progress.weighted_ppm),
+        );
+        let hover = match &meta {
+            Some(meta) => format!("{band}\n{meta}"),
+            None => band.clone(),
+        };
+        let _ = bar.on_hover_text(hover);
+        ui.label(RichText::new(format!("{}%", completed_percent(progress))).strong());
+        completed_count(ui, progress);
+    });
+    let meta = meta.and_then(|label| {
+        let text = RichText::new(format!(
+            "{} {}",
+            icons::CLOCK_COUNTER_CLOCKWISE,
+            label.trim_start_matches("Revision and last run: ")
+        ))
+        .text_style(text_style_badge())
+        .color(palette().TEXT_MUTED);
+        let galley = egui::WidgetText::from(text).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::FontSelection::Default,
+        );
+        (ui.available_width() - galley.size().x - SP_3 >= LEGEND_MIN_WIDTH)
+            .then_some((galley, label))
+    });
+    ui.horizontal_top(|ui| {
+        let legend_width = ui.available_width()
+            - meta
+                .as_ref()
+                .map_or(0.0, |(galley, _)| galley.size().x + SP_3);
+        let wrapping = egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true);
+        ui.allocate_ui_with_layout(egui::vec2(legend_width, 0.0), wrapping, |ui| {
+            ui.spacing_mut().item_spacing.x = SP_3;
+            for status in LEGEND_ORDER {
                 let (icon, name, color) = status_style(status);
-                let count = value(&progress.leaf_counts, status);
-                counted(ui, icon, color, &count.to_string(), name);
+                let share = format!("{}%", percent(value(&progress.weighted_ppm, status)));
+                counted(ui, icon, color, &share, &format!("{name} weight: {share}"));
             }
-        } else {
-            ui.label(small(NOT_PLANNED, palette().TEXT_MUTED));
-        }
-        {
-            let revision = state
-                .tree()
-                .map(|t| t.revision)
-                .or_else(|| state.summary().map(|s| s.revision));
-            let run = state
-                .history()
-                .and_then(|h| h.entries.first())
-                .and_then(|entry| entry.change.as_ref())
-                .and_then(|change| change.source_run_id.as_deref());
-            let mut meta = Vec::new();
-            if let Some(revision) = revision.filter(|r| r.0 > 0) {
-                meta.push(format!("r{}", revision.0));
-            }
-            if let Some(time) = state.summary().and_then(|s| clock(s.updated_at_unix_ms)) {
-                meta.push(time);
-            }
-            if let Some(run) = run {
-                meta.push(run.to_owned());
-            }
-            if !meta.is_empty() {
-                let text = meta.join(" · ");
-                ui.add_space(SP_2);
-                let response = ui.label(
-                    RichText::new(&text)
-                        .text_style(text_style_badge())
-                        .color(palette().TEXT_MUTED),
-                );
-                let hover = format!("Revision and last run: {text}");
+        });
+        if let Some((galley, label)) = meta {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                let response = ui.label(galley);
                 response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &hover)
+                    egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label)
                 });
-            }
+                let _ = response.on_hover_text(label);
+            });
         }
     });
 }
 
-/// A tree row; returns whether it was clicked.
+fn weight_label(ui: &mut Ui, weight: u8) {
+    let response = ui.label(small(
+        format!("{} {weight}", icons::SCALES),
+        palette().TEXT_MUTED,
+    ));
+    let label = format!("Weight {weight}");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+    let _ = response.on_hover_text(label);
+}
+
+/// A parent's mini bar and completed share.
+fn parent_share(ui: &mut Ui, ppm: &PlanStatusValues) {
+    ui.label(small(
+        format!("{}%", percent(ppm.completed)),
+        palette().TEXT_MUTED,
+    ));
+    progress_bar(ui, egui::vec2(MINI_BAR_WIDTH, BAR_HEIGHT), Some(ppm));
+}
+
+/// A tree row; returns whether it was clicked. The selected row scrolls into
+/// view once each time the selection changes.
 fn node_row(ui: &mut Ui, node: &PlanNodeView, selected: bool) -> bool {
     let label = node_label(node);
     let fill = if selected {
@@ -344,36 +526,40 @@ fn node_row(ui: &mut Ui, node: &PlanNodeView, selected: bool) -> bool {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.add_space(SP_3 * node.depth as f32);
-                match node.status {
-                    Some(status) => {
-                        status_icon(ui, status);
-                    }
-                    None => {
-                        progress_bar(ui, MINI_BAR_WIDTH, Some(&node.progress_ppm));
-                        ui.label(small(
-                            format!("{}%", node.progress_ppm.completed.min(1_000_000) / 10_000),
-                            palette().TEXT_MUTED,
-                        ));
-                    }
-                }
+                status_icon(ui, node_status(node.status, &node.progress_ppm));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let response = ui.label(small(
-                        format!("{} {}", icons::SCALES, node.weight),
-                        palette().TEXT_MUTED,
-                    ));
-                    let weight = format!("Weight {}", node.weight);
-                    response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &weight)
-                    });
-                    let _ = response.on_hover_text(weight);
+                    if node.status.is_none() {
+                        parent_share(ui, &node.progress_ppm);
+                    }
+                    weight_label(ui, node.weight);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.add(egui::Label::new(&node.title).truncate());
+                        let title = RichText::new(&node.title);
+                        let title = if node.status.is_none() {
+                            title.strong()
+                        } else {
+                            title
+                        };
+                        ui.add(egui::Label::new(title).truncate());
                     });
                 });
             });
         });
+    let rect = inner.response.rect;
+    if selected {
+        let edge = egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height()));
+        ui.painter().rect_filled(edge, 1.0, palette().ACCENT);
+        let shown = ui.id().with("plan-selection-shown");
+        let changed = ui.data_mut(|data| {
+            let changed = data.get_temp::<String>(shown).as_deref() != Some(&node.task_id);
+            data.insert_temp(shown, node.task_id.clone());
+            changed
+        });
+        if changed {
+            ui.scroll_to_rect(rect, None);
+        }
+    }
     let response = ui.interact(
-        inner.response.rect,
+        rect,
         ui.id().with(("plan-node", &node.task_id)),
         Sense::click(),
     );
@@ -383,16 +569,19 @@ fn node_row(ui: &mut Ui, node: &PlanNodeView, selected: bool) -> bool {
     response.clicked()
 }
 
-/// A tree row's accessible name: its title and state (or completion share).
+/// A tree row's accessible name: its title, state, a parent's completion
+/// share, and its weight.
 pub fn node_label(node: &PlanNodeView) -> String {
-    let state = match node.status {
-        Some(status) => status_style(status).1.to_owned(),
+    let state = status_style(node_status(node.status, &node.progress_ppm)).1;
+    match node.status {
+        Some(_) => format!("{}, {state}, weight {}", node.title, node.weight),
         None => format!(
-            "{}% complete",
-            node.progress_ppm.completed.min(1_000_000) / 10_000
+            "{}, {state}, {}% complete, weight {}",
+            node.title,
+            percent(node.progress_ppm.completed),
+            node.weight
         ),
-    };
-    format!("{}, {state}, weight {}", node.title, node.weight)
+    }
 }
 
 fn section(ui: &mut Ui, icon: &str, name: &str, color: Color32, body: &str) {
@@ -402,34 +591,21 @@ fn section(ui: &mut Ui, icon: &str, name: &str, color: Color32, body: &str) {
     });
 }
 
+/// The selected task: its title row, then what blocks it, its description and
+/// its result.
 fn detail(ui: &mut Ui, node: &workbench_protocol::namespaces::execution::plan::PlanNodeDetail) {
     ui.horizontal(|ui| {
-        match node.status {
-            Some(status) => {
-                status_icon(ui, status);
+        status_icon(ui, node_status(node.status, &node.progress_ppm));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            weight_label(ui, node.weight);
+            if node.status.is_none() {
+                parent_share(ui, &node.progress_ppm);
             }
-            None => {
-                progress_bar(ui, MINI_BAR_WIDTH, Some(&node.progress_ppm));
-                ui.label(small(
-                    format!("{}%", node.progress_ppm.completed.min(1_000_000) / 10_000),
-                    palette().TEXT_MUTED,
-                ));
-            }
-        }
-        ui.add(egui::Label::new(RichText::new(&node.title).strong()).wrap());
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(RichText::new(&node.title).strong()).wrap());
+            });
+        });
     });
-    if !node.description.is_empty() {
-        section(
-            ui,
-            icons::TEXT_ALIGN_LEFT,
-            "Description",
-            palette().TEXT_MUTED,
-            &node.description,
-        );
-    }
-    if !node.result.is_empty() {
-        section(ui, icons::FLAG, "Result", palette().SUCCESS, &node.result);
-    }
     if !node.blocker.is_empty() {
         egui::Frame::new()
             .stroke(Stroke::new(1.0, palette().ERROR_FG))
@@ -446,6 +622,18 @@ fn detail(ui: &mut Ui, node: &workbench_protocol::namespaces::execution::plan::P
                     &node.blocker,
                 );
             });
+    }
+    if !node.description.is_empty() {
+        section(
+            ui,
+            icons::TEXT_ALIGN_LEFT,
+            "Description",
+            palette().TEXT_MUTED,
+            &node.description,
+        );
+    }
+    if !node.result.is_empty() {
+        section(ui, icons::FLAG, "Result", palette().SUCCESS, &node.result);
     }
     ui.add_space(SP_2);
 }

@@ -94,10 +94,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.place_conversation_plan_tab();
         }
         self.focus_panel(PANEL);
+        self.reveal_conversation_plan_tab();
     }
 
-    /// Adds the tab to the subagent region (as the agent browser does), else
-    /// to the right of the main area.
+    /// The tab sits near the start of its bar, so scrolling the bar back to
+    /// its start shows the title and close button even when the bar has more
+    /// tabs than fit; egui_dock otherwise keeps the old scroll offset.
+    fn reveal_conversation_plan_tab(&mut self) {
+        if let Some(path) = self.dock.find_tab(&PanelId::new(PANEL))
+            && let Ok(leaf) = self.dock.leaf_mut(path.node_path())
+        {
+            leaf.scroll = 0.0;
+        }
+    }
+
+    /// Adds the tab to the subagent region (as the agent browser does) right
+    /// after the Subagents tab, else to the right of the main area. A narrow
+    /// region's tab bar cannot show every transcript, and a tab appended last
+    /// would open out of sight.
     fn place_conversation_plan_tab(&mut self) {
         let id = PanelId::new(PANEL);
         let focus = self.subagent_focus_snapshot();
@@ -107,6 +121,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .filter(|path| path.surface == SurfaceIndex::main())
             .map(|path| path.node)
             .or_else(|| self.subagent_leaves().first().copied());
+        let home = PanelId::new("subagents-home");
         let leaf = region.and_then(|node| {
             self.dock
                 .leaf_mut(NodePath {
@@ -117,8 +132,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         });
         match leaf {
             Some(leaf) => {
-                leaf.tabs.push(id);
-                leaf.active = TabIndex(leaf.tabs.len() - 1);
+                let index = leaf
+                    .tabs
+                    .iter()
+                    .position(|tab| tab == &home)
+                    .map_or(0, |home| home + 1);
+                leaf.tabs.insert(index, id);
+                leaf.active = TabIndex(index);
             }
             None => {
                 let tree = self.dock.main_surface_mut();

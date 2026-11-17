@@ -82,19 +82,24 @@ fn without_a_plan_the_band_says_so_and_cannot_open() {
 fn panel_harness(
     scenario: PlanScenario,
 ) -> Harness<'static, (ConversationPlanModel, Vec<PlanPanelAction>)> {
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(640.0, 900.0))
-        .build_ui_state(
-            |ui, (model, actions): &mut (ConversationPlanModel, Vec<PlanPanelAction>)| {
-                if !themed(ui) {
-                    return;
-                }
-                if let Some(action) = plan_panel(ui, model.state()) {
-                    actions.push(action);
-                }
-            },
-            (model(scenario), Vec::new()),
-        );
+    sized_panel_harness(scenario, egui::vec2(640.0, 900.0))
+}
+
+fn sized_panel_harness(
+    scenario: PlanScenario,
+    size: egui::Vec2,
+) -> Harness<'static, (ConversationPlanModel, Vec<PlanPanelAction>)> {
+    let mut harness = Harness::builder().with_size(size).build_ui_state(
+        |ui, (model, actions): &mut (ConversationPlanModel, Vec<PlanPanelAction>)| {
+            if !themed(ui) {
+                return;
+            }
+            if let Some(action) = plan_panel(ui, model.state()) {
+                actions.push(action);
+            }
+        },
+        (model(scenario), Vec::new()),
+    );
     harness.run();
     harness
 }
@@ -108,6 +113,67 @@ fn a_tree_row_click_asks_to_select_that_task() {
     assert_eq!(
         harness.state().1,
         vec![PlanPanelAction::Select(node.task_id)]
+    );
+}
+
+#[test]
+fn the_detail_shows_the_blocker_before_the_description() {
+    let harness = panel_harness(PlanScenario::Detailed);
+    let blocker = harness.get_by_label("Blocker").rect();
+    let description = harness.get_by_label("Description").rect();
+    assert!(
+        blocker.bottom() <= description.top(),
+        "{blocker:?} {description:?}"
+    );
+}
+
+/// The selected row's rectangle and the detail's blocker.
+fn row_and_blocker(size: egui::Vec2) -> (egui::Rect, egui::Rect) {
+    let harness = sized_panel_harness(PlanScenario::Detailed, size);
+    let state = harness.state().0.state();
+    let selected = state.selected().unwrap();
+    let node = state
+        .tree()
+        .unwrap()
+        .nodes
+        .iter()
+        .find(|node| node.task_id == selected)
+        .unwrap()
+        .clone();
+    let row = harness.get_by_label(&node_label(&node)).rect();
+    (row, harness.get_by_label("Blocker").rect())
+}
+
+#[test]
+fn the_detail_sits_beside_the_tree_when_wide_and_below_it_when_narrow() {
+    let (row, blocker) = row_and_blocker(egui::vec2(900.0, 600.0));
+    assert!(row.right() <= blocker.left(), "{row:?} {blocker:?}");
+
+    let (row, blocker) = row_and_blocker(egui::vec2(420.0, 900.0));
+    assert!(row.bottom() <= blocker.top(), "{row:?} {blocker:?}");
+}
+
+#[test]
+fn the_legend_gives_each_states_share_of_the_servers_weight() {
+    let harness = panel_harness(PlanScenario::Mixed);
+    let progress = harness.state().0.state().tree().unwrap().progress;
+    for status in LEGEND_ORDER {
+        let name = status_style(status).1;
+        let share = percent(value(&progress.weighted_ppm, status));
+        harness.get_by_label(&format!("{name} weight: {share}%"));
+    }
+}
+
+#[test]
+fn without_a_plan_the_panel_shows_the_empty_state() {
+    let harness = panel_harness(PlanScenario::Unplanned);
+    let labels: Vec<_> = harness.query_all_by_label(NOT_PLANNED).collect();
+    assert!(labels.len() >= 2, "icon and text say the plan is empty");
+    assert!(
+        harness
+            .query_all_by_role(egui::accesskit::Role::Button)
+            .next()
+            .is_none()
     );
 }
 
