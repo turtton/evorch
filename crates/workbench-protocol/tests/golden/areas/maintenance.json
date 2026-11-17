@@ -1,1 +1,187 @@
-{}
+{
+  "command/maintenance/cancel_maintenance": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "cancel_maintenance"
+    },
+    "type": "maintenance"
+  },
+  "command/maintenance/start_maintenance": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1",
+        "task": {
+          "payload": {
+            "batch_rows": 1000,
+            "max_rows": 10000
+          },
+          "type": "backfill_events"
+        }
+      },
+      "type": "start_maintenance"
+    },
+    "type": "maintenance"
+  },
+  "query/maintenance/get_maintenance": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_maintenance"
+    },
+    "type": "maintenance"
+  },
+  "query/maintenance/list_maintenance": {
+    "payload": {
+      "payload": {
+        "page": {
+          "limit": 20
+        }
+      },
+      "type": "list_maintenance"
+    },
+    "type": "maintenance"
+  },
+  "query_reply/maintenance/list": {
+    "payload": {
+      "payload": {
+        "items": [
+          {
+            "batches": 2,
+            "effect": "complete",
+            "operation": {
+              "operation_id": "op-2",
+              "revision": "4",
+              "state": {
+                "type": "ready"
+              }
+            },
+            "outcome": "completed_with_gaps",
+            "progress": {
+              "payload": {
+                "request_id": "request-1",
+                "succeeded": 11,
+                "target_count": 12,
+                "unindexed": 1
+              },
+              "type": "reindex_threads"
+            },
+            "task": "reindex_threads"
+          },
+          {
+            "batches": 0,
+            "effect": "none",
+            "operation": {
+              "operation_id": "op-1",
+              "revision": "3",
+              "state": {
+                "type": "pending"
+              }
+            },
+            "progress": {
+              "payload": {
+                "converted": 0,
+                "reattributed": 0
+              },
+              "type": "backfill_events"
+            },
+            "task": "backfill_events"
+          }
+        ],
+        "snapshot_revision": "5"
+      },
+      "type": "list"
+    },
+    "type": "maintenance"
+  },
+  "query_reply/maintenance/operation": {
+    "payload": {
+      "payload": {
+        "batches": 2,
+        "effect": "complete",
+        "operation": {
+          "operation_id": "op-2",
+          "revision": "4",
+          "state": {
+            "type": "ready"
+          }
+        },
+        "outcome": "completed_with_gaps",
+        "progress": {
+          "payload": {
+            "request_id": "request-1",
+            "succeeded": 11,
+            "target_count": 12,
+            "unindexed": 1
+          },
+          "type": "reindex_threads"
+        },
+        "task": "reindex_threads"
+      },
+      "type": "operation"
+    },
+    "type": "maintenance"
+  },
+  "ui_event/maintenance/maintenance_progress": {
+    "payload": {
+      "payload": {
+        "view": {
+          "batches": 3,
+          "effect": "partial",
+          "operation": {
+            "operation_id": "op-1",
+            "revision": "3",
+            "state": {
+              "type": "pending"
+            }
+          },
+          "progress": {
+            "payload": {
+              "converted": 3000,
+              "reattributed": 0,
+              "remaining_unattributed": 0,
+              "remaining_unconverted": 7000
+            },
+            "type": "backfill_events"
+          },
+          "task": "backfill_events"
+        }
+      },
+      "type": "maintenance_progress"
+    },
+    "type": "maintenance"
+  },
+  "ui_event/maintenance/maintenance_settled": {
+    "payload": {
+      "payload": {
+        "view": {
+          "batches": 3,
+          "effect": "partial",
+          "message": "cancelled after 3 committed batches",
+          "operation": {
+            "operation_id": "op-1",
+            "revision": "3",
+            "state": {
+              "reason": "requested",
+              "type": "cancelled"
+            }
+          },
+          "progress": {
+            "payload": {
+              "converted": 3000,
+              "reattributed": 0,
+              "remaining_unattributed": 0,
+              "remaining_unconverted": 7000
+            },
+            "type": "backfill_events"
+          },
+          "task": "backfill_events"
+        }
+      },
+      "type": "maintenance_settled"
+    },
+    "type": "maintenance"
+  }
+}
