@@ -22,7 +22,7 @@ pub struct RestartTasks(Arc<Inner>);
 struct Inner {
     tracker: Mutex<TaskTracker>,
     failed: AtomicBool,
-    activity: Activity,
+    activity: ActivityObserver,
 }
 
 struct Completion {
@@ -82,31 +82,40 @@ impl RestartTasks {
     }
 }
 
-// (active tasks, sticky unconfirmed completion, generation). Only copied
-// standard types escape this private lock; observers cannot stall task Drop.
+/// Read-only, cloneable activity observation independent of task/connection ownership.
+/// Snapshots are copied and notification futures never retain an update lock.
+#[derive(Clone, Default)]
+pub struct ActivityObserver(Arc<Activity>);
+
+// (active items, sticky unconfirmed completion, generation).
+// Only copied standard types escape this private lock.
 #[derive(Default)]
 struct Activity {
     state: Mutex<(usize, bool, u64)>,
     changed: tokio::sync::Notify,
 }
 
-impl Activity {
+impl ActivityObserver {
     fn update(&self, change: impl FnOnce(&mut (usize, bool, u64))) {
         {
             // No user code runs while locked, and poison must not make Drop
             // panic if a preceding task unwound.
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             change(&mut state);
             state.2 = state.2.wrapping_add(1);
         }
-        self.changed.notify_waiters();
+        self.0.changed.notify_waiters();
     }
 
-    fn started(&self) {
+    pub(crate) fn started(&self) {
         self.update(|state| state.0 = state.0.saturating_add(1));
     }
 
-    fn completed(&self, finished: bool) {
+    pub(crate) fn completed(&self, finished: bool) {
         self.update(|state| {
             state.0 = state.0.saturating_sub(1);
             state.1 |= !finished;
@@ -114,13 +123,12 @@ impl Activity {
     }
 }
 
-impl RestartTasks {
+impl ActivityObserver {
     /// Copied active count, sticky unconfirmed-completion flag and generation.
-    /// Observation never closes admission or exposes a guard needed by Drop.
-    pub fn activity_snapshot(&self) -> (usize, bool, u64) {
+    /// No update lock escapes this method.
+    pub fn snapshot(&self) -> (usize, bool, u64) {
         *self
             .0
-            .activity
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -129,17 +137,24 @@ impl RestartTasks {
     /// Await a generation different from the caller's copied snapshot. Register
     /// before rechecking to avoid losing a concurrent update; a completed pair
     /// of start/end transitions also changes the generation. No lock crosses
-    /// an await, and cancellation never affects task admission or ownership.
-    pub async fn activity_changed(&self, observed: u64) {
+    /// an await, and cancellation never affects activity ownership.
+    pub async fn changed(&self, observed: u64) {
         loop {
-            let changed = self.0.activity.changed.notified();
+            let changed = self.0.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self.activity_snapshot().2 != observed {
+            if self.snapshot().2 != observed {
                 return;
             }
             changed.await;
         }
+    }
+}
+
+impl RestartTasks {
+    /// Observe without closing admission or changing task ownership/drain.
+    pub fn activity(&self) -> ActivityObserver {
+        self.0.activity.clone()
     }
 }
 
@@ -152,37 +167,38 @@ mod activity_tests {
     #[tokio::test]
     async fn open_admission_reports_increases_decreases_and_coalesced_activity() {
         let tasks = RestartTasks::default();
-        let mut observed = tasks.activity_snapshot();
+        let observer = tasks.activity();
+        let mut observed = observer.snapshot();
         assert_eq!((observed.0, observed.1), (0, false));
         let (release, receive) = oneshot::channel();
         let first = tasks.spawn(async move { receive.await.unwrap() }).unwrap();
-        tasks.activity_changed(observed.2).await;
-        observed = tasks.activity_snapshot();
+        observer.changed(observed.2).await;
+        observed = observer.snapshot();
         assert_eq!((observed.0, observed.1), (1, false));
         let (release_second, receive_second) = oneshot::channel();
         let second = tasks
             .spawn(async move { receive_second.await.unwrap() })
             .unwrap();
-        tasks.activity_changed(observed.2).await;
-        observed = tasks.activity_snapshot();
+        observer.changed(observed.2).await;
+        observed = observer.snapshot();
         assert_eq!((observed.0, observed.1), (2, false));
 
         release.send(()).unwrap();
         first.await.unwrap();
-        tasks.activity_changed(observed.2).await;
-        observed = tasks.activity_snapshot();
+        observer.changed(observed.2).await;
+        observed = observer.snapshot();
         assert_eq!((observed.0, observed.1), (1, false));
         release_second.send(()).unwrap();
         second.await.unwrap();
-        tasks.activity_changed(observed.2).await;
-        observed = tasks.activity_snapshot();
+        observer.changed(observed.2).await;
+        observed = observer.snapshot();
         assert_eq!((observed.0, observed.1), (0, false));
 
         // Observation never seals admission; even an entirely completed task
         // since the last observation leaves a generation to reset idle grace.
         tasks.spawn(async {}).unwrap().await.unwrap();
-        tasks.activity_changed(observed.2).await;
-        let after = tasks.activity_snapshot();
+        observer.changed(observed.2).await;
+        let after = observer.snapshot();
         assert_ne!(after.2, observed.2);
         assert_eq!((after.0, after.1), (0, false));
         tasks.drain().await.unwrap();
@@ -192,7 +208,8 @@ mod activity_tests {
     async fn aborted_or_panicking_tasks_publish_a_sticky_unconfirmed_completion() {
         for panic in [false, true] {
             let tasks = RestartTasks::default();
-            let observed = tasks.activity_snapshot();
+            let observer = tasks.activity();
+            let observed = observer.snapshot();
             let task = if panic {
                 tasks.spawn(async { panic!("injected failure") }).unwrap()
             } else {
@@ -201,17 +218,41 @@ mod activity_tests {
                 task
             };
             assert!(task.await.is_err());
-            tasks.activity_changed(observed.2).await;
-            let activity = tasks.activity_snapshot();
+            observer.changed(observed.2).await;
+            let activity = observer.snapshot();
             assert_eq!((activity.0, activity.1), (0, true));
             assert!(tasks.drain().await.is_err());
-            assert_eq!(tasks.activity_snapshot(), activity);
+            assert_eq!(observer.snapshot(), activity);
         }
+    }
+
+    #[test]
+    fn observer_snapshot_and_waiter_allow_completion_on_another_thread() {
+        struct CompleteOnDrop(ActivityObserver);
+        impl Drop for CompleteOnDrop {
+            fn drop(&mut self) {
+                self.0.completed(false);
+            }
+        }
+        let observer = ActivityObserver::default();
+        observer.started();
+        let copied = observer.snapshot();
+        let mut changed = Box::pin(observer.changed(copied.2));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(changed.as_mut().poll(&mut context).is_pending());
+        let completion = CompleteOnDrop(observer.clone());
+        std::thread::spawn(move || drop(completion)).join().unwrap();
+        assert_eq!((copied.0, copied.1), (1, false));
+        assert!(changed.as_mut().poll(&mut context).is_ready());
+        let after = observer.snapshot();
+        assert_eq!((after.0, after.1), (0, true));
+        assert_ne!(after.2, copied.2);
     }
 
     #[test]
     fn held_observation_and_waiter_do_not_block_runtime_destruction() {
         let tasks = RestartTasks::default();
+        let observer = tasks.activity();
         let owner = tasks.clone();
         let (started, entered) = std::sync::mpsc::channel();
         let (release, receive) = oneshot::channel();
@@ -235,9 +276,9 @@ mod activity_tests {
             drop(runtime);
         });
         entered.recv().unwrap();
-        let observation = tasks.activity_snapshot();
+        let observation = observer.snapshot();
         assert_eq!((observation.0, observation.1), (1, false));
-        let mut changed = Box::pin(tasks.activity_changed(observation.2));
+        let mut changed = Box::pin(observer.changed(observation.2));
         let mut context = Context::from_waker(Waker::noop());
         assert!(changed.as_mut().poll(&mut context).is_pending());
         release.send(()).unwrap();
@@ -247,7 +288,7 @@ mod activity_tests {
         thread.join().unwrap();
         assert_eq!((observation.0, observation.1), (1, false));
         assert!(changed.as_mut().poll(&mut context).is_ready());
-        let after = tasks.activity_snapshot();
+        let after = observer.snapshot();
         assert_eq!((after.0, after.1), (0, true));
         assert_ne!(after.2, observation.2);
     }
