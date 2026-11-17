@@ -125,6 +125,10 @@ fn a_saved_image_route_in_a_role_chain_stays_visible_and_blocks_saving() {
     let error = settings.error.as_deref().expect("validation error");
     assert!(error.contains("agents.roles.planner.models"), "{error}");
     assert!(error.contains("codex/gpt-image-1"), "{error}");
-    assert!(settings.open && !settings.is_saving());
+    assert!(!settings.is_saving());
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
     assert_eq!(std::fs::read(&path).expect("config"), before);
 }

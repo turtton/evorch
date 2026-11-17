@@ -22,8 +22,8 @@ fn harness(loaded: bool) -> Harness<'static, ProviderSettingsModel> {
         .build_ui_state(
             |ui, settings| {
                 gui::theme::install(ui.ctx());
-                gui::panes::provider_settings::provider_settings_modal(
-                    ui.ctx(),
+                gui::panes::provider_settings::provider_settings_body(
+                    ui,
                     settings,
                     &CodexAuthModel::default(),
                 );
@@ -183,13 +183,12 @@ fn rename_default_updates_row_and_default() {
 fn capture_model_management() {
     // Given
     let mut fixture = harness(true);
-    fixture.state_mut().open = true;
     let state = gui::app::WorkbenchState::new(
         gui::fixture::DemoSource(Vec::new()),
         &workspace_ui::UiSettings::default(),
     )
     .unwrap()
-    .with_provider_settings(std::mem::take(fixture.state_mut()));
+    .with_open_provider_settings(std::mem::take(fixture.state_mut()));
     let mut h = gui::headless::HeadlessWorkbench::new(state, [1200.0, 1000.0]);
     h.run();
     // When / Then

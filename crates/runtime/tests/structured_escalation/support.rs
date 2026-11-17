@@ -152,7 +152,6 @@ fn harness_with_model(
             generation: config::GenerationOverridesConfig {
                 temperature: Some(0.25),
                 max_tokens: Some(321),
-                ..Default::default()
             },
             ..Default::default()
         },
@@ -251,7 +250,6 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
             generation: config::GenerationOverridesConfig {
                 temperature: Some(0.25),
                 max_tokens: Some(321),
-                ..Default::default()
             },
             ..Default::default()
         },

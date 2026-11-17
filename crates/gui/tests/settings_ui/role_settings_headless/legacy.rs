@@ -122,7 +122,7 @@ fn web_researcher_row_saves_when_model_selected() {
 }
 
 #[test]
-fn save_success_closes_modal() {
+fn save_success_keeps_modal_open() {
     // Given: an open role editor with a valid change.
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
@@ -132,10 +132,13 @@ fn save_success_closes_modal() {
     harness.click_label("Save role settings");
     harness.step();
     finish(&mut harness);
-    // Then: the modal closes without an error.
+    // Then: the modal stays open on the tab without an error.
     assert_eq!(harness.state().role_settings().error, None);
-    assert!(!harness.state().role_settings().open);
-    assert!(!harness.has_label("Agent role settings"));
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
+    assert!(harness.has_label("Agent role settings"));
 }
 
 #[test]
@@ -178,7 +181,7 @@ fn role_settings_geometry_matrix() {
         for dpi in [1.0, 1.5, 2.0] {
             let temp = tempfile::tempdir().expect("temp");
             let (mut original, _) = fixture(temp.path());
-            original.state_mut().role_settings_mut().open = false;
+            original.state_mut().close_settings_modal();
             let mut state =
                 WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
                     .expect("state")
@@ -195,10 +198,13 @@ fn role_settings_geometry_matrix() {
             // When: the deepest category controls are expanded.
             harness.click_label("Worker");
             harness.run();
+            // The header may sit under the Close button in a short window; scroll it clear first.
+            harness.scroll_label_into_view("quick");
+            harness.run();
             harness.click_label("quick");
             harness.run();
             // Then: save stays visible and category controls are scroll reachable.
-            for label in ["Save role settings", "Cancel", "quick route"] {
+            for label in ["Save role settings", "Close", "quick route"] {
                 harness.scroll_label_into_view(label);
                 harness.run();
                 let rects = harness.label_rects(label);
@@ -215,7 +221,7 @@ fn role_settings_geometry_matrix() {
 }
 
 #[test]
-fn menu_opens_role_settings_and_cancel_discards_edits() {
+fn menu_opens_role_settings_and_close_discards_edits() {
     // Given: a closed role editor with an unsaved change.
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
@@ -227,7 +233,7 @@ fn menu_opens_role_settings_and_cancel_discards_edits() {
         .base
         .models = vec![config::ChainEntryConfig::route("fast")];
     harness.run();
-    harness.click_label("Cancel");
+    harness.click_label("Close");
     harness.run();
     // When: reopening through the settings menu.
     harness.click_label("⚙");

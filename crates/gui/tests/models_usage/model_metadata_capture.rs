@@ -19,7 +19,6 @@ fn capture_model_metadata() {
     };
     for size in [[1200.0, 900.0], [800.0, 600.0]] {
         let mut settings = ProviderSettingsModel::default();
-        settings.open = true;
         settings.model_presets.insert(
             "large".into(),
             config::ModelPresetConfig {
@@ -41,7 +40,7 @@ fn capture_model_metadata() {
         let state =
             WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
                 .unwrap()
-                .with_provider_settings(settings);
+                .with_open_provider_settings(settings);
         let mut harness = HeadlessWorkbench::new(state, size);
         harness.run();
         let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {

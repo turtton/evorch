@@ -15,4 +15,5 @@ mod save_model_kinds;
 mod self_improvement_settings_headless;
 mod settings_error_display;
 mod settings_load_options;
+mod settings_tabs_headless;
 mod window_options;

@@ -295,7 +295,6 @@ fn merge_generation(
 ) -> GenerationOverridesConfig {
     GenerationOverridesConfig {
         temperature: category.temperature.or(role.temperature),
-        top_p: category.top_p.or(role.top_p),
         max_tokens: category.max_tokens.or(role.max_tokens),
     }
 }
@@ -424,9 +423,6 @@ pub struct GenerationOverridesConfig {
     /// サンプリング温度。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    /// nucleus サンプリングの確率質量。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
     /// 最大出力トークン数。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -817,7 +813,6 @@ preset = "worker-appendix"
 
 [agents.worker.generation]
 temperature = 0.7
-top_p = 1.0
 max_tokens = 4096
 
 [agents.worker.categories.quick]
@@ -831,7 +826,6 @@ preset = "quick-appendix"
         assert_eq!(agents.worker.head_route(), Some("worker"));
         assert_eq!(agents.worker.preset.as_deref(), Some("worker-appendix"));
         assert_eq!(agents.worker.generation.temperature, Some(0.7));
-        assert_eq!(agents.worker.generation.top_p, Some(1.0));
         assert_eq!(agents.worker.generation.max_tokens, Some(4096));
         let quick = agents
             .worker
@@ -865,14 +859,13 @@ preset = "quick-appendix"
         );
     }
 
-    // Given: generation の 3 フィールドをすべて含む設定 TOML
+    // Given: generation の全フィールドを含む設定 TOML
     // When: GenerationOverridesConfig にパースする
     // Then: 型付きの値として読み取れる
     #[test]
     fn generation_overrides_parse_typed_fields() {
         let doc = r#"
 temperature = 0.2
-top_p = 0.9
 max_tokens = 8192
 "#;
 
@@ -880,7 +873,6 @@ max_tokens = 8192
             toml::from_str(doc).expect("generation 上書きをパースできる");
 
         assert_eq!(generation.temperature, Some(0.2));
-        assert_eq!(generation.top_p, Some(0.9));
         assert_eq!(generation.max_tokens, Some(8192));
     }
 
@@ -929,7 +921,6 @@ temperature = 0.9
         assert_eq!(resolved.preset.as_deref(), Some("worker-appendix"));
         assert_eq!(resolved.generation.temperature, Some(0.9));
         assert_eq!(resolved.generation.max_tokens, Some(4096));
-        assert_eq!(resolved.generation.top_p, None);
     }
 
     #[test]
@@ -941,7 +932,6 @@ models = [{ route = "review-base" }]
 preset = "base-appendix"
 [agents.reviewer.generation]
 temperature = 0.2
-top_p = 0.8
 max_tokens = 4096
 [agents.reviewer.categories.plan-review]
 models = [{ route = "plan-model" }]
@@ -950,7 +940,6 @@ temperature = 0.6
 [agents.reviewer.categories.tool-execution]
 preset = "tool-appendix"
 [agents.reviewer.categories.tool-execution.generation]
-top_p = 0.9
 max_tokens = 2048
 "#,
         )
@@ -960,7 +949,6 @@ max_tokens = 2048
         assert_eq!(plan.head_route(), "plan-model");
         assert_eq!(plan.preset.as_deref(), Some("base-appendix"));
         assert_eq!(plan.generation.temperature, Some(0.6));
-        assert_eq!(plan.generation.top_p, Some(0.8));
         assert_eq!(plan.generation.max_tokens, Some(4096));
         let tool = agents
             .binding_for("reviewer", Some("tool-execution"))
@@ -968,7 +956,6 @@ max_tokens = 2048
         assert_eq!(tool.head_route(), "review-base");
         assert_eq!(tool.preset.as_deref(), Some("tool-appendix"));
         assert_eq!(tool.generation.temperature, Some(0.2));
-        assert_eq!(tool.generation.top_p, Some(0.9));
         assert_eq!(tool.generation.max_tokens, Some(2048));
         assert_eq!(
             agents

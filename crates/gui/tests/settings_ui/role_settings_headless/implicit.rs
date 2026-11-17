@@ -19,6 +19,7 @@ fn implicit_roles_without_routes_offer_creation_with_resolved_role_name() {
         let text = std::fs::read_to_string(&path).expect("config");
         let text = text.split("[routing.routes]").next().expect("profiles");
         std::fs::write(&path, text).expect("no routes");
+        harness.state_mut().close_settings_modal();
         harness.state_mut().open_role_settings();
         let agents = harness.state().role_settings().agents.clone();
         harness.run();
@@ -30,8 +31,14 @@ fn implicit_roles_without_routes_offer_creation_with_resolved_role_name() {
         harness.click_label("Create route");
         harness.run();
         // Then: routing is prefilled without materializing an agents binding or writing disk.
-        assert!(!harness.state().role_settings().open);
-        assert!(harness.state().routing_settings().open);
+        assert_ne!(
+            harness.state().settings_tab(),
+            Some(gui::panes::settings::SettingsTab::AgentRoles)
+        );
+        assert_eq!(
+            harness.state().settings_tab(),
+            Some(gui::panes::settings::SettingsTab::Routing)
+        );
         assert_eq!(
             harness
                 .state()

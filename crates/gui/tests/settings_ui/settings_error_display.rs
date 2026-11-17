@@ -12,8 +12,8 @@ fn modal(error: &str) -> Harness<'static, ProviderSettingsModel> {
         .build_ui_state(
             |ui, settings| {
                 gui::theme::install(ui.ctx());
-                gui::panes::provider_settings::provider_settings_modal(
-                    ui.ctx(),
+                gui::panes::provider_settings::provider_settings_body(
+                    ui,
                     settings,
                     &CodexAuthModel::default(),
                 );

@@ -47,7 +47,10 @@ fn saves_existing_keyring_profile_without_typing_token() {
         harness.state().provider_settings().error
     );
     assert!(harness.state().provider_settings().editor.is_none());
-    assert!(harness.state().provider_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Providers)
+    );
     assert!(harness.has_label("Provider settings"));
     assert!(harness.has_label("A"));
     assert!(harness.has_label("Edit"));
@@ -243,7 +246,14 @@ fn save_valid_settings_writes_project_config_and_flips_status() {
         harness.state().provider_status(),
         &ProviderStatus::Configured
     );
-    assert!(!harness.state().provider_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Providers)
+    );
+    assert!(harness.has_label("Provider settings"));
+    harness.click_label("Close");
+    harness.run();
+    assert_eq!(harness.state().settings_tab(), None);
     assert!(!harness.has_label("Provider settings"));
     harness.run();
     harness.step();

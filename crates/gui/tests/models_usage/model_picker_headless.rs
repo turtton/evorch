@@ -458,7 +458,10 @@ fn picker_disabled_without_profiles_offers_settings() {
     harness.click_label("Providers");
     harness.run();
     // Then
-    assert!(harness.state().provider_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Providers)
+    );
     assert!(harness.has_label("Select model"));
 }
 

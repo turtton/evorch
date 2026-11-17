@@ -72,7 +72,7 @@ fn compactor_controls_save_chain_effort_generation_and_restore_inheritance() {
     harness.run();
     harness.click_label("Generation overrides");
     harness.run();
-    for label in ["Temperature", "Top p", "Max tokens"] {
+    for label in ["Temperature", "Max tokens"] {
         harness.scroll_label_into_view(label);
         harness.run();
         harness.click_label(label);
@@ -82,7 +82,6 @@ fn compactor_controls_save_chain_effort_generation_and_restore_inheritance() {
         models: vec![config::ChainEntryConfig::with_effort("fast", "high")],
         generation: config::GenerationOverridesConfig {
             temperature: Some(0.0),
-            top_p: Some(0.0),
             max_tokens: Some(1),
         },
         ..Default::default()
@@ -136,8 +135,14 @@ fn unknown_compactor_route_opens_prefilled_routing_settings() {
     harness.click_label("Create route");
     harness.run();
 
-    assert!(!harness.state().role_settings().open);
-    assert!(harness.state().routing_settings().open);
+    assert_ne!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     assert_eq!(
         harness
             .state()
@@ -188,7 +193,10 @@ fn invalid_compactor_settings_are_rejected_before_saving() {
         let error = settings.error.as_deref().expect("validation error");
         assert!(error.contains("agents.roles.compactor"));
         assert!(harness.has_label(error));
-        assert!(settings.open);
+        assert_eq!(
+            harness.state().settings_tab(),
+            Some(gui::panes::settings::SettingsTab::AgentRoles)
+        );
         assert!(!settings.is_saving());
         assert_eq!(std::fs::read(&path).expect("config"), before);
     }

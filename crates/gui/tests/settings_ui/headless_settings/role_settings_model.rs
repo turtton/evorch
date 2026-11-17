@@ -76,20 +76,6 @@ fn compactor_generation_validation_rejects_non_finite_and_out_of_range_values() 
                 ..Default::default()
             },
         ),
-        (
-            "top_p",
-            config::GenerationOverridesConfig {
-                top_p: Some(f64::INFINITY),
-                ..Default::default()
-            },
-        ),
-        (
-            "top_p",
-            config::GenerationOverridesConfig {
-                top_p: Some(-0.1),
-                ..Default::default()
-            },
-        ),
     ] {
         let mut editor = RoleSettingsModel::default();
         editor.agents.roles.compactor.generation = generation;

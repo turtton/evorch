@@ -91,9 +91,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if capture.open_settings {
         let config = gui::fixture::demo_provider_config();
-        *state.provider_settings_mut() =
-            gui::model::provider_settings::ProviderSettingsModel::seed_from_config(&config);
-        state.provider_settings_mut().open = true;
+        state.open_provider_settings_with(
+            gui::model::provider_settings::ProviderSettingsModel::seed_from_config(&config),
+        );
         if capture.edit_profile {
             state.provider_settings_mut().edit("local");
         }

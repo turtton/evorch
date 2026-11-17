@@ -53,9 +53,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.load_sandbox_settings();
         self.sandbox_settings.draft = self.sandbox_settings.config;
-        self.provider_settings.open = false;
-        self.routing_settings.open = false;
-        self.role_settings.open = false;
+        self.dismiss_settings_modal();
         self.close_theme_settings();
         self.self_improvement_settings.open = false;
         self.agent_features.open = false;

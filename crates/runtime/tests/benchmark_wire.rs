@@ -73,7 +73,6 @@ async fn benchmark_preserves_http_payload_and_rejects_cross_protocol_before_requ
     agents.worker.base.generation = config::GenerationOverridesConfig {
         temperature: Some(0.25),
         max_tokens: Some(321),
-        ..Default::default()
     };
     let model = Arc::new(RoutedModel::new(
         ComposedProviders {

@@ -5,7 +5,8 @@ For Codex (ChatGPT login) and OpenAI API image generation and editing, see
 this optional capability; it uses a separate image-model chain, not chat tools.
 
 Open **Provider settings** to add a Claude API, Claude subscription, or Cursor
-profile. Claude API keys can be read from an environment variable or saved in
+profile. It opens the **Providers** tab of the settings window; see
+[The settings window](#the-settings-window). Claude API keys can be read from an environment variable or saved in
 the credential store. Subscription profiles support browser sign-in; Cursor also
 supports a user API key. Use **Refresh
 models** after signing in, select the models to enable, choose a default, and
@@ -441,13 +442,36 @@ single-entry `models` list, and a route candidate's `reasoning_effort` moves to
 the chain entries that use that route. The first saved change rewrites the file
 as version 3.
 
+### The settings window
+
+Providers, Routing and Agent roles share one settings window with a tab for
+each. The provider, routing and agent role entries of the settings menu open
+the window on their own tab; opening another entry while it is open only
+switches the tab. The window does not remember the tab after it closes.
+
+- Switching tabs keeps every unsaved draft and error. **Save** writes only the
+  current tab and the window stays open afterwards. **Close** is the single way
+  out; it discards the unsaved drafts of all tabs. While a save is running, tabs,
+  **Close** and a second save are disabled.
+- Routing and Agent roles edit the same profile. While either tab has unsaved
+  edits the profile selector is disabled and says so.
+- A role binding without a route offers **Create route**. It keeps the role draft,
+  adds the route to the Routing draft (an existing route of that name is shown
+  instead of duplicated) and opens the Routing tab. A successful Routing save
+  returns to Agent roles; a failed one stays on Routing with both drafts kept.
+  Opening Routing directly or moving tabs by hand drops the way back.
+- A provider save can add automatic routes to the saved routing. The Routing tab
+  picks them up when it has no unsaved edits. With edits, the draft is kept; if
+  the saved routing of the profile changed, saving it is disabled until you close
+  and reopen the window, so the automatic routes are never overwritten.
+
 ### Editing chains in the GUI
 
-Agent role settings edit the whole chain of a role or category. The first
+The Agent roles tab edits the whole chain of a role or category. The first
 picker sets the head route; each fallback entry below it picks one of the
-defined routes and its own reasoning effort, and can be moved up, moved down
-or removed. "Add … fallback" appends the first defined route the chain does
-not use yet. Agent roles, categories and the compactor are offered only routes
+defined routes and its own reasoning effort. Icon buttons (named for assistive
+tools and shown as tooltips) move an entry up or down, remove it, or add a
+fallback. Adding appends the first defined route the chain does not use yet. Agent roles, categories and the compactor are offered only routes
 of chat models, and the Image generator only routes of image generation models
 (see [Model kinds and the image generator](#model-kinds-and-the-image-generator)).
 

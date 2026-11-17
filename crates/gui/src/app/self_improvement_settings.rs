@@ -20,9 +20,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             Err(error) => self.self_improvement_settings.error = Some(error.to_string()),
         }
-        self.provider_settings.open = false;
-        self.routing_settings.open = false;
-        self.role_settings.open = false;
+        self.dismiss_settings_modal();
         self.sandbox_settings.open = false;
         self.agent_features.open = false;
         self.close_theme_settings();

@@ -91,7 +91,6 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
         preset: Some("role-preset".into()),
         generation: GenerationOverridesConfig {
             temperature: Some(0.2),
-            top_p: Some(0.9),
             max_tokens: Some(4096),
         },
     };

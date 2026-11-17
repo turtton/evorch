@@ -197,7 +197,7 @@ const EVAL_BUDGET_KEYS: &[&str] = &[
 const EVAL_BINDINGS: &[&str] = &["user_simulator", "judge"];
 const ROLE_BINDING_KEYS: &[&str] = &["models", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["models", "preset", "generation"];
-const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens"];
+const GENERATION_KEYS: &[&str] = &["temperature", "max_tokens"];
 const CREDENTIAL_LIKE_KEYS: &[&str] = &[
     "api_key",
     "apikey",

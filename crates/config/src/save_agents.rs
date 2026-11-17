@@ -118,9 +118,6 @@ fn insert_generation(table: &mut Table, generation: &GenerationOverridesConfig) 
     if let Some(temperature) = generation.temperature {
         overrides.insert("temperature", value(temperature));
     }
-    if let Some(top_p) = generation.top_p {
-        overrides.insert("top_p", value(top_p));
-    }
     if let Some(max_tokens) = generation.max_tokens {
         overrides.insert("max_tokens", value(i64::from(max_tokens)));
     }

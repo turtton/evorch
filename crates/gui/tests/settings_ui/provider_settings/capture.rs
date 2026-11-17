@@ -47,11 +47,7 @@ fn capture_codex_auth_png_evidence() {
     let (backend, tx) = ScriptedCodexAuthBackend::gated();
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("default state builds")
-        .with_provider_settings({
-            let mut settings = ProviderSettingsModel::default();
-            settings.open = true;
-            settings
-        })
+        .with_open_provider_settings(ProviderSettingsModel::default())
         .with_codex_auth(CodexAuthModel::with_backend(backend, "codex"));
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     // Given: the modal is opened on its default OpenAI tab.
@@ -161,11 +157,10 @@ fn capture_modal_png_evidence() {
             ..Default::default()
         };
         let mut model = ProviderSettingsModel::default();
-        model.open = true;
         model.editor = Some(gui::model::provider_settings::ProfileEditor::OpenAiCompatible(editor));
         let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
             .expect("default state builds")
-            .with_provider_settings(model);
+            .with_open_provider_settings(model);
         let mut harness = HeadlessWorkbench::new(state, size);
         // When: the seeded modal renders directly, independent of ambient credentials.
         harness.run();

@@ -48,9 +48,9 @@ impl State {
             Self::Empty | Self::Demo => {}
             Self::ErrorThread => state.apply_events(demo_error_events()),
             Self::EditProfile => {
-                *state.provider_settings_mut() =
-                    ProviderSettingsModel::seed_from_config(&demo_provider_config());
-                state.provider_settings_mut().open = true;
+                state.open_provider_settings_with(ProviderSettingsModel::seed_from_config(
+                    &demo_provider_config(),
+                ));
                 state.provider_settings_mut().edit("local");
             }
             Self::ThemeSettings => state.open_theme_settings(),

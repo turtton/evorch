@@ -1,7 +1,7 @@
 use crate::model::routing_settings::RoutingSettingsModel;
 mod candidate;
 use crate::theme::{
-    text::{h3, muted},
+    text::muted,
     tokens::*,
     widgets::{primary_button, surface_frame},
 };
@@ -9,57 +9,53 @@ use candidate::candidate_picker;
 
 pub enum RoutingSettingsAction {
     Save,
-    Cancel,
     Profile(crate::model::role_profiles::RoleProfileAction),
 }
 
-pub fn routing_settings_modal(
-    ctx: &egui::Context,
+/// The Routing tab of the settings modal. `profile_locked` disables profile changes while
+/// any settings tab holds unsaved edits.
+pub fn routing_settings_body(
+    ui: &mut egui::Ui,
     model: &mut RoutingSettingsModel,
+    profile_locked: bool,
 ) -> Option<RoutingSettingsAction> {
     let mut action = None;
     let busy = model.is_saving();
-    egui::Modal::new(egui::Id::new("routing-settings"))
-.backdrop_color(palette().OVERLAY)
-.frame(surface_frame(palette().SURFACE_RAISED))
-        .show(ctx, |ui| {
-            ui.set_width((ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0);
-            ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
-            ui.label(h3("Routing settings"));
-            ui.label(muted("Candidates are tried from top to bottom. An empty override uses the profile default."));
-            ui.add_enabled_ui(!busy, |ui| {
-                if let Some(profile) = crate::panes::role_profiles::role_profile_bar(
-                    ui,
-                    "routing",
-                    &mut model.profiles,
-                ) {
-                    action = Some(RoutingSettingsAction::Profile(profile));
-                }
-            });
-            ui.add_enabled_ui(!busy, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("routing-routes")
-                    .max_height((ctx.viewport_rect().height() - TOPBAR * 5.0).max(TOPBAR))
-                    .show(ui, |ui| route_list(ui, model));
-            });
-            if let Some(error) = &model.validation_error {
-crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
-            }
-            if busy {
-                ui.label(muted("Saving and reloading runtime..."));
-            }
-            ui.add_enabled_ui(!busy, |ui| {
-                ui.horizontal(|ui| {
-                    if primary_button(ui, "Save routing").clicked() {
-                        action = Some(RoutingSettingsAction::Save);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        model.origin_role_settings = false;
-                        action = Some(RoutingSettingsAction::Cancel);
-                    }
-                });
-            });
-        });
+    let ctx = ui.ctx().clone();
+    ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
+    ui.label(muted(
+        "Candidates are tried from top to bottom. An empty override uses the profile default.",
+    ));
+    ui.add_enabled_ui(!busy && !profile_locked, |ui| {
+        if let Some(profile) =
+            crate::panes::role_profiles::role_profile_bar(ui, "routing", &mut model.profiles)
+        {
+            action = Some(RoutingSettingsAction::Profile(profile));
+        }
+    });
+    if profile_locked {
+        ui.label(muted(crate::panes::role_profiles::PROFILE_LOCKED_NOTICE));
+    }
+    ui.add_enabled_ui(!busy, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("routing-routes")
+            .max_height((ctx.viewport_rect().height() - TOPBAR * 7.5).max(TOPBAR))
+            .show(ui, |ui| route_list(ui, model));
+    });
+    if let Some(error) = &model.validation_error {
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
+    }
+    if let Some(conflict) = &model.conflict {
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, conflict);
+    }
+    if busy {
+        ui.label(muted("Saving and reloading runtime..."));
+    }
+    ui.add_enabled_ui(!busy && model.conflict.is_none(), |ui| {
+        if primary_button(ui, "Save routing").clicked() {
+            action = Some(RoutingSettingsAction::Save);
+        }
+    });
     action
 }
 

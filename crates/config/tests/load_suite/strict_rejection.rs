@@ -486,6 +486,28 @@ fn agents_section_unknown_key_is_rejected_with_path() {
     );
 }
 
+// Given: 廃止した generation.top_p をロール・名前付きロール・カテゴリに書いた設定
+// When: 厳格に読み込む
+// Then: いずれも top_p の完全なパスを含む unknown field として拒否される
+#[test]
+fn retired_generation_top_p_is_rejected_for_roles_and_categories() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    for table in [
+        "agents.worker.generation",
+        "agents.roles.planner.generation",
+        "agents.worker.categories.quick.generation",
+        "agents.reviewer.categories.plan-review.generation",
+        "role_profiles.night.agents.worker.generation",
+        "role_profiles.night.agents.roles.planner.generation",
+        "role_profiles.night.agents.worker.categories.quick.generation",
+    ] {
+        assert_error_contains(
+            load_project(&tmp, &format!("[{table}]\ntop_p = 0.9\n")),
+            &[&format!("{table}.top_p"), "unknown field"],
+        );
+    }
+}
+
 // Given: agents カテゴリに未知のカテゴリ名と未知のキーを含む設定 / When: 読み込む
 // Then: カテゴリ名とキーの完全なパスを含むエラーになる
 #[test]

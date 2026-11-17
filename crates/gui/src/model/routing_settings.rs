@@ -16,8 +16,11 @@ pub struct ModelChoices {
 
 #[derive(Debug, Default)]
 pub struct RoutingSettingsModel {
-    pub open: bool,
     pub routes: BTreeMap<String, Vec<RouteCandidateConfig>>,
+    /// The routes as last seeded or saved: edits are the difference from it.
+    pub base_routes: BTreeMap<String, Vec<RouteCandidateConfig>>,
+    /// Why saving is disabled: an in-app write changed the saved routing under unsaved edits.
+    pub conflict: Option<String>,
     /// 保存時に `[routing]` を置き換えても失わないよう、読み込んだ値を保持する。
     pub cooldown: config::CooldownConfig,
     /// `cooldown` と同じく、保存で失わないよう読み込んだ値を保持する。
@@ -96,6 +99,7 @@ impl RoutingSettingsModel {
         });
         Self {
             routes: config.routing.routes.clone(),
+            base_routes: config.routing.routes.clone(),
             cooldown: config.routing.cooldown.clone(),
             fallback: config.routing.fallback.clone(),
             route_users: config
@@ -137,34 +141,59 @@ impl RoutingSettingsModel {
         self.save_rx.is_some()
     }
 
+    /// Whether the draft differs from what was seeded or last saved, renames included.
+    pub fn is_dirty(&self) -> bool {
+        self.routes != self.base_routes || !self.route_renames().is_empty()
+    }
+
+    /// Takes the saved-state fields of `config` (a profile view) and leaves the draft alone.
+    pub fn refresh_references(&mut self, config: &Config) {
+        let fresh = Self::seed_from_config(config);
+        self.route_users = fresh.route_users;
+        self.implicit_route_users = fresh.implicit_route_users;
+        self.profile_names = fresh.profile_names;
+        self.profile_models = fresh.profile_models;
+        self.providers = fresh.providers;
+        self.agents = fresh.agents;
+    }
+
     pub fn seed_from_config_prefill(config: &Config, logical: &str) -> Self {
         let mut model = Self::seed_from_config(config);
-        model.origin_role_settings = true;
-        match model.add_route(logical) {
+        model.add_prefill_route(logical, &config.agents);
+        model
+    }
+
+    /// Adds `logical` as the route a role binding asks for and returns to roles after saving.
+    /// An existing route is shown instead of duplicated.
+    pub fn add_prefill_route(&mut self, logical: &str, agents: &config::AgentsConfig) {
+        self.origin_role_settings = true;
+        if self.routes.contains_key(logical) {
+            self.expanded.insert(logical.into());
+            return;
+        }
+        match self.add_route(logical) {
             Ok(()) => {
                 // A route created for the image generator starts on an image model.
-                if config
-                    .agents
+                if agents
                     .image_generator_chain()
                     .iter()
                     .any(|entry| entry.route == logical)
-                    && let Some(candidate) = model.image_candidate()
+                    && let Some(candidate) = self.image_candidate()
                 {
-                    model.routes.insert(logical.into(), vec![candidate]);
+                    self.routes.insert(logical.into(), vec![candidate]);
                 }
-                model.pending_new_route = Some(logical.into());
-                model.route_users.insert(
+                self.pending_new_route = Some(logical.into());
+                self.route_users.insert(
                     logical.into(),
-                    config::types::agents::roles_using(logical, &config.agents),
+                    config::types::agents::roles_using(logical, agents),
                 );
-                model.implicit_route_users.insert(
+                self.implicit_route_users.insert(
                     logical.into(),
-                    config::types::agents::implicit_roles_using(logical, &config.agents),
+                    config::types::agents::implicit_roles_using(logical, agents),
                 );
             }
-            Err(error) => model.validation_error = Some(error.to_string()),
+            Err(error) => self.validation_error = Some(error.to_string()),
         }
-        model
     }
 
     pub fn add_route(&mut self, name: &str) -> Result<(), ConfigError> {
@@ -493,13 +522,18 @@ mod tests {
                 auto: false,
             }],
         );
-        // When: 重複名または空白名をプリフィルする。
-        for name in ["existing", " "] {
-            let model = RoutingSettingsModel::seed_from_config_prefill(&config, name);
-            // Then: 既存ルートを壊さず検証エラーを表示する。
-            assert_eq!(model.routes, config.routing.routes);
-            assert_eq!(model.pending_new_route, None);
-            assert!(model.validation_error.is_some());
-        }
+        // When: 重複名をプリフィルする。
+        let model = RoutingSettingsModel::seed_from_config_prefill(&config, "existing");
+        // Then: 既存ルートを重複追加せず展開して見せる。
+        assert_eq!(model.routes, config.routing.routes);
+        assert_eq!(model.pending_new_route, None);
+        assert!(model.validation_error.is_none());
+        assert!(model.expanded.contains("existing"));
+        // When: 空白名をプリフィルする。
+        let model = RoutingSettingsModel::seed_from_config_prefill(&config, " ");
+        // Then: 既存ルートを壊さず検証エラーを表示する。
+        assert_eq!(model.routes, config.routing.routes);
+        assert_eq!(model.pending_new_route, None);
+        assert!(model.validation_error.is_some());
     }
 }

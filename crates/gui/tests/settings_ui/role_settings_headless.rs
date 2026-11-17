@@ -35,9 +35,8 @@ fn logical_model_options_come_from_routing_routes() {
             .insert(name.into(), vec![config::RouteCandidateConfig::default()]);
     }
     // When: opening the seeded dropdown.
-    let mut model = gui::model::role_settings::RoleSettingsModel::seed_from_config(&config);
-    model.open = true;
-    *harness.state_mut().role_settings_mut() = model;
+    let model = gui::model::role_settings::RoleSettingsModel::seed_from_config(&config);
+    harness.state_mut().open_role_settings_with(model);
     harness.run();
     harness.click_label("Explorer");
     harness.run();
@@ -72,6 +71,7 @@ fn empty_routes_options_keep_only_explicit_bindings() {
     )
     .expect("write");
     // When: reopening from disk.
+    harness.state_mut().close_settings_modal();
     harness.state_mut().open_role_settings();
     // Then: raw provider IDs and implicit role names are not offered.
     assert_eq!(harness.state().role_settings().logical_models, ["legacy"]);
@@ -99,8 +99,10 @@ fn undefined_binding_shows_warning_and_route_create_button() {
     harness.step();
     finish(&mut harness);
     assert_eq!(harness.state().role_settings().error, None);
-    assert!(!harness.state().role_settings().open);
-    harness.state_mut().open_role_settings();
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
     assert_eq!(
         harness.state().role_settings().agents.explorer.head_route(),
         Some("unknown")
@@ -174,6 +176,7 @@ fn empty_routes_banner_in_role_settings_explains_missing_routes() {
     )
     .expect("write");
     // When: opening settings from the changed config.
+    harness.state_mut().close_settings_modal();
     harness.state_mut().open_role_settings();
     harness.run();
     // Then: roles without matching routes fail on use rather than resolving implicitly.
@@ -200,9 +203,15 @@ fn route_create_from_role_settings_opens_prefilled_routing_modal() {
     harness.click_label("Create route");
     harness.run();
     // Then: only routing is open and the logical name is preserved in its new row.
-    assert!(!harness.state().role_settings().open);
+    assert_ne!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::AgentRoles)
+    );
     assert!(!harness.has_label("Agent role settings"));
-    assert!(harness.state().routing_settings().open);
+    assert_eq!(
+        harness.state().settings_tab(),
+        Some(gui::panes::settings::SettingsTab::Routing)
+    );
     assert!(harness.has_label("Routing settings"));
     assert_eq!(
         harness

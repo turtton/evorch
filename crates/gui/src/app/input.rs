@@ -3,9 +3,7 @@ use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn settings_owns_input(&self) -> bool {
-        self.provider_settings.open
-            || self.routing_settings.open
-            || self.role_settings.open
+        self.settings.tab.is_some()
             || self.sandbox_settings.open
             || self.agent_features.open
             || self.self_improvement_settings.open
