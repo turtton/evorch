@@ -211,8 +211,8 @@ fn assert_content<S: AgentRunSource + 'static>(
         if id == &run && tool_name == "working_note_read")));
     h.run();
     assert!(
-        h.has_label("✓ Read ledger"),
-        "Evaluator tool call is readable in its pane"
+        h.has_label("1 tool call") || h.has_label("✓ Read ledger"),
+        "Evaluator tool call is in its pane: a card while the run is mid-turn, folded once its result text follows"
     );
     assert!(
         h.has_label(&format!("Evaluator progress {prompt}")),

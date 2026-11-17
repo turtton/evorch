@@ -33,6 +33,7 @@ mod perf;
 mod queue;
 mod sandbox_review;
 mod thinking;
+mod tool_group;
 mod unreadable;
 mod virtual_list;
 #[doc(hidden)]
@@ -248,6 +249,28 @@ fn latest_shell_job_entries(
         .collect()
 }
 
+/// A group header's row revision: its membership and each member's change
+/// counter, never any text. Closed members are not drawn, so their own
+/// layout inputs need no part in it.
+fn group_revision(
+    model: &TranscriptModel,
+    group: &tool_group::ToolGroup,
+    key: usize,
+    open: bool,
+    layout_revision: u64,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut revision = std::hash::DefaultHasher::new();
+    layout_revision.hash(&mut revision);
+    (key, open, group.calls, group.failed).hash(&mut revision);
+    for index in group.start..group.end {
+        let id = model.visible_entry_id(index);
+        id.hash(&mut revision);
+        model.entry_revision(id).hash(&mut revision);
+    }
+    revision.finish()
+}
+
 /// Only hash mutation counters, not large markdown/tool-output strings. A
 /// parent's layout also depends on its nested children and live shell state.
 fn row_revision(
@@ -294,6 +317,25 @@ pub fn transcript_body_with_repo_root(
     repo_root: Option<&std::path::Path>,
 ) {
     transcript_body_with_agents(ui, model, repo_root, &[]);
+}
+
+/// A transcript that also draws pull request candidate chips under their tool
+/// calls, for tests of what stays visible while a tool group is closed.
+#[doc(hidden)]
+pub fn transcript_body_with_chips_for_tests(
+    ui: &mut egui::Ui,
+    model: &TranscriptModel,
+    chips: &mut crate::panes::pull_request_chip::PullRequestChips<'_>,
+) {
+    run_detail_body(
+        ui,
+        model,
+        (None, &[]),
+        None,
+        None,
+        (None, &mut None),
+        Some(chips),
+    );
 }
 
 /// A run transcript whose run IDs resolve to the names in `agents`.
@@ -365,6 +407,7 @@ fn run_detail_body(
     // looking at must not move because of it, even when the pane follows the
     // end of the conversation, so a move caused by that is undone.
     let anchor_key = model_id.with("body-anchor");
+    let open_groups_key = model_id.with("tool-groups-open");
     let previous_anchor: Option<ScrollAnchor> = ui.data(|data| data.get_temp(anchor_key));
     let mut first_visible: Option<(usize, f32)> = None;
     // Where the entry the reader was looking at stands now, whether or not it
@@ -406,6 +449,20 @@ fn run_detail_body(
             let layout_revision = layout_revision.finish();
             let latest_job_entry = latest_shell_job_entries(entries, model.shell_jobs());
             let nesting = crate::panes::transcript_tool::RunJsNesting::new(entries);
+            let groups = tool_group::project(entries, &nesting);
+            let mut open_groups: tool_group::OpenGroups = ui
+                .data(|data| data.get_temp(open_groups_key))
+                .unwrap_or_default();
+            if !open_groups.is_empty()
+                && open_groups.retain(|id| model.visible_index_of(id).is_some())
+            {
+                ui.data_mut(|data| data.insert_temp(open_groups_key, open_groups.clone()));
+            }
+            let mut toggled_group: Option<usize> = None;
+            let mut next_group = 0;
+            let mut hidden_until = 0;
+            let mut header_top = 0.0_f32;
+            list.perf.group_headers += groups.len() as u64;
             // shell-job map, run_js nesting and the row loop each walk every entry.
             list.perf.passes += 1;
             list.perf.projection_rebuilds += 1;
@@ -414,6 +471,54 @@ fn run_detail_body(
             let loop_clock = perf::Clock::start(list.perf_on());
             let mut folded_until = 0;
             for (entry_idx, entry) in entries.iter().enumerate() {
+                if let Some(group) = groups.get(next_group)
+                    && group.start == entry_idx
+                {
+                    next_group += 1;
+                    let key = model.visible_entry_id(group.first_tool);
+                    let open = open_groups.is_open(key);
+                    let revision = group_revision(model, group, key, open, layout_revision);
+                    let row_top = ui.cursor().top();
+                    list.keyed_row(
+                        ui,
+                        viewport,
+                        virtual_list::RowKey::GroupHeader(key),
+                        revision,
+                        |ui| {
+                            ui.add_space(SP_1);
+                            if tool_group::header(ui, group, open) {
+                                toggled_group = Some(key);
+                            }
+                            if !open && let Some(chips) = chips.as_deref_mut() {
+                                for index in group.start..group.end {
+                                    crate::panes::pull_request_chip::show(
+                                        ui,
+                                        chips,
+                                        &entries[index..=index],
+                                    );
+                                }
+                            }
+                        },
+                    );
+                    if first_visible.is_none() && ui.cursor().top() > screen_viewport.top() {
+                        first_visible = Some((key, row_top - content_top));
+                    }
+                    header_top = row_top - content_top;
+                    if !open {
+                        hidden_until = group.end;
+                    }
+                }
+                if entry_idx < hidden_until {
+                    // An anchor hidden by a collapse follows its group header.
+                    if anchored_entry_y.is_none()
+                        && previous_anchor
+                            .is_some_and(|anchor| anchor.entry == model.visible_entry_id(entry_idx))
+                    {
+                        anchored_entry_y = Some(header_top);
+                    }
+                    list.perf.rows_hidden_by_groups += u64::from(list.perf_on());
+                    continue;
+                }
                 if entry_idx < folded_until || nesting.is_nested(entry_idx) {
                     continue;
                 }
@@ -665,6 +770,11 @@ fn run_detail_body(
                 }
             }
             list.perf.loop_ns += loop_clock.elapsed_ns();
+            if let Some(key) = toggled_group {
+                open_groups.toggle(key);
+                ui.data_mut(|data| data.insert_temp(open_groups_key, open_groups));
+                ui.ctx().request_repaint();
+            }
             list.publish_perf();
             list.store(ui, cache_key);
             corrected_offset = anchor_correction(

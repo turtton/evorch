@@ -414,8 +414,8 @@ fn replay_operations_issue_no_commands_and_leave_the_live_conversation_alone() {
     assert!(harness.has_label("root-agent (orchestrator)"));
     harness.click_label("  child-reviewer (reviewer)");
     assert!(
-        harness.has_label("✓ read_file"),
-        "the root run's tool call is drawn"
+        harness.has_label("1 tool call"),
+        "the root run's tool call is drawn, folded under its answer"
     );
     settle(&mut harness);
     assert_eq!(harness.state().evaluations().replay_run(), Some("run-2"));

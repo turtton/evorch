@@ -3,6 +3,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// What a virtual row stands for. An entry row keeps the egui ID
+/// `scope.with(entry_id)` it always had; a group header is named by the stable
+/// entry ID of its first tool call and gets an ID of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum RowKey {
+    Entry(usize),
+    GroupHeader(usize),
+}
+
 #[derive(Clone, Copy)]
 struct MeasuredRow {
     revision: u64,
@@ -15,7 +24,7 @@ struct MeasuredRow {
 
 #[derive(Clone, Default)]
 pub(super) struct VirtualList {
-    heights: HashMap<usize, MeasuredRow>,
+    heights: HashMap<RowKey, MeasuredRow>,
     width: f32,
     enabled: bool,
     scope_id: Option<egui::Id>,
@@ -92,7 +101,9 @@ impl VirtualList {
         cache.scope_id = Some(id);
         let retained: HashSet<_> = entries.collect();
         cache.perf.entries_enumerated += retained.len() as u64;
-        cache.heights.retain(|entry, _| retained.contains(entry));
+        cache.heights.retain(|key, _| match key {
+            RowKey::Entry(id) | RowKey::GroupHeader(id) => retained.contains(id),
+        });
         cache
     }
 
@@ -118,7 +129,18 @@ impl VirtualList {
         revision: u64,
         draw: impl FnOnce(&mut egui::Ui),
     ) {
-        let previous = self.heights.get(&entry_id).copied();
+        self.keyed_row(ui, viewport, RowKey::Entry(entry_id), revision, draw);
+    }
+
+    pub(super) fn keyed_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport: egui::Rect,
+        key: RowKey,
+        revision: u64,
+        draw: impl FnOnce(&mut egui::Ui),
+    ) {
+        let previous = self.heights.get(&key).copied();
         let height = previous.map(|row| row.height);
         let top = ui.cursor().top();
         let skip = self.enabled
@@ -131,7 +153,11 @@ impl VirtualList {
                 .is_some_and(|height| top + height < viewport.top() || top > viewport.bottom());
         // An explicit ID also severs egui's parent auto-ID counter dependency:
         // eviction or consolidation of earlier rows must not lose selection.
-        let scope = self.scope_id.expect("list loaded").with(entry_id);
+        let scope_base = self.scope_id.expect("list loaded");
+        let scope = match key {
+            RowKey::Entry(id) => scope_base.with(id),
+            RowKey::GroupHeader(id) => scope_base.with(("tool-group-header", id)),
+        };
         let mut contains_async = false;
         let draw_clock = super::perf::Clock::start(self.perf_on);
         let response = ui.scope_builder(egui::UiBuilder::new().id(scope), |ui| {
@@ -183,7 +209,7 @@ impl VirtualList {
             let stable =
                 unchanged && previous.is_some_and(|row| row.settled || row.frame_nr != frame_nr);
             self.heights.insert(
-                entry_id,
+                key,
                 MeasuredRow {
                     revision,
                     height: measured,

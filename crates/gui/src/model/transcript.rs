@@ -292,6 +292,14 @@ impl TranscriptModel {
             .map(|meta| meta.id)
     }
 
+    /// Position of the entry within [`Self::visible_entries`], or `None` when
+    /// it is gone or outside the view window.
+    pub fn visible_index_of(&self, entry_id: usize) -> Option<usize> {
+        let start = self.view_start.min(self.entries.len());
+        let relative = self.entry_index(entry_id)?.checked_sub(start)?;
+        (relative < self.visible_entries().len()).then_some(relative)
+    }
+
     /// Changes whenever the entry's displayed content is mutated.
     pub fn entry_revision(&self, entry_id: usize) -> Option<u64> {
         Some(self.entry_meta[self.entry_index(entry_id)?].revision)
