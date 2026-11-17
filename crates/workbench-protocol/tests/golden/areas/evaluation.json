@@ -1,4 +1,45 @@
 {
+  "command/evaluation/cancel_evaluation_job": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "cancel_evaluation_job"
+    },
+    "type": "evaluation"
+  },
+  "command/evaluation/start_evaluation_report": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-2",
+        "rejudge": true,
+        "targets": [
+          "run-1",
+          "run-2"
+        ]
+      },
+      "type": "start_evaluation_report"
+    },
+    "type": "evaluation"
+  },
+  "command/evaluation/start_evaluation_run": {
+    "payload": {
+      "payload": {
+        "candidate": "[agents.worker]\n",
+        "keep_workspace": false,
+        "operation_id": "op-1",
+        "output": "run-1",
+        "problem": "it looped",
+        "repeat": 2,
+        "report": true,
+        "thread": "thread-1",
+        "verify": "cargo test",
+        "verify_timeout_secs": 600
+      },
+      "type": "start_evaluation_run"
+    },
+    "type": "evaluation"
+  },
   "query/evaluation/get_evaluation": {
     "payload": {
       "payload": {
@@ -6,6 +47,15 @@
         "operation_id": "op-2"
       },
       "type": "get_evaluation"
+    },
+    "type": "evaluation"
+  },
+  "query/evaluation/get_evaluation_job": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-1"
+      },
+      "type": "get_evaluation_job"
     },
     "type": "evaluation"
   },
@@ -95,6 +145,34 @@
     },
     "type": "evaluation"
   },
+  "query_reply/evaluation/job": {
+    "payload": {
+      "payload": {
+        "cross_thread": {
+          "text": "| thread |",
+          "total_bytes": 10,
+          "truncated": false
+        },
+        "effect": "complete",
+        "kind": "rejudge",
+        "operation": {
+          "operation_id": "op-1",
+          "revision": "3",
+          "state": {
+            "type": "ready"
+          }
+        },
+        "reports": [
+          "run-1",
+          "run-2"
+        ],
+        "runs": [],
+        "runs_omitted": 0
+      },
+      "type": "job"
+    },
+    "type": "evaluation"
+  },
   "query_reply/evaluation/list": {
     "payload": {
       "payload": {
@@ -172,6 +250,80 @@
         }
       },
       "type": "report"
+    },
+    "type": "evaluation"
+  },
+  "ui_event/evaluation/evaluation_job_progress": {
+    "payload": {
+      "payload": {
+        "view": {
+          "effect": "none",
+          "kind": "run",
+          "operation": {
+            "operation_id": "op-1",
+            "revision": "3",
+            "state": {
+              "type": "pending"
+            }
+          },
+          "output": "run-1",
+          "runs": [
+            {
+              "denied_requests": 0,
+              "elapsed_ms": 3400,
+              "index": 0,
+              "label": "baseline",
+              "pushed_refs": 0,
+              "reason": "",
+              "status": "completed",
+              "tokens": 1200,
+              "tool_calls": 5,
+              "user_turns": 2,
+              "verification_passed": true
+            }
+          ],
+          "runs_omitted": 0
+        }
+      },
+      "type": "evaluation_job_progress"
+    },
+    "type": "evaluation"
+  },
+  "ui_event/evaluation/evaluation_job_settled": {
+    "payload": {
+      "payload": {
+        "view": {
+          "effect": "unknown",
+          "failure": "internal",
+          "kind": "run",
+          "message": "the job's task ended without a result",
+          "operation": {
+            "operation_id": "op-1",
+            "revision": "3",
+            "state": {
+              "code": "internal",
+              "type": "failed"
+            }
+          },
+          "runs": [
+            {
+              "denied_requests": 0,
+              "elapsed_ms": 3400,
+              "index": 0,
+              "label": "baseline",
+              "pushed_refs": 0,
+              "reason": "",
+              "status": "completed",
+              "tokens": 1200,
+              "tool_calls": 5,
+              "user_turns": 2,
+              "verification_passed": true
+            }
+          ],
+          "runs_omitted": 0
+        }
+      },
+      "type": "evaluation_job_settled"
     },
     "type": "evaluation"
   },

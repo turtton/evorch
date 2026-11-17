@@ -339,8 +339,6 @@ async fn an_approved_evaluation_runs_every_sample_and_reports_once() {
             repeat,
             "--output",
             dir,
-            "--db",
-            &fixture.recorded.config.db_path.display().to_string(),
             "--user-config",
             &fixture.user.path().display().to_string(),
         ]

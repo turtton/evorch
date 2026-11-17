@@ -1,6 +1,7 @@
-//! Host service of the `evaluation` area, read side (PR 13): which evaluation
-//! groups exist, how their members stand, and the report a member left. PR 17c
-//! adds the jobs (run, report, rejudge) to this file.
+//! Host service of the `evaluation` area: which evaluation groups exist, how
+//! their members stand, and the report a member left (PR 13, read side); and the
+//! jobs that run an evaluation, make its report or judge it again (PR 17c,
+//! see [`jobs`]).
 //!
 //! The files are read through the shared
 //! [`EvaluationInspector`](eval::inspection::EvaluationInspector), which confines
@@ -22,12 +23,14 @@ use super::{
     diagnostics::read_ops::{HEAD_BYTES, ReadOps, bounded_head, digest_of, first_line, page_of},
 };
 use crate::bootstrap::BootstrapError;
+use crate::bootstrap::restart::HostCommandPermit;
 use crate::queries::{Pager, error, revision};
 use eval::inspection::{
     Artifact, EvaluationGroupSnapshot, EvaluationInspector, FileState, GroupPhase, MemberPhase,
     ProblemKind,
 };
 use std::path::PathBuf;
+use std::sync::Arc;
 use workbench_protocol::{
     errors::{ErrorCode, WorkbenchError},
     events::UiEvent,
@@ -37,14 +40,20 @@ use workbench_protocol::{
         diagnostics::ReadOutcome,
         evaluation::{
             EvaluationEvent, EvaluationGroupDetail, EvaluationGroupPhase, EvaluationGroupSummary,
-            EvaluationList, EvaluationMemberPhase, EvaluationMemberSummary, EvaluationProblemKind,
-            EvaluationReportText, EvaluationTrialCounts, GetEvaluation, GetEvaluationReport,
-            ListEvaluations, MAX_EVALUATION_MEMBERS,
+            EvaluationJobView, EvaluationList, EvaluationMemberPhase, EvaluationMemberSummary,
+            EvaluationProblemKind, EvaluationReportText, EvaluationTrialCounts, GetEvaluation,
+            GetEvaluationReport, ListEvaluations, MAX_EVALUATION_MEMBERS, StartEvaluationReport,
+            StartEvaluationRun,
         },
     },
     operation::OperationView,
     wire::Revision,
 };
+
+mod jobs;
+
+pub use eval::runner::Isolation;
+pub use jobs::{Accepted, JobHook, JobParts, JobSeams, JobStage};
 
 /// Groups one list asks the inspector for (it applies its own, smaller bound).
 const LIST_LIMIT: usize = 200;
@@ -69,6 +78,7 @@ pub struct EvaluationArea {
     reads: ReadOps<EvaluationRead>,
     pager: Pager,
     root: Option<PathBuf>,
+    jobs: Option<Arc<jobs::Jobs>>,
 }
 
 impl EvaluationArea {
@@ -76,11 +86,77 @@ impl EvaluationArea {
         let source = handles
             .source("evaluation")
             .map_err(|e| BootstrapError::from(e.message))?;
-        Ok(Self::from_parts(
-            handles.tasks.clone(),
+        Ok(Self::from_job_parts(JobParts {
+            tasks: handles.tasks.clone(),
             source,
-            handles.config_dir.join("eval"),
-        ))
+            root: handles.config_dir.join("eval"),
+            config_dir: handles.config_dir.clone(),
+            database: handles.database.clone(),
+            credentials: handles.credentials.clone(),
+            seams: JobSeams::default(),
+        }))
+    }
+
+    /// The service with its jobs: reads and the run, report and rejudge jobs.
+    pub fn from_job_parts(parts: JobParts) -> Self {
+        let mut area = Self::from_parts(
+            parts.tasks.clone(),
+            parts.source.clone(),
+            parts.root.clone(),
+        );
+        area.jobs = Some(jobs::Jobs::new(parts));
+        area
+    }
+
+    fn jobs(&self) -> Result<&Arc<jobs::Jobs>, WorkbenchError> {
+        self.jobs.as_ref().ok_or_else(|| {
+            error(
+                ErrorCode::UnsupportedCapability,
+                "evaluation jobs are not available in this host",
+            )
+        })
+    }
+
+    /// Accept a replay job: start it, or answer from the table.
+    ///
+    /// # Errors
+    /// `Conflict` for an id used by a different request, `Busy` when another
+    /// job uses the directory, `LimitExceeded` once the table is full,
+    /// `Draining` once the host stops.
+    pub fn start_run(
+        &self,
+        start: &StartEvaluationRun,
+        accepted: HostCommandPermit,
+    ) -> Result<Accepted, WorkbenchError> {
+        self.jobs()?.start_run(start, accepted)
+    }
+
+    /// Accept a report or rejudge job.
+    ///
+    /// # Errors
+    /// See [`Self::start_run`].
+    pub fn start_report(
+        &self,
+        start: &StartEvaluationReport,
+        accepted: HostCommandPermit,
+    ) -> Result<Accepted, WorkbenchError> {
+        self.jobs()?.start_report(start, accepted)
+    }
+
+    /// Ask a running job to stop; the view of one that already ended.
+    ///
+    /// # Errors
+    /// `NotFound` for a job the core does not hold.
+    pub fn cancel_job(&self, id: &OperationId) -> Result<Accepted, WorkbenchError> {
+        self.jobs()?.cancel(id)
+    }
+
+    /// One job, running or finished.
+    ///
+    /// # Errors
+    /// `NotFound` for a job the core does not hold.
+    pub fn job(&self, id: &OperationId) -> Result<EvaluationJobView, WorkbenchError> {
+        self.jobs()?.get(id)
     }
 
     /// The service over its parts: the host's tasks, the namespace's event
@@ -94,6 +170,7 @@ impl EvaluationArea {
             }),
             pager: Pager::default(),
             root: Some(root),
+            jobs: None,
         }
     }
 

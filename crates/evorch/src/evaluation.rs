@@ -1,28 +1,57 @@
 //! `evorch eval run/report/clean`: replay a recorded thread under
 //! the user's configuration and a candidate overlay, then judge, reprice and
 //! report the replays (ADR 0036).
+//!
+//! `run` and `report` (which also rejudges) are jobs of the core (ADR 0045
+//! §10): this module turns the command line into the core's request, follows
+//! the job until it settles and prints what it left. The core owns the
+//! configuration database, the credentials and the evaluation directory; the
+//! CLI never opens them, and without a core it does nothing. `clean` removes
+//! workspaces on the local disk and stays here.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::Duration;
 
-use eval::{EvalArgs, Isolation, ReportArgs, ReportDeps, RunReport, RunnerDeps};
-use routing::EnvLookup;
+use workbench_client::{ClientError, WorkbenchClient};
+use workbench_protocol::{
+    ErrorCode, RetryAdvice, WorkbenchError,
+    commands::{Command as CoreCommand, CommandResult},
+    events::{SubscriptionScope, UiEvent},
+    handshake::Capability,
+    ids::{OperationId, ThreadId},
+    namespaces::{
+        diagnostics::OperationTarget,
+        evaluation::{
+            EvaluationCommand, EvaluationEvent, EvaluationJobEffect, EvaluationJobView,
+            EvaluationQuery, EvaluationReply, EvaluationResult, EvaluationRunLine,
+            StartEvaluationReport, StartEvaluationRun, validate_target_name,
+        },
+    },
+    operation::OperationState,
+    queries::{Query, QueryReply},
+};
 
-pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--repeat <n>] [--output <dir>] [--db <path>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--report|--no-report] [--keep-workspace]
+use crate::cli::core_client::{self, CliError, Step, exit};
+
+pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--repeat <n>] [--output <name>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--report|--no-report] [--keep-workspace]
        evorch eval clean [--output <dir> ...] [--user-config <dir>] [--dry-run] [--include-unfinished]
-       evorch eval report --output <dir> [--output <dir> ...] [--user-config <dir>] [--rejudge]
-`eval run` replays the thread <n> times (default eval.repeat_target) under the user's
-configuration, then <n> times with the candidate overlay merged over it. The overlay is a
-config file fragment; when a role_profile is active, change role_profiles.<name> rather than
-agents or routing. It cannot change eval, tools or comment_checker. --problem describes what
-went wrong in the thread and is judged as its own aspect. --verify runs a command in each
-replay's final workspace, without network, failing after --verify-timeout (default 600) s.
-The default database is <user-config-dir>/evorch-events.db, the GUI's store. The default
-output is <user-config-dir>/eval/<UTC YYYYmmdd-HHMMSS>-<thread-id>; it must be missing or
-empty. Workspaces are removed after finish/verification, including on failure;
---keep-workspace preserves them. SIGINT/SIGTERM/SIGKILL do not run cleanup: use eval clean
-after interruption (the OS releases the runner lock). Unless --no-report is given, the directory is then reported as by `eval report`.
+       evorch eval report --output <name> [--output <name> ...] [--user-config <dir>] [--rejudge]
+`eval run` and `eval report` run in the evorch core, which is started when none is running; they
+do not work without it. `eval run` replays the thread <n> times (default eval.repeat_target) under
+the user's configuration, then <n> times with the candidate overlay merged over it. The overlay is a
+config file fragment (the CLI reads the file and sends its text); when a role_profile is active,
+change role_profiles.<name> rather than agents or routing. It cannot change eval, tools or
+comment_checker. --problem describes what went wrong in the thread and is judged as its own aspect.
+--verify runs a command in each replay's final workspace, without network, failing after
+--verify-timeout (default 600) s. The core reads its own database; there is no --db.
+The output is a directory of <user-config-dir>/eval, named by --output (a plain name, or a path
+directly inside that directory); it must be missing or empty. The default is
+<UTC YYYYmmdd-HHMMSS>-<thread-id>. Workspaces are removed after finish/verification, including on
+failure; --keep-workspace preserves them. Interrupting this command does not stop the job: it
+runs on in the core, and an interrupted or cancelled one leaves workspaces for eval clean.
+Unless --no-report is given, the directory is then reported as by `eval report`.
 `eval report` reprices every run from one price table, judges each baseline/candidate pair
 in both orders (cached in <dir>/judgments; --rejudge asks again), and writes
 <dir>/report.json and <dir>/report.md. Several directories are also tabulated side by side.
@@ -35,9 +64,32 @@ not actual disk space freed.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Run { args: EvalArgs, report: bool },
-    Report(ReportArgs),
+    Run(RunRequest),
+    Report(ReportRequest),
     Clean(CleanArgs),
+}
+
+/// `evorch eval run`, as typed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunRequest {
+    pub thread: String,
+    pub candidate: Option<PathBuf>,
+    pub repeat: Option<u32>,
+    pub output: Option<PathBuf>,
+    pub user_config_dir: Option<PathBuf>,
+    pub problem: Option<String>,
+    pub verify: Option<String>,
+    pub verify_timeout_secs: Option<u32>,
+    pub keep_workspace: bool,
+    pub report: bool,
+}
+
+/// `evorch eval report`, as typed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReportRequest {
+    pub outputs: Vec<PathBuf>,
+    pub user_config_dir: Option<PathBuf>,
+    pub rejudge: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,206 +195,449 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<Command, String>
     }
 }
 
+fn positive(flag: &str, value: &str) -> Result<u32, String> {
+    value
+        .parse()
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(|| format!("{flag} must be a positive integer\n{USAGE}"))
+}
+
 fn parse_run(mut argv: impl Iterator<Item = String>) -> Result<Command, String> {
-    let mut args = EvalArgs::default();
+    let mut request = RunRequest {
+        report: true,
+        ..RunRequest::default()
+    };
     let mut thread = None;
-    let mut report = true;
     while let Some(flag) = argv.next() {
-        if matches!(flag.as_str(), "--report" | "--no-report") {
-            report = flag == "--report";
-            continue;
-        }
-        if flag == "--keep-workspace" {
-            args.keep_workspace = true;
-            continue;
+        match flag.as_str() {
+            "--report" | "--no-report" => {
+                request.report = flag == "--report";
+                continue;
+            }
+            "--keep-workspace" => {
+                request.keep_workspace = true;
+                continue;
+            }
+            _ => {}
         }
         let value = argv.next().ok_or_else(|| USAGE.to_owned())?;
         match flag.as_str() {
             "--thread" => thread = Some(value),
-            "--candidate" => args.candidate = Some(PathBuf::from(value)),
-            "--repeat" => {
-                args.repeat = Some(
-                    value
-                        .parse()
-                        .ok()
-                        .filter(|repeat| *repeat > 0)
-                        .ok_or_else(|| format!("--repeat must be a positive integer\n{USAGE}"))?,
-                );
-            }
-            "--output" => args.output = Some(PathBuf::from(value)),
-            "--db" => args.db = Some(PathBuf::from(value)),
-            "--user-config" => args.user_config_dir = Some(PathBuf::from(value)),
-            "--problem" => args.problem = Some(value).filter(|text| !text.trim().is_empty()),
-            "--verify" => args.verify = Some(value).filter(|text| !text.trim().is_empty()),
-            "--verify-timeout" => {
-                args.verify_timeout = Some(Duration::from_secs(
-                    value.parse().ok().filter(|secs| *secs > 0).ok_or_else(|| {
-                        format!("--verify-timeout must be a positive number of seconds\n{USAGE}")
-                    })?,
+            "--candidate" => request.candidate = Some(PathBuf::from(value)),
+            "--repeat" => request.repeat = Some(positive("--repeat", &value)?),
+            "--output" => request.output = Some(PathBuf::from(value)),
+            "--db" => {
+                return Err(format!(
+                    "--db is not accepted: the evorch core reads its own database\n{USAGE}"
                 ));
+            }
+            "--user-config" => request.user_config_dir = Some(PathBuf::from(value)),
+            "--problem" => request.problem = Some(value).filter(|text| !text.trim().is_empty()),
+            "--verify" => request.verify = Some(value).filter(|text| !text.trim().is_empty()),
+            "--verify-timeout" => {
+                request.verify_timeout_secs =
+                    Some(value.parse().ok().filter(|secs| *secs > 0).ok_or_else(|| {
+                        format!("--verify-timeout must be a positive number of seconds\n{USAGE}")
+                    })?);
             }
             _ => return Err(USAGE.into()),
         }
     }
-    args.thread_id = thread
+    request.thread = thread
         .filter(|thread| !thread.is_empty())
         .ok_or_else(|| USAGE.to_owned())?;
-    Ok(Command::Run { args, report })
+    Ok(Command::Run(request))
 }
 
 fn parse_report(mut argv: impl Iterator<Item = String>) -> Result<Command, String> {
-    let mut args = ReportArgs::default();
+    let mut request = ReportRequest::default();
     while let Some(flag) = argv.next() {
         if flag == "--rejudge" {
-            args.rejudge = true;
+            request.rejudge = true;
             continue;
         }
         let value = argv.next().ok_or_else(|| USAGE.to_owned())?;
         match flag.as_str() {
-            "--output" => args.dirs.push(PathBuf::from(value)),
-            "--user-config" => args.user_config_dir = Some(PathBuf::from(value)),
+            "--output" => request.outputs.push(PathBuf::from(value)),
+            "--user-config" => request.user_config_dir = Some(PathBuf::from(value)),
             _ => return Err(USAGE.into()),
         }
     }
-    if args.dirs.is_empty() {
+    if request.outputs.is_empty() {
         return Err(USAGE.into());
     }
-    Ok(Command::Report(args))
+    Ok(Command::Report(request))
 }
 
-/// Runs the command, printing one line per replay as it ends.
-pub async fn run(command: Command, env: Arc<dyn EnvLookup>) -> Result<String, String> {
-    // Maintenance must not load catalog, credentials or invoke a model.
-    if let Command::Clean(args) = command {
-        return clean(args);
-    }
-    let catalog = match catalog::ModelCatalog::load_or_refresh(&catalog::default_cache_dir()).await
-    {
-        Ok(catalog) => Some(Arc::new(catalog)),
-        Err(error) => {
-            eprintln!("model catalog unavailable; usage is priced from config only: {error}");
-            None
-        }
-    };
-    let report_deps = |env| ReportDeps {
-        env,
-        judge: None,
-        credentials: None,
-        catalog: catalog.clone(),
-    };
-    match command {
-        Command::Clean(_) => unreachable!("clean dispatched before catalog access"),
-        Command::Run { args, report } => {
-            let user_config_dir = args.user_config_dir.clone();
-            let deps = RunnerDeps {
-                env: Arc::clone(&env),
-                isolation: Isolation::Production,
-                models: None,
-                credentials: None,
-                catalog: catalog.clone(),
-            };
-            let result = eval::runner::run_with_cleanup(
-                args, deps,
-                |report| println!("{}", summary(report)),
-                |dir, cleanup| {
-                    for entry in &cleanup.entries {
-                        if let eval::cleanup::Action::Skip(reason) | eval::cleanup::Action::Failed(reason) = &entry.action {
-                            eprintln!("warning: workspace cleanup {}: {reason}; retry with evorch eval clean --output {:?}", entry.path.display(), dir);
-                        }
-                    }
-                },
-            ).await;
-            let (dir, failure) = match result {
-                Ok(evaluation) => (evaluation.dir, None),
-                Err(error) => {
-                    // A failed preflight still owns a complete manifest and
-                    // evidence. Report them, but never turn failure into success.
-                    let eval::EvalError::Preflight { report: path, .. } = &error else {
-                        return Err(error.to_string());
-                    };
-                    if !report {
-                        return Err(error.to_string());
-                    }
-                    let dir = path.parent().ok_or_else(|| error.to_string())?.to_owned();
-                    (dir, Some(error.to_string()))
-                }
-            };
-            let results = failure
-                .clone()
-                .unwrap_or_else(|| format!("Results in {}", dir.display()));
-            if !report {
-                return Ok(results);
-            }
-            let args = ReportArgs {
-                dirs: vec![dir.clone()],
-                user_config_dir,
-                rejudge: false,
-            };
-            eval::report(args, &report_deps(env))
-                .await
-                .map_err(|error| format!("{results}; the report failed: {error}"))?;
-            let message = format!(
-                "{results}\nReport in {}",
-                dir.join(eval::output::REPORT_MARKDOWN_FILE).display()
-            );
-            if failure.is_some() {
-                Err(message)
-            } else {
-                Ok(message)
-            }
-        }
-        Command::Report(args) => {
-            let dirs = args.dirs.clone();
-            let reports = eval::report(args, &report_deps(env))
-                .await
-                .map_err(|error| error.to_string())?;
-            let mut text: Vec<String> = dirs
-                .iter()
-                .map(|dir| {
-                    format!(
-                        "Report in {}",
-                        dir.join(eval::output::REPORT_MARKDOWN_FILE).display()
-                    )
-                })
-                .collect();
-            if reports.len() > 1 {
-                text.push(eval::cross_thread_table(&reports));
-            }
-            Ok(text.join("\n"))
-        }
-    }
+// ---- where the evaluations are --------------------------------------------
+
+/// The evaluation root of a user configuration directory: where the core
+/// keeps the evaluations it runs.
+fn eval_root(user_config_dir: Option<&Path>) -> Result<PathBuf, String> {
+    user_config_dir
+        .map(Path::to_path_buf)
+        .or_else(config::user_config_dir)
+        .map(|dir| dir.join("eval"))
+        .ok_or_else(|| "cannot resolve user config directory; pass --user-config <dir>".to_owned())
 }
 
-fn summary(report: &RunReport) -> String {
-    let outcome = &report.outcome;
-    let status = serde_json::to_value(outcome.status)
+/// The name of the directory `value` stands for under `root`. The core takes
+/// names only, so a path is accepted when it is a directory directly inside
+/// the evaluation root (after resolving links on the way to it); a link at the
+/// end is refused, never followed.
+fn target_name(root: &Path, value: &Path) -> Result<String, String> {
+    let shown = value.display();
+    let mut parts = value.components();
+    let single = match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(name)), None) => Some(name),
+        _ => None,
+    };
+    let name = if let Some(name) = single {
+        name.to_owned()
+    } else {
+        let name = value
+            .file_name()
+            .ok_or_else(|| format!("{shown} does not name a directory"))?
+            .to_owned();
+        let parent = match value.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let parent = parent
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve {}: {error}", parent.display()))?;
+        let root = root.canonicalize().map_err(|error| {
+            format!(
+                "cannot resolve the evaluation directory {}: {error}",
+                root.display()
+            )
+        })?;
+        if parent != root {
+            return Err(format!(
+                "{shown} is not directly inside the evaluation directory {}; pass its name",
+                root.display()
+            ));
+        }
+        if std::fs::symlink_metadata(parent.join(&name))
+            .is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(format!("{shown} is a link, not a directory"));
+        }
+        name
+    };
+    let name = name
+        .into_string()
+        .map_err(|_| format!("{shown} is not a name the core accepts"))?;
+    validate_target_name("output", &name).map_err(|error| format!("{shown}: {error}"))?;
+    Ok(name)
+}
+
+// ---- following the job ------------------------------------------------------
+
+fn operation_id() -> Result<OperationId, CliError> {
+    OperationId::new(format!("cli-eval-{}", uuid::Uuid::new_v4()))
+        .map_err(|error| CliError::Failed(error.to_string()))
+}
+
+/// One line per replay, as it ends.
+fn summary(line: &EvaluationRunLine) -> String {
+    let status = serde_json::to_value(line.status)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_default();
-    let verification = outcome.verification.as_ref().map_or("", |verification| {
-        if verification.passed {
-            ", verification passed"
-        } else {
-            ", verification failed"
-        }
-    });
+    let verification = match line.verification_passed {
+        None => "",
+        Some(true) => ", verification passed",
+        Some(false) => ", verification failed",
+    };
     format!(
         "{}-{}: {status} ({}); {} user turns, {} tokens, {} tool calls, {:.1} s, {} denied, {} pushed refs{verification}",
-        report.label,
-        report.index,
-        outcome.reason,
-        outcome.user_turns,
-        outcome.tokens,
-        outcome.tool_calls,
-        Duration::from_millis(outcome.elapsed_ms).as_secs_f64(),
-        outcome.denied_requests.len(),
-        outcome.pushed_refs.len(),
+        line.label,
+        line.index,
+        line.reason,
+        line.user_turns,
+        line.tokens,
+        line.tool_calls,
+        Duration::from_millis(line.elapsed_ms).as_secs_f64(),
+        line.denied_requests,
+        line.pushed_refs,
     )
+}
+
+fn is_job_event(event: &UiEvent) -> bool {
+    matches!(
+        event,
+        UiEvent::Evaluation(
+            EvaluationEvent::EvaluationJobProgress { .. }
+                | EvaluationEvent::EvaluationJobSettled { .. }
+        )
+    )
+}
+
+/// Start the job `command` names and follow it until it settles, handing every
+/// replay line to `progress` once.
+async fn follow(
+    client: &WorkbenchClient,
+    command: EvaluationCommand,
+    id: &OperationId,
+    progress: &dyn Fn(&str),
+) -> Result<EvaluationJobView, CliError> {
+    let reply = core_client::send(client, CoreCommand::Evaluation(command)).await?;
+    match reply.result.as_deref() {
+        Some(CommandResult::Evaluation(EvaluationResult::Job(_))) => {}
+        _ => {
+            return Err(CliError::Failed(
+                "protocol violation: the core did not answer with a job".into(),
+            ));
+        }
+    }
+    let printed = Cell::new(0_usize);
+    core_client::wait_settled(client, SubscriptionScope::All, is_job_event, || {
+        let (printed, id) = (&printed, id.clone());
+        async move {
+            let reply = client
+                .query(Query::Evaluation(EvaluationQuery::GetEvaluationJob(
+                    OperationTarget { operation_id: id },
+                )))
+                .await;
+            let view = match reply {
+                Ok(QueryReply::Evaluation(EvaluationReply::Job(view))) => *view,
+                Ok(_) => {
+                    return Err(ClientError::Server(WorkbenchError::new(
+                        ErrorCode::Internal,
+                        "protocol violation: the core did not answer with a job",
+                        RetryAdvice::Never,
+                    )));
+                }
+                // The core no longer holds the job: it restarted, so whether
+                // the job finished is not known.
+                Err(ClientError::Server(error)) if error.code == ErrorCode::NotFound => {
+                    return Ok(Step::Unknown);
+                }
+                Err(error) => return Err(error),
+            };
+            for line in view.runs.iter().skip(printed.get()) {
+                progress(&summary(line));
+            }
+            printed.set(view.runs.len());
+            Ok(if view.operation.state.is_final() {
+                Step::Settled(view)
+            } else {
+                Step::Pending
+            })
+        }
+    })
+    .await
+}
+
+// ---- what the command prints ------------------------------------------------
+
+/// The text of a finished command: `Ok` goes to stdout (exit 0), `Err` to
+/// stderr (exit 1).
+type Rendered = Result<String, String>;
+
+fn warnings(view: &EvaluationJobView, lines: &mut Vec<String>) {
+    if view.runs_omitted > 0 {
+        lines.push(format!(
+            "{} more replays ended than the core lists",
+            view.runs_omitted
+        ));
+    }
+    lines.extend(view.warnings.iter().map(|text| format!("warning: {text}")));
+}
+
+fn report_lines(root: &Path, view: &EvaluationJobView, lines: &mut Vec<String>) {
+    lines.extend(view.reports.iter().map(|name| {
+        format!(
+            "Report in {}",
+            root.join(name)
+                .join(eval::output::REPORT_MARKDOWN_FILE)
+                .display()
+        )
+    }));
+    if let Some(table) = &view.cross_thread {
+        lines.push(table.text.clone());
+    }
+}
+
+/// What a job that did not finish left on disk, as a sentence for `dir`.
+fn effect_line(view: &EvaluationJobView, what: &str, dir: &str) -> Option<String> {
+    match view.effect {
+        EvaluationJobEffect::Partial => Some(format!("{what} written so far stay in {dir}")),
+        EvaluationJobEffect::Unknown => Some(format!(
+            "what the job wrote is unknown; look at {dir} before running it again"
+        )),
+        EvaluationJobEffect::None | EvaluationJobEffect::Complete => None,
+    }
+}
+
+fn stopped(view: &EvaluationJobView) -> String {
+    view.message
+        .clone()
+        .unwrap_or_else(|| match view.operation.state {
+            OperationState::Cancelled { .. } => "the evaluation was cancelled".to_owned(),
+            _ => "the evaluation failed".to_owned(),
+        })
+}
+
+fn render_run(view: &EvaluationJobView, root: &Path, report: bool) -> Rendered {
+    let dir = view
+        .output
+        .as_ref()
+        .map(|name| root.join(name).display().to_string());
+    let mut lines = Vec::new();
+    if view.operation.state == OperationState::Ready {
+        lines.extend(dir.iter().map(|dir| format!("Results in {dir}")));
+        if report {
+            report_lines(root, view, &mut lines);
+        }
+        warnings(view, &mut lines);
+        return Ok(lines.join("\n"));
+    }
+    lines.push(stopped(view));
+    if let Some(dir) = &dir {
+        lines.extend(effect_line(view, "the files", dir));
+    }
+    report_lines(root, view, &mut lines);
+    warnings(view, &mut lines);
+    Err(lines.join("\n"))
+}
+
+fn render_report(view: &EvaluationJobView, root: &Path) -> Rendered {
+    let mut lines = Vec::new();
+    if view.operation.state == OperationState::Ready {
+        report_lines(root, view, &mut lines);
+        return Ok(lines.join("\n"));
+    }
+    lines.push(stopped(view));
+    lines.extend(effect_line(
+        view,
+        "the reports",
+        &root.display().to_string(),
+    ));
+    report_lines(root, view, &mut lines);
+    Err(lines.join("\n"))
+}
+
+// ---- the commands ------------------------------------------------------------
+
+async fn run_job(request: RunRequest, root: &Path) -> Result<Rendered, CliError> {
+    let failed = |text: String| CliError::Failed(text);
+    let output = request
+        .output
+        .as_deref()
+        .map(|value| target_name(root, value))
+        .transpose()
+        .map_err(failed)?;
+    let candidate = request
+        .candidate
+        .as_deref()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read candidate {}: {error}", path.display()))
+        })
+        .transpose()
+        .map_err(failed)?;
+    let operation_id = operation_id()?;
+    let start = StartEvaluationRun {
+        operation_id: operation_id.clone(),
+        thread: ThreadId::new(request.thread)
+            .map_err(|error| CliError::Failed(format!("--thread: {error}")))?,
+        candidate,
+        repeat: request.repeat,
+        output,
+        problem: request.problem,
+        verify: request.verify,
+        verify_timeout_secs: request.verify_timeout_secs,
+        keep_workspace: request.keep_workspace,
+        report: request.report,
+    };
+    let report = request.report;
+    let connected =
+        core_client::connect(request.user_config_dir, &[Capability::SnapshotEvents]).await?;
+    let view = follow(
+        &connected.client,
+        EvaluationCommand::StartEvaluationRun(Box::new(start)),
+        &operation_id,
+        &|line| println!("{line}"),
+    )
+    .await?;
+    Ok(render_run(&view, root, report))
+}
+
+async fn report_job(request: ReportRequest, root: &Path) -> Result<Rendered, CliError> {
+    let targets = request
+        .outputs
+        .iter()
+        .map(|value| target_name(root, value))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(CliError::Failed)?;
+    let operation_id = operation_id()?;
+    let start = StartEvaluationReport {
+        operation_id: operation_id.clone(),
+        targets,
+        rejudge: request.rejudge,
+    };
+    let connected =
+        core_client::connect(request.user_config_dir, &[Capability::SnapshotEvents]).await?;
+    let view = follow(
+        &connected.client,
+        EvaluationCommand::StartEvaluationReport(start),
+        &operation_id,
+        &|line| println!("{line}"),
+    )
+    .await?;
+    Ok(render_report(&view, root))
+}
+
+/// Run the command; `clean` locally, the others in the core.
+///
+/// # Errors
+/// The command could not be carried out (no core, a refusal, a lost reply);
+/// a job that ran and failed is the `Err` of the text, not of this.
+pub async fn execute(command: Command) -> Result<Rendered, CliError> {
+    match command {
+        Command::Clean(args) => Ok(clean(args)),
+        Command::Run(request) => {
+            let root = eval_root(request.user_config_dir.as_deref()).map_err(CliError::Failed)?;
+            run_job(request, &root).await
+        }
+        Command::Report(request) => {
+            let root = eval_root(request.user_config_dir.as_deref()).map_err(CliError::Failed)?;
+            report_job(request, &root).await
+        }
+    }
+}
+
+/// Run the command and print its result; the exit code says how it went.
+pub async fn run(command: Command) -> ExitCode {
+    match execute(command).await {
+        Ok(Ok(text)) => {
+            println!("{text}");
+            exit::code(exit::SUCCESS)
+        }
+        Ok(Err(text)) => {
+            eprintln!("{text}");
+            exit::code(exit::FAILURE)
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            error.exit_code()
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use workbench_protocol::{
+        errors::ErrorCode,
+        management::EvaluationJobKind,
+        namespaces::{diagnostics::BoundedText, evaluation::EvaluationRunStatus},
+        operation::{CancelReason, OperationView},
+        wire::Revision,
+    };
 
     fn parse(args: &[&str]) -> Result<Command, String> {
         parse_args(args.iter().map(|arg| (*arg).to_owned()))
@@ -362,8 +657,6 @@ mod tests {
             "3",
             "--output",
             "out",
-            "--db",
-            "events.db",
             "--user-config",
             "config",
             "--problem",
@@ -382,21 +675,18 @@ mod tests {
         // Then: every value lands in its field and the report step is skipped.
         assert_eq!(
             command,
-            Command::Run {
-                args: EvalArgs {
-                    thread_id: "thread-1".into(),
-                    candidate: Some("c.toml".into()),
-                    repeat: Some(3),
-                    output: Some("out".into()),
-                    db: Some("events.db".into()),
-                    user_config_dir: Some("config".into()),
-                    problem: Some("the reviewer missed a bug".into()),
-                    verify: Some("cargo test --offline".into()),
-                    verify_timeout: Some(Duration::from_secs(120)),
-                    keep_workspace: true,
-                },
+            Command::Run(RunRequest {
+                thread: "thread-1".into(),
+                candidate: Some("c.toml".into()),
+                repeat: Some(3),
+                output: Some("out".into()),
+                user_config_dir: Some("config".into()),
+                problem: Some("the reviewer missed a bug".into()),
+                verify: Some("cargo test --offline".into()),
+                verify_timeout_secs: Some(120),
+                keep_workspace: true,
                 report: false,
-            }
+            })
         );
     }
 
@@ -405,19 +695,16 @@ mod tests {
         let command = parse(&["eval", "run", "--thread", "t"]).unwrap();
         assert_eq!(
             command,
-            Command::Run {
-                args: EvalArgs {
-                    thread_id: "t".into(),
-                    ..EvalArgs::default()
-                },
+            Command::Run(RunRequest {
+                thread: "t".into(),
                 report: true,
-            }
+                ..RunRequest::default()
+            })
         );
     }
 
     #[test]
     fn report_takes_several_directories_and_rejudge() {
-        // Given / When: a report over two directories that asks the judge again.
         let command = parse(&[
             "eval",
             "report",
@@ -430,16 +717,20 @@ mod tests {
             "config",
         ])
         .unwrap();
-
-        // Then: both directories are kept in order.
         assert_eq!(
             command,
-            Command::Report(ReportArgs {
-                dirs: vec!["a".into(), "b".into()],
+            Command::Report(ReportRequest {
+                outputs: vec!["a".into(), "b".into()],
                 user_config_dir: Some("config".into()),
                 rejudge: true,
             })
         );
+    }
+
+    #[test]
+    fn the_core_owns_the_database_so_db_is_refused() {
+        let error = parse(&["eval", "run", "--thread", "t", "--db", "events.db"]).unwrap_err();
+        assert!(error.contains("--db is not accepted"), "{error}");
     }
 
     #[test]
@@ -467,13 +758,165 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_target_is_a_name_or_a_directory_directly_inside_the_evaluation_root() {
+        // Given: an evaluation root with a directory, a link and a stranger.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("eval");
+        std::fs::create_dir_all(root.join("run-a")).unwrap();
+        std::fs::create_dir_all(temp.path().join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("elsewhere"), root.join("link")).unwrap();
+
+        // Then: a name and a path of the root's own directory both give the name.
+        assert_eq!(target_name(&root, Path::new("run-a")).unwrap(), "run-a");
+        assert_eq!(target_name(&root, &root.join("run-a")).unwrap(), "run-a");
+        assert_eq!(
+            target_name(&root, &root.join("not-yet")).unwrap(),
+            "not-yet"
+        );
+        // A path that reaches the root through a link is the same directory.
+        let through = temp.path().join("through");
+        std::os::unix::fs::symlink(&root, &through).unwrap();
+        assert_eq!(target_name(&root, &through.join("run-a")).unwrap(), "run-a");
+
+        // And what is outside the root, a link at the end, a nested path or an
+        // unnameable one is refused before anything is sent.
+        for refused in [
+            temp.path().join("elsewhere"),
+            root.join("link"),
+            root.join("run-a").join("deeper"),
+            root.join(".groups"),
+            root.join("bad name"),
+            PathBuf::from(".."),
+            PathBuf::from("."),
+            PathBuf::from("/"),
+        ] {
+            assert!(
+                target_name(&root, &refused).is_err(),
+                "{} must be refused",
+                refused.display()
+            );
+        }
+    }
+
+    fn job(state: OperationState, kind: EvaluationJobKind) -> EvaluationJobView {
+        let effect = if state == OperationState::Ready {
+            EvaluationJobEffect::Complete
+        } else {
+            EvaluationJobEffect::None
+        };
+        EvaluationJobView {
+            operation: OperationView {
+                operation_id: OperationId::new("op").unwrap(),
+                state,
+                revision: Revision(1),
+                result: None,
+            },
+            kind,
+            runs: Vec::new(),
+            runs_omitted: 0,
+            output: None,
+            reports: Vec::new(),
+            cross_thread: None,
+            effect,
+            failure: None,
+            message: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_finished_run_says_where_its_results_and_report_are() {
+        let mut view = job(OperationState::Ready, EvaluationJobKind::Run);
+        view.output = Some("out".into());
+        view.reports = vec!["out".into()];
+        view.warnings = vec!["workspace x was not removed".into()];
+        let text = render_run(&view, Path::new("/cfg/eval"), true).unwrap();
+        assert!(text.starts_with("Results in /cfg/eval/out\n"), "{text}");
+        assert!(text.contains("Report in /cfg/eval/out/report.md"), "{text}");
+        assert!(
+            text.contains("warning: workspace x was not removed"),
+            "{text}"
+        );
+        assert!(
+            !render_run(&view, Path::new("/cfg/eval"), false)
+                .unwrap()
+                .contains("Report in")
+        );
+    }
+
+    #[test]
+    fn a_failed_run_is_an_error_that_names_what_it_left() {
+        let failed = OperationState::Failed {
+            code: ErrorCode::InvalidRequest,
+        };
+        let mut view = job(failed, EvaluationJobKind::Run);
+        view.output = Some("out".into());
+        view.message = Some("evaluation preflight failed: no thread".into());
+        view.effect = EvaluationJobEffect::Unknown;
+        view.reports = vec!["out".into()];
+        let text = render_run(&view, Path::new("/cfg/eval"), true).unwrap_err();
+        assert!(text.starts_with("evaluation preflight failed"), "{text}");
+        assert!(text.contains("unknown; look at /cfg/eval/out"), "{text}");
+        assert!(text.contains("Report in /cfg/eval/out/report.md"), "{text}");
+
+        view.effect = EvaluationJobEffect::Partial;
+        view.operation.state = OperationState::Cancelled {
+            reason: CancelReason::Requested,
+        };
+        view.message = None;
+        let text = render_run(&view, Path::new("/cfg/eval"), true).unwrap_err();
+        assert!(text.starts_with("the evaluation was cancelled"), "{text}");
+        assert!(
+            text.contains("written so far stay in /cfg/eval/out"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_report_lists_each_directory_and_the_side_by_side_table() {
+        let mut view = job(OperationState::Ready, EvaluationJobKind::Rejudge);
+        view.reports = vec!["a".into(), "b".into()];
+        view.cross_thread = Some(BoundedText {
+            text: "| thread | a | b |".into(),
+            total_bytes: 19,
+            truncated: false,
+        });
+        let text = render_report(&view, Path::new("/cfg/eval")).unwrap();
+        assert_eq!(
+            text,
+            "Report in /cfg/eval/a/report.md\nReport in /cfg/eval/b/report.md\n| thread | a | b |"
+        );
+    }
+
+    #[test]
+    fn a_replay_line_keeps_the_format_the_runner_always_printed() {
+        let line = EvaluationRunLine {
+            label: "baseline".into(),
+            index: 1,
+            status: EvaluationRunStatus::Completed,
+            reason: "done".into(),
+            user_turns: 2,
+            tokens: 300,
+            tool_calls: 4,
+            elapsed_ms: 1500,
+            denied_requests: 0,
+            pushed_refs: 1,
+            verification_passed: Some(false),
+        };
+        assert_eq!(
+            summary(&line),
+            "baseline-1: completed (done); 2 user turns, 300 tokens, 4 tool calls, 1.5 s, 0 denied, 1 pushed refs, verification failed"
+        );
+    }
 }
 
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
     #[tokio::test]
-    async fn clean_parses_all_flags_and_needs_no_catalog_or_credentials() {
+    async fn clean_parses_all_flags_and_needs_no_core() {
         let temp = tempfile::tempdir().unwrap();
         let command = parse_args(
             [
@@ -501,14 +944,13 @@ mod cleanup_tests {
                 include_unfinished: true
             })
         );
-        let text = run(
-            Command::Clean(CleanArgs {
-                user_config_dir: Some(temp.path().into()),
-                ..Default::default()
-            }),
-            Arc::new(routing::MapEnv::default()),
-        )
+        // No core runs here: clean must never try to reach one.
+        let text = execute(Command::Clean(CleanArgs {
+            user_config_dir: Some(temp.path().into()),
+            ..Default::default()
+        }))
         .await
+        .unwrap()
         .unwrap();
         assert!(text.contains("0 bytes known"));
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
