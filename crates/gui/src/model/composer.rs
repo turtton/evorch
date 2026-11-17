@@ -568,16 +568,22 @@ mod tests {
     }
 
     #[test]
-    fn pasted_image_can_be_added_and_removed() {
+    fn attachment_upload_state_blocks_send_until_ready_and_can_be_removed() {
         let mut model = ComposerModel::default();
-        assert!(model.add_pasted_image("data:image/png;base64,aGVsbG8="));
-        assert_eq!(
-            model.attachments[0].data_url(),
-            "data:image/png;base64,aGVsbG8="
-        );
-        assert!(model.image_warning().is_some());
+        model
+            .add_attachment(AttachmentDraft::new(crate::attachments::AttachmentFile {
+                draft_id: "draft".into(),
+                filename: "notes.txt".into(),
+                media_type: "text/plain".into(),
+                bytes: b"hello".to_vec(),
+            }))
+            .unwrap();
+        assert!(!model.attachments_ready());
+        model.attachments[0].upload = AttachmentUploadState::Failed("offline".into());
+        assert!(!model.attachments_ready());
         assert!(model.remove_attachment(0));
         assert!(!model.remove_attachment(0));
+        assert!(model.attachments_ready());
     }
 
     #[test]
