@@ -15,6 +15,7 @@ use workbench_web::{BackendSubscription, WebSession, WorkbenchBackend};
 pub struct HostBackend {
     pub host: Arc<Mutex<CommandHost>>,
     pub projection: Arc<Projection>,
+    connections: Arc<workbench_host::connections::ConnectionHooks>,
     hello: ServerHello,
     redactor: Arc<secret_guard::SecretRedactor>,
     closing: AtomicBool,
@@ -65,10 +66,14 @@ fn protect<T: Serialize + DeserializeOwned>(
 
 impl HostBackend {
     pub fn new(host: Arc<Mutex<CommandHost>>, identity: String) -> Self {
-        let projection = host.lock().unwrap().projection().clone();
+        let (projection, connections) = {
+            let host = host.lock().unwrap();
+            (host.projection().clone(), host.connections())
+        };
         Self {
             host,
             projection,
+            connections,
             redactor: Arc::new(secret_guard::SecretRedactor::from_env()),
             closing: AtomicBool::new(false),
             unix_clients: AtomicU32::new(0),
@@ -102,6 +107,15 @@ impl HostBackend {
     pub(crate) fn connected(&self) -> ConnectedClient<'_> {
         self.unix_clients.fetch_add(1, Ordering::SeqCst);
         ConnectedClient(self)
+    }
+    /// The handshake of `client` was accepted: its connection is open until the
+    /// guard is dropped, whatever ends it, and the areas that started work for
+    /// the client hear of it then.
+    pub(crate) fn client_connection(
+        &self,
+        client: ClientId,
+    ) -> workbench_host::connections::ClientConnection {
+        self.connections.open(client)
     }
     fn transport_status(&self, mut status: CoreStatus) -> CoreStatus {
         status.running.clients = self.unix_clients.load(Ordering::SeqCst);

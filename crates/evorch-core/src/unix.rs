@@ -87,6 +87,7 @@ pub async fn connection(
             }
         }
     });
+    let _client_connection = backend.client_connection(client.client_instance_id.clone());
     let provenance = Provenance::human(Surface::Desktop, client.client_instance_id);
     let mut session = None;
     let mut subscriptions = BTreeMap::new();

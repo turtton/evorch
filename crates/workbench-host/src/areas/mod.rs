@@ -78,6 +78,9 @@ pub struct AreaHandles {
     /// The event database file (PR 13, 17d). Opening it is the storage layer's
     /// business: read through `runtime` or write through `storage`.
     pub database: PathBuf,
+    /// The connections of the clients and the hooks to run when one leaves; an
+    /// area that starts work for a client registers one (ADR 0045 §10).
+    pub connections: Arc<crate::connections::ConnectionHooks>,
 }
 
 /// See [`AreaHandles::reload_models`].
@@ -97,6 +100,8 @@ impl AreaHandles {
 /// host use: every area then has nothing behind it.
 #[derive(Default)]
 pub struct Areas {
+    /// See [`AreaHandles::connections`].
+    pub connections: Arc<crate::connections::ConnectionHooks>,
     pub workspace: workspace::WorkspaceArea,
     pub mcp: mcp::McpArea,
     pub execution: execution::ExecutionArea,
@@ -121,6 +126,7 @@ impl Areas {
     /// The first area that cannot be constructed; the bootstrap then fails.
     pub fn new(handles: &AreaHandles) -> Result<Self, BootstrapError> {
         Ok(Self {
+            connections: handles.connections.clone(),
             workspace: workspace::WorkspaceArea::new(handles)?,
             mcp: mcp::McpArea::new(handles)?,
             execution: execution::ExecutionArea::new(handles)?,
