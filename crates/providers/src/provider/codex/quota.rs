@@ -1,5 +1,6 @@
 //! Account quota acquisition; call `fetch_quota` repeatedly to poll with caching.
 
+mod auth;
 mod rpc;
 mod wire;
 
@@ -92,6 +93,8 @@ pub struct QuotaConfig {
     pub app_server_program: PathBuf,
     pub app_server_args: Vec<String>,
     pub wham_endpoint: String,
+    /// OAuth endpoint, shared with chat by default; overridable for tests.
+    pub auth_base_url: String,
     pub timeout: Duration,
     pub refresh_interval: Duration,
     /// The core's ledger: the app-server child and its supervisor are
@@ -105,6 +108,7 @@ impl Default for QuotaConfig {
             app_server_program: "codex".into(),
             app_server_args: vec!["app-server".into(), "--stdio".into()],
             wham_endpoint: "https://chatgpt.com/backend-api/wham/usage".into(),
+            auth_base_url: super::client::DEFAULT_AUTH_BASE_URL.into(),
             timeout: Duration::from_secs(10),
             refresh_interval: Duration::from_secs(60),
             ledger: None,
@@ -133,6 +137,7 @@ pub struct CodexQuotaClient {
     last_error: Option<QuotaError>,
     attempted_at: Option<Instant>,
     failures: u32,
+    rejected_bundle: Option<super::tokens::TokenBundle>,
 }
 
 impl CodexQuotaClient {
@@ -153,6 +158,7 @@ impl CodexQuotaClient {
             last_error: None,
             attempted_at: None,
             failures: 0,
+            rejected_bundle: None,
         })
     }
 
@@ -205,9 +211,14 @@ impl CodexQuotaClient {
                     }),
             }
         } else {
-            wire::fetch_wham(&self.http, &self.config, self.store.as_ref())
-                .await
-                .map(|quota| (quota, QuotaSource::Wham))
+            auth::fetch(
+                &self.http,
+                &self.config,
+                self.store.clone(),
+                &mut self.rejected_bundle,
+            )
+            .await
+            .map(|quota| (quota, QuotaSource::Wham))
         };
         self.attempted_at = Some(Instant::now());
         match result {

@@ -207,7 +207,8 @@ fn start_worker<T: QuotaData>(mut backend: Box<dyn QuotaBackend<T>>) -> Job<T> {
             if stopped.load(Ordering::Acquire) {
                 break;
             }
-            // Never cancel the fetch future: both sources can take ~20s and need child cleanup.
+            // Never cancel fetch: source fallback, OAuth recovery and child cleanup
+            // may require multiple requests (or waiting for an account refresh).
             let result = runtime.block_on(backend.fetch());
             let interval = backend.interval();
             if stopped.load(Ordering::Acquire) || tx.send((result, interval)).is_err() {

@@ -387,3 +387,61 @@ fn weekly_only_plan_labels_primary_window_by_its_duration() {
     harness.get_by_label_contains("wk: 75.0% remaining");
     assert!(harness.query_by_label("Codex · 75% 5h · 40% wk").is_none());
 }
+
+#[tokio::test]
+async fn codex_quota_real_client_accepts_refreshed_access_with_expired_id() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use providers::provider::codex::{
+        quota::{CodexQuotaClient, QuotaConfig},
+        tokens::{CodexTokenStore, InMemoryTokenStore, TokenBundle},
+    };
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+    let server = MockServer::start().await;
+    let store = Arc::new(InMemoryTokenStore::new());
+    let jwt = |exp| {
+        format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(json!({
+        "exp": exp, "https://api.openai.com/auth": {"chatgpt_account_id": "gui-test-account"}
+    }).to_string()))
+    };
+    store
+        .save(&TokenBundle {
+            access_token: jwt(1_u64),
+            refresh_token: "fake-refresh".into(),
+            id_token: jwt(1),
+        })
+        .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"access_token": jwt(4_000_000_000), "refresh_token": "fake-rotated"}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET")).and(path("/usage"))
+        .and(header("authorization", format!("Bearer {}", jwt(4_000_000_000))))
+        .and(header("chatgpt-account-id", "gui-test-account"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"plan_type":"plus", "rate_limit":{
+            "primary_window":{"used_percent":25.0,"limit_window_seconds":18000,"reset_at":2000000000}
+        }}))).expect(1).mount(&server).await;
+    let mut client = CodexQuotaClient::new_for_account(
+        QuotaConfig {
+            wham_endpoint: format!("{}/usage", server.uri()),
+            auth_base_url: server.uri(),
+            ..QuotaConfig::default()
+        },
+        store,
+    )
+    .unwrap();
+    let mut state = QuotaState::default();
+    state.accept(client.fetch_quota().await);
+    assert!(state.error.is_none());
+    assert!(!state.snapshot.as_ref().unwrap().stale);
+    let mut harness = quota_harness(state);
+    harness.run();
+    harness.get_by_label("Codex · 75% 5h");
+}

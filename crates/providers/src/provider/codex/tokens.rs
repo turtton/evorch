@@ -148,6 +148,15 @@ pub trait CodexTokenStore: Send + Sync {
     /// # Errors
     /// 書き込みに失敗した場合 [`ProviderError`] を返す。
     fn save(&self, bundle: &TokenBundle) -> Result<(), ProviderError>;
+
+    /// Serialize refresh across managers. Adapters should supply a per-account lock.
+    /// The default safely serializes all stores in this process, across runtimes.
+    fn refresh_lock(&self) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        static LOCK: std::sync::OnceLock<std::sync::Arc<tokio::sync::Mutex<()>>> =
+            std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
 }
 
 /// テスト・組み込み用のメモリ内トークンストア。
