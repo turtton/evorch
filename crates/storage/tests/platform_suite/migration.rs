@@ -11,7 +11,7 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 66;
+const LATEST_SCHEMA: u32 = 67;
 
 const EXPECTED_TABLES: [&str; 121] = [
     "restart_learning_inventory",

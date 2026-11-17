@@ -1472,7 +1472,7 @@ fn appends_for_deleted_runs_are_refused_without_side_effects() {
         handle.append_event(None, &pull_request),
         Err(StorageError::Tombstoned { thread_id: Some(thread), .. }) if thread == "P"
     ));
-    assert_eq!(handle.statistics().unwrap().events_rejected_tombstoned, 3);
+    assert_eq!(handle.statistics().unwrap().events_rejected_tombstoned, 2);
     assert_eq!(handle.statistics().unwrap().event_write_failures, 0);
 
     // And: a host mirror of a deleted thread is skipped while the rest is stored.

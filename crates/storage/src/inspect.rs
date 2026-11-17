@@ -777,13 +777,20 @@ fn contains_text(value: &Value, needle: Option<&str>) -> bool {
     }
 }
 
-/// Whether the event belongs to a deleted run or thread.
+/// Whether the payload is a retired `ThreadTodoUpdated` row: the type no longer exists, the
+/// row stays only until bounded retention removes it, and it is never shown.
+fn is_retired_todo(payload: &Value) -> bool {
+    payload["kind"] == "Orchestrator" && payload["payload"]["kind"] == "ThreadTodoUpdated"
+}
+
+/// Whether the event belongs to a deleted run or thread, or is a retired todo row.
 fn hidden(
     tombstones: &crate::thread_retention::TombstoneSet,
     payload: &Value,
     run_id: Option<String>,
 ) -> bool {
     run_id.is_some_and(|run| tombstones.contains_run(&run))
+        || is_retired_todo(payload)
         || serde_json::from_value::<event_bus::EventKind>(payload.clone())
             .is_ok_and(|kind| tombstones.rejects(&kind).is_some())
 }

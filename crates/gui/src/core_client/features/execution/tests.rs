@@ -662,7 +662,6 @@ fn the_goal_review_and_the_checks_pause_send_their_own_commands() {
     screen.get_by_label("ゴール: ship it");
     screen.get_by_label("✔ tests pass");
     screen.get_by_label("指摘: fix the docs");
-    screen.get_by_label("▶ write tests");
 
     screen.get_by_label("ゴールレビュー").click();
     let sent = asked(&mut screen);

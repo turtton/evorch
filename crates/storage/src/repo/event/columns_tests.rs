@@ -387,12 +387,6 @@ fn every_variant() -> Vec<(&'static str, &'static str, Value, Option<&'static st
         ),
         (
             "Orchestrator",
-            "ThreadTodoUpdated",
-            json!({"snapshot": {"list_id": "l", "thread_id": "t", "revision": 1, "items": []}}),
-            None,
-        ),
-        (
-            "Orchestrator",
             "TaskProgressed",
             json!({"task_id": "t", "run_id": "run-a", "progress": {}, "reason": "r"}),
             Some("run-a"),
@@ -507,7 +501,7 @@ fn every_variant_is_stored_with_the_columns_its_helpers_and_payload_give() {
             "{variant}"
         );
     }
-    assert_eq!(cases.len(), 62);
+    assert_eq!(cases.len(), 61);
 }
 
 #[test]
@@ -746,8 +740,8 @@ fn scenario() -> Scenario {
             false,
             kind_from(adjacent(
                 "Orchestrator",
-                "ThreadTodoUpdated",
-                json!({"snapshot": {"list_id": "l", "thread_id": "t", "revision": 1, "items": []}}),
+                "TaskProgressed",
+                json!({"task_id": "t2", "run_id": "run-9", "progress": {}, "reason": "r"}),
             )),
         ),
         (
@@ -840,15 +834,15 @@ impl Scenario {
         );
         assert_eq!(
             self.matching(&[("Orchestrator", Some("TaskProgressed"))]),
-            self.pick(&[9])
+            self.pick(&[8, 9])
         );
         assert_eq!(
             self.matching(&[
-                ("Orchestrator", Some("ThreadTodoUpdated")),
+                ("Orchestrator", Some("TaskCheckpoint")),
                 ("Message", Some("MessageCompleted")),
                 ("Message", None),
             ]),
-            self.pick(&[1, 2, 8, 11, 12])
+            self.pick(&[1, 2, 10, 11, 12])
         );
         assert_eq!(self.matching(&[("Tool", None)]), self.pick(&[3, 4, 5]));
         assert_eq!(

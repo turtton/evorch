@@ -1023,7 +1023,7 @@ async fn handoff_copies_authentic_question_answers_without_sharing_review_author
             .review_attachment_acceptances_for_lineage(&[target.to_string()])
             .unwrap()
             .len(),
-        1
+        2
     );
     runtime.stop(source, StopScope::SelfOnly).unwrap();
     runtime.wait(source).await.unwrap();
@@ -1288,7 +1288,7 @@ async fn initial_control_event_failure_rolls_back_commit_and_keeps_source_runnin
             .orchestrator_events_ordered()
             .unwrap()
             .len(),
-        2
+        1
     );
     runtime.stop(source, StopScope::SelfOnly).unwrap();
     runtime.wait(source).await.unwrap();

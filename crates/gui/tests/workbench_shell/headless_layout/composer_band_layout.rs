@@ -99,7 +99,7 @@ fn rect(harness: &Harness<'_, State>, label: &str) -> Rect {
 fn assert_input_fully_visible(harness: &Harness<'_, State>, height: f32, context: &str) {
     let input = rect(harness, INPUT);
     let status = rect(harness, STATUS);
-    let band = rect(harness, "Procedures: Procedure step 3");
+    let band = rect(harness, "Goal: Investigate the slow operation");
     let reply = rect(harness, "AI response");
     assert!(
         band.bottom() <= input.top() + 0.5,
@@ -148,7 +148,7 @@ fn input_keeps_priority_over_expanded_goal_details_in_a_short_pane() {
     let one_line = rect(&harness, INPUT);
     harness.get_by_label("Show goal details").click();
     harness.run();
-    harness.get_by_label("Explain the cause");
+    harness.get_by_label("Original request: Explain the cause");
     harness.state_mut().0.input = "first\nsecond\nthird\nfourth\nfifth\nsixth".into();
     harness.run();
     let six_lines = rect(&harness, INPUT);

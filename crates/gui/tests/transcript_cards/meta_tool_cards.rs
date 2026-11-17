@@ -29,7 +29,7 @@ async fn coordination_calls_reach_the_transcript_but_finish_does_not() {
             "send_message",
             json!({"run_id": "run-404", "message": "hi"}),
         ),
-        ("todo_write", json!({"items": "nope"})),
+        ("plan_update", json!({"items": "nope"})),
         ("get_goal", json!({})),
         ("finish", json!({"result": "all done"})),
     ];
@@ -57,7 +57,7 @@ async fn coordination_calls_reach_the_transcript_but_finish_does_not() {
     let names: Vec<_> = tools.iter().map(|(name, _)| *name).collect();
     assert_eq!(
         names,
-        ["delegate", "send_message", "todo_write", "get_goal"]
+        ["delegate", "send_message", "plan_update", "get_goal"]
     );
     assert!(
         tools
