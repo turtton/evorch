@@ -418,6 +418,7 @@ impl Feature for ExecutionFeature {
         let changed = match event {
             ExecutionEvent::RunChanged { run } => Some(&run.thread),
             ExecutionEvent::ThreadExecutionChanged { thread, .. } => Some(thread),
+            ExecutionEvent::ConversationPlanChanged { thread, .. } => Some(thread),
         };
         if changed == self.thread.as_ref() {
             // Ask again instead of patching: the core's answer is current.
@@ -431,6 +432,8 @@ impl Feature for ExecutionFeature {
                     }
                 }
                 ExecutionEvent::ThreadExecutionChanged { .. } => self.execution_stale = true,
+                // Plan consumers are connected only at the public cutover.
+                ExecutionEvent::ConversationPlanChanged { .. } => {}
             }
         }
     }
