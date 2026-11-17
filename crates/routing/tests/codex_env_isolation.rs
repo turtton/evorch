@@ -99,6 +99,7 @@ async fn codex_tokens_never_reach_sandbox_child_env() {
         store,
         None,
         &FactoryOptions {
+            codex_catalog_cache: Some(Arc::new(providers::CodexCatalogCache::new())),
             auth_base_url_override: Some(server.uri()),
             ..FactoryOptions::default()
         },

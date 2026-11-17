@@ -64,6 +64,9 @@ impl Scenario {
             },
             store,
         )
+        .map(|client| {
+            client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+        })
         .unwrap();
         Self {
             server,

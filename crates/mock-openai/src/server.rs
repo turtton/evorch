@@ -367,6 +367,12 @@ impl StreamingMockOpenAi {
     /// first reads the catalog.
     #[must_use]
     pub fn with_codex_model_capabilities(self, slug: &str, capabilities: Value) -> Self {
+        self.set_codex_model_capabilities(slug, capabilities);
+        self
+    }
+
+    /// Updates the served catalog without replacing the server or its prompt-cache state.
+    pub fn set_codex_model_capabilities(&self, slug: &str, capabilities: Value) {
         {
             let mut models = self.codex_models.lock().unwrap_or_else(|e| e.into_inner());
             let index = models
@@ -382,7 +388,6 @@ impl StreamingMockOpenAi {
                 entry.extend(fields.clone());
             }
         }
-        self
     }
 
     /// Returns the API base URL, including `/v1`.

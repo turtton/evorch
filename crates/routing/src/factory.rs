@@ -179,6 +179,8 @@ pub fn subscription_refresh_lock(
 /// [`FactoryOptions`] は provider client 構築時の上書き設定です。
 #[derive(Debug, Clone, Default)]
 pub struct FactoryOptions {
+    /// Shared Codex discovery cache; None selects the process default.
+    pub codex_catalog_cache: Option<Arc<providers::CodexCatalogCache>>,
     /// OAuth 認証先ベース URL の上書き。`None` なら [`DEFAULT_AUTH_BASE_URL`]
     /// を使用する。
     pub auth_base_url_override: Option<String>,
@@ -187,6 +189,15 @@ pub struct FactoryOptions {
     /// Claude subscription installation seed. API-key clients never access this path.
     /// Library callers without a path share a process-local seed.
     pub claude_installation_id_path: Option<PathBuf>,
+}
+
+impl FactoryOptions {
+    /// Effective cache shared with metadata resolution when composing a runtime.
+    pub fn codex_catalog_cache(&self) -> Arc<providers::CodexCatalogCache> {
+        self.codex_catalog_cache
+            .clone()
+            .unwrap_or_else(providers::default_codex_catalog_cache)
+    }
 }
 
 /// プロファイルから対応する provider client を構築します。
@@ -358,6 +369,7 @@ fn build_codex(
             reason: format!("codex client の構築に失敗しました: {error}"),
         }
     })?;
+    let client = client.with_catalog_cache(options.codex_catalog_cache());
     Ok(Box::new(client.with_profile(&profile.name)))
 }
 

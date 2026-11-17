@@ -204,3 +204,82 @@ fn surfaces_hint_when_backend_returns_zero_models() {
     assert_eq!(editor.models, configured);
     assert!(editor.fetch.available_models.is_none());
 }
+
+#[tokio::test]
+async fn repeated_fetches_share_catalog_across_short_lived_runtimes() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{"slug":"model", "context_window":12345}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(sandbox::FileCredentialStore::open(directory.path()).unwrap());
+    let token = format!(
+        "header.{}.sig",
+        URL_SAFE_NO_PAD.encode(r#"{"exp":4102444800}"#)
+    );
+    store.set("profile", &sandbox::credential::Secret::from(serde_json::json!({
+        "access_token":token, "refresh_token":"unused",
+        "id_token":format!("header.{}.sig", URL_SAFE_NO_PAD.encode(r#"{"exp":4102444800,"https://api.openai.com/auth":{"chatgpt_account_id":"account"}}"#))
+    }).to_string())).unwrap();
+    let cache = Arc::new(providers::CodexCatalogCache::new());
+    let mut settings = super::super::ProviderSettingsModel::default();
+    settings.add(super::super::ProviderKind::CodexSubscription);
+    let editor = settings.codex_mut().unwrap();
+    editor.account = "profile".into();
+    editor.fetch.base_url = server.uri();
+    for _ in 0..2 {
+        editor.start_models_fetch_with_store_and_cache(Some(store.clone()), cache.clone());
+        let receiver = editor.fetch.models_rx.take().unwrap();
+        // Receiving the explicit completion signal also allows the server runtime to run.
+        let fetched = tokio::task::spawn_blocking(move || receiver.recv().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.models, ["model"]);
+        assert_eq!(fetched.context_windows["model"], 12345);
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+// Identity only: default wiring must not depend on HTTP, credentials, a unique
+// port or current cache contents. There is no test-only singleton override.
+#[test]
+fn all_default_codex_catalog_entry_points_select_the_same_process_instance() {
+    use providers::provider::codex::{CodexClient, CodexConfig};
+    let default = providers::default_codex_catalog_cache(); // Also selected by list_codex_models.
+    let client = CodexClient::with_config(
+        CodexConfig::default(),
+        Arc::new(providers::provider::codex::tokens::InMemoryTokenStore::new()),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&default, client.catalog_cache()));
+    assert!(Arc::ptr_eq(
+        &default,
+        &routing::factory::FactoryOptions::default().codex_catalog_cache()
+    ));
+    assert!(Arc::ptr_eq(&default, &default_fetch_cache()));
+    let config = config::Config::default();
+    let directory = tempfile::tempdir().unwrap();
+    let bus = Arc::new(event_bus::EventBus::new(16));
+    let composition = runtime::compose_runtime(runtime::RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
+        user_config_dir: Some(directory.path().join("empty")),
+        config: &config,
+        executor: Arc::new(tools::ToolExecutor::new(bus.clone())),
+        bus,
+        credential_store: Arc::new(sandbox::FileCredentialStore::open(directory.path()).unwrap()),
+        env: Arc::new(routing::MapEnv::default()),
+        model_source: runtime::ModelSource::Fixed(Arc::new(runtime::compose::UnconfiguredModel)),
+        workspace: None,
+    })
+    .unwrap();
+    assert!(Arc::ptr_eq(
+        &default,
+        composition.runtime.codex_catalog_cache().unwrap()
+    ));
+}

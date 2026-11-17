@@ -90,6 +90,9 @@ fn client_at(
         },
         store,
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .expect("Codex client can be built")
 }
 

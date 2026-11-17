@@ -187,6 +187,7 @@ fn codex_client(server: &MockServer, bus: Arc<EventBus>) -> CodexClient {
         },
         store,
     )
+    .map(|client| client.with_catalog_cache(Arc::new(providers::CodexCatalogCache::new())))
     .unwrap()
 }
 

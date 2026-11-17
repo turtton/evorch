@@ -54,6 +54,9 @@ async fn codex_streaming_preserves_reasoning_text_and_first_token() {
         },
         store,
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .expect("client");
     let mut request = request();
     request.observation = Some(ObservationContext {

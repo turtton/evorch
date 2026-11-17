@@ -40,10 +40,23 @@ impl Default for CodexModelsFetch {
     }
 }
 
+fn default_fetch_cache() -> Arc<providers::CodexCatalogCache> {
+    providers::default_codex_catalog_cache()
+}
+
 impl CodexEditorModel {
     pub fn start_models_fetch_with_store(
         &mut self,
         store: Option<Arc<dyn sandbox::CredentialStore>>,
+    ) {
+        self.start_models_fetch_with_store_and_cache(store, default_fetch_cache());
+    }
+
+    /// Runs Fetch with an explicitly scoped cache, including across its short-lived runtime.
+    pub fn start_models_fetch_with_store_and_cache(
+        &mut self,
+        store: Option<Arc<dyn sandbox::CredentialStore>>,
+        cache: Arc<providers::CodexCatalogCache>,
     ) {
         if self.fetch.models_rx.is_some() {
             return;
@@ -64,7 +77,8 @@ impl CodexEditorModel {
                     .build()
                     .map_err(|error| error.to_string())?;
                 runtime.block_on(async {
-                    let models = providers::list_codex_models(
+                    let models = providers::list_codex_models_with_cache(
+                        &cache,
                         &base_url,
                         &providers::ProviderAuth::new(credentials.access_token),
                         &credentials.account_id,

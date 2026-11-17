@@ -13,7 +13,7 @@ use mock_openai::cache_contract::{
     CacheProtocol, assert_append_only, assert_compaction_transition,
 };
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
-use runtime::{ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime};
+use runtime::{ModelSource, Role, RunConfig, RuntimeComposition};
 use sandbox::credential::FileCredentialStore;
 use serde_json::Value;
 use tools::ToolExecutor;
@@ -144,17 +144,20 @@ summarizer = "structural"
     }
     let store = Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
     let model = codex_model(&config, &store, &bus, &patch_mock.codex_base_url());
-    let runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(directory.path().join("empty-user-config")),
-        config: &config,
-        bus,
-        executor: Arc::new(executor),
-        credential_store: store,
-        env: Arc::new(routing::MapEnv::default()),
-        model_source: ModelSource::Fixed(model),
-        workspace: None,
-    })
+    let runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(directory.path().join("empty-user-config")),
+            config: &config,
+            bus,
+            executor: Arc::new(executor),
+            credential_store: store,
+            env: Arc::new(routing::MapEnv::default()),
+            model_source: ModelSource::Fixed(model),
+            workspace: None,
+        },
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
     .unwrap()
     .runtime
     .with_sequential_run_ids()

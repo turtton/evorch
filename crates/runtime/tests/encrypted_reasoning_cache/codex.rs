@@ -8,10 +8,7 @@ use mock_openai::codex_auth::{FAR_FUTURE_EXP, token_bundle};
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use routing::MapEnv;
 use runtime::compose::SwitchableModel;
-use runtime::{
-    AgentModel, AgentRuntime, ModelSource, Role, RunConfig, RunId, RuntimeComposition,
-    compose_runtime,
-};
+use runtime::{AgentModel, AgentRuntime, ModelSource, Role, RunConfig, RunId, RuntimeComposition};
 use sandbox::credential::{CredentialStore, FileCredentialStore, Secret};
 use serde_json::Value;
 use tools::ToolExecutor;
@@ -84,6 +81,7 @@ fn routed(
             env: offline_env(),
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions {
+                codex_catalog_cache: Some(Arc::new(providers::CodexCatalogCache::new())),
                 auth_base_url_override: Some(mock.codex_base_url()),
                 ..Default::default()
             },
@@ -159,17 +157,20 @@ impl Live {
             executor.register(tool).unwrap();
         }
         let live = Arc::new(SwitchableModel::new(routed(&config, &store, &bus, &mock)));
-        let mut runtime = compose_runtime(RuntimeComposition {
-            model_catalog_dir: Some(test_support::model_catalog_dir()),
-            user_config_dir: Some(directory.path().join("empty-user-config")),
-            config: &config,
-            bus: bus.clone(),
-            executor: Arc::new(executor),
-            credential_store: store.clone(),
-            env: offline_env(),
-            model_source: ModelSource::Fixed(live.clone()),
-            workspace: None,
-        })
+        let mut runtime = runtime::compose_runtime_with_catalog_cache(
+            RuntimeComposition {
+                model_catalog_dir: Some(test_support::model_catalog_dir()),
+                user_config_dir: Some(directory.path().join("empty-user-config")),
+                config: &config,
+                bus: bus.clone(),
+                executor: Arc::new(executor),
+                credential_store: store.clone(),
+                env: offline_env(),
+                model_source: ModelSource::Fixed(live.clone()),
+                workspace: None,
+            },
+            Arc::new(providers::CodexCatalogCache::new()),
+        )
         .unwrap()
         .runtime
         .with_sequential_run_ids()
@@ -220,17 +221,20 @@ impl Live {
         let mut executor = ToolExecutor::new(self.bus.clone());
         executor.register(Arc::new(BulkRead)).unwrap();
         let storage = storage::Storage::open(db.clone()).unwrap();
-        let runtime = compose_runtime(RuntimeComposition {
-            model_catalog_dir: Some(test_support::model_catalog_dir()),
-            user_config_dir: Some(self.directory.path().join("empty-user-config")),
-            config: &config,
-            bus: self.bus.clone(),
-            executor: Arc::new(executor),
-            credential_store: self.store.clone(),
-            env: offline_env(),
-            model_source: ModelSource::Fixed(self.live.clone()),
-            workspace: None,
-        })
+        let runtime = runtime::compose_runtime_with_catalog_cache(
+            RuntimeComposition {
+                model_catalog_dir: Some(test_support::model_catalog_dir()),
+                user_config_dir: Some(self.directory.path().join("empty-user-config")),
+                config: &config,
+                bus: self.bus.clone(),
+                executor: Arc::new(executor),
+                credential_store: self.store.clone(),
+                env: offline_env(),
+                model_source: ModelSource::Fixed(self.live.clone()),
+                workspace: None,
+            },
+            Arc::new(providers::CodexCatalogCache::new()),
+        )
         .unwrap()
         .runtime
         .with_system_prompts(contract_prompts())
@@ -599,17 +603,20 @@ summarizer = "structural"
     executor.register(Arc::new(BulkRead)).unwrap();
     let store = Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
     sign_in(&store, "access-0", ACCOUNT, FAR_FUTURE_EXP);
-    let runtime = compose_runtime(RuntimeComposition {
-        model_catalog_dir: Some(test_support::model_catalog_dir()),
-        user_config_dir: Some(directory.path().join("empty-user-config")),
-        config: &config,
-        bus: bus.clone(),
-        executor: Arc::new(executor),
-        credential_store: store.clone(),
-        env: Arc::new(MapEnv::default()),
-        model_source: ModelSource::Fixed(routed(&config, &store, &bus, &primary)),
-        workspace: None,
-    })
+    let runtime = runtime::compose_runtime_with_catalog_cache(
+        RuntimeComposition {
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+            user_config_dir: Some(directory.path().join("empty-user-config")),
+            config: &config,
+            bus: bus.clone(),
+            executor: Arc::new(executor),
+            credential_store: store.clone(),
+            env: Arc::new(MapEnv::default()),
+            model_source: ModelSource::Fixed(routed(&config, &store, &bus, &primary)),
+            workspace: None,
+        },
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
     .unwrap()
     .runtime
     .with_sequential_run_ids()

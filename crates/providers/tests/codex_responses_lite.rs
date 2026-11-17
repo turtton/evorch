@@ -64,6 +64,9 @@ fn client_at(
         },
         store,
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .expect("Codex client can be built")
 }
 
@@ -190,50 +193,131 @@ async fn non_lite_model_keeps_the_regular_shape() {
     assert_eq!(body["input"][0]["role"], "developer");
 }
 
-// Given: a catalog that fails with 500
-// When: several requests and a model listing follow
-// Then: they keep the legacy shape, the catalog is not read again, and exactly one
-// diagnostic reports the failed read
+// Discovery failures do not freeze a client's wire capabilities.
 #[tokio::test]
-async fn failed_catalog_keeps_the_legacy_shape_and_is_not_read_again() {
-    let server = MockServer::start().await;
-    mount_catalog(&server, ResponseTemplate::new(500).set_body_string("down")).await;
-    mount_responses(&server).await;
-    let bus = Arc::new(EventBus::new(64));
-    let mut receiver = bus.subscribe();
-    let client = client(&server, seeded_store(), Some(bus.clone()));
-
-    for user in ["first", "second"] {
+async fn model_listing_retries_failure_and_empty_catalog_before_first_wire_use() {
+    for response in [
+        ResponseTemplate::new(500),
+        ResponseTemplate::new(200).set_body_json(json!({"models":[]})),
+    ] {
+        let server = MockServer::start().await;
+        mount_catalog(&server, response).await;
+        let client = client(&server, seeded_store(), None);
+        let initial = client.list_models(&ProviderAuth::new("")).await;
+        assert!(initial.is_err() || initial.unwrap().unwrap().is_empty());
+        assert_eq!(catalog_reads(&server).await.len(), 1);
+        server.reset().await;
+        mount_catalog(
+            &server,
+            ResponseTemplate::new(200).set_body_raw(CATALOG, "application/json"),
+        )
+        .await;
+        mount_responses(&server).await;
+        assert!(
+            !client
+                .list_models(&ProviderAuth::new(""))
+                .await
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
         client
-            .send(&ProviderAuth::new(""), &chat("gpt-6-astra", user))
+            .send(
+                &ProviderAuth::new(""),
+                &chat("gpt-6-astra", "after recovery"),
+            )
             .await
-            .expect("send succeeds");
+            .unwrap();
+        assert_eq!(catalog_reads(&server).await.len(), 1);
+        assert_eq!(
+            codex_support::response_requests(&server).await[0].headers[LITE_HEADER],
+            "true"
+        );
     }
-    let listing = client.list_models(&ProviderAuth::new("")).await;
+}
 
-    assert!(
-        listing.is_err(),
-        "the cached failure is reported to the listing"
-    );
-    assert_eq!(catalog_reads(&server).await.len(), 1);
-    for request in codex_support::response_requests(&server).await {
-        assert!(request.headers.get(LITE_HEADER).is_none());
-        let body = body(&request);
+// Wire fallback is immutable even if a later independent listing recovers.
+#[tokio::test]
+async fn failed_wire_catalog_stays_legacy_after_listing_recovers() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    for (response, diagnostics) in [
+        (ResponseTemplate::new(500), 3),
+        (
+            ResponseTemplate::new(200).set_body_json(json!({"models":[]})),
+            2,
+        ),
+    ] {
+        let server = MockServer::start().await;
+        mount_catalog(&server, response).await;
+        mount_responses(&server).await;
+        let bus = Arc::new(EventBus::new(64));
+        let mut receiver = bus.subscribe();
+        let ticks = Arc::new(AtomicU64::new(0));
+        let clock = ticks.clone();
+        let cache = Arc::new(providers::CodexCatalogCache::with_clock(Arc::new(
+            move || std::time::Duration::from_secs(clock.load(Ordering::Relaxed)),
+        )));
+        let client = client(&server, seeded_store(), Some(bus)).with_catalog_cache(cache);
+        for user in ["first", "second"] {
+            client
+                .send(&ProviderAuth::new(""), &chat("gpt-6-astra", user))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            catalog_reads(&server).await.len(),
+            1,
+            "send alone never retries"
+        );
+        server.reset().await;
+        mount_catalog(
+            &server,
+            ResponseTemplate::new(200).set_body_raw(CATALOG, "application/json"),
+        )
+        .await;
+        mount_responses(&server).await;
+        assert!(
+            !client
+                .list_models(&ProviderAuth::new(""))
+                .await
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        ticks.store(300, Ordering::Relaxed);
+        // Once discovery succeeds, its list remains fixed too, even after shared TTL expiry.
+        assert!(
+            !client
+                .list_models(&ProviderAuth::new(""))
+                .await
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        client
+            .send(&ProviderAuth::new(""), &chat("gpt-6-astra", "third"))
+            .await
+            .unwrap();
+        assert_eq!(catalog_reads(&server).await.len(), 1);
+        let sent = codex_support::response_requests(&server).await;
+        assert!(sent[0].headers.get(LITE_HEADER).is_none());
+        let body = body(&sent[0]);
         assert_eq!(body["tools"].as_array().unwrap().len(), 2);
         assert_eq!(body["parallel_tool_calls"], true);
         assert_eq!(
             body["reasoning"],
-            json!({"effort": "medium", "summary": "auto"})
+            json!({"effort":"medium","summary":"auto"})
         );
         assert!(body.get("text").is_none());
+        // A successful discovery remains observable (and failure, if any, is emitted once).
+        assert_eq!(catalog_diagnostics(&mut receiver), diagnostics);
     }
-    assert_eq!(catalog_diagnostics(&mut receiver), 1);
 }
 
 // Given: one client / When: it lists models and then sends (and the reverse)
 // Then: both share a single catalog read
 #[tokio::test]
-async fn model_listing_and_requests_share_one_catalog_read() {
+async fn first_nonempty_listing_and_first_wire_capabilities_agree() {
     for list_first in [true, false] {
         let server = MockServer::start().await;
         mount_catalog(
@@ -458,4 +542,72 @@ async fn only_a_regular_model_can_forbid_tool_calls() {
             .supports_tool_choice_none(&chat("gpt-6-astra", "hi"))
             .await
     );
+}
+
+// A profile label is not catalog identity. Direct API calls (metadata and repeated
+// GUI Fetch equivalents) reuse the same cache as concurrent and later clients.
+#[tokio::test]
+async fn concurrent_clients_direct_api_and_metadata_share_one_catalog_get() {
+    let server = MockServer::start().await;
+    mount_catalog(
+        &server,
+        ResponseTemplate::new(200).set_body_raw(CATALOG, "application/json"),
+    )
+    .await;
+    let cache = Arc::new(providers::CodexCatalogCache::new());
+    let bus = Arc::new(EventBus::new(32));
+    let mut receiver = bus.subscribe();
+    let a = client(&server, seeded_store(), Some(bus.clone()))
+        .with_catalog_cache(cache.clone())
+        .with_profile("alpha");
+    let b = client(&server, seeded_store(), Some(bus))
+        .with_catalog_cache(cache.clone())
+        .with_profile("beta");
+    let auth = ProviderAuth::new("");
+    let (a, b) = tokio::join!(a.list_models(&auth), b.list_models(&auth));
+    assert_eq!(a.unwrap(), b.unwrap());
+    let mut diagnostics = Vec::new();
+    while diagnostics.len() < 2 {
+        let event = receiver.recv().await.unwrap();
+        if let EventKind::Diagnostic(event) = event.kind {
+            diagnostics.push(event);
+        }
+    }
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|d| d.detail.contains("catalog_cache_hit=false"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|d| d.detail.contains("catalog_cache_hit=true"))
+            .count(),
+        1
+    );
+    for d in diagnostics {
+        for secret in ["access-tok-1", "acc-123", &server.uri()] {
+            assert!(!d.detail.contains(secret));
+        }
+    }
+    for _ in 0..2 {
+        let models = providers::list_codex_models_with_cache(
+            &cache,
+            &format!("{}/backend-api/codex", server.uri()),
+            &ProviderAuth::new("access-tok-1"),
+            "acc-123",
+        )
+        .await
+        .unwrap();
+        assert_eq!(models.len(), 3);
+    }
+    client(&server, seeded_store(), None)
+        .with_catalog_cache(cache)
+        .list_models(&auth)
+        .await
+        .unwrap();
+    assert_eq!(catalog_reads(&server).await.len(), 1);
 }

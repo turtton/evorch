@@ -252,6 +252,22 @@ fn codex_model_with_bus(
     id_token: &str,
     bus: Option<Arc<EventBus>>,
 ) -> Arc<RoutedModel> {
+    codex_model_with_bus_and_cache(
+        server,
+        store,
+        id_token,
+        bus,
+        Arc::new(providers::CodexCatalogCache::new()),
+    )
+}
+
+fn codex_model_with_bus_and_cache(
+    server: &wiremock::MockServer,
+    store: Arc<FileCredentialStore>,
+    id_token: &str,
+    bus: Option<Arc<EventBus>>,
+    cache: Arc<providers::CodexCatalogCache>,
+) -> Arc<RoutedModel> {
     use sandbox::credential::CredentialStore;
     store
         .set(
@@ -292,6 +308,7 @@ fn codex_model_with_bus(
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions {
                 auth_base_url_override: Some(server.uri()),
+                codex_catalog_cache: Some(cache),
                 ..Default::default()
             },
         },
@@ -322,6 +339,59 @@ async fn catalog_diagnostics(
             _ => {}
         }
     }
+}
+
+#[tokio::test]
+async fn codex_catalog_is_shared_across_composition_preflights() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::path("/backend-api/codex/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"models": [{"slug": "gpt-4o"}]})),
+        )
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
+    let bus = Arc::new(EventBus::new(32));
+    let mut receiver = bus.subscribe();
+    let cache = Arc::new(providers::CodexCatalogCache::new());
+    let models: Vec<_> = (0..4)
+        .map(|_| {
+            codex_model_with_bus_and_cache(
+                &server,
+                store.clone(),
+                FRESH_ID_TOKEN,
+                Some(bus.clone()),
+                cache.clone(),
+            )
+        })
+        .collect();
+    for model in models {
+        model
+            .preflight_routes(&[routing::ResolvedRoute {
+                profile: "codex".into(),
+                model_id: "gpt-4o".into(),
+            }])
+            .await
+            .unwrap();
+    }
+    let diagnostics = catalog_diagnostics(&bus, &mut receiver).await;
+    assert_eq!(diagnostics.len(), 4);
+    let gets = server.received_requests().await.unwrap().len();
+    let misses = diagnostics
+        .iter()
+        .filter(|d| d.detail.contains("catalog_cache_hit=false"))
+        .count();
+    assert_eq!(
+        misses, gets,
+        "diagnostics must reflect actual HTTP requests"
+    );
+    assert_eq!(
+        gets, 1,
+        "four composition preflights should share their catalog"
+    );
 }
 
 #[tokio::test]

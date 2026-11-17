@@ -94,7 +94,7 @@ pub mod benchmark;
 
 pub use compose::{
     ComposedRuntime, CompositionError, ModelIdentity, ModelSource, RoutedModel, RuntimeComposition,
-    WorkspaceSeam, compose_runtime,
+    WorkspaceSeam, compose_runtime, compose_runtime_with_catalog_cache,
 };
 pub use context::{
     AgentContext, CompactionCheckpoint, ResponsesReplayBinding, ResponsesReplayState,

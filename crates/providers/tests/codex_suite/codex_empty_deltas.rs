@@ -41,6 +41,9 @@ async fn empty_deltas_are_noops_and_reasoning_alone_has_no_ttft() {
         },
         store,
     )
+    .map(|client| {
+        client.with_catalog_cache(std::sync::Arc::new(providers::CodexCatalogCache::new()))
+    })
     .expect("client");
     let request = ChatRequest {
         tool_choice: None,
