@@ -23,7 +23,7 @@ pub const RECLAIM_EVENT_ROWS: usize = 500;
 pub const RECLAIM_EVENT_BYTES: u64 = 4 * 1024 * 1024;
 /// Rows deleted from a small table by one reclaim transaction.
 pub const RECLAIM_ROWS: usize = 500;
-/// Ledger / todo rows *scanned* by one reclaim transaction; the cursor advances
+/// Ledger / retired todo rows *scanned* by one reclaim transaction; the cursor advances
 /// by rows scanned, not by rows matched.
 pub const RECLAIM_SCAN_ROWS: usize = 2_000;
 /// Index blocks (and their text) purged by one reclaim transaction.
@@ -359,7 +359,7 @@ impl TombstoneSet {
     }
 
     /// The tombstoned identity an event belongs to, if any: its owning run, or
-    /// the thread of a thread goal / todo snapshot or of a pull request change.
+    /// the thread of a thread goal snapshot, a pull request change or a conversation plan event.
     pub(crate) fn rejects(&self, kind: &EventKind) -> Option<StorageError> {
         if self.runs.is_empty() && self.threads.is_empty() {
             return None;
