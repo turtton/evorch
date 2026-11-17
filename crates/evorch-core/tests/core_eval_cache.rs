@@ -244,6 +244,15 @@ async fn settled(
     }
 }
 
+/// Wait until the counted task of the job ended: the job reports its end
+/// before the task drops what it holds, so a view alone does not say it.
+async fn idle(tasks: &AreaTasks) {
+    let ended = tasks.counted_ended_notify();
+    while tasks.busy() {
+        ended.notified().await;
+    }
+}
+
 /// The host of the first scenarios: the production `evaluation` area over the
 /// recorded database, with only the isolation of the replays' tools switched off.
 fn job_host(root: &Path, config_dir: &Path, database: &Path) -> (CommandHost, AreaTasks) {
@@ -357,7 +366,7 @@ async fn a_replay_started_through_the_core_keeps_the_sent_prefix_on_the_producti
             "a schema is requested"
         );
     }
-    assert!(!tasks.busy(), "the job released its counted task");
+    idle(&tasks).await;
 }
 
 fn provider_drained(provider: &StreamingMockOpenAi) {
@@ -499,5 +508,5 @@ reviewer = [{{ profile = "local" }}]
             .all(|request| request.method == "GET"),
         "no replay or judge inference"
     );
-    assert!(!tasks.busy());
+    idle(&tasks).await;
 }
