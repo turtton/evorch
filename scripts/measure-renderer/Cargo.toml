@@ -1,0 +1,22 @@
+# Measurement tool for the out-of-process renderer helper (ADR 0045, plan 16a).
+#
+# Deliberately NOT a member of the evorch workspace: it declares its own
+# `[workspace]`, so the root Cargo.toml, Cargo.lock, CI groups and flake stay
+# untouched (feature scope `pr16a1`: documents and `scripts/measure-renderer*`
+# only). It depends on `renderer-ipc` by path and drives the real
+# `evorch-renderer` binary through the real `RendererClient`.
+#
+# Build and run through `scripts/measure-renderer.sh`.
+[package]
+name = "measure-renderer"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[dependencies]
+renderer-ipc = { path = "../../crates/renderer-ipc" }
+rustix = { version = "1", features = ["process", "net"] }
+serde_json = "1"
+
+[workspace]
