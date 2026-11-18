@@ -219,6 +219,8 @@ struct ProgressLines {
     next: Cell<u64>,
     /// The batch count of the last line.
     printed: Cell<u64>,
+    /// The text of the last line, for [`Self::terminal`].
+    last_text: std::cell::RefCell<Option<String>>,
 }
 
 impl ProgressLines {
@@ -233,7 +235,24 @@ impl ProgressLines {
         } else {
             batches.saturating_mul(2)
         });
-        Some(line())
+        let line = line();
+        *self.last_text.borrow_mut() = Some(line.clone());
+        Some(line)
+    }
+
+    /// The line of the end state of a task that is not counted in batches: printed once,
+    /// unless it reads as the last line already printed. A reindex that the core's index
+    /// owner works on ends with `step 0` (nothing was stepped by this client), and a
+    /// terminal that only changes the totals keeps its batch count, so `last` would
+    /// skip both.
+    fn terminal(&self, line: impl FnOnce() -> String) -> Option<String> {
+        let line = line();
+        let mut last = self.last_text.borrow_mut();
+        if last.as_deref() == Some(line.as_str()) {
+            return None;
+        }
+        *last = Some(line.clone());
+        Some(line)
     }
 
     /// The line for the last state, unless it was the last one printed.
@@ -370,7 +389,9 @@ fn reindex_line(batches: u32, progress: &MaintenanceProgress) -> String {
 /// and step path as the GUI, driven by the core's writer. The result (stdout)
 /// is the JSON the offline command printed (`accepted`, `completed`,
 /// `completed_with_gaps`, `failed`); the progress goes to stderr within the
-/// budget of [`ProgressLines`], the last state included.
+/// budget of [`ProgressLines`], the end state included: exactly once, also when the
+/// index owner of the core worked on the request (`step 0`, this client stepped nothing)
+/// or the end only changed the totals.
 ///
 /// A reindex that ends early (this process interrupted or its connection lost)
 /// leaves its durable request pending, for the next owner of the index.
@@ -404,17 +425,14 @@ pub async fn reindex(
         Err(error) => {
             let (batches, progress) = last.take();
             if let Some(progress) = progress
-                && let Some(line) =
-                    lines.last(u64::from(batches), || reindex_line(batches, &progress))
+                && let Some(line) = lines.terminal(|| reindex_line(batches, &progress))
             {
                 eprintln!("{line}");
             }
             return Err(error);
         }
     };
-    if let Some(line) = lines.last(u64::from(view.batches), || {
-        reindex_line(view.batches, &view.progress)
-    }) {
+    if let Some(line) = lines.terminal(|| reindex_line(view.batches, &view.progress)) {
         eprintln!("{line}");
     }
     let MaintenanceProgress::ReindexThreads { result, .. } = &view.progress else {
@@ -526,6 +544,38 @@ mod tests {
         assert_eq!(out.last().unwrap(), &at(905).line());
         assert_eq!(lines.last(905, || at(905).line()), None);
         assert!(out.len() <= seen.len() + 1);
+    }
+
+    #[test]
+    fn an_end_state_of_step_zero_is_printed_once_and_a_repeat_is_not() {
+        // Given: a reindex the core's index owner worked on: this client stepped nothing.
+        let lines = ProgressLines::default();
+        let end =
+            || "reindex-threads: step 0: request r-1: targets 2, succeeded 2, gaps 0".to_owned();
+
+        // When: the end state is offered twice.
+        let first = lines.terminal(end);
+        let second = lines.terminal(end);
+
+        // Then: it is printed, once.
+        assert_eq!(first.as_deref(), Some(end().as_str()));
+        assert_eq!(second, None);
+    }
+
+    #[test]
+    fn an_end_state_that_only_changes_the_totals_is_printed_after_the_last_step_line() {
+        // Given: a step line was printed for batch 3.
+        let lines = ProgressLines::default();
+        let step = lines.offer(1, || "reindex-threads: step 3: request r-1".to_owned());
+        assert!(step.is_some());
+
+        // When: the end keeps the batch count but carries the totals.
+        let end = lines.terminal(|| {
+            "reindex-threads: step 3: request r-1: targets 2, succeeded 1, gaps 1".to_owned()
+        });
+
+        // Then: the totals are not lost.
+        assert!(end.is_some_and(|line| line.contains("gaps 1")));
     }
 
     #[test]
