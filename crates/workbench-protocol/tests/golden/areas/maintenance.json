@@ -61,7 +61,8 @@
             "progress": {
               "payload": {
                 "converted": 0,
-                "reattributed": 0
+                "reattributed": 0,
+                "undecodable": 0
               },
               "type": "backfill_events"
             },
@@ -84,7 +85,8 @@
                 "converted": 3000,
                 "reattributed": 0,
                 "remaining_unattributed": 0,
-                "remaining_unconverted": 7000
+                "remaining_unconverted": 7000,
+                "undecodable": 2
               },
               "type": "backfill_events"
             },
@@ -115,7 +117,8 @@
             "converted": 3000,
             "reattributed": 0,
             "remaining_unattributed": 0,
-            "remaining_unconverted": 7000
+            "remaining_unconverted": 7000,
+            "undecodable": 2
           },
           "type": "backfill_events"
         },
@@ -143,7 +146,8 @@
               "converted": 3000,
               "reattributed": 0,
               "remaining_unattributed": 0,
-              "remaining_unconverted": 7000
+              "remaining_unconverted": 7000,
+              "undecodable": 2
             },
             "type": "backfill_events"
           },
@@ -174,7 +178,8 @@
               "converted": 3000,
               "reattributed": 0,
               "remaining_unattributed": 0,
-              "remaining_unconverted": 7000
+              "remaining_unconverted": 7000,
+              "undecodable": 2
             },
             "type": "backfill_events"
           },

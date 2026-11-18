@@ -3,9 +3,12 @@
 //! never opens the database.
 //!
 //! One task exists: `backfill_events` (convert the legacy `subkind` / `run_id`
-//! columns of the events table). The thread-index rebuild is not here yet: its
-//! request registration is one unbounded writer transaction. Offline tools (`evorch maintenance <other>`, `inspect`) stay
-//! outside the core and are not part of this namespace.
+//! columns of the events table). The thread-index rebuild (`reindex-threads`) is
+//! not here yet: its request registration is one unbounded writer transaction,
+//! which would block every other write. Stage 17d-3 bounds that transaction in
+//! storage and then adds the task (it must be done before 19a). Offline tools
+//! (`evorch maintenance <other>`, `inspect`) stay outside the core and are not
+//! part of this namespace.
 //!
 //! # Operations
 //!
@@ -228,6 +231,9 @@ pub enum MaintenanceProgress {
     BackfillEvents {
         converted: u64,
         reattributed: u64,
+        /// Rows among the two counts above whose payload no longer decodes
+        /// (they got a blank `subkind` and no `run_id`).
+        undecodable: u64,
         /// Rows still unconverted after the last committed batch; absent
         /// before the first one.
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -22,12 +22,14 @@ use workbench_host::areas::maintenance::{
     MaintenanceArea, MaintenanceHook, MaintenanceSeams, MaintenanceStage,
 };
 use workbench_host::bootstrap::restart::HostRestartPhase;
+use workbench_host::connections::ConnectionHooks;
 use workbench_host::provenance::local_desktop;
 use workbench_protocol::WorkbenchError;
 use workbench_protocol::commands::{Command, CommandDisposition, CommandReply, CommandResult};
-use workbench_protocol::envelope::Provenance;
+use workbench_protocol::envelope::{Provenance, Surface};
 use workbench_protocol::errors::ErrorCode;
 use workbench_protocol::events::{Subscribe, SubscriptionScope, UiEvent};
+use workbench_protocol::ids::ClientId;
 use workbench_protocol::namespaces::diagnostics::OperationTarget;
 use workbench_protocol::namespaces::maintenance::{
     BackfillEvents, CancelMaintenance, ListMaintenance, MaintenanceCommand, MaintenanceEffect,
@@ -79,14 +81,27 @@ impl Hold {
 }
 
 fn setup(hook: Option<MaintenanceHook>) -> World {
-    world(|parts| Areas {
-        maintenance: MaintenanceArea::from_parts(
+    setup_with_connections(hook, &Arc::new(ConnectionHooks::default()))
+}
+
+/// A host whose maintenance area stops a leaving client's operations through
+/// `connections`, the way the bootstrapped core wires it.
+fn setup_with_connections(
+    hook: Option<MaintenanceHook>,
+    connections: &Arc<ConnectionHooks>,
+) -> World {
+    world(|parts| {
+        let maintenance = MaintenanceArea::from_parts(
             parts.tasks.clone(),
             parts.projection.source("maintenance").unwrap(),
             parts.storage.clone(),
             MaintenanceSeams { hook },
-        ),
-        ..Default::default()
+        );
+        maintenance.stop_on_disconnect(connections);
+        Areas {
+            maintenance,
+            ..Default::default()
+        }
     })
 }
 
@@ -630,4 +645,69 @@ fn automatic_retention_running_beside_a_backfill_does_not_change_what_it_reports
     assert_eq!(done.effect, MaintenanceEffect::Complete);
     assert_eq!((done.batches, converted_of(done)), (2, 6));
     assert_eq!(unconverted(&w), 1);
+}
+
+fn client(name: &str) -> Provenance {
+    Provenance::human(Surface::Cli, ClientId::new(name).unwrap())
+}
+
+#[test]
+fn a_client_that_leaves_stops_only_what_it_started_at_the_next_batch_boundary() {
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
+    let connections = Arc::new(ConnectionHooks::default());
+    let mut w = setup_with_connections(Some(hold.hook()), &connections);
+    seed_legacy(&w, 10);
+    let mut events = subscribe(&w);
+    let owner = client("cli-owner");
+    let bystander = client("cli-bystander");
+    let owner_id = owner.client_id.clone().unwrap();
+    let owner_connection = connections.open(owner_id);
+    let bystander_connection = connections.open(bystander.client_id.clone().unwrap());
+
+    start(&mut w, owner, "owned", backfill(3, None)).unwrap();
+    w.rt.block_on(hold.reached());
+
+    // A client that started nothing leaves: the operation is not asked to stop.
+    drop(bystander_connection);
+    let still = get(&w, "owned").unwrap();
+    assert!(!still.operation.state.is_final());
+
+    // Its owner leaves: the operation stops after the batch it had committed.
+    drop(owner_connection);
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "owned");
+    let done = settled_view(&seen);
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    assert_eq!((done.batches, converted_of(done)), (1, 3));
+    assert_eq!(unconverted(&w), 7);
+}
+
+#[test]
+fn an_operation_without_an_owning_client_is_not_stopped_by_any_client_leaving() {
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
+    let connections = Arc::new(ConnectionHooks::default());
+    let mut w = setup_with_connections(Some(hold.hook()), &connections);
+    seed_legacy(&w, 6);
+    let mut events = subscribe(&w);
+    let someone = client("cli-someone");
+    let connection = connections.open(someone.client_id.clone().unwrap());
+
+    let ownerless = Provenance {
+        client_id: None,
+        ..web()
+    };
+    start(&mut w, ownerless, "ownerless", backfill(2, None)).unwrap();
+    w.rt.block_on(hold.reached());
+
+    drop(connection);
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "ownerless");
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    assert_eq!(unconverted(&w), 0);
 }

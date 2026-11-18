@@ -37,10 +37,11 @@ use workbench_client::{
     ClientConfig, ClientError, ConnectionState, Subscription, TransportError, WorkbenchClient,
 };
 use workbench_protocol::{
+    ErrorCode, RetryAdvice, WorkbenchError,
     commands::{Command, CommandReply},
     events::{Subscribe, SubscriptionScope, UiEvent},
     handshake::{BuildInfo, Capability},
-    ids::{ClientId, RequestId},
+    ids::{ClientId, OperationId, RequestId},
     queries::{Query, QueryReply},
 };
 
@@ -266,6 +267,67 @@ pub async fn send(client: &WorkbenchClient, command: Command) -> Result<CommandR
 /// See [`CliError`].
 pub async fn ask(client: &WorkbenchClient, query: Query) -> Result<QueryReply, CliError> {
     client.query(query).await.map_err(CliError::from)
+}
+
+/// The text a finished command leaves: `Ok` goes to stdout (exit 0), `Err` to
+/// stderr (exit 1).
+pub type Rendered = Result<String, String>;
+
+/// The exit code of a command that ran in the core, after printing its result:
+/// `Ok(Ok(text))` to stdout, a job that ran and failed (`Ok(Err(text))`) and a
+/// command that could not be carried out to stderr.
+pub fn finish(result: Result<Rendered, CliError>) -> ExitCode {
+    match result {
+        Ok(Ok(text)) => {
+            println!("{text}");
+            exit::code(exit::SUCCESS)
+        }
+        Ok(Err(text)) => {
+            eprintln!("{text}");
+            exit::code(exit::FAILURE)
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            error.exit_code()
+        }
+    }
+}
+
+/// A fresh id for an operation this invocation starts: `prefix` names the
+/// command, the rest is random. The core attributes the operation to this
+/// connection's client, so a retry of the same invocation never collides with
+/// another one's.
+///
+/// # Errors
+/// The prefix does not form a valid id.
+pub fn operation_id(prefix: &str) -> Result<OperationId, CliError> {
+    OperationId::new(format!("{prefix}-{}", uuid::Uuid::new_v4()))
+        .map_err(|error| CliError::Failed(error.to_string()))
+}
+
+/// Read one operation: `pick` takes the view out of the reply of `query`.
+/// `None` when the core does not hold the operation (it restarted, or the
+/// operation left its table), so whether it finished is not known.
+///
+/// # Errors
+/// A refusal other than "not found", a lost connection, or a reply of another
+/// kind than `query` asks for.
+pub async fn read_operation<V>(
+    client: &WorkbenchClient,
+    query: Query,
+    pick: impl FnOnce(QueryReply) -> Option<V>,
+) -> Result<Option<V>, ClientError> {
+    match client.query(query).await {
+        Ok(reply) => pick(reply).map(Some).ok_or_else(|| {
+            ClientError::Server(WorkbenchError::new(
+                ErrorCode::Internal,
+                "protocol violation: the core did not answer with the operation asked for",
+                RetryAdvice::Never,
+            ))
+        }),
+        Err(ClientError::Server(error)) if error.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// What one read of an operation found.

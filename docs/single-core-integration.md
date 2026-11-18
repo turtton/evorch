@@ -353,6 +353,34 @@ same, and no helper process is started.
   4b-d-3) adds `local_desktop()` (or the connection's provenance) as the third
   argument when it rebases.
 
+## Stage 17d-2: `maintenance backfill-events` in the core (reindex is 17d-3)
+
+`evorch maintenance backfill-events` is a task of the core's `maintenance` area
+(17d-1). It parses its command line (`crates/evorch/src/backfill.rs`), starts one
+operation and follows it (`crates/evorch/src/online_maintenance.rs`); it never
+opens the configuration database, and `--db` is refused like it is for `eval`.
+`--user-config` names the configuration whose core runs it. The shared client
+(`cli/core_client.rs`) now also holds what `eval` and `backfill-events` both
+need (operation ids, reading an operation, printing the finish and the exit
+code), and `evaluation.rs` uses it.
+
+| Contract | Where it is held | Where it is tested |
+|---|---|---|
+| An operation remembers the client that started it, from the connection and never from the request. When that client's last connection ends (an interrupt, a kill, a lost connection) the operation is cancelled like a requested cancel, at its next batch boundary, and a batch already in the writer commits first. No other client's operation is touched | `MaintenanceArea::stop_on_disconnect`, `Running::owner` | `crates/workbench-host/tests/maintenance_online.rs`, `crates/core-client-e2e/tests/maintenance_cli.rs` (a real `evorch-core` process and CLI processes killed by SIGKILL and SIGINT) |
+| The CLI loops bounded operations (`--batch-rows` per batch, at most 10 million rows per operation) until nothing is left, `--max-rows` is spent or no progress is made | `online_maintenance::backfill` | `maintenance_cli` |
+| stderr gets one line per batch, stdout the JSON summary `{converted, undecodable, batches, reattributed, remaining}` exactly as the offline command printed it (`converted` counts the rows that could not be decoded too, as before; `undecodable` says how many of them); a failed task ends with exit code 1 | `online_maintenance::backfill`, `core_client::finish` | `maintenance_cli`, `crates/evorch/tests/maintenance_e2e.rs` |
+
+- `BackfillProgress` of the storage crate and the protocol's
+  `MaintenanceProgress::BackfillEvents` gain `undecodable`, so the summary keeps
+  its shape.
+- The integration PR (#674) added the evorch dev-dependency of
+  `core-client-e2e`, the `online_maintenance` export and the scope.
+- **`reindex-threads` is not part of 17d-2.** It stays an offline command with
+  `--db`, as in 17c. It becomes a core task in **17d-3**, which first bounds its
+  registration transaction in storage and then adds a `MaintenanceTask` and a
+  function like `backfill` over `online_maintenance::run_task`. **17d-3 must be
+  finished before 19a.**
+
 ## Reserved migration numbers
 
 Storage migrations are numbered from one shared ledger kept by the

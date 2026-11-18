@@ -32,7 +32,7 @@ fn backfill(state: Value, batches: u32, effect: &str, extra: Value) -> Value {
         "operation": {"operation_id": "op-1", "state": state, "revision": "3"},
         "task": "backfill_events", "batches": batches,
         "progress": {"type": "backfill_events", "payload": {
-            "converted": 3000, "reattributed": 0,
+            "converted": 3000, "reattributed": 0, "undecodable": 2,
             "remaining_unconverted": 7000, "remaining_unattributed": 0}},
         "effect": effect
     });
@@ -87,7 +87,7 @@ pub fn samples() -> AreaSamples {
                 json!({"items": [
                     backfill(json!({"type": "pending"}), 0, "none",
                              json!({"progress": {"type": "backfill_events", "payload": {
-                                 "converted": 0, "reattributed": 0}}})),
+                                 "converted": 0, "reattributed": 0, "undecodable": 0}}})),
                     backfill(json!({"type": "failed", "code": "storage_unavailable"}), 3,
                              "unknown",
                              json!({"message": "a batch failed and may have committed part of its work; read the state again"}))],

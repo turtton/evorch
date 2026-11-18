@@ -89,10 +89,11 @@ fn compact_and_online_backfill_have_separate_safety_options() {
     )
     .unwrap();
     assert_eq!(
-        args.options,
-        storage::EventBackfillOptions {
-            batch_rows: 2,
-            max_rows: Some(3)
+        args,
+        evorch::backfill::BackfillRequest {
+            user_config_dir: None,
+            batch_rows: Some(2),
+            max_rows: Some(3),
         }
     );
     for args in [
@@ -114,7 +115,15 @@ fn compact_and_online_backfill_have_separate_safety_options() {
         vec!["backfill-events", "--sidebar", "sidebar.json"],
         vec!["backfill-events", "--batch-rows", "0"],
         vec!["backfill-events", "--batch-rows", "100001"],
-        vec!["backfill-events", "--db", "a", "--db", "b"],
+        vec!["backfill-events", "--db", "a"],
+        vec![
+            "backfill-events",
+            "--user-config",
+            "a",
+            "--user-config",
+            "b",
+        ],
+        vec!["backfill-events", "--max-rows", "0"],
     ] {
         let full = [vec!["maintenance"], args].concat();
         assert!(
@@ -143,48 +152,6 @@ fn vacuum_is_a_preview_until_apply_and_takes_only_apply_and_backup() {
         let full = [vec!["maintenance"], args].concat();
         assert!(parse(&full).is_err(), "{full:?}");
     }
-}
-
-#[test]
-fn backfill_cli_outputs_progress_without_starting_runtime() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("events.db");
-    let db = storage::Database::open(&storage::StorageConfig {
-        db_path: path.clone(),
-        ..Default::default()
-    })
-    .unwrap();
-    let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute(
-        "INSERT INTO events(schema_version,monotonic_ns,wall_clock_ns,kind,payload) VALUES(1,0,0,'Message','undecodable')",
-        [],
-    ).unwrap();
-    let result = std::process::Command::new(
-        std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"),
-    )
-    .args([
-        "maintenance",
-        "backfill-events",
-        "--db",
-        path.to_str().unwrap(),
-        "--batch-rows",
-        "1",
-        "--max-rows",
-        "1",
-    ])
-    .output()
-    .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(
-        summary,
-        serde_json::json!({"converted":1,"reattributed":0,"undecodable":1,"batches":1,"remaining":0})
-    );
-    drop(db);
 }
 
 #[test]
