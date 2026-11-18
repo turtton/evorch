@@ -12,7 +12,7 @@ use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 68;
+const LATEST_SCHEMA: u32 = 69;
 
 const EXPECTED_TABLES: [&str; 121] = [
     "restart_learning_inventory",
@@ -138,7 +138,7 @@ const EXPECTED_TABLES: [&str; 121] = [
     "conversation_plan_history",
 ];
 
-const EXPECTED_INDICES: [&str; 97] = [
+const EXPECTED_INDICES: [&str; 98] = [
     "learning_jobs_state",
     "idx_conversation_plan_nodes_ord",
     "restart_expected_run",
@@ -164,6 +164,7 @@ const EXPECTED_INDICES: [&str; 97] = [
     "idx_content_blob_refs_header_blob",
     "idx_content_blob_refs_message_blob",
     "idx_artifact_refs_sha",
+    "idx_artifact_refs_thread_artifact",
     "idx_assistant_references_source",
     "idx_events_orchestrator_unattributed",
     "idx_retention_staging_member",
@@ -1325,6 +1326,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v69.sql"),
                 include_str!("../../undo/undo_v68.sql"),
                 include_str!("../../undo/undo_v67.sql"),
                 include_str!("../../undo/undo_v66.sql"),
