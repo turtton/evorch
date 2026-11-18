@@ -325,6 +325,30 @@ impl PinnedDir {
         }
     }
 
+    /// The regular file `name` opened for reading without following a link,
+    /// or `None` when it is missing, a link or not a regular file. Reading
+    /// the returned file reads what was checked, even if the name is replaced
+    /// afterwards.
+    ///
+    /// # Errors
+    /// The file cannot be opened for another reason.
+    pub fn open_regular(&self, name: &str) -> io::Result<Option<std::fs::File>> {
+        use rustix::fs::{Mode, OFlags};
+        plain(name)?;
+        let opened = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        );
+        let file = match opened {
+            Ok(fd) => std::fs::File::from(fd),
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::LOOP) => return Ok(None),
+            Err(errno) => return Err(errno.into()),
+        };
+        Ok(file.metadata()?.is_file().then_some(file))
+    }
+
     /// Put `bytes` in `name` through a new temporary file renamed over it. A
     /// link that is already called `name` is replaced, not followed.
     ///

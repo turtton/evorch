@@ -19,7 +19,8 @@ use crate::conversation::Entry;
 use crate::simulator::{Action, PendingQuestion, UserSimulator};
 use crate::source::OriginalThread;
 
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The most a replay's runs are given, all together, to stop once asked to.
+pub const SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 const INPUT_SUMMARY_CHARS: usize = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -655,13 +656,16 @@ async fn converse(
 }
 
 async fn settle(runtime: &AgentRuntime) {
-    for agent in runtime.list_agents() {
-        if tokio::time::timeout(SETTLE_TIMEOUT, runtime.wait(agent.run_id))
-            .await
-            .is_err()
-        {
-            tracing::warn!(run_id = %agent.run_id, "replay run did not stop in time");
+    // One deadline for all of them: the runs were asked to stop together, so
+    // the bound does not grow with their number.
+    let waited = tokio::time::timeout(SETTLE_TIMEOUT, async {
+        for agent in runtime.list_agents() {
+            let _ = runtime.wait(agent.run_id).await;
         }
+    })
+    .await;
+    if waited.is_err() {
+        tracing::warn!("replay runs did not stop in time");
     }
 }
 

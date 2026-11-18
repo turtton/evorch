@@ -356,18 +356,7 @@ fn load_run(
         .read(output::DIFF_FILE)
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
-    let database = run_dir.join(output::DATABASE_FILE);
-    // The database is opened by its path, read-only; only a regular file that
-    // is not a link is handed to it.
-    let record = if run_dir.is_regular_file(output::DATABASE_FILE)? {
-        RunRecord::load(&database)
-    } else {
-        Ok(RunRecord::default())
-    }
-    .map_err(|source| EvalError::Database {
-        path: database.clone(),
-        source,
-    })?;
+    let record = load_database(&run_dir)?;
     let summary = RunSummary {
         label: entry.label.clone(),
         index: entry.index,
@@ -386,6 +375,66 @@ fn load_run(
         diff,
         record,
     })
+}
+
+/// The record of the run's database, read from the descriptor of the regular
+/// file that was checked, never from its name: the database (and a `-wal` or
+/// `-journal` holding unapplied changes) is copied to a private directory
+/// from no-follow descriptors, and that copy is opened. A link in its place
+/// gives an empty record, and a directory replaced after it was pinned is not
+/// followed.
+fn load_database(run_dir: &output::PinnedDir) -> Result<RunRecord, EvalError> {
+    let database = run_dir.join(output::DATABASE_FILE);
+    let fail = |source| EvalError::Database {
+        path: database.clone(),
+        source,
+    };
+    let Some(snapshot) = DatabaseSnapshot::copy(run_dir)? else {
+        return Ok(RunRecord::default());
+    };
+    RunRecord::load(&snapshot.database()).map_err(fail)
+}
+
+/// A private copy of a run's database, removed when dropped.
+struct DatabaseSnapshot {
+    dir: PathBuf,
+}
+
+impl DatabaseSnapshot {
+    const SIDECARS: [&str; 2] = ["-wal", "-journal"];
+
+    fn copy(run_dir: &output::PinnedDir) -> std::io::Result<Option<Self>> {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let Some(mut source) = run_dir.open_regular(output::DATABASE_FILE)? else {
+            return Ok(None);
+        };
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).map_err(|error| std::io::Error::other(error.to_string()))?;
+        let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let dir = std::env::temp_dir().join(format!("evorch-report-{name}"));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        let snapshot = Self { dir };
+        let mut target = std::fs::File::create_new(snapshot.database())?;
+        std::io::copy(&mut source, &mut target)?;
+        for suffix in Self::SIDECARS {
+            let sidecar = format!("{}{suffix}", output::DATABASE_FILE);
+            if let Some(mut source) = run_dir.open_regular(&sidecar)? {
+                let mut target = std::fs::File::create_new(snapshot.dir.join(&sidecar))?;
+                std::io::copy(&mut source, &mut target)?;
+            }
+        }
+        Ok(Some(snapshot))
+    }
+
+    fn database(&self) -> PathBuf {
+        self.dir.join(output::DATABASE_FILE)
+    }
+}
+
+impl Drop for DatabaseSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 async fn report_dir(

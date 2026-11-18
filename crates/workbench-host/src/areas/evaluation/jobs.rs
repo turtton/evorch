@@ -1043,8 +1043,13 @@ async fn cancelled(cancel: &watch::Receiver<bool>) {
     }
 }
 
-/// How long a stopped job's work may take to stop its runs before it is dropped.
-const STOP_GRACE: Duration = Duration::from_secs(30);
+/// How long a stopped job's work may take to stop its runs before it is
+/// dropped: the replay's own bound for its runs to stop, and then time to
+/// finish what follows.
+const STOP_GRACE: Duration = Duration::from_secs(eval::driver::SETTLE_TIMEOUT.as_secs() + 30);
+
+// The work is dropped only after the replay gave up waiting for its runs.
+const _: () = assert!(STOP_GRACE.as_secs() > eval::driver::SETTLE_TIMEOUT.as_secs());
 
 struct AbortOnDrop(tokio::task::AbortHandle);
 

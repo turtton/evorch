@@ -15,7 +15,6 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use support::{World, operation, world};
 use workbench_host::areas::Areas;
@@ -397,16 +396,36 @@ fn a_host_without_jobs_refuses_to_start_one() {
 }
 
 /// The price catalog is asked for by each job: one that could not be loaded
-/// (the source answers nothing) does not decide the jobs after it.
+/// (the source answers nothing) does not decide the jobs after it, which get
+/// the catalog once it can be read.
 #[test]
-fn every_job_asks_for_its_own_price_catalog() {
-    let asked = Arc::new(AtomicUsize::new(0));
-    let counter = asked.clone();
+fn a_catalog_that_could_not_be_loaded_is_found_by_the_next_job() {
+    let cache = tempfile::tempdir().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        cache.path().join("models-dev.json"),
+        serde_json::json!({"fetched_at": now, "api": {}}).to_string(),
+    )
+    .unwrap();
+    let found = Arc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(catalog::ModelCatalog::load_or_refresh(cache.path()))
+            .unwrap(),
+    );
+    let answers = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+    let record = answers.clone();
     let mut w = setup_with(JobSeams {
         load_catalog: false,
         catalog_source: Some(Arc::new(move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-            None
+            let mut asked = record.lock().unwrap();
+            let readable = !asked.is_empty();
+            asked.push(readable);
+            readable.then(|| found.clone())
         })),
         ..JobSeams::default()
     });
@@ -417,5 +436,5 @@ fn every_job_asks_for_its_own_price_catalog() {
         settled(&w, &mut events, id);
         w.settle();
     }
-    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    assert_eq!(*answers.lock().unwrap(), [false, true]);
 }

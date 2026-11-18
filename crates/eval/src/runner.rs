@@ -474,8 +474,10 @@ async fn replay_once(
     };
     let finished = workspace.finish();
     let verification = match &context.verify {
-        Some(command) => Some(verify_in(context, &workspace.project_dir, command).await),
-        None => None,
+        Some(command) if !driver::is_cancelled(context.deps.cancel.as_ref()) => {
+            Some(verify_in(context, &workspace.project_dir, command).await)
+        }
+        _ => None,
     };
     let (status, reason, diff, pushed_refs) = match finished {
         Ok(result) => (
@@ -538,6 +540,7 @@ async fn verify_in(context: &Context, project: &Path, command: &str) -> Verifica
         project,
         shell_environment(),
         context.verify_timeout,
+        context.deps.cancel.as_ref(),
     )
     .await
 }
