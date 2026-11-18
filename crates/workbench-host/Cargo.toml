@@ -40,7 +40,7 @@ thiserror = { workspace = true }
 
 [features]
 # Test-only entry points for the in-process adapter's tests.
-test-support = ["runtime/recovery-test-support"]
+test-support = ["runtime/recovery-test-support", "runtime/idle-test-support"]
 
 [dev-dependencies]
 runtime = { path = "../runtime", features = ["recovery-test-support", "idle-test-support"] }
