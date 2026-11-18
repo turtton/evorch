@@ -8,8 +8,8 @@
 //! accepted so the core starts it like the real helper, and is otherwise
 //! unused). Not shipped; built only with the `renderer-test-helper` feature.
 use renderer_ipc::{
-    Backend, BackendContext, ExitReason, Notices, OpenArtifact, RemoteError, ServeConfig, TabId,
-    Viewport, serve,
+    Backend, BackendContext, ExitReason, FrameQueue, Notices, OpenArtifact, RemoteError,
+    ServeConfig, TabId, Viewport, serve,
 };
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
@@ -23,6 +23,21 @@ struct Blank {
     /// How many `DOM.getDocument` probes reached this helper.
     probes: std::sync::atomic::AtomicUsize,
     shutdown_gate: Option<std::path::PathBuf>,
+    frames: std::sync::Arc<FrameQueue>,
+    /// How many frames were published; the fill byte of the next one.
+    painted: std::sync::atomic::AtomicU8,
+}
+
+impl Blank {
+    /// One 4x2 frame whose bytes all equal how many frames came before it.
+    /// Painting is driven by a request (streaming on, resize), never a timer.
+    fn paint(&self, tab: TabId) {
+        let fill = self
+            .painted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .wrapping_add(1);
+        self.frames.publish(tab, 4, 2, &[fill; 4 * 2 * 4]);
+    }
 }
 
 impl Backend for Blank {
@@ -33,10 +48,14 @@ impl Backend for Blank {
     ) -> Result<Viewport, RemoteError> {
         Ok(open.viewport)
     }
-    fn resize(&self, _: TabId, _: Viewport) -> Result<(), RemoteError> {
+    fn resize(&self, tab: TabId, _: Viewport) -> Result<(), RemoteError> {
+        self.paint(tab);
         Ok(())
     }
-    fn set_streaming(&self, _: TabId, _: bool) -> Result<(), RemoteError> {
+    fn set_streaming(&self, tab: TabId, enabled: bool) -> Result<(), RemoteError> {
+        if enabled {
+            self.paint(tab);
+        }
         Ok(())
     }
     fn set_frame_rate(&self, _: TabId, _: u8) -> Result<(), RemoteError> {
@@ -242,10 +261,12 @@ fn main() -> ExitCode {
         control,
         frames,
         ServeConfig::default(),
-        move |_: BackendContext| {
+        move |context: BackendContext| {
             Ok(Blank {
                 probes: Default::default(),
                 shutdown_gate,
+                frames: context.frames,
+                painted: Default::default(),
             })
         },
     );
