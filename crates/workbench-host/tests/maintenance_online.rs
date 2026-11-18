@@ -34,7 +34,8 @@ use workbench_protocol::namespaces::diagnostics::OperationTarget;
 use workbench_protocol::namespaces::maintenance::{
     BackfillEvents, CancelMaintenance, ListMaintenance, MaintenanceCommand, MaintenanceEffect,
     MaintenanceEvent, MaintenanceOutcome, MaintenanceProgress, MaintenanceQuery, MaintenanceReply,
-    MaintenanceResult, MaintenanceTask, MaintenanceView, StartMaintenance,
+    MaintenanceResult, MaintenanceTask, MaintenanceView, ReindexResult, ReindexThreads,
+    StartMaintenance,
 };
 use workbench_protocol::operation::{CancelReason, OperationState};
 use workbench_protocol::queries::{Query, QueryReply};
@@ -209,6 +210,16 @@ fn subscribe(w: &World) -> workbench_host::subscriptions::Subscription {
         .unwrap()
 }
 
+/// The settled event comes just before the counted task ends: wait for the end.
+fn wait_until_idle(w: &World) {
+    let ended = w.tasks.counted_ended_notify();
+    w.rt.block_on(async {
+        while w.tasks.busy() {
+            ended.notified().await;
+        }
+    });
+}
+
 /// Every maintenance event of `id` up to and including its settled event.
 fn events_until_settled(
     rt: &tokio::runtime::Runtime,
@@ -255,7 +266,9 @@ fn settled_view(events: &[MaintenanceEvent]) -> &MaintenanceView {
 }
 
 fn converted_of(view: &MaintenanceView) -> u64 {
-    let MaintenanceProgress::BackfillEvents { converted, .. } = &view.progress;
+    let MaintenanceProgress::BackfillEvents { converted, .. } = &view.progress else {
+        panic!("a backfill reports its own progress");
+    };
     *converted
 }
 
@@ -289,7 +302,7 @@ fn a_backfill_runs_in_bounded_batches_and_announces_each_committed_batch() {
     assert_eq!((done.batches, converted_of(done)), (4, 10));
     assert_eq!(&get(&w, "fill").unwrap(), done);
     assert_eq!(unconverted(&w), 0);
-    assert!(!w.tasks.busy());
+    wait_until_idle(&w);
 }
 
 #[test]
@@ -324,7 +337,10 @@ fn a_backfill_adds_the_undecodable_rows_of_both_of_its_targets() {
         undecodable,
         remaining_unconverted,
         remaining_unattributed,
-    } = &done.progress;
+    } = &done.progress
+    else {
+        panic!("a backfill reports its own progress");
+    };
     assert_eq!(
         (
             *converted,
@@ -351,7 +367,10 @@ fn a_backfill_stops_at_its_row_bound_and_says_what_is_left() {
     let MaintenanceProgress::BackfillEvents {
         remaining_unconverted,
         ..
-    } = &done.progress;
+    } = &done.progress
+    else {
+        panic!("a backfill reports its own progress");
+    };
     assert_eq!(*remaining_unconverted, Some(5));
     assert_eq!(unconverted(&w), 5);
 }
@@ -849,4 +868,371 @@ fn a_late_notice_still_stops_what_the_client_started_before_it_left() {
     );
     assert_eq!((done.batches, converted_of(done)), (1, 3));
     drop(second);
+}
+
+// ---- reindex of the thread search index (stage 17d-3) ----
+
+fn reindex(wait: bool) -> MaintenanceTask {
+    MaintenanceTask::ReindexThreads(ReindexThreads {
+        wait,
+        ..Default::default()
+    })
+}
+
+/// A verified source run the index can take.
+fn source(w: &World, id: &str, at: i64) {
+    use storage::thread_index::{
+        BlockOrigin, BlockProvenance, MessageProvenance, PROVENANCE_FORMAT_VERSION,
+        ProvenanceEvidence, ProvenanceMap, ProvenanceStatus, SnapshotWrite,
+    };
+    let handle = w.store.handle();
+    handle
+        .save_snapshot_bundle(&SnapshotWrite {
+            record: storage::RunContextRecord {
+                run_id: id.into(),
+                role: "worker".into(),
+                name: "worker".into(),
+                parent_run_id: None,
+                config_json: serde_json::json!({"thread_id": id}).to_string(),
+                messages_json: serde_json::json!([
+                    {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+                ])
+                .to_string(),
+                checkpoints_json: "[]".into(),
+                terminal_phase: "Done".into(),
+                restorable: true,
+                updated_at_ns: at,
+                host_inputs_json: "[]".into(),
+            },
+            expected_snapshot_revision: None,
+            binding: None,
+            status: ProvenanceStatus::Verified {
+                evidence: ProvenanceEvidence::CompletePositionMap,
+            },
+            map: ProvenanceMap {
+                version: PROVENANCE_FORMAT_VERSION,
+                raw_message_count: 1,
+                checkpoint_count: 0,
+                messages: vec![MessageProvenance {
+                    raw_index: 0,
+                    ordinal: 0,
+                    blocks: vec![BlockProvenance {
+                        block_index: 0,
+                        origin: BlockOrigin::Native,
+                        excluded_reason: None,
+                    }],
+                }],
+            },
+        })
+        .unwrap();
+    handle
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: id.into(),
+            project_root: Some("/project".into()),
+            root_run_id: Some(id.into()),
+            created_at_ns: at,
+            updated_at_ns: at,
+            ..Default::default()
+        }])
+        .unwrap();
+}
+
+fn reindex_parts(view: &MaintenanceView) -> (Option<&str>, Option<&ReindexResult>) {
+    let MaintenanceProgress::ReindexThreads {
+        request_id, result, ..
+    } = &view.progress
+    else {
+        panic!("a reindex reports its own progress");
+    };
+    (request_id.as_deref(), result.as_ref())
+}
+
+/// A gui-owned lease, so a reindex of the core has to wait or be delegated.
+fn gui_lease(w: &World) -> storage::thread_index::IndexLease {
+    use storage::thread_index::{IndexOwner, IndexOwnerKind, LeaseResult};
+    let now = storage::system_time_to_ns(std::time::SystemTime::now()).unwrap();
+    match w
+        .store
+        .handle()
+        .acquire_thread_index_lease(
+            &IndexOwner {
+                id: "gui".into(),
+                kind: IndexOwnerKind::Gui,
+            },
+            now,
+            storage::THREAD_INDEX_LEASE_NS,
+        )
+        .unwrap()
+    {
+        LeaseResult::Acquired(lease) => lease,
+        other => panic!("the lease was free: {other:?}"),
+    }
+}
+
+#[test]
+fn a_reindex_runs_the_index_and_ends_with_the_result_a_command_line_prints() {
+    let mut w = setup(None);
+    source(&w, "first", 10);
+    source(&w, "second", 20);
+    let mut events = subscribe(&w);
+
+    let reply = start(&mut w, web(), "index", reindex(false)).unwrap();
+    assert_eq!(reply.disposition, CommandDisposition::Accepted);
+    assert!(!view_of(&reply).operation.state.is_final());
+
+    let seen = events_until_settled(&w.rt, &mut events, "index");
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    assert_eq!(done.effect, MaintenanceEffect::Complete);
+    assert_eq!(done.outcome, Some(MaintenanceOutcome::Completed));
+    let (request_id, result) = reindex_parts(done);
+    let Some(ReindexResult::Completed {
+        request_id: named,
+        summary,
+    }) = result
+    else {
+        panic!("a finished reindex names its result: {result:?}");
+    };
+    assert_eq!(Some(named.as_str()), request_id);
+    assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+    assert!(summary.gaps.is_empty());
+    // Every step that made progress was announced, and none names a result.
+    let progress = progress_views(&seen);
+    assert!(!progress.is_empty());
+    assert!(progress.iter().all(|view| reindex_parts(view).1.is_none()));
+    assert!(progress.iter().any(|view| view.batches > 0));
+    assert_eq!(&get(&w, "index").unwrap(), done);
+    wait_until_idle(&w);
+}
+
+#[test]
+fn a_reindex_handed_to_another_owner_ends_delegated_with_the_request_left_pending() {
+    use storage::thread_index::RequestProgress;
+    let mut w = setup(None);
+    source(&w, "first", 10);
+    let _gui = gui_lease(&w);
+    let mut events = subscribe(&w);
+
+    start(&mut w, web(), "handed", reindex(false)).unwrap();
+    let seen = events_until_settled(&w.rt, &mut events, "handed");
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    assert_eq!(done.outcome, Some(MaintenanceOutcome::Delegated));
+    let (request_id, result) = reindex_parts(done);
+    let Some(ReindexResult::Accepted { request_id: named }) = result else {
+        panic!("a handed request is accepted, not done: {result:?}");
+    };
+    assert_eq!(Some(named.as_str()), request_id);
+    let now = storage::system_time_to_ns(std::time::SystemTime::now()).unwrap();
+    assert!(matches!(
+        w.store
+            .handle()
+            .thread_index_request_status(named, now)
+            .unwrap()
+            .progress,
+        RequestProgress::Pending(_)
+    ));
+}
+
+#[test]
+fn a_cancelled_reindex_stops_before_the_next_step_and_leaves_the_request_to_the_next_owner() {
+    use storage::thread_index::{IndexOwner, IndexOwnerKind, LeaseResult, RequestProgress};
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 0);
+    let mut w = setup(Some(hold.hook()));
+    source(&w, "first", 10);
+    let mut events = subscribe(&w);
+
+    start(&mut w, web(), "stopped", reindex(false)).unwrap();
+    w.rt.block_on(hold.reached());
+    cancel(&mut w, web(), "stopped").unwrap();
+    hold.release();
+
+    let seen = events_until_settled(&w.rt, &mut events, "stopped");
+    let done = settled_view(&seen);
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    // No step ran: the request is durable and pending, and the lease is free.
+    let (request_id, result) = reindex_parts(done);
+    assert!(result.is_none());
+    let request_id = request_id.expect("the request was registered").to_owned();
+    let handle = w.store.handle();
+    let now = storage::system_time_to_ns(std::time::SystemTime::now()).unwrap();
+    assert!(matches!(
+        handle
+            .thread_index_request_status(&request_id, now)
+            .unwrap()
+            .progress,
+        RequestProgress::Pending(_)
+    ));
+    assert!(matches!(
+        handle
+            .acquire_thread_index_lease(
+                &IndexOwner {
+                    id: "next".into(),
+                    kind: IndexOwnerKind::Gui,
+                },
+                now,
+                storage::THREAD_INDEX_LEASE_NS,
+            )
+            .unwrap(),
+        LeaseResult::Acquired(_)
+    ));
+}
+
+#[test]
+fn a_reindex_waiting_for_another_owner_is_cancelled_without_waiting_for_the_lease() {
+    let mut w = setup(None);
+    source(&w, "first", 10);
+    let _gui = gui_lease(&w);
+    let mut events = subscribe(&w);
+
+    start(&mut w, web(), "waiting", reindex(true)).unwrap();
+    // The first announcement names the request: the operation is in its loop,
+    // with the lease held by another owner.
+    w.rt.block_on(async {
+        loop {
+            let UiEvent::Maintenance(MaintenanceEvent::MaintenanceProgress { view }) =
+                events.recv().await.expect("the subscription is open").event
+            else {
+                continue;
+            };
+            if view.operation.operation_id.as_str() == "waiting" {
+                return;
+            }
+        }
+    });
+    cancel(&mut w, web(), "waiting").unwrap();
+    let seen = events_until_settled(&w.rt, &mut events, "waiting");
+    assert_eq!(
+        settled_view(&seen).operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    wait_until_idle(&w);
+}
+
+#[test]
+fn a_client_that_leaves_stops_only_the_reindex_it_started() {
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 0);
+    let connections = Arc::new(ConnectionHooks::default());
+    let mut w = setup_with_connections(Some(hold.hook()), &connections);
+    source(&w, "first", 10);
+    let mut events = subscribe(&w);
+    let owner = client("cli-owner");
+    let bystander = client("cli-bystander");
+    let owner_connection = connections.open(owner.client_id.clone().unwrap());
+    let bystander_connection = connections.open(bystander.client_id.clone().unwrap());
+
+    start(&mut w, owner, "owned", reindex(false)).unwrap();
+    w.rt.block_on(hold.reached());
+
+    drop(bystander_connection);
+    assert!(!get(&w, "owned").unwrap().operation.state.is_final());
+
+    drop(owner_connection);
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "owned");
+    assert_eq!(
+        settled_view(&seen).operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+}
+
+#[test]
+fn a_reindex_with_no_target_completes_with_an_empty_summary() {
+    let mut w = setup(None);
+    source(&w, "first", 10);
+    let mut events = subscribe(&w);
+    let task = MaintenanceTask::ReindexThreads(ReindexThreads {
+        since_ns: Some(i64::MAX),
+        ..Default::default()
+    });
+    start(&mut w, web(), "bound", task).unwrap();
+    let seen = events_until_settled(&w.rt, &mut events, "bound");
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    let (_, result) = reindex_parts(done);
+    let Some(ReindexResult::Completed { summary, .. }) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (0, 0));
+}
+
+#[test]
+fn reindexes_run_side_by_side_and_the_second_is_handed_to_the_first_not_refused_busy() {
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 0);
+    let mut w = setup(Some(hold.hook()));
+    source(&w, "first", 10);
+    let mut events = subscribe(&w);
+
+    start(&mut w, web(), "driving", reindex(false)).unwrap();
+    // The first holds the index lease: it is registered and about to step.
+    w.rt.block_on(hold.reached());
+
+    let second = start(&mut w, web(), "beside", reindex(false)).unwrap();
+    assert_eq!(second.disposition, CommandDisposition::Accepted);
+    let seen = events_until_settled(&w.rt, &mut events, "beside");
+    let handed = settled_view(&seen);
+    assert_eq!(handed.outcome, Some(MaintenanceOutcome::Delegated));
+    assert!(matches!(
+        reindex_parts(handed).1,
+        Some(ReindexResult::Accepted { .. })
+    ));
+    // The first one is untouched by the second and still finishes the work.
+    assert!(!get(&w, "driving").unwrap().operation.state.is_final());
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "driving");
+    let done = settled_view(&seen);
+    assert_eq!(done.outcome, Some(MaintenanceOutcome::Completed));
+    assert!(matches!(
+        reindex_parts(done).1,
+        Some(ReindexResult::Completed { .. })
+    ));
+}
+
+#[test]
+fn a_cancel_between_two_registration_steps_closes_the_request_and_leaves_the_index_alone() {
+    // More runs than one registration window, so the registration takes several steps.
+    let hold = Hold::new(MaintenanceStage::BeforeRegistrationStep, 1);
+    let mut w = setup(Some(hold.hook()));
+    for n in 0..300 {
+        source(&w, &format!("run-{n:03}"), 10 + n);
+    }
+    let mut events = subscribe(&w);
+
+    start(&mut w, web(), "registering", reindex(false)).unwrap();
+    // One step committed (the first window of targets), the next not yet taken.
+    w.rt.block_on(hold.reached());
+    cancel(&mut w, web(), "registering").unwrap();
+    hold.release();
+
+    let seen = events_until_settled(&w.rt, &mut events, "registering");
+    let done = settled_view(&seen);
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    let (_, result) = reindex_parts(done);
+    assert!(result.is_none());
+    // The unfinished request is closed, not left to be published or driven, and
+    // the lease is free: another owner takes it at once.
+    let conn = rusqlite::Connection::open(db_path(&w)).unwrap();
+    let states: Vec<String> = conn
+        .prepare("SELECT state FROM thread_index_requests")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(states, vec!["cancelled".to_owned()]);
+    let _next_owner = gui_lease(&w);
 }

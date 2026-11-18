@@ -31,7 +31,10 @@ use crate::thread_index::{
     LeaseResult, ReindexRequest, RequestFailure, RequestStatus, RequestSubmission,
     ThreadIndexSettings,
 };
-pub use index::{THREAD_INDEX_LEASE_NS, ThreadIndexCounters, ThreadIndexJobStatus, WalWaitStatus};
+pub use index::{
+    Registration, RegistrationProgress, THREAD_INDEX_LEASE_NS, ThreadIndexCounters,
+    ThreadIndexJobStatus, WalWaitStatus,
+};
 #[cfg(test)]
 mod manual_cleanup_tests;
 mod state;
@@ -1439,7 +1442,10 @@ impl StorageHandle {
     }
 
     /// Persists a reindex request with its frozen targets and elects the owner
-    /// in the same transaction (ADR 0041 R5).
+    /// (ADR 0041 R5): [`Self::begin_thread_index_registration`] and every step of
+    /// [`Self::advance_thread_index_registration`] up to the publish, one writer command
+    /// each, so the writer serves other commands in between. A caller that needs to stop
+    /// or cancel between the steps drives them itself.
     /// All index-control `now_ns` arguments must be Unix-epoch wall-clock nanoseconds (`SystemTime`), matching admission's resampled clock.
     ///
     /// # Errors
@@ -1452,11 +1458,78 @@ impl StorageHandle {
         now_ns: i64,
         lease_duration_ns: i64,
     ) -> Result<RequestSubmission, RequestFailure> {
+        let mut registration = self.begin_thread_index_registration(request, now_ns)?;
+        loop {
+            match self.advance_thread_index_registration(
+                &mut registration,
+                owner,
+                now_ns,
+                lease_duration_ns,
+            ) {
+                Ok(RegistrationProgress::InProgress) => {}
+                Ok(RegistrationProgress::Published(submission)) => return Ok(submission),
+                Err(error) => {
+                    let _ = self.abort_thread_index_registration(&registration);
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// Creates the `registering` request of a reindex. It is not observable until the
+    /// last step publishes it.
+    ///
+    /// # Errors
+    /// `InvalidArguments` for a malformed request, `PersistenceUnavailable` /
+    /// `DatabaseUnavailable` when it could not be stored.
+    pub fn begin_thread_index_registration(
+        &self,
+        request: &ReindexRequest,
+        now_ns: i64,
+    ) -> Result<Registration, RequestFailure> {
         let request = Box::new(request.clone());
+        self.index_control(|reply| index::IndexCommand::BeginRegistration(request, now_ns, reply))
+    }
+
+    /// One bounded step of `registration` (one short transaction in the writer). On an
+    /// error the registration cannot continue: close it with
+    /// [`Self::abort_thread_index_registration`].
+    ///
+    /// # Errors
+    /// `PersistenceUnavailable` / `DatabaseUnavailable` when the step could not run.
+    pub fn advance_thread_index_registration(
+        &self,
+        registration: &mut Registration,
+        owner: &IndexOwner,
+        now_ns: i64,
+        lease_duration_ns: i64,
+    ) -> Result<RegistrationProgress, RequestFailure> {
+        let current = Box::new(registration.clone());
         let owner = owner.clone();
-        self.index_control(|reply| {
-            index::IndexCommand::Submit(request, owner, now_ns, lease_duration_ns, reply)
-        })
+        let (next, progress) = self.index_control(|reply| {
+            index::IndexCommand::AdvanceRegistration(
+                current,
+                owner,
+                now_ns,
+                lease_duration_ns,
+                reply,
+            )
+        })?;
+        *registration = next;
+        Ok(progress)
+    }
+
+    /// Closes an unfinished registration `cancelled`. Nothing of the index changes; the
+    /// frozen targets only marked runs for re-indexing.
+    ///
+    /// # Errors
+    /// `DatabaseUnavailable` for a closed writer.
+    pub fn abort_thread_index_registration(
+        &self,
+        registration: &Registration,
+    ) -> Result<(), RequestFailure> {
+        let registration = Box::new(registration.clone());
+        self.index_control(|reply| index::IndexCommand::AbortRegistration(registration, reply))
     }
 
     /// Shared request status, including the current lease holder (if any).

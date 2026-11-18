@@ -1,8 +1,8 @@
 //! The online maintenance tasks of the core as a CLI sees them (ADR 0045,
 //! stage 17d): start one task, follow its operation until it settles and report
-//! its progress. `evorch maintenance backfill-events` is the first user; the
-//! next one (`reindex-threads`, stage 17d-3) adds a [`MaintenanceTask`] and a
-//! function like [`backfill`] over [`run_task`], and nothing else here.
+//! its progress. `evorch maintenance backfill-events` ([`backfill`]) and
+//! `evorch reindex-threads` ([`reindex`], stage 17d-3) are both a
+//! [`MaintenanceTask`] over [`run_task`], and nothing else here.
 //!
 //! The core owns the database and runs the task in bounded batches through its
 //! one writer. The CLI only asks, follows and prints; it never opens the
@@ -31,7 +31,8 @@ use workbench_protocol::{
         maintenance::{
             BackfillEvents, MAX_ROWS_LIMIT, MaintenanceCommand, MaintenanceEvent,
             MaintenanceProgress, MaintenanceQuery, MaintenanceReply, MaintenanceResult,
-            MaintenanceTask, MaintenanceView, StartMaintenance,
+            MaintenanceTask, MaintenanceView, ReindexFailure, ReindexResult, ReindexThreads,
+            StartMaintenance,
         },
     },
     operation::{CancelReason, OperationState},
@@ -159,7 +160,11 @@ impl Totals {
             undecodable,
             remaining_unconverted,
             remaining_unattributed,
-        } = &view.progress;
+        } = &view.progress
+        else {
+            // Another task's progress: a backfill is only ever answered with its own.
+            return self;
+        };
         Self {
             converted: self.converted + converted,
             undecodable: self.undecodable + undecodable,
@@ -199,42 +204,62 @@ impl Totals {
 /// How many of the first batches get a line of their own.
 const EVERY_BATCH_UP_TO: u64 = 16;
 
-/// The progress lines of a backfill, within a budget that does not grow with
+/// The progress lines of a task, within a budget that does not grow with
 /// the number of batches: one line for each of the first
 /// [`EVERY_BATCH_UP_TO`] batches, then one each time the batch count has
 /// doubled (so about `EVERY_BATCH_UP_TO` + log2(batches) lines whatever the
 /// batch size, 16 + 64 at most), and the last state of each bounded operation
 /// ([`backfill`] runs one per 10 million rows, so a run has one line more for
 /// each operation after the first). A line states the totals so far, so the
-/// batches between two lines are not lost, only not announced.
+/// batches between two lines are not lost, only not announced. The line itself
+/// is the task's: it is built only when the budget lets it through.
 #[derive(Debug, Default)]
 struct ProgressLines {
     /// The batch count the next line waits for.
     next: Cell<u64>,
     /// The batch count of the last line.
     printed: Cell<u64>,
+    /// The text of the last line, for [`Self::terminal`].
+    last_text: std::cell::RefCell<Option<String>>,
 }
 
 impl ProgressLines {
-    /// The line for `totals`, unless the budget skips it.
-    fn offer(&self, totals: Totals) -> Option<String> {
-        if totals.batches < self.next.get().max(1) {
+    /// The line for the state after `batches` batches, unless the budget skips it.
+    fn offer(&self, batches: u64, line: impl FnOnce() -> String) -> Option<String> {
+        if batches < self.next.get().max(1) {
             return None;
         }
-        self.printed.set(totals.batches);
-        self.next.set(if totals.batches < EVERY_BATCH_UP_TO {
-            totals.batches + 1
+        self.printed.set(batches);
+        self.next.set(if batches < EVERY_BATCH_UP_TO {
+            batches + 1
         } else {
-            totals.batches.saturating_mul(2)
+            batches.saturating_mul(2)
         });
-        Some(totals.line())
+        let line = line();
+        *self.last_text.borrow_mut() = Some(line.clone());
+        Some(line)
+    }
+
+    /// The line of the end state of a task that is not counted in batches: printed once,
+    /// unless it reads as the last line already printed. A reindex that the core's index
+    /// owner works on ends with `step 0` (nothing was stepped by this client), and a
+    /// terminal that only changes the totals keeps its batch count, so `last` would
+    /// skip both.
+    fn terminal(&self, line: impl FnOnce() -> String) -> Option<String> {
+        let line = line();
+        let mut last = self.last_text.borrow_mut();
+        if last.as_deref() == Some(line.as_str()) {
+            return None;
+        }
+        *last = Some(line.clone());
+        Some(line)
     }
 
     /// The line for the last state, unless it was the last one printed.
-    fn last(&self, totals: Totals) -> Option<String> {
-        (totals.batches > self.printed.get()).then(|| {
-            self.printed.set(totals.batches);
-            totals.line()
+    fn last(&self, batches: u64, line: impl FnOnce() -> String) -> Option<String> {
+        (batches > self.printed.get()).then(|| {
+            self.printed.set(batches);
+            line()
         })
     }
 }
@@ -270,7 +295,8 @@ pub async fn backfill(
                 max_rows: Some(rows),
             }),
             &|view| {
-                if let Some(line) = lines.offer(before.after(view)) {
+                let now = before.after(view);
+                if let Some(line) = lines.offer(now.batches, || now.line()) {
                     eprintln!("{line}");
                 }
             },
@@ -280,14 +306,14 @@ pub async fn backfill(
         let view = match view {
             Ok(view) => view,
             Err(error) => {
-                if let Some(line) = lines.last(totals) {
+                if let Some(line) = lines.last(totals.batches, || totals.line()) {
                     eprintln!("{line}");
                 }
                 return Err(error);
             }
         };
         totals = totals.after(&view);
-        if let Some(line) = lines.last(totals) {
+        if let Some(line) = lines.last(totals.batches, || totals.line()) {
             eprintln!("{line}");
         }
         if view.operation.state != OperationState::Ready {
@@ -322,9 +348,133 @@ pub async fn execute(request: BackfillRequest) -> Result<Rendered, CliError> {
     backfill(&connected.client, &request).await
 }
 
+// ---- reindex-threads ---------------------------------------------------------
+
+/// How a reindex ended, as the command line shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReindexEnd {
+    /// The result the command prints to stdout as JSON (a `failed` one ends
+    /// the command with exit code 1, after the print).
+    Result(ReindexResult),
+    /// No result of the work: the operation was stopped or its request was
+    /// cancelled by another owner. Said on stderr, exit code 1.
+    Stopped(String),
+}
+
+/// The state of a reindex after a step, as one progress line. The gaps are counted in
+/// targets: a summary lists one entry for each reason, with the count of targets of it.
+fn reindex_line(batches: u32, progress: &MaintenanceProgress) -> String {
+    let MaintenanceProgress::ReindexThreads {
+        request_id,
+        summary,
+        ..
+    } = progress
+    else {
+        return format!("reindex-threads: step {batches}");
+    };
+    let request = request_id.as_deref().unwrap_or("-");
+    summary.as_ref().map_or_else(
+        || format!("reindex-threads: step {batches}: request {request}"),
+        |summary| {
+            format!(
+                "reindex-threads: step {batches}: request {request}: targets {}, succeeded {}, gaps {}",
+                summary.target_count,
+                summary.succeeded,
+                summary.gaps.iter().fold(0_u64, |all, gap| all.saturating_add(gap.count))
+            )
+        },
+    )
+}
+
+/// Reindex the threads of `args` in the core: the same durable request, lease
+/// and step path as the GUI, driven by the core's writer. The result (stdout)
+/// is the JSON the offline command printed (`accepted`, `completed`,
+/// `completed_with_gaps`, `failed`); the progress goes to stderr within the
+/// budget of [`ProgressLines`], the end state included: exactly once, also when the
+/// index owner of the core worked on the request (`step 0`, this client stepped nothing)
+/// or the end only changed the totals.
+///
+/// A reindex that ends early (this process interrupted or its connection lost)
+/// leaves its durable request pending, for the next owner of the index.
+///
+/// # Errors
+/// As [`run_task`]: no core, a refusal (`busy` while another reindex runs in
+/// the core), a lost connection.
+pub async fn reindex(
+    client: &WorkbenchClient,
+    args: &ReindexThreads,
+) -> Result<ReindexEnd, CliError> {
+    let id = core_client::operation_id("cli-reindex")?;
+    let lines = ProgressLines::default();
+    let last = std::cell::RefCell::new((0_u32, None::<MaintenanceProgress>));
+    let view = run_task(
+        client,
+        &id,
+        MaintenanceTask::ReindexThreads(args.clone()),
+        &|view| {
+            *last.borrow_mut() = (view.batches, Some(view.progress.clone()));
+            if let Some(line) = lines.offer(u64::from(view.batches), || {
+                reindex_line(view.batches, &view.progress)
+            }) {
+                eprintln!("{line}");
+            }
+        },
+    )
+    .await;
+    let view = match view {
+        Ok(view) => view,
+        Err(error) => {
+            let (batches, progress) = last.take();
+            if let Some(progress) = progress
+                && let Some(line) = lines.terminal(|| reindex_line(batches, &progress))
+            {
+                eprintln!("{line}");
+            }
+            return Err(error);
+        }
+    };
+    if let Some(line) = lines.terminal(|| reindex_line(view.batches, &view.progress)) {
+        eprintln!("{line}");
+    }
+    let MaintenanceProgress::ReindexThreads { result, .. } = &view.progress else {
+        return Err(CliError::Failed(
+            "protocol violation: the core answered a reindex with another task".into(),
+        ));
+    };
+    Ok(match result {
+        Some(result) => ReindexEnd::Result(result.clone()),
+        None => ReindexEnd::Stopped(stopped("reindex-threads", &view)),
+    })
+}
+
+/// Run the reindex in the core of the configuration `user_config_dir` names.
+///
+/// # Errors
+/// As [`reindex`], and no core could be reached or started.
+pub async fn execute_reindex(
+    user_config_dir: Option<PathBuf>,
+    args: &ReindexThreads,
+) -> Result<ReindexEnd, CliError> {
+    let connected = core_client::connect(user_config_dir, &[Capability::SnapshotEvents]).await?;
+    reindex(&connected.client, args).await
+}
+
+/// The result a command prints when it could not get one from the core: no
+/// core or a lost connection is an unavailable database, anything else a
+/// control failure of the reindex.
+pub fn failure_of(error: &CliError) -> ReindexFailure {
+    match error {
+        CliError::Unavailable(_) | CliError::Disconnected => ReindexFailure::DatabaseUnavailable,
+        _ => ReindexFailure::UnrecoverableControlFailure,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use workbench_protocol::namespaces::maintenance::{
+        ReindexGap, ReindexGapReason, ReindexSummary,
+    };
 
     fn at(batches: u64) -> Totals {
         Totals {
@@ -338,8 +488,10 @@ mod tests {
     /// ends there.
     fn lines_of(batches: u64) -> Vec<String> {
         let lines = ProgressLines::default();
-        let mut out: Vec<String> = (1..=batches).filter_map(|n| lines.offer(at(n))).collect();
-        out.extend(lines.last(at(batches)));
+        let mut out: Vec<String> = (1..=batches)
+            .filter_map(|n| lines.offer(n, || at(n).line()))
+            .collect();
+        out.extend(lines.last(batches, || at(batches).line()));
         out
     }
 
@@ -386,13 +538,83 @@ mod tests {
         let seen = [1, 2, 7, 40, 41, 900];
 
         // When: each is offered and the run ends at 905.
-        let mut out: Vec<_> = seen.iter().filter_map(|n| lines.offer(at(*n))).collect();
-        out.extend(lines.last(at(905)));
+        let mut out: Vec<_> = seen
+            .iter()
+            .filter_map(|n| lines.offer(*n, || at(*n).line()))
+            .collect();
+        out.extend(lines.last(905, || at(905).line()));
 
         // Then: the budget decides which are printed, and the end is printed once.
         assert_eq!(out.last().unwrap(), &at(905).line());
-        assert_eq!(lines.last(at(905)), None);
+        assert_eq!(lines.last(905, || at(905).line()), None);
         assert!(out.len() <= seen.len() + 1);
+    }
+
+    fn reindex_progress(gaps: &[(ReindexGapReason, u64)]) -> MaintenanceProgress {
+        MaintenanceProgress::ReindexThreads {
+            request_id: Some("r-1".into()),
+            summary: Some(ReindexSummary {
+                target_count: 5,
+                succeeded: 1,
+                deleted_before_submission: 0,
+                gaps: gaps
+                    .iter()
+                    .map(|(reason, count)| ReindexGap {
+                        reason: *reason,
+                        count: *count,
+                    })
+                    .collect(),
+            }),
+            result: None,
+        }
+    }
+
+    #[test]
+    fn the_gaps_of_a_line_are_the_targets_not_the_reasons() {
+        // Given: one reason with two targets, and then two reasons with 2 and 1.
+        let one_reason = reindex_progress(&[(ReindexGapReason::IndexDisabled, 2)]);
+        let two_reasons = reindex_progress(&[
+            (ReindexGapReason::IndexDisabled, 2),
+            (ReindexGapReason::CapacityPaused, 1),
+        ]);
+        let none = reindex_progress(&[]);
+
+        // When/Then: the line counts the targets.
+        assert!(reindex_line(3, &one_reason).ends_with("succeeded 1, gaps 2"));
+        assert!(reindex_line(3, &two_reasons).ends_with("succeeded 1, gaps 3"));
+        assert!(reindex_line(3, &none).ends_with("succeeded 1, gaps 0"));
+    }
+
+    #[test]
+    fn an_end_state_of_step_zero_is_printed_once_and_a_repeat_is_not() {
+        // Given: a reindex the core's index owner worked on: this client stepped nothing.
+        let lines = ProgressLines::default();
+        let end =
+            || "reindex-threads: step 0: request r-1: targets 2, succeeded 2, gaps 0".to_owned();
+
+        // When: the end state is offered twice.
+        let first = lines.terminal(end);
+        let second = lines.terminal(end);
+
+        // Then: it is printed, once.
+        assert_eq!(first.as_deref(), Some(end().as_str()));
+        assert_eq!(second, None);
+    }
+
+    #[test]
+    fn an_end_state_that_only_changes_the_totals_is_printed_after_the_last_step_line() {
+        // Given: a step line was printed for batch 3.
+        let lines = ProgressLines::default();
+        let step = lines.offer(1, || "reindex-threads: step 3: request r-1".to_owned());
+        assert!(step.is_some());
+
+        // When: the end keeps the batch count but carries the totals.
+        let end = lines.terminal(|| {
+            "reindex-threads: step 3: request r-1: targets 2, succeeded 1, gaps 1".to_owned()
+        });
+
+        // Then: the totals are not lost.
+        assert!(end.is_some_and(|line| line.contains("gaps 1")));
     }
 
     #[test]
@@ -401,6 +623,6 @@ mod tests {
         let lines = ProgressLines::default();
 
         // Then: there is no line, as before.
-        assert_eq!(lines.last(Totals::default()), None);
+        assert_eq!(lines.last(0, || Totals::default().line()), None);
     }
 }

@@ -93,3 +93,55 @@ fn capacity_wait_expired_gap_reason_round_trips_under_its_stable_name() {
         state
     );
 }
+
+#[test]
+fn opening_the_storage_alone_cancels_a_registration_a_dead_process_left() {
+    // Given: a database a previous process left with a registration still in progress
+    // (it died between two registration steps), a pending request and a cancelled one
+    let temp_dir = tempfile::TempDir::new().expect("temporary directory must be created");
+    let path = temp_dir.path().join("storage.db");
+    let config = storage::StorageConfig {
+        db_path: path.clone(),
+        ..storage::StorageConfig::default()
+    };
+    drop(storage::Database::open(&config).expect("fresh database must open"));
+    let connection = rusqlite::Connection::open(&path).expect("migrated database must reopen");
+    for (id, state, finished) in [
+        ("left-behind", "registering", None),
+        ("pending", "pending", None),
+        ("cancelled", "cancelled", Some(2_i64)),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO thread_index_requests(request_id, include_evicted, state, \
+                 created_at_ns, finished_at_ns) VALUES (?1, 0, ?2, 1, ?3)",
+                rusqlite::params![id, state, finished],
+            )
+            .expect("request must insert");
+    }
+    let state_of = |id: &str| -> String {
+        connection
+            .query_row(
+                "SELECT state FROM thread_index_requests WHERE request_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .expect("request row must exist")
+    };
+    assert_eq!(state_of("left-behind"), "registering");
+
+    // When: the storage starts; nothing submits, registers or cancels anything
+    let storage = storage::Storage::open(config).expect("storage must open");
+
+    // Then: the leftover registration is closed as cancelled (the index was never
+    // touched), and the other requests are untouched
+    assert_eq!(state_of("left-behind"), "cancelled");
+    assert_eq!(state_of("pending"), "pending");
+    assert_eq!(state_of("cancelled"), "cancelled");
+    let status = storage
+        .handle()
+        .thread_index_request_status("left-behind", 10)
+        .expect("a swept registration is observable as cancelled");
+    assert_eq!(status.progress, RequestProgress::Cancelled);
+    storage.close();
+}

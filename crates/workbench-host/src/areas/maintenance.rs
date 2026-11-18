@@ -38,6 +38,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use storage::StorageHandle;
+use storage::thread_index::{IndexOwner, IndexOwnerKind, ReindexRequest, RequestFailure};
 use tokio::sync::watch;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::events::UiEvent;
@@ -58,6 +59,9 @@ use crate::bootstrap::restart::HostCommandPermit;
 use crate::connections::{ConnectionEpoch, ConnectionHooks};
 use crate::queries::{Pager, error, revision};
 
+mod reindex;
+use reindex::{Advance, Finished, Submitted};
+
 /// Operations the table keeps (running and settled). Beyond it a new id is
 /// refused: an id that is forgotten could run a second time.
 const MAX_OPERATIONS: usize = 64;
@@ -71,6 +75,9 @@ pub enum MaintenanceStage {
     /// Everything but the next batch is ready; the next step is the writer.
     /// The `u32` of the hook is the number of batches committed so far.
     BeforeBatch,
+    /// A reindex is being registered and the next step is the writer. The `u32` of the
+    /// hook is the number of registration steps committed so far.
+    BeforeRegistrationStep,
 }
 
 /// A seam for tests: awaited at each [`MaintenanceStage`] of every operation.
@@ -118,7 +125,9 @@ struct Inner {
 
 struct State {
     table: Operations<MaintenanceView>,
-    running: HashMap<MaintenanceKind, Running>,
+    /// The operations that run, by id: a backfill excludes another backfill, while
+    /// reindexes run side by side (they share the index through its lease).
+    running: HashMap<OperationId, Running>,
 }
 
 /// Who started an operation and during which run of connections of that client.
@@ -130,7 +139,7 @@ struct Owner {
 }
 
 struct Running {
-    id: OperationId,
+    kind: MaintenanceKind,
     /// The client that started it, when the connection said who it was.
     owner: Option<Owner>,
     cancel: watch::Sender<bool>,
@@ -153,6 +162,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What a started operation does, resolved by the handler.
 enum Work {
     Backfill { batch_rows: usize, max_rows: u64 },
+    Reindex { request: ReindexRequest, wait: bool },
 }
 
 /// How an operation ended.
@@ -166,6 +176,9 @@ enum Ended {
         message: &'static str,
         /// A writer step failed and may have committed work it did not report.
         unknown: bool,
+        /// What the settled view shows besides the failure (a reindex names its
+        /// failed result).
+        progress: Option<MaintenanceProgress>,
     },
     Cancelled(CancelReason),
 }
@@ -176,6 +189,7 @@ impl Ended {
             code: ErrorCode::StorageUnavailable,
             message: "the storage is unavailable",
             unknown: false,
+            progress: None,
         }
     }
 
@@ -183,10 +197,11 @@ impl Ended {
     /// that it did not report.
     fn unreported(self) -> Self {
         match self {
-            Self::Failed { code, .. } => Self::Failed {
+            Self::Failed { code, progress, .. } => Self::Failed {
                 code,
                 message: "a batch failed and may have committed part of its work; read the state again",
                 unknown: true,
+                progress,
             },
             other => other,
         }
@@ -197,6 +212,7 @@ impl Ended {
             code: ErrorCode::Internal,
             message: "the maintenance task did not finish",
             unknown: false,
+            progress: None,
         }
     }
 }
@@ -217,6 +233,11 @@ fn initial_progress(kind: MaintenanceKind) -> MaintenanceProgress {
             undecodable: 0,
             remaining_unconverted: None,
             remaining_unattributed: None,
+        },
+        MaintenanceKind::ReindexThreads => MaintenanceProgress::ReindexThreads {
+            request_id: None,
+            summary: None,
+            result: None,
         },
     }
 }
@@ -312,6 +333,14 @@ impl MaintenanceArea {
                 batch_rows: task.batch_rows.unwrap_or(DEFAULT_BATCH_ROWS) as usize,
                 max_rows: task.max_rows.unwrap_or(DEFAULT_MAX_ROWS),
             },
+            MaintenanceTask::ReindexThreads(task) => Work::Reindex {
+                request: ReindexRequest {
+                    canonical_project: task.canonical_project.clone(),
+                    since_ns: task.since_ns,
+                    include_evicted: task.include_evicted,
+                },
+                wait: task.wait,
+            },
         };
         let (view, cancel) = {
             let mut state = lock(&inner.state);
@@ -341,10 +370,12 @@ impl MaintenanceArea {
                 }
                 Lookup::New => {}
             }
-            if state.running.contains_key(&kind) {
+            if kind == MaintenanceKind::BackfillEvents
+                && state.running.values().any(|running| running.kind == kind)
+            {
                 return Err(WorkbenchError::new(
                     ErrorCode::Busy,
-                    "another operation of this task is running; list the maintenance operations to see it",
+                    "another backfill is running; list the maintenance operations to see it",
                     RetryAdvice::UserActionRequired,
                 ));
             }
@@ -375,9 +406,9 @@ impl MaintenanceArea {
             state.table.insert(view.clone(), digest)?;
             let (cancel, observed) = watch::channel(false);
             state.running.insert(
-                kind,
+                start.operation_id.clone(),
                 Running {
-                    id: start.operation_id.clone(),
+                    kind,
                     owner,
                     cancel,
                 },
@@ -390,12 +421,12 @@ impl MaintenanceArea {
             inner
                 .tasks
                 .spawn_counted_tracked("maintenance", Some(accepted), move |stop| {
-                    this.run(id, kind, work, stop, cancel)
+                    this.run(id, work, stop, cancel)
                 });
         if let Err(refused) = spawned {
             let mut state = lock(&inner.state);
             state.table.forget(&start.operation_id);
-            state.running.remove(&kind);
+            state.running.remove(&start.operation_id);
             return Err(WorkbenchError::new(
                 ErrorCode::Draining,
                 refused.to_string(),
@@ -417,9 +448,9 @@ impl MaintenanceArea {
         let inner = self.inner()?;
         let state = lock(&inner.state);
         let view = state.table.get(id).cloned().ok_or_else(unknown)?;
-        let already_applied = match state.running.get(&view.task) {
-            Some(running) if running.id == *id => running.cancel.send_replace(true),
-            _ => true,
+        let already_applied = match state.running.get(id) {
+            Some(running) => running.cancel.send_replace(true),
+            None => true,
         };
         Ok(Accepted {
             view,
@@ -477,15 +508,13 @@ impl Inner {
     async fn run(
         self: Arc<Self>,
         id: OperationId,
-        kind: MaintenanceKind,
         work: Work,
-        stop: StopSignal,
+        mut stop: StopSignal,
         cancel: watch::Receiver<bool>,
     ) -> Result<(), BootstrapError> {
         let mut guard = Settle {
             inner: self.clone(),
             id: id.clone(),
-            kind,
             settled: false,
         };
         self.at(MaintenanceStage::Started, &id, 0).await;
@@ -496,6 +525,9 @@ impl Inner {
             } => {
                 self.backfill(&id, batch_rows, max_rows, &stop, &cancel)
                     .await
+            }
+            Work::Reindex { request, wait } => {
+                self.reindex(&id, request, wait, &mut stop, &cancel).await
             }
         };
         guard.finish(&ended);
@@ -578,6 +610,144 @@ impl Inner {
         }
     }
 
+    /// A reindex: the request is registered and then driven as the foreground
+    /// owner of the index, one pass per loop turn. Every pass is looked at
+    /// against a cancel or a stop first; an operation that ends early leaves the
+    /// durable request `pending` and gives the lease back.
+    async fn reindex(
+        &self,
+        id: &OperationId,
+        request: ReindexRequest,
+        wait: bool,
+        stop: &mut StopSignal,
+        cancel: &watch::Receiver<bool>,
+    ) -> Ended {
+        if let Some(reason) = Self::interrupted(stop, cancel) {
+            return Ended::Cancelled(reason);
+        }
+        let owner = IndexOwner {
+            id: format!("core-{}", id.as_str()),
+            kind: IndexOwnerKind::Cli,
+        };
+        // The registration is bounded writer steps, not one long command: a cancel
+        // or a stop is looked at before each of them, and an interrupted one is
+        // closed `cancelled` with the index untouched.
+        let storage = self.storage.clone();
+        let mut registering = match blocking(move || {
+            reindex::begin(&storage, &request, owner, wait, reindex::clock_ns())
+        })
+        .await
+        {
+            Ok(Ok(registering)) => registering,
+            Ok(Err(reason)) => return reindex_failed(None, None, reason),
+            Err(ended) => return ended,
+        };
+        let mut steps = 0_u32;
+        let submitted = loop {
+            self.at(MaintenanceStage::BeforeRegistrationStep, id, steps)
+                .await;
+            if let Some(reason) = Self::interrupted(stop, cancel) {
+                let storage = self.storage.clone();
+                let _ = blocking(move || registering.abort(&storage)).await;
+                return Ended::Cancelled(reason);
+            }
+            let storage = self.storage.clone();
+            let stepped = blocking(move || {
+                let step = registering.step(&storage, reindex::clock_ns());
+                if step.is_err() {
+                    registering.abort(&storage);
+                }
+                (registering, step)
+            })
+            .await;
+            let (next, step) = match stepped {
+                Ok(stepped) => stepped,
+                Err(ended) => return ended,
+            };
+            registering = next;
+            steps += 1;
+            match step {
+                Ok(Some(submitted)) => break submitted,
+                Ok(None) => {}
+                Err(reason) => return reindex_failed(None, None, reason),
+            }
+        };
+        let driver = match submitted {
+            Submitted::Delegated { request_id } => {
+                return Ended::Completed {
+                    outcome: MaintenanceOutcome::Delegated,
+                    progress: Some(MaintenanceProgress::ReindexThreads {
+                        request_id: Some(request_id.clone()),
+                        summary: None,
+                        result: Some(reindex::wire_result(
+                            &storage::thread_index::ReindexResult::Accepted { request_id },
+                        )),
+                    }),
+                };
+            }
+            Submitted::Driving(driver) => driver,
+            // Only the tests' one-shot `submit` makes it; the steps report it.
+            #[cfg(test)]
+            Submitted::Failed(reason) => return reindex_failed(None, None, reason),
+        };
+        // The request id is known from now on: show it before the first pass.
+        self.record(id, 0, reindex::progress(&driver));
+        let mut held = Some(driver);
+        let mut batches = 0_u32;
+        let ended = loop {
+            if let Some(reason) = Self::interrupted(stop, cancel) {
+                break Ended::Cancelled(reason);
+            }
+            self.at(MaintenanceStage::BeforeBatch, id, batches).await;
+            // The last look before the writer, as for a backfill batch.
+            if let Some(reason) = Self::interrupted(stop, cancel) {
+                break Ended::Cancelled(reason);
+            }
+            let Some(mut driver) = held.take() else {
+                break Ended::internal();
+            };
+            let storage = self.storage.clone();
+            let passed = blocking(move || {
+                let advance = driver.advance(&storage, &mut reindex::clock_ns);
+                (driver, advance)
+            })
+            .await;
+            let (driver, advance) = match passed {
+                Ok(passed) => passed,
+                Err(ended) => break ended,
+            };
+            let progress = reindex::progress(&driver);
+            let request_id = driver.request_id().to_owned();
+            held = Some(driver);
+            match advance {
+                Advance::Done(finished) => {
+                    break reindex_ended(&request_id, progress, finished);
+                }
+                Advance::Progressed => {
+                    batches += 1;
+                    self.record(id, batches, progress);
+                }
+                Advance::Wait(pause) => {
+                    // Nothing to do until the index wakes (or the owner's
+                    // lease expires): wait for that or for a signal.
+                    tokio::select! {
+                        biased;
+                        () = stop.stopped() => {}
+                        () = cancelled(cancel.clone()) => {}
+                        () = tokio::time::sleep(pause) => {}
+                    }
+                }
+            }
+        };
+        if let Some(mut driver) = held {
+            let storage = self.storage.clone();
+            // The lease is fenced and expires by itself: a lost release only
+            // delays the next owner.
+            let _ = blocking(move || driver.release(&storage)).await;
+        }
+        ended
+    }
+
     /// A committed batch: keep its counters and tell the clients.
     fn record(&self, id: &OperationId, batches: u32, progress: MaintenanceProgress) {
         let view = lock(&self.state).table.update(id, |view| {
@@ -598,7 +768,7 @@ impl Inner {
         let _ = self.source.publish(UiEvent::Maintenance(event));
     }
 
-    fn settle(&self, id: &OperationId, kind: MaintenanceKind, ended: &Ended) {
+    fn settle(&self, id: &OperationId, ended: &Ended) {
         let view = {
             let mut state = lock(&self.state);
             let view = state.table.update(id, |view| {
@@ -621,7 +791,11 @@ impl Inner {
                         code,
                         message,
                         unknown,
+                        progress,
                     } => {
+                        if let Some(progress) = progress {
+                            view.progress = progress.clone();
+                        }
                         view.operation.state = OperationState::Failed { code: *code };
                         view.effect = if *unknown {
                             MaintenanceEffect::Unknown
@@ -644,9 +818,7 @@ impl Inner {
                     }
                 }
             });
-            if state.running.get(&kind).is_some_and(|run| run.id == *id) {
-                state.running.remove(&kind);
-            }
+            state.running.remove(id);
             view
         };
         if let Some(view) = view {
@@ -657,7 +829,86 @@ impl Inner {
     }
 }
 
+async fn cancelled(mut cancel: watch::Receiver<bool>) {
+    // A dropped sender is also an end of the operation's owner.
+    let _ = cancel.wait_for(|requested| *requested).await;
+}
+
+/// How a reindex that submitted nothing, or whose control path broke, fails.
+fn reindex_failed(
+    request_id: Option<String>,
+    summary: Option<workbench_protocol::namespaces::maintenance::ReindexSummary>,
+    reason: RequestFailure,
+) -> Ended {
+    use workbench_protocol::namespaces::maintenance::ReindexResult;
+    let wire = reindex::failure(reason);
+    let (code, message) = match reason {
+        RequestFailure::InvalidArguments => {
+            (ErrorCode::InvalidRequest, "the reindex request is invalid")
+        }
+        RequestFailure::DatabaseUnavailable | RequestFailure::PersistenceUnavailable => {
+            (ErrorCode::StorageUnavailable, "the storage is unavailable")
+        }
+        RequestFailure::UnrecoverableControlFailure => (
+            ErrorCode::Internal,
+            "the index control failed in a way the reindex cannot recover from",
+        ),
+    };
+    Ended::Failed {
+        code,
+        message,
+        unknown: false,
+        progress: Some(MaintenanceProgress::ReindexThreads {
+            request_id: request_id.clone(),
+            summary,
+            result: Some(ReindexResult::Failed {
+                request_id,
+                reason: wire,
+            }),
+        }),
+    }
+}
+
+/// How a reindex the driver finished ends the operation.
+fn reindex_ended(request_id: &str, progress: MaintenanceProgress, finished: Finished) -> Ended {
+    use storage::thread_index::ReindexResult as Stored;
+    let summary = match &progress {
+        MaintenanceProgress::ReindexThreads { summary, .. } => summary.clone(),
+        MaintenanceProgress::BackfillEvents { .. } => None,
+    };
+    match finished {
+        Finished::Result(Stored::Failed { request_id, reason }) => {
+            reindex_failed(request_id, summary, reason)
+        }
+        Finished::Result(result) => Ended::Completed {
+            outcome: match result {
+                Stored::Accepted { .. } => MaintenanceOutcome::Delegated,
+                _ => MaintenanceOutcome::Completed,
+            },
+            progress: Some(MaintenanceProgress::ReindexThreads {
+                request_id: Some(request_id.to_owned()),
+                summary,
+                result: Some(reindex::wire_result(&result)),
+            }),
+        },
+        // Another owner cancelled this request; that is not a result of the work.
+        Finished::Cancelled => Ended::Failed {
+            code: ErrorCode::Conflict,
+            message: "the reindex request was cancelled by another owner",
+            unknown: false,
+            progress: Some(MaintenanceProgress::ReindexThreads {
+                request_id: Some(request_id.to_owned()),
+                summary,
+                result: None,
+            }),
+        },
+    }
+}
+
 /// Run `work` on a blocking worker: the storage writer answers synchronously.
+/// `Ended` is the one error type of the operation's steps; it carries a reindex's
+/// named result, so it is larger than clippy likes and is returned once per step.
+#[allow(clippy::result_large_err)]
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, Ended> {
@@ -670,25 +921,21 @@ async fn blocking<T: Send + 'static>(
 struct Settle {
     inner: Arc<Inner>,
     id: OperationId,
-    kind: MaintenanceKind,
     settled: bool,
 }
 
 impl Settle {
     fn finish(&mut self, ended: &Ended) {
         self.settled = true;
-        self.inner.settle(&self.id, self.kind, ended);
+        self.inner.settle(&self.id, ended);
     }
 }
 
 impl Drop for Settle {
     fn drop(&mut self) {
         if !self.settled {
-            self.inner.settle(
-                &self.id,
-                self.kind,
-                &Ended::Cancelled(CancelReason::Shutdown),
-            );
+            self.inner
+                .settle(&self.id, &Ended::Cancelled(CancelReason::Shutdown));
         }
     }
 }

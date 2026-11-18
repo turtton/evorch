@@ -24,17 +24,20 @@ use crate::thread_index::{
     ThreadIndexSettings,
 };
 use crate::{StorageConfig, StorageError};
+use registration::Phase;
 
 mod capacity;
 #[cfg(test)]
 mod gate_measure;
 mod lease;
+mod registration;
 mod requests;
 #[cfg(test)]
 mod tests;
 mod wait;
 mod work;
 
+pub use registration::{Registration, RegistrationProgress};
 pub use work::ThreadIndexCounters;
 pub(crate) use work::{Env, IndexRuntime};
 
@@ -75,66 +78,17 @@ impl ThreadIndexControl for Control<'_> {
         now_ns: i64,
         lease_duration_ns: i64,
     ) -> Result<RequestSubmission, RequestFailure> {
-        requests::validate(request)?;
-        let conn = self.env.conn;
-        let rt = &mut *self.rt;
-        let mut wal_pending = false;
-        let (request_id, lease) = (|| {
-            let transaction = rusqlite::Transaction::new_unchecked(
-                conn,
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            work::discover_all(&transaction, rt, now_ns)?;
-            let (request_id, _) = requests::submit_in(&transaction, request, now_ns)?;
-            let lease = lease::acquire_in(&transaction, owner, now_ns, lease_duration_ns)?;
-            // A parked owner does not run another step for each request.
-            // Finalize policy gaps at acceptance instead of waiting forever.
-            let status = work::capacity_status(
-                self.env,
-                rt,
-                PlannedGrowth::Bounded {
-                    db: 0,
-                    wal: 0,
-                    shm: 0,
-                },
-            )?;
-            // A WAL-only refusal is the bounded wait, not a policy gap: the
-            // request stays pending and expires on its own deadline. A WAL
-            // pause left by an earlier expiry is released so the next step
-            // admits (or waits) again from this request's own start.
-            wal_pending = status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
-                && rt.pause.is_none_or(|pause| pause.state == status.state);
-            if !wal_pending
-                && status.state != CapacityState::Normal
-                && status.state != CapacityState::IndexPaused(IndexPauseReason::SettingsAdjustment)
-            {
-                let gap = if !rt.settings.enabled {
-                    RequestGapReason::IndexDisabled
-                } else {
-                    RequestGapReason::CapacityPaused
-                };
-                requests::gap_pending(&transaction, gap)?;
-                requests::finalize(&transaction, now_ns)?;
-            }
-            transaction.commit()?;
-            Ok::<_, StorageError>((request_id, lease))
-        })()
-        .map_err(persistence)?;
-        if wal_pending {
-            let rt = &mut *self.rt;
-            rt.pause = None;
-            rt.paused_growth = None;
-            rt.paused_work = None;
-            if let Some(wait) = rt.wal_wait.as_mut() {
-                wait.advance_to(self.now_ns);
+        let mut registration = self.begin_registration(request, now_ns)?;
+        loop {
+            match self.advance_registration(&mut registration, owner, now_ns, lease_duration_ns) {
+                Ok(RegistrationProgress::InProgress) => {}
+                Ok(RegistrationProgress::Published(submission)) => return Ok(submission),
+                Err(error) => {
+                    self.abort_registration(&registration);
+                    return Err(error);
+                }
             }
         }
-        let status = self.request_status(&request_id, now_ns)?;
-        Ok(RequestSubmission {
-            request_id,
-            lease,
-            progress: status.progress,
-        })
     }
 
     fn request_status(
@@ -191,6 +145,246 @@ impl ThreadIndexControl for Control<'_> {
         {
             let _ = (lease, now_ns, self.redactor);
             unreachable!("production steps must use the shared extractor")
+        }
+    }
+}
+
+/// What the capacity policy asks of a registration now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Policy {
+    Open,
+    /// A WAL-only refusal: the bounded wait, not a policy gap.
+    WalWait,
+    Gap(RequestGapReason),
+}
+
+/// How the last short transaction ended.
+#[derive(Debug)]
+pub(crate) enum PublishOutcome {
+    Published(RequestSubmission),
+    /// The policy changed to a gap while targets were still pending; nothing committed.
+    Replan,
+}
+
+#[cfg(test)]
+impl PublishOutcome {
+    pub(crate) fn published(self) -> RequestSubmission {
+        match self {
+            Self::Published(submission) => submission,
+            Self::Replan => panic!("the publish asked for a replan"),
+        }
+    }
+}
+
+/// The bounded steps of a registration (see `requests` and `registration`): each one
+/// is a short transaction, so the writer serves other commands between them.
+impl Control<'_> {
+    /// Creates the `registering` request.
+    pub(crate) fn begin_registration(
+        &mut self,
+        request: &ReindexRequest,
+        now_ns: i64,
+    ) -> Result<Registration, RequestFailure> {
+        requests::validate(request)?;
+        let request_id = registration::begin_live(self.env.db_path, || {
+            requests::begin_registration(self.env.conn, request, now_ns)
+        })
+        .map_err(persistence)?;
+        Ok(Registration::new(request_id))
+    }
+
+    /// One bounded step of `registration`.
+    pub(crate) fn advance_registration(
+        &mut self,
+        registration: &mut Registration,
+        owner: &IndexOwner,
+        now_ns: i64,
+        lease_duration_ns: i64,
+    ) -> Result<RegistrationProgress, RequestFailure> {
+        let request_id = registration.request_id.clone();
+        match registration.phase.clone() {
+            Phase::Discover => {
+                if self.discover_batch(now_ns)? {
+                    registration.phase = Phase::Freeze(None);
+                }
+            }
+            Phase::Freeze(cursor) => {
+                let batch = self.freeze_batch(&request_id, cursor.as_ref())?;
+                registration.phase = match batch.next {
+                    Some(next) => Phase::Freeze(Some(next)),
+                    None => Phase::Gap(None),
+                };
+            }
+            Phase::Gap(cursor) => {
+                let policy = self.policy().map_err(persistence)?;
+                registration.gap_closed = false;
+                if let Policy::Gap(reason) = policy {
+                    let batch = requests::gap_batch(
+                        self.env.conn,
+                        &request_id,
+                        reason,
+                        cursor.as_ref(),
+                        requests::GAP_BATCH,
+                    )
+                    .map_err(persistence)?;
+                    if let Some(next) = batch.next {
+                        registration.phase = Phase::Gap(Some(next));
+                        return Ok(RegistrationProgress::InProgress);
+                    }
+                    // The scan reached the end: no target of the registration is pending.
+                    registration.gap_closed = true;
+                }
+                registration.phase = Phase::Publish;
+            }
+            Phase::Publish => {
+                match self.publish_registration(
+                    &request_id,
+                    registration.gap_closed,
+                    owner,
+                    now_ns,
+                    lease_duration_ns,
+                )? {
+                    PublishOutcome::Published(submission) => {
+                        registration::unmark_live(self.env.db_path, &request_id);
+                        return Ok(RegistrationProgress::Published(submission));
+                    }
+                    PublishOutcome::Replan => registration.phase = Phase::Gap(None),
+                }
+            }
+        }
+        Ok(RegistrationProgress::InProgress)
+    }
+
+    /// One discovery batch; `true` once every run has an index row.
+    pub(crate) fn discover_batch(&mut self, now_ns: i64) -> Result<bool, RequestFailure> {
+        work::discover_step(self.env.conn, self.rt, now_ns).map_err(persistence)
+    }
+
+    /// Freezes the next batch of targets after `cursor`.
+    pub(crate) fn freeze_batch(
+        &mut self,
+        request_id: &str,
+        cursor: Option<&requests::FreezeCursor>,
+    ) -> Result<requests::FrozenBatch, RequestFailure> {
+        requests::freeze_batch(self.env.conn, request_id, cursor, requests::FREEZE_BATCH)
+            .map_err(persistence)
+    }
+
+    fn policy(&mut self) -> Result<Policy, StorageError> {
+        let status = work::capacity_status(
+            self.env,
+            self.rt,
+            PlannedGrowth::Bounded {
+                db: 0,
+                wal: 0,
+                shm: 0,
+            },
+        )?;
+        // A WAL-only refusal is the bounded wait, not a policy gap: the request stays
+        // pending and expires on its own deadline. A WAL pause left by an earlier expiry
+        // is released so the next step admits (or waits) again from this request's start.
+        let wal_pending = status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+            && self
+                .rt
+                .pause
+                .is_none_or(|pause| pause.state == status.state);
+        Ok(if wal_pending {
+            Policy::WalWait
+        } else if status.state != CapacityState::Normal
+            && status.state != CapacityState::IndexPaused(IndexPauseReason::SettingsAdjustment)
+        {
+            Policy::Gap(if self.rt.settings.enabled {
+                RequestGapReason::CapacityPaused
+            } else {
+                RequestGapReason::IndexDisabled
+            })
+        } else {
+            Policy::Open
+        })
+    }
+
+    /// The last short transaction: the request becomes pending and the owner is elected.
+    /// Its work does not depend on the number of targets. The policy is evaluated again
+    /// inside it: when it turned into a gap and the gap batches have not run under it
+    /// (`gap_closed` is false), nothing is committed and the caller closes the targets in
+    /// batches first (`Replan`). When they did run, no target is pending and the request
+    /// ends `completed_with_gaps` here, at acceptance, without reading its targets.
+    pub(crate) fn publish_registration(
+        &mut self,
+        request_id: &str,
+        gap_closed: bool,
+        owner: &IndexOwner,
+        now_ns: i64,
+        lease_duration_ns: i64,
+    ) -> Result<PublishOutcome, RequestFailure> {
+        // The policy is read before the write transaction: it looks at the whole index (sizes,
+        // the charges of every run), and the writer is the only thread that changes it.
+        let policy = self.policy().map_err(persistence)?;
+        let Some((lease, wal_pending)) = self
+            .publish_transaction(
+                request_id,
+                gap_closed,
+                policy,
+                owner,
+                now_ns,
+                lease_duration_ns,
+            )
+            .map_err(persistence)?
+        else {
+            return Ok(PublishOutcome::Replan);
+        };
+        if wal_pending {
+            let rt = &mut *self.rt;
+            rt.pause = None;
+            rt.paused_growth = None;
+            rt.paused_work = None;
+            if let Some(wait) = rt.wal_wait.as_mut() {
+                wait.advance_to(self.now_ns);
+            }
+        }
+        let status = self.request_status(request_id, now_ns)?;
+        Ok(PublishOutcome::Published(RequestSubmission {
+            request_id: request_id.to_owned(),
+            lease,
+            progress: status.progress,
+        }))
+    }
+
+    fn publish_transaction(
+        &mut self,
+        request_id: &str,
+        gap_closed: bool,
+        policy: Policy,
+        owner: &IndexOwner,
+        now_ns: i64,
+        lease_duration_ns: i64,
+    ) -> Result<Option<(LeaseResult, bool)>, StorageError> {
+        let conn = self.env.conn;
+        let transaction =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let gap = matches!(policy, Policy::Gap(_));
+        if gap && !gap_closed {
+            return Ok(None);
+        }
+        requests::publish_registration(&transaction, request_id, now_ns)?;
+        let lease = lease::acquire_in(&transaction, owner, now_ns, lease_duration_ns)?;
+        if gap_closed {
+            // A parked owner does not run another step for each request: what the gap
+            // batches closed finishes at acceptance instead of waiting forever.
+            requests::complete_closed_registration(&transaction, request_id, now_ns)?;
+        }
+        transaction.commit()?;
+        Ok(Some((lease, policy == Policy::WalWait)))
+    }
+
+    /// An unfinished registration ends `cancelled`; best effort, the start-up sweep of a
+    /// later process closes what this cannot.
+    pub(crate) fn abort_registration(&mut self, registration: &Registration) {
+        registration::unmark_live(self.env.db_path, &registration.request_id);
+        if let Err(error) =
+            requests::abort_registering(self.env.conn, &registration.request_id, self.now_ns)
+        {
+            tracing::warn!(error = %error, "thread index registration abort failed");
         }
     }
 }
@@ -255,13 +449,15 @@ pub(super) enum IndexCommand {
     StartOwner(IndexOwner, SyncSender<super::Command>, Reply<LeaseResult>),
     ObserveRetention(std::sync::Weak<dyn Fn() + Send + Sync>),
     StopOwner(Reply<()>),
-    Submit(
-        Box<ReindexRequest>,
+    BeginRegistration(Box<ReindexRequest>, i64, ControlReply<Registration>),
+    AdvanceRegistration(
+        Box<Registration>,
         IndexOwner,
         i64,
         i64,
-        ControlReply<RequestSubmission>,
+        ControlReply<(Registration, RegistrationProgress)>,
     ),
+    AbortRegistration(Box<Registration>, ControlReply<()>),
     Status(String, i64, ControlReply<RequestStatus>),
     Cancel(String, i64, ControlReply<RequestStatus>),
     Acquire(IndexOwner, i64, i64, ControlReply<LeaseResult>),
@@ -351,6 +547,26 @@ impl IndexJob {
             work::apply_settings(env, &mut rt, config.thread_index, now_ns()).map(drop)
         }) {
             tracing::warn!(error = %error, "thread index settings could not be applied");
+        }
+        // A registration left behind by an interrupted process can never finish: its
+        // submitter is gone. It ends `cancelled` (the index itself was never touched).
+        // One writer process per database (ADR 0045): the registrations of this process
+        // that are still running are the only ones kept.
+        // The sweep and the creation of a registration exclude each other, so a registration
+        // that is committed but not yet marked live is never taken for a dead one.
+        match registration::sweep_dead(&config.db_path, |live| {
+            requests::cancel_stale_registering(conn, live, now_ns())
+        }) {
+            Ok(closed) if closed > 0 => {
+                tracing::info!(
+                    closed,
+                    "cancelled reindex registrations left by a dead process"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "stale reindex registrations could not be swept");
+            }
         }
         Self {
             rt,
@@ -784,10 +1000,25 @@ pub(super) fn handle(
         IndexCommand::StopOwner(reply) => {
             let _ = reply.send(stop_owner(job, conn));
         }
-        IndexCommand::Submit(request, owner, now_ns, duration, reply) => {
-            let _ = reply.send(control.submit_request(&request, &owner, now_ns, duration));
-            job.maybe_work = true;
-            job.wake_due_wait(now);
+        IndexCommand::BeginRegistration(request, now_ns, reply) => {
+            let _ = reply.send(control.begin_registration(&request, now_ns));
+        }
+        IndexCommand::AdvanceRegistration(registration, owner, now_ns, duration, reply) => {
+            let mut registration = *registration;
+            let result = control
+                .advance_registration(&mut registration, &owner, now_ns, duration)
+                .map(|progress| (registration, progress));
+            let published = matches!(result, Ok((_, RegistrationProgress::Published(_))));
+            let _ = reply.send(result);
+            if published {
+                job.maybe_work = true;
+                job.wake_due_wait(now);
+            }
+        }
+        IndexCommand::AbortRegistration(registration, reply) => {
+            control.now_ns = now;
+            control.abort_registration(&registration);
+            let _ = reply.send(Ok(()));
         }
         IndexCommand::Status(request_id, now_ns, reply) => {
             let _ = reply.send(control.request_status(&request_id, now_ns));

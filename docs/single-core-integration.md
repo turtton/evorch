@@ -401,11 +401,32 @@ code), and `evaluation.rs` uses it.
   its shape.
 - The integration PR (#674) added the evorch dev-dependency of
   `core-client-e2e`, the `online_maintenance` export and the scope.
-- **`reindex-threads` is not part of 17d-2.** It stays an offline command with
-  `--db`, as in 17c. It becomes a core task in **17d-3**, which first bounds its
-  registration transaction in storage and then adds a `MaintenanceTask` and a
-  function like `backfill` over `online_maintenance::run_task`. **17d-3 must be
-  finished before 19a.**
+- **`reindex-threads` is not part of 17d-2.** It became a core task in 17d-3
+  (below).
+
+## Stage 17d-3: `reindex-threads` in the core
+
+`evorch reindex-threads` is a task of the same `maintenance` area, started and
+followed like `backfill-events` (`crates/evorch/src/reindex_threads.rs` parses
+the command line and builds the `MaintenanceTask::ReindexThreads`;
+`online_maintenance::reindex` and `execute_reindex` run it;
+`cli/reindex.rs` prints the end). The CLI never opens the database. `--db` is
+refused with a message naming `--user-config`, which names the configuration
+whose core runs the reindex.
+
+| Contract | Where it is held | Where it is tested |
+|---|---|---|
+| Registering a request is bounded, and the writer is free between its steps. The request row is created as `registering`; its targets are frozen in batches by a window of 256 runs in primary-key order (resumed by the last run id, so a batch reads one window whatever the table size), each batch a short transaction; the policy gaps of a disabled or paused index are closed for the registration's own targets only, in windows of 256 targets examined (a keyset by run id over its own targets; the budget counts the rows examined, pending or not, so a window costs the same wherever it is and whatever else is pending); a last short transaction makes it `pending`, and it does constant work: it reads no target (the capacity policy is read before it, and what the gap batches closed ends `completed_with_gaps` by a primary-key update). Terminalizing a published request belongs to its owner alone (the index owner's step, or the transaction that stops it): a registration never terminalizes, or closes the targets of, another request, so a request left behind by an interrupted registration is reclaimed by the owner, never by the next registration (a limit until 19a: an old GUI sweep may cancel a registration driven by the core). Each step is its own writer command (`StorageHandle::{begin,advance,abort}_thread_index_registration`), so other writes, a stop and a cancel are served between two steps. A `registering` request is not observable (status, settling, gap closing and work selection look only at `pending`), an unfinished one is made `cancelled` (`abort`, or the sweep when the index job starts for a database, which spares the registrations this process still drives; creating a registration and marking it live exclude the sweep, so a registration committed a moment ago is never taken for a dead one), and the targets it froze follow a generation bump made by another registration, so they do not turn into gaps | `crates/storage/src/writer/index/requests.rs`, `registration.rs`, `work.rs` | `crates/storage/src/writer/index/tests.rs` (window cost counted by targets examined, policy-gap batches and replan, own-request-only gap closing, publish cost independent of the target count beside a pending request, sweep exclusion, stop between steps, start-up sweep) |
+| The core's area registers the request stepwise and drives it as the foreground owner of the index, one pass per step, looking at a stop or a cancel before each registration step and each pass. An operation that ends early aborts an unfinished registration, or leaves a published request `pending` and gives the lease back, so the next reindex (or the index's own worker) takes the rest. Reindexes do not exclude one another (only a backfill answers `busy`): a second one is `accepted` (`Delegated`) while another owner holds the lease, and with `--wait` it waits for the index to wake | `MaintenanceArea` (`areas/maintenance.rs`, `areas/maintenance/reindex.rs`) | `crates/workbench-host/tests/maintenance_online.rs` (including a reindex beside another one), `maintenance_cli` (two CLI processes) |
+| An operation remembers the client that started it and is cancelled, at its next step, when that client's last connection ends (ADR 0045 §10). Another client's operation, and a client that started nothing, are not touched | `MaintenanceArea::stop_on_disconnect` (as for a backfill) | `crates/core-client-e2e/tests/maintenance_cli.rs`: CLI processes killed by SIGKILL and SIGINT while the area is held by a seam; the client that stays then reindexes the threads the stopped one left |
+| stdout is the JSON result the offline command printed (`accepted`, `completed`, `completed_with_gaps`, `failed`); `failed` ends with exit code 1 after the print. A reindex that could not run at all (no core, a lost connection, a refusal) also prints a `failed` result, so a script reading stdout sees one shape. A reindex that was stopped, or cancelled by another owner, leaves no result: it is said on stderr with exit code 1. stderr gets throttled progress lines (the `ProgressLines` of 17d-2), each with the request id and its totals | `cli/reindex.rs`, `online_maintenance::reindex` | `maintenance_cli` (a held core and the production composition `BootstrappedHost::open` builds), `crates/evorch/src/reindex_threads/tests.rs` |
+
+- The protocol gains `MaintenanceTask::ReindexThreads`, `MaintenanceProgress::ReindexThreads`
+  and the result types (`ReindexResult`, `ReindexSummary`, `ReindexFailure`,
+  `ReindexGap`), which serialize as the storage's own result does; the golden file
+  of the area holds them.
+- The `--db` of `inspect` and of the offline maintenance commands stays (17e).
+- **17d-3 must be finished before 19a.**
 
 ## Before 17d-3: resident thread-index owner in the core
 

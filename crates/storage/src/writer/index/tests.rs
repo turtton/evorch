@@ -13,7 +13,7 @@ use tempfile::TempDir;
 
 use super::capacity::{self, MEASURED_POLICY, Measurement};
 use super::work::{self, Env, IndexRuntime};
-use super::{Control, ThreadIndexCounters, should_step};
+use super::{Control, Registration, RegistrationProgress, ThreadIndexCounters, should_step};
 use crate::db::{FileSizes, file_sizes};
 use crate::repo::thread_index::{SqliteSnapshotStore, SqliteThreadIndex};
 use crate::thread_index::*;
@@ -1940,8 +1940,8 @@ fn public_cli_steps_use_one_extractor_without_starting_a_gui_owner() {
     handle
         .append_indexed_note("other", "canonical writer remains available")
         .unwrap();
-    for _ in 0..100 {
-        handle.step_thread_index(&lease, S).unwrap();
+    for _ in 0..1_000 {
+        let step = handle.step_thread_index(&lease, S).unwrap();
         if matches!(
             handle
                 .thread_index_request_status(&submitted.request_id, S)
@@ -1950,6 +1950,11 @@ fn public_cli_steps_use_one_extractor_without_starting_a_gui_owner() {
             RequestProgress::Terminal(ReindexResult::Completed { .. })
         ) {
             return;
+        }
+        if matches!(step, IndexStepResult::Idle { .. }) {
+            // The extraction is on its worker: wait for its step to be reported
+            // instead of spinning against it.
+            receiver.recv_timeout(Duration::from_secs(30)).unwrap();
         }
     }
     panic!("request did not finish");
@@ -2460,12 +2465,7 @@ fn wal_wait_expires_requests_individually_and_the_job_waits_for_the_last_deadlin
     waiting(fx.drive(&lease, 2 * S));
     // Exercise the state machine with an already-accepted request. Admission
     // of new requests during a wait is wired separately in U3.
-    let late_id = {
-        let transaction = fx.conn().unchecked_transaction().unwrap();
-        let (id, _) = super::requests::submit_in(&transaction, &all(), 10 * S).unwrap();
-        transaction.commit().unwrap();
-        id
-    };
+    let (late_id, _) = super::requests::submit_for_test(fx.conn(), &all(), 10 * S).unwrap();
     let early_deadline = 2 * S + WAL_WAIT_LIMIT_NS;
     let late_deadline = 10 * S + WAL_WAIT_LIMIT_NS;
     let next = waiting(fx.drive(&lease, early_deadline));
@@ -3187,14 +3187,10 @@ fn wal_job_expiry_rechecks_a_concurrent_submission_inside_immediate() {
     let submit_entering = entering.clone();
     let submit_done = submitted.clone();
     let peer = std::thread::spawn(move || {
-        let mut conn = Connection::open(path).unwrap();
+        let conn = Connection::open(path).unwrap();
         submit_entering.wait();
-        let transaction = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .unwrap();
-        let (request_id, targets) = super::requests::submit_in(&transaction, &all(), at).unwrap();
+        let (request_id, targets) = super::requests::submit_for_test(&conn, &all(), at).unwrap();
         assert_eq!(targets, 1);
-        transaction.commit().unwrap();
         submit_done.wait();
         request_id
     });
@@ -3744,4 +3740,1018 @@ fn explicit_reindex_never_revives_an_archived_thread_whatever_the_evict_reason()
         "left as it was, not made pending"
     );
     assert_eq!(fx.row("run-root").state, "indexed");
+}
+
+fn request_state(fx: &Fixture, request_id: &str) -> String {
+    fx.conn()
+        .query_row(
+            "SELECT state FROM thread_index_requests WHERE request_id = ?1",
+            [request_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn target_count(fx: &Fixture, request_id: &str) -> u64 {
+    fx.conn()
+        .query_row(
+            "SELECT COUNT(*) FROM thread_index_request_targets WHERE request_id = ?1",
+            [request_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// Saves `count` runs, indexes them and returns their ids.
+fn indexed_runs(fx: &mut Fixture, count: usize) -> Vec<String> {
+    let lease = fx.lease(&cli(), S);
+    let ids: Vec<String> = (0..count).map(|index| format!("run-{index:03}")).collect();
+    for (index, run_id) in ids.iter().enumerate() {
+        fx.save(&verified(run_id, "alpha", (10 + index as i64) * S));
+    }
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    fx.control(3 * S).release_lease(&lease).unwrap();
+    assert_eq!(searchable_runs(fx, &ids).len(), count);
+    ids
+}
+
+/// Opens a registration, discovers every run and freezes `batches` batches of two runs.
+fn partial_registration(
+    fx: &mut Fixture,
+    batches: usize,
+    now: i64,
+) -> (String, Option<FreezeCursor>) {
+    let request_id = fx
+        .control(now)
+        .begin_registration(&all(), now)
+        .unwrap()
+        .request_id;
+    while !fx.control(now).discover_batch(now).unwrap() {}
+    let mut cursor = None;
+    for _ in 0..batches {
+        cursor = super::requests::freeze_batch(fx.conn(), &request_id, cursor.as_ref(), 2)
+            .unwrap()
+            .next;
+    }
+    (request_id, cursor)
+}
+
+use super::requests::FreezeCursor;
+
+#[test]
+fn a_registering_request_is_invisible_to_status_and_to_the_scheduler() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    let (request_id, cursor) = partial_registration(&mut fx, 1, 4 * S);
+    assert!(cursor.is_some(), "two of five runs frozen");
+    assert_eq!(request_state(&fx, &request_id), "registering");
+    assert_eq!(target_count(&fx, &request_id), 2);
+    // Unknown, never `cancelled` or `pending`.
+    assert_eq!(
+        fx.control(5 * S).request_status(&request_id, 5 * S),
+        Err(RequestFailure::InvalidArguments)
+    );
+    // Cancelling it from outside cannot touch a registration that is still being frozen.
+    assert_eq!(
+        fx.control(5 * S).cancel_request(&request_id),
+        Err(RequestFailure::InvalidArguments)
+    );
+    assert_eq!(request_state(&fx, &request_id), "registering");
+    // The scheduler sees no pending target: nothing leases or steps for it.
+    let has_pending: bool = fx
+        .conn()
+        .query_row(super::requests::HAS_PENDING_TARGETS_SQL, [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(!has_pending);
+}
+
+#[test]
+fn registration_resumes_at_each_batch_boundary_and_publishes_once() {
+    let mut fx = Fixture::new(512 * MIB);
+    let ids = indexed_runs(&mut fx, 5);
+    let (request_id, mut cursor) = partial_registration(&mut fx, 1, 4 * S);
+    // Each batch is its own committed transaction; the cursor alone resumes the scan.
+    let mut frozen = 2;
+    while cursor.is_some() {
+        let batch =
+            super::requests::freeze_batch(fx.conn(), &request_id, cursor.as_ref(), 2).unwrap();
+        frozen += batch.targets;
+        cursor = batch.next;
+    }
+    assert_eq!(frozen, 5);
+    assert_eq!(target_count(&fx, &request_id), 5);
+    // No run is frozen twice and none is skipped across the batch boundaries.
+    let order: Vec<String> = fx
+        .conn()
+        .prepare(
+            "SELECT run_id FROM thread_index_request_targets WHERE request_id = ?1 \
+             ORDER BY run_id DESC",
+        )
+        .unwrap()
+        .query_map([&request_id], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let mut expected = ids;
+    expected.reverse();
+    assert_eq!(order, expected);
+    let submitted = fx
+        .control(6 * S)
+        .publish_registration(&request_id, false, &cli(), 6 * S, HOUR)
+        .unwrap()
+        .published();
+    assert!(
+        matches!(submitted.progress, RequestProgress::Pending(ref summary) if summary.target_count == 5)
+    );
+    assert_eq!(request_state(&fx, &request_id), "pending");
+    // A second publish of the same registration is refused, not applied twice.
+    assert!(
+        fx.control(6 * S)
+            .publish_registration(&request_id, false, &cli(), 6 * S, HOUR)
+            .is_err()
+    );
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("lease");
+    };
+    assert_eq!(fx.drive(&lease, 7 * S), idle());
+    let ReindexResult::Completed { summary, .. } = terminal(&mut fx, &request_id, 8 * S) else {
+        panic!("completed");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (5, 5));
+}
+
+#[test]
+fn the_start_up_sweep_cancels_a_dead_registration_only_and_keeps_the_index() {
+    let mut fx = Fixture::new(512 * MIB);
+    let ids = indexed_runs(&mut fx, 5);
+    let blocks_before: u64 = fx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM conversation_blocks", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let (request_id, _) = partial_registration(&mut fx, 1, 4 * S);
+    // A registration this process still runs survives the start-up of another storage
+    // of the same file.
+    let peer = fx.peer();
+    drop(super::IndexJob::new(peer.conn(), &peer.config, false));
+    assert_eq!(request_state(&fx, &request_id), "registering");
+    // The registering process dies here: nothing marks it live any more, and the next
+    // start-up closes it.
+    super::registration::unmark_live(&fx.config.db_path, &request_id);
+    drop(super::IndexJob::new(peer.conn(), &peer.config, false));
+    assert_eq!(request_state(&fx, &request_id), "cancelled");
+    assert_eq!(
+        fx.control(5 * S)
+            .request_status(&request_id, 5 * S)
+            .unwrap()
+            .progress,
+        RequestProgress::Cancelled
+    );
+    // The registration only marked two runs for re-index: every block is still stored,
+    // and the ordinary background indexing makes them searchable again.
+    let blocks: u64 = fx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM conversation_blocks", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(blocks, blocks_before);
+    let lease = fx.lease(&cli(), 6 * S);
+    assert_eq!(fx.drive(&lease, 6 * S), idle());
+    assert_eq!(searchable_runs(&fx, &ids).len(), 5);
+    // A new request then settles cleanly.
+    let (new_id, targets) = super::requests::submit_for_test(fx.conn(), &all(), 6 * S).unwrap();
+    assert_eq!(targets, 5);
+    assert_eq!(fx.drive(&lease, 7 * S), idle());
+    assert!(matches!(
+        terminal(&mut fx, &new_id, 8 * S),
+        ReindexResult::Completed { .. }
+    ));
+    assert_eq!(searchable_runs(&fx, &ids).len(), 5);
+}
+
+#[test]
+fn an_aborted_registration_is_cancelled_and_never_pending() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 3);
+    let (request_id, _) = partial_registration(&mut fx, 1, 4 * S);
+    fx.control(5 * S)
+        .abort_registration(&Registration::new(request_id.clone()));
+    assert_eq!(request_state(&fx, &request_id), "cancelled");
+    // Publishing an aborted registration is refused.
+    assert!(
+        fx.control(5 * S)
+            .publish_registration(&request_id, false, &cli(), 5 * S, HOUR)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_target_frozen_before_a_later_registration_follows_the_new_generation() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 4);
+    // `slow` froze two runs and waits; `fast` registers and publishes in between,
+    // which bumps the generation of every run.
+    let (slow, mut cursor) = partial_registration(&mut fx, 1, 4 * S);
+    let (fast, fast_targets) = super::requests::submit_for_test(fx.conn(), &all(), 5 * S).unwrap();
+    assert_eq!(fast_targets, 4);
+    while cursor.is_some() {
+        cursor = super::requests::freeze_batch(fx.conn(), &slow, cursor.as_ref(), 2)
+            .unwrap()
+            .next;
+    }
+    let submitted = fx
+        .control(6 * S)
+        .publish_registration(&slow, false, &cli(), 6 * S, HOUR)
+        .unwrap()
+        .published();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("lease");
+    };
+    assert_eq!(fx.drive(&lease, 7 * S), idle());
+    for request_id in [&slow, &fast] {
+        let ReindexResult::Completed { summary, .. } = terminal(&mut fx, request_id, 8 * S) else {
+            panic!("{request_id} must complete without stale-generation gaps");
+        };
+        assert_eq!(summary.succeeded, summary.target_count);
+    }
+}
+
+/// VM steps one freeze batch of `request` costs on `fx`.
+fn freeze_batch_cost(fx: &Fixture, request_id: &str, cursor: Option<&FreezeCursor>) -> u64 {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let steps = Arc::new(AtomicU64::new(0));
+    let count = steps.clone();
+    fx.conn()
+        .progress_handler(
+            1,
+            Some(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        )
+        .unwrap();
+    super::requests::freeze_batch(fx.conn(), request_id, cursor, 2).unwrap();
+    fx.conn().progress_handler(0, None::<fn() -> bool>).unwrap();
+    steps.load(Ordering::Relaxed)
+}
+
+fn nowhere() -> ReindexRequest {
+    ReindexRequest {
+        canonical_project: Some("/no/such/project".to_owned()),
+        ..all()
+    }
+}
+
+#[test]
+fn a_freeze_batch_reads_one_window_whatever_the_table_size_and_the_filter() {
+    let mut fx = Fixture::new(512 * MIB);
+    for index in 0..8 {
+        fx.save(&verified(
+            &format!("run-{index:04}"),
+            "small",
+            (10 + index) * S,
+        ));
+    }
+    let request_id = fx
+        .control(4 * S)
+        .begin_registration(&nowhere(), 4 * S)
+        .unwrap()
+        .request_id;
+    while !fx.control(4 * S).discover_batch(4 * S).unwrap() {}
+    let middle = FreezeCursor {
+        run_id: "run-0004".to_owned(),
+    };
+    let small = [
+        freeze_batch_cost(&fx, &request_id, None),
+        freeze_batch_cost(&fx, &request_id, Some(&middle)),
+    ];
+    for index in 8..600 {
+        fx.save(&verified(
+            &format!("run-{index:04}"),
+            "large",
+            (10 + index) * S,
+        ));
+    }
+    while !fx.control(5 * S).discover_batch(5 * S).unwrap() {}
+    let middle = FreezeCursor {
+        run_id: "run-0300".to_owned(),
+    };
+    let large = [
+        freeze_batch_cost(&fx, &request_id, None),
+        freeze_batch_cost(&fx, &request_id, Some(&middle)),
+    ];
+    assert!(small.into_iter().all(|steps| steps > 0));
+    assert_eq!(
+        large, small,
+        "a batch examines `limit` runs after the cursor, never the filtered table"
+    );
+    assert_eq!(
+        target_count(&fx, &request_id),
+        0,
+        "no run is in the project"
+    );
+}
+
+#[test]
+fn policy_gap_batches_close_only_the_registration_within_their_limit() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    let published = fx
+        .control(4 * S)
+        .submit_request(&all(), &cli(), 4 * S, HOUR)
+        .unwrap();
+    let (request_id, cursor) = partial_registration(&mut fx, 3, 5 * S);
+    assert_eq!(cursor, None);
+    assert_eq!(target_count(&fx, &request_id), 5);
+    let before = request_rows(&fx, &published.request_id);
+    let mut windows = 0;
+    let mut cursor = None;
+    loop {
+        let batch = super::requests::gap_batch(
+            fx.conn(),
+            &request_id,
+            RequestGapReason::IndexDisabled,
+            cursor.as_ref(),
+            4,
+        )
+        .unwrap();
+        windows += 1;
+        cursor = batch.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(windows, 2, "five targets in windows of four");
+    let pending: u64 = fx
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM thread_index_request_targets \
+             WHERE request_id = ?1 AND state = 'pending'",
+            [&request_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+    assert_eq!(
+        request_rows(&fx, &published.request_id),
+        before,
+        "the gap batches touch the registration's own targets only"
+    );
+}
+
+/// Every row of one request (its state and its targets), as text.
+fn request_rows(fx: &Fixture, request_id: &str) -> Vec<String> {
+    let mut statement = fx
+        .conn()
+        .prepare(
+            "SELECT 'request|' || state || '|' || COALESCE(finished_at_ns, '') \
+             FROM thread_index_requests WHERE request_id = ?1 \
+             UNION ALL \
+             SELECT 'target|' || run_id || '|' || state || '|' || COALESCE(gap_reason, '') \
+             FROM thread_index_request_targets WHERE request_id = ?1 ORDER BY 1",
+        )
+        .unwrap();
+    statement
+        .query_map([request_id], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn a_policy_that_turns_into_a_gap_before_the_publish_is_replanned_in_batches() {
+    use super::registration::Phase;
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 3);
+    let mut registration = fx.control(4 * S).begin_registration(&all(), 4 * S).unwrap();
+    while registration.phase != Phase::Publish {
+        let progress = fx
+            .control(4 * S)
+            .advance_registration(&mut registration, &cli(), 4 * S, HOUR)
+            .unwrap();
+        assert_eq!(progress, RegistrationProgress::InProgress);
+    }
+    // The index is disabled while the last transaction has not run yet.
+    fx.control(5 * S)
+        .apply_index_settings(ThreadIndexSettings {
+            enabled: false,
+            max_bytes: 512 * MIB,
+        })
+        .unwrap();
+    // The publish commits nothing: it asks for the gap batches first.
+    let progress = fx
+        .control(5 * S)
+        .advance_registration(&mut registration, &cli(), 5 * S, HOUR)
+        .unwrap();
+    assert_eq!(progress, RegistrationProgress::InProgress);
+    assert_eq!(registration.phase, Phase::Gap(None));
+    assert_eq!(request_state(&fx, registration.request_id()), "registering");
+    let submission = loop {
+        match fx
+            .control(5 * S)
+            .advance_registration(&mut registration, &cli(), 5 * S, HOUR)
+            .unwrap()
+        {
+            RegistrationProgress::InProgress => {}
+            RegistrationProgress::Published(submission) => break submission,
+        }
+    };
+    assert!(matches!(
+        submission.progress,
+        RequestProgress::Terminal(ReindexResult::CompletedWithGaps { summary, .. })
+            if summary.gaps == vec![RequestGapCount { reason: RequestGapReason::IndexDisabled, count: 3 }]
+    ));
+}
+
+#[test]
+fn a_registration_driven_through_the_handle_can_stop_between_steps() {
+    let dir = TempDir::new().unwrap();
+    let storage = storage(&dir, HardLimits::default());
+    let handle = storage.handle();
+    for index in 0..3 {
+        handle
+            .save_snapshot_bundle(&verified(
+                &format!("run-{index}"),
+                "stepwise",
+                (10 + index) * S,
+            ))
+            .unwrap();
+    }
+    let mut registration = handle.begin_thread_index_registration(&all(), S).unwrap();
+    let progress = handle
+        .advance_thread_index_registration(&mut registration, &cli(), S, HOUR)
+        .unwrap();
+    assert_eq!(progress, RegistrationProgress::InProgress);
+    // The writer serves other commands between two steps, and the request stays hidden.
+    assert_eq!(
+        handle.thread_index_request_status(registration.request_id(), S),
+        Err(RequestFailure::InvalidArguments)
+    );
+    // The caller stops here: the request ends cancelled and the index is untouched.
+    handle
+        .abort_thread_index_registration(&registration)
+        .unwrap();
+    assert_eq!(
+        handle
+            .thread_index_request_status(registration.request_id(), S)
+            .unwrap()
+            .progress,
+        RequestProgress::Cancelled
+    );
+    // The one-shot submit is the same steps driven to the end.
+    let submitted = handle
+        .submit_thread_index_request(&all(), &cli(), 2 * S, HOUR)
+        .unwrap();
+    assert!(matches!(submitted.lease, LeaseResult::Acquired(_)));
+    assert!(matches!(
+        submitted.progress,
+        RequestProgress::Pending(ref summary) if summary.target_count == 3
+    ));
+}
+
+/// A published request with a target for every indexed run: all `succeeded` but the one
+/// with the greatest run id, which is still `pending`.
+fn seed_published_request(fx: &Fixture, request_id: &str) {
+    fx.conn()
+        .execute(
+            "INSERT INTO thread_index_requests(request_id, include_evicted, state, created_at_ns) \
+             VALUES (?1, 0, 'pending', 1)",
+            [request_id],
+        )
+        .unwrap();
+    fx.conn()
+        .execute(
+            "INSERT INTO thread_index_request_targets(request_id, run_id, source_revision, \
+             extractor_version, accounting_version, work_generation, state) \
+             SELECT ?1, run_id, source_revision, extractor_version, accounting_version, \
+             work_generation, CASE WHEN run_id = (SELECT MAX(run_id) FROM thread_index_runs) \
+             THEN 'pending' ELSE 'succeeded' END FROM thread_index_runs",
+            [request_id],
+        )
+        .unwrap();
+}
+
+fn drive_to_publish(fx: &mut Fixture, registration: &mut Registration, now: i64) {
+    use super::registration::Phase;
+    while registration.phase != Phase::Publish {
+        let progress = fx
+            .control(now)
+            .advance_registration(registration, &cli(), now, HOUR)
+            .unwrap();
+        assert_eq!(progress, RegistrationProgress::InProgress);
+    }
+}
+
+/// The VM steps and the rows changed by the publish step of a registration that
+/// closes `runs` targets under a capacity gap while a published request with as many
+/// succeeded targets (and one pending) exists.
+fn gap_publish_cost(runs: usize) -> (u64, i64) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let mut fx = Fixture::new(512 * MIB);
+    let lease = fx.lease(&cli(), S);
+    for index in 0..runs {
+        fx.save(&verified(
+            &format!("run-{index:05}"),
+            "alpha",
+            (10 + index as i64) * S,
+        ));
+    }
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    fx.control(3 * S).release_lease(&lease).unwrap();
+    seed_published_request(&fx, "old");
+    fx.config.hard_limits.max_db_bytes = 1;
+    let mut registration = fx.control(4 * S).begin_registration(&all(), 4 * S).unwrap();
+    drive_to_publish(&mut fx, &mut registration, 4 * S);
+    assert!(registration.gap_closed);
+    // A registration does not terminalize a published request: its owner does.
+    assert_eq!(request_state(&fx, "old"), "pending");
+    // The transaction alone: the policy is read before it and the status after it.
+    let policy = fx.control(5 * S).policy().unwrap();
+    let steps = Arc::new(AtomicU64::new(0));
+    let count = steps.clone();
+    fx.conn()
+        .progress_handler(
+            1,
+            Some(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        )
+        .unwrap();
+    let changes = fx.conn().total_changes();
+    let published = fx
+        .control(5 * S)
+        .publish_transaction(registration.request_id(), true, policy, &cli(), 5 * S, HOUR)
+        .unwrap();
+    let changed = i64::try_from(fx.conn().total_changes() - changes).unwrap();
+    fx.conn().progress_handler(0, None::<fn() -> bool>).unwrap();
+    assert!(published.is_some());
+    let status = fx
+        .control(5 * S)
+        .request_status(registration.request_id(), 5 * S)
+        .unwrap();
+    assert!(matches!(
+        status.progress,
+        RequestProgress::Terminal(ReindexResult::CompletedWithGaps { ref summary, .. })
+            if summary.gaps == vec![RequestGapCount {
+                reason: RequestGapReason::CapacityPaused,
+                count: runs as u64,
+            }]
+    ));
+    // The succeeded targets of the earlier request were re-checked, not rewritten.
+    let held: u64 = fx
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM thread_index_request_targets \
+             WHERE request_id = 'old' AND state = 'succeeded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, runs as u64 - 1);
+    (steps.load(Ordering::Relaxed), changed)
+}
+
+#[test]
+fn the_publish_transaction_of_a_gap_registration_does_not_scale_with_the_targets() {
+    // More than one freeze window apart, so a per-target cost shows.
+    let (small_steps, small_changes) = gap_publish_cost(300);
+    let (large_steps, large_changes) = gap_publish_cost(1200);
+    assert!(
+        small_changes <= 12 && large_changes <= 12,
+        "rows changed by the publish: {small_changes} / {large_changes}"
+    );
+    assert!(
+        large_steps <= small_steps + small_steps / 4,
+        "VM steps of the publish grew with the targets: {small_steps} -> {large_steps}"
+    );
+}
+
+#[test]
+fn a_gap_registration_changes_no_row_of_another_request_at_any_phase() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    fx.control(4 * S)
+        .apply_index_settings(ThreadIndexSettings {
+            enabled: false,
+            max_bytes: 512 * MIB,
+        })
+        .unwrap();
+    // A request published at an earlier moment, still pending, with one pending target.
+    seed_published_request(&fx, "old");
+    let before = request_rows(&fx, "old");
+    let mut registration = fx.control(5 * S).begin_registration(&all(), 5 * S).unwrap();
+    // Every command of the registration, including the one that publishes it, and an
+    // abort at each boundary, leave the other request as it was.
+    let mut commands = 0;
+    loop {
+        assert_eq!(
+            request_rows(&fx, "old"),
+            before,
+            "after {commands} commands"
+        );
+        match fx
+            .control(5 * S)
+            .advance_registration(&mut registration, &cli(), 5 * S, HOUR)
+            .unwrap()
+        {
+            RegistrationProgress::InProgress => commands += 1,
+            RegistrationProgress::Published(submission) => {
+                assert!(matches!(
+                    submission.progress,
+                    RequestProgress::Terminal(ReindexResult::CompletedWithGaps { .. })
+                ));
+                break;
+            }
+        }
+    }
+    assert_eq!(request_rows(&fx, "old"), before);
+    assert_eq!(request_state(&fx, "old"), "pending");
+    let mut aborted = fx.control(6 * S).begin_registration(&all(), 6 * S).unwrap();
+    fx.control(6 * S)
+        .advance_registration(&mut aborted, &cli(), 6 * S, HOUR)
+        .unwrap();
+    fx.control(6 * S).abort_registration(&aborted);
+    assert_eq!(request_rows(&fx, "old"), before);
+}
+
+/// VM steps of one gap window of `request_id` after `cursor`.
+fn gap_window_cost(
+    fx: &Fixture,
+    request_id: &str,
+    cursor: Option<&super::requests::GapCursor>,
+) -> (u64, Option<super::requests::GapCursor>) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let steps = Arc::new(AtomicU64::new(0));
+    let count = steps.clone();
+    fx.conn()
+        .progress_handler(
+            1,
+            Some(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        )
+        .unwrap();
+    let batch = super::requests::gap_batch(
+        fx.conn(),
+        request_id,
+        RequestGapReason::CapacityPaused,
+        cursor,
+        256,
+    )
+    .unwrap();
+    fx.conn().progress_handler(0, None::<fn() -> bool>).unwrap();
+    (steps.load(Ordering::Relaxed), batch.next)
+}
+
+/// A request in `request_state` with `targets` targets in `target_state`.
+fn seed_targets(
+    fx: &Fixture,
+    request_id: &str,
+    request_state: &str,
+    targets: usize,
+    target_state: &str,
+) {
+    fx.conn()
+        .execute(
+            "INSERT INTO thread_index_requests(request_id, include_evicted, state, created_at_ns) \
+             VALUES (?1, 0, ?2, 1)",
+            rusqlite::params![request_id, request_state],
+        )
+        .unwrap();
+    fx.conn()
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?2) \
+             INSERT INTO thread_index_request_targets(request_id, run_id, source_revision, \
+             extractor_version, accounting_version, work_generation, state, gap_reason) \
+             SELECT ?1, printf('run-%06d', i), 1, 1, 1, 0, ?3, \
+             CASE WHEN ?3 = 'gap' THEN 'index_disabled' END FROM n",
+            rusqlite::params![request_id, i64::try_from(targets).unwrap(), target_state],
+        )
+        .unwrap();
+}
+
+/// Costs (VM steps) of the first, a middle and the last window of a registration of
+/// `total` targets, with `others` other pending requests alongside.
+fn gap_window_costs(total: usize, others: usize) -> (u64, u64, u64) {
+    let fx = Fixture::new(512 * MIB);
+    seed_targets(&fx, "registering-one", "registering", total, "pending");
+    for index in 0..others {
+        seed_targets(&fx, &format!("other-{index:05}"), "pending", 1, "pending");
+    }
+    let (first, mut cursor) = gap_window_cost(&fx, "registering-one", None);
+    let windows_total = total.div_ceil(256);
+    let (mut middle, mut last, mut windows) = (0, 0, 1);
+    while cursor.is_some() {
+        let (steps, next) = gap_window_cost(&fx, "registering-one", cursor.as_ref());
+        windows += 1;
+        if windows == windows_total / 2 {
+            middle = steps;
+        }
+        last = steps;
+        cursor = next;
+    }
+    assert_eq!(windows, windows_total, "{total} targets in windows of 256");
+    let pending: u64 = fx
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending' \
+             AND request_id = 'registering-one'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+    (first, middle, last)
+}
+
+/// `a` and `b` are within a quarter of each other, in both directions.
+fn same_cost(what: &str, a: u64, b: u64) {
+    assert!(a > 0 && b > 0, "{what}: no cost measured ({a}, {b})");
+    assert!(
+        a <= b + b / 4 && b <= a + a / 4,
+        "{what}: the cost depends on where the window is or how many targets there are \
+         ({a} vs {b})"
+    );
+}
+
+#[test]
+fn a_gap_window_costs_the_same_wherever_it_is_and_however_many_targets_there_are() {
+    let (small_first, small_middle, _) = gap_window_costs(5_000, 0);
+    let (large_first, large_middle, large_last) = gap_window_costs(20_000, 0);
+    // A window anywhere in the registration costs what the first one does.
+    same_cost("5000: middle vs first", small_middle, small_first);
+    same_cost("20000: middle vs first", large_middle, large_first);
+    // A window of the same size costs the same whatever the total (the window that
+    // ends the scan reads fewer targets, so it is not held to the full-window cost).
+    same_cost("first, 5000 vs 20000", small_first, large_first);
+    same_cost("middle, 5000 vs 20000", small_middle, large_middle);
+    assert!(large_last <= large_first + large_first / 4);
+}
+
+#[test]
+fn a_gap_window_costs_the_same_whatever_else_is_pending() {
+    let (alone_first, alone_middle, _) = gap_window_costs(5_000, 0);
+    let (crowded_first, crowded_middle, _) = gap_window_costs(5_000, 3_000);
+    same_cost("first, alone vs crowded", alone_first, crowded_first);
+    same_cost("middle, alone vs crowded", alone_middle, crowded_middle);
+}
+
+#[test]
+fn a_gap_window_update_is_a_range_of_the_primary_key_closed_by_the_window() {
+    let fx = Fixture::new(512 * MIB);
+    seed_targets(&fx, "registering-one", "registering", 600, "pending");
+    let plan: String = fx
+        .conn()
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            super::requests::GAP_CLOSED_WINDOW_SQL
+        ))
+        .unwrap()
+        .query_map(
+            rusqlite::params!["registering-one", "gap", "", "run-000255"],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        plan.contains("run_id>?") && plan.contains("run_id<?"),
+        "the window is not bounded above in the index range: {plan}"
+    );
+}
+
+#[test]
+fn a_gap_window_counts_the_targets_it_examines_not_only_the_ones_it_changes() {
+    let fx = Fixture::new(512 * MIB);
+    // Every target is closed already: no window changes a row, yet each ends at its limit.
+    seed_targets(&fx, "closed", "registering", 600, "gap");
+    let mut cursor = None;
+    let mut windows = 0;
+    loop {
+        let batch = super::requests::gap_batch(
+            fx.conn(),
+            "closed",
+            RequestGapReason::CapacityPaused,
+            cursor.as_ref(),
+            256,
+        )
+        .unwrap();
+        windows += 1;
+        cursor = batch.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(windows, 3, "600 examined targets in windows of 256");
+}
+
+#[test]
+fn a_run_that_lost_its_index_is_a_gap_in_the_result_the_owner_terminalizes() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    // The same terminalization the owner's step does, after the last pending target
+    // succeeded: the held targets are re-checked in the transaction that ends the request.
+    let settle = |fx: &Fixture, lost: Option<&str>| {
+        fx.conn()
+            .execute("DELETE FROM thread_index_request_targets", [])
+            .unwrap();
+        fx.conn()
+            .execute("DELETE FROM thread_index_requests", [])
+            .unwrap();
+        seed_published_request(fx, "old");
+        fx.conn()
+            .execute(
+                "UPDATE thread_index_request_targets SET state = 'succeeded' \
+                 WHERE state = 'pending'",
+                [],
+            )
+            .unwrap();
+        if let Some(run_id) = lost {
+            fx.conn()
+                .execute(
+                    "UPDATE thread_index_runs SET state = 'deleted', source_present = 0 \
+                     WHERE run_id = ?1",
+                    [run_id],
+                )
+                .unwrap();
+        }
+        super::requests::finalize(fx.conn(), 9 * S).unwrap();
+    };
+    settle(&fx, None);
+    assert_eq!(request_state(&fx, "old"), "completed");
+    settle(&fx, Some("run-000"));
+    assert_eq!(request_state(&fx, "old"), "completed_with_gaps");
+    let gaps = request_rows(&fx, "old")
+        .into_iter()
+        .filter(|row| row.starts_with("target|run-000|gap|"))
+        .count();
+    assert_eq!(gaps, 1, "the lost run is a gap, not a success");
+}
+
+/// What the retention does to a deleted run: the tombstone, then the purge of its index rows
+/// until the row ends `deleted`.
+fn lose_index_by_retention(fx: &Fixture, run_id: &str) {
+    use crate::repo::thread_index::purge_index_rows;
+    fx.conn()
+        .execute(
+            "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES (?1, 't', 'f')",
+            [run_id],
+        )
+        .unwrap();
+    for _ in 0..1_000 {
+        let progress =
+            purge_index_rows(fx.conn(), run_id, PurgeTarget::Tombstoned, 64, 1 << 20).unwrap();
+        if !progress.remaining {
+            assert_eq!(fx.row(run_id).state, "deleted");
+            return;
+        }
+    }
+    panic!("the purge did not settle");
+}
+
+#[test]
+fn runs_that_lose_their_index_by_retention_or_another_connection_end_as_gaps() {
+    // Given: a published request whose targets were indexed when it froze them, with one
+    // run still to index so that the request stays pending.
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    fx.save(&verified("run-new", "fresh", 30 * S));
+    let submitted = fx
+        .control(4 * S)
+        .submit_request(&all(), &cli(), 4 * S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("the lease is the request's own");
+    };
+    assert!(matches!(
+        submitted.progress,
+        RequestProgress::Pending(ref summary) if summary.target_count == 6
+    ));
+    // When: one run loses its index through the retention's own purge, another one is
+    // removed by a different connection, and the owner finishes the request.
+    lose_index_by_retention(&fx, "run-000");
+    let other = Connection::open(&fx.config.db_path).unwrap();
+    other
+        .execute("DELETE FROM thread_index_runs WHERE run_id = 'run-001'", [])
+        .unwrap();
+    drop(other);
+    assert_eq!(fx.drive(&lease, 5 * S), idle());
+    // Then: neither is counted as a success, and no new registration was needed.
+    let ReindexResult::CompletedWithGaps { summary, .. } =
+        terminal(&mut fx, &submitted.request_id, 6 * S)
+    else {
+        panic!("completed_with_gaps");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (6, 4));
+    assert_eq!(
+        summary.gaps,
+        vec![RequestGapCount {
+            reason: RequestGapReason::Deleted,
+            count: 2
+        }]
+    );
+}
+
+/// Drives the owner step by step until a request that has `new_runs` runs to index is terminal,
+/// with one unrelated run losing its index by the retention between every two steps when
+/// `unrelated` is set. After every step a request without a pending target must already be
+/// terminal: the owner ends it in the step that finishes its last target, in one pass.
+fn drive_request_with_retention_changes(unrelated: bool, new_runs: usize) -> ReindexResult {
+    let mut fx = Fixture::new(512 * MIB);
+    let others = indexed_runs(&mut fx, 8);
+    for index in 0..new_runs {
+        fx.save(&verified(
+            &format!("run-new-{index}"),
+            "fresh",
+            (100 + index as i64) * S,
+        ));
+    }
+    let request = ReindexRequest {
+        since_ns: Some(100 * S),
+        ..all()
+    };
+    let submitted = fx
+        .control(4 * S)
+        .submit_request(&request, &cli(), 4 * S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("the lease is the request's own");
+    };
+    assert!(matches!(
+        submitted.progress,
+        RequestProgress::Pending(ref summary) if summary.target_count == new_runs as u64
+    ));
+    let pending_targets = |fx: &Fixture| -> u64 {
+        fx.conn()
+            .query_row(
+                "SELECT COUNT(*) FROM thread_index_request_targets \
+                 WHERE request_id = ?1 AND state = 'pending'",
+                [&submitted.request_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let mut unrelated_runs = others.iter();
+    for _ in 0..1_000 {
+        let result = fx.control(5 * S).step(&lease, 5 * S).unwrap();
+        if pending_targets(&fx) == 0 {
+            assert_ne!(
+                request_state(&fx, &submitted.request_id),
+                "pending",
+                "a request without a pending target is ended by the step that finished it"
+            );
+        }
+        if result != IndexStepResult::Progress {
+            assert_eq!(result, idle());
+            return terminal(&mut fx, &submitted.request_id, 6 * S);
+        }
+        if unrelated && let Some(run_id) = unrelated_runs.next() {
+            lose_index_by_retention(&fx, run_id);
+        }
+    }
+    panic!("the request did not settle");
+}
+
+#[test]
+fn unrelated_retention_changes_between_steps_do_not_delay_the_end_of_a_request() {
+    // Given/When: the same request driven with and without a retention change of a run
+    // that is not one of its targets between every two steps.
+    let quiet = drive_request_with_retention_changes(false, 4);
+    let busy = drive_request_with_retention_changes(true, 4);
+    // Then: it ends in one pass with the same result.
+    assert_eq!(busy, quiet);
+    let ReindexResult::Completed { summary, .. } = busy else {
+        panic!("completed");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (4, 4));
+}
+
+#[test]
+fn creating_and_sweeping_registrations_exclude_each_other() {
+    use super::registration;
+    let path = std::path::Path::new("/exclusion/db");
+    let id = registration::begin_live::<()>(path, || {
+        assert!(
+            registration::is_locked(),
+            "the sweep cannot run between the commit of a registering row and its mark"
+        );
+        Ok("reindex-x".to_owned())
+    })
+    .unwrap();
+    registration::sweep_dead(path, |live| {
+        assert!(registration::is_locked());
+        assert_eq!(live, std::slice::from_ref(&id));
+    });
+    registration::unmark_live(path, &id);
+    registration::sweep_dead(path, |live| assert!(live.is_empty()));
 }

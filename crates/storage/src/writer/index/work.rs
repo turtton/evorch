@@ -64,6 +64,7 @@ pub(crate) struct IndexRuntime {
     pub accounting: AccountingPolicy,
     /// Last refused admission; `None` while admitting.
     pub pause: Option<IndexCapacityStatus>,
+    /// Whether the registrations an earlier process left behind are closed.
     pub wal_wait: Option<WalWait>,
     /// At most one admission checkpoint per step, including a wait probe.
     pub last_checkpoint: Option<CheckpointOutcome>,
@@ -1820,6 +1821,23 @@ pub(crate) fn foreground_step(
 }
 
 /// Discovery to completion (request submission needs every source header).
+/// One discovery batch in its own transaction; `true` once every run has an
+/// index row.
+pub(crate) fn discover_step(
+    conn: &Connection,
+    rt: &mut IndexRuntime,
+    now_ns: i64,
+) -> Result<bool, StorageError> {
+    let complete = SqliteThreadIndex::new(conn)
+        .discover_batch(DISCOVERY_BATCH, now_ns)?
+        .complete;
+    if complete {
+        rt.discovery_complete = true;
+    }
+    Ok(complete)
+}
+
+#[allow(dead_code)]
 pub(crate) fn discover_all(
     conn: &Connection,
     rt: &mut IndexRuntime,
