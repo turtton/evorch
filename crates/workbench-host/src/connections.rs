@@ -77,9 +77,12 @@ impl ConnectionHooks {
         };
         // This runs in a guard's drop, possibly while another panic unwinds: a
         // hook that panics must neither escape nor keep the later hooks from
-        // running, so each one is isolated and a failure is only logged.
+        // running, so each one is isolated and a failure is only logged. The
+        // payload of the panic is a value of the hook's choosing whose own drop
+        // may panic, so it is leaked rather than dropped here.
         for hook in hooks {
-            if std::panic::catch_unwind(AssertUnwindSafe(|| hook(client))).is_err() {
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| hook(client))) {
+                std::mem::forget(payload);
                 tracing::warn!(client = %client.as_str(), "a connection-closed hook panicked");
             }
         }
@@ -198,6 +201,50 @@ mod tests {
         // Then: the drop returned, the later hook ran, and the client is gone.
         assert_eq!(*seen.lock().unwrap(), ["cli-a"]);
         assert_eq!(hooks.connections_of(&client("cli-a")), 0);
+    }
+
+    /// A panic payload whose own drop panics.
+    struct Bomb;
+
+    impl Drop for Bomb {
+        fn drop(&mut self) {
+            panic!("the payload was dropped");
+        }
+    }
+
+    #[test]
+    fn a_panic_payload_that_panics_when_dropped_does_not_escape_either() {
+        // Given: a hook that panics with such a payload, before a recording one.
+        let hooks = Arc::new(ConnectionHooks::default());
+        hooks.register(Arc::new(|_| std::panic::panic_any(Bomb)));
+        let seen = recording(&hooks);
+        let connection = hooks.open(client("cli-a"));
+
+        // When: the client leaves.
+        drop(connection);
+
+        // Then: the drop returned and the later hook ran.
+        assert_eq!(*seen.lock().unwrap(), ["cli-a"]);
+    }
+
+    #[test]
+    fn a_failing_hook_during_an_unwind_does_not_abort_the_process() {
+        // Given: a hook that panics with a Bomb, and a connection held by code
+        // that panics itself, so the guard drops while that panic unwinds (a
+        // panic escaping the drop there would abort the whole test process).
+        let hooks = Arc::new(ConnectionHooks::default());
+        hooks.register(Arc::new(|_| std::panic::panic_any(Bomb)));
+        let seen = recording(&hooks);
+
+        // When: the holder panics.
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _connection = hooks.open(client("cli-a"));
+            panic!("the holder failed");
+        }));
+
+        // Then: only the holder's panic came out, and the later hook ran.
+        assert!(outcome.is_err());
+        assert_eq!(*seen.lock().unwrap(), ["cli-a"]);
     }
 
     #[test]
