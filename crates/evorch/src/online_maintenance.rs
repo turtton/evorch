@@ -361,7 +361,8 @@ pub enum ReindexEnd {
     Stopped(String),
 }
 
-/// The state of a reindex after a step, as one progress line.
+/// The state of a reindex after a step, as one progress line. The gaps are counted in
+/// targets: a summary lists one entry for each reason, with the count of targets of it.
 fn reindex_line(batches: u32, progress: &MaintenanceProgress) -> String {
     let MaintenanceProgress::ReindexThreads {
         request_id,
@@ -379,7 +380,7 @@ fn reindex_line(batches: u32, progress: &MaintenanceProgress) -> String {
                 "reindex-threads: step {batches}: request {request}: targets {}, succeeded {}, gaps {}",
                 summary.target_count,
                 summary.succeeded,
-                summary.gaps.len()
+                summary.gaps.iter().fold(0_u64, |all, gap| all.saturating_add(gap.count))
             )
         },
     )
@@ -471,6 +472,9 @@ pub fn failure_of(error: &CliError) -> ReindexFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use workbench_protocol::namespaces::maintenance::{
+        ReindexGap, ReindexGapReason, ReindexSummary,
+    };
 
     fn at(batches: u64) -> Totals {
         Totals {
@@ -544,6 +548,41 @@ mod tests {
         assert_eq!(out.last().unwrap(), &at(905).line());
         assert_eq!(lines.last(905, || at(905).line()), None);
         assert!(out.len() <= seen.len() + 1);
+    }
+
+    fn reindex_progress(gaps: &[(ReindexGapReason, u64)]) -> MaintenanceProgress {
+        MaintenanceProgress::ReindexThreads {
+            request_id: Some("r-1".into()),
+            summary: Some(ReindexSummary {
+                target_count: 5,
+                succeeded: 1,
+                deleted_before_submission: 0,
+                gaps: gaps
+                    .iter()
+                    .map(|(reason, count)| ReindexGap {
+                        reason: *reason,
+                        count: *count,
+                    })
+                    .collect(),
+            }),
+            result: None,
+        }
+    }
+
+    #[test]
+    fn the_gaps_of_a_line_are_the_targets_not_the_reasons() {
+        // Given: one reason with two targets, and then two reasons with 2 and 1.
+        let one_reason = reindex_progress(&[(ReindexGapReason::IndexDisabled, 2)]);
+        let two_reasons = reindex_progress(&[
+            (ReindexGapReason::IndexDisabled, 2),
+            (ReindexGapReason::CapacityPaused, 1),
+        ]);
+        let none = reindex_progress(&[]);
+
+        // When/Then: the line counts the targets.
+        assert!(reindex_line(3, &one_reason).ends_with("succeeded 1, gaps 2"));
+        assert!(reindex_line(3, &two_reasons).ends_with("succeeded 1, gaps 3"));
+        assert!(reindex_line(3, &none).ends_with("succeeded 1, gaps 0"));
     }
 
     #[test]

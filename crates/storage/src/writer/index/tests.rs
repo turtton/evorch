@@ -4598,6 +4598,144 @@ fn a_run_that_lost_its_index_is_a_gap_in_the_result_the_owner_terminalizes() {
     assert_eq!(gaps, 1, "the lost run is a gap, not a success");
 }
 
+/// What the retention does to a deleted run: the tombstone, then the purge of its index rows
+/// until the row ends `deleted`.
+fn lose_index_by_retention(fx: &Fixture, run_id: &str) {
+    use crate::repo::thread_index::purge_index_rows;
+    fx.conn()
+        .execute(
+            "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES (?1, 't', 'f')",
+            [run_id],
+        )
+        .unwrap();
+    for _ in 0..1_000 {
+        let progress =
+            purge_index_rows(fx.conn(), run_id, PurgeTarget::Tombstoned, 64, 1 << 20).unwrap();
+        if !progress.remaining {
+            assert_eq!(fx.row(run_id).state, "deleted");
+            return;
+        }
+    }
+    panic!("the purge did not settle");
+}
+
+#[test]
+fn runs_that_lose_their_index_by_retention_or_another_connection_end_as_gaps() {
+    // Given: a published request whose targets were indexed when it froze them, with one
+    // run still to index so that the request stays pending.
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    fx.save(&verified("run-new", "fresh", 30 * S));
+    let submitted = fx
+        .control(4 * S)
+        .submit_request(&all(), &cli(), 4 * S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("the lease is the request's own");
+    };
+    assert!(matches!(
+        submitted.progress,
+        RequestProgress::Pending(ref summary) if summary.target_count == 6
+    ));
+    // When: one run loses its index through the retention's own purge, another one is
+    // removed by a different connection, and the owner finishes the request.
+    lose_index_by_retention(&fx, "run-000");
+    let other = Connection::open(&fx.config.db_path).unwrap();
+    other
+        .execute("DELETE FROM thread_index_runs WHERE run_id = 'run-001'", [])
+        .unwrap();
+    drop(other);
+    assert_eq!(fx.drive(&lease, 5 * S), idle());
+    // Then: neither is counted as a success, and no new registration was needed.
+    let ReindexResult::CompletedWithGaps { summary, .. } =
+        terminal(&mut fx, &submitted.request_id, 6 * S)
+    else {
+        panic!("completed_with_gaps");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (6, 4));
+    assert_eq!(
+        summary.gaps,
+        vec![RequestGapCount {
+            reason: RequestGapReason::Deleted,
+            count: 2
+        }]
+    );
+}
+
+/// Drives the owner step by step until a request that has `new_runs` runs to index is terminal,
+/// with one unrelated run losing its index by the retention between every two steps when
+/// `unrelated` is set. After every step a request without a pending target must already be
+/// terminal: the owner ends it in the step that finishes its last target, in one pass.
+fn drive_request_with_retention_changes(unrelated: bool, new_runs: usize) -> ReindexResult {
+    let mut fx = Fixture::new(512 * MIB);
+    let others = indexed_runs(&mut fx, 8);
+    for index in 0..new_runs {
+        fx.save(&verified(
+            &format!("run-new-{index}"),
+            "fresh",
+            (100 + index as i64) * S,
+        ));
+    }
+    let request = ReindexRequest {
+        since_ns: Some(100 * S),
+        ..all()
+    };
+    let submitted = fx
+        .control(4 * S)
+        .submit_request(&request, &cli(), 4 * S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("the lease is the request's own");
+    };
+    assert!(matches!(
+        submitted.progress,
+        RequestProgress::Pending(ref summary) if summary.target_count == new_runs as u64
+    ));
+    let pending_targets = |fx: &Fixture| -> u64 {
+        fx.conn()
+            .query_row(
+                "SELECT COUNT(*) FROM thread_index_request_targets \
+                 WHERE request_id = ?1 AND state = 'pending'",
+                [&submitted.request_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let mut unrelated_runs = others.iter();
+    for _ in 0..1_000 {
+        let result = fx.control(5 * S).step(&lease, 5 * S).unwrap();
+        if pending_targets(&fx) == 0 {
+            assert_ne!(
+                request_state(&fx, &submitted.request_id),
+                "pending",
+                "a request without a pending target is ended by the step that finished it"
+            );
+        }
+        if result != IndexStepResult::Progress {
+            assert_eq!(result, idle());
+            return terminal(&mut fx, &submitted.request_id, 6 * S);
+        }
+        if unrelated && let Some(run_id) = unrelated_runs.next() {
+            lose_index_by_retention(&fx, run_id);
+        }
+    }
+    panic!("the request did not settle");
+}
+
+#[test]
+fn unrelated_retention_changes_between_steps_do_not_delay_the_end_of_a_request() {
+    // Given/When: the same request driven with and without a retention change of a run
+    // that is not one of its targets between every two steps.
+    let quiet = drive_request_with_retention_changes(false, 4);
+    let busy = drive_request_with_retention_changes(true, 4);
+    // Then: it ends in one pass with the same result.
+    assert_eq!(busy, quiet);
+    let ReindexResult::Completed { summary, .. } = busy else {
+        panic!("completed");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (4, 4));
+}
+
 #[test]
 fn creating_and_sweeping_registrations_exclude_each_other() {
     use super::registration;

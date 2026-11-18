@@ -1301,6 +1301,7 @@ async fn a_registration_the_index_cannot_serve_ends_at_its_admission(
     let store = core.store.clone().unwrap();
     store.apply_thread_index_settings(settings).unwrap();
     core.source("first", 10);
+    core.source("second", 20);
     // The index of a disabled core does not discover runs: a header exists, as
     // the enabled core made it earlier.
     rusqlite::Connection::open(&core.database)
@@ -1309,7 +1310,7 @@ async fn a_registration_the_index_cannot_serve_ends_at_its_admission(
             "INSERT OR IGNORE INTO thread_index_runs(run_id, state, source_revision, \
              snapshot_revision, source_context_sha256, extractor_version, accounting_version, \
              source_updated_at_ns, retention_at_ns) SELECT run_id, 'pending', snapshot_revision, \
-             snapshot_revision, '', 1, 1, updated_at_ns, 1 FROM run_contexts WHERE run_id = 'first'",
+             snapshot_revision, '', 1, 1, updated_at_ns, 1 FROM run_contexts WHERE run_id IN ('first', 'second')",
         )
         .unwrap();
 
@@ -1330,11 +1331,19 @@ async fn a_registration_the_index_cannot_serve_ends_at_its_admission(
     else {
         panic!("not a completed_with_gaps result: {out}");
     };
-    assert_eq!((summary.target_count, summary.succeeded), (1, 0));
+    assert_eq!((summary.target_count, summary.succeeded), (2, 0));
     assert_eq!(summary.gaps.len(), 1);
     assert_eq!(
         serde_json::to_value(summary.gaps[0].reason).unwrap(),
         serde_json::to_value(reason).unwrap()
+    );
+    // And: the gaps are counted in targets (two, of one reason), also in the line of stderr.
+    assert_eq!(summary.gaps[0].count, 2);
+    assert!(
+        err.lines()
+            .last()
+            .is_some_and(|line| line.ends_with("targets 2, succeeded 0, gaps 2")),
+        "the end state on stderr counts targets, not reasons: {err}"
     );
     assert_eq!(core.request_state(&request_id), "completed_with_gaps");
 
