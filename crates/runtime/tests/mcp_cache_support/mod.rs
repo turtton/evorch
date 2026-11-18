@@ -43,10 +43,18 @@ pub const GOAL: &str = "Inspect remote evidence without changing the sent prefix
 #[derive(Clone)]
 pub enum Step {
     Call(String),
+    /// A call whose arguments are given; they are part of the recorded input.
+    /// Only the artifact cache test builds it; the other binaries share this module.
+    #[allow(dead_code)]
+    CallWith(String, Value),
     Text(String),
 }
 pub fn call(name: &str) -> Step {
     Step::Call(name.into())
+}
+#[allow(dead_code)]
+pub fn call_with(name: &str, arguments: Value) -> Step {
+    Step::CallWith(name.into(), arguments)
 }
 pub fn answer() -> Step {
     Step::Text("Retained analysis with evidence. ".repeat(150))
@@ -316,6 +324,14 @@ impl Provider {
                             &format!("call-{i}"),
                             &name,
                             [json!({"index":i}).to_string()],
+                        ),
+                        Step::CallWith(name, arguments) => ScriptedResponse::tool_call(
+                            &format!("response-{i}"),
+                            MODEL,
+                            0,
+                            &format!("call-{i}"),
+                            &name,
+                            [arguments.to_string()],
                         ),
                         Step::Text(text) => {
                             ScriptedResponse::text_stream(&format!("response-{i}"), MODEL, [text])

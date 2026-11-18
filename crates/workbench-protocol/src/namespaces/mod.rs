@@ -67,39 +67,6 @@ macro_rules! no_results {
     };
 }
 
-macro_rules! no_queries {
-    ($name:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-        pub enum $name {}
-        impl $name {
-            pub fn required_capability(&self) -> crate::Capability {
-                match *self {}
-            }
-            pub fn validate(
-                &self,
-                _limits: &crate::handshake::WireLimits,
-            ) -> Result<(), crate::validation::ValidationError> {
-                match *self {}
-            }
-        }
-    };
-}
-
-macro_rules! no_replies {
-    ($name:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-        pub enum $name {}
-        impl $name {
-            pub fn validate(
-                &self,
-                _limits: &crate::handshake::WireLimits,
-            ) -> Result<(), crate::validation::ValidationError> {
-                match *self {}
-            }
-        }
-    };
-}
-
 macro_rules! no_events {
     ($name:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -109,26 +76,6 @@ macro_rules! no_events {
                 match *self {}
             }
         }
-    };
-}
-
-/// Everything an unimplemented namespace consists of: five empty enums and
-/// empty operation lists.
-macro_rules! reserved_namespace {
-    ($command:ident, $result:ident, $query:ident, $reply:ident, $event:ident) => {
-        no_commands!($command);
-        no_results!($result);
-        no_queries!($query);
-        no_replies!($reply);
-        no_events!($event);
-        /// Wire names of the namespace's commands (none).
-        pub const COMMAND_OPERATIONS: &[&str] = &[];
-        /// Wire names of the namespace's queries (none).
-        pub const QUERY_OPERATIONS: &[&str] = &[];
-        /// Wire names of the namespace's events (none).
-        pub const EVENT_TYPES: &[&str] = &[];
-        /// Tagged choices inside a command's payload that classification names (none).
-        pub const NESTED_COMMANDS: &[$crate::namespaces::NestedOperation] = &[];
     };
 }
 

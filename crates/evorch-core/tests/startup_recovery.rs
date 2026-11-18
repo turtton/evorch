@@ -825,6 +825,18 @@ async fn startup_process_cache_preserves_wire_prefix_after_planned_adoption() {
         .map(|r| r.body)
         .collect::<Vec<_>>();
     assert_eq!(requests.len(), 2);
+    // The run restored by startup recovery sees the artifact provider's catalog
+    // exactly as before the restart: `inspect_artifact` once, same array.
+    for request in &requests {
+        let names = request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tool| tool["function"]["name"] == "inspect_artifact")
+            .count();
+        assert_eq!(names, 1, "inspect_artifact is offered once");
+    }
+    assert_eq!(requests[0]["tools"], requests[1]["tools"]);
     assert_append_only(CacheProtocol::OpenAi, &requests[0], &requests[1]).unwrap_or_else(|error| {
         let changed = requests[0]
             .as_object()

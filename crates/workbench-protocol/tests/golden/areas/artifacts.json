@@ -1,1 +1,122 @@
-{}
+{
+  "command/artifacts/open_preview": {
+    "payload": {
+      "payload": {
+        "artifact": {
+          "artifact_id": "artifact-1234567890abcdef1234567890abcdef",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "project": "project-1",
+          "thread": "thread-1"
+        },
+        "session": {
+          "core_epoch": 17,
+          "id": "1234567890abcdef1234567890abcdef"
+        },
+        "viewport": {
+          "height": 768,
+          "width": 1024
+        }
+      },
+      "type": "open_preview"
+    },
+    "type": "artifacts"
+  },
+  "query/artifacts/get": {
+    "payload": {
+      "payload": {
+        "artifact": {
+          "artifact_id": "artifact-1234567890abcdef1234567890abcdef",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "project": "project-1",
+          "thread": "thread-1"
+        }
+      },
+      "type": "get"
+    },
+    "type": "artifacts"
+  },
+  "query/artifacts/list": {
+    "payload": {
+      "payload": {
+        "after": null,
+        "limit": 16,
+        "project": "project-1",
+        "thread": "thread-1"
+      },
+      "type": "list"
+    },
+    "type": "artifacts"
+  },
+  "query/artifacts/read_content": {
+    "payload": {
+      "payload": {
+        "artifact": {
+          "artifact_id": "artifact-1234567890abcdef1234567890abcdef",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "project": "project-1",
+          "thread": "thread-1"
+        },
+        "max_bytes": 1024,
+        "offset": 0
+      },
+      "type": "read_content"
+    },
+    "type": "artifacts"
+  },
+  "query_reply/artifacts/content": {
+    "payload": {
+      "payload": {
+        "artifact": {
+          "artifact_id": "artifact-1234567890abcdef1234567890abcdef",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "project": "project-1",
+          "thread": "thread-1"
+        },
+        "eof": true,
+        "offset": 0,
+        "text": "<html>"
+      },
+      "type": "content"
+    },
+    "type": "artifacts"
+  },
+  "query_reply/artifacts/list": {
+    "payload": {
+      "payload": {
+        "artifacts": [
+          {
+            "byte_len": 12,
+            "media_type": "text/html",
+            "reference": {
+              "artifact_id": "artifact-1234567890abcdef1234567890abcdef",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "project": "project-1",
+              "thread": "thread-1"
+            },
+            "title": "Offline chart"
+          }
+        ],
+        "next": null
+      },
+      "type": "list"
+    },
+    "type": "artifacts"
+  },
+  "query_reply/artifacts/metadata": {
+    "payload": {
+      "payload": {
+        "byte_len": 12,
+        "media_type": "text/html",
+        "reference": {
+          "artifact_id": "artifact-1234567890abcdef1234567890abcdef",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "project": "project-1",
+          "thread": "thread-1"
+        },
+        "title": "Offline chart"
+      },
+      "type": "metadata"
+    },
+    "type": "artifacts"
+  }
+}

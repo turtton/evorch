@@ -1,1 +1,355 @@
-{}
+{
+  "command/browser/capture_renderer_tab": {
+    "payload": {
+      "payload": {
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "capture_renderer_tab"
+    },
+    "type": "browser"
+  },
+  "command/browser/close_renderer_session": {
+    "payload": {
+      "payload": {
+        "session": {
+          "core_epoch": 17,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "close_renderer_session"
+    },
+    "type": "browser"
+  },
+  "command/browser/close_renderer_tab": {
+    "payload": {
+      "payload": {
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "close_renderer_tab"
+    },
+    "type": "browser"
+  },
+  "command/browser/create_renderer_session": {
+    "payload": {
+      "payload": {},
+      "type": "create_renderer_session"
+    },
+    "type": "browser"
+  },
+  "command/browser/grant_renderer_observer": {
+    "payload": {
+      "payload": {
+        "client": "client-b",
+        "frames": false,
+        "metadata": true,
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "grant_renderer_observer"
+    },
+    "type": "browser"
+  },
+  "command/browser/renderer_cdp": {
+    "payload": {
+      "payload": {
+        "method": "Runtime.evaluate",
+        "params": {
+          "expression": "1+1"
+        },
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "renderer_cdp"
+    },
+    "type": "browser"
+  },
+  "command/browser/resize_renderer_tab": {
+    "payload": {
+      "payload": {
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        },
+        "viewport": {
+          "height": 768,
+          "width": 1024
+        }
+      },
+      "type": "resize_renderer_tab"
+    },
+    "type": "browser"
+  },
+  "command/browser/resume_renderer_session": {
+    "payload": {
+      "payload": {
+        "session": {
+          "core_epoch": 17,
+          "id": "1234567890abcdef1234567890abcdef"
+        },
+        "token": "1234567890abcdef1234567890abcdef"
+      },
+      "type": "resume_renderer_session"
+    },
+    "type": "browser"
+  },
+  "command/browser/set_renderer_frame_rate": {
+    "payload": {
+      "payload": {
+        "fps": 10,
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "set_renderer_frame_rate"
+    },
+    "type": "browser"
+  },
+  "command/browser/set_renderer_streaming": {
+    "payload": {
+      "payload": {
+        "enabled": false,
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "set_renderer_streaming"
+    },
+    "type": "browser"
+  },
+  "command/browser/settle_renderer_tab": {
+    "payload": {
+      "payload": {
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "settle_renderer_tab"
+    },
+    "type": "browser"
+  },
+  "command/browser/subscribe_renderer_frames": {
+    "payload": {
+      "payload": {
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "subscribe_renderer_frames"
+    },
+    "type": "browser"
+  },
+  "command/browser/take_renderer_notices": {
+    "payload": {
+      "payload": {
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "take_renderer_notices"
+    },
+    "type": "browser"
+  },
+  "command/browser/unsubscribe_renderer_frames": {
+    "payload": {
+      "payload": {
+        "subscription": "1234567890abcdef1234567890abcdef"
+      },
+      "type": "unsubscribe_renderer_frames"
+    },
+    "type": "browser"
+  },
+  "query/browser/get_renderer_operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "1234567890abcdef1234567890abcdef"
+      },
+      "type": "get_renderer_operation"
+    },
+    "type": "browser"
+  },
+  "query/browser/get_renderer_status": {
+    "payload": {
+      "payload": {},
+      "type": "get_renderer_status"
+    },
+    "type": "browser"
+  },
+  "query/browser/get_renderer_tab": {
+    "payload": {
+      "payload": {
+        "tab": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        }
+      },
+      "type": "get_renderer_tab"
+    },
+    "type": "browser"
+  },
+  "query/browser/list_renderer_tabs": {
+    "payload": {
+      "payload": {
+        "limit": 4,
+        "offset": 0
+      },
+      "type": "list_renderer_tabs"
+    },
+    "type": "browser"
+  },
+  "query_reply/browser/operation": {
+    "payload": {
+      "payload": {
+        "operation_id": "1234567890abcdef1234567890abcdef",
+        "state": {
+          "payload": {
+            "output": {
+              "payload": {
+                "result": {
+                  "result": {
+                    "type": "number",
+                    "value": 2
+                  }
+                }
+              },
+              "type": "cdp"
+            }
+          },
+          "type": "completed"
+        }
+      },
+      "type": "operation"
+    },
+    "type": "browser"
+  },
+  "query_reply/browser/status": {
+    "payload": {
+      "payload": {
+        "core_epoch": 17,
+        "generation": 2,
+        "phase": "ready",
+        "tabs_limit": 4,
+        "tabs_used": 1
+      },
+      "type": "status"
+    },
+    "type": "browser"
+  },
+  "query_reply/browser/tab": {
+    "payload": {
+      "payload": {
+        "artifact": {
+          "artifact_id": "artifact-1234567890abcdef1234567890abcdef",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "project": "project-1",
+          "thread": "thread-1"
+        },
+        "fps": 30,
+        "owner": "client_preview",
+        "reference": {
+          "core_epoch": 17,
+          "generation": 2,
+          "id": "1234567890abcdef1234567890abcdef"
+        },
+        "session": {
+          "core_epoch": 17,
+          "id": "1234567890abcdef1234567890abcdef"
+        },
+        "streaming": false,
+        "viewport": {
+          "height": 768,
+          "width": 1024
+        }
+      },
+      "type": "tab"
+    },
+    "type": "browser"
+  },
+  "query_reply/browser/tabs": {
+    "payload": {
+      "payload": {
+        "more": false,
+        "tabs": [
+          {
+            "artifact": {
+              "artifact_id": "artifact-1234567890abcdef1234567890abcdef",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "project": "project-1",
+              "thread": "thread-1"
+            },
+            "fps": 30,
+            "owner": "client_preview",
+            "reference": {
+              "core_epoch": 17,
+              "generation": 2,
+              "id": "1234567890abcdef1234567890abcdef"
+            },
+            "session": {
+              "core_epoch": 17,
+              "id": "1234567890abcdef1234567890abcdef"
+            },
+            "streaming": false,
+            "viewport": {
+              "height": 768,
+              "width": 1024
+            }
+          }
+        ]
+      },
+      "type": "tabs"
+    },
+    "type": "browser"
+  },
+  "ui_event/browser/operation_changed": {
+    "payload": {
+      "payload": {
+        "id": "1234567890abcdef1234567890abcdef"
+      },
+      "type": "operation_changed"
+    },
+    "type": "browser"
+  },
+  "ui_event/browser/renderer_changed": {
+    "payload": {
+      "payload": {
+        "id": "1234567890abcdef1234567890abcdef"
+      },
+      "type": "renderer_changed"
+    },
+    "type": "browser"
+  },
+  "ui_event/browser/tab_changed": {
+    "payload": {
+      "payload": {
+        "id": "1234567890abcdef1234567890abcdef"
+      },
+      "type": "tab_changed"
+    },
+    "type": "browser"
+  }
+}

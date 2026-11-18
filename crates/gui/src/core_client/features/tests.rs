@@ -162,6 +162,22 @@ fn feature_ids_with_namespace_status(
         .collect()
 }
 
+/// Reserved and implemented namespaces partition the registered slots. The set of
+/// reserved ones may be empty once every namespace is implemented; the partition
+/// and the implemented set keep the checks below from being vacuous.
+fn assert_every_slot_has_a_namespace_status(features: &Features, reserved: &[FeatureId]) {
+    let implemented = feature_ids_with_namespace_status(features, NamespaceStatus::Implemented);
+    assert!(
+        !implemented.is_empty(),
+        "the registry should include an implemented namespace"
+    );
+    assert_eq!(
+        reserved.len() + implemented.len(),
+        features.features.len(),
+        "every slot names a reserved or an implemented namespace"
+    );
+}
+
 #[test]
 fn implemented_features_are_offered_and_reserved_placeholders_stay_silent() {
     let mut features = Features::default();
@@ -191,10 +207,7 @@ fn implemented_features_are_offered_and_reserved_placeholders_stay_silent() {
             .is_empty()
     );
     let reserved = feature_ids_with_namespace_status(&features, NamespaceStatus::Reserved);
-    assert!(
-        !reserved.is_empty(),
-        "the registry should include a reserved namespace placeholder"
-    );
+    assert_every_slot_has_a_namespace_status(&features, &reserved);
     let offered = features.available(true, &Capability::IMPLEMENTED);
     assert!(
         reserved.iter().all(|id| !offered.contains(id)),
@@ -419,10 +432,7 @@ fn a_slot_of_a_reserved_namespace_is_not_offered() {
     let features = Features::default();
     let offered = features.available(true, &Capability::IMPLEMENTED);
     let reserved = feature_ids_with_namespace_status(&features, NamespaceStatus::Reserved);
-    assert!(
-        !reserved.is_empty(),
-        "the registry should include a reserved namespace placeholder"
-    );
+    assert_every_slot_has_a_namespace_status(&features, &reserved);
     for id in reserved {
         assert!(!offered.contains(&id), "{id:?} is offered while reserved");
     }

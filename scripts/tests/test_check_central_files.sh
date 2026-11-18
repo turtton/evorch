@@ -78,12 +78,26 @@ expect fail "pr14 does not own the pr15 cache target" "$central" --scope pr14 --
 files crates/evorch-core/tests/core_eval_cache.rs
 expect ok "pr17c owns its cache target" "$central" --scope pr17c --files-from "$work/files"
 expect fail "pr15 does not own the pr17c cache target" "$central" --scope pr15 --files-from "$work/files"
-# 16a-2: pr16a2 owns the renderer wiring leaves and not the central files, the
-# GUI feature files of the namespaces it fills, or the CLI.
+# F2's approved exception grants no access to other central files or scopes.
+files crates/workbench-protocol/src/namespaces/mod.rs crates/workbench-protocol/tests/namespaces.rs scripts/feature-scopes.txt \
+  scripts/check-central-files.sh scripts/tests/test_check_central_files.sh
+expect ok "F2 owns the macro cleanup and its gate configuration" "$central" --scope pr16a2 --files-from "$work/files"
+expect fail "another feature has no F2 central exception" "$central" --scope pr10 --files-from "$work/files"
+files crates/workbench-host/src/ingress.rs crates/workbench-host/src/areas/mod.rs
+expect ok "F2 may add the renderer grace accessor and its delegate" "$central" --scope pr16a2 --files-from "$work/files"
+expect fail "other scopes cannot change the host ingress or area registry" "$central" --scope pr10 --files-from "$work/files"
+files crates/workbench-host/Cargo.toml
+expect ok "F2 may promote the host async-trait dependency" "$central" --scope pr16a2 --files-from "$work/files"
+expect fail "other scopes cannot change the host manifest" "$central" --scope pr10 --files-from "$work/files"
+files crates/storage/src/artifact_refs.rs crates/storage/src/repo/artifact_refs.rs crates/storage/tests/renderer_artifact_refs.rs
+expect ok "F2 owns only the thread-scoped artifact reads" "$central" --scope pr16a2 --files-from "$work/files"
+files crates/storage/src/writer.rs
+expect fail "F2 may not change the storage writer" "$central" --scope pr16a2 --files-from "$work/files"
+# The GUI feature files and CLI are still outside pr16a2.
 files crates/workbench-host/src/areas/artifacts.rs crates/workbench-host/src/areas/renderer/mod.rs crates/renderer-ipc/src/client.rs crates/evorch-core/tests/core_renderer_cache.rs crates/runtime/src/artifacts/inspect.rs
 expect ok "pr16a2 owns the artifact and renderer leaves" "$central" --scope pr16a2 --files-from "$work/files"
 expect fail "pr15 does not own the artifact leaf" "$central" --scope pr15 --files-from "$work/files"
-for central_file in crates/workbench-host/src/areas/mod.rs crates/workbench-host/src/ingress.rs crates/workbench-host/Cargo.toml scripts/ci-test-groups.json; do
+for central_file in crates/workbench-host/src/areas/registry_other.rs crates/workbench-host/src/ingress/namespaces/mod.rs crates/runtime/Cargo.toml scripts/ci-test-groups.json; do
   files crates/workbench-host/src/areas/artifacts.rs "$central_file"
   expect fail "pr16a2 may not change the central $central_file" "$central" --scope pr16a2 --files-from "$work/files"
 done

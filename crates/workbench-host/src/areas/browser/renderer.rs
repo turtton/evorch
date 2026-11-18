@@ -33,12 +33,21 @@ pub enum OwnerError {
     Invalid,
     #[error("renderer is stopping")]
     Stopping,
+    #[error("renderer request timed out; execution is uncertain")]
+    TimedOut,
+    #[error("renderer refused the request: {0:?}")]
+    Remote(renderer_ipc::ErrorKind),
     #[error("renderer IPC failed: {0}")]
     Ipc(String),
 }
 impl From<ClientError> for OwnerError {
     fn from(e: ClientError) -> Self {
-        Self::Ipc(e.to_string())
+        match e {
+            ClientError::Timeout => Self::TimedOut,
+            ClientError::Remote(error) => Self::Remote(error.kind),
+            ClientError::Local(_) => Self::Invalid,
+            ClientError::Closed(reason) => Self::Ipc(format!("{reason:?}")),
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,11 +135,13 @@ enum Action {
     Resize(Tab, Viewport),
     Streaming(Tab, bool),
     FrameRate(Tab, u8),
+    PageRequest(Tab, Request),
     Close(Tab),
     Stop,
 }
 enum Answer {
     Open(Tab),
+    PageReply(Reply, Vec<u8>),
     Done,
 }
 struct Envelope {
@@ -138,11 +149,65 @@ struct Envelope {
     action: Action,
     reply: oneshot::Sender<Result<Answer, OwnerError>>,
 }
+/// Only the actor adds/removes live tabs, so pending cleanup cannot outgrow the
+/// tab budget. Drop callbacks do not need a command or AreaTasks queue slot.
+#[derive(Default)]
+struct TabCleanup {
+    live: std::sync::Mutex<Vec<(Tab, bool)>>,
+    requested: tokio::sync::Notify,
+    finished: tokio::sync::Notify,
+}
+impl TabCleanup {
+    fn opened(&self, tab: Tab) {
+        let mut live = self.live.lock().unwrap();
+        debug_assert!(live.len() < renderer_ipc::MAX_TABS);
+        live.push((tab, false));
+    }
+    fn request(&self, tab: Tab) {
+        let mut live = self.live.lock().unwrap();
+        if let Some((_, pending)) = live.iter_mut().find(|(candidate, _)| *candidate == tab) {
+            *pending = true;
+            self.requested.notify_one();
+        }
+    }
+    fn take(&self) -> Option<Tab> {
+        self.live
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|(_, pending)| *pending)
+            .map(|(tab, pending)| {
+                *pending = false;
+                *tab
+            })
+    }
+    fn contains(&self, tab: Tab) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(candidate, _)| *candidate == tab)
+    }
+    fn closed(&self, tab: Tab) {
+        self.live
+            .lock()
+            .unwrap()
+            .retain(|(candidate, _)| *candidate != tab);
+        self.finished.notify_waiters();
+    }
+    fn clear(&self) {
+        self.live.lock().unwrap().clear();
+        self.finished.notify_waiters();
+    }
+}
 #[derive(Clone)]
 pub struct RendererOwner {
     body_budget: Arc<tokio::sync::Semaphore>,
     commands: mpsc::Sender<Envelope>,
     status: watch::Receiver<Status>,
+    cleanup: Arc<TabCleanup>,
+    pub(crate) run_tabs:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, super::run_pages::RunTab>>>,
 }
 impl RendererOwner {
     /// Installs an idle watcher only. No process, IPC reader or directory yet.
@@ -157,13 +222,17 @@ impl RendererOwner {
             generation: 0,
             tabs: 0,
         });
+        let cleanup = Arc::new(TabCleanup::default());
+        let actor_cleanup = cleanup.clone();
         tasks.spawn("renderer-owner", move |stop| {
-            Actor::new(ledger, config, status, stop).run(rx)
+            Actor::new(ledger, config, status, stop, actor_cleanup).run(rx)
         })?;
         Ok(Self {
             body_budget: Arc::new(tokio::sync::Semaphore::new(64 * 1024 * 1024)),
             commands,
             status: view,
+            cleanup,
+            run_tabs: Arc::default(),
         })
     }
     pub fn status(&self) -> Status {
@@ -204,7 +273,7 @@ impl RendererOwner {
             .map_err(|_| OwnerError::Invalid)?;
         match self.call(Action::Open(open, body)).await? {
             Answer::Open(tab) => Ok(tab),
-            Answer::Done => Err(OwnerError::Unavailable),
+            _ => Err(OwnerError::Unavailable),
         }
     }
     pub async fn close(&self, tab: Tab) -> Result<(), OwnerError> {
@@ -221,6 +290,103 @@ impl RendererOwner {
     }
     pub async fn stop(&self) -> Result<(), OwnerError> {
         self.call(Action::Stop).await.map(|_| ())
+    }
+    /// The already-owned actor reclaims the tab, even when both work queues are full.
+    pub(crate) fn close_later(&self, tab: Tab) {
+        self.cleanup.request(tab);
+    }
+    /// Cancellation only drops the wait; it cannot withdraw cleanup ownership.
+    pub(crate) async fn close_wait(&self, tab: Tab) -> Result<(), OwnerError> {
+        self.close_later(tab);
+        let mut status = self.subscribe();
+        loop {
+            let finished = self.cleanup.finished.notified();
+            tokio::pin!(finished);
+            finished.as_mut().enable();
+            if !self.cleanup.contains(tab) {
+                return Ok(());
+            }
+            if self.commands.is_closed() {
+                return Err(OwnerError::Stopping);
+            }
+            tokio::select! {
+                _ = &mut finished => {}
+                changed = status.changed() => {
+                    if changed.is_err() {
+                        return Err(OwnerError::Stopping);
+                    }
+                }
+            }
+        }
+    }
+    async fn page_request(
+        &self,
+        tab: Tab,
+        request: Request,
+    ) -> Result<(Reply, Vec<u8>), OwnerError> {
+        request.validate(0).map_err(|_| OwnerError::Invalid)?;
+        match self.call(Action::PageRequest(tab, request)).await? {
+            Answer::PageReply(reply, body) => Ok((reply, body)),
+            _ => Err(OwnerError::Unavailable),
+        }
+    }
+    pub async fn cdp(
+        &self,
+        tab: Tab,
+        method: String,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, OwnerError> {
+        let (reply, _) = self
+            .page_request(
+                tab,
+                Request::Cdp {
+                    tab: tab.id,
+                    method,
+                    params,
+                    timeout_ms: 30_000,
+                },
+            )
+            .await?;
+        match reply {
+            Reply::Cdp { result } => Ok(result),
+            _ => Err(OwnerError::Unavailable),
+        }
+    }
+    pub async fn settle(&self, tab: Tab) -> Result<(), OwnerError> {
+        self.page_request(
+            tab,
+            Request::Settle {
+                tab: tab.id,
+                timeout_ms: 30_000,
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+    pub async fn notices(&self, tab: Tab) -> Result<renderer_ipc::Notices, OwnerError> {
+        match self
+            .page_request(tab, Request::TakeNotices { tab: tab.id })
+            .await?
+            .0
+        {
+            Reply::Notices(notices) => Ok(notices),
+            _ => Err(OwnerError::Unavailable),
+        }
+    }
+    pub async fn capture(&self, tab: Tab) -> Result<Vec<u8>, OwnerError> {
+        let (reply, body) = self
+            .page_request(
+                tab,
+                Request::Capture {
+                    tab: tab.id,
+                    timeout_ms: 30_000,
+                },
+            )
+            .await?;
+        if !matches!(reply, Reply::Png) {
+            return Err(OwnerError::Unavailable);
+        }
+        Ok(body)
     }
 }
 type RpcReply = Result<(Reply, Vec<u8>), ClientError>;
@@ -401,6 +567,7 @@ struct Actor {
     config: OwnerConfig,
     status: watch::Sender<Status>,
     stop: StopSignal,
+    cleanup: Arc<TabCleanup>,
     live: Option<Generation>,
     budget: RendererBudget,
     generation: u64,
@@ -415,12 +582,14 @@ impl Actor {
         config: OwnerConfig,
         status: watch::Sender<Status>,
         stop: StopSignal,
+        cleanup: Arc<TabCleanup>,
     ) -> Self {
         Self {
             ledger,
             config,
             status,
             stop,
+            cleanup,
             live: None,
             budget: RendererBudget::default(),
             generation: 0,
@@ -455,6 +624,7 @@ impl Actor {
         }
         self.live = None;
         self.budget = RendererBudget::default();
+        self.cleanup.clear();
         self.idle = None;
         if failed {
             self.failures = (self.failures + 1).min(6);
@@ -564,6 +734,7 @@ impl Actor {
                 }
                 self.idle = None;
                 self.failures = 0;
+                self.cleanup.opened(tab);
                 self.phase(Phase::Ready);
                 return Ok(Answer::Open(tab));
             }
@@ -609,6 +780,13 @@ impl Actor {
                 )
                 .await?;
             }
+            Action::PageRequest(tab, request) => {
+                self.tab(tab)?;
+                let (reply, body) = self
+                    .rpc(request, Vec::new(), Duration::from_secs(40))
+                    .await?;
+                return Ok(Answer::PageReply(reply, body));
+            }
             Action::Close(tab) => {
                 self.tab(tab)?;
                 self.rpc(
@@ -618,6 +796,7 @@ impl Actor {
                 )
                 .await?;
                 self.budget.remove(tab.id);
+                self.cleanup.closed(tab);
                 if self.budget.is_empty() {
                     if self.budget.used_4k {
                         self.end(true, false).await?;
@@ -638,12 +817,24 @@ impl Actor {
         mut commands: mpsc::Receiver<Envelope>,
     ) -> Result<(), crate::bootstrap::BootstrapError> {
         loop {
+            if self.stop.is_stopped() {
+                break;
+            }
+            if let Some(tab) = self.cleanup.take() {
+                if self.action(Action::Close(tab)).await.is_err()
+                    && self.end(false, true).await.is_err()
+                {
+                    break;
+                }
+                continue;
+            }
             let idle = self.idle;
             let event = tokio::select! { biased;
                 _ = self.stop.stopped() => None,
                 _ = async { if let Some(live) = &self.live { let _ = live.child.exited().await; } else { std::future::pending::<()>().await; } } => {
                     if self.end(false,true).await.is_err() { break; } continue;
                 }
+                _ = self.cleanup.requested.notified() => continue,
                 command = commands.recv() => command,
                 _ = async { if let Some(deadline) = idle { tokio::time::sleep_until(deadline).await; } else { std::future::pending::<()>().await; } } => {
                     if self.end(true,false).await.is_err() { break; } continue;
@@ -655,12 +846,13 @@ impl Actor {
             if command.reply.is_closed() {
                 continue;
             }
+            let page_request = matches!(command.action, Action::PageRequest(..));
             let result = self.action(command.action).await;
             if result.as_ref().is_err_and(|e| {
                 matches!(
                     e,
                     OwnerError::Ipc(_) | OwnerError::Unavailable | OwnerError::Stopping
-                )
+                ) || (!page_request && matches!(e, OwnerError::Remote(_) | OwnerError::TimedOut))
             }) && self.end(false, true).await.is_err()
             {
                 let _ = command.reply.send(result);
@@ -687,6 +879,47 @@ impl Actor {
 #[cfg(test)]
 mod installation_tests {
     use super::*;
+    #[test]
+    fn cleanup_only_accepts_live_tabs_and_does_not_retarget_a_new_generation() {
+        let cleanup = TabCleanup::default();
+        let tabs = (0..renderer_ipc::MAX_TABS)
+            .map(|id| Tab {
+                generation: 1,
+                id: TabId(id as u64),
+            })
+            .collect::<Vec<_>>();
+        for tab in &tabs {
+            cleanup.opened(*tab);
+        }
+        for id in 100..1100 {
+            cleanup.request(Tab {
+                generation: 1,
+                id: TabId(id),
+            });
+        }
+        assert!(cleanup.take().is_none());
+        for tab in &tabs {
+            cleanup.request(*tab);
+            cleanup.request(*tab);
+        }
+        let mut requested = Vec::new();
+        while let Some(tab) = cleanup.take() {
+            requested.push(tab);
+            cleanup.closed(tab);
+        }
+        assert_eq!(requested, tabs);
+        let replacement = Tab {
+            generation: 2,
+            id: tabs[0].id,
+        };
+        cleanup.opened(replacement);
+        cleanup.request(tabs[0]);
+        assert!(cleanup.take().is_none());
+        cleanup.request(replacement);
+        assert_eq!(cleanup.take(), Some(replacement));
+        cleanup.clear();
+        assert!(!cleanup.contains(replacement));
+    }
     #[test]
     fn startup_override_wins_without_probing_the_running_executable() {
         let configured = PathBuf::from("/nix/store/distribution/libexec/renderer with spaces");
@@ -719,7 +952,7 @@ mod installation_tests {
         );
     }
     #[tokio::test]
-    async fn central_binding_shares_the_single_owner_and_store_but_keeps_provider_disabled() {
+    async fn central_binding_shares_one_owner_store_and_stable_provider_without_spawning() {
         let temp = tempfile::tempdir().unwrap();
         let profiles = temp.path().join("profiles");
         let tasks = AreaTasks::new(tokio::runtime::Handle::current());
@@ -742,7 +975,10 @@ mod installation_tests {
                 .commands
                 .same_channel(&areas.artifacts.renderer.as_ref().unwrap().commands)
         );
-        assert!(areas.artifact_pages().is_none());
+        assert!(Arc::ptr_eq(
+            &areas.artifact_pages().unwrap(),
+            &areas.artifact_pages().unwrap()
+        ));
         assert_eq!(owner.status().phase, Phase::Stopped);
         assert!(ledger.children().is_empty());
         assert!(!profiles.exists());

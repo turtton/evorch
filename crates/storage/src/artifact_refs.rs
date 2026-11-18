@@ -15,6 +15,11 @@
 
 use crate::{Database, StorageError};
 
+/// Maximum rows returned by a thread-scoped metadata page (including lookahead).
+pub const MAX_THREAD_ARTIFACT_PAGE: usize = 128;
+/// A metadata count is a capped count, never an unbounded thread scan.
+pub const MAX_THREAD_ARTIFACT_COUNT: usize = 1024;
+
 /// One artifact's claim on a blob.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactRef {
@@ -66,6 +71,56 @@ pub struct UnknownMeta {
 }
 
 impl Database {
+    /// A single reference belonging to `thread_id`. Knowing its ID or blob hash
+    /// alone does not establish this affiliation.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn artifact_ref_for_thread(
+        &self,
+        thread_id: &str,
+        artifact_id: &str,
+    ) -> Result<Option<ArtifactRef>, StorageError> {
+        crate::repo::artifact_refs::ref_for_thread(&self.conn, thread_id, artifact_id)
+    }
+
+    /// References strictly after `cursor`, ordered by ID, filtered by thread
+    /// **before** pagination. `limit` is capped at [`MAX_THREAD_ARTIFACT_PAGE`];
+    /// zero returns no rows. The composite thread/ID index bounds the seek.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn artifact_refs_for_thread(
+        &self,
+        thread_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ArtifactRef>, StorageError> {
+        crate::repo::artifact_refs::refs_for_thread(
+            &self.conn,
+            thread_id,
+            cursor,
+            limit.min(MAX_THREAD_ARTIFACT_PAGE),
+        )
+    }
+
+    /// `min(thread's reference count, limit, MAX_THREAD_ARTIFACT_COUNT)`.
+    /// This is deliberately not an exact total once the cap is reached.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn artifact_ref_count_for_thread(
+        &self,
+        thread_id: &str,
+        limit: usize,
+    ) -> Result<usize, StorageError> {
+        crate::repo::artifact_refs::count_for_thread(
+            &self.conn,
+            thread_id,
+            limit.min(MAX_THREAD_ARTIFACT_COUNT),
+        )
+    }
+
     /// The collector's state.
     ///
     /// # Errors

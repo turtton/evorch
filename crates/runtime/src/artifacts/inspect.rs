@@ -14,12 +14,22 @@ use crate::{AgentRuntime, agent_loop::LoopState};
 
 pub const INSPECT_ARTIFACT: &str = "inspect_artifact";
 
-/// Offline pages for HTML artifacts, one per key (a run). The GUI provides
-/// them on CEF; without a provider the tool is not offered.
+/// Offline pages for HTML artifacts, one per key (a run).
 #[async_trait::async_trait]
 pub trait ArtifactPages: Send + Sync {
     /// Loads `html` as `key`'s page, replacing the page `key` had.
     async fn open(&self, key: &str, html: Vec<u8>) -> Result<Arc<dyn ArtifactPage>, String>;
+
+    /// Metadata has already passed inspect's conversation ownership check.
+    /// Older providers can keep their existing page-opening behavior.
+    async fn open_artifact(
+        &self,
+        key: &str,
+        html: Vec<u8>,
+        _record: &super::ArtifactRecord,
+    ) -> Result<Arc<dyn ArtifactPage>, String> {
+        self.open(key, html).await
+    }
 
     fn page(&self, key: &str) -> Option<Arc<dyn ArtifactPage>>;
 
@@ -129,14 +139,14 @@ async fn run(
     }
     let pages = runtime
         .artifact_pages()
-        .ok_or("artifact inspection needs the GUI built with CEF")?;
+        .ok_or("artifact inspection needs the core renderer helper")?;
     let args: Args = crate::meta::parse(input)?;
     let key = state.caller_run_id().to_string();
     let page = match args.action {
         Action::Open => {
             let id = required(args.artifact_id, "artifact_id")?;
-            let html = artifact_html(state, runtime, &id)?;
-            pages.open(&key, html).await?
+            let (record, html) = artifact_html(state, runtime, &id)?;
+            pages.open_artifact(&key, html, &record).await?
         }
         Action::Close => {
             return Ok(ToolResult::success(if pages.close(&key) {
@@ -195,7 +205,11 @@ async fn run(
 }
 
 /// The artifact's HTML, if it belongs to the caller's conversation.
-fn artifact_html(state: &LoopState, runtime: &AgentRuntime, id: &str) -> Result<Vec<u8>, String> {
+fn artifact_html(
+    state: &LoopState,
+    runtime: &AgentRuntime,
+    id: &str,
+) -> Result<(super::ArtifactRecord, Vec<u8>), String> {
     let store = super::store(runtime)?;
     let record = store.load(id)?;
     let root = runtime.run_root(state.caller_run_id())?;
@@ -213,8 +227,9 @@ fn artifact_html(state: &LoopState, runtime: &AgentRuntime, id: &str) -> Result<
             record.media_type
         ));
     }
-    std::fs::read(store.blob_path(&record))
-        .map_err(|error| format!("artifact {id} is no longer stored: {error}"))
+    let html = std::fs::read(store.blob_path(&record))
+        .map_err(|error| format!("artifact {id} is no longer stored: {error}"))?;
+    Ok((record, html))
 }
 
 async fn outline(page: &dyn ArtifactPage) -> Result<ToolResult, String> {

@@ -1,23 +1,23 @@
-//! The renderer wiring of PR 16a-2's integration PR adds no tool and changes no
-//! cache prefix: the artifact area is wired into the core but its provider
-//! factory returns `None`, so the runtime is given no `ArtifactPages` and does not
-//! offer `inspect_artifact`. This is the baseline the feature PRs extend:
-//! integration-16a2 registers it in the cache gate and the later PRs (F1 owner,
-//! F2 artifact API) add their scenarios to this binary. F2 turns the provider on
-//! and changes the expectation here deliberately: the tool is then offered from
-//! the first request and stays frozen whatever the helper does.
+//! F2 turns the artifact provider on: the runtime is given an `ArtifactPages`
+//! before any run exists, so `inspect_artifact` is part of the tool catalog from
+//! the first request of every conversation and stays frozen whatever the helper
+//! does (plan §8.2).
 //!
 //! The core is bootstrapped (the production composition, including the artifact
-//! wiring) and two turns of one conversation cross the production routing and
+//! wiring) and the turns of one conversation cross the production routing and
 //! HTTP adapters, for the Chat Completions and the subscription (Claude) wire.
 //! The assertions read the recorded requests: the tool array is byte-identical
-//! across the turns, the input-derived cache prefix only grows, and
-//! `inspect_artifact` is absent. No helper is started and no test waits for time.
+//! across the turns whether the helper is absent, not started, running, crashed
+//! or restarted; the input-derived cache prefix only grows (tool success, a
+//! re-open of the artifact, a failed call after a crash, a core restart); and a
+//! conversation that last ran without the provider meets exactly one tools-only
+//! boundary. Every wait is a lifecycle event of the run, never a duration.
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use event_bus::AgentRunPhase;
 use sandbox::CredentialStore as _;
-use serde_json::Value;
+use serde_json::{Value, json};
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
 use workbench_host::provenance::local_desktop;
 use workbench_protocol::commands::{Command, ComposerRole, SendChat};
@@ -41,6 +41,253 @@ impl runtime::SandboxFactory for Unisolated {
     }
 }
 
+/// The model of a core that predates the artifact provider: it forwards every
+/// call of the production model and hides `inspect_artifact` from the tool array,
+/// which is exactly the catalog such a core sent. The switch ends the pretence, as
+/// the upgraded core does when it resumes the conversation.
+struct WithoutArtifactTool(
+    Arc<dyn runtime::AgentModel>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
+
+impl WithoutArtifactTool {
+    fn visible(&self, tools: &[providers::ToolSpec]) -> Vec<providers::ToolSpec> {
+        let hidden = self.1.load(std::sync::atomic::Ordering::SeqCst);
+        tools
+            .iter()
+            .filter(|tool| !(hidden && tool.name.ends_with(runtime::artifacts::INSPECT_ARTIFACT)))
+            .cloned()
+            .collect()
+    }
+}
+
+type Invocation = runtime::AgentInvocationContext;
+type Rt<T> = Result<T, runtime::RuntimeError>;
+
+#[async_trait]
+impl runtime::AgentModel for WithoutArtifactTool {
+    fn validate_checkpoint_compatibility(
+        &self,
+        invocation: &Invocation,
+        role: runtime::Role,
+        pins: &[runtime::RoutePinRecord],
+        input: Option<&runtime::quiesce::ProviderInput>,
+    ) -> Rt<()> {
+        self.0
+            .validate_checkpoint_compatibility(invocation, role, pins, input)
+    }
+    fn adopt_recovery_checkpoint(
+        &self,
+        run_id: &str,
+        pins: &[runtime::RoutePinRecord],
+        input: Option<&runtime::quiesce::ProviderInput>,
+    ) {
+        self.0.adopt_recovery_checkpoint(run_id, pins, input);
+    }
+    fn checkpoint_provider_input(&self, run_id: &str) -> Option<runtime::quiesce::ProviderInput> {
+        self.0.checkpoint_provider_input(run_id)
+    }
+    fn restore_checkpoint_provider_state(
+        &self,
+        run_id: &str,
+        role: runtime::Role,
+        category: Option<&str>,
+        input: &runtime::quiesce::ProviderInput,
+    ) {
+        self.0
+            .restore_checkpoint_provider_state(run_id, role, category, input);
+    }
+    fn narrows_edit_tools(&self) -> bool {
+        self.0.narrows_edit_tools()
+    }
+    fn edit_tool_for_run(
+        &self,
+        run_id: &str,
+        role: runtime::Role,
+        category: Option<&str>,
+    ) -> Option<config::EditToolConfig> {
+        self.0.edit_tool_for_run(run_id, role, category)
+    }
+    fn edit_tools_by_run(
+        &self,
+    ) -> std::collections::BTreeMap<(String, String), config::EditToolConfig> {
+        self.0.edit_tools_by_run()
+    }
+    fn restore_edit_tools(
+        &self,
+        history: &std::collections::BTreeMap<(String, String), config::EditToolConfig>,
+    ) {
+        self.0.restore_edit_tools(history);
+    }
+    fn model_switch_prepared(&self, invocation: &Invocation, role: runtime::Role, selected: &str) {
+        self.0.model_switch_prepared(invocation, role, selected);
+    }
+    fn image_generation_enabled(&self) -> bool {
+        self.0.image_generation_enabled()
+    }
+    fn web_search_provider(
+        &self,
+        invocation: &Invocation,
+        role: runtime::Role,
+        tools: &[providers::ToolSpec],
+        usage_sink: Arc<dyn Fn(providers::Usage) + Send + Sync>,
+    ) -> Rt<Option<Arc<dyn tools::search::SearchProvider>>> {
+        self.0
+            .web_search_provider(invocation, role, &self.visible(tools), usage_sink)
+    }
+    fn requires_admission(&self) -> bool {
+        self.0.requires_admission()
+    }
+    async fn admit(&self, invocation: &Invocation, role: runtime::Role) -> Rt<()> {
+        self.0.admit(invocation, role).await
+    }
+    async fn compact_context(
+        &self,
+        invocation: &Invocation,
+        role: runtime::Role,
+        messages: &[providers::Message],
+        instructions: &[providers::Message],
+        tools: &[providers::ToolSpec],
+    ) -> Rt<Option<providers::CompactionResult>> {
+        self.0
+            .compact_context(
+                invocation,
+                role,
+                messages,
+                instructions,
+                &self.visible(tools),
+            )
+            .await
+    }
+    async fn prepare_replay_context(
+        &self,
+        invocation: &Invocation,
+        role: runtime::Role,
+        messages: &[providers::Message],
+        tools: &[providers::ToolSpec],
+        replay: &runtime::ResponsesReplayState,
+    ) -> Rt<()> {
+        self.0
+            .prepare_replay_context(invocation, role, messages, &self.visible(tools), replay)
+            .await
+    }
+    async fn resolve_replay_scope(
+        &self,
+        invocation: &Invocation,
+        role: runtime::Role,
+        tools: &[providers::ToolSpec],
+    ) -> Rt<Option<providers::ResolvedResponsesScope>> {
+        self.0
+            .resolve_replay_scope(invocation, role, &self.visible(tools))
+            .await
+    }
+    async fn complete_streaming_with_replay(
+        &self,
+        invocation: &Invocation,
+        role: runtime::Role,
+        messages: &[providers::Message],
+        tools: &[providers::ToolSpec],
+        bus: &event_bus::EventBus,
+        replay: &runtime::ResponsesReplayState,
+    ) -> Rt<providers::ChatResponse> {
+        self.0
+            .complete_streaming_with_replay(
+                invocation,
+                role,
+                messages,
+                &self.visible(tools),
+                bus,
+                replay,
+            )
+            .await
+    }
+    async fn complete(
+        &self,
+        invocation: &Invocation,
+        role: runtime::Role,
+        messages: &[providers::Message],
+        tools: &[providers::ToolSpec],
+    ) -> Rt<providers::ChatResponse> {
+        self.0
+            .complete(invocation, role, messages, &self.visible(tools))
+            .await
+    }
+    async fn complete_structured(
+        &self,
+        invocation: &Invocation,
+        role: runtime::Role,
+        messages: &[providers::Message],
+        schema: &providers::JsonSchema,
+    ) -> Rt<providers::ChatResponse> {
+        self.0
+            .complete_structured(invocation, role, messages, schema)
+            .await
+    }
+    async fn complete_streaming(
+        &self,
+        invocation: &Invocation,
+        role: runtime::Role,
+        messages: &[providers::Message],
+        tools: &[providers::ToolSpec],
+        bus: &event_bus::EventBus,
+    ) -> Rt<providers::ChatResponse> {
+        self.0
+            .complete_streaming(invocation, role, messages, &self.visible(tools), bus)
+            .await
+    }
+    fn selected_model(&self, role: runtime::Role, category: Option<&str>) -> String {
+        self.0.selected_model(role, category)
+    }
+    fn chain_models(&self, role: runtime::Role, category: Option<&str>) -> Vec<String> {
+        self.0.chain_models(role, category)
+    }
+    fn selected_model_for_run(
+        &self,
+        run_id: &str,
+        role: runtime::Role,
+        category: Option<&str>,
+    ) -> String {
+        self.0.selected_model_for_run(run_id, role, category)
+    }
+    fn catalog_context_window(&self, selected_model: &str) -> Option<u64> {
+        self.0.catalog_context_window(selected_model)
+    }
+    fn available_profiles(&self) -> Vec<runtime::compose::ProfileSummary> {
+        self.0.available_profiles()
+    }
+    fn selected_reasoning_effort(
+        &self,
+        role: runtime::Role,
+        category: Option<&str>,
+    ) -> Option<String> {
+        self.0.selected_reasoning_effort(role, category)
+    }
+    fn binding_preview(
+        &self,
+        role: runtime::Role,
+        category: Option<&str>,
+    ) -> Option<config::types::agents::ResolvedAgentBinding> {
+        self.0.binding_preview(role, category)
+    }
+    fn route_pins(&self, run_id: &str) -> Vec<runtime::RoutePinRecord> {
+        self.0.route_pins(run_id)
+    }
+    fn restore_route_pins(&self, run_id: &str, pins: &[runtime::RoutePinRecord]) {
+        self.0.restore_route_pins(run_id, pins);
+    }
+    fn output_limit_catalogs(&self) -> Option<runtime::compose::OutputLimitCatalogs> {
+        self.0.output_limit_catalogs()
+    }
+    fn restore_output_limit_catalogs(&self, shared: &runtime::compose::OutputLimitCatalogs) {
+        self.0.restore_output_limit_catalogs(shared);
+    }
+    fn route_pins_by_run(
+        &self,
+    ) -> std::collections::BTreeMap<String, Vec<runtime::RoutePinRecord>> {
+        self.0.route_pins_by_run()
+    }
+}
+
 fn tool_names(provider: &cache::Provider, request: &Value) -> Vec<String> {
     request["tools"]
         .as_array()
@@ -56,15 +303,101 @@ fn tool_names(provider: &cache::Provider, request: &Value) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn artifact_wiring_leaves_the_tool_catalog_and_the_sent_prefix_unchanged() {
-    for subscription in [false, true] {
+fn offers_inspect(provider: &cache::Provider, request: &Value) -> usize {
+    tool_names(provider, request)
+        .iter()
+        .filter(|name| name.ends_with(runtime::artifacts::INSPECT_ARTIFACT))
+        .count()
+}
+
+/// The tool result the request carries last, as the provider received it.
+fn last_tool_result(provider: &cache::Provider, request: &Value) -> String {
+    let messages = request["messages"].as_array().expect("a message array");
+    let message = match provider {
+        cache::Provider::Api(_) => messages.iter().rev().find(|m| m["role"] == "tool"),
+        cache::Provider::Claude(_) => messages.iter().rev().find(|m| {
+            m["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"))
+        }),
+    };
+    message.expect("a tool result was sent").to_string()
+}
+
+/// `artifact-<32 hex>` in a request that carries the capture's result.
+fn artifact_id(requests: &[Value]) -> String {
+    for body in requests.iter().map(Value::to_string) {
+        for (at, _) in body.match_indices("artifact-") {
+            let id: String = body[at..].chars().take("artifact-".len() + 32).collect();
+            if id["artifact-".len()..]
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+                && id.len() == "artifact-".len() + 32
+            {
+                return id;
+            }
+        }
+    }
+    panic!(
+        "no request carries the captured artifact id: {}",
+        requests.last().map(Value::to_string).unwrap_or_default()
+    );
+}
+
+/// Which helper the core is told to start; nothing is started at bootstrap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Helper {
+    /// The configured path does not exist: opening a page fails, the catalog does not.
+    Absent,
+    /// The fake helper that serves the IPC protocol and renders nothing.
+    #[cfg(feature = "renderer-test-helper")]
+    Fake,
+}
+
+impl Helper {
+    fn path(self) -> std::path::PathBuf {
+        match self {
+            Self::Absent => "/nonexistent-evorch-helper/evorch-renderer".into(),
+            #[cfg(feature = "renderer-test-helper")]
+            Self::Fake => std::env::var_os("CARGO_BIN_EXE_evorch-renderer-test-helper")
+                .expect("the fake helper is built with the renderer-test-helper feature")
+                .into(),
+        }
+    }
+}
+
+/// The core reads the helper path from the process environment while it is
+/// bootstrapped; boots in this binary take turns so none sees another's value.
+static HELPER_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct World {
+    project: cache::Project,
+    provider: cache::Provider,
+    config: config::Config,
+    user: std::path::PathBuf,
+    root: std::path::PathBuf,
+}
+
+struct Running {
+    core: BootstrappedHost,
+    receiver: event_bus::EventReceiver,
+    /// The run of the conversation on this core once a chat reached it.
+    run: Option<runtime::RunId>,
+}
+
+impl World {
+    async fn new(subscription: bool) -> Self {
         let project = cache::Project::new();
         let provider = cache::Provider::new(subscription).await;
         let config = cache::configuration(&provider);
         let root = project.root().canonicalize().unwrap();
         let user = root.join("user");
         std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            root.join("page.html"),
+            "<!doctype html><button>Add</button>",
+        )
+        .unwrap();
         let store = SidebarStore::new(user.join("sidebar.json"));
         let mut document = SidebarDocument::default();
         document
@@ -86,7 +419,7 @@ async fn artifact_wiring_leaves_the_tool_catalog_and_the_sent_prefix_unchanged()
             .set(
                 "claude",
                 &sandbox::Secret::from(
-                    serde_json::json!({
+                    json!({
                         "access_token": "fixture-mcp-token",
                         "refresh_token": "fixture-refresh",
                         "expires_at": 4_102_444_800u64
@@ -95,15 +428,31 @@ async fn artifact_wiring_leaves_the_tool_catalog_and_the_sent_prefix_unchanged()
                 ),
             )
             .unwrap();
+        Self {
+            project,
+            provider,
+            config,
+            user,
+            root,
+        }
+    }
+
+    /// A core over this world's directories. `hide_artifact_tool` wraps the
+    /// model of a core that does not offer `inspect_artifact` while it is set.
+    async fn boot(
+        &self,
+        helper: Helper,
+        hide_artifact_tool: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Running {
         let bus = Arc::new(event_bus::EventBus::new(4096));
         let model = workbench_host::bootstrap::models::compose_production_model(
-            &config,
+            &self.config,
             &workbench_host::bootstrap::models::ProductionModel {
                 load_options: config::LoadOptions {
-                    user_config_dir: Some(user.clone()),
+                    user_config_dir: Some(self.user.clone()),
                     ..Default::default()
                 },
-                credential_store: project.secrets.clone(),
+                credential_store: self.project.secrets.clone(),
                 bus: bus.clone(),
                 env: Arc::new(routing::MapEnv::from_iter([(
                     "MCP_CACHE_KEY",
@@ -113,11 +462,19 @@ async fn artifact_wiring_leaves_the_tool_catalog_and_the_sent_prefix_unchanged()
             },
         )
         .unwrap();
-        let mut core = BootstrappedHost::open_with_test_seams(
+        let model: Arc<dyn runtime::AgentModel> = match hide_artifact_tool {
+            Some(hidden) => Arc::new(WithoutArtifactTool(model, hidden)),
+            None => model,
+        };
+        let _only_boot = HELPER_ENV.lock().await;
+        // SAFETY: boots hold HELPER_ENV, and nothing else in this binary reads or
+        // writes the variable while one runs.
+        unsafe { std::env::set_var("EVORCH_RENDERER_EXEC", helper.path()) };
+        let core = BootstrappedHost::open_with_test_seams(
             BootstrapOptions {
-                config_dir: user.clone(),
-                project_root: root.clone(),
-                ownership_root: project.sockets().to_path_buf(),
+                config_dir: self.user.clone(),
+                project_root: self.root.clone(),
+                ownership_root: self.project.sockets().to_path_buf(),
             },
             TestSeams {
                 model,
@@ -126,25 +483,39 @@ async fn artifact_wiring_leaves_the_tool_catalog_and_the_sent_prefix_unchanged()
         )
         .await
         .unwrap();
-        let mut h = cache::Harness {
-            runtime: core.runtime.clone(),
-            receiver: core.runtime.event_bus().subscribe(),
+        let receiver = core.runtime.event_bus().subscribe();
+        Running {
+            core,
+            receiver,
+            run: None,
+        }
+    }
+
+    /// One user turn on the thread: it scripts `steps`, sends `text`, and returns
+    /// when the run waits again. The first call creates the thread.
+    async fn turn(&self, running: &mut Running, first: bool, text: &str, steps: Vec<cache::Step>) {
+        self.provider.enqueue(steps);
+        if let Some(run) = running.run {
+            running.core.runtime.send_message(run, text.into()).unwrap();
+            cache::through(&mut running.receiver, run, AgentRunPhase::Waiting).await;
+            return;
+        }
+        let send = SendChat {
+            project: ProjectId::new("p").unwrap(),
+            thread: ThreadId::new("t1").unwrap(),
+            submission_id: SubmissionId::new(uuid::Uuid::new_v4().to_string()).unwrap(),
+            composer_role: ComposerRole::Worker,
+            text: text.into(),
+            skills: vec![],
+            attachments: vec![],
+            model_preference: None,
+            fork_seed: None,
         };
-        provider.enqueue(vec![cache::answer()]);
         let run: runtime::RunId = {
-            let send = SendChat {
-                project: ProjectId::new("p").unwrap(),
-                thread: ThreadId::new("t1").unwrap(),
-                submission_id: SubmissionId::new("00000000-0000-4000-8000-000000000009").unwrap(),
-                composer_role: ComposerRole::Worker,
-                text: cache::GOAL.into(),
-                skills: vec![],
-                attachments: vec![],
-                model_preference: None,
-                fork_seed: None,
-            };
-            let mut host = core.host.lock().unwrap();
-            host.reserve_new_chat_thread(&send).unwrap();
+            let mut host = running.core.host.lock().unwrap();
+            if first {
+                host.reserve_new_chat_thread(&send).unwrap();
+            }
             host.handle_command(
                 Command::Conversation(
                     workbench_protocol::namespaces::ConversationCommand::SendChat(send),
@@ -153,36 +524,225 @@ async fn artifact_wiring_leaves_the_tool_catalog_and_the_sent_prefix_unchanged()
             )
             .unwrap()
             .run_id
-            .unwrap()
+            .expect("the chat was accepted")
             .as_str()
             .parse()
             .unwrap()
         };
-        cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
-        provider.enqueue(vec![cache::answer()]);
-        core.runtime
-            .send_message(run, "Continue with the artifact area wired".into())
-            .unwrap();
-        cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
+        running.run = Some(run);
+        cache::through(&mut running.receiver, run, AgentRunPhase::Waiting).await;
+    }
 
-        let requests = provider.requests();
-        assert_eq!(requests.len(), 2);
-        cache::assert_frozen(&provider, &requests);
-        for request in &requests {
-            let names = tool_names(&provider, request);
-            assert!(!names.is_empty(), "the catalog is not empty");
-            assert!(
-                !names
-                    .iter()
-                    .any(|name| name.ends_with(runtime::artifacts::INSPECT_ARTIFACT)),
-                "the artifact provider is None until the artifact API PR: {names:?}"
+    fn inspect(&self, arguments: Value) -> cache::Step {
+        cache::call_with(runtime::artifacts::INSPECT_ARTIFACT, arguments)
+    }
+
+    async fn finish(self, mut running: Running) {
+        self.provider.assert_drained();
+        running.core.shutdown().await.unwrap();
+    }
+}
+
+/// The tools of every request are one array, `inspect_artifact` is in it once,
+/// and each request extends the previous input.
+fn assert_frozen_with_artifact_tool(provider: &cache::Provider, requests: &[Value]) {
+    cache::assert_frozen(provider, requests);
+    for request in requests {
+        assert_eq!(
+            offers_inspect(provider, request),
+            1,
+            "the provider is Some: the tool is offered once: {:?}",
+            tool_names(provider, request)
+        );
+    }
+}
+
+/// The catalog is the same whether the helper was never started, is running, was
+/// killed, or cannot be started at all; the tool results differ, the wire prefix
+/// only grows.
+async fn catalog_scenario(subscription: bool, helper: Helper) {
+    let world = World::new(subscription).await;
+    let mut running = world.boot(helper, None).await;
+    let started_before = running.core.spawn_ledger.children().len();
+    // Helper not started yet: a failed call, then a capture (no helper needed).
+    world
+        .turn(
+            &mut running,
+            true,
+            cache::GOAL,
+            vec![
+                world.inspect(json!({"action": "snapshot"})),
+                cache::call_with(
+                    "render_artifact",
+                    json!({"path": "page.html", "title": "page"}),
+                ),
+                cache::answer(),
+            ],
+        )
+        .await;
+    assert_eq!(running.core.spawn_ledger.children().len(), started_before);
+    let id = artifact_id(&world.provider.requests());
+    // Open the page: the helper starts (or cannot), the tool succeeds (or fails).
+    world
+        .turn(
+            &mut running,
+            false,
+            "Open it",
+            vec![
+                world.inspect(json!({"action": "open", "artifact_id": id})),
+                cache::answer(),
+            ],
+        )
+        .await;
+    let opened = running.core.spawn_ledger.children().len() > started_before;
+    assert_eq!(opened, helper != Helper::Absent, "helper start");
+    // Open the same artifact again, then drive the page.
+    world
+        .turn(
+            &mut running,
+            false,
+            "Open it again",
+            vec![
+                world.inspect(json!({"action": "open", "artifact_id": id})),
+                world.inspect(json!({"action": "snapshot"})),
+                cache::answer(),
+            ],
+        )
+        .await;
+    if helper != Helper::Absent {
+        // The helper is stopped cleanly and a later open starts a new one.
+        let owner = running.core.host.lock().unwrap().renderer_owner().unwrap();
+        owner.stop().await.unwrap();
+        let before = running.core.spawn_ledger.children().len();
+        world
+            .turn(
+                &mut running,
+                false,
+                "Open it after the stop",
+                vec![
+                    world.inspect(json!({"action": "open", "artifact_id": id})),
+                    world.inspect(json!({"action": "snapshot"})),
+                    cache::answer(),
+                ],
+            )
+            .await;
+        assert_eq!(
+            running.core.spawn_ledger.children().len(),
+            before + 1,
+            "the reopened page runs on a new helper"
+        );
+        // The helper dies under the conversation: the next call fails, the next
+        // request still carries the same catalog and an unchanged prefix.
+        running.core.spawn_ledger.stop_all_children();
+        world
+            .turn(
+                &mut running,
+                false,
+                "Look again",
+                vec![
+                    world.inspect(json!({"action": "snapshot"})),
+                    cache::answer(),
+                ],
+            )
+            .await;
+    }
+    let requests = world.provider.requests();
+    assert_frozen_with_artifact_tool(&world.provider, &requests);
+    assert!(
+        requests.len() >= 8,
+        "every scripted step was one request: {}",
+        requests.len()
+    );
+    let first_open = last_tool_result(&world.provider, &requests[4]);
+    if helper == Helper::Absent {
+        assert!(
+            first_open.contains("renderer is unavailable"),
+            "{first_open}"
+        );
+    } else {
+        assert!(!first_open.contains("is_error\":true"), "{first_open}");
+        assert!(first_open.contains("button \\\"Add\\\""), "{first_open}");
+        let after_crash = last_tool_result(&world.provider, requests.last().unwrap());
+        assert!(
+            after_crash.contains("no artifact page is open"),
+            "the crashed helper's page is gone: {after_crash}"
+        );
+    }
+    world.finish(running).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_catalog_and_prefix_stay_frozen_when_the_helper_cannot_be_started() {
+    for subscription in [false, true] {
+        catalog_scenario(subscription, Helper::Absent).await;
+    }
+}
+
+#[cfg(feature = "renderer-test-helper")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_catalog_and_prefix_stay_frozen_while_the_helper_is_not_started_running_and_crashed() {
+    for subscription in [false, true] {
+        catalog_scenario(subscription, Helper::Fake).await;
+    }
+}
+
+/// A conversation last sent by a core without the provider meets one tools-only
+/// boundary when the current core takes it over: only `inspect_artifact` is
+/// added, system, model, settings, affinity and history are unchanged, and the
+/// next turns reuse the new prefix.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conversation_from_before_the_provider_gets_one_tools_only_boundary() {
+    for subscription in [false, true] {
+        let world = World::new(subscription).await;
+        let hidden = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut running = world.boot(Helper::Absent, Some(hidden.clone())).await;
+        world
+            .turn(&mut running, true, cache::GOAL, vec![cache::answer()])
+            .await;
+        world
+            .turn(&mut running, false, "One more", vec![cache::answer()])
+            .await;
+        hidden.store(false, std::sync::atomic::Ordering::SeqCst);
+        world
+            .turn(
+                &mut running,
+                false,
+                "After the upgrade",
+                vec![cache::answer()],
+            )
+            .await;
+        world
+            .turn(&mut running, false, "And again", vec![cache::answer()])
+            .await;
+        let requests = world.provider.requests();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[..2] {
+            assert_eq!(
+                offers_inspect(&world.provider, request),
+                0,
+                "pre-F2 catalog"
             );
         }
-        provider.assert_drained();
-        core.runtime
-            .stop(run, runtime::StopScope::SelfOnly)
-            .unwrap();
-        core.runtime.wait(run).await.unwrap();
-        core.shutdown().await.unwrap();
+        cache::assert_frozen(&world.provider, &requests[..2]);
+        // The boundary: the tool array differs by exactly `inspect_artifact`...
+        let before = tool_names(&world.provider, &requests[1]);
+        let after = tool_names(&world.provider, &requests[2]);
+        let added: Vec<_> = after.iter().filter(|name| !before.contains(name)).collect();
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert!(added[0].ends_with(runtime::artifacts::INSPECT_ARTIFACT));
+        assert_eq!(after.len(), before.len() + 1);
+        // ...and nothing else: with the old array put back, the request is an
+        // ordinary append (same settings, system and affinity, same history).
+        let mut as_before = requests[2].clone();
+        as_before["tools"] = requests[1]["tools"].clone();
+        mock_openai::cache_contract::assert_append_only(
+            world.provider.protocol(),
+            &requests[1],
+            &as_before,
+        )
+        .unwrap();
+        // After the boundary the catalog is frozen and the prefix reused.
+        assert_frozen_with_artifact_tool(&world.provider, &requests[2..]);
+        world.finish(running).await;
     }
 }

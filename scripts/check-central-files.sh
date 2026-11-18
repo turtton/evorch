@@ -51,6 +51,18 @@ is_central() {
   [[ "$verdict" == 1 ]]
 }
 
+# F2 removes the last reserved namespaces and their three shared macros in one
+# buildable change, and reads the renderer reconnection grace through one
+# accessor on the host (ingress.rs) and one delegating method (areas/mod.rs). Only these reviewed paths are exempt; other scopes and
+# central files keep their fence.
+scoped_central_exception() {
+  [[ "$1" == pr16a2 ]] || return 1
+  case "$2" in
+    crates/workbench-protocol/src/namespaces/mod.rs | crates/workbench-protocol/tests/namespaces.rs | crates/workbench-host/Cargo.toml | crates/workbench-host/src/ingress.rs | crates/workbench-host/src/areas/mod.rs | scripts/feature-scopes.txt | scripts/check-central-files.sh | scripts/tests/test_check_central_files.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The patterns a scope allows, one per line (`area:` items expanded).
 scope_patterns() {
   local name=$1 line item area found=0
@@ -113,7 +125,7 @@ if [[ "$check_data" == 1 ]]; then
     while IFS= read -r pattern; do
       # A scope pattern that is itself a central file would make the check unsatisfiable.
       case "$pattern" in *'*'*) continue ;; esac
-      if is_central "$pattern"; then
+      if is_central "$pattern" && ! scoped_central_exception "$name" "$pattern"; then
         echo "FAIL: scope $name allows the central file $pattern" >&2
         failures=$((failures + 1))
       fi
@@ -152,7 +164,7 @@ patterns=$(scope_patterns "$scope") || { echo "unknown scope: $scope (see $scope
 failures=0
 for file in "${changed[@]}"; do
   [[ -n "$file" ]] || continue
-  if is_central "$file"; then
+  if is_central "$file" && ! scoped_central_exception "$scope" "$file"; then
     echo "FAIL: $file is a central file; only an integration PR may change it (scope $scope)" >&2
     failures=$((failures + 1))
   elif ! matches_any "$file" <<< "$patterns"; then
@@ -161,4 +173,4 @@ for file in "${changed[@]}"; do
   fi
 done
 [[ "$failures" == 0 ]] || exit 1
-echo "scope $scope: ${#changed[@]} changed file(s), none central, all in scope"
+echo "scope $scope: ${#changed[@]} changed file(s), all in scope (only approved central exceptions)"

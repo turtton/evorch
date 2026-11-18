@@ -353,6 +353,32 @@ same, and no helper process is started.
   4b-d-3) adds `local_desktop()` (or the connection's provenance) as the third
   argument when it rebases.
 
+### Stage 16a-2 F2: the artifact and renderer API (the provider becomes `Some`)
+
+F2 turns the rows above that say "the provider is `None`" around:
+`ArtifactsArea::artifact_pages` returns the core's `RuntimePages`, so
+`inspect_artifact` is offered from the first request of every conversation
+(`core_renderer_cache` asserts one occurrence per request and a frozen
+catalog). The helper is still started lazily; catalog availability does not
+depend on it.
+
+| Contract | Where it is held | Where it is tested |
+|---|---|---|
+| `ReadContent` is authorized by the thread and project the artifact is **stored** under (storage index, sidebar project root, meta file, digest), never by what the client states, and not by who owns a preview session. Any mismatch is `NotFound` | `ingress/namespaces/artifacts.rs` (`renderer_artifact_record`), `areas/artifacts.rs` (`verified_record`) | `evorch-core/tests/renderer_artifacts.rs` |
+| The Web surface gets `List` and `Get` metadata only. `ReadContent` (text included) and every renderer query, a capture reference through `GetRendererOperation` included, fail with one fixed `PermissionDenied`, before the artifact is looked up | `ingress/namespaces/{artifacts,browser}.rs` (`local_surface`) | `renderer_artifacts.rs`, `areas/browser/service/tests.rs` |
+| `ReadContent` returns HTML and text only, as UTF-8 chunks; the byte offset and limit are validated and a chunk never ends inside a character. Image bodies are refused with `InvalidRequest` | `areas/artifacts/content.rs` | `content.rs` unit tests, `renderer_artifacts.rs` |
+| No base64 DTO is public: `ReadRendererCapture`, `CaptureContent` and a base64 `ReadContent` do not decode | `workbench-protocol/src/namespaces/{artifacts,browser}` | `namespaces/browser/tests.rs`, protocol golden files |
+| A capture is a PNG held privately by the owner (bounded by count and by bytes, reclaimed on its terms), fetched only through a reference the owner and the surface are authorized for. The runtime's `inspect_artifact` screenshot is unchanged | `areas/browser/service/operations.rs` | `areas/browser/service/tests.rs` |
+| `ArtifactPages::open_artifact(key, html, &ArtifactRecord)` defaults to `open`; only the core adapter overrides it, so the tab's `ArtifactRef` comes from the record whose ownership `inspect_artifact` already checked. The GUI adapter and `ToolSpec` are untouched | `runtime/src/artifacts/inspect.rs`, `areas/browser/run_pages.rs` | `runtime/src/artifacts/tests/inspect.rs` (default delegates to `open`; an override receives the verified record), `renderer_owner.rs` (the core adapter tags the run tab with its record, a plain `open` does not), `renderer_owner_cef.rs` (real CEF, 1024x768) |
+| A detached preview session keeps the core up for the 30 s reconnect grace (`RetentionReason::RendererReconnectGrace`), after which the ordinary idle grace starts. It is not a `ConnectedClients` entry and not running work; a helper watcher never counts as work | `CommandHost::renderer_reconnect_grace`, `lifecycle/idle/renderer.rs`, `backend.rs` | `lifecycle/idle/renderer.rs` (virtual time) |
+
+- HTML returned by `ReadContent` is the stored blob byte for byte: the inline
+  `data:` URIs that capture put there are not touched.
+- Follow-ups. **F3**: the binary transfer of image artifacts and of capture
+  PNGs (the frame/binary route). **Web**: whether the Web surface may later read
+  bodies or captures is open; until then it is refused as above, and that needs
+  its own decision and threat model before it changes.
+
 ## Stage 17d-2: `maintenance backfill-events` in the core (reindex is 17d-3)
 
 `evorch maintenance backfill-events` is a task of the core's `maintenance` area

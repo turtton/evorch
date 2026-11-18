@@ -504,3 +504,39 @@ async fn cancelling_open_does_not_strand_a_tab_or_its_reservation() {
     shutdown(tasks, &ledger).await;
     tree.assert_clean();
 }
+#[tokio::test]
+async fn open_artifact_tags_the_run_tab_with_its_record_and_plain_open_does_not() {
+    use runtime::artifacts::{ArtifactPages as _, ArtifactRecord};
+    use workbench_host::areas::browser::run_pages::RuntimePages;
+    let mut tree = support::Tree::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (tasks, ledger, owner) = fixture(&dir.path().join("profiles"));
+    let pages = RuntimePages::new(Some(owner));
+    let record = ArtifactRecord {
+        artifact_id: "artifact-1".into(),
+        sha256: "0".repeat(64),
+        media_type: "text/html".into(),
+        extension: "html".into(),
+        title: "page".into(),
+        caption: None,
+        source_path: "/unused".into(),
+        byte_len: 0,
+        run_id: "run-1".into(),
+        root_run_id: "run-1".into(),
+        thread_id: Some("thread-1".into()),
+        inlined_assets: Vec::new(),
+    };
+    pages
+        .open_artifact("run-1", b"<p>tagged</p>".to_vec(), &record)
+        .await
+        .unwrap();
+    tree.track(&ledger);
+    assert_eq!(pages.artifact_of("run-1"), Some(record));
+    // The default path keeps the previous behaviour: a page without a record.
+    pages.open("run-2", b"<p>plain</p>".to_vec()).await.unwrap();
+    assert!(pages.page("run-2").is_some());
+    assert_eq!(pages.artifact_of("run-2"), None);
+    assert!(pages.close("run-1") && pages.close("run-2"));
+    shutdown(tasks, &ledger).await;
+    tree.assert_clean();
+}

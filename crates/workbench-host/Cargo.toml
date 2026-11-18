@@ -11,6 +11,7 @@ description = "Core-side command handling for the evorch workbench protocol (ADR
 # must never reach a GUI or client crate. scripts/check-workbench-boundaries.sh
 # enforces that in CI.
 [dependencies]
+async-trait = { workspace = true }
 base64 = { workspace = true }
 rustix = { version = "1", features = ["fs"] }
 image = { workspace = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
@@ -52,7 +53,6 @@ test-support = ["runtime/recovery-test-support", "runtime/idle-test-support"]
 runtime = { path = "../runtime", features = ["recovery-test-support", "idle-test-support"] }
 test-socket-dir = { path = "../test-socket-dir" }
 storage = { path = "../storage", features = ["test-support"] }
-async-trait = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

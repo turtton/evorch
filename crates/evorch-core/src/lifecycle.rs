@@ -5,6 +5,15 @@ use tokio::time::Instant;
 mod idle_activity;
 #[path = "lifecycle/idle/clock.rs"]
 mod idle_clock;
+#[path = "lifecycle/idle/renderer.rs"]
+mod idle_renderer;
+
+/// Whether a reconnection grace read from the browser leaf is still running.
+pub(crate) fn renderer_grace_running(
+    grace: workbench_host::areas::browser::RendererReconnectGrace,
+) -> bool {
+    idle_renderer::deadline(grace, Instant::now()).is_some()
+}
 
 pub struct IdleGrace {
     grace: Duration,
@@ -147,15 +156,19 @@ impl LifecycleDriver {
         let outcome = loop {
             host.host.lock().unwrap().service_mut().poll();
             let (web_count, web_busy) = web_activity.observe(&mut self.idle);
+            // Retains the process until the browser leaf's deadline; it is not a
+            // client and not work, so the idle grace restarts after it.
+            let renderer_grace = idle_renderer::current(host, clock.now());
             let deadline = self.idle.update_at(
                 clock.now(),
                 // The legacy entry point cannot prove an externally owned web
                 // listener empty. Production always transfers the actual owner.
                 web_enabled && web.is_none(),
                 clients.len() + web_count,
-                host.busy() || self.restart.busy() || web_busy,
+                host.busy() || self.restart.busy() || web_busy || renderer_grace.is_some(),
             );
             let expired = clock.expired(deadline);
+            let grace_over = clock.expired(renderer_grace);
             tokio::select! {
                 _ = signals.received() => break Ok(()),
                 Some(request) = self.control_requests.recv() => {
@@ -202,6 +215,7 @@ impl LifecycleDriver {
                 _ = index_work.notified() => (),
                 _ = adoption.notified() => self.idle.reset(),
                 _ = restart.changed() => self.idle.reset(),
+                _ = grace_over, if renderer_grace.is_some() => self.idle.reset(),
                 _ = web_activity.changed() => self.idle.reset(),
                 _ = expired => {
                     if web_activity.has_changed() {
@@ -210,7 +224,8 @@ impl LifecycleDriver {
                     }
                     if !(web_enabled && web.is_none()) {
                         let idle_now = || clients.is_empty() && !host.busy()
-                            && !self.restart.busy() && !backend.web_delivery_busy() && !web_activity.has_changed();
+                            && !self.restart.busy() && !backend.web_delivery_busy() && !web_activity.has_changed()
+                            && idle_renderer::current(host, clock.now()).is_none();
                         let stop = match web.as_ref() {
                             Some(web) => web.try_begin_idle_shutdown_if(idle_now),
                             None => idle_now(),

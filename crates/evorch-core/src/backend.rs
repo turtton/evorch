@@ -141,7 +141,12 @@ impl HostBackend {
     ) -> workbench_host::connections::ClientConnection {
         self.connections.open(client)
     }
-    fn transport_status(&self, mut status: CoreStatus) -> CoreStatus {
+    /// `grace` is read by the caller: it may already hold the host lock.
+    fn transport_status(
+        &self,
+        mut status: CoreStatus,
+        grace: workbench_host::areas::browser::RendererReconnectGrace,
+    ) -> CoreStatus {
         let web = self.web_clients.lock().unwrap();
         let web_count = web.as_ref().map_or(0, |clients| {
             u32::try_from(clients.snapshot().0).unwrap_or(u32::MAX)
@@ -169,6 +174,11 @@ impl HostBackend {
                 RetentionReason::WebServing,
             ),
             (status.running.turns > 0, RetentionReason::ActiveTurn),
+            (
+                // Only the browser leaf's own deadline: not a client, not work.
+                crate::lifecycle::renderer_grace_running(grace),
+                RetentionReason::RendererReconnectGrace,
+            ),
         ] {
             if retain && !status.retention_reasons.contains(&reason) {
                 status.retention_reasons.push(reason);
@@ -191,7 +201,8 @@ impl HostBackend {
         ) {
             hello.status = status;
         }
-        hello.status = self.transport_status(hello.status);
+        let grace = self.host.lock().unwrap().renderer_reconnect_grace();
+        hello.status = self.transport_status(hello.status, grace);
         hello
     }
     pub fn mask<T: Serialize + DeserializeOwned>(&self, value: T) -> Result<T, WorkbenchError> {
@@ -228,9 +239,14 @@ impl HostBackend {
                             ReplyPayload::Query(match reply {
                                 workbench_protocol::queries::QueryReply::Lifecycle(
                                     LifecycleReply::CoreStatus(status),
-                                ) => workbench_protocol::queries::QueryReply::Lifecycle(
-                                    LifecycleReply::CoreStatus(self.transport_status(status)),
-                                ),
+                                ) => {
+                                    workbench_protocol::queries::QueryReply::Lifecycle(
+                                        LifecycleReply::CoreStatus(self.transport_status(
+                                            status,
+                                            host.renderer_reconnect_grace(),
+                                        )),
+                                    )
+                                }
                                 reply => reply,
                             })
                         })
