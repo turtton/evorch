@@ -125,8 +125,13 @@ const C_GC: u64 = 24;
 // only `thread_runs`; the `thread_index_requests` table stays empty here. v68 copies every
 // request row, so its cost does grow with the number of requests (request and target
 // rows are kept, see thread_retention), and this gate does not check that cost.
+// v69 adds the thread/cursor index on artifact_refs. With 4 KiB pages, empty
+// artifact_refs and 10/100,000 existing thread_runs rows in this v38 -> latest probe,
+// baseline main used 390/604 frames; v69 used 395/609 (+5 in both cases), and VM steps
+// grew by 38 in both cases (217,895 -> 217,933). Add exactly those 5 fixed schema
+// frames; the independent VM-step scaling assertion and collection budgets stay.
 const MIGRATION_FRAMES: u64 =
-    24 + 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4 + 32 + 24 + 32 + 16 + 12;
+    24 + 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4 + 32 + 24 + 32 + 16 + 12 + 5;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -363,6 +368,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v69.sql"),
                     include_str!("../undo/undo_v68.sql"),
                     include_str!("../undo/undo_v67.sql"),
                     include_str!("../undo/undo_v66.sql"),

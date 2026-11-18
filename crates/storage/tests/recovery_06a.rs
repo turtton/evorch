@@ -575,6 +575,7 @@ fn fresh_upgrade_and_undo_v61_preserve_previous_intents() {
     let sql = rusqlite::Connection::open(&f.config.db_path).unwrap();
     let package = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let undo_latest = [
+        "undo/undo_v69.sql",
         "undo/undo_v68.sql",
         "undo/undo_v67.sql",
         "undo/undo_v66.sql",
