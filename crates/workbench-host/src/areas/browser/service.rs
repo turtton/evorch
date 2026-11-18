@@ -552,6 +552,18 @@ impl RendererService {
         }
         Ok(Some(tab.public.artifact.clone()))
     }
+    /// The tabs the runs display, as the host holds them after the last sync.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn run_tabs(&self) -> Vec<RendererTab> {
+        self.state
+            .lock()
+            .unwrap()
+            .tabs
+            .values()
+            .filter(|tab| tab.client.is_none())
+            .map(|tab| tab.public.clone())
+            .collect()
+    }
     pub(crate) fn sync_runs(&self, runs: Vec<(super::run_pages::RunTab, ArtifactRef)>) {
         self.prune();
         let mut state = self.state.lock().unwrap();

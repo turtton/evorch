@@ -51,6 +51,10 @@ impl Respond for Endpoint {
                 json!({"type":"tool_use","id":format!("call-{index}"),"name":format!("_mcp__evorch__{name}"),"input":{"index":index}}),
                 "tool_use",
             ),
+            Step::CallWith(name, arguments) => (
+                json!({"type":"tool_use","id":format!("call-{index}"),"name":format!("_mcp__evorch__{name}"),"input":arguments}),
+                "tool_use",
+            ),
             Step::Text(text) => (json!({"type":"text","text":text}), "end_turn"),
         };
         let events = [

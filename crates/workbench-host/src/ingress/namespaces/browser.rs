@@ -81,6 +81,13 @@ impl CommandHost {
         };
         Ok(QueryReply::Browser(reply))
     }
+    /// Syncs the run tabs and lists the ones that passed the stored-thread and
+    /// artifact checks, for a test that cannot see the private state.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn renderer_run_tabs(&self) -> Result<Vec<RendererTab>, WorkbenchError> {
+        self.renderer_sync_runs()?;
+        Ok(self.areas.browser.service()?.run_tabs())
+    }
     fn renderer_sync_runs(&self) -> Result<(), WorkbenchError> {
         let service = self.areas.browser.service()?;
         let Some(owner) = self.areas.browser.renderer.as_ref() else {
@@ -99,9 +106,10 @@ impl CommandHost {
             let Some(record) = &run.artifact else {
                 continue;
             };
-            if record.run_id != run_id {
-                continue;
-            }
+            // The artifact may come from another run of the same conversation
+            // (`inspect_artifact` allows that): the displaying run's thread must be
+            // the stored artifact's thread, and `renderer_artifact_record` verifies
+            // the stored artifact itself.
             let affiliation = self
                 .service
                 .runtime()

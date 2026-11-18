@@ -552,6 +552,13 @@ impl CommandHost {
         self.areas.renderer_reconnect_grace()
     }
 
+    /// The core's renderer owner, which a test stops to restart the helper
+    /// without waiting for its idle deadline.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn renderer_owner(&self) -> Option<crate::areas::browser::renderer::RendererOwner> {
+        self.areas.browser.renderer.clone()
+    }
+
     /// Answer `query` for `session`.
     ///
     /// `provenance` is what the transport established for the caller (the same
