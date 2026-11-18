@@ -14,9 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use workbench_client::{ClientError, WorkbenchClient};
+use workbench_client::WorkbenchClient;
 use workbench_protocol::{
-    ErrorCode, RetryAdvice, WorkbenchError,
     commands::{Command as CoreCommand, CommandResult},
     events::{SubscriptionScope, UiEvent},
     handshake::Capability,
@@ -33,7 +32,7 @@ use workbench_protocol::{
     queries::{Query, QueryReply},
 };
 
-use crate::cli::core_client::{self, CliError, Step, exit};
+use crate::cli::core_client::{self, CliError, Rendered, Step};
 
 pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--repeat <n>] [--output <name>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--report|--no-report] [--keep-workspace]
        evorch eval clean [--output <dir> ...] [--user-config <dir>] [--dry-run] [--include-unfinished]
@@ -348,11 +347,6 @@ fn target_name(root: &Path, value: &Path) -> Result<String, String> {
 
 // ---- following the job ------------------------------------------------------
 
-fn operation_id() -> Result<OperationId, CliError> {
-    OperationId::new(format!("cli-eval-{}", uuid::Uuid::new_v4()))
-        .map_err(|error| CliError::Failed(error.to_string()))
-}
-
 /// One line per replay, as it ends.
 fn summary(line: &EvaluationRunLine) -> String {
     let status = serde_json::to_value(line.status)
@@ -409,26 +403,18 @@ async fn follow(
     core_client::wait_settled(client, SubscriptionScope::All, is_job_event, || {
         let (printed, id) = (&printed, id.clone());
         async move {
-            let reply = client
-                .query(Query::Evaluation(EvaluationQuery::GetEvaluationJob(
-                    OperationTarget { operation_id: id },
-                )))
-                .await;
-            let view = match reply {
-                Ok(QueryReply::Evaluation(EvaluationReply::Job(view))) => *view,
-                Ok(_) => {
-                    return Err(ClientError::Server(WorkbenchError::new(
-                        ErrorCode::Internal,
-                        "protocol violation: the core did not answer with a job",
-                        RetryAdvice::Never,
-                    )));
-                }
-                // The core no longer holds the job: it restarted, so whether
-                // the job finished is not known.
-                Err(ClientError::Server(error)) if error.code == ErrorCode::NotFound => {
-                    return Ok(Step::Unknown);
-                }
-                Err(error) => return Err(error),
+            let query = Query::Evaluation(EvaluationQuery::GetEvaluationJob(OperationTarget {
+                operation_id: id,
+            }));
+            // The core no longer holds the job: it restarted, so whether the
+            // job finished is not known.
+            let Some(view) = core_client::read_operation(client, query, |reply| match reply {
+                QueryReply::Evaluation(EvaluationReply::Job(view)) => Some(*view),
+                _ => None,
+            })
+            .await?
+            else {
+                return Ok(Step::Unknown);
             };
             for line in view.runs.iter().skip(printed.get()) {
                 progress(&summary(line));
@@ -445,10 +431,6 @@ async fn follow(
 }
 
 // ---- what the command prints ------------------------------------------------
-
-/// The text of a finished command: `Ok` goes to stdout (exit 0), `Err` to
-/// stderr (exit 1).
-type Rendered = Result<String, String>;
 
 fn warnings(view: &EvaluationJobView, lines: &mut Vec<String>) {
     if view.runs_omitted > 0 {
@@ -552,7 +534,7 @@ async fn run_job(request: RunRequest, root: &Path) -> Result<Rendered, CliError>
         })
         .transpose()
         .map_err(failed)?;
-    let operation_id = operation_id()?;
+    let operation_id = core_client::operation_id("cli-eval")?;
     let start = StartEvaluationRun {
         operation_id: operation_id.clone(),
         thread: ThreadId::new(request.thread)
@@ -586,7 +568,7 @@ async fn report_job(request: ReportRequest, root: &Path) -> Result<Rendered, Cli
         .map(|value| target_name(root, value))
         .collect::<Result<Vec<_>, _>>()
         .map_err(CliError::Failed)?;
-    let operation_id = operation_id()?;
+    let operation_id = core_client::operation_id("cli-eval")?;
     let start = StartEvaluationReport {
         operation_id: operation_id.clone(),
         targets,
@@ -625,20 +607,7 @@ pub async fn execute(command: Command) -> Result<Rendered, CliError> {
 
 /// Run the command and print its result; the exit code says how it went.
 pub async fn run(command: Command) -> ExitCode {
-    match execute(command).await {
-        Ok(Ok(text)) => {
-            println!("{text}");
-            exit::code(exit::SUCCESS)
-        }
-        Ok(Err(text)) => {
-            eprintln!("{text}");
-            exit::code(exit::FAILURE)
-        }
-        Err(error) => {
-            eprintln!("{error}");
-            error.exit_code()
-        }
-    }
+    core_client::finish(execute(command).await)
 }
 
 #[cfg(test)]

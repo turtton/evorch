@@ -15,12 +15,14 @@ impl CommandHost {
     pub(in crate::ingress) fn maintenance_command(
         &mut self,
         command: MaintenanceCommand,
-        _provenance: &Provenance,
+        provenance: &Provenance,
         restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         let accepted = match &command {
             MaintenanceCommand::StartMaintenance(start) => {
-                self.areas.maintenance.start(start, restart)?
+                self.areas
+                    .maintenance
+                    .start(start, provenance.client_id.as_ref(), restart)?
             }
             // Cancelling holds the restart gate only for this call; the
             // operation it names keeps the permit of its own start.

@@ -23,6 +23,11 @@
 //!   batch already inside the writer is a transaction and commits first, and
 //!   the counters then include it. A task dropped without an outcome settles as
 //!   `cancelled(shutdown)`, never as a success.
+//! * **Owner and disconnect.** An operation remembers the client that started
+//!   it (from the connection, never from the request). When that client's last
+//!   connection ends the operation is cancelled like a requested cancel; the
+//!   operations of other clients, and one started without a known client, run
+//!   on (ADR 0045 §10).
 //! * **Partial results.** `effect` tells what the committed batches cover: a
 //!   failed or cancelled operation that committed batches ends `partial`.
 //! * **Unknown outcomes.** The table lives in memory; after a restart it is
@@ -30,13 +35,13 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use storage::StorageHandle;
 use tokio::sync::watch;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::events::UiEvent;
-use workbench_protocol::ids::OperationId;
+use workbench_protocol::ids::{ClientId, OperationId};
 use workbench_protocol::namespaces::maintenance::{
     DEFAULT_BATCH_ROWS, DEFAULT_MAX_ROWS, MAX_MESSAGE_BYTES, MaintenanceEffect, MaintenanceEvent,
     MaintenanceKind, MaintenanceOutcome, MaintenanceProgress, MaintenanceTask, MaintenanceView,
@@ -50,6 +55,7 @@ use super::settings::operations::{Lookup, Operations, Tracked, digest_of};
 use super::{AreaHandles, AreaTasks, ProjectionSource, StopSignal};
 use crate::bootstrap::BootstrapError;
 use crate::bootstrap::restart::HostCommandPermit;
+use crate::connections::{ConnectionEpoch, ConnectionHooks};
 use crate::queries::{Pager, error, revision};
 
 /// Operations the table keeps (running and settled). Beyond it a new id is
@@ -105,6 +111,9 @@ struct Inner {
     source: ProjectionSource,
     storage: StorageHandle,
     seams: MaintenanceSeams,
+    /// Where the clients' connections are counted, once the area stops work on
+    /// a disconnect (see [`MaintenanceArea::stop_on_disconnect`]).
+    connections: OnceLock<Arc<ConnectionHooks>>,
 }
 
 struct State {
@@ -112,8 +121,18 @@ struct State {
     running: HashMap<MaintenanceKind, Running>,
 }
 
+/// Who started an operation and during which run of connections of that client.
+struct Owner {
+    client: ClientId,
+    /// The epoch the client was in when the operation was accepted; before
+    /// every epoch when it held no connection then.
+    epoch: ConnectionEpoch,
+}
+
 struct Running {
     id: OperationId,
+    /// The client that started it, when the connection said who it was.
+    owner: Option<Owner>,
     cancel: watch::Sender<bool>,
 }
 
@@ -195,6 +214,7 @@ fn initial_progress(kind: MaintenanceKind) -> MaintenanceProgress {
         MaintenanceKind::BackfillEvents => MaintenanceProgress::BackfillEvents {
             converted: 0,
             reattributed: 0,
+            undecodable: 0,
             remaining_unconverted: None,
             remaining_unattributed: None,
         },
@@ -206,12 +226,34 @@ impl MaintenanceArea {
         let source = handles
             .source("maintenance")
             .map_err(|e| BootstrapError::from(e.message))?;
-        Ok(Self::from_parts(
+        let area = Self::from_parts(
             handles.tasks.clone(),
             source,
             handles.storage.clone(),
             MaintenanceSeams::default(),
-        ))
+        );
+        area.stop_on_disconnect(&handles.connections);
+        Ok(area)
+    }
+
+    /// Stop the operations a client started when its last connection ends, and
+    /// no one else's (ADR 0045 §10). The hook only records the request; each
+    /// operation stops at its next batch boundary on its own task, and a batch
+    /// already inside the writer commits first.
+    ///
+    /// A notice names the epoch of the client's connections that ended
+    /// ([`ConnectionEpoch`]) and stops the operations accepted in it or before
+    /// it, so a notice that reaches the area late, after the client connected
+    /// again and started something, leaves that alone.
+    pub fn stop_on_disconnect(&self, connections: &Arc<ConnectionHooks>) {
+        let Some(inner) = &self.inner else { return };
+        let _ = inner.connections.set(connections.clone());
+        let inner = Arc::downgrade(inner);
+        connections.register(Arc::new(move |client, epoch| {
+            if let Some(inner) = inner.upgrade() {
+                inner.stop_operations_of(client, epoch);
+            }
+        }));
     }
 
     /// The service over its parts: the host's tasks, the namespace's event
@@ -232,6 +274,7 @@ impl MaintenanceArea {
                 source,
                 storage,
                 seams,
+                connections: OnceLock::new(),
             })),
             pager: Pager::default(),
         }
@@ -257,6 +300,7 @@ impl MaintenanceArea {
     pub fn start(
         &self,
         start: &StartMaintenance,
+        owner: Option<&ClientId>,
         accepted: HostCommandPermit,
     ) -> Result<Accepted, WorkbenchError> {
         let inner = self.inner()?;
@@ -271,6 +315,16 @@ impl MaintenanceArea {
         };
         let (view, cancel) = {
             let mut state = lock(&inner.state);
+            // Read under the table's lock: an operation that is accepted is
+            // never older than the epoch it records.
+            let owner = owner.map(|client| Owner {
+                client: client.clone(),
+                epoch: inner
+                    .connections
+                    .get()
+                    .and_then(|connections| connections.epoch_of(client))
+                    .unwrap_or_default(),
+            });
             match state.table.lookup(&start.operation_id, &digest) {
                 Lookup::Same(view) => {
                     return Ok(Accepted {
@@ -324,6 +378,7 @@ impl MaintenanceArea {
                 kind,
                 Running {
                     id: start.operation_id.clone(),
+                    owner,
                     cancel,
                 },
             );
@@ -404,6 +459,15 @@ fn unknown() -> WorkbenchError {
 }
 
 impl Inner {
+    fn stop_operations_of(&self, client: &ClientId, ended: ConnectionEpoch) {
+        for running in lock(&self.state).running.values() {
+            let stale = |owner: &Owner| owner.client == *client && owner.epoch <= ended;
+            if running.owner.as_ref().is_some_and(stale) {
+                running.cancel.send_replace(true);
+            }
+        }
+    }
+
     async fn at(&self, stage: MaintenanceStage, id: &OperationId, batches: u32) {
         if let Some(hook) = &self.seams.hook {
             hook(stage, id, batches).await;
@@ -458,7 +522,7 @@ impl Inner {
         cancel: &watch::Receiver<bool>,
     ) -> Ended {
         let mut batches = 0_u32;
-        let (mut converted, mut reattributed) = (0_u64, 0_u64);
+        let (mut converted, mut reattributed, mut undecodable) = (0_u64, 0_u64, 0_u64);
         loop {
             if let Some(reason) = Self::interrupted(stop, cancel) {
                 return Ended::Cancelled(reason);
@@ -489,9 +553,11 @@ impl Inner {
             };
             converted += step.converted;
             reattributed += step.reattributed;
+            undecodable += step.undecodable;
             let progress = MaintenanceProgress::BackfillEvents {
                 converted,
                 reattributed,
+                undecodable,
                 remaining_unconverted: Some(step.remaining_unconverted),
                 remaining_unattributed: Some(step.remaining_unattributed),
             };

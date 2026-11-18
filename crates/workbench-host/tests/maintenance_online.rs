@@ -14,7 +14,7 @@ mod common;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use support::{World, operation, world};
 use workbench_host::areas::Areas;
@@ -22,12 +22,14 @@ use workbench_host::areas::maintenance::{
     MaintenanceArea, MaintenanceHook, MaintenanceSeams, MaintenanceStage,
 };
 use workbench_host::bootstrap::restart::HostRestartPhase;
+use workbench_host::connections::ConnectionHooks;
 use workbench_host::provenance::local_desktop;
 use workbench_protocol::WorkbenchError;
 use workbench_protocol::commands::{Command, CommandDisposition, CommandReply, CommandResult};
-use workbench_protocol::envelope::Provenance;
+use workbench_protocol::envelope::{Provenance, Surface};
 use workbench_protocol::errors::ErrorCode;
 use workbench_protocol::events::{Subscribe, SubscriptionScope, UiEvent};
+use workbench_protocol::ids::ClientId;
 use workbench_protocol::namespaces::diagnostics::OperationTarget;
 use workbench_protocol::namespaces::maintenance::{
     BackfillEvents, CancelMaintenance, ListMaintenance, MaintenanceCommand, MaintenanceEffect,
@@ -79,14 +81,27 @@ impl Hold {
 }
 
 fn setup(hook: Option<MaintenanceHook>) -> World {
-    world(|parts| Areas {
-        maintenance: MaintenanceArea::from_parts(
+    setup_with_connections(hook, &Arc::new(ConnectionHooks::default()))
+}
+
+/// A host whose maintenance area stops a leaving client's operations through
+/// `connections`, the way the bootstrapped core wires it.
+fn setup_with_connections(
+    hook: Option<MaintenanceHook>,
+    connections: &Arc<ConnectionHooks>,
+) -> World {
+    world(|parts| {
+        let maintenance = MaintenanceArea::from_parts(
             parts.tasks.clone(),
             parts.projection.source("maintenance").unwrap(),
             parts.storage.clone(),
             MaintenanceSeams { hook },
-        ),
-        ..Default::default()
+        );
+        maintenance.stop_on_disconnect(connections);
+        Areas {
+            maintenance,
+            ..Default::default()
+        }
     })
 }
 
@@ -275,6 +290,52 @@ fn a_backfill_runs_in_bounded_batches_and_announces_each_committed_batch() {
     assert_eq!(&get(&w, "fill").unwrap(), done);
     assert_eq!(unconverted(&w), 0);
     assert!(!w.tasks.busy());
+}
+
+#[test]
+fn a_backfill_adds_the_undecodable_rows_of_both_of_its_targets() {
+    // Given: a row the first target converts, one it cannot decode (no `subkind`
+    // and a payload that is not JSON), and an Orchestrator event the second
+    // target attributes whose payload no longer decodes.
+    let mut w = setup(None);
+    let conn = rusqlite::Connection::open(db_path(&w)).unwrap();
+    conn.execute_batch(
+        "INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+         VALUES (1, 1, 1, 'Message', '{\"kind\":\"Message\",\"payload\":{\"kind\":\"MessageCompleted\",\"payload\":{\"run_id\":\"run-c\",\"text\":\"t\"}}}');
+         INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+         VALUES (1, 2, 2, 'Message', '{');
+         INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind) \
+         VALUES (1, 3, 3, 'Orchestrator', '{', 'TaskProgressed');",
+    )
+    .unwrap();
+    drop(conn);
+    let mut events = subscribe(&w);
+
+    // When: the backfill runs one row at a time.
+    start(&mut w, web(), "both", backfill(1, None)).unwrap();
+    let seen = events_until_settled(&w.rt, &mut events, "both");
+
+    // Then: the operation counts the undecodable rows of both targets.
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    let MaintenanceProgress::BackfillEvents {
+        converted,
+        reattributed,
+        undecodable,
+        remaining_unconverted,
+        remaining_unattributed,
+    } = &done.progress;
+    assert_eq!(
+        (
+            *converted,
+            *reattributed,
+            *undecodable,
+            *remaining_unconverted,
+            *remaining_unattributed
+        ),
+        (2, 1, 2, Some(0), Some(0))
+    );
+    assert_eq!(&get(&w, "both").unwrap(), done);
 }
 
 #[test]
@@ -630,4 +691,162 @@ fn automatic_retention_running_beside_a_backfill_does_not_change_what_it_reports
     assert_eq!(done.effect, MaintenanceEffect::Complete);
     assert_eq!((done.batches, converted_of(done)), (2, 6));
     assert_eq!(unconverted(&w), 1);
+}
+
+fn client(name: &str) -> Provenance {
+    Provenance::human(Surface::Cli, ClientId::new(name).unwrap())
+}
+
+#[test]
+fn a_client_that_leaves_stops_only_what_it_started_at_the_next_batch_boundary() {
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
+    let connections = Arc::new(ConnectionHooks::default());
+    let mut w = setup_with_connections(Some(hold.hook()), &connections);
+    seed_legacy(&w, 10);
+    let mut events = subscribe(&w);
+    let owner = client("cli-owner");
+    let bystander = client("cli-bystander");
+    let owner_id = owner.client_id.clone().unwrap();
+    let owner_connection = connections.open(owner_id);
+    let bystander_connection = connections.open(bystander.client_id.clone().unwrap());
+
+    start(&mut w, owner, "owned", backfill(3, None)).unwrap();
+    w.rt.block_on(hold.reached());
+
+    // A client that started nothing leaves: the operation is not asked to stop.
+    drop(bystander_connection);
+    let still = get(&w, "owned").unwrap();
+    assert!(!still.operation.state.is_final());
+
+    // Its owner leaves: the operation stops after the batch it had committed.
+    drop(owner_connection);
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "owned");
+    let done = settled_view(&seen);
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    assert_eq!((done.batches, converted_of(done)), (1, 3));
+    assert_eq!(unconverted(&w), 7);
+}
+
+#[test]
+fn an_operation_without_an_owning_client_is_not_stopped_by_any_client_leaving() {
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
+    let connections = Arc::new(ConnectionHooks::default());
+    let mut w = setup_with_connections(Some(hold.hook()), &connections);
+    seed_legacy(&w, 6);
+    let mut events = subscribe(&w);
+    let someone = client("cli-someone");
+    let connection = connections.open(someone.client_id.clone().unwrap());
+
+    let ownerless = Provenance {
+        client_id: None,
+        ..web()
+    };
+    start(&mut w, ownerless, "ownerless", backfill(2, None)).unwrap();
+    w.rt.block_on(hold.reached());
+
+    drop(connection);
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "ownerless");
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    assert_eq!(unconverted(&w), 0);
+}
+
+/// A hook that holds up the notices of the first departure: the thread of the leaving
+/// connection waits in it until `release`, so what the client does meanwhile
+/// happens before the later hooks (the area's) hear of the departure.
+struct HeldNotice {
+    entered: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+fn hold_notices(connections: &ConnectionHooks) -> HeldNotice {
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let first = std::sync::atomic::AtomicBool::new(true);
+    connections.register(Arc::new(move |_, _| {
+        // Only the first departure is held up.
+        if !first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        entered_tx.send(()).unwrap();
+        release_rx.lock().unwrap().recv().unwrap();
+    }));
+    HeldNotice { entered, release }
+}
+
+#[test]
+fn a_late_notice_of_an_earlier_connection_does_not_stop_what_the_client_started_since() {
+    // Given: the notices of a departure are held up before they reach the area.
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
+    let connections = Arc::new(ConnectionHooks::default());
+    let notices = hold_notices(&connections);
+    let mut w = setup_with_connections(Some(hold.hook()), &connections);
+    seed_legacy(&w, 6);
+    let mut events = subscribe(&w);
+    let who = client("cli-again");
+    let id = who.client_id.clone().unwrap();
+    let first = connections.open(id.clone());
+    let leaving = std::thread::spawn(move || drop(first));
+    notices.entered.recv().unwrap();
+
+    // When: the client connects again and starts an operation, and only then
+    // the notice of the connection that ended reaches the area.
+    let second = connections.open(id);
+    start(&mut w, who, "since", backfill(2, None)).unwrap();
+    w.rt.block_on(hold.reached());
+    notices.release.send(()).unwrap();
+    leaving.join().unwrap();
+
+    // Then: the operation of the client's current connection is not stopped.
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "since");
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    assert_eq!(unconverted(&w), 0);
+    drop(second);
+}
+
+#[test]
+fn a_late_notice_still_stops_what_the_client_started_before_it_left() {
+    // Given: an operation of a client, and the notices of its departure held up.
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
+    let connections = Arc::new(ConnectionHooks::default());
+    let notices = hold_notices(&connections);
+    let mut w = setup_with_connections(Some(hold.hook()), &connections);
+    seed_legacy(&w, 10);
+    let mut events = subscribe(&w);
+    let who = client("cli-leaving");
+    let id = who.client_id.clone().unwrap();
+    let first = connections.open(id.clone());
+    start(&mut w, who, "before", backfill(3, None)).unwrap();
+    w.rt.block_on(hold.reached());
+    let leaving = std::thread::spawn(move || drop(first));
+    notices.entered.recv().unwrap();
+
+    // When: the client is back by the time the notice reaches the area (a
+    // count of its connections now would hide that it left).
+    let second = connections.open(id);
+    notices.release.send(()).unwrap();
+    leaving.join().unwrap();
+
+    // Then: what it started before it left stops at the next batch boundary.
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "before");
+    let done = settled_view(&seen);
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    assert_eq!((done.batches, converted_of(done)), (1, 3));
+    drop(second);
 }
