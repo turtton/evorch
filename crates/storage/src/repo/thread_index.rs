@@ -21,7 +21,6 @@ use crate::threads::ThreadRunRow;
 
 // Until the writer job drives the index (ADR 0041 順序5), only tests call it.
 mod dependencies;
-pub(crate) mod held_epoch;
 #[allow(dead_code)]
 mod index;
 pub(crate) mod provenance_rows;

@@ -555,7 +555,6 @@ fn adjustment_step(
                         new_charge.unwrap_or(0)
                     ],
                 )?;
-                crate::repo::thread_index::held_epoch::note_held_change(conn, &run_id)?;
                 requests::sync(conn)?;
                 requests::finalize(conn, now_ns)?;
             } else {

@@ -212,10 +212,10 @@ impl Control<'_> {
                 let batch = self.freeze_batch(&request_id, cursor.as_ref())?;
                 registration.phase = match batch.next {
                     Some(next) => Phase::Freeze(Some(next)),
-                    None => Phase::Gap,
+                    None => Phase::Gap(None),
                 };
             }
-            Phase::Gap => {
+            Phase::Gap(cursor) => {
                 let policy = self.policy().map_err(persistence)?;
                 registration.gap_closed = false;
                 if let Policy::Gap(reason) = policy {
@@ -223,43 +223,18 @@ impl Control<'_> {
                         self.env.conn,
                         &request_id,
                         reason,
+                        cursor.as_ref(),
                         requests::GAP_BATCH,
                     )
                     .map_err(persistence)?;
-                    for drained in batch.drained {
-                        if !registration.unsettled.contains(&drained) {
-                            registration.unsettled.push(drained);
-                        }
-                    }
-                    if batch.closed >= requests::GAP_BATCH {
+                    if let Some(next) = batch.next {
+                        registration.phase = Phase::Gap(Some(next));
                         return Ok(RegistrationProgress::InProgress);
                     }
-                    // Fewer than a batch closed: no target of the registration or of a
-                    // published request is pending any more.
+                    // The scan reached the end: no target of the registration is pending.
                     registration.gap_closed = true;
                 }
-                registration.phase = Self::after_gap(registration);
-            }
-            Phase::Settle(cursor) => {
-                let Some(settling) = registration.unsettled.first().cloned() else {
-                    registration.phase = Phase::Publish;
-                    return Ok(RegistrationProgress::InProgress);
-                };
-                match requests::settle_batch(
-                    self.env.conn,
-                    &settling,
-                    &cursor,
-                    requests::SETTLE_BATCH,
-                    now_ns,
-                )
-                .map_err(persistence)?
-                {
-                    requests::Settled::More(next) => registration.phase = Phase::Settle(next),
-                    requests::Settled::Done => {
-                        registration.unsettled.remove(0);
-                        registration.phase = Self::after_gap(registration);
-                    }
-                }
+                registration.phase = Phase::Publish;
             }
             Phase::Publish => {
                 match self.publish_registration(
@@ -273,21 +248,11 @@ impl Control<'_> {
                         registration::unmark_live(self.env.db_path, &request_id);
                         return Ok(RegistrationProgress::Published(submission));
                     }
-                    PublishOutcome::Replan => registration.phase = Phase::Gap,
+                    PublishOutcome::Replan => registration.phase = Phase::Gap(None),
                 }
             }
         }
         Ok(RegistrationProgress::InProgress)
-    }
-
-    /// The phase after the policy-gap batches: the published requests they left without
-    /// a pending target are settled first, then the registration is published.
-    fn after_gap(registration: &Registration) -> Phase {
-        if registration.unsettled.is_empty() {
-            Phase::Publish
-        } else {
-            Phase::Settle(requests::SettleCursor::default())
-        }
     }
 
     /// One discovery batch; `true` once every run has an index row.

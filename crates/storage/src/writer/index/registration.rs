@@ -1,7 +1,7 @@
 //! The registration state machine of a reindex request (ADR 0041 R5, ADR 0045 §10).
 //!
 //! A registration is a sequence of bounded writer commands (discovery batches, freeze
-//! batches, policy-gap batches, settle windows, one publish), each a short transaction. The caller
+//! batches, policy-gap batches, one publish), each a short transaction. The caller
 //! drives it with `StorageHandle::advance_thread_index_registration` and may check its
 //! own stop and cancel conditions between steps; the writer serves its other commands
 //! between them. A registration that is not driven to the end is closed with
@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use super::requests::{FreezeCursor, SettleCursor};
+use super::requests::{FreezeCursor, GapCursor};
 use crate::thread_index::RequestSubmission;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,11 +21,9 @@ pub(crate) enum Phase {
     Discover,
     /// Freezing the targets, resumed after the cursor.
     Freeze(Option<FreezeCursor>),
-    /// Closing the targets a disabled or paused index cannot work on.
-    Gap,
-    /// Settling the published requests the gap batches left without a pending target,
-    /// one window of targets at a time (the first of `Registration::unsettled`).
-    Settle(SettleCursor),
+    /// Closing the registration's own targets a disabled or paused index cannot work on,
+    /// resumed after the cursor.
+    Gap(Option<GapCursor>),
     /// The last short transaction.
     Publish,
 }
@@ -35,11 +33,6 @@ pub(crate) enum Phase {
 pub struct Registration {
     pub(crate) request_id: String,
     pub(crate) phase: Phase,
-    /// Published requests the gap batches found without a pending target: they end
-    /// terminal, in bounded windows, before the publish. A cache of what the tables say
-    /// (every gap batch lists them again), so a registration that stops loses nothing: the
-    /// next one finds the same requests.
-    pub(crate) unsettled: Vec<String>,
     /// The gap batches ran under a gap policy and left no target pending, so the
     /// publish can end the request without looking at its targets.
     pub(crate) gap_closed: bool,
@@ -50,7 +43,6 @@ impl Registration {
         Self {
             request_id,
             phase: Phase::Discover,
-            unsettled: Vec::new(),
             gap_closed: false,
         }
     }

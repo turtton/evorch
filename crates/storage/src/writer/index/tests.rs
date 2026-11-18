@@ -4053,7 +4053,7 @@ fn a_freeze_batch_reads_one_window_whatever_the_table_size_and_the_filter() {
 }
 
 #[test]
-fn policy_gap_batches_close_the_registration_and_published_requests_within_their_limit() {
+fn policy_gap_batches_close_only_the_registration_within_their_limit() {
     let mut fx = Fixture::new(512 * MIB);
     indexed_runs(&mut fx, 5);
     let published = fx
@@ -4063,34 +4063,59 @@ fn policy_gap_batches_close_the_registration_and_published_requests_within_their
     let (request_id, cursor) = partial_registration(&mut fx, 3, 5 * S);
     assert_eq!(cursor, None);
     assert_eq!(target_count(&fx, &request_id), 5);
-    let mut batches = Vec::new();
+    let before = request_rows(&fx, &published.request_id);
+    let mut windows = 0;
+    let mut cursor = None;
     loop {
-        let closed =
-            super::requests::gap_batch(fx.conn(), &request_id, RequestGapReason::IndexDisabled, 4)
-                .unwrap()
-                .closed;
-        batches.push(closed);
-        if closed < 4 {
+        let batch = super::requests::gap_batch(
+            fx.conn(),
+            &request_id,
+            RequestGapReason::IndexDisabled,
+            cursor.as_ref(),
+            4,
+        )
+        .unwrap();
+        windows += 1;
+        cursor = batch.next;
+        if cursor.is_none() {
             break;
         }
     }
-    assert_eq!(batches, [4, 4, 2], "no batch exceeds its limit");
+    assert_eq!(windows, 2, "five targets in windows of four");
     let pending: u64 = fx
         .conn()
         .query_row(
-            "SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending'",
-            [],
+            "SELECT COUNT(*) FROM thread_index_request_targets \
+             WHERE request_id = ?1 AND state = 'pending'",
+            [&request_id],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(pending, 0);
-    assert!(matches!(
-        fx.control(6 * S)
-            .request_status(&published.request_id, 6 * S)
-            .unwrap()
-            .progress,
-        RequestProgress::Pending(_) | RequestProgress::Terminal(_)
-    ));
+    assert_eq!(
+        request_rows(&fx, &published.request_id),
+        before,
+        "the gap batches touch the registration's own targets only"
+    );
+}
+
+/// Every row of one request (its state and its targets), as text.
+fn request_rows(fx: &Fixture, request_id: &str) -> Vec<String> {
+    let mut statement = fx
+        .conn()
+        .prepare(
+            "SELECT 'request|' || state || '|' || COALESCE(finished_at_ns, '') \
+             FROM thread_index_requests WHERE request_id = ?1 \
+             UNION ALL \
+             SELECT 'target|' || run_id || '|' || state || '|' || COALESCE(gap_reason, '') \
+             FROM thread_index_request_targets WHERE request_id = ?1 ORDER BY 1",
+        )
+        .unwrap();
+    statement
+        .query_map([request_id], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 #[test]
@@ -4119,7 +4144,7 @@ fn a_policy_that_turns_into_a_gap_before_the_publish_is_replanned_in_batches() {
         .advance_registration(&mut registration, &cli(), 5 * S, HOUR)
         .unwrap();
     assert_eq!(progress, RegistrationProgress::InProgress);
-    assert_eq!(registration.phase, Phase::Gap);
+    assert_eq!(registration.phase, Phase::Gap(None));
     assert_eq!(request_state(&fx, registration.request_id()), "registering");
     let submission = loop {
         match fx
@@ -4239,8 +4264,8 @@ fn gap_publish_cost(runs: usize) -> (u64, i64) {
     let mut registration = fx.control(4 * S).begin_registration(&all(), 4 * S).unwrap();
     drive_to_publish(&mut fx, &mut registration, 4 * S);
     assert!(registration.gap_closed);
-    // The published request was settled by the windows before the publish.
-    assert_eq!(request_state(&fx, "old"), "completed_with_gaps");
+    // A registration does not terminalize a published request: its owner does.
+    assert_eq!(request_state(&fx, "old"), "pending");
     // The transaction alone: the policy is read before it and the status after it.
     let policy = fx.control(5 * S).policy().unwrap();
     let steps = Arc::new(AtomicU64::new(0));
@@ -4304,97 +4329,7 @@ fn the_publish_transaction_of_a_gap_registration_does_not_scale_with_the_targets
 }
 
 #[test]
-fn settle_windows_terminalize_a_request_the_gap_batches_closed() {
-    use super::requests::{SettleCursor, Settled};
-    let mut fx = Fixture::new(512 * MIB);
-    indexed_runs(&mut fx, 5);
-    seed_published_request(&fx, "old");
-    let closed =
-        super::requests::gap_batch(fx.conn(), "none", RequestGapReason::CapacityPaused, 100)
-            .unwrap();
-    assert_eq!(
-        (closed.closed, closed.drained.as_slice()),
-        (1, ["old".to_owned()].as_slice())
-    );
-    let mut cursor = SettleCursor::default();
-    let mut windows = 0;
-    loop {
-        windows += 1;
-        assert_eq!(
-            request_state(&fx, "old"),
-            "pending",
-            "not before the last window"
-        );
-        match super::requests::settle_batch(fx.conn(), "old", &cursor, 2, 9 * S).unwrap() {
-            Settled::More(next) => cursor = next,
-            Settled::Done => break,
-        }
-    }
-    assert_eq!(windows, 3, "five targets in windows of two");
-    assert_eq!(request_state(&fx, "old"), "completed_with_gaps");
-    // A request that is no longer pending ends the settling at once.
-    assert!(matches!(
-        super::requests::settle_batch(fx.conn(), "old", &SettleCursor::default(), 2, 9 * S)
-            .unwrap(),
-        Settled::Done
-    ));
-}
-
-#[test]
-fn a_run_that_loses_its_index_between_settle_windows_restarts_the_pass() {
-    use super::requests::{SettleCursor, Settled};
-    let mut fx = Fixture::new(512 * MIB);
-    indexed_runs(&mut fx, 5);
-    seed_published_request(&fx, "old");
-    super::requests::gap_batch(fx.conn(), "none", RequestGapReason::CapacityPaused, 100).unwrap();
-    let target_state = |fx: &Fixture, run_id: &str| -> String {
-        fx.conn()
-            .query_row(
-                "SELECT state FROM thread_index_request_targets \
-                 WHERE request_id = 'old' AND run_id = ?1",
-                [run_id],
-                |row| row.get(0),
-            )
-            .unwrap()
-    };
-    // The first window reads run-000 and run-001 as succeeded.
-    let mut cursor =
-        match super::requests::settle_batch(fx.conn(), "old", &SettleCursor::default(), 2, 9 * S)
-            .unwrap()
-        {
-            Settled::More(next) => next,
-            Settled::Done => panic!("five targets do not fit one window of two"),
-        };
-    assert_eq!(target_state(&fx, "run-000"), "succeeded");
-    // Then run-000 loses its index (retention), as another step of the writer would do.
-    fx.conn()
-        .execute(
-            "UPDATE thread_index_runs SET state = 'deleted', source_present = 0 \
-             WHERE run_id = 'run-000'",
-            [],
-        )
-        .unwrap();
-    crate::repo::thread_index::held_epoch::note_held_change(fx.conn(), "run-000").unwrap();
-    let mut windows = 1;
-    loop {
-        windows += 1;
-        match super::requests::settle_batch(fx.conn(), "old", &cursor, 2, 9 * S).unwrap() {
-            Settled::More(next) => cursor = next,
-            Settled::Done => break,
-        }
-    }
-    assert_eq!(windows, 6, "three windows, then the whole pass again");
-    assert_eq!(
-        target_state(&fx, "run-000"),
-        "gap",
-        "the restarted pass saw the change; it did not end on the first reading"
-    );
-    assert_eq!(request_state(&fx, "old"), "completed_with_gaps");
-}
-
-#[test]
-fn a_request_a_stopped_registration_left_unsettled_is_terminalized_by_the_next_one() {
-    use super::registration::Phase;
+fn a_gap_registration_changes_no_row_of_another_request_at_any_phase() {
     let mut fx = Fixture::new(512 * MIB);
     indexed_runs(&mut fx, 5);
     fx.control(4 * S)
@@ -4403,44 +4338,50 @@ fn a_request_a_stopped_registration_left_unsettled_is_terminalized_by_the_next_o
             max_bytes: 512 * MIB,
         })
         .unwrap();
-    // Disabling ends the requests published so far; "old" is one a registration of
-    // an earlier moment left pending.
+    // A request published at an earlier moment, still pending, with one pending target.
     seed_published_request(&fx, "old");
-    // The first registration closes the last pending target of "old" and stops before
-    // it settles the request: the registration is aborted, nothing remembers "old".
-    let mut first = fx.control(5 * S).begin_registration(&all(), 5 * S).unwrap();
-    while !matches!(first.phase, Phase::Settle(_)) {
-        let progress = fx
+    let before = request_rows(&fx, "old");
+    let mut registration = fx.control(5 * S).begin_registration(&all(), 5 * S).unwrap();
+    // Every command of the registration, including the one that publishes it, and an
+    // abort at each boundary, leave the other request as it was.
+    let mut commands = 0;
+    loop {
+        assert_eq!(
+            request_rows(&fx, "old"),
+            before,
+            "after {commands} commands"
+        );
+        match fx
             .control(5 * S)
-            .advance_registration(&mut first, &cli(), 5 * S, HOUR)
-            .unwrap();
-        assert_eq!(progress, RegistrationProgress::InProgress);
+            .advance_registration(&mut registration, &cli(), 5 * S, HOUR)
+            .unwrap()
+        {
+            RegistrationProgress::InProgress => commands += 1,
+            RegistrationProgress::Published(submission) => {
+                assert!(matches!(
+                    submission.progress,
+                    RequestProgress::Terminal(ReindexResult::CompletedWithGaps { .. })
+                ));
+                break;
+            }
+        }
     }
+    assert_eq!(request_rows(&fx, "old"), before);
     assert_eq!(request_state(&fx, "old"), "pending");
-    fx.control(5 * S).abort_registration(&first);
-    assert_eq!(request_state(&fx, first.request_id()), "cancelled");
-    assert_eq!(
-        request_state(&fx, "old"),
-        "pending",
-        "the cancelled registration does not end it"
-    );
-    // The next registration reads the tables, finds "old" without a pending target and
-    // ends it before it publishes itself.
-    let mut second = fx.control(6 * S).begin_registration(&all(), 6 * S).unwrap();
-    while let RegistrationProgress::InProgress = fx
-        .control(6 * S)
-        .advance_registration(&mut second, &cli(), 6 * S, HOUR)
-        .unwrap()
-    {}
-    assert_eq!(request_state(&fx, "old"), "completed_with_gaps");
+    let mut aborted = fx.control(6 * S).begin_registration(&all(), 6 * S).unwrap();
+    fx.control(6 * S)
+        .advance_registration(&mut aborted, &cli(), 6 * S, HOUR)
+        .unwrap();
+    fx.control(6 * S).abort_registration(&aborted);
+    assert_eq!(request_rows(&fx, "old"), before);
 }
 
-/// VM steps of one settle window of `request_id`.
-fn settle_window_cost(
+/// VM steps of one gap window of `request_id` after `cursor`.
+fn gap_window_cost(
     fx: &Fixture,
     request_id: &str,
-    cursor: &super::requests::SettleCursor,
-) -> (u64, super::requests::Settled) {
+    cursor: Option<&super::requests::GapCursor>,
+) -> (u64, Option<super::requests::GapCursor>) {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     let steps = Arc::new(AtomicU64::new(0));
@@ -4454,18 +4395,31 @@ fn settle_window_cost(
             }),
         )
         .unwrap();
-    let settled = super::requests::settle_batch(fx.conn(), request_id, cursor, 256, 9 * S).unwrap();
+    let batch = super::requests::gap_batch(
+        fx.conn(),
+        request_id,
+        RequestGapReason::CapacityPaused,
+        cursor,
+        256,
+    )
+    .unwrap();
     fx.conn().progress_handler(0, None::<fn() -> bool>).unwrap();
-    (steps.load(Ordering::Relaxed), settled)
+    (steps.load(Ordering::Relaxed), batch.next)
 }
 
-/// A published request with `targets` gap targets (so no run is read).
-fn seed_gap_request(fx: &Fixture, request_id: &str, targets: usize) {
+/// A request in `request_state` with `targets` targets in `target_state`.
+fn seed_targets(
+    fx: &Fixture,
+    request_id: &str,
+    request_state: &str,
+    targets: usize,
+    target_state: &str,
+) {
     fx.conn()
         .execute(
             "INSERT INTO thread_index_requests(request_id, include_evicted, state, created_at_ns) \
-             VALUES (?1, 0, 'pending', 1)",
-            [request_id],
+             VALUES (?1, 0, ?2, 1)",
+            rusqlite::params![request_id, request_state],
         )
         .unwrap();
     fx.conn()
@@ -4473,37 +4427,126 @@ fn seed_gap_request(fx: &Fixture, request_id: &str, targets: usize) {
             "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?2) \
              INSERT INTO thread_index_request_targets(request_id, run_id, source_revision, \
              extractor_version, accounting_version, work_generation, state, gap_reason) \
-             SELECT ?1, printf('run-%06d', i), 1, 1, 1, 0, 'gap', 'index_disabled' FROM n",
-            rusqlite::params![request_id, i64::try_from(targets).unwrap()],
+             SELECT ?1, printf('run-%06d', i), 1, 1, 1, 0, ?3, \
+             CASE WHEN ?3 = 'gap' THEN 'index_disabled' END FROM n",
+            rusqlite::params![request_id, i64::try_from(targets).unwrap(), target_state],
         )
         .unwrap();
 }
 
 #[test]
-fn a_settle_window_reads_its_window_whatever_its_place_in_the_request() {
-    use super::requests::{SettleCursor, Settled};
+fn a_gap_window_costs_the_same_wherever_it_is_and_whatever_else_is_pending() {
+    let window_costs = |others: usize| -> (u64, u64) {
+        let fx = Fixture::new(512 * MIB);
+        seed_targets(&fx, "registering-one", "registering", 5_000, "pending");
+        for index in 0..others {
+            seed_targets(&fx, &format!("other-{index:05}"), "pending", 1, "pending");
+        }
+        let (first, mut cursor) = gap_window_cost(&fx, "registering-one", None);
+        let mut middle = 0;
+        let mut windows = 1;
+        while cursor.is_some() {
+            let (steps, next) = gap_window_cost(&fx, "registering-one", cursor.as_ref());
+            windows += 1;
+            if windows == 15 {
+                middle = steps;
+            }
+            cursor = next;
+        }
+        assert_eq!(windows, 20, "5000 targets in windows of 256");
+        let pending: u64 = fx
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending' \
+                 AND request_id = 'registering-one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0);
+        (first, middle)
+    };
+    let (alone_first, alone_middle) = window_costs(0);
+    let (crowded_first, crowded_middle) = window_costs(3_000);
+    assert!(alone_first > 0);
+    assert!(
+        alone_middle <= alone_first + alone_first / 4,
+        "a later window re-read the earlier ones: {alone_first} -> {alone_middle}"
+    );
+    assert!(
+        crowded_first <= alone_first + alone_first / 4
+            && crowded_middle <= alone_middle + alone_middle / 4,
+        "other pending requests changed the cost: {alone_first}/{alone_middle} -> \
+         {crowded_first}/{crowded_middle}"
+    );
+}
+
+#[test]
+fn a_gap_window_counts_the_targets_it_examines_not_only_the_ones_it_changes() {
     let fx = Fixture::new(512 * MIB);
-    seed_gap_request(&fx, "big", 5_000);
-    let mut cursor = SettleCursor::default();
-    let mut costs = Vec::new();
+    // Every target is closed already: no window changes a row, yet each ends at its limit.
+    seed_targets(&fx, "closed", "registering", 600, "gap");
+    let mut cursor = None;
+    let mut windows = 0;
     loop {
-        let (steps, settled) = settle_window_cost(&fx, "big", &cursor);
-        costs.push(steps);
-        match settled {
-            Settled::More(next) => cursor = next,
-            Settled::Done => break,
+        let batch = super::requests::gap_batch(
+            fx.conn(),
+            "closed",
+            RequestGapReason::CapacityPaused,
+            cursor.as_ref(),
+            256,
+        )
+        .unwrap();
+        windows += 1;
+        cursor = batch.next;
+        if cursor.is_none() {
+            break;
         }
     }
-    assert_eq!(costs.len(), 20, "5000 targets in windows of 256");
-    let first = costs[0];
-    // The last window is the short one; a middle window is a full one like the first.
-    let middle = costs[costs.len() - 2];
-    assert!(first > 0);
-    assert!(
-        middle <= first + first / 4,
-        "a later window re-read the earlier ones: first {first} steps, one of the last {middle}"
-    );
-    assert_eq!(request_state(&fx, "big"), "completed_with_gaps");
+    assert_eq!(windows, 3, "600 examined targets in windows of 256");
+}
+
+#[test]
+fn a_run_that_lost_its_index_is_a_gap_in_the_result_the_owner_terminalizes() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    // The same terminalization the owner's step does, after the last pending target
+    // succeeded: the held targets are re-checked in the transaction that ends the request.
+    let settle = |fx: &Fixture, lost: Option<&str>| {
+        fx.conn()
+            .execute("DELETE FROM thread_index_request_targets", [])
+            .unwrap();
+        fx.conn()
+            .execute("DELETE FROM thread_index_requests", [])
+            .unwrap();
+        seed_published_request(fx, "old");
+        fx.conn()
+            .execute(
+                "UPDATE thread_index_request_targets SET state = 'succeeded' \
+                 WHERE state = 'pending'",
+                [],
+            )
+            .unwrap();
+        if let Some(run_id) = lost {
+            fx.conn()
+                .execute(
+                    "UPDATE thread_index_runs SET state = 'deleted', source_present = 0 \
+                     WHERE run_id = ?1",
+                    [run_id],
+                )
+                .unwrap();
+        }
+        super::requests::finalize(fx.conn(), 9 * S).unwrap();
+    };
+    settle(&fx, None);
+    assert_eq!(request_state(&fx, "old"), "completed");
+    settle(&fx, Some("run-000"));
+    assert_eq!(request_state(&fx, "old"), "completed_with_gaps");
+    let gaps = request_rows(&fx, "old")
+        .into_iter()
+        .filter(|row| row.starts_with("target|run-000|gap|"))
+        .count();
+    assert_eq!(gaps, 1, "the lost run is a gap, not a success");
 }
 
 #[test]

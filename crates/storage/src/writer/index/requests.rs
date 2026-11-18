@@ -6,9 +6,8 @@
 //! [`FREEZE_BATCH`] runs in primary-key order, resumed by the last run id of the
 //! previous window, so a batch reads at most one window and is its own short
 //! transaction), the policy gaps of a disabled or paused index are closed in
-//! batches of [`GAP_BATCH`] targets, the published requests those batches left
-//! without a pending target are settled in windows of [`SETTLE_BATCH`] targets
-//! ([`settle_batch`]), and one last short transaction turns the request into
+//! windows of [`GAP_BATCH`] targets examined (a keyset over the request's own targets,
+//! [`gap_batch`]), and one last short transaction turns the request into
 //! `pending`. That transaction does work of a constant size: it neither re-checks nor
 //! counts targets, because the steps before it already did. Each step is a separate
 //! writer command, so the writer serves other commands in between.
@@ -32,7 +31,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::lease;
 use crate::StorageError;
-use crate::repo::thread_index::held_epoch;
 use crate::thread_index::{
     IndexBlockedReason, IndexTarget, ReindexRequest, ReindexResult, RequestFailure,
     RequestGapCount, RequestGapReason, RequestProgress, RequestStatus, RequestSummary,
@@ -312,207 +310,72 @@ pub(crate) fn cancel_stale_registering(
     live: &[String],
     now_ns: i64,
 ) -> Result<usize, StorageError> {
-    let mut statement =
-        conn.prepare("SELECT request_id FROM thread_index_requests WHERE state = 'registering'")?;
-    let leftover = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
-    let mut closed = 0;
-    for request_id in leftover.iter().filter(|id| !live.contains(id)) {
-        if abort_registering(conn, request_id, now_ns)? {
-            closed += 1;
-        }
-    }
-    Ok(closed)
+    // One statement; `live` is the set of this process's own registrations (a handful).
+    let live = to_json(&live)?;
+    Ok(conn.execute(
+        "UPDATE thread_index_requests SET state = 'cancelled', finished_at_ns = ?1 \
+         WHERE state = 'registering' \
+         AND request_id NOT IN (SELECT value FROM json_each(?2))",
+        params![now_ns, live],
+    )?)
+}
+
+/// Where the next policy-gap batch resumes: the last target examined by the previous one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GapCursor {
+    pub run_id: String,
 }
 
 /// What one policy-gap batch did.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct GapBatch {
-    /// Targets closed (the registration's and the published requests').
-    pub closed: usize,
-    /// The published requests (not the registration) left without a pending target:
-    /// they are `pending` until a pass terminalizes them (`settle_batch`). Complete only
-    /// when `closed` is less than the limit (a full batch stops looking at owners).
-    pub drained: Vec<String>,
+    /// `None` when the scan reached the end of the registration's targets.
+    pub next: Option<GapCursor>,
 }
 
-/// Closes up to `limit` pending targets with `reason`: those of the registration
-/// `request_id` and of the published requests (capacity pause / disabled index:
-/// requests never wait indefinitely). One short transaction per call; `closed` tells
-/// how many targets it closed, so a caller repeats it until it is less than `limit`:
-/// then no target of either is pending any more.
+/// Closes the pending targets of the registration `request_id`, and only those, with
+/// `reason`: the targets of a disabled or paused index cannot be worked on. One short
+/// transaction per call over a window of at most `limit` targets after `cursor` in
+/// run-id order (a primary-key seek; the budget counts the targets examined, whether or
+/// not they were pending). A caller repeats it with the returned cursor until it is
+/// `None`.
+///
+/// The rows of any other request are not touched: a published request ends terminal
+/// through its owner, which is the only terminalizer of a published request (its step, or
+/// the transaction that stops it).
 pub(crate) fn gap_batch(
     conn: &Connection,
     request_id: &str,
     reason: RequestGapReason,
+    cursor: Option<&GapCursor>,
     limit: usize,
 ) -> Result<GapBatch, StorageError> {
     immediate(conn, |conn| {
         let reason = to_json(&reason)?;
-        let mut owners = vec![request_id.to_owned()];
-        let mut statement =
-            conn.prepare("SELECT request_id FROM thread_index_requests WHERE state = 'pending'")?;
-        owners.extend(
-            statement
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-        drop(statement);
-        let mut batch = GapBatch::default();
-        for owner in owners {
-            let room = limit - batch.closed;
-            if room == 0 {
-                break;
-            }
-            let closed = conn.execute(
-                "UPDATE thread_index_request_targets SET state = 'gap', gap_reason = ?2 \
-                 WHERE request_id = ?1 AND run_id IN (SELECT run_id FROM \
-                 thread_index_request_targets WHERE request_id = ?1 AND state = 'pending' \
-                 LIMIT ?3)",
-                params![owner, reason, i64::try_from(room).unwrap_or(i64::MAX)],
-            )?;
-            // Fewer than the room: no target of this owner is pending any more, whether
-            // this batch closed the last ones or an interrupted earlier registration did.
-            // The state is read from the table, never remembered, so a request a
-            // registration left unsettled is found by the next one.
-            if closed < room && owner != request_id {
-                batch.drained.push(owner);
-            }
-            batch.closed += closed;
-        }
-        Ok(batch)
-    })
-}
-
-/// Windows of targets one settle step reads.
-pub(crate) const SETTLE_BATCH: usize = 256;
-
-/// Where the settling of one published request stopped.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SettleCursor {
-    after: Option<String>,
-    saw_gap: bool,
-    saw_pending: bool,
-    /// [`held_epoch::current`] when the pass began: a change since means a window read
-    /// earlier may be stale, and the pass starts over.
-    epoch: u64,
-}
-
-/// The result of one settle step.
-#[derive(Debug)]
-pub(crate) enum Settled {
-    More(SettleCursor),
-    Done,
-}
-
-/// Bounded version of [`finalize`] for one published request whose pending targets a
-/// policy-gap batch closed: one window of at most `limit` targets in run-id order, as
-/// its own short transaction. A succeeded target is re-checked against its run (as
-/// `finalize` does); a gap or pending one is only noted. The last window terminalizes
-/// the request (`completed` or `completed_with_gaps`) when no target was pending.
-/// Targets never turn pending again, but a succeeded one can lose its index between
-/// windows ([`held_epoch`]): the pass then starts over. A request that
-/// is not `pending` any more (settled meanwhile by a step) ends the settling at once.
-pub(crate) fn settle_batch(
-    conn: &Connection,
-    request_id: &str,
-    cursor: &SettleCursor,
-    limit: usize,
-    now_ns: i64,
-) -> Result<Settled, StorageError> {
-    immediate(conn, |conn| {
-        let live: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM thread_index_requests \
-             WHERE request_id = ?1 AND state = 'pending')",
-            [request_id],
-            |row| row.get(0),
-        )?;
-        if !live {
-            return Ok(Settled::Done);
-        }
-        // The first window and a resumed one are two statements: an `?2 IS NULL OR
-        // run_id > ?2` condition keeps the planner from seeking by the composite primary
-        // key, and every later window would scan again what the earlier ones read.
-        let mut statement = conn.prepare(&format!(
-            "SELECT t.run_id, t.state, t.source_revision, t.extractor_version, \
-             t.accounting_version, t.work_generation, {RUN_COLUMNS} \
-             FROM thread_index_request_targets t \
-             LEFT JOIN thread_index_runs r ON r.run_id = t.run_id \
-             WHERE t.request_id = ?1 {} \
-             ORDER BY t.run_id LIMIT ?2",
-            if cursor.after.is_some() {
-                "AND t.run_id > ?3"
-            } else {
-                ""
-            }
-        ))?;
-        let window = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&request_id, &window];
-        if let Some(after) = &cursor.after {
-            bound.push(after);
-        }
-        let rows = statement
-            .query_map(rusqlite::params_from_iter(bound), |row| {
-                let run_id: String = row.get(0)?;
-                Ok((
-                    run_id.clone(),
-                    row.get::<_, String>(1)?,
-                    IndexTarget {
-                        run_id,
-                        source_revision: row.get(2)?,
-                        extractor_version: row.get(3)?,
-                        accounting_version: row.get(4)?,
-                    },
-                    row.get::<_, u64>(5)?,
-                    run_view(row, 6)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        let mut next = cursor.clone();
-        if cursor.after.is_none() {
-            next.epoch = held_epoch::current(conn);
-        }
-        for (run_id, state, target, generation, run) in &rows {
-            match state.as_str() {
-                "pending" => next.saw_pending = true,
-                "gap" => next.saw_gap = true,
-                _ => {
-                    let outcome = judge(target, *generation, run.as_ref(), true)?;
-                    if !matches!(outcome, Outcome::Succeeded) {
-                        set_target(conn, request_id, run_id, &outcome)?;
-                    }
-                    next.saw_gap |= matches!(outcome, Outcome::Gap(_));
-                }
-            }
-        }
-        if rows.len() >= limit {
-            next.after = rows.last().map(|row| row.0.clone());
-            return Ok(Settled::More(next));
-        }
-        if cursor.after.is_some() && held_epoch::current(conn) != next.epoch {
-            // A run read in an earlier window changed what it holds since: what the
-            // windows saw is not one state. The targets already closed stay closed.
-            return Ok(Settled::More(SettleCursor::default()));
-        }
-        if !next.saw_pending {
-            conn.execute(
-                "UPDATE thread_index_requests SET state = ?2, finished_at_ns = ?3 \
-                 WHERE request_id = ?1 AND state = 'pending'",
+        let after = cursor.map_or("", |cursor| cursor.run_id.as_str());
+        // The last run of the window: the `limit`-th target after the cursor, when there
+        // is one (an offset of at most `limit` rows).
+        let last: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM thread_index_request_targets \
+                 WHERE request_id = ?1 AND run_id > ?2 ORDER BY run_id LIMIT 1 OFFSET ?3",
                 params![
                     request_id,
-                    if next.saw_gap {
-                        "completed_with_gaps"
-                    } else {
-                        "completed"
-                    },
-                    now_ns
+                    after,
+                    i64::try_from(limit.saturating_sub(1)).unwrap_or(i64::MAX)
                 ],
-            )?;
-        }
-        Ok(Settled::Done)
+                |row| row.get(0),
+            )
+            .optional()?;
+        conn.execute(
+            "UPDATE thread_index_request_targets SET state = 'gap', gap_reason = ?2 \
+             WHERE request_id = ?1 AND run_id > ?3 AND (?4 IS NULL OR run_id <= ?4) \
+             AND state = 'pending'",
+            params![request_id, reason, after, last],
+        )?;
+        Ok(GapBatch {
+            next: last.map(|run_id| GapCursor { run_id }),
+        })
     })
 }
 
