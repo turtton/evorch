@@ -365,6 +365,25 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   載って次の起動が続ける。権限などの失敗は `failed`（path 付き）で、`removed` に数えない。失敗するまでに消した
   entry も予算から引く（失敗しても後続の dir が予算を超えて消すことはない）。存在確認も同じ規則で、
   明示的な NotFound だけが「無い」を意味し、それ以外の失敗は `failed` として報告する。
+- **archive 時の scratch 回収（稼働中）。** 起動フェーズの確定とは別に、family を archive した時点で scratch を
+  解放する。既存の archive 可否判定は変えず、新たな拒否や run の停止は追加しない。host の `SetFamilyArchived` と native GUI の archive は、sidebar の保存成功後・保存ロック解放後・
+  添付削除の前に、family の全 thread の ID だけをヒントとして ownership host へ送る（archived=true の再要求でも
+  送る。保存失敗・添付 Busy・restore では送らない）。ヒントはメモリに集約するだけで、sidebar の読み・
+  ownership write transaction での検証・rename は UI スレッドにも host command にも置かず、専用の archive スレッドが行う。
+  archive の成否と応答は回収に依存しない。使われていない thread は rename して `.trash-*` に退避し、物理削除は
+  非同期の collector が行う。利用中の thread は全利用者が終わってから回収し、完了した turn の入力待ちは idle とみなす。
+  tool/question 待ちは idle ではなく、run 本体・子 run・shell job を個別の identity で保護する。shell job は終端かつ
+  teardown 確認済みになってから解除する。
+  再開すると同じパスを再 prepare し、消失通知を一度だけ追記する。判定する checker は host と GUI が
+  `workbench_host::scratch_archive::install` で注入し、共有 sidebar を保存ロックなしの `read_unlocked` で読む。
+  family を解決できない thread、共有 sidebar がない構成、読取エラーは削除せず保持し、既知の unarchived はヒントを捨てる。
+  添付の削除 API・ロック・root には触れない。**`.trash-*` がディスク上の正本**で、起動時と通知時に回収する。
+  負荷は 256 entry ごとに 2 ms、Busy は 1 回だけ 100 ms 待って再試行する。失敗 tree は同じ pass で再試行せず、
+  自己 wake も行わず、次の通知または起動で再試行する。通常 shutdown では producer の停止・
+  drain・owner の release の後に `stop_scratch_cleanup` を呼ぶ。既存の restart/takeover 時の reset の契約は変わらない。
+  既知の制限: 他プロセスが owner の archived thread はこのプロセスでは回収されず残り得る。保留中のヒントはメモリだけ
+  なので planned handoff で失われ、次の release か通常起動で回収する。archive の成功と物理削除の完了は別で、
+  後者は遅れる。削除できない tree は診断を出して残る。
 - **進捗。** `run_exclusive_phase_with_progress` が段の開始・終了、root 束縛、family の確定を呼び出し元のスレッドで
   順に通知する（`tracing` の `thread_retention` target にも info で出す）。
 - **owner の残骸。** 両ロックの下に生きたプロセスはないので、owners.db の行はすべて残骸として扱う。

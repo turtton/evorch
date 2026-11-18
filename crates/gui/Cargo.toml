@@ -89,6 +89,8 @@ notify-rust = "4"
 [dev-dependencies]
 test-socket-dir = { path = "../test-socket-dir" }
 workbench-host = { path = "../workbench-host", features = ["test-support"] }
+# The archive hint test waits for the scratch archive pass on its barrier.
+runtime = { path = "../runtime", features = ["idle-test-support"] }
 # The history restore test converts a database the build wrote, after taking it back to version 39.
 storage = { path = "../storage", features = ["unchecked-open"] }
 # Leaves a descriptor without O_CLOEXEC open to check child launches.

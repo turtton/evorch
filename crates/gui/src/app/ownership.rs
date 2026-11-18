@@ -49,7 +49,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.external_work
             .set_source(super::external_work::Source::of_host(&host));
         self.ownership = Some(host);
+        self.wire_scratch_archive();
         self
+    }
+
+    /// The single place the native window connects archive-time scratch recovery
+    /// to the saved shared sidebar. It runs from both builders, so the checker is
+    /// injected once the ownership host and the sidebar path are both known,
+    /// whichever is set last. Without a sidebar path nothing is injected and an
+    /// archived thread's scratch is kept.
+    pub(super) fn wire_scratch_archive(&self) {
+        if let (Some(host), Some(path)) = (&self.ownership, &self.sidebar_path) {
+            workbench_host::scratch_archive::install(host, Some(path.clone()));
+        }
     }
 
     pub fn thread_writable(&self) -> bool {

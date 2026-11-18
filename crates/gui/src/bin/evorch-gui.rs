@@ -1195,6 +1195,9 @@ fn build_workbench(
     // Deleted threads and runs are refused from here on. The set was read after the
     // start-up locks became shared, so no other process can add to it meanwhile.
     install_host_tombstones(&ownership, &prelude.tombstones);
+    // Archive-time scratch recovery is wired by `WorkbenchState::with_ownership` /
+    // `with_sidebar_path` (the same builders the tests use), which inject the
+    // checker for the shared sidebar once both are known.
     background.owner_drain = Some((
         workbench_host::bootstrap::lane_pr::RuntimeDrain::new(runtime.clone(), runtime_executor),
         ownership.clone(),
@@ -1645,6 +1648,9 @@ impl Drop for GuiStorageResources {
         }
         if let Err(error) = self.ownership.release_ready() {
             tracing::warn!(%error, "failed to release ownership after storage drain");
+        }
+        if let Err(error) = self.ownership.stop_scratch_cleanup() {
+            tracing::warn!(%error, "failed to stop scratch cleanup after ownership release");
         }
         // The bridge is still subscribed when release_ready emits Released.
         // Its final snapshot durably records that transition after prior deltas.

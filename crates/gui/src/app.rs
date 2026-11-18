@@ -69,6 +69,8 @@ mod system_notifications;
 mod tab_viewer;
 mod theme_settings;
 mod thread_archive;
+#[cfg(test)]
+mod thread_archive_scratch_tests;
 mod thread_mirror;
 mod thread_retention;
 mod thread_search;

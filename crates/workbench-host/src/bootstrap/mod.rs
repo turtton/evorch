@@ -27,6 +27,8 @@ pub mod recovery;
 mod recovery_06a_tests;
 pub mod restart;
 pub mod retention;
+#[cfg(test)]
+mod scratch_archive_tests;
 pub mod services;
 #[cfg(test)]
 mod tests;
@@ -542,6 +544,9 @@ impl BootstrappedHost {
                 .map_err(|_| "owner tombstone guard already set")?;
         }
         runtime.set_thread_scratch(owner.thread_scratch());
+        // Archive-time scratch recovery confirms the archive from the saved
+        // shared sidebar; the workspace area below sends the hints.
+        crate::scratch_archive::install(&owner, Some(options.config_dir.join("sidebar.json")));
         let _ = evaluator.runtime.set(runtime.downgrade());
         let reload_models: crate::areas::ReloadModels = Arc::new(move || {
             if let Some(live) = &live {
@@ -596,6 +601,7 @@ impl BootstrappedHost {
             evaluations: evaluations.clone(),
             evaluator: evaluator.clone(),
             database: storage_config.db_path.clone(),
+            owner: owner.clone(),
         })?;
         // What the saved sidebar grants (trust, allowed directories, the
         // read-only directories of threads) is declared before any run starts
@@ -895,6 +901,8 @@ impl BootstrappedHost {
                 Err(error) => lane_pr::remember(&mut failure, Err::<(), _>(error)),
             }
         }
+        // Stop the archive worker and collector after producer/drain/release handling.
+        lane_pr::remember(&mut failure, self.owner.stop_scratch_cleanup());
         if let Some(mut bridge) = self.bridge.take() {
             lane_pr::remember(&mut failure, bridge.try_shutdown());
         }

@@ -43,7 +43,7 @@ thiserror = { workspace = true }
 test-support = ["runtime/recovery-test-support"]
 
 [dev-dependencies]
-runtime = { path = "../runtime", features = ["recovery-test-support"] }
+runtime = { path = "../runtime", features = ["recovery-test-support", "idle-test-support"] }
 test-socket-dir = { path = "../test-socket-dir" }
 storage = { path = "../storage", features = ["test-support"] }
 async-trait = { workspace = true }
