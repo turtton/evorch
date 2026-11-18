@@ -121,7 +121,10 @@ const C_GC: u64 = 24;
 // versus 547 at v64. The allowance stays independent of existing content rows.
 // v68: rebuild of thread_index_requests (new table, copy, rename, one index): the full-chain
 // probe measured 604 frames with 100,000 rows (8 above the prior ceiling of 596). Reserve 12
-// more fixed schema frames (the measured 8 plus 4 of placement headroom); no row-scaled work.
+// more fixed schema frames (the measured 8 plus 4 of placement headroom). This gate grows
+// only `thread_runs`; the `thread_index_requests` table stays empty here. v68 copies every
+// request row, so its cost does grow with the number of requests (request and target
+// rows are kept, see thread_retention), and this gate does not check that cost.
 const MIGRATION_FRAMES: u64 =
     24 + 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4 + 32 + 24 + 32 + 16 + 12;
 

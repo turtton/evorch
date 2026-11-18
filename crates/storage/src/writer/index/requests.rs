@@ -539,6 +539,9 @@ pub(crate) fn fail_pending(
 }
 
 /// Shared GUI/CLI status, including whether any owner currently holds the lease.
+///
+/// A request that is still `registering` (its targets are being committed in batches) is
+/// not observable: it is reported as unknown, never as cancelled.
 pub(crate) fn status(
     conn: &Connection,
     request_id: &str,
@@ -547,7 +550,7 @@ pub(crate) fn status(
     let row: Option<(String, Option<String>, u64)> = conn
         .query_row(
             "SELECT state, failure_reason, deleted_before_submission FROM thread_index_requests \
-             WHERE request_id = ?1",
+             WHERE request_id = ?1 AND state <> 'registering'",
             [request_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
