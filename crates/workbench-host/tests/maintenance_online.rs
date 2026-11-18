@@ -210,6 +210,16 @@ fn subscribe(w: &World) -> workbench_host::subscriptions::Subscription {
         .unwrap()
 }
 
+/// The settled event comes just before the counted task ends: wait for the end.
+fn wait_until_idle(w: &World) {
+    let ended = w.tasks.counted_ended_notify();
+    w.rt.block_on(async {
+        while w.tasks.busy() {
+            ended.notified().await;
+        }
+    });
+}
+
 /// Every maintenance event of `id` up to and including its settled event.
 fn events_until_settled(
     rt: &tokio::runtime::Runtime,
@@ -292,7 +302,7 @@ fn a_backfill_runs_in_bounded_batches_and_announces_each_committed_batch() {
     assert_eq!((done.batches, converted_of(done)), (4, 10));
     assert_eq!(&get(&w, "fill").unwrap(), done);
     assert_eq!(unconverted(&w), 0);
-    assert!(!w.tasks.busy());
+    wait_until_idle(&w);
 }
 
 #[test]
@@ -992,7 +1002,7 @@ fn a_reindex_runs_the_index_and_ends_with_the_result_a_command_line_prints() {
     assert!(progress.iter().all(|view| reindex_parts(view).1.is_none()));
     assert!(progress.iter().any(|view| view.batches > 0));
     assert_eq!(&get(&w, "index").unwrap(), done);
-    assert!(!w.tasks.busy());
+    wait_until_idle(&w);
 }
 
 #[test]
@@ -1103,13 +1113,7 @@ fn a_reindex_waiting_for_another_owner_is_cancelled_without_waiting_for_the_leas
             reason: CancelReason::Requested
         }
     );
-    // The settled event comes just before the counted task ends: wait for the end.
-    let ended = w.tasks.counted_ended_notify();
-    w.rt.block_on(async {
-        while w.tasks.busy() {
-            ended.notified().await;
-        }
-    });
+    wait_until_idle(&w);
 }
 
 #[test]
