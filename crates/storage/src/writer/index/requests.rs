@@ -432,17 +432,29 @@ pub(crate) fn settle_batch(
         if !live {
             return Ok(Settled::Done);
         }
+        // The first window and a resumed one are two statements: an `?2 IS NULL OR
+        // run_id > ?2` condition keeps the planner from seeking by the composite primary
+        // key, and every later window would scan again what the earlier ones read.
         let mut statement = conn.prepare(&format!(
             "SELECT t.run_id, t.state, t.source_revision, t.extractor_version, \
              t.accounting_version, t.work_generation, {RUN_COLUMNS} \
              FROM thread_index_request_targets t \
              LEFT JOIN thread_index_runs r ON r.run_id = t.run_id \
-             WHERE t.request_id = ?1 AND (?2 IS NULL OR t.run_id > ?2) \
-             ORDER BY t.run_id LIMIT ?3"
+             WHERE t.request_id = ?1 {} \
+             ORDER BY t.run_id LIMIT ?2",
+            if cursor.after.is_some() {
+                "AND t.run_id > ?3"
+            } else {
+                ""
+            }
         ))?;
         let window = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&request_id, &window];
+        if let Some(after) = &cursor.after {
+            bound.push(after);
+        }
         let rows = statement
-            .query_map(params![request_id, cursor.after, window], |row| {
+            .query_map(rusqlite::params_from_iter(bound), |row| {
                 let run_id: String = row.get(0)?;
                 Ok((
                     run_id.clone(),

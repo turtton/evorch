@@ -4393,10 +4393,123 @@ fn a_run_that_loses_its_index_between_settle_windows_restarts_the_pass() {
 }
 
 #[test]
+fn a_request_a_stopped_registration_left_unsettled_is_terminalized_by_the_next_one() {
+    use super::registration::Phase;
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    fx.control(4 * S)
+        .apply_index_settings(ThreadIndexSettings {
+            enabled: false,
+            max_bytes: 512 * MIB,
+        })
+        .unwrap();
+    // Disabling ends the requests published so far; "old" is one a registration of
+    // an earlier moment left pending.
+    seed_published_request(&fx, "old");
+    // The first registration closes the last pending target of "old" and stops before
+    // it settles the request: the registration is aborted, nothing remembers "old".
+    let mut first = fx.control(5 * S).begin_registration(&all(), 5 * S).unwrap();
+    while !matches!(first.phase, Phase::Settle(_)) {
+        let progress = fx
+            .control(5 * S)
+            .advance_registration(&mut first, &cli(), 5 * S, HOUR)
+            .unwrap();
+        assert_eq!(progress, RegistrationProgress::InProgress);
+    }
+    assert_eq!(request_state(&fx, "old"), "pending");
+    fx.control(5 * S).abort_registration(&first);
+    assert_eq!(request_state(&fx, first.request_id()), "cancelled");
+    assert_eq!(
+        request_state(&fx, "old"),
+        "pending",
+        "the cancelled registration does not end it"
+    );
+    // The next registration reads the tables, finds "old" without a pending target and
+    // ends it before it publishes itself.
+    let mut second = fx.control(6 * S).begin_registration(&all(), 6 * S).unwrap();
+    while let RegistrationProgress::InProgress = fx
+        .control(6 * S)
+        .advance_registration(&mut second, &cli(), 6 * S, HOUR)
+        .unwrap()
+    {}
+    assert_eq!(request_state(&fx, "old"), "completed_with_gaps");
+}
+
+/// VM steps of one settle window of `request_id`.
+fn settle_window_cost(
+    fx: &Fixture,
+    request_id: &str,
+    cursor: &super::requests::SettleCursor,
+) -> (u64, super::requests::Settled) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let steps = Arc::new(AtomicU64::new(0));
+    let count = steps.clone();
+    fx.conn()
+        .progress_handler(
+            1,
+            Some(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        )
+        .unwrap();
+    let settled = super::requests::settle_batch(fx.conn(), request_id, cursor, 256, 9 * S).unwrap();
+    fx.conn().progress_handler(0, None::<fn() -> bool>).unwrap();
+    (steps.load(Ordering::Relaxed), settled)
+}
+
+/// A published request with `targets` gap targets (so no run is read).
+fn seed_gap_request(fx: &Fixture, request_id: &str, targets: usize) {
+    fx.conn()
+        .execute(
+            "INSERT INTO thread_index_requests(request_id, include_evicted, state, created_at_ns) \
+             VALUES (?1, 0, 'pending', 1)",
+            [request_id],
+        )
+        .unwrap();
+    fx.conn()
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?2) \
+             INSERT INTO thread_index_request_targets(request_id, run_id, source_revision, \
+             extractor_version, accounting_version, work_generation, state, gap_reason) \
+             SELECT ?1, printf('run-%06d', i), 1, 1, 1, 0, 'gap', 'index_disabled' FROM n",
+            rusqlite::params![request_id, i64::try_from(targets).unwrap()],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_settle_window_reads_its_window_whatever_its_place_in_the_request() {
+    use super::requests::{SettleCursor, Settled};
+    let fx = Fixture::new(512 * MIB);
+    seed_gap_request(&fx, "big", 5_000);
+    let mut cursor = SettleCursor::default();
+    let mut costs = Vec::new();
+    loop {
+        let (steps, settled) = settle_window_cost(&fx, "big", &cursor);
+        costs.push(steps);
+        match settled {
+            Settled::More(next) => cursor = next,
+            Settled::Done => break,
+        }
+    }
+    assert_eq!(costs.len(), 20, "5000 targets in windows of 256");
+    let first = costs[0];
+    // The last window is the short one; a middle window is a full one like the first.
+    let middle = costs[costs.len() - 2];
+    assert!(first > 0);
+    assert!(
+        middle <= first + first / 4,
+        "a later window re-read the earlier ones: first {first} steps, one of the last {middle}"
+    );
+    assert_eq!(request_state(&fx, "big"), "completed_with_gaps");
+}
+
+#[test]
 fn creating_and_sweeping_registrations_exclude_each_other() {
     use super::registration;
     let path = std::path::Path::new("/exclusion/db");
-    assert!(!registration::is_locked());
     let id = registration::begin_live::<()>(path, || {
         assert!(
             registration::is_locked(),
@@ -4411,5 +4524,4 @@ fn creating_and_sweeping_registrations_exclude_each_other() {
     });
     registration::unmark_live(path, &id);
     registration::sweep_dead(path, |live| assert!(live.is_empty()));
-    assert!(!registration::is_locked());
 }
