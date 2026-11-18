@@ -19,10 +19,13 @@
 //!   Jobs run side by side (the Evaluator starts a group of runs), except that
 //!   two jobs never use the same directory name at once: that start is `Busy`.
 //! * **Cancel and stop.** A requested cancel ends the job `cancelled(requested)`,
-//!   a stop of the host `cancelled(shutdown)`. Both drop the job's work where it
-//!   is: files already written stay and the workspaces are removed with
-//!   `evorch eval clean`. A task dropped without an outcome settles as
-//!   `cancelled(shutdown)`, never as a success.
+//!   a stop of the host `cancelled(shutdown)`. Both ask the work to stop, and
+//!   the runner then removes the workspaces it made as at the end of any run
+//!   (those it could not remove are in `warnings`); files already written stay.
+//!   Only a work that does not stop within the grace and is dropped leaves its
+//!   workspaces behind, which the view warns of, as does a killed core: they
+//!   are removed with `evorch eval clean`. A task dropped without an outcome
+//!   settles as `cancelled(shutdown)`, never as a success.
 //! * **Effect.** What the job left is read from the directory when it settles
 //!   (a run that wrote anything into its output is `partial`); a job whose work
 //!   panicked says `unknown`.
@@ -481,6 +484,7 @@ impl Jobs {
         if tokio::time::timeout(STOP_GRACE, &mut handle).await.is_err() {
             handle.abort();
             let _ = (&mut handle).await;
+            self.note_dropped(&id);
         }
         let ended = Ended::Cancelled(reason);
         guard.finish(ended);
@@ -643,6 +647,19 @@ impl Jobs {
                 view: Box::new(view),
             });
         }
+    }
+
+    /// A job whose work did not stop in time and was dropped: it did not get
+    /// to remove the workspaces it made.
+    fn note_dropped(&self, id: &OperationId) {
+        lock(&self.state).table.update(id, |view| {
+            if view.warnings.len() < MAX_JOB_WARNINGS {
+                view.warnings.push(
+                    "the job did not stop in time and was dropped; its workspaces may remain, remove them with evorch eval clean"
+                        .to_owned(),
+                );
+            }
+        });
     }
 
     /// Workspaces the runner could not remove: the view says so, the job's own
@@ -808,11 +825,9 @@ impl Jobs {
                         view.message = Some(
                             match reason {
                                 CancelReason::Requested => {
-                                    "cancelled; the files already written stay, and the workspaces are removed with evorch eval clean"
+                                    "cancelled; the files already written stay"
                                 }
-                                _ => {
-                                    "the core stopped; the files already written stay, and the workspaces are removed with evorch eval clean"
-                                }
+                                _ => "the core stopped; the files already written stay",
                             }
                             .to_owned(),
                         );

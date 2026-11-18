@@ -51,7 +51,9 @@ absolute path that is a direct child of that directory: no `..`, no links); it m
 <UTC YYYYmmdd-HHMMSS>-<thread-id>. Workspaces are removed after finish/verification, including on
 failure; --keep-workspace preserves them. Interrupting or killing this command, or losing its
 connection, stops the job it started (and no other job): the core cancels it when the command's
-last connection to it ends. A stopped job leaves workspaces for eval clean.
+last connection to it ends, and the replay removes its workspaces as it ends. They remain only
+with --keep-workspace, when one could not be removed (the job's warnings say which), when the job
+did not stop in time and was dropped, or when the core itself was killed; `eval clean` removes them.
 Unless --no-report is given, the directory is then reported as by `eval report`.
 `eval report` reprices every run from one price table, judges each baseline/candidate pair
 in both orders (cached in <dir>/judgments; --rejudge asks again), and writes
