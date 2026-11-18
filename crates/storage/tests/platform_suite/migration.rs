@@ -339,11 +339,14 @@ fn v68_lets_a_reindex_request_register_before_it_is_visible() {
 
 #[test]
 fn a_registering_request_is_not_observable_through_the_status_query() {
-    // Given: a database with a request that is still registering, a pending one and a
-    // cancelled one
+    // Given: an open storage and, written by another connection after it opened, a
+    // request that is still registering, a pending one and a cancelled one (rows left
+    // from before the open would be closed by the start-up sweep instead)
     let temp_dir = TempDir::new().expect("temporary directory must be created");
     let path = database_path(&temp_dir);
     drop(Database::open(&config_for(&path)).expect("fresh database must open"));
+    let storage = Storage::open(config_for(&path)).expect("storage must open");
+    let handle = storage.handle();
     let connection = Connection::open(&path).expect("migrated database must reopen");
     for (id, state, finished) in [
         ("registering", "registering", None),
@@ -361,8 +364,6 @@ fn a_registering_request_is_not_observable_through_the_status_query() {
     drop(connection);
 
     // When: the public status query asks about each
-    let storage = Storage::open(config_for(&path)).expect("storage must open");
-    let handle = storage.handle();
     let status = |id: &str| handle.thread_index_request_status(id, 10);
 
     // Then: the registering request is unknown, never reported as cancelled
