@@ -1940,8 +1940,8 @@ fn public_cli_steps_use_one_extractor_without_starting_a_gui_owner() {
     handle
         .append_indexed_note("other", "canonical writer remains available")
         .unwrap();
-    for _ in 0..100 {
-        handle.step_thread_index(&lease, S).unwrap();
+    for _ in 0..1_000 {
+        let step = handle.step_thread_index(&lease, S).unwrap();
         if matches!(
             handle
                 .thread_index_request_status(&submitted.request_id, S)
@@ -1950,6 +1950,11 @@ fn public_cli_steps_use_one_extractor_without_starting_a_gui_owner() {
             RequestProgress::Terminal(ReindexResult::Completed { .. })
         ) {
             return;
+        }
+        if matches!(step, IndexStepResult::Idle { .. }) {
+            // The extraction is on its worker: wait for its step to be reported
+            // instead of spinning against it.
+            receiver.recv_timeout(Duration::from_secs(30)).unwrap();
         }
     }
     panic!("request did not finish");
