@@ -52,7 +52,7 @@ impl Core {
         .unwrap();
         let connections = boot.host.lock().unwrap().connections();
         let (left, departures) = mpsc::unbounded_channel();
-        connections.register(Arc::new(move |client| {
+        connections.register(Arc::new(move |client, _| {
             left.send(client.clone()).unwrap();
         }));
         let backend = Arc::new(HostBackend::new(boot.host.clone(), "hooks".into()));
