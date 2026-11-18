@@ -189,6 +189,8 @@ pub enum CoreState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetentionReason {
+    /// A published reindex request has pending targets, even with no client.
+    PendingReindex,
     ActiveTurn,
     ToolExecution,
     WaitingLane,

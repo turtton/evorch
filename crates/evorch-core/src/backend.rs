@@ -15,6 +15,7 @@ use workbench_web::{BackendSubscription, WebSession, WorkbenchBackend};
 pub struct HostBackend {
     pub host: Arc<Mutex<CommandHost>>,
     pub projection: Arc<Projection>,
+    runtime: runtime::AgentRuntime,
     connections: Arc<workbench_host::connections::ConnectionHooks>,
     hello: ServerHello,
     redactor: Arc<secret_guard::SecretRedactor>,
@@ -80,13 +81,18 @@ impl HostBackend {
         active != 0 || unconfirmed
     }
     pub fn new(host: Arc<Mutex<CommandHost>>, identity: String) -> Self {
-        let (projection, connections) = {
+        let (projection, connections, runtime) = {
             let host = host.lock().unwrap();
-            (host.projection().clone(), host.connections())
+            (
+                host.projection().clone(),
+                host.connections(),
+                host.service().runtime().clone(),
+            )
         };
         Self {
             host,
             projection,
+            runtime,
             connections,
             redactor: Arc::new(secret_guard::SecretRedactor::from_env()),
             closing: AtomicBool::new(false),
@@ -144,7 +150,14 @@ impl HostBackend {
             .unix_clients
             .load(Ordering::SeqCst)
             .saturating_add(web_count);
+        // A lifecycle reply may still hold the command-host mutex. Read via
+        // the captured runtime instead of recursively locking that host.
+        let pending_reindex = self
+            .runtime
+            .with_storage_reader(|db| db.has_pending_reindex())
+            .map_or(true, |pending| pending.unwrap_or(false));
         for (retain, reason) in [
+            (pending_reindex, RetentionReason::PendingReindex),
             (
                 status.running.clients > 0,
                 RetentionReason::ConnectedClients,

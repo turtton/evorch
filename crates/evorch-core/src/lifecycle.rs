@@ -141,6 +141,7 @@ impl LifecycleDriver {
         let mut events = host.runtime.event_bus().subscribe();
         let background = host.host.lock().unwrap().service().background_work_notify();
         let area_work = host.area_work_notify();
+        let index_work = host.thread_index_work_notify();
         let adoption = host.runtime.input_adoption_notifier();
         let mut restart = self.restart.subscribe();
         let outcome = loop {
@@ -198,6 +199,7 @@ impl LifecycleDriver {
                 },
                 _ = background.notified() => self.idle.reset(),
                 _ = area_work.notified() => self.idle.reset(),
+                _ = index_work.notified() => (),
                 _ = adoption.notified() => self.idle.reset(),
                 _ = restart.changed() => self.idle.reset(),
                 _ = web_activity.changed() => self.idle.reset(),

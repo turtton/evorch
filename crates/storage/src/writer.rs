@@ -1404,9 +1404,23 @@ impl StorageHandle {
             .map_err(|_| RequestFailure::DatabaseUnavailable)?
     }
 
-    /// Makes this process's writer the long-lived (GUI) index owner: it takes
-    /// the DB lease when free, renews it, and steps the index in the
-    /// background. A CLI must not call this; it submits a request and, when
+    /// Subscribe to changes of the durable pending-reindex retention condition.
+    /// Retain the nonblocking callback to remain subscribed. Notifications may
+    /// coalesce; consumers must re-read the DB, not infer state from a wakeup.
+    pub fn observe_pending_reindex(
+        &self,
+        observer: &Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<(), StorageError> {
+        self.0
+            .send(Command::Index(index::IndexCommand::ObserveRetention(
+                Arc::downgrade(observer),
+            )))
+            .map_err(|_| StorageError::WriterClosed)
+    }
+
+    /// Makes this process's writer the long-lived core (or legacy GUI) index
+    /// owner: it takes the DB lease when free, renews it, and steps the index
+    /// in the background. A one-shot CLI submits a request and, when
     /// the submission elected it, steps in the foreground.
     ///
     /// # Errors
@@ -1552,6 +1566,39 @@ impl StorageHandle {
     /// Returns an error for a closed writer.
     pub fn thread_index_job_status(&self) -> Result<ThreadIndexJobStatus, StorageError> {
         self.index_request(index::IndexCommand::JobStatus)
+    }
+
+    /// Observe background index steps without polling or sleeping in tests.
+    #[cfg(feature = "test-support")]
+    pub fn observe_thread_index_for_test(
+        &self,
+    ) -> Result<mpsc::Receiver<ThreadIndexCounters>, StorageError> {
+        let (sender, receiver) = mpsc::channel();
+        self.0
+            .send(Command::Index(index::IndexCommand::Observe(sender)))
+            .map_err(|_| StorageError::WriterClosed)?;
+        Ok(receiver)
+    }
+
+    /// Freeze wall time at the actual writer/admission boundary in tests.
+    #[cfg(feature = "test-support")]
+    pub fn set_thread_index_clock_for_test(
+        &self,
+        clock: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    ) -> Result<(), StorageError> {
+        self.0
+            .send(Command::Index(index::IndexCommand::Clock(clock)))
+            .map_err(|_| StorageError::WriterClosed)?;
+        self.barrier()
+    }
+
+    /// Deliver a heartbeat event; the returned status acknowledges its step.
+    #[cfg(feature = "test-support")]
+    pub fn tick_thread_index_for_test(&self) -> Result<ThreadIndexJobStatus, StorageError> {
+        self.0
+            .send(Command::Index(index::IndexCommand::Tick))
+            .map_err(|_| StorageError::WriterClosed)?;
+        self.thread_index_job_status()
     }
 
     #[cfg(test)]

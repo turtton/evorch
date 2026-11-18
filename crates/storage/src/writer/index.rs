@@ -253,6 +253,7 @@ type ControlReply<T> = ReplySender<T, RequestFailure>;
 
 pub(super) enum IndexCommand {
     StartOwner(IndexOwner, SyncSender<super::Command>, Reply<LeaseResult>),
+    ObserveRetention(std::sync::Weak<dyn Fn() + Send + Sync>),
     StopOwner(Reply<()>),
     Submit(
         Box<ReindexRequest>,
@@ -279,13 +280,13 @@ pub(super) enum IndexCommand {
     #[cfg(test)]
     Block(mpsc::Receiver<()>),
     /// Test observer: receives the counters after every background step.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Observe(Sender<ThreadIndexCounters>),
     /// Freeze the state machine's clock independently of real scheduler time.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Clock(std::sync::Arc<std::sync::atomic::AtomicI64>),
     /// Make a periodic owner tick due without sleeping in tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Tick,
 }
 
@@ -293,7 +294,7 @@ struct OwnerState {
     owner: IndexOwner,
     lease: Option<IndexLease>,
     next_heartbeat: Instant,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     next_heartbeat_ns: i64,
     sender: SyncSender<super::Command>,
 }
@@ -306,6 +307,8 @@ struct Extractor {
 /// Background owner state kept by the writer thread.
 pub(super) struct IndexJob {
     rt: IndexRuntime,
+    retention_pending: bool,
+    retention_observers: Vec<std::sync::Weak<dyn Fn() + Send + Sync>>,
     redactor: SecretRedactor,
     owner: Option<OwnerState>,
     extractor: Option<Extractor>,
@@ -316,11 +319,11 @@ pub(super) struct IndexJob {
     last_step: Instant,
     idle_steps: u64,
     forced_steps: u64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     observer: Option<Sender<ThreadIndexCounters>>,
     #[cfg(test)]
     step_timings_us: Vec<(&'static str, u128)>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     clock: Option<std::sync::Arc<std::sync::atomic::AtomicI64>>,
 }
 
@@ -351,6 +354,8 @@ impl IndexJob {
         }
         Self {
             rt,
+            retention_pending: false,
+            retention_observers: Vec::new(),
             redactor: SecretRedactor::from_env(),
             owner: None,
             extractor: None,
@@ -361,11 +366,11 @@ impl IndexJob {
             last_step: Instant::now(),
             idle_steps: 0,
             forced_steps: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             observer: None,
             #[cfg(test)]
             step_timings_us: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             clock: None,
         }
     }
@@ -378,6 +383,8 @@ impl IndexJob {
                 enabled: false,
                 max_bytes: crate::thread_index::DEFAULT_THREAD_INDEX_MAX_BYTES,
             }),
+            retention_pending: false,
+            retention_observers: Vec::new(),
             redactor: SecretRedactor::from_env(),
             owner: None,
             extractor: None,
@@ -388,11 +395,11 @@ impl IndexJob {
             last_step: Instant::now(),
             idle_steps: 0,
             forced_steps: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             observer: None,
             #[cfg(test)]
             step_timings_us: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             clock: None,
         }
     }
@@ -402,7 +409,7 @@ impl IndexJob {
     }
 
     fn now_ns(&self) -> i64 {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(clock) = &self.clock {
             return clock.load(std::sync::atomic::Ordering::SeqCst);
         }
@@ -477,12 +484,12 @@ impl IndexJob {
 
     fn heartbeat(&mut self, conn: &Connection, now: Instant) {
         let now_ns = self.now_ns();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let clock_frozen = self.clock.is_some();
         let Some(owner) = self.owner.as_mut() else {
             return;
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if clock_frozen && now_ns < owner.next_heartbeat_ns {
             owner.next_heartbeat = now + HEARTBEAT;
             return;
@@ -491,7 +498,7 @@ impl IndexJob {
             return;
         }
         owner.next_heartbeat = now + HEARTBEAT;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             owner.next_heartbeat_ns = now_ns.saturating_add(HEARTBEAT.as_nanos() as i64);
         }
@@ -584,6 +591,36 @@ pub(super) fn run_due(
     source_suspended: bool,
     idle: bool,
 ) {
+    let heartbeat_due = job
+        .owner
+        .as_ref()
+        .is_some_and(|owner| Instant::now() >= owner.next_heartbeat);
+    run_step(job, conn, config, source_suspended, idle);
+    if !job.retention_observers.is_empty() {
+        let pending = crate::repo::thread_index::has_pending_reindex(conn).unwrap_or(true);
+        // A different process can create AND finish work between our reads.
+        // Heartbeats wake arbitration too; the consumer does not reset grace.
+        if heartbeat_due || pending != job.retention_pending {
+            job.retention_pending = pending;
+            job.retention_observers.retain(|observer| {
+                if let Some(observer) = observer.upgrade() {
+                    observer();
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+    }
+}
+
+fn run_step(
+    job: &mut IndexJob,
+    conn: &Connection,
+    config: &StorageConfig,
+    source_suspended: bool,
+    idle: bool,
+) {
     let now = Instant::now();
     job.heartbeat(conn, now);
     if job.retry_wake.is_some_and(|wake| now >= wake) {
@@ -669,14 +706,14 @@ pub(super) fn run_due(
     notify_observer(job);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn notify_observer(job: &IndexJob) {
     if let Some(observer) = &job.observer {
         let _ = observer.send(job.rt.counters);
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn notify_observer(_job: &IndexJob) {}
 
 /// Capacity may have changed (maintenance checkpoint, cleanup): re-judge a
@@ -724,6 +761,9 @@ pub(super) fn handle(
         now_ns: now,
     };
     match command {
+        IndexCommand::ObserveRetention(observer) => {
+            job.retention_observers.push(observer);
+        }
         IndexCommand::StartOwner(owner, sender, reply) => {
             let result = lease::acquire(conn, &owner, now, THREAD_INDEX_LEASE_NS);
             let lease = match &result {
@@ -734,7 +774,7 @@ pub(super) fn handle(
                 owner,
                 lease,
                 next_heartbeat: Instant::now() + HEARTBEAT,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 next_heartbeat_ns: now.saturating_add(HEARTBEAT.as_nanos() as i64),
                 sender,
             });
@@ -824,14 +864,17 @@ pub(super) fn handle(
         IndexCommand::Block(release) => {
             let _ = release.recv();
         }
-        #[cfg(test)]
-        IndexCommand::Observe(observer) => job.observer = Some(observer),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
+        IndexCommand::Observe(observer) => {
+            job.observer = Some(observer);
+            notify_observer(job);
+        }
+        #[cfg(any(test, feature = "test-support"))]
         IndexCommand::Clock(clock) => {
             job.rt.admission_clock = Some(clock.clone());
             job.clock = Some(clock);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         IndexCommand::Tick => {
             if let Some(owner) = job.owner.as_mut() {
                 owner.next_heartbeat = Instant::now();

@@ -1,5 +1,6 @@
 //! Composition tests await transport/runtime completion, never elapsed real time.
 mod adoption;
+mod reindex;
 
 use super::*;
 use std::{future::Future, pin::Pin, sync::Arc, task::Poll};

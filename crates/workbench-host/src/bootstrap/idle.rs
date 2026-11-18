@@ -2,6 +2,13 @@
 use super::BootstrappedHost;
 
 impl BootstrappedHost {
+    /// Wake arbitration only when explicit reindex retention changes.
+    pub fn thread_index_work_notify(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.thread_index_owner
+            .as_ref()
+            .map(|owner| owner.changed())
+            .unwrap_or_default()
+    }
     pub fn busy(&self) -> bool {
         self.host.lock().unwrap().service().restart_gate().busy()
             || self.evaluations.is_busy()
@@ -14,6 +21,8 @@ impl BootstrappedHost {
             || self.host.lock().unwrap().service().has_background_work()
             || self.area_tasks.busy()
             || self.runtime.has_active_runs()
+            || self.runtime.with_storage_reader(|db| db.has_pending_reindex())
+                .map_or(true, |pending| pending.unwrap_or(false))
             // P9 recovery does not yet restore questions or approval authority.
             // Preserve even questions belonging to a run not currently loaded.
             || self.runtime.with_storage_reader(|db| {

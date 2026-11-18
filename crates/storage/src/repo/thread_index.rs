@@ -1076,3 +1076,8 @@ pub(crate) fn index_run_status(
         last_error_code,
     }))
 }
+
+/// Durable retention signal: ordinary discovery and terminal-wait rows are idle.
+pub(crate) fn has_pending_reindex(conn: &Connection) -> Result<bool, StorageError> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM thread_index_requests q WHERE q.state = 'pending' AND EXISTS(SELECT 1 FROM thread_index_request_targets t WHERE t.request_id = q.request_id AND t.state = 'pending'))", [], |row| row.get(0))?)
+}

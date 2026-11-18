@@ -80,7 +80,7 @@ pub(crate) struct IndexRuntime {
     pub counters: ThreadIndexCounters,
     #[cfg(test)]
     pub commit_timings_us: Vec<(&'static str, u128)>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub admission_clock: Option<std::sync::Arc<std::sync::atomic::AtomicI64>>,
 }
 
@@ -118,7 +118,7 @@ impl IndexRuntime {
             counters: ThreadIndexCounters::default(),
             #[cfg(test)]
             commit_timings_us: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             admission_clock: None,
         }
     }
@@ -136,6 +136,10 @@ impl IndexRuntime {
         #[cfg(not(test))]
         {
             let _ = step_now_ns;
+            #[cfg(feature = "test-support")]
+            if let Some(clock) = &self.admission_clock {
+                return clock.load(std::sync::atomic::Ordering::SeqCst);
+            }
             super::now_ns()
         }
     }

@@ -38,6 +38,12 @@ pub struct RunContextMeta {
 }
 
 impl Database {
+    /// Whether a published reindex request still has pending target work.
+    /// Background discovery alone must not retain an otherwise idle core.
+    pub fn has_pending_reindex(&self) -> Result<bool, StorageError> {
+        crate::repo::thread_index::has_pending_reindex(&self.conn)
+    }
+
     pub fn user_question(&self, id: &str) -> Result<Option<event_bus::UserQuestion>, StorageError> {
         crate::repo::user_questions::get(&self.conn, id)
     }

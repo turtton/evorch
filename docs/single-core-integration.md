@@ -381,6 +381,28 @@ code), and `evaluation.rs` uses it.
   function like `backfill` over `online_maintenance::run_task`. **17d-3 must be
   finished before 19a.**
 
+## Before 17d-3: resident thread-index owner in the core
+
+This independent integration PR starts from main, before #683 (17d-3). It moves
+index-owner lifecycle responsibility into the production core bootstrap; it does
+not change reindex registration or route the CLI through maintenance tasks.
+
+| Contract | Implementation / verification |
+| --- | --- |
+| Activated core owns one resident index worker; lease contention retries at heartbeat and only a live holder steps | Bootstrap thread-index guard; restart and exact-expiry writer-event tests |
+| Restart leftovers and targets closed by retention settle without a new registration | Production bootstrap and actual `reclaim_step` tests |
+| Shutdown/planned exit release the index lease before the storage barrier; no later index step | Shutdown guard; planned StopRequested and barrier tests |
+| Published pending requests with pending targets prevent idle exit, passive indexing does not | `has_pending_reindex`, host busy policy, `RetentionReason::PendingReindex` (`pending_reindex`) |
+| Legacy GUI and core coexist until 19a under one fenced DB lease | Separate-process IPC test using the legacy GUI storage-owner API (no CEF) |
+
+The existing `cli` lease kind is reused with unique core owner IDs because v27
+allows only `gui`/`cli`. A distinct kind is a follow-up; no migration is added.
+With the core holding the lease, non-wait `reindex-threads` now returns `accepted`,
+as specified in ADR 0041 R5; `--wait` still waits for terminal results. The core is
+the explicit resident process allowed by ADR 0045, not a hidden index daemon.
+Owner step/finalization boundedness and #683 registration changes remain outside
+this predecessor.
+
 ## Reserved migration numbers
 
 Storage migrations are numbered from one shared ledger kept by the
