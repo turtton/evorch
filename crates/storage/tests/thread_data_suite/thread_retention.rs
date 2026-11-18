@@ -1781,6 +1781,7 @@ fn the_second_backfill_target_attributes_orchestrator_events_without_rewriting_p
     // byte-identical, and the undecodable row stops counting as pending.
     assert_eq!(progress.converted, 1);
     assert_eq!(progress.reattributed, 4);
+    assert_eq!(progress.undecodable, 1);
     assert_eq!(
         (
             progress.remaining_unconverted,

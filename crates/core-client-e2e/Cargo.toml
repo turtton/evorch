@@ -24,6 +24,8 @@ evorch-core = { path = "../evorch-core" }
 core-instance = { path = "../core-instance" }
 core-launcher = { path = "../core-launcher" }
 workbench-protocol = { path = "../workbench-protocol" }
+workbench-client = { path = "../workbench-client" }
+evorch = { path = "../evorch" }
 workbench-host = { path = "../workbench-host", features = ["test-support"] }
 egui_kittest = { workspace = true }
 workspace-state = { path = "../workspace-state" }
