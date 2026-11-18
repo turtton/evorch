@@ -180,6 +180,17 @@ pub(super) fn spawn_thread<F>(inner: &Arc<Inner>, name: &'static str, work: F) -
 where
     F: FnOnce() + Send + 'static,
 {
+    spawn_registered_thread(inner, name, work).map(|_| ())
+}
+
+fn spawn_registered_thread<F>(
+    inner: &Arc<Inner>,
+    name: &'static str,
+    work: F,
+) -> io::Result<WorkerId>
+where
+    F: FnOnce() + Send + 'static,
+{
     let finish = enroll(inner, name, true);
     let id = finish.id;
     let spawned = std::thread::Builder::new()
@@ -202,7 +213,7 @@ where
             }
             table.epoch += 1;
             inner.workers_activity.send_replace(table.activity());
-            Ok(())
+            Ok(id)
         }
         Err(error) => {
             // The closure was dropped unrun, which counted as a finish.
@@ -212,6 +223,27 @@ where
             inner.workers_activity.send_replace(table.activity());
             Err(error)
         }
+    }
+}
+
+impl super::Admission<'_> {
+    /// Start a ledger-owned thread and return its stable join identity.
+    /// Unlike the legacy optional-ledger adapter, this requires an owner.
+    pub fn spawn_registered_worker_thread<F>(
+        &self,
+        name: &'static str,
+        work: F,
+    ) -> io::Result<WorkerId>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let Some((ledger, _guard)) = &self.managed else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "registered worker requires a ledger",
+            ));
+        };
+        spawn_registered_thread(&ledger.inner, name, work)
     }
 }
 
@@ -289,13 +321,45 @@ impl SpawnLedger {
         }
     }
 
+    /// Join only these registered workers. Unrelated long-lived workers do not
+    /// delay completion. Thread joiners and handles remain ledger-owned if this
+    /// wait is cancelled; retrying it observes the same joins.
+    pub async fn join_worker_ids(&self, ids: &[WorkerId]) -> Result<(), JoinFailed> {
+        let ids: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+        loop {
+            let mut activity = self.inner.workers_activity.subscribe();
+            let unjoined = self.start_selected_thread_joins(Some(&ids));
+            if unjoined > 0 {
+                return Err(JoinFailed { unjoined });
+            }
+            if !locked(&self.inner.workers)
+                .live
+                .keys()
+                .any(|id| ids.contains(id))
+            {
+                return Ok(());
+            }
+            if activity.changed().await.is_err() {
+                return Ok(());
+            }
+        }
+    }
+
     /// Hand each unjoined thread to a joiner thread of the ledger, which
     /// removes the record once the thread is gone. Returns how many could not
     /// be handed over: their handle goes back to the record, which stays.
     fn start_thread_joins(&self) -> usize {
+        self.start_selected_thread_joins(None)
+    }
+
+    fn start_selected_thread_joins(
+        &self,
+        ids: Option<&std::collections::BTreeSet<WorkerId>>,
+    ) -> usize {
         let threads: Vec<_> = locked(&self.inner.workers)
             .live
             .iter_mut()
+            .filter(|(id, _)| ids.is_none_or(|ids| ids.contains(id)))
             .filter_map(|(id, record)| record.thread.take().map(|handle| (*id, handle)))
             .collect();
         let mut unjoined = 0;
@@ -370,5 +434,71 @@ impl SpawnLedger {
         F: FnOnce() + Send + 'static,
     {
         spawn_thread(&self.inner, name, work)
+    }
+}
+
+#[cfg(test)]
+mod selected_join_tests {
+    use super::*;
+    #[tokio::test]
+    async fn joining_one_generation_does_not_wait_for_an_unrelated_resident_thread() {
+        let ledger = SpawnLedger::new();
+        let (release, held) = std::sync::mpsc::channel();
+        let admission = ledger.admit().unwrap();
+        let resident = admission
+            .spawn_registered_worker_thread("resident", move || held.recv().unwrap())
+            .unwrap();
+        let renderer = admission
+            .spawn_registered_worker_thread("renderer", || {})
+            .unwrap();
+        drop(admission);
+        ledger.join_worker_ids(&[renderer]).await.unwrap();
+        assert_eq!(
+            ledger.workers().iter().map(|w| w.id).collect::<Vec<_>>(),
+            vec![resident]
+        );
+        release.send(()).unwrap();
+        ledger.close_fence();
+        ledger.join_workers().await.unwrap();
+    }
+    #[tokio::test]
+    async fn cancelling_a_targeted_join_keeps_the_join_and_retry_observes_its_completion() {
+        let ledger = SpawnLedger::new();
+        let (release, held) = std::sync::mpsc::channel();
+        let admission = ledger.admit().unwrap();
+        let id = admission
+            .spawn_registered_worker_thread("held", move || held.recv().unwrap())
+            .unwrap();
+        drop(admission);
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        *locked(&ledger.inner.seams.joiner_start) = Some(Box::new(move || {
+            let _ = started.send(());
+        }));
+        let ids = [id];
+        let mut joining = Box::pin(ledger.join_worker_ids(&ids));
+        tokio::select! {biased; result=&mut joining=>panic!("held worker joined: {result:?}"), result=started_rx=>result.unwrap()};
+        drop(joining);
+        assert!(ledger.workers().iter().any(|w| w.id == id));
+        release.send(()).unwrap();
+        ledger.join_worker_ids(&[id]).await.unwrap();
+        assert!(ledger.workers().is_empty());
+    }
+    #[tokio::test]
+    async fn targeted_join_start_failure_retains_the_thread_until_retry() {
+        let ledger = SpawnLedger::new();
+        let admission = ledger.admit().unwrap();
+        let id = admission
+            .spawn_registered_worker_thread("retry", || {})
+            .unwrap();
+        drop(admission);
+        ledger
+            .inner
+            .seams
+            .fail_joiner_starts
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(ledger.join_worker_ids(&[id]).await.unwrap_err().unjoined, 1);
+        assert!(ledger.workers().iter().any(|w| w.id == id));
+        ledger.join_worker_ids(&[id]).await.unwrap();
+        assert!(ledger.workers().is_empty());
     }
 }

@@ -72,6 +72,24 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The core's private generation profiles carry a lease. Holding it here
+    // prevents next-core cleanup from deleting a still-running helper's data.
+    // Standalone callers without an owner.lock keep their existing behavior.
+    let lease = args.cache_dir.join("owner.lock");
+    let _profile_lease = if lease.exists() {
+        match std::fs::File::open(&lease).and_then(|file| {
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared)?;
+            Ok(file)
+        }) {
+            Ok(file) => Some(file),
+            Err(error) => {
+                eprintln!("evorch-renderer: profile lease: {error}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
     let config = RuntimeConfig {
         root_cache_path: args.cache_dir,
         log_file: args.log_file,

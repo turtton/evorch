@@ -21,6 +21,8 @@ pub enum ChildKind {
     Eval,
     /// A target probe.
     Probe,
+    /// The core-owned offline renderer helper.
+    Renderer,
     Other,
 }
 
@@ -33,6 +35,7 @@ impl ChildKind {
             Self::ShellJob => "shell-job",
             Self::Eval => "eval",
             Self::Probe => "probe",
+            Self::Renderer => "renderer",
             Self::Other => "other",
         }
     }

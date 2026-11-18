@@ -1,20 +1,22 @@
-//! Host service of the `browser` area (PR 16a-2 / 16b). Placeholder: the namespace is reserved,
-//! so nothing reaches this service and it starts no task, opens no file and
-//! talks to nothing. The PR that implements the area fills in this file, the
-//! adapter `ingress/namespaces/browser.rs` and the protocol module, and nothing
-//! shared.
-//!
-//! Reserved for the renderer and browser work; takes nothing yet.
+//! Offline renderer lifecycle. The protocol/provider remain disabled until F2.
 use super::AreaHandles;
 use crate::bootstrap::BootstrapError;
-
-/// The `browser` service, reached from `ingress/namespaces/browser.rs` as
-/// `self.areas.browser`.
+mod budget;
+mod profiles;
+pub mod renderer;
 #[derive(Default)]
-pub struct BrowserArea {}
-
+pub struct BrowserArea {
+    pub renderer: Option<renderer::RendererOwner>,
+}
 impl BrowserArea {
-    pub(super) fn new(_handles: &AreaHandles) -> Result<Self, BootstrapError> {
-        Ok(Self::default())
+    pub(super) fn new(handles: &AreaHandles) -> Result<Self, BootstrapError> {
+        let config = renderer::OwnerConfig::installed(handles.config_dir.join("renderer-profiles"))
+            .map_err(|e| BootstrapError::from(e.to_string()))?;
+        let renderer =
+            renderer::RendererOwner::new(&handles.tasks, handles.spawn_ledger.clone(), config)
+                .map_err(|e| BootstrapError::from(e.to_string()))?;
+        Ok(Self {
+            renderer: Some(renderer),
+        })
     }
 }

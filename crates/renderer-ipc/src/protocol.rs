@@ -95,6 +95,11 @@ pub enum Request {
         tab: TabId,
         enabled: bool,
     },
+    /// Changes the off-screen painting limit without replacing the tab.
+    SetFrameRate {
+        tab: TabId,
+        frame_rate: u8,
+    },
     /// Replies with a PNG of the loaded page in the response body.
     Capture {
         tab: TabId,
@@ -544,6 +549,13 @@ impl Request {
                 no_body()?;
                 viewport.validate()
             }
+            Self::SetFrameRate { frame_rate, .. } => {
+                no_body()?;
+                if *frame_rate == 0 || *frame_rate > MAX_FRAME_RATE {
+                    return Err(RemoteError::invalid("frame rate outside 1..=60"));
+                }
+                Ok(())
+            }
             Self::SetStreaming { .. }
             | Self::TakeNotices { .. }
             | Self::CloseTab { .. }
@@ -785,5 +797,26 @@ mod tests {
             serde_json::from_slice::<RequestFrame>(&json).unwrap(),
             request
         );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn dynamic_frame_rate_uses_the_same_one_to_sixty_fps_bound_and_no_body() {
+    for (frame_rate, valid) in [
+        (0, false),
+        (1, true),
+        (10, true),
+        (30, true),
+        (60, true),
+        (61, false),
+        (255, false),
+    ] {
+        let request = Request::SetFrameRate {
+            tab: TabId(1),
+            frame_rate,
+        };
+        assert_eq!(request.validate(0).is_ok(), valid);
+        assert!(request.validate(1).is_err());
     }
 }

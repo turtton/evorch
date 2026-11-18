@@ -169,6 +169,27 @@ fn at_most_four_tabs_and_closing_a_session_closes_its_tabs() {
 }
 
 #[test]
+fn definitely_unsent_opens_do_not_exhaust_tab_frame_slots() {
+    let connected = connect_fake();
+    let oversized = vec![0; renderer_ipc::codec::MAX_CONTROL_BODY + 1];
+    for id in 10..10 + MAX_TABS as u64 + 1 {
+        let (mut open, _) = index_only();
+        open.tab = TabId(id);
+        assert!(matches!(
+            connected.client.open_artifact(open, &oversized),
+            Err(ClientError::Local(_))
+        ));
+    }
+    for id in 1..=MAX_TABS as u64 {
+        let (mut open, body) = index_only();
+        open.tab = TabId(id);
+        connected.client.open_artifact(open, &body).unwrap();
+    }
+    connected.client.shutdown(NEVER);
+    connected.helper.join().unwrap();
+}
+
+#[test]
 fn a_timed_out_request_fails_alone_and_its_late_response_is_discarded() {
     let connected = connect_fake();
     let client = &connected.client;
@@ -337,4 +358,38 @@ fn a_stop_during_large_frames_ends_as_an_acknowledged_shutdown_every_time() {
         assert_eq!(c.client.shutdown(NEVER), CloseReason::ShutdownAcknowledged);
         assert_eq!(c.helper.join().unwrap(), ExitReason::ShutdownRequested);
     }
+}
+
+#[test]
+fn external_owner_can_register_readers_before_hello_and_join_after_close() {
+    let (control, peer_control) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (frames, peer_frames) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (_handles, init) = fake_init();
+    let helper = serve_in_thread(peer_control, peer_frames, ServeConfig::default(), init);
+    let (client, jobs) =
+        RendererClient::prepare(control, frames, ClientConfig::new(RendererGeneration(9))).unwrap();
+    // No hidden thread starts in prepare: the owner holds all loop jobs.
+    let threads: Vec<_> = jobs
+        .into_iter()
+        .map(|job| std::thread::spawn(move || job.run()))
+        .collect();
+    assert_eq!(client.hello().unwrap().protocol, PROTOCOL_VERSION);
+    client.close();
+    client.wait_readers();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    helper.join().unwrap();
+}
+#[test]
+fn dropping_an_unstarted_reader_does_not_lose_completion_on_partial_start_failure() {
+    let (control, _peer_control) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (frames, _peer_frames) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (client, [control, frames]) =
+        RendererClient::prepare(control, frames, ClientConfig::new(RendererGeneration(9))).unwrap();
+    let thread = std::thread::spawn(move || control.run());
+    drop(frames);
+    client.close();
+    client.wait_readers();
+    thread.join().unwrap();
 }
