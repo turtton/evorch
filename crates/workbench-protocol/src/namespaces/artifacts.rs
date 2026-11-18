@@ -102,7 +102,11 @@ impl ArtifactsCommand {
     deny_unknown_fields
 )]
 pub enum ArtifactsResult {
-    Accepted { operation_id: RendererId },
+    Accepted {
+        operation_id: RendererId,
+    },
+    /// The data connection now carries the artifact bytes.
+    Bound {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

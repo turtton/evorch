@@ -37,7 +37,6 @@ pub async fn connection(
             "wrong socket peer owner",
         ));
     }
-    let _connected = backend.connected();
     let (mut read, write) = stream.into_split();
     let mut hello = backend.hello();
     let first = tokio::select! { r = payload(&mut read, hello.limits.max_frame_bytes) => r?, _ = shutdown.changed() => return Ok(()) };
@@ -46,6 +45,7 @@ pub async fn connection(
     else {
         return Ok(());
     };
+    let _connected = backend.connected();
     let client: ClientHello = serde_json::from_slice(&first).map_err(invalid)?;
     let negotiated = negotiate(
         &client,

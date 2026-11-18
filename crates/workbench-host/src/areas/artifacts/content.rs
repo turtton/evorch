@@ -6,7 +6,10 @@ use std::{
 use runtime::artifacts::{ArtifactRecord, ArtifactStore};
 use workbench_protocol::{
     errors::{ErrorCode, RetryAdvice, WorkbenchError},
-    namespaces::artifacts::{ArtifactMetadata, ArtifactRef, MAX_CONTENT_CHUNK_BYTES},
+    namespaces::{
+        artifacts::{ArtifactMetadata, ArtifactRef, MAX_CONTENT_CHUNK_BYTES},
+        browser::data::{BlobSource, BlobStart, MAX_IMAGE_BLOB_BYTES, MediaType},
+    },
 };
 
 pub(crate) fn not_found() -> WorkbenchError {
@@ -83,6 +86,45 @@ fn blob(store: &ArtifactStore, record: &ArtifactRecord) -> Result<File, Workbenc
         return Err(storage_error());
     }
     Ok(file)
+}
+
+/// The original bytes of an image artifact, as the blob a data connection
+/// carries. The file is opened and checked here; reading it is the transfer's
+/// work, off the host lock. The reader is bound to the recorded length.
+pub(super) fn image_blob(
+    store: &ArtifactStore,
+    record: &ArtifactRecord,
+) -> Result<(BlobStart, Box<dyn Read + Send>), WorkbenchError> {
+    let media_type = match record.media_type.as_str() {
+        "image/png" => MediaType::Png,
+        "image/jpeg" => MediaType::Jpeg,
+        "image/gif" => MediaType::Gif,
+        "image/webp" => MediaType::Webp,
+        _ => return Err(invalid("artifact is not an image")),
+    };
+    if record.byte_len == 0 || record.byte_len > MAX_IMAGE_BLOB_BYTES {
+        return Err(invalid("image artifact is too large for a data connection"));
+    }
+    let mut digest = [0u8; 32];
+    if record.sha256.len() != 64 {
+        return Err(not_found());
+    }
+    for (at, byte) in digest.iter_mut().enumerate() {
+        *byte =
+            u8::from_str_radix(&record.sha256[at * 2..at * 2 + 2], 16).map_err(|_| not_found())?;
+    }
+    let file = blob(store, record)?;
+    Ok((
+        BlobStart {
+            core_epoch: 0,
+            transfer_id: 0,
+            source: BlobSource::Artifact,
+            media_type,
+            total_bytes: record.byte_len,
+            digest,
+        },
+        Box::new(file.take(record.byte_len)),
+    ))
 }
 
 pub(super) fn read_text(

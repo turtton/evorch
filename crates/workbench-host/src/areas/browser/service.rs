@@ -1,4 +1,5 @@
 //! Private renderer state: receipts/events carry ids; only local, authorized queries read outputs.
+use super::renderer::data::Revocation;
 use super::renderer::{OwnerError, Phase, RendererOwner, Tab};
 use crate::{
     areas::{AreaHandles, AreaTasks, ProjectionSource},
@@ -21,6 +22,7 @@ use workbench_protocol::{
     ids::ClientId,
     namespaces::{artifacts::ArtifactRef, browser::*},
 };
+mod bind;
 mod operations;
 #[cfg(test)]
 mod tests;
@@ -87,8 +89,16 @@ struct Operation {
 }
 struct Capture {
     tab: Tab,
-    bytes: Vec<u8>,
+    bytes: Arc<Vec<u8>>,
     expires: Instant,
+    /// The Capture operation that produced it; the binding names it again.
+    operation: RendererId,
+    client: ClientId,
+    surface: Surface,
+    connection_epoch: Option<ConnectionEpoch>,
+    /// Set once a data connection is bound: the transfer is then the only
+    /// reader and the Capture goes with it.
+    bound: Option<Revocation>,
 }
 struct Subscription {
     client: ClientId,
@@ -97,6 +107,16 @@ struct Subscription {
     session: Option<String>,
     tab: Tab,
     expires: Instant,
+    token: RendererId,
+    /// Set once a data connection is bound. The token is spent then; dropping
+    /// the subscription drops this and ends the lease.
+    bound: Option<Revocation>,
+}
+fn alive_after(bound: &Option<Revocation>, expires: Instant, now: Instant) -> bool {
+    match bound {
+        Some(revocation) => !revocation.finished(),
+        None => expires > now,
+    }
 }
 /// A copy of when the preview control grace of a disconnected client ends.
 ///
@@ -162,6 +182,10 @@ impl RendererService {
                 state.subscriptions.retain(|_, lease| {
                     &lease.client != client
                         || lease.connection_epoch.is_some_and(|epoch| epoch > ended)
+                });
+                state.captures.retain(|_, capture| {
+                    &capture.client != client
+                        || capture.connection_epoch.is_some_and(|epoch| epoch > ended)
                 });
             }
         }));
@@ -338,12 +362,12 @@ impl RendererService {
             .values()
             .map(|tab| tab.physical)
             .collect::<Vec<_>>();
-        state
-            .captures
-            .retain(|_, capture| capture.expires > now && live.contains(&capture.tab));
-        state
-            .subscriptions
-            .retain(|_, lease| lease.expires > now && live.contains(&lease.tab));
+        state.captures.retain(|_, capture| {
+            alive_after(&capture.bound, capture.expires, now) && live.contains(&capture.tab)
+        });
+        state.subscriptions.retain(|_, lease| {
+            alive_after(&lease.bound, lease.expires, now) && live.contains(&lease.tab)
+        });
         for operation in state.operations.values_mut() {
             if operation
                 .tab

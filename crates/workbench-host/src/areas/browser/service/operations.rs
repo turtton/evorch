@@ -258,7 +258,10 @@ impl RendererService {
                 state.subscriptions.remove(subscription.as_str());
                 (None, Some(tab), Some(RendererOutput::Done), None)
             }
-            BrowserCommand::BindRendererData { .. } => return Err(denied()),
+            BrowserCommand::BindRendererData { channel_id, source } => {
+                self.bind_data(&mut state, channel_id, source, &client, p)?;
+                (None, None, Some(RendererOutput::Done), None)
+            }
             _ => {
                 let reference = match &command {
                     BrowserCommand::ResizeRendererTab { tab, .. }
@@ -321,7 +324,7 @@ impl RendererService {
                         (scope, Some(tab.physical), Some(RendererOutput::Done), None)
                     }
                     BrowserCommand::SubscribeRendererFrames { .. } => {
-                        if state.subscriptions.len() >= 16 {
+                        if state.subscriptions.len() >= data::MAX_FRAME_SUBSCRIPTIONS {
                             return Err(busy());
                         }
                         let subscription = id();
@@ -335,6 +338,8 @@ impl RendererService {
                                 session: scope.clone(),
                                 tab: tab.physical,
                                 expires: Instant::now() + GRACE,
+                                token: token.clone(),
+                                bound: None,
                             },
                         );
                         (
@@ -553,14 +558,24 @@ impl RendererService {
                             {
                                 return Err(RendererFailure::Busy);
                             }
+                            let (client, surface) = state
+                                .operations
+                                .get(operation_id.as_str())
+                                .map(|op| (op.client.clone(), op.surface))
+                                .ok_or(RendererFailure::Closed)?;
                             let capture_id = id();
                             let byte_len = bytes.len() as u64;
                             state.captures.insert(
                                 capture_id.as_str().to_owned(),
                                 Capture {
                                     tab: tab.physical,
-                                    bytes,
+                                    bytes: Arc::new(bytes),
                                     expires: Instant::now() + GRACE,
+                                    operation: operation_id.clone(),
+                                    connection_epoch: self.connections.epoch_of(&client),
+                                    client,
+                                    surface,
+                                    bound: None,
                                 },
                             );
                             Ok(RendererOutput::Capture {

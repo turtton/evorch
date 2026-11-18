@@ -9,6 +9,7 @@ use renderer_ipc::{
     ClientConfig, ClientError, OpenArtifact, RendererClient, RendererGeneration, Reply, Request,
     TabId, Viewport,
 };
+pub mod data;
 pub use sandbox::SpawnLedger;
 use sandbox::{
     ChildKind,
@@ -67,6 +68,8 @@ pub struct Status {
 }
 #[derive(Clone)]
 pub struct OwnerConfig {
+    /// The memory budget of the raw frames of every helper generation of this core.
+    pub frame_pool: Arc<renderer_ipc::FramePool>,
     /// Trusted distribution path, never supplied by artifact/client input.
     pub executable: PathBuf,
     pub profiles: PathBuf,
@@ -96,6 +99,7 @@ impl OwnerConfig {
     }
     pub fn new(executable: PathBuf, profiles: PathBuf) -> Self {
         Self {
+            frame_pool: renderer_ipc::FramePool::new(renderer_ipc::FRAME_BUDGET_BYTES),
             executable,
             profiles,
             idle: Duration::from_secs(30),
@@ -206,6 +210,8 @@ pub struct RendererOwner {
     commands: mpsc::Sender<Envelope>,
     status: watch::Receiver<Status>,
     cleanup: Arc<TabCleanup>,
+    plane: data::DataPlane,
+    frames: FrameSource,
     pub(crate) run_tabs:
         Arc<std::sync::Mutex<std::collections::HashMap<String, super::run_pages::RunTab>>>,
 }
@@ -224,19 +230,31 @@ impl RendererOwner {
         });
         let cleanup = Arc::new(TabCleanup::default());
         let actor_cleanup = cleanup.clone();
+        let frames = FrameSource::default();
+        let actor_frames = frames.clone();
         tasks.spawn("renderer-owner", move |stop| {
-            Actor::new(ledger, config, status, stop, actor_cleanup).run(rx)
+            Actor::new(ledger, config, status, stop, actor_cleanup, actor_frames).run(rx)
         })?;
         Ok(Self {
             body_budget: Arc::new(tokio::sync::Semaphore::new(64 * 1024 * 1024)),
             commands,
             status: view,
             cleanup,
+            plane: data::DataPlane::default(),
+            frames,
             run_tabs: Arc::default(),
         })
     }
     pub fn status(&self) -> Status {
         *self.status.borrow()
+    }
+    /// The data connections of this owner: channels, bindings and leases.
+    pub fn data_plane(&self) -> data::DataPlane {
+        self.plane.clone()
+    }
+    /// The connection the raw frames of `tab` arrive on, for a frame lease.
+    pub(crate) fn frame_source(&self, tab: Tab) -> Option<Arc<RendererClient>> {
+        self.frames.get(tab.generation)
     }
     pub fn subscribe(&self) -> watch::Receiver<Status> {
         self.status.clone()
@@ -396,6 +414,28 @@ struct Work {
     timeout: Duration,
     reply: oneshot::Sender<RpcReply>,
 }
+type LiveClient = Option<(u64, Arc<RendererClient>)>;
+/// The frame connection of the live helper generation, readable without the
+/// actor so a lease can be made under the service lock. Cleared before the
+/// generation is stopped.
+#[derive(Clone, Default)]
+struct FrameSource(Arc<std::sync::Mutex<LiveClient>>);
+impl FrameSource {
+    fn set(&self, generation: u64, client: Arc<RendererClient>) {
+        *self.0.lock().unwrap() = Some((generation, client));
+    }
+    fn clear(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+    fn get(&self, generation: u64) -> Option<Arc<RendererClient>> {
+        self.0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(live, _)| *live == generation)
+            .map(|(_, client)| client.clone())
+    }
+}
 struct Generation {
     child: GroupChild,
     client: Arc<RendererClient>,
@@ -422,6 +462,7 @@ impl Generation {
         let channels = renderer_ipc::stdio_channels().map_err(|_| OwnerError::Unavailable)?;
         let mut client_config = ClientConfig::new(RendererGeneration(generation));
         client_config.hello_timeout = config.hello_timeout;
+        client_config.frame_pool = config.frame_pool.clone();
         let (client, jobs) =
             RendererClient::prepare(channels.control, channels.frames, client_config)?;
         let client = Arc::new(client);
@@ -569,6 +610,7 @@ struct Actor {
     stop: StopSignal,
     cleanup: Arc<TabCleanup>,
     live: Option<Generation>,
+    frames: FrameSource,
     budget: RendererBudget,
     generation: u64,
     next_tab: u64,
@@ -583,8 +625,10 @@ impl Actor {
         status: watch::Sender<Status>,
         stop: StopSignal,
         cleanup: Arc<TabCleanup>,
+        frames: FrameSource,
     ) -> Self {
         Self {
+            frames,
             ledger,
             config,
             status,
@@ -608,6 +652,7 @@ impl Actor {
     }
     async fn end(&mut self, graceful: bool, failed: bool) -> Result<(), OwnerError> {
         self.phase(Phase::Stopping);
+        self.frames.clear();
         if let Some(live) = &mut self.live {
             if graceful && !self.stop.is_stopped() && !self.ledger.is_fenced() {
                 let _ = live
@@ -656,6 +701,7 @@ impl Actor {
         self.generation += 1;
         self.phase(Phase::Starting);
         let (live, error) = Generation::spawn(&self.ledger, &self.config, self.generation)?;
+        self.frames.set(self.generation, live.client.clone());
         self.live = Some(live);
         if let Some(error) = error {
             return Err(error);

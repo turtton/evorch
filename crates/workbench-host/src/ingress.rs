@@ -559,6 +559,21 @@ impl CommandHost {
         self.areas.browser.renderer.clone()
     }
 
+    /// The data connections of the core's renderer owner. A data connection is
+    /// not a client and has no provenance: it opens a channel here, and only a
+    /// control command that passed its own authorization binds the channel to
+    /// frames or a blob (see `BindRendererData` and `BindArtifactContent`).
+    /// The plane offers no way to take frames or bytes without such a binding,
+    /// and this is not the reconnect-grace accessor: that one only tells when
+    /// previews expire.
+    pub fn renderer_data_plane(&self) -> Option<crate::areas::browser::renderer::data::DataPlane> {
+        self.areas
+            .browser
+            .renderer
+            .as_ref()
+            .map(|owner| owner.data_plane())
+    }
+
     /// Answer `query` for `session`.
     ///
     /// `provenance` is what the transport established for the caller (the same
