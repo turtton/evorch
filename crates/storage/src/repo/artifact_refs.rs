@@ -1,9 +1,64 @@
 //! SQL of the artifact reference tables (see `crate::artifact_refs`).
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::StorageError;
 use crate::artifact_refs::{ArtifactRef, GcState, MetaState, UnknownMeta};
+
+const THREAD_REF: &str = "SELECT artifact_id, sha256, thread_id, run_id, recorded_at_ns \
+    FROM artifact_refs WHERE thread_id = ?1 AND artifact_id = ?2";
+const THREAD_PAGE: &str = "SELECT artifact_id, sha256, thread_id, run_id, recorded_at_ns \
+    FROM artifact_refs WHERE thread_id = ?1 AND artifact_id > ?2 \
+    ORDER BY artifact_id LIMIT ?3";
+// LIMIT must be inside the subquery: an outer LIMIT would still count every row.
+const THREAD_COUNT: &str = "SELECT count(*) FROM \
+    (SELECT 1 FROM artifact_refs WHERE thread_id = ?1 LIMIT ?2)";
+
+fn read_ref(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRef> {
+    Ok(ArtifactRef {
+        artifact_id: row.get(0)?,
+        sha256: row.get(1)?,
+        thread_id: row.get(2)?,
+        run_id: row.get(3)?,
+        recorded_at_ns: row.get(4)?,
+    })
+}
+
+pub(crate) fn ref_for_thread(
+    conn: &Connection,
+    thread_id: &str,
+    artifact_id: &str,
+) -> Result<Option<ArtifactRef>, StorageError> {
+    Ok(conn
+        .query_row(THREAD_REF, params![thread_id, artifact_id], read_ref)
+        .optional()?)
+}
+
+pub(crate) fn refs_for_thread(
+    conn: &Connection,
+    thread_id: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<Vec<ArtifactRef>, StorageError> {
+    let mut statement = conn.prepare_cached(THREAD_PAGE)?;
+    let rows = statement.query_map(
+        params![thread_id, cursor.unwrap_or(""), limit as i64],
+        read_ref,
+    )?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+pub(crate) fn count_for_thread(
+    conn: &Connection,
+    thread_id: &str,
+    limit: usize,
+) -> Result<usize, StorageError> {
+    Ok(
+        conn.query_row(THREAD_COUNT, params![thread_id, limit as i64], |row| {
+            row.get(0)
+        })?,
+    )
+}
 
 pub(crate) fn gc_state(conn: &Connection) -> Result<GcState, StorageError> {
     Ok(conn.query_row(
@@ -194,4 +249,73 @@ pub(crate) fn unknown_count(conn: &Connection) -> Result<u64, StorageError> {
         |row| row.get(0),
     )?;
     Ok(u64::try_from(count).unwrap_or(0))
+}
+
+#[cfg(test)]
+mod renderer_read_tests {
+    use super::*;
+    use crate::{Database, StorageConfig};
+    use rusqlite::{StatementStatus, ToSql};
+
+    fn indexed_steps(conn: &Connection, sql: &str, args: &[&dyn ToSql]) -> i32 {
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(args, |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("SEARCH") && step.contains("thread_id=?")),
+            "{plan:?}"
+        );
+        if sql == THREAD_PAGE {
+            assert!(
+                plan.iter().any(|step| step.contains("artifact_id>?")),
+                "{plan:?}"
+            );
+        }
+        let mut statement = conn.prepare(sql).unwrap();
+        let mut rows = statement.query(args).unwrap();
+        while rows.next().unwrap().is_some() {}
+        drop(rows);
+        assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0);
+        assert_eq!(statement.get_status(StatementStatus::Sort), 0);
+        statement.get_status(StatementStatus::VmStep)
+    }
+
+    #[test]
+    fn renderer_reads_seek_and_count_work_stops_at_the_requested_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("refs.db"),
+            ..Default::default()
+        };
+        let db = Database::open(&config).unwrap();
+        let conn = Connection::open(&config.db_path).unwrap();
+        conn.execute_batch(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2048)
+             INSERT INTO artifact_refs
+             SELECT printf('m-%05d', x), 'shared', 'owned', NULL, x FROM n;",
+        )
+        .unwrap();
+        assert_eq!(db.artifact_ref_count_for_thread("owned", 7).unwrap(), 7);
+        let page_args: &[&dyn ToSql] = &[&"owned", &"m-00003", &7_i64];
+        let count_args: &[&dyn ToSql] = &[&"owned", &7_i64];
+        let first = indexed_steps(&conn, THREAD_PAGE, page_args);
+        let count = indexed_steps(&conn, THREAD_COUNT, count_args);
+        conn.execute_batch(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000)
+             INSERT INTO artifact_refs
+             SELECT printf('a-%05d', x), 'shared', 'foreign', NULL, x FROM n;
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000)
+             INSERT INTO artifact_refs
+             SELECT printf('z-%05d', x), 'shared', 'owned', NULL, x FROM n;",
+        )
+        .unwrap();
+        assert_eq!(indexed_steps(&conn, THREAD_PAGE, page_args), first);
+        assert_eq!(indexed_steps(&conn, THREAD_COUNT, count_args), count);
+        assert_eq!(db.artifact_ref_count_for_thread("owned", 7).unwrap(), 7);
+    }
 }

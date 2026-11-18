@@ -1,18 +1,15 @@
-//! The renderer wiring of PR 16a-2's integration PR adds no tool and changes no
-//! cache prefix: the artifact area is wired into the core but its provider
-//! factory returns `None`, so the runtime is given no `ArtifactPages` and does not
-//! offer `inspect_artifact`. This is the baseline the feature PRs extend:
-//! integration-16a2 registers it in the cache gate and the later PRs (F1 owner,
-//! F2 artifact API) add their scenarios to this binary. F2 turns the provider on
-//! and changes the expectation here deliberately: the tool is then offered from
-//! the first request and stays frozen whatever the helper does.
+//! F2 turns the artifact provider on: the runtime is given an `ArtifactPages`
+//! before any run exists, so `inspect_artifact` is part of the tool catalog from
+//! the first request of every conversation and stays frozen whatever the helper
+//! does (it is never started by these turns).
 //!
 //! The core is bootstrapped (the production composition, including the artifact
 //! wiring) and two turns of one conversation cross the production routing and
 //! HTTP adapters, for the Chat Completions and the subscription (Claude) wire.
 //! The assertions read the recorded requests: the tool array is byte-identical
 //! across the turns, the input-derived cache prefix only grows, and
-//! `inspect_artifact` is absent. No helper is started and no test waits for time.
+//! `inspect_artifact` is offered in both. No helper is started and no test waits
+//! for time.
 use std::sync::Arc;
 
 use event_bus::AgentRunPhase;
@@ -57,7 +54,7 @@ fn tool_names(provider: &cache::Provider, request: &Value) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn artifact_wiring_leaves_the_tool_catalog_and_the_sent_prefix_unchanged() {
+async fn the_artifact_tool_is_offered_from_the_first_request_and_the_catalog_stays_frozen() {
     for subscription in [false, true] {
         let project = cache::Project::new();
         let provider = cache::Provider::new(subscription).await;
@@ -130,7 +127,12 @@ async fn artifact_wiring_leaves_the_tool_catalog_and_the_sent_prefix_unchanged()
             runtime: core.runtime.clone(),
             receiver: core.runtime.event_bus().subscribe(),
         };
-        provider.enqueue(vec![cache::answer()]);
+        // The first model step calls the artifact tool with arguments it refuses,
+        // so the turn crosses a failed tool result before it answers.
+        provider.enqueue(vec![
+            cache::call(&provider.tool_name(runtime::artifacts::INSPECT_ARTIFACT)),
+            cache::answer(),
+        ]);
         let run: runtime::RunId = {
             let send = SendChat {
                 project: ProjectId::new("p").unwrap(),
@@ -166,16 +168,18 @@ async fn artifact_wiring_leaves_the_tool_catalog_and_the_sent_prefix_unchanged()
         cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
 
         let requests = provider.requests();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         cache::assert_frozen(&provider, &requests);
         for request in &requests {
             let names = tool_names(&provider, request);
             assert!(!names.is_empty(), "the catalog is not empty");
-            assert!(
-                !names
+            assert_eq!(
+                names
                     .iter()
-                    .any(|name| name.ends_with(runtime::artifacts::INSPECT_ARTIFACT)),
-                "the artifact provider is None until the artifact API PR: {names:?}"
+                    .filter(|name| name.ends_with(runtime::artifacts::INSPECT_ARTIFACT))
+                    .count(),
+                1,
+                "the artifact provider is Some: the tool is offered once: {names:?}"
             );
         }
         provider.assert_drained();

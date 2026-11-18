@@ -162,6 +162,10 @@ impl Areas {
         areas.bind_artifacts(handles.artifacts.clone());
         Ok(areas)
     }
+    /// The unexpired control-reconnection grace of the renderer previews.
+    pub fn renderer_reconnect_grace(&self) -> browser::RendererReconnectGrace {
+        self.browser.reconnect_grace()
+    }
     fn bind_artifacts(&mut self, store: Arc<runtime::artifacts::ArtifactStore>) {
         self.artifacts = artifacts::ArtifactsArea::new(store, self.browser.renderer.clone());
     }

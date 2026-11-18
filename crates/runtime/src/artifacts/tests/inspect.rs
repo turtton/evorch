@@ -287,3 +287,65 @@ async fn without_pages_the_tool_is_not_offered_and_fails_closed() {
     let results = harness.results(run);
     assert!(results[1].0, "{results:?}");
 }
+
+/// A provider that overrides `open_artifact`, as the core's adapter does.
+#[derive(Default)]
+struct Recording {
+    inner: Pages,
+    records: Mutex<Vec<(String, String, Option<String>)>>,
+}
+
+#[async_trait::async_trait]
+impl ArtifactPages for Recording {
+    async fn open(&self, key: &str, html: Vec<u8>) -> Result<Arc<dyn ArtifactPage>, String> {
+        self.inner.open(key, html).await
+    }
+
+    async fn open_artifact(
+        &self,
+        key: &str,
+        html: Vec<u8>,
+        record: &ArtifactRecord,
+    ) -> Result<Arc<dyn ArtifactPage>, String> {
+        self.records.lock().unwrap().push((
+            key.into(),
+            record.artifact_id.clone(),
+            record.thread_id.clone(),
+        ));
+        self.inner.open(key, html).await
+    }
+
+    fn page(&self, key: &str) -> Option<Arc<dyn ArtifactPage>> {
+        self.inner.page(key)
+    }
+
+    fn close(&self, key: &str) -> bool {
+        self.inner.close(key)
+    }
+}
+
+#[tokio::test]
+async fn open_hands_the_verified_record_to_an_overriding_provider() {
+    let harness = Harness::new();
+    let pages = Arc::new(Recording::default());
+    harness
+        .runtime
+        .set_artifact_pages(Arc::clone(&pages) as Arc<dyn ArtifactPages>);
+    let run = harness.root(
+        "thread",
+        Role::Worker,
+        vec![render("mock.html", "Counter"), open_last_capture(), stop()],
+    );
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    let results = harness.results(run);
+    assert!(results[..2].iter().all(|(error, _)| !error), "{results:?}");
+    let records = pages.records.lock().unwrap();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].0, run.to_string());
+    assert_eq!(records[0].2.as_deref(), Some("thread"));
+    // Only the overriding method ran; the plain `open` path was not taken first.
+    assert_eq!(pages.inner.opened.lock().unwrap().len(), 1);
+}

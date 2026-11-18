@@ -546,6 +546,12 @@ impl CommandHost {
         self.areas.connections.clone()
     }
 
+    /// When the control-reconnection grace of the renderer previews ends, as a
+    /// copy. The core retains itself until then and not beyond.
+    pub fn renderer_reconnect_grace(&self) -> crate::areas::browser::RendererReconnectGrace {
+        self.areas.renderer_reconnect_grace()
+    }
+
     /// Answer `query` for `session`.
     ///
     /// `provenance` is what the transport established for the caller (the same

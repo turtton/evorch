@@ -490,11 +490,29 @@ fn a_command_receipt_has_no_per_namespace_optional_fields() {
             "{field}"
         );
     }
-    // A reserved namespace has no result to put there.
-    let name = reserved()[0];
-    let reserved =
-        json!({"disposition": "accepted", "result": {"type": name, "payload": {"type": "x"}}});
-    assert!(serde_json::from_value::<CommandReply>(reserved).is_err());
+    // Exercise implemented namespaces even after the last reserved one is filled.
+    for namespace in ["artifacts", "browser"] {
+        let wire = json!({"disposition":"accepted","result":{
+            "type":namespace,"payload":{"type":"accepted","payload":{
+                "operation_id":"1234567890abcdef1234567890abcdef"
+            }}
+        }});
+        let receipt: CommandReply = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(receipt).unwrap(), wire);
+        for field in ["artifacts", "browser", "conversation", "lane_management"] {
+            let mut legacy = wire.clone();
+            legacy[field] = json!({"operation_id":"1234567890abcdef1234567890abcdef"});
+            assert!(
+                serde_json::from_value::<CommandReply>(legacy).is_err(),
+                "{field}"
+            );
+        }
+    }
+    for name in reserved() {
+        let wire =
+            json!({"disposition": "accepted", "result": {"type": name, "payload": {"type": "x"}}});
+        assert!(serde_json::from_value::<CommandReply>(wire).is_err());
+    }
 }
 
 #[test]

@@ -90,3 +90,46 @@ async fn abrupt_real_core_exit_ends_helper_by_eof_and_collects_the_old_profile()
     let dir = tempfile::tempdir().unwrap();
     support::core_eof(executable(), &dir.path().join("profiles")).await;
 }
+
+#[tokio::test]
+#[ignore = "requires actual CEF; mandatory cef-e2e supplies EVORCH_RENDERER_EXE"]
+async fn inspect_artifact_pages_open_through_the_core_owner_with_the_owned_record() {
+    use runtime::artifacts::{ArtifactPages as _, ArtifactRecord};
+    use workbench_host::areas::browser::run_pages::RuntimePages;
+    let root = tempfile::tempdir().unwrap();
+    let tasks = AreaTasks::new(tokio::runtime::Handle::current());
+    let ledger = sandbox::SpawnLedger::new();
+    let owner = RendererOwner::new(
+        &tasks,
+        ledger,
+        OwnerConfig::new(executable(), root.path().join("profiles")),
+    )
+    .unwrap();
+    let pages = RuntimePages::new(Some(owner.clone()));
+    let record = ArtifactRecord {
+        artifact_id: "artifact-1".into(),
+        sha256: "0".repeat(64),
+        media_type: "text/html".into(),
+        extension: "html".into(),
+        title: "page".into(),
+        caption: None,
+        source_path: "/unused".into(),
+        byte_len: 0,
+        run_id: "run-1".into(),
+        root_run_id: "run-1".into(),
+        thread_id: Some("thread-1".into()),
+        inlined_assets: Vec::new(),
+    };
+    let page = pages
+        .open_artifact("run-1", b"<button>inspect me</button>".to_vec(), &record)
+        .await
+        .unwrap();
+    assert!(pages.page("run-1").is_some());
+    let png = page.agent().screenshot().await.unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    // IHDR: the screenshot is the 1024x768 viewport.
+    assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 1024);
+    assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 768);
+    assert!(pages.close("run-1"));
+    owner.stop().await.unwrap();
+}
