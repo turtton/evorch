@@ -87,6 +87,12 @@ for central_file in crates/workbench-host/src/areas/mod.rs crates/workbench-host
   files crates/workbench-host/src/areas/artifacts.rs "$central_file"
   expect fail "pr16a2 may not change the central $central_file" "$central" --scope pr16a2 --files-from "$work/files"
 done
+files crates/workbench-client/src/transport.rs crates/workbench-client/tests/unix_socket.rs docs/renderer-measurement.md docs/single-core-integration.md crates/evorch-core/src/unix.rs crates/evorch-core/src/renderer.rs
+expect ok "pr16a2 owns the frame receive path, the UDS seam and its two documents" "$central" --scope pr16a2 --files-from "$work/files"
+for other in docs/providers.md docs/browser.md crates/workbench-client/src/subscription.rs crates/workbench-client/src/client.rs crates/workbench-client/tests/subscriptions.rs crates/workbench-client/tests/connection.rs; do
+  files "$other"
+  expect fail "pr16a2 does not own $other" "$central" --scope pr16a2 --files-from "$work/files"
+done
 files crates/gui/src/core_client/features/artifacts.rs
 expect fail "pr16a2 does not own the GUI feature file" "$central" --scope pr16a2 --files-from "$work/files"
 files crates/evorch/src/cli/inspect.rs

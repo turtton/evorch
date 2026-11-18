@@ -91,6 +91,11 @@ pub struct AreaHandles {
     /// helper is spawned and reclaimed through it too; an area never builds a
     /// ledger of its own (PR 16a-2).
     pub spawn_ledger: sandbox::SpawnLedger,
+    /// The command service's own restart gate (a clone shares its state). An
+    /// area that must stop its work for a restart watches this one through
+    /// `subscribe()` and `phase()`; it never builds a gate or a notification
+    /// of its own (PR 16a-2).
+    pub restart_gate: crate::bootstrap::restart::HostRestartGate,
 }
 
 /// See [`AreaHandles::reload_models`].

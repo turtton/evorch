@@ -2277,3 +2277,58 @@ fn approval_input_masks_before_chunking_and_accepts_exactly_one_mib() {
     assert_eq!(chunk.total_bytes, ByteOffset(1024 * 1024));
     assert_eq!(chunk.text.len(), 65_536);
 }
+
+#[test]
+fn a_query_needs_a_consistent_provenance_and_the_session_name_does_not_stand_in_for_one() {
+    use workbench_protocol::envelope::{Actor, Provenance, Surface};
+    let f = Fixture::new();
+    let status = || Query::Lifecycle(LifecycleQuery::GetCoreStatus);
+    let session = |name: &str| SessionId::new(name).unwrap();
+    let desktop = workbench_host::provenance::local_desktop();
+    // Each inconsistent pairing of actor, surface and run is refused before
+    // anything is answered.
+    let mut agent_with_interface = Provenance::agent(RunId::new("run-1").unwrap());
+    agent_with_interface.surface = Surface::Desktop;
+    let mut human_with_run = desktop.clone();
+    human_with_run.agent_run_id = Some(RunId::new("run-1").unwrap());
+    let mut human_without_surface = desktop.clone();
+    human_without_surface.surface = Surface::None;
+    let mut agent_without_run = Provenance::agent(RunId::new("run-1").unwrap());
+    agent_without_run.agent_run_id = None;
+    for inconsistent in [
+        agent_with_interface,
+        human_with_run,
+        human_without_surface,
+        agent_without_run,
+    ] {
+        let refused = f
+            .host
+            .handle_query(&session("session"), &status(), &inconsistent)
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidRequest, "{inconsistent:?}");
+    }
+    // The name a core uses for its own health query grants a client nothing: the
+    // provenance decides, and a refused provenance stays refused under it.
+    let mut impostor = desktop.clone();
+    impostor.actor = Actor::Agent;
+    assert!(
+        f.host
+            .handle_query(&session("core-health"), &status(), &impostor)
+            .is_err()
+    );
+    let named = f
+        .host
+        .handle_query(&session("core-health"), &status(), &desktop)
+        .unwrap();
+    let plain = f
+        .host
+        .handle_query(&session("session"), &status(), &desktop)
+        .unwrap();
+    assert!(matches!(
+        (&named, &plain),
+        (
+            QueryReply::Lifecycle(LifecycleReply::CoreStatus(_)),
+            QueryReply::Lifecycle(LifecycleReply::CoreStatus(_))
+        )
+    ));
+}
