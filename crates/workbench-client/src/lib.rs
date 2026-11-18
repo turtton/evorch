@@ -22,6 +22,7 @@
 mod client;
 mod error;
 pub mod fake;
+pub mod renderer;
 mod subscription;
 mod transport;
 
