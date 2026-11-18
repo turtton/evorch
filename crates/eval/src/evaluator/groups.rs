@@ -212,8 +212,6 @@ fn launch_with(
             member.repeat.to_string().into(),
             "--output".into(),
             member.dir.clone().into(),
-            "--db".into(),
-            context.database.clone().into(),
             "--user-config".into(),
             context.user_config_dir.clone().into(),
         ]

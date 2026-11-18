@@ -10,6 +10,8 @@ use sandbox::{CommandSpec, Sandbox};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::driver::CancelSignal;
+
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 const TAIL_BYTES: usize = 8 * 1024;
 
@@ -46,13 +48,21 @@ impl Verification {
 /// Run `command` with `sh -c` in `cwd`. It passes only when it exits with 0
 /// within `timeout`; the whole process group is killed at the timeout. The
 /// command runs in its own session, without evorch's terminal or descriptors.
+///
+/// When `cancel` is already set the command is not started; when it is set
+/// while the command runs, the command and what it left running are killed and
+/// reaped before this returns, and the result is a failure that says so.
 pub async fn run(
     sandbox: &dyn Sandbox,
     command: &str,
     cwd: &Path,
     env: Vec<(String, String)>,
     timeout: Duration,
+    cancel: Option<&CancelSignal>,
 ) -> Verification {
+    if cancel.is_some_and(|cancel| *cancel.borrow()) {
+        return Verification::unstarted(command, CANCELLED.to_owned());
+    }
     let wrapped = match sandbox.wrap(CommandSpec {
         program: "sh".into(),
         args: vec!["-c".into(), command.to_owned()],
@@ -78,25 +88,34 @@ pub async fn run(
     let mut err = Tail::default();
     // The exited command stays unreaped until its output ends, so stopping what
     // it left running cannot signal a reused group id.
-    let finished = tokio::time::timeout(timeout, async {
-        let (exited, (), ()) = tokio::join!(
-            child.exited(),
-            drain(stdout.as_mut(), &mut out),
-            drain(stderr.as_mut(), &mut err)
-        );
-        exited
-    })
-    .await;
+    let finished = tokio::select! {
+        finished = tokio::time::timeout(timeout, async {
+            let (exited, (), ()) = tokio::join!(
+                child.exited(),
+                drain(stdout.as_mut(), &mut out),
+                drain(stderr.as_mut(), &mut err)
+            );
+            exited
+        }) => finished.map(Some),
+        () = cancelled(cancel) => Ok(None),
+    };
     // Stop what the command left running (after a timeout, the command too)
     // and reap it.
     let reaped = tokio::time::timeout(Duration::from_secs(1), child.kill_and_wait()).await;
     let (exit_code, timed_out, error) = match (finished, reaped) {
         (Err(_), _) => (None, true, None),
-        (Ok(Err(error)), _) | (Ok(Ok(())), Ok(Err(error))) => {
+        (Ok(None), Ok(Ok(_))) => (None, false, Some(CANCELLED.to_owned())),
+        (Ok(None), Ok(Err(error))) => (None, false, Some(format!("{CANCELLED}: {error}"))),
+        (Ok(None), Err(_)) => (
+            None,
+            false,
+            Some(format!("{CANCELLED}; the command was not reaped")),
+        ),
+        (Ok(Some(Err(error))), _) | (Ok(Some(Ok(()))), Ok(Err(error))) => {
             (None, false, Some(error.to_string()))
         }
-        (Ok(Ok(())), Ok(Ok(status))) => (status.code(), false, None),
-        (Ok(Ok(())), Err(_)) => (
+        (Ok(Some(Ok(()))), Ok(Ok(status))) => (status.code(), false, None),
+        (Ok(Some(Ok(()))), Err(_)) => (
             None,
             false,
             Some("the exited command was not reaped".into()),
@@ -112,6 +131,19 @@ pub async fn run(
         stderr_tail: err.text(),
         error,
     }
+}
+
+const CANCELLED: &str = "cancelled: the evaluation was asked to stop";
+
+/// Resolves when the evaluation is asked to stop, and never without a signal.
+async fn cancelled(cancel: Option<&CancelSignal>) {
+    if let Some(cancel) = cancel {
+        let mut cancel = cancel.clone();
+        if cancel.wait_for(|requested| *requested).await.is_ok() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
 }
 
 /// The last `TAIL_BYTES` of a stream, marking that earlier output was dropped.
@@ -170,6 +202,7 @@ mod tests {
             dir.path(),
             vec![("EVAL_FLAG".into(), "set".into())],
             timeout,
+            None,
         )
         .await
     }
@@ -248,6 +281,88 @@ mod tests {
         assert!(pid.parse::<u32>().is_ok(), "{verification:?}");
         assert_eq!(session, pid, "{verification:?}");
         assert_eq!(descriptor, "descriptor-closed", "{verification:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn cancelling_a_running_command_kills_and_reaps_it_before_returning() {
+        use std::io::Read as _;
+        // Given: a command that reports its pid and that it runs, then would
+        // outlive the test and leave a mark.
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &ready,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RWXU,
+            0,
+        )
+        .unwrap();
+        let (cancel, signal) = tokio::sync::watch::channel(false);
+        let command = "echo $$ > pid; echo ready > ready; sleep 30; touch after";
+        let sandbox = DirectSandbox::new_unchecked();
+
+        // When: it is cancelled once it says it runs.
+        let (verification, ()) = tokio::join!(
+            run(
+                &sandbox,
+                command,
+                dir.path(),
+                Vec::new(),
+                DEFAULT_TIMEOUT,
+                Some(&signal),
+            ),
+            async {
+                let fifo = ready.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut text = String::new();
+                    std::fs::File::open(fifo)
+                        .unwrap()
+                        .read_to_string(&mut text)
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+                cancel.send(true).unwrap();
+            }
+        );
+
+        // Then: it failed as cancelled, its process is gone and reaped, and
+        // nothing ran after the cancellation.
+        assert!(!verification.passed);
+        assert!(!verification.timed_out);
+        assert_eq!(verification.exit_code, None);
+        assert_eq!(verification.error.as_deref(), Some(CANCELLED));
+        let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        assert!(
+            !Path::new(&format!("/proc/{}", pid.trim())).exists(),
+            "{pid} was not reaped"
+        );
+        assert!(!dir.path().join("after").exists());
+    }
+
+    #[tokio::test]
+    async fn a_command_is_not_started_once_cancellation_was_requested() {
+        // Given: the evaluation was already asked to stop.
+        let dir = tempfile::tempdir().unwrap();
+        let (_cancel, signal) = tokio::sync::watch::channel(true);
+
+        // When: a verification is run.
+        let verification = run(
+            &DirectSandbox::new_unchecked(),
+            "touch started",
+            dir.path(),
+            Vec::new(),
+            DEFAULT_TIMEOUT,
+            Some(&signal),
+        )
+        .await;
+
+        // Then: nothing started.
+        assert!(!verification.passed);
+        assert_eq!(verification.error.as_deref(), Some(CANCELLED));
+        assert!(!dir.path().join("started").exists());
     }
 
     #[test]

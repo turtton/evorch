@@ -166,6 +166,232 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     std::fs::rename(partial, path)
 }
 
+/// A directory held open by descriptor. Everything done through it is relative
+/// to the descriptor and follows no symbolic link, so a link planted in the
+/// directory, or the directory swapped for a link after it was chosen, cannot
+/// send a read or a write elsewhere.
+#[derive(Debug)]
+pub struct PinnedDir {
+    fd: rustix::fd::OwnedFd,
+    path: PathBuf,
+}
+
+/// A name that is one ordinary path component.
+fn is_plain(name: &str) -> bool {
+    !name.is_empty() && !matches!(name, "." | "..") && !name.contains(['/', '\0'])
+}
+
+fn plain(name: &str) -> io::Result<()> {
+    if is_plain(name) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name:?} is not a plain file name"),
+        ))
+    }
+}
+
+impl PinnedDir {
+    /// Open `path` itself, which is trusted and may be a link: the evaluation
+    /// root.
+    ///
+    /// # Errors
+    /// The directory cannot be opened.
+    pub fn open_root(path: &Path) -> io::Result<Self> {
+        use rustix::fs::{Mode, OFlags};
+        let fd = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(Self {
+            fd,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// The directory `path` names, refusing one whose last component is a link.
+    ///
+    /// # Errors
+    /// The parent cannot be opened, or the directory is missing or a link.
+    pub fn open_path(path: &Path) -> io::Result<Self> {
+        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "no directory name");
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(invalid)?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        Self::open_root(parent.unwrap_or_else(|| Path::new(".")))?.open_dir(name)
+    }
+
+    /// The directory `name` inside this one, never through a link.
+    ///
+    /// # Errors
+    /// `name` is not a plain name, or it is missing, not a directory or a link.
+    pub fn open_dir(&self, name: &str) -> io::Result<Self> {
+        use rustix::fs::{Mode, OFlags};
+        plain(name)?;
+        let fd = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(Self {
+            fd,
+            path: self.path.join(name),
+        })
+    }
+
+    /// The directory `relative` (components separated by `/`) below this one,
+    /// opened one component at a time; a link or a `..` anywhere in it is refused.
+    ///
+    /// # Errors
+    /// As [`Self::open_dir`] for any component.
+    pub fn open_below(&self, relative: &str) -> io::Result<Self> {
+        let mut parts = relative.split('/');
+        let mut dir = self.open_dir(parts.next().unwrap_or_default())?;
+        for part in parts {
+            dir = dir.open_dir(part)?;
+        }
+        Ok(dir)
+    }
+
+    /// The directory `name` inside this one, made when it is missing.
+    ///
+    /// # Errors
+    /// As [`Self::open_dir`], or it cannot be made.
+    pub fn ensure_dir(&self, name: &str) -> io::Result<Self> {
+        use rustix::fs::Mode;
+        plain(name)?;
+        match rustix::fs::mkdirat(&self.fd, name, Mode::RWXU) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(errno) => return Err(errno.into()),
+        }
+        self.open_dir(name)
+    }
+
+    /// Where the directory is, for messages and for a reader that takes a path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn join(&self, name: &str) -> PathBuf {
+        self.path.join(name)
+    }
+
+    /// The bytes of the regular file `name`, never through a link and never
+    /// blocking on a FIFO or a device.
+    ///
+    /// # Errors
+    /// `NotFound` when there is no such file; otherwise it is a link, not a
+    /// regular file or unreadable.
+    pub fn read(&self, name: &str) -> io::Result<Vec<u8>> {
+        use rustix::fs::{Mode, OFlags};
+        use std::io::Read as _;
+        plain(name)?;
+        let fd = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut file = std::fs::File::from(fd);
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not a regular file", self.join(name).display()),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Whether `name` is a regular file here, found without following a link.
+    ///
+    /// # Errors
+    /// The directory cannot be inspected.
+    pub fn is_regular_file(&self, name: &str) -> io::Result<bool> {
+        plain(name)?;
+        match rustix::fs::statat(&self.fd, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok(rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                == rustix::fs::FileType::RegularFile),
+            Err(rustix::io::Errno::NOENT) => Ok(false),
+            Err(errno) => Err(errno.into()),
+        }
+    }
+
+    /// The regular file `name` opened for reading without following a link,
+    /// or `None` when it is missing, a link or not a regular file. Reading
+    /// the returned file reads what was checked, even if the name is replaced
+    /// afterwards.
+    ///
+    /// # Errors
+    /// The file cannot be opened for another reason.
+    pub fn open_regular(&self, name: &str) -> io::Result<Option<std::fs::File>> {
+        use rustix::fs::{Mode, OFlags};
+        plain(name)?;
+        let opened = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        );
+        let file = match opened {
+            Ok(fd) => std::fs::File::from(fd),
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::LOOP) => return Ok(None),
+            Err(errno) => return Err(errno.into()),
+        };
+        Ok(file.metadata()?.is_file().then_some(file))
+    }
+
+    /// Put `bytes` in `name` through a new temporary file renamed over it. A
+    /// link that is already called `name` is replaced, not followed.
+    ///
+    /// # Errors
+    /// The file cannot be written.
+    pub fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        use rustix::fs::{AtFlags, Mode, OFlags};
+        use std::io::Write as _;
+        plain(name)?;
+        let partial = format!(".{name}.partial");
+        match rustix::fs::unlinkat(&self.fd, &partial, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+            Err(errno) => return Err(errno.into()),
+        }
+        let fd = rustix::fs::openat(
+            &self.fd,
+            &partial,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH,
+        )?;
+        let mut file = std::fs::File::from(fd);
+        let written = file.write_all(bytes).and_then(|()| file.flush());
+        drop(file);
+        let renamed = written.and_then(|()| {
+            rustix::fs::renameat(&self.fd, &partial, &self.fd, name).map_err(Into::into)
+        });
+        if renamed.is_err() {
+            let _ = rustix::fs::unlinkat(&self.fd, &partial, AtFlags::empty());
+        }
+        renamed
+    }
+
+    /// [`Self::write`] of `value` as pretty JSON.
+    ///
+    /// # Errors
+    /// As [`Self::write`].
+    pub fn write_json(&self, name: &str, value: &impl Serialize) -> io::Result<()> {
+        let mut text = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
+        text.push(b'\n');
+        self.write(name, &text)
+    }
+}
+
 pub fn write_run(
     dir: &Path,
     outcome: &Outcome,
@@ -216,5 +442,85 @@ mod tests {
             create_dir(&used).unwrap_err().kind(),
             io::ErrorKind::AlreadyExists
         );
+    }
+
+    /// A link among the files of an evaluation directory is replaced, never
+    /// followed, and a link standing in for a directory or a file to read is
+    /// refused; this is what keeps a report inside the evaluation root.
+    #[test]
+    fn links_inside_a_pinned_directory_are_never_followed() {
+        use std::os::unix::fs::symlink;
+
+        // Given: report files and the judgments directory are links to places outside.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("eval");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        symlink(&victim, dir.join(REPORT_MARKDOWN_FILE)).unwrap();
+        symlink(&victim, dir.join(REPORT_JSON_FILE)).unwrap();
+        symlink(&outside, dir.join(JUDGMENTS_DIR)).unwrap();
+        let pinned = PinnedDir::open_path(&dir).unwrap();
+
+        // When: the report files are written and the links are used as a directory and a file.
+        pinned
+            .write_json(REPORT_JSON_FILE, &serde_json::json!({}))
+            .unwrap();
+        pinned.write(REPORT_MARKDOWN_FILE, b"# report").unwrap();
+
+        // Then: the outside file is untouched, the files are regular, and reading refuses links.
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        for name in [REPORT_MARKDOWN_FILE, REPORT_JSON_FILE] {
+            assert!(std::fs::symlink_metadata(dir.join(name)).unwrap().is_file());
+        }
+        assert!(pinned.open_dir(JUDGMENTS_DIR).is_err());
+        assert!(pinned.ensure_dir(JUDGMENTS_DIR).is_err());
+        symlink(&victim, dir.join("linked.json")).unwrap();
+        assert!(pinned.read("linked.json").is_err());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    /// A directory swapped for a link after it was pinned is not followed: what
+    /// is written goes where the descriptor points.
+    #[test]
+    fn a_directory_swapped_for_a_link_after_it_was_pinned_is_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        // Given: the directory is pinned, and then replaced by a link to another place.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("eval");
+        let moved = root.path().join("moved");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let pinned = PinnedDir::open_path(&dir).unwrap();
+        std::fs::rename(&dir, &moved).unwrap();
+        symlink(&elsewhere, &dir).unwrap();
+
+        // When: files are written and a subdirectory is made through the pinned directory.
+        pinned.write(REPORT_MARKDOWN_FILE, b"# report").unwrap();
+        pinned.ensure_dir(JUDGMENTS_DIR).unwrap();
+
+        // Then: they are in the directory that was pinned, and nowhere else.
+        assert!(moved.join(REPORT_MARKDOWN_FILE).is_file());
+        assert!(moved.join(JUDGMENTS_DIR).is_dir());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    /// A directory that is itself a link, or a name that climbs out, is refused.
+    #[test]
+    fn a_directory_that_is_a_link_or_climbs_out_cannot_be_opened() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, root.path().join("link")).unwrap();
+        let pinned = PinnedDir::open_root(root.path()).unwrap();
+        assert!(pinned.open_dir("real").is_ok());
+        assert!(pinned.open_dir("link").is_err());
+        assert!(PinnedDir::open_path(&root.path().join("link")).is_err());
+        assert!(pinned.open_dir("../real").is_err());
+        assert!(pinned.open_below("real/../real").is_err());
     }
 }

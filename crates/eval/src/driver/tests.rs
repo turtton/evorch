@@ -77,6 +77,15 @@ impl Harness {
     }
 
     async fn drive_via(&self, budget: &EvalBudgetConfig, desk: &dyn Desk) -> ReplayOutcome {
+        self.drive_cancellable(budget, desk, None).await
+    }
+
+    async fn drive_cancellable(
+        &self,
+        budget: &EvalBudgetConfig,
+        desk: &dyn Desk,
+        cancel: Option<CancelSignal>,
+    ) -> ReplayOutcome {
         let simulator = UserSimulator::new(
             Arc::clone(&self.user) as Arc<dyn runtime::AgentModel>,
             &self.thread.thread_id,
@@ -94,6 +103,7 @@ impl Harness {
                     keep_alive: true,
                     ..RunConfig::default()
                 },
+                cancel,
             },
             desk,
         )
@@ -223,6 +233,60 @@ async fn simulated_reply_reaches_the_agent_and_finish_stops_the_replay() {
         serde_json::json!({"kind": "assistant", "text": "found the bug"})
     );
     assert!(payloads[0]["pending_question"].is_null());
+}
+
+#[tokio::test]
+async fn a_cancel_stops_the_root_before_the_replay_returns() {
+    // Given: an agent whose first request is in flight and never answers.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let harness = Harness::new(
+        [Step::Gated {
+            entered: Arc::clone(&entered),
+            release: Arc::new(tokio::sync::Notify::new()),
+            then: Box::new(Step::Hang),
+        }],
+        10,
+        [],
+    );
+    let (cancel, signal) = watch::channel(false);
+    let budget = EvalBudgetConfig::default();
+
+    // When: the replay is asked to stop while that request is in flight.
+    let (outcome, ()) = tokio::join!(
+        harness.drive_cancellable(&budget, &harness.runtime, Some(signal)),
+        async {
+            entered.notified().await;
+            cancel.send_replace(true);
+        }
+    );
+
+    // Then: it ends as incomplete, and the run is already stopped when it returns.
+    assert_eq!(outcome.status, Status::Incomplete, "{}", outcome.reason);
+    assert!(outcome.reason.contains("cancelled"), "{}", outcome.reason);
+    let phases = harness.root_phases();
+    assert_eq!(phases.len(), 1, "{phases:?}");
+    assert!(
+        matches!(phases[0], AgentRunPhase::Stopped | AgentRunPhase::Error),
+        "{phases:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cancel_before_the_start_runs_nothing() {
+    // Given: a stop request that arrived before the replay began.
+    let harness = Harness::new([text("never sent")], 10, []);
+    let (_cancel, signal) = watch::channel(true);
+
+    // When: the replay is driven.
+    let budget = EvalBudgetConfig::default();
+    let outcome = harness
+        .drive_cancellable(&budget, &harness.runtime, Some(signal))
+        .await;
+
+    // Then: no run was started.
+    assert_eq!(outcome.status, Status::Incomplete, "{}", outcome.reason);
+    assert!(harness.root_phases().is_empty());
+    assert!(sent_texts(&harness.agent).is_empty());
 }
 
 #[tokio::test]

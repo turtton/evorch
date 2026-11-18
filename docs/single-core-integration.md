@@ -286,6 +286,40 @@ learns to take a cancel signal and to wait until the command's process group is
 reaped. The file belongs to the scope `pr17c`; its only caller is
 `crates/eval/src/runner.rs`.
 
+## Stage 17c: `eval run`, `eval report` and `eval report --rejudge` in the core
+
+The three commands are counted jobs of the core's `evaluation` area
+(`crates/workbench-host/src/areas/evaluation/jobs.rs`). `evorch eval` parses
+its command line, sends one command and follows the job; it never opens the
+configuration database and `--db` is refused. `eval clean` stays outside the
+core until 19b (see the allowlist note above).
+
+| Contract | Where it is held | Where it is tested |
+|---|---|---|
+| A start answers at once and the work runs in a counted task that keeps the command's restart permit until the job settles; the host's busy decision sees a running evaluation | `jobs::Jobs::start_run` / `start_report` | `crates/workbench-host/tests/evaluation_jobs.rs` (a job held at its start, released by the test) |
+| The same operation id with the same request is answered from the table, another request under the id is `Conflict`, a full table is `LimitExceeded`, and two jobs never use one output directory at once (`Busy`) | `jobs::Jobs` | `evaluation_jobs` |
+| A client names directories by name under the evaluation root, never by path; the candidate overlay travels as text, is written to a private file and removed when the job ends; no host path is in a view or a failure message | `validate_target_name`, `jobs::prepare_run`, `jobs::Jobs::scrubber` | `evaluation_jobs`, protocol validation tests |
+| The replay reads its thread from the database the core serves, and its providers and credentials are the core's own: the CLI sends no database, no configuration directory and no credential | `jobs::Jobs`, `JobParts` | `core_eval_cache` |
+| Cancel ends a job `cancelled(requested)`, a stop of the host `cancelled(shutdown)`; a task that is dropped without an outcome is never a success. A job whose work panicked says `effect = unknown`; what a job left on disk is read from the directory when it settles | `jobs::Jobs::settle` | `evaluation_jobs` |
+| A failed preflight ends the job `failed` with its evidence and the report in the output directory, and sends no inference | the runner (`eval::runner`), unchanged | `core_eval_cache::a_failed_preflight_through_the_core_reports_and_sends_no_inference` |
+| **Cache contract.** A replay started through the core sends the provider exactly what the same replay always sent: the agent's second request extends the first (model, cache key, tool schema, prefix), the simulated user's requests are separate structured calls with a schema, and the job adds nothing to either | the runner, unchanged | `core_eval_cache::a_replay_started_through_the_core_keeps_the_sent_prefix_on_the_production_wire` (input-derived mock cache, `assert_append_only`) |
+| The Evaluator's `eval_start` children are `evorch eval run` processes without `--db`; they connect to the core of the same configuration directory | `crates/eval/src/evaluator/groups.rs` | `crates/eval/src/evaluator/tests/start.rs` |
+| The command line the CLI accepts, and the exit codes (0, 1, 3, 130) | `crates/evorch/src/evaluation.rs` | its unit tests, `crates/evorch/tests/evaluation_e2e.rs` |
+
+Known limits, left for later stages:
+
+- The bootstrap has no seam for the isolation of a replay, so the replay
+  scenarios of `core_eval_cache` assemble the host the way the host's own tests
+  do (the production `evaluation` area, tool isolation switched off), and the
+  bootstrapped core is only checked for wiring (a job for an unknown thread
+  fails with its reason). A replay through a real core process under the
+  production sandbox is not tested end to end; the bootstrap is a central file.
+- The core still records every Unix-socket connection as `Surface::Desktop`
+  (`crates/evorch-core/src/unix.rs`), so an `evorch eval` job is not yet
+  recorded as `Surface::Cli` (ADR 0045 §6).
+- A command larger than the frame limit fails before it is written; the CLI
+  reports it as an unknown outcome rather than a refusal.
+
 ## Reserved migration numbers
 
 Storage migrations are numbered from one shared ledger kept by the

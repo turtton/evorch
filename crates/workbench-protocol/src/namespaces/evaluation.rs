@@ -1,7 +1,37 @@
-//! Evaluation namespace, read side (ADR 0045, PR 13): which evaluation groups
-//! exist, how their members stand, and the report a member left. PR 17c adds the
-//! commands that run, report and rejudge, with the same ids and job vocabulary
-//! of [`crate::management`]. Reads are operations (see [`super::diagnostics`]).
+//! Evaluation namespace (ADR 0045, PR 13 and PR 17c): which evaluation groups
+//! exist, how their members stand, the report a member left, and the jobs that
+//! run an evaluation, make its report or judge it again. Reads are operations
+//! (see [`super::diagnostics`]); the jobs use the job vocabulary of
+//! [`crate::management`].
+//!
+//! # Jobs
+//!
+//! `start_evaluation_run` and `start_evaluation_report` name an
+//! [`OperationId`] and are answered at once with the job's
+//! [`EvaluationJobView`]; the work runs in the core. A finished replay
+//! publishes [`EvaluationEvent::EvaluationJobProgress`]; the end publishes
+//! [`EvaluationEvent::EvaluationJobSettled`] and is readable with
+//! `get_evaluation_job`.
+//!
+//! * **Idempotent.** The same id with the same request joins the first job
+//!   (nothing runs twice); the same id with another request is a `conflict`.
+//!   A job the core no longer holds (it restarted) answers `not_found`, and its
+//!   outcome is unknown: look at the evaluation directory before running it
+//!   again. A client never resends a command whose reply it lost.
+//! * **Names, not paths.** A job names the directories it writes or reads by
+//!   their name under the evaluation root ([`validate_target_name`]); a client
+//!   never sends a path. The overlay of a run travels as its text.
+//! * **Effect.** [`EvaluationJobView::effect`] says what the job left on disk:
+//!   `none`, `partial` (a failed or cancelled job whose output directory was
+//!   begun), `complete` (the job ended `ready`) or `unknown` (the job's task
+//!   broke off in a way that does not say what was written). A failed
+//!   preflight stays `failed` even when its evidence was reported.
+//! * **Cancel.** `cancel_evaluation_job` stops the job where it is; the files
+//!   it already wrote stay, and the workspaces it made are removed with
+//!   `evorch eval clean`. A shutdown ends a job as `cancelled(shutdown)`.
+//! * **Bounded.** The core holds at most [`MAX_EVALUATION_JOBS`] jobs, finished
+//!   ones included (none is forgotten, so a resent id never runs twice); beyond
+//!   that a new id is refused with `limit_exceeded` until the core restarts.
 //!
 //! The core reads the evaluation files; a view carries no path and no raw file
 //! error. A file that is simply not there is [`ArtifactPresence::Missing`], one
@@ -9,34 +39,381 @@
 //! [`EvaluationProblemKind`]; the two are never reported as one another.
 use super::diagnostics::{BoundedText, OperationTarget, ReadOutcome};
 use crate::{
+    errors::ErrorCode,
     handshake::{Capability, WireLimits},
-    ids::{EvaluationGroupId, EvaluationMemberId, OperationId},
-    limits::{MAX_NAME_BYTES, MAX_TITLE_BYTES},
-    management::{ArtifactPresence, EvaluationArtifactRef},
-    operation::OperationView,
+    ids::{EvaluationGroupId, EvaluationMemberId, OperationId, ThreadId},
+    limits::{MAX_INLINE_MESSAGE_BYTES, MAX_NAME_BYTES, MAX_TITLE_BYTES},
+    management::{ArtifactPresence, EvaluationArtifactRef, EvaluationJobKind},
+    operation::{OperationState, OperationView},
     queries::PageRequest,
-    validation::{ValidationError, check_bytes, check_count, check_line},
+    validation::{ValidationError, check_bytes, check_count, check_line, check_text},
     views::Page,
     wire::Revision,
 };
 use serde::{Deserialize, Serialize};
 
-pub const COMMAND_OPERATIONS: &[&str] = &[];
+pub const COMMAND_OPERATIONS: &[&str] = &[
+    "start_evaluation_run",
+    "start_evaluation_report",
+    "cancel_evaluation_job",
+];
 pub const QUERY_OPERATIONS: &[&str] = &[
     "list_evaluations",
     "get_evaluation",
     "get_evaluation_report",
     "get_evaluation_operation",
+    "get_evaluation_job",
 ];
-pub const EVENT_TYPES: &[&str] = &["evaluation_operation_changed"];
+pub const EVENT_TYPES: &[&str] = &[
+    "evaluation_operation_changed",
+    "evaluation_job_progress",
+    "evaluation_job_settled",
+];
 /// Tagged choices inside a command's payload that classification names (none).
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
 /// Most members one [`EvaluationGroupDetail`] lists.
 pub const MAX_EVALUATION_MEMBERS: usize = 64;
+/// Jobs the core holds (running and finished).
+pub const MAX_EVALUATION_JOBS: usize = 256;
+/// Largest `repeat` of a run.
+pub const MAX_EVALUATION_REPEAT: u32 = 64;
+/// Largest overlay text of a run, in bytes.
+pub const MAX_CANDIDATE_BYTES: usize = 64 * 1024;
+/// Longest `verify` command of a run, in bytes.
+pub const MAX_VERIFY_BYTES: usize = 4 * 1024;
+/// Largest `verify_timeout_secs` of a run (a day).
+pub const MAX_VERIFY_TIMEOUT_SECS: u32 = 86_400;
+/// Most directories one report job names.
+pub const MAX_REPORT_TARGETS: usize = 16;
+/// Most replay lines one [`EvaluationJobView`] lists.
+pub const MAX_JOB_RUNS: usize = 128;
+/// Most workspace-cleanup warnings one view lists.
+pub const MAX_JOB_WARNINGS: usize = 8;
+/// Longest [`EvaluationJobView::message`], and each warning, in bytes.
+pub const MAX_JOB_MESSAGE_BYTES: usize = 512;
 
-no_commands!(EvaluationCommand);
-no_results!(EvaluationResult);
+/// A directory under the evaluation root, by name: one plain component of
+/// ASCII letters, digits, `.`, `_` and `-` that does not start with a dot (so
+/// neither `..` nor the group records of the root).
+///
+/// # Errors
+/// The name is empty, too long or has another character or a leading dot.
+pub fn validate_target_name(field: &'static str, name: &str) -> Result<(), ValidationError> {
+    check_bytes(field, name, MAX_NAME_BYTES, false)?;
+    if name.starts_with('.')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(ValidationError::InvalidChars { field });
+    }
+    Ok(())
+}
+
+/// Replay a recorded thread under the user's configuration, and again with an
+/// overlay (the candidate) merged over it; then report the directory unless
+/// `report` is false.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartEvaluationRun {
+    pub operation_id: OperationId,
+    pub thread: ThreadId,
+    /// The text of the candidate overlay (a configuration fragment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<String>,
+    /// Replays per configuration; the configured `eval.repeat_target` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<u32>,
+    /// The output directory, by name under the evaluation root (it must be
+    /// missing or empty); a name from the time and the thread when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// What went wrong in the thread; judged as an aspect of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// A command run in each replay's final workspace, without network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_timeout_secs: Option<u32>,
+    #[serde(default)]
+    pub keep_workspace: bool,
+    /// Report the directory when the replays are done.
+    pub report: bool,
+}
+
+impl StartEvaluationRun {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(candidate) = &self.candidate {
+            check_text("candidate", candidate, MAX_CANDIDATE_BYTES, false)?;
+        }
+        if let Some(repeat) = self.repeat
+            && !(1..=MAX_EVALUATION_REPEAT).contains(&repeat)
+        {
+            return Err(ValidationError::OutOfRange {
+                field: "repeat",
+                reason: "must be 1..=64",
+            });
+        }
+        if let Some(output) = &self.output {
+            validate_target_name("output", output)?;
+        }
+        if let Some(problem) = &self.problem {
+            check_text("problem", problem, MAX_INLINE_MESSAGE_BYTES, false)?;
+        }
+        if let Some(verify) = &self.verify {
+            check_text("verify", verify, MAX_VERIFY_BYTES, false)?;
+        }
+        if let Some(secs) = self.verify_timeout_secs
+            && !(1..=MAX_VERIFY_TIMEOUT_SECS).contains(&secs)
+        {
+            return Err(ValidationError::OutOfRange {
+                field: "verify_timeout_secs",
+                reason: "must be 1..=86400",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Report evaluation directories, or judge them again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartEvaluationReport {
+    pub operation_id: OperationId,
+    /// Directories by name under the evaluation root; several are also
+    /// tabulated side by side.
+    pub targets: Vec<String>,
+    /// Judge again even where a judgment is cached (kind `rejudge`).
+    #[serde(default)]
+    pub rejudge: bool,
+}
+
+impl StartEvaluationReport {
+    pub fn kind(&self) -> EvaluationJobKind {
+        if self.rejudge {
+            EvaluationJobKind::Rejudge
+        } else {
+            EvaluationJobKind::GenerateReport
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.targets.is_empty() {
+            return Err(ValidationError::Empty { field: "targets" });
+        }
+        check_count("targets", self.targets.len(), MAX_REPORT_TARGETS)?;
+        for target in &self.targets {
+            validate_target_name("targets", target)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelEvaluationJob {
+    /// The job to cancel (the id its start named).
+    pub operation_id: OperationId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum EvaluationCommand {
+    StartEvaluationRun(Box<StartEvaluationRun>),
+    StartEvaluationReport(StartEvaluationReport),
+    CancelEvaluationJob(CancelEvaluationJob),
+}
+
+impl EvaluationCommand {
+    pub fn required_capability(&self) -> Capability {
+        Capability::Commands
+    }
+
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::StartEvaluationRun(run) => run.validate(),
+            Self::StartEvaluationReport(report) => report.validate(),
+            Self::CancelEvaluationJob(_) => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum EvaluationResult {
+    /// The job, pending or settled.
+    Job(Box<EvaluationJobView>),
+}
+
+/// How a replay ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationRunStatus {
+    Completed,
+    Incomplete,
+    Failed,
+    PrepareFailed,
+}
+
+/// One replay that ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationRunLine {
+    /// The configuration, `baseline` or `candidate`.
+    pub label: String,
+    pub index: u32,
+    pub status: EvaluationRunStatus,
+    pub reason: String,
+    pub user_turns: u32,
+    pub tokens: u64,
+    pub tool_calls: u32,
+    pub elapsed_ms: u64,
+    pub denied_requests: u32,
+    pub pushed_refs: u32,
+    /// Whether the verify command passed; absent when none ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_passed: Option<bool>,
+}
+
+impl EvaluationRunLine {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_line("label", &self.label, MAX_NAME_BYTES, false)?;
+        check_bytes("reason", &self.reason, MAX_TITLE_BYTES, true)
+    }
+}
+
+/// What a job left on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationJobEffect {
+    /// Nothing was written.
+    None,
+    /// The job failed or was cancelled after it began its output directory:
+    /// the directory is neither untouched nor finished.
+    Partial,
+    /// The job ended `ready`: it did what it was asked.
+    Complete,
+    /// The job's task broke off and does not say what it wrote. Look at the
+    /// directory before running the job again.
+    Unknown,
+}
+
+/// What kind of failure ended a job (its state carries the error code).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationJobFailure {
+    /// The request does not fit the configuration or the files it names.
+    Usage,
+    /// The thread cannot be replayed, or its record cannot be read.
+    Source,
+    /// The candidate overlay is unusable.
+    Overlay,
+    /// The preflight failed; its evidence stays in the output directory.
+    Preflight,
+    /// The replays ended and the report could not be made.
+    Report,
+    Io,
+    Internal,
+}
+
+/// A job and how it stands. The state of `operation` carries the error code;
+/// `message` is a bounded, secret-free sentence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationJobView {
+    pub operation: OperationView,
+    pub kind: EvaluationJobKind,
+    /// The replays that ended, in order (at most [`MAX_JOB_RUNS`]).
+    pub runs: Vec<EvaluationRunLine>,
+    /// Replays that ended beyond the lines kept.
+    #[serde(default)]
+    pub runs_omitted: u32,
+    /// The output directory of a run job, by name under the evaluation root;
+    /// present once the job knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// The directories whose `report.md` the job wrote, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reports: Vec<String>,
+    /// The side-by-side table of several reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_thread: Option<BoundedText>,
+    pub effect: EvaluationJobEffect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<EvaluationJobFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Workspaces that were not removed (retry with `evorch eval clean`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl EvaluationJobView {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.operation.validate()?;
+        check_count("runs", self.runs.len(), MAX_JOB_RUNS)?;
+        for run in &self.runs {
+            run.validate()?;
+        }
+        check_count("reports", self.reports.len(), MAX_REPORT_TARGETS)?;
+        for name in self.output.iter().chain(&self.reports) {
+            validate_target_name("output", name)?;
+        }
+        if let Some(table) = &self.cross_thread {
+            table.validate()?;
+        }
+        if let Some(message) = &self.message {
+            check_bytes("message", message, MAX_JOB_MESSAGE_BYTES, true)?;
+        }
+        check_count("warnings", self.warnings.len(), MAX_JOB_WARNINGS)?;
+        for warning in &self.warnings {
+            check_bytes("warnings", warning, MAX_JOB_MESSAGE_BYTES, true)?;
+        }
+        let ready = self.operation.state == OperationState::Ready;
+        if ready != (self.effect == EvaluationJobEffect::Complete) {
+            return Err(ValidationError::Inconsistent {
+                field: "effect",
+                reason: "a job is complete exactly when it is ready",
+            });
+        }
+        if self.effect == EvaluationJobEffect::Unknown
+            && !matches!(self.operation.state, OperationState::Failed { .. })
+        {
+            return Err(ValidationError::Inconsistent {
+                field: "effect",
+                reason: "only a failed job can leave an unknown effect",
+            });
+        }
+        if self.failure.is_some() && !matches!(self.operation.state, OperationState::Failed { .. })
+        {
+            return Err(ValidationError::Inconsistent {
+                field: "failure",
+                reason: "only a failed job names a failure",
+            });
+        }
+        Ok(())
+    }
+
+    /// The error code when the job failed.
+    pub fn failure_code(&self) -> Option<ErrorCode> {
+        match self.operation.state {
+            OperationState::Failed { code } => Some(code),
+            _ => None,
+        }
+    }
+}
 
 /// Why an existing evaluation file could not be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -263,6 +640,8 @@ pub enum EvaluationQuery {
     GetEvaluation(GetEvaluation),
     GetEvaluationReport(GetEvaluationReport),
     GetEvaluationOperation(OperationTarget),
+    /// One run, report or rejudge job, whatever its state.
+    GetEvaluationJob(OperationTarget),
 }
 
 impl EvaluationQuery {
@@ -275,7 +654,8 @@ impl EvaluationQuery {
             Self::ListEvaluations(list) => list.page.validate(),
             Self::GetEvaluation(_)
             | Self::GetEvaluationReport(_)
-            | Self::GetEvaluationOperation(_) => Ok(()),
+            | Self::GetEvaluationOperation(_)
+            | Self::GetEvaluationJob(_) => Ok(()),
         }
     }
 }
@@ -292,6 +672,7 @@ pub enum EvaluationReply {
     Group(Box<ReadOutcome<EvaluationGroupDetail>>),
     Report(Box<ReadOutcome<EvaluationReportText>>),
     Operation(OperationView),
+    Job(Box<EvaluationJobView>),
 }
 
 impl EvaluationReply {
@@ -302,6 +683,7 @@ impl EvaluationReply {
             Self::Group(outcome) => outcome.validate_with(EvaluationGroupDetail::validate),
             Self::Report(outcome) => outcome.validate_with(EvaluationReportText::validate),
             Self::Operation(view) => view.validate(),
+            Self::Job(view) => view.validate(),
         }
     }
 }
@@ -316,12 +698,36 @@ impl EvaluationReply {
 pub enum EvaluationEvent {
     /// A read operation reached a final state; ask again for its data.
     EvaluationOperationChanged { view: OperationView },
+    /// A replay of a running job ended.
+    EvaluationJobProgress { view: Box<EvaluationJobView> },
+    /// The job reached its final state.
+    EvaluationJobSettled { view: Box<EvaluationJobView> },
 }
 
 impl EvaluationEvent {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::EvaluationOperationChanged { view } => view.validate(),
+            Self::EvaluationJobProgress { view } => {
+                view.validate()?;
+                if view.operation.state.is_final() {
+                    return Err(ValidationError::Inconsistent {
+                        field: "view",
+                        reason: "a progress event names a running job",
+                    });
+                }
+                Ok(())
+            }
+            Self::EvaluationJobSettled { view } => {
+                view.validate()?;
+                if !view.operation.state.is_final() {
+                    return Err(ValidationError::Inconsistent {
+                        field: "view",
+                        reason: "a settled event names a final job",
+                    });
+                }
+                Ok(())
+            }
         }
     }
 }
