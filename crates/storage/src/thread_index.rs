@@ -10,6 +10,8 @@ mod contracts;
 mod extract;
 mod legacy;
 pub use legacy::{LegacyProvenanceReason, derive_legacy_provenance};
+// The writer's stepwise registration of a reindex request (ADR 0045 stage 17d-3).
+pub use crate::writer::{Registration, RegistrationProgress};
 
 pub use accounting::{
     ACCOUNTING_VERSION, DEFAULT_ACCOUNTING_POLICY, SharedIndexAccountant, account_index_input,

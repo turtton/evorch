@@ -1018,3 +1018,52 @@ async fn a_cli_killed_by_sigkill_stops_only_its_own_reindex() {
 async fn a_cli_interrupted_by_sigint_stops_only_its_own_reindex() {
     a_signalled_cli_stops_only_its_own_reindex(Some("INT")).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_cli_processes_reindexing_at_once_are_not_refused_and_the_second_is_handed_over() {
+    // Given: two threads to index, and a core that holds the first reindex
+    // after it registered, with the index lease.
+    let hold = Hold::after(0);
+    let core = Core::start(0, 0, Some(hold.hook())).await;
+    core.source("first", 10);
+    core.source("second", 20);
+    let first = core.cli_reindex("");
+    hold.reached().await;
+
+    // When: a second CLI process reindexes while the first one runs.
+    let second = core.cli_reindex("");
+    let second = tokio::task::spawn_blocking(move || second.wait_with_output().unwrap())
+        .await
+        .unwrap();
+
+    // Then: it is not refused as busy: the work is accepted, left to the owner
+    // that runs, and said so as the offline command did.
+    let (out, err) = (
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr),
+    );
+    assert!(second.status.success(), "{err}");
+    assert!(
+        matches!(
+            printed_result(&out),
+            storage::thread_index::ReindexResult::Accepted { .. }
+        ),
+        "{out}"
+    );
+
+    // And: the first one is untouched and prints the completed result.
+    hold.release();
+    let first = tokio::task::spawn_blocking(move || first.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    let (out, err) = (
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
+    assert!(first.status.success(), "{err}");
+    let storage::thread_index::ReindexResult::Completed { summary, .. } = printed_result(&out)
+    else {
+        panic!("not a completed result: {out}");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+}

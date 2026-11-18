@@ -75,6 +75,9 @@ pub enum MaintenanceStage {
     /// Everything but the next batch is ready; the next step is the writer.
     /// The `u32` of the hook is the number of batches committed so far.
     BeforeBatch,
+    /// A reindex is being registered and the next step is the writer. The `u32` of the
+    /// hook is the number of registration steps committed so far.
+    BeforeRegistrationStep,
 }
 
 /// A seam for tests: awaited at each [`MaintenanceStage`] of every operation.
@@ -122,7 +125,9 @@ struct Inner {
 
 struct State {
     table: Operations<MaintenanceView>,
-    running: HashMap<MaintenanceKind, Running>,
+    /// The operations that run, by id: a backfill excludes another backfill, while
+    /// reindexes run side by side (they share the index through its lease).
+    running: HashMap<OperationId, Running>,
 }
 
 /// Who started an operation and during which run of connections of that client.
@@ -134,7 +139,7 @@ struct Owner {
 }
 
 struct Running {
-    id: OperationId,
+    kind: MaintenanceKind,
     /// The client that started it, when the connection said who it was.
     owner: Option<Owner>,
     cancel: watch::Sender<bool>,
@@ -365,10 +370,12 @@ impl MaintenanceArea {
                 }
                 Lookup::New => {}
             }
-            if state.running.contains_key(&kind) {
+            if kind == MaintenanceKind::BackfillEvents
+                && state.running.values().any(|running| running.kind == kind)
+            {
                 return Err(WorkbenchError::new(
                     ErrorCode::Busy,
-                    "another operation of this task is running; list the maintenance operations to see it",
+                    "another backfill is running; list the maintenance operations to see it",
                     RetryAdvice::UserActionRequired,
                 ));
             }
@@ -399,9 +406,9 @@ impl MaintenanceArea {
             state.table.insert(view.clone(), digest)?;
             let (cancel, observed) = watch::channel(false);
             state.running.insert(
-                kind,
+                start.operation_id.clone(),
                 Running {
-                    id: start.operation_id.clone(),
+                    kind,
                     owner,
                     cancel,
                 },
@@ -414,12 +421,12 @@ impl MaintenanceArea {
             inner
                 .tasks
                 .spawn_counted_tracked("maintenance", Some(accepted), move |stop| {
-                    this.run(id, kind, work, stop, cancel)
+                    this.run(id, work, stop, cancel)
                 });
         if let Err(refused) = spawned {
             let mut state = lock(&inner.state);
             state.table.forget(&start.operation_id);
-            state.running.remove(&kind);
+            state.running.remove(&start.operation_id);
             return Err(WorkbenchError::new(
                 ErrorCode::Draining,
                 refused.to_string(),
@@ -441,9 +448,9 @@ impl MaintenanceArea {
         let inner = self.inner()?;
         let state = lock(&inner.state);
         let view = state.table.get(id).cloned().ok_or_else(unknown)?;
-        let already_applied = match state.running.get(&view.task) {
-            Some(running) if running.id == *id => running.cancel.send_replace(true),
-            _ => true,
+        let already_applied = match state.running.get(id) {
+            Some(running) => running.cancel.send_replace(true),
+            None => true,
         };
         Ok(Accepted {
             view,
@@ -501,7 +508,6 @@ impl Inner {
     async fn run(
         self: Arc<Self>,
         id: OperationId,
-        kind: MaintenanceKind,
         work: Work,
         mut stop: StopSignal,
         cancel: watch::Receiver<bool>,
@@ -509,7 +515,6 @@ impl Inner {
         let mut guard = Settle {
             inner: self.clone(),
             id: id.clone(),
-            kind,
             settled: false,
         };
         self.at(MaintenanceStage::Started, &id, 0).await;
@@ -624,17 +629,50 @@ impl Inner {
             id: format!("core-{}", id.as_str()),
             kind: IndexOwnerKind::Cli,
         };
+        // The registration is bounded writer steps, not one long command: a cancel
+        // or a stop is looked at before each of them, and an interrupted one is
+        // closed `cancelled` with the index untouched.
         let storage = self.storage.clone();
-        let submitted = match blocking(move || {
-            reindex::submit(&storage, &request, owner, wait, reindex::clock_ns())
+        let mut registering = match blocking(move || {
+            reindex::begin(&storage, &request, owner, wait, reindex::clock_ns())
         })
         .await
         {
-            Ok(submitted) => submitted,
+            Ok(Ok(registering)) => registering,
+            Ok(Err(reason)) => return reindex_failed(None, None, reason),
             Err(ended) => return ended,
         };
+        let mut steps = 0_u32;
+        let submitted = loop {
+            self.at(MaintenanceStage::BeforeRegistrationStep, id, steps)
+                .await;
+            if let Some(reason) = Self::interrupted(stop, cancel) {
+                let storage = self.storage.clone();
+                let _ = blocking(move || registering.abort(&storage)).await;
+                return Ended::Cancelled(reason);
+            }
+            let storage = self.storage.clone();
+            let stepped = blocking(move || {
+                let step = registering.step(&storage, reindex::clock_ns());
+                if step.is_err() {
+                    registering.abort(&storage);
+                }
+                (registering, step)
+            })
+            .await;
+            let (next, step) = match stepped {
+                Ok(stepped) => stepped,
+                Err(ended) => return ended,
+            };
+            registering = next;
+            steps += 1;
+            match step {
+                Ok(Some(submitted)) => break submitted,
+                Ok(None) => {}
+                Err(reason) => return reindex_failed(None, None, reason),
+            }
+        };
         let driver = match submitted {
-            Submitted::Failed(reason) => return reindex_failed(None, None, reason),
             Submitted::Delegated { request_id } => {
                 return Ended::Completed {
                     outcome: MaintenanceOutcome::Delegated,
@@ -648,6 +686,9 @@ impl Inner {
                 };
             }
             Submitted::Driving(driver) => driver,
+            // Only the tests' one-shot `submit` makes it; the steps report it.
+            #[cfg(test)]
+            Submitted::Failed(reason) => return reindex_failed(None, None, reason),
         };
         // The request id is known from now on: show it before the first pass.
         self.record(id, 0, reindex::progress(&driver));
@@ -727,7 +768,7 @@ impl Inner {
         let _ = self.source.publish(UiEvent::Maintenance(event));
     }
 
-    fn settle(&self, id: &OperationId, kind: MaintenanceKind, ended: &Ended) {
+    fn settle(&self, id: &OperationId, ended: &Ended) {
         let view = {
             let mut state = lock(&self.state);
             let view = state.table.update(id, |view| {
@@ -777,9 +818,7 @@ impl Inner {
                     }
                 }
             });
-            if state.running.get(&kind).is_some_and(|run| run.id == *id) {
-                state.running.remove(&kind);
-            }
+            state.running.remove(id);
             view
         };
         if let Some(view) = view {
@@ -882,25 +921,21 @@ async fn blocking<T: Send + 'static>(
 struct Settle {
     inner: Arc<Inner>,
     id: OperationId,
-    kind: MaintenanceKind,
     settled: bool,
 }
 
 impl Settle {
     fn finish(&mut self, ended: &Ended) {
         self.settled = true;
-        self.inner.settle(&self.id, self.kind, ended);
+        self.inner.settle(&self.id, ended);
     }
 }
 
 impl Drop for Settle {
     fn drop(&mut self) {
         if !self.settled {
-            self.inner.settle(
-                &self.id,
-                self.kind,
-                &Ended::Cancelled(CancelReason::Shutdown),
-            );
+            self.inner
+                .settle(&self.id, &Ended::Cancelled(CancelReason::Shutdown));
         }
     }
 }

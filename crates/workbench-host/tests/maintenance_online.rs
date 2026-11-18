@@ -1160,3 +1160,75 @@ fn a_reindex_with_no_target_completes_with_an_empty_summary() {
     };
     assert_eq!((summary.target_count, summary.succeeded), (0, 0));
 }
+
+#[test]
+fn reindexes_run_side_by_side_and_the_second_is_handed_to_the_first_not_refused_busy() {
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 0);
+    let mut w = setup(Some(hold.hook()));
+    source(&w, "first", 10);
+    let mut events = subscribe(&w);
+
+    start(&mut w, web(), "driving", reindex(false)).unwrap();
+    // The first holds the index lease: it is registered and about to step.
+    w.rt.block_on(hold.reached());
+
+    let second = start(&mut w, web(), "beside", reindex(false)).unwrap();
+    assert_eq!(second.disposition, CommandDisposition::Accepted);
+    let seen = events_until_settled(&w.rt, &mut events, "beside");
+    let handed = settled_view(&seen);
+    assert_eq!(handed.outcome, Some(MaintenanceOutcome::Delegated));
+    assert!(matches!(
+        reindex_parts(handed).1,
+        Some(ReindexResult::Accepted { .. })
+    ));
+    // The first one is untouched by the second and still finishes the work.
+    assert!(!get(&w, "driving").unwrap().operation.state.is_final());
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "driving");
+    let done = settled_view(&seen);
+    assert_eq!(done.outcome, Some(MaintenanceOutcome::Completed));
+    assert!(matches!(
+        reindex_parts(done).1,
+        Some(ReindexResult::Completed { .. })
+    ));
+}
+
+#[test]
+fn a_cancel_between_two_registration_steps_closes_the_request_and_leaves_the_index_alone() {
+    // More runs than one registration window, so the registration takes several steps.
+    let hold = Hold::new(MaintenanceStage::BeforeRegistrationStep, 1);
+    let mut w = setup(Some(hold.hook()));
+    for n in 0..300 {
+        source(&w, &format!("run-{n:03}"), 10 + n);
+    }
+    let mut events = subscribe(&w);
+
+    start(&mut w, web(), "registering", reindex(false)).unwrap();
+    // One step committed (the first window of targets), the next not yet taken.
+    w.rt.block_on(hold.reached());
+    cancel(&mut w, web(), "registering").unwrap();
+    hold.release();
+
+    let seen = events_until_settled(&w.rt, &mut events, "registering");
+    let done = settled_view(&seen);
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    let (_, result) = reindex_parts(done);
+    assert!(result.is_none());
+    // The unfinished request is closed, not left to be published or driven, and
+    // the lease is free: another owner takes it at once.
+    let conn = rusqlite::Connection::open(db_path(&w)).unwrap();
+    let states: Vec<String> = conn
+        .prepare("SELECT state FROM thread_index_requests")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(states, vec!["cancelled".to_owned()]);
+    let _next_owner = gui_lease(&w);
+}

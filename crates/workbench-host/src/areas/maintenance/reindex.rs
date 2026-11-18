@@ -23,6 +23,7 @@ use storage::thread_index::{
     ProvenanceUnknownReason, ReindexRequest, ReindexResult as StorageResult, RequestFailure,
     RequestGapReason, RequestProgress, RequestSubmission, RequestSummary,
 };
+use storage::thread_index::{Registration, RegistrationProgress};
 use workbench_protocol::namespaces::maintenance as wire;
 
 const FIRST_BACKOFF: Duration = Duration::from_millis(25);
@@ -31,7 +32,8 @@ const MIN_WAIT: Duration = Duration::from_millis(1);
 
 /// What `submit` made of the request.
 pub(super) enum Submitted {
-    /// The request was not stored.
+    /// The request was not stored (the one-shot [`submit`] of the tests).
+    #[cfg(test)]
     Failed(RequestFailure),
     /// Another live owner holds the index and the caller did not wait: the
     /// request is accepted and durable, not done.
@@ -59,8 +61,9 @@ pub(super) enum Advance {
     Wait(Duration),
 }
 
-/// Stores the request and elects the owner. With `wait` unset and another live
-/// owner holding the lease the request is only accepted (`Delegated`).
+/// Stores the request in one command and elects the owner: the registration of
+/// the tests' driver loop. The area registers in bounded steps ([`begin`]).
+#[cfg(test)]
 pub(super) fn submit(
     handle: &StorageHandle,
     request: &ReindexRequest,
@@ -68,14 +71,73 @@ pub(super) fn submit(
     wait: bool,
     now_ns: i64,
 ) -> Submitted {
+    match handle.submit_thread_index_request(request, &owner, now_ns, THREAD_INDEX_LEASE_NS) {
+        Ok(submission) => elected(owner, wait, submission),
+        Err(reason) => Submitted::Failed(reason),
+    }
+}
+
+/// A registration that is driven one bounded writer step at a time, so the caller
+/// looks at its cancel and stop between the steps and the writer serves its other
+/// commands in between.
+pub(super) struct Registering {
+    registration: Registration,
+    owner: IndexOwner,
+    wait: bool,
+}
+
+/// Starts the registration of `request` (the first, tiny step).
+pub(super) fn begin(
+    handle: &StorageHandle,
+    request: &ReindexRequest,
+    owner: IndexOwner,
+    wait: bool,
+    now_ns: i64,
+) -> Result<Registering, RequestFailure> {
+    let registration = handle.begin_thread_index_registration(request, now_ns)?;
+    Ok(Registering {
+        registration,
+        owner,
+        wait,
+    })
+}
+
+impl Registering {
+    /// One bounded step. `Ok(None)` asks for another one; on an error the caller
+    /// closes the registration with [`Self::abort`].
+    pub(super) fn step(
+        &mut self,
+        handle: &StorageHandle,
+        now_ns: i64,
+    ) -> Result<Option<Submitted>, RequestFailure> {
+        match handle.advance_thread_index_registration(
+            &mut self.registration,
+            &self.owner,
+            now_ns,
+            THREAD_INDEX_LEASE_NS,
+        )? {
+            RegistrationProgress::InProgress => Ok(None),
+            RegistrationProgress::Published(submission) => {
+                Ok(Some(elected(self.owner.clone(), self.wait, submission)))
+            }
+        }
+    }
+
+    /// Closes an unfinished registration `cancelled`; the index is untouched.
+    pub(super) fn abort(&self, handle: &StorageHandle) {
+        if let Err(reason) = handle.abort_thread_index_registration(&self.registration) {
+            tracing::warn!(?reason, "thread index registration abort failed");
+        }
+    }
+}
+
+/// What the election of a published request means for its caller.
+fn elected(owner: IndexOwner, wait: bool, submission: RequestSubmission) -> Submitted {
     let RequestSubmission {
         request_id,
         lease,
         progress,
-    } = match handle.submit_thread_index_request(request, &owner, now_ns, THREAD_INDEX_LEASE_NS) {
-        Ok(submission) => submission,
-        Err(reason) => return Submitted::Failed(reason),
-    };
+    } = submission;
     let lease = match lease {
         LeaseResult::Acquired(lease) => Some(lease),
         LeaseResult::HeldByOther(_) if !wait && matches!(progress, RequestProgress::Pending(_)) => {

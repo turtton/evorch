@@ -2,21 +2,26 @@
 //!
 //! Registration freezes `(run, revision, versions)` targets and applies the
 //! explicit-reindex R2 cell. It is bounded: the request row is created first as
-//! `registering`, its targets are committed in batches of [`FREEZE_BATCH`] runs
-//! (a keyset cursor over `(retention_at_ns, run_id)`, so every batch is its own
-//! short transaction and an interrupted registration resumes from the cursor),
-//! and one last short transaction turns it into `pending`. A `registering`
-//! request is not observable: status, rebinding, settling, gap closing, the
+//! `registering`, its targets are committed in batches (each a window of
+//! [`FREEZE_BATCH`] runs in primary-key order, resumed by the last run id of the
+//! previous window, so a batch reads at most one window and is its own short
+//! transaction), the policy gaps of a disabled or paused index are closed in
+//! batches of [`GAP_BATCH`] targets, and one last short transaction turns the
+//! request into `pending`. Each step is a separate writer command, so the writer
+//! serves other commands in between.
+//!
+//! A `registering` request is not observable: status, settling, gap closing, the
 //! wait deadlines and work selection only look at `pending` requests, and
-//! [`abort_registering`] / [`cancel_all_registering`] (the first registration of a process) make an
-//! unfinished one `cancelled`. Its frozen targets are not rebound while it is
-//! registering (rebinding only walks `pending` requests); the first `sync` after
-//! it became `pending` rebinds a target whose run moved to a newer generation.
-//! Targets are then settled from the run
-//! rows (`sync`): success needs the same revision/versions committed; every
-//! other terminal state is a reasoned gap. A request terminalizes when no
-//! target is pending, after re-checking that succeeded targets are still held.
-//! Terminal results never change afterwards.
+//! [`abort_registering`] / [`cancel_stale_registering`] (the start-up sweep) make an
+//! unfinished one `cancelled`. That is a matter of visibility only: the frozen
+//! targets of a `registering` request are still rebound when a later registration
+//! bumps the generation of their run (see [`rebind_shared`]), or they would
+//! turn stale and close as gaps once the request is published.
+//!
+//! Targets are settled from the run rows (`sync`): success needs the same
+//! revision/versions committed; every other terminal state is a reasoned gap. A
+//! request terminalizes when no target is pending, after re-checking that
+//! succeeded targets are still held. Terminal results never change afterwards.
 
 use std::collections::BTreeMap;
 
@@ -120,9 +125,11 @@ pub(crate) const FREEZE_BATCH: usize = 256;
 /// Where the next freeze batch resumes: the last run examined by the previous one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FreezeCursor {
-    pub retention_at_ns: i64,
     pub run_id: String,
 }
+
+/// Targets one policy-gap batch closes at most.
+pub(crate) const GAP_BATCH: usize = 256;
 
 /// One committed freeze batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,48 +179,54 @@ pub(crate) fn freeze_batch(
 ) -> Result<FrozenBatch, StorageError> {
     immediate(conn, |conn| {
         let request = registering_request(conn, request_id)?;
-        // A run of a thread that is archived now is never a target, whatever its state or
-        // why it was evicted: only unarchiving brings it back.
-        let archived = crate::repo::thread_index::archived_run_predicate("r.run_id");
+        // The window is the next `limit` runs after the cursor in primary-key order (an
+        // index seek, never a scan of the table); the filters are applied to those rows
+        // only. A run of a thread that is archived now is never a target, whatever its
+        // state or why it was evicted: only unarchiving brings it back.
+        let archived = crate::repo::thread_index::archived_run_predicate("w.run_id");
+        let after = if cursor.is_some() {
+            "WHERE run_id < ?4"
+        } else {
+            ""
+        };
         let mut statement = conn.prepare(&format!(
-            "SELECT r.run_id, r.state, r.retention_at_ns FROM thread_index_runs r \
-             WHERE NOT {archived} AND (?1 IS NULL OR r.source_updated_at_ns >= ?1) \
+            "SELECT w.run_id, w.state, (NOT {archived} \
+             AND (?1 IS NULL OR w.source_updated_at_ns >= ?1) \
              AND (?2 IS NULL OR EXISTS (SELECT 1 FROM thread_runs tr \
                   JOIN threads t ON t.thread_id = tr.thread_id \
-                  WHERE tr.run_id = r.run_id AND t.project_root = ?2)) \
-             AND (?3 IS NULL OR (r.retention_at_ns, r.run_id) < (?3, ?4)) \
-             ORDER BY r.retention_at_ns DESC, r.run_id DESC LIMIT ?5"
+                  WHERE tr.run_id = w.run_id AND t.project_root = ?2))) \
+             FROM (SELECT run_id, state, source_updated_at_ns FROM thread_index_runs {after} \
+                   ORDER BY run_id DESC LIMIT ?3) w"
         ))?;
-        let candidates = statement
-            .query_map(
-                params![
-                    request.since_ns,
-                    request.canonical_project,
-                    cursor.map(|cursor| cursor.retention_at_ns),
-                    cursor.map(|cursor| cursor.run_id.as_str()),
-                    i64::try_from(limit).unwrap_or(i64::MAX)
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )?
+        let window = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut values: Vec<&dyn rusqlite::ToSql> =
+            vec![&request.since_ns, &request.canonical_project, &window];
+        if let Some(cursor) = cursor {
+            values.push(&cursor.run_id);
+        }
+        let mut examined = statement
+            .query_map(values.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        let complete = candidates.len() < limit;
-        let next = candidates
+        examined.sort_by(|a, b| b.0.cmp(&a.0));
+        let complete = examined.len() < limit;
+        let next = examined
             .last()
             .filter(|_| !complete)
-            .map(|(run_id, _, retention_at_ns)| FreezeCursor {
-                retention_at_ns: *retention_at_ns,
+            .map(|(run_id, _, _)| FreezeCursor {
                 run_id: run_id.clone(),
             });
         let mut deleted = 0_u64;
         let mut targets = 0_u64;
-        for (run_id, state, _) in candidates {
+        for (run_id, state, selected) in examined {
+            if !selected {
+                continue;
+            }
             match state.as_str() {
                 "deleted" => {
                     deleted += 1;
@@ -287,16 +300,66 @@ pub(crate) fn abort_registering(
     )? == 1)
 }
 
-/// Start-up: registrations left behind by an interrupted process end `cancelled`.
-pub(crate) fn cancel_all_registering(
+/// Start-up sweep: registrations left behind by an interrupted process end `cancelled`
+/// (the index itself was never touched). `live` names the registrations a writer of
+/// this process is still running; those are never swept. Returns how many were closed.
+pub(crate) fn cancel_stale_registering(
     conn: &Connection,
+    live: &[String],
     now_ns: i64,
 ) -> Result<usize, StorageError> {
-    Ok(conn.execute(
-        "UPDATE thread_index_requests SET state = 'cancelled', finished_at_ns = ?1 \
-         WHERE state = 'registering'",
-        [now_ns],
-    )?)
+    let mut statement =
+        conn.prepare("SELECT request_id FROM thread_index_requests WHERE state = 'registering'")?;
+    let leftover = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut closed = 0;
+    for request_id in leftover.iter().filter(|id| !live.contains(id)) {
+        if abort_registering(conn, request_id, now_ns)? {
+            closed += 1;
+        }
+    }
+    Ok(closed)
+}
+
+/// Closes up to `limit` pending targets with `reason`: those of the registration
+/// `request_id` and of the published requests (capacity pause / disabled index:
+/// requests never wait indefinitely). One short transaction per call; returns how many
+/// targets it closed, so a caller repeats it until it returns less than `limit`.
+pub(crate) fn gap_batch(
+    conn: &Connection,
+    request_id: &str,
+    reason: RequestGapReason,
+    limit: usize,
+) -> Result<usize, StorageError> {
+    immediate(conn, |conn| {
+        let reason = to_json(&reason)?;
+        let mut owners = vec![request_id.to_owned()];
+        let mut statement =
+            conn.prepare("SELECT request_id FROM thread_index_requests WHERE state = 'pending'")?;
+        owners.extend(
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        drop(statement);
+        let mut closed = 0;
+        for owner in owners {
+            let room = limit - closed;
+            if room == 0 {
+                break;
+            }
+            closed += conn.execute(
+                "UPDATE thread_index_request_targets SET state = 'gap', gap_reason = ?2 \
+                 WHERE request_id = ?1 AND run_id IN (SELECT run_id FROM \
+                 thread_index_request_targets WHERE request_id = ?1 AND state = 'pending' \
+                 LIMIT ?3)",
+                params![owner, reason, i64::try_from(room).unwrap_or(i64::MAX)],
+            )?;
+        }
+        Ok(closed)
+    })
 }
 
 /// Run columns a target is judged against.
@@ -414,16 +477,21 @@ const RUN_COLUMNS: &str = "r.state, r.source_revision, r.extractor_version, r.ac
 
 type Judged = (String, String, IndexTarget, u64, Option<RunView>);
 
-fn targets_with_runs(conn: &Connection, target_state: &str) -> Result<Vec<Judged>, StorageError> {
+fn targets_with_runs(
+    conn: &Connection,
+    target_state: &str,
+    only_request: Option<&str>,
+) -> Result<Vec<Judged>, StorageError> {
     let mut statement = conn.prepare(&format!(
         "SELECT t.request_id, t.run_id, t.source_revision, t.extractor_version, \
          t.accounting_version, t.work_generation, {RUN_COLUMNS} \
          FROM thread_index_request_targets t \
          JOIN thread_index_requests q ON q.request_id = t.request_id AND q.state = 'pending' \
-         LEFT JOIN thread_index_runs r ON r.run_id = t.run_id WHERE t.state = ?1"
+         LEFT JOIN thread_index_runs r ON r.run_id = t.run_id \
+         WHERE t.state = ?1 AND (?2 IS NULL OR t.request_id = ?2)"
     ))?;
     let rows = statement
-        .query_map([target_state], |row| {
+        .query_map(params![target_state, only_request], |row| {
             let run_id: String = row.get(1)?;
             Ok((
                 row.get(0)?,
@@ -477,7 +545,7 @@ fn set_target(
 
 /// Settles pending targets of live requests from the run rows.
 pub(crate) fn sync(conn: &Connection) -> Result<(), StorageError> {
-    for (request_id, run_id, target, generation, run) in targets_with_runs(conn, "pending")? {
+    for (request_id, run_id, target, generation, run) in targets_with_runs(conn, "pending", None)? {
         let outcome = judge(&target, generation, run.as_ref(), false)?;
         set_target(conn, &request_id, &run_id, &outcome)?;
     }
@@ -554,6 +622,21 @@ pub(super) const HAS_PENDING_TARGETS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM th
      WHERE q.state = 'pending' AND EXISTS (SELECT 1 FROM thread_index_request_targets t \
      WHERE t.request_id = q.request_id AND t.state = 'pending'))";
 
+/// Whether a target is still pending in the registration `request_id` or in a published
+/// request (what a policy-gap batch closes). Existence only.
+pub(crate) fn has_gappable_pending(
+    conn: &Connection,
+    request_id: &str,
+) -> Result<bool, StorageError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_index_request_targets t \
+         WHERE t.state = 'pending' AND (t.request_id = ?1 OR t.request_id IN \
+         (SELECT request_id FROM thread_index_requests WHERE state = 'pending')))",
+        [request_id],
+        |row| row.get(0),
+    )?)
+}
+
 /// Heartbeats need only existence, not the latest timestamp across all work.
 pub(crate) fn has_pending_targets(conn: &Connection) -> Result<bool, StorageError> {
     Ok(conn.query_row(HAS_PENDING_TARGETS_SQL, [], |row| row.get(0))?)
@@ -574,13 +657,15 @@ pub(crate) fn finalize(conn: &Connection, now_ns: i64) -> Result<usize, StorageE
     if ready.is_empty() {
         return Ok(0);
     }
-    for (request_id, run_id, target, generation, run) in targets_with_runs(conn, "succeeded")? {
-        if !ready.contains(&request_id) {
-            continue;
-        }
-        let outcome = judge(&target, generation, run.as_ref(), true)?;
-        if !matches!(outcome, Outcome::Succeeded) {
-            set_target(conn, &request_id, &run_id, &outcome)?;
+    // Only the requests that are ready: the succeeded targets of the others are not read.
+    for ready_id in &ready {
+        for (request_id, run_id, target, generation, run) in
+            targets_with_runs(conn, "succeeded", Some(ready_id))?
+        {
+            let outcome = judge(&target, generation, run.as_ref(), true)?;
+            if !matches!(outcome, Outcome::Succeeded) {
+                set_target(conn, &request_id, &run_id, &outcome)?;
+            }
         }
     }
     for request_id in &ready {

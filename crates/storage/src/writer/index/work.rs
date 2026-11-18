@@ -65,7 +65,6 @@ pub(crate) struct IndexRuntime {
     /// Last refused admission; `None` while admitting.
     pub pause: Option<IndexCapacityStatus>,
     /// Whether the registrations an earlier process left behind are closed.
-    pub registrations_swept: bool,
     pub wal_wait: Option<WalWait>,
     /// At most one admission checkpoint per step, including a wait probe.
     pub last_checkpoint: Option<CheckpointOutcome>,
@@ -109,7 +108,6 @@ impl IndexRuntime {
             policy: MEASURED_POLICY,
             accounting: DEFAULT_ACCOUNTING_POLICY,
             pause: None,
-            registrations_swept: false,
             wal_wait: None,
             last_checkpoint: None,
             paused_growth: None,
