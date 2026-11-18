@@ -115,8 +115,11 @@ struct InboxState {
 
 pub(crate) struct UserInbox {
     adoptions: Arc<std::sync::atomic::AtomicUsize>,
+    adoption_changed: Arc<tokio::sync::Notify>,
     #[cfg(any(test, feature = "idle-test-support"))]
     adoption_gate: Mutex<Option<adoption::Gate>>,
+    #[cfg(any(test, feature = "idle-test-support"))]
+    wake_adoption_gate: Mutex<Option<adoption::Gate>>,
     state: Mutex<InboxState>,
     wake: tokio::sync::watch::Sender<bool>,
     // Separate from observation: host preparation can access the run map, whose
@@ -140,8 +143,11 @@ impl Default for UserInbox {
     fn default() -> Self {
         Self {
             adoptions: Arc::default(),
+            adoption_changed: Arc::default(),
             #[cfg(any(test, feature = "idle-test-support"))]
             adoption_gate: Mutex::default(),
+            #[cfg(any(test, feature = "idle-test-support"))]
+            wake_adoption_gate: Mutex::default(),
             state: Mutex::new(InboxState::default()),
             wake: tokio::sync::watch::channel(false).0,
             trusted_send: Mutex::new(()),

@@ -602,6 +602,7 @@ impl BootstrappedHost {
             evaluator: evaluator.clone(),
             database: storage_config.db_path.clone(),
             owner: owner.clone(),
+            connections: Arc::default(),
         })?;
         // What the saved sidebar grants (trust, allowed directories, the
         // read-only directories of threads) is declared before any run starts

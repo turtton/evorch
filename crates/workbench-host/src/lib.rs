@@ -15,6 +15,7 @@ pub mod areas;
 pub mod attachments;
 pub mod bootstrap;
 pub mod commands;
+pub mod connections;
 pub mod ingress;
 pub mod lane;
 pub mod lane_delivery;
