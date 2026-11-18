@@ -93,6 +93,16 @@ for other in docs/providers.md docs/browser.md crates/workbench-client/src/subsc
   files "$other"
   expect fail "pr16a2 does not own $other" "$central" --scope pr16a2 --files-from "$work/files"
 done
+# Reconnection retention is wired only in F2's two exact lifecycle leaves.
+files crates/evorch-core/src/lifecycle.rs crates/evorch-core/src/lifecycle/idle/renderer.rs
+expect ok "pr16a2 owns the renderer idle seam and its exact test leaf" "$central" --scope pr16a2 --files-from "$work/files"
+expect fail "pr15 does not own the renderer idle seam" "$central" --scope pr15 --files-from "$work/files"
+for other in crates/evorch-core/src/lifecycle/signals.rs crates/evorch-core/src/lifecycle/idle/activity.rs crates/evorch-core/src/lifecycle/idle/other.rs crates/workbench-protocol/src/handshake.rs; do
+  files "$other"
+  expect fail "pr16a2 does not own $other" "$central" --scope pr16a2 --files-from "$work/files"
+done
+files crates/workbench-protocol/src/handshake.rs
+expect ok "only integration may register the renderer wire reason" "$central" --scope integration --files-from "$work/files"
 files crates/gui/src/core_client/features/artifacts.rs
 expect fail "pr16a2 does not own the GUI feature file" "$central" --scope pr16a2 --files-from "$work/files"
 files crates/evorch/src/cli/inspect.rs

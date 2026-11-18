@@ -198,6 +198,9 @@ pub enum RetentionReason {
     ConnectedClients,
     /// Web delivery is enabled even when no browser is connected.
     WebServing,
+    /// A CLIENT preview has a finite control-reconnection grace period.
+    /// This is not a live client, helper watcher, or executing tool.
+    RendererReconnectGrace,
 }
 
 /// How much work is running.
@@ -494,5 +497,29 @@ impl HandshakeRejected {
             self.missing_capabilities.len(),
             MAX_HELLO_CAPABILITIES,
         )
+    }
+}
+
+#[cfg(test)]
+mod renderer_retention_tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_grace_has_an_independent_wire_reason() {
+        let wire = serde_json::json!({
+            "state": "ready",
+            "retention_reasons": ["renderer_reconnect_grace"],
+            "running": {
+                "turns": 0, "tool_calls": 0, "waiting_lanes": 0,
+                "shell_jobs": 0, "clients": 0
+            }
+        });
+        let status: CoreStatus = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            status.retention_reasons,
+            [RetentionReason::RendererReconnectGrace]
+        );
+        assert_eq!(status.running, ActivityCounts::default());
+        assert_eq!(serde_json::to_value(status).unwrap(), wire);
     }
 }

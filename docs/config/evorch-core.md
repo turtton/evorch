@@ -110,6 +110,9 @@ SafeRestart capability はまだ提供しない。
 公開する。hello・health・GetCoreStatus は同じ集計を使用する。HTTP keep-alive と
 SSE は TCP 接続単位で数え、タブや session ID の重複排除はしない。実 Web owner を
 引き渡さない旧 embedding API だけは、保守的な `web_serving` 保持を継続する。
+`renderer_reconnect_grace` は、CLIENT preview の制御接続が切れた後の有限の再接続
+猶予（30 秒）だけを表す wire 上の保持理由で、生きた client・helper の watcher・
+実行中の tool ではないため `running` には数えない。この変更ではまだ誰も出さない。
 `tool_calls` / `waiting_lanes` / `shell_jobs` の公開 counter と、それらの保持理由は
 まだ未集計（0 / 未掲載）。実際の idle 判定は公開 status ではなく、runtime・shell・
 compaction の作業状態と接続 census、切断後も残る accepted Web command / SSE
