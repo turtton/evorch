@@ -384,6 +384,46 @@ async fn metadata_observation_never_grants_mutation_or_cross_surface_access() {
     f.finish().await;
 }
 
+/// The Web surface may read metadata only: even with the owner's client id it can
+/// neither start frame delivery nor take a Capture, so it never holds a lease or
+/// an operation a data connection could bind (F3 sends bodies to the desktop
+/// and CLI surfaces only; Web support is a separate plan).
+#[tokio::test]
+async fn the_web_surface_cannot_obtain_frames_or_a_capture_even_as_the_owner() {
+    let f = Fixture::new();
+    let owner = provenance("owner", Surface::Desktop);
+    let web = provenance("owner", Surface::Web);
+    let (session, _) = f.session(&owner);
+    let tab = live_tab(&session, owner.client_id.clone());
+    let reference = tab.public.reference.clone();
+    f.service
+        .state
+        .lock()
+        .unwrap()
+        .tabs
+        .insert(reference.id.as_str().to_owned(), tab);
+    for command in [
+        BrowserCommand::SubscribeRendererFrames {
+            tab: reference.clone(),
+        },
+        BrowserCommand::SetRendererStreaming {
+            tab: reference.clone(),
+            enabled: true,
+        },
+        BrowserCommand::CaptureRendererTab {
+            tab: reference.clone(),
+        },
+    ] {
+        let error = f.command(&web, command).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+    }
+    {
+        let state = f.service.state.lock().unwrap();
+        assert!(state.subscriptions.is_empty());
+    }
+    f.finish().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn private_operation_count_bytes_and_ttl_are_bounded_and_late_completion_stays_cancelled() {
     let f = Fixture::new();
