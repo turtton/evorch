@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use rusqlite::{Connection, params};
 
 use super::*;
+use crate::repo::thread_index::held_epoch;
 use crate::thread_index::{PurgeProgress, PurgeTarget};
 
 /// Failures of one source revision before it becomes `blocked`.
@@ -443,6 +444,7 @@ impl<'c> SqliteThreadIndex<'c> {
             ),
             [run_id],
         )?;
+        held_epoch::note_held_change(self.conn, run_id)?;
         Ok(())
     }
 }
@@ -644,6 +646,7 @@ impl ThreadIndexRepository for SqliteThreadIndex<'_> {
                     accounting.charged_bytes,
                 ],
             )?;
+            held_epoch::note_held_change(conn, &target.run_id)?;
             self.close_request_target(guard, None)?;
             Ok(IndexCommitResult::Committed)
         })
@@ -911,6 +914,7 @@ pub(crate) fn purge_index_rows_with(
                          work_generation = work_generation + 1 WHERE run_id = ?1",
                         [run_id],
                     )?;
+                    held_epoch::note_held_change(conn, run_id)?;
                 }
             }
         }

@@ -32,6 +32,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::lease;
 use crate::StorageError;
+use crate::repo::thread_index::held_epoch;
 use crate::thread_index::{
     IndexBlockedReason, IndexTarget, ReindexRequest, ReindexResult, RequestFailure,
     RequestGapCount, RequestGapReason, RequestProgress, RequestStatus, RequestSummary,
@@ -331,8 +332,10 @@ pub(crate) fn cancel_stale_registering(
 pub(crate) struct GapBatch {
     /// Targets closed (the registration's and the published requests').
     pub closed: usize,
-    /// The published requests (not the registration) that lost a pending target.
-    pub touched: Vec<String>,
+    /// The published requests (not the registration) left without a pending target:
+    /// they are `pending` until a pass terminalizes them (`settle_batch`). Complete only
+    /// when `closed` is less than the limit (a full batch stops looking at owners).
+    pub drained: Vec<String>,
 }
 
 /// Closes up to `limit` pending targets with `reason`: those of the registration
@@ -370,8 +373,12 @@ pub(crate) fn gap_batch(
                  LIMIT ?3)",
                 params![owner, reason, i64::try_from(room).unwrap_or(i64::MAX)],
             )?;
-            if closed > 0 && owner != request_id {
-                batch.touched.push(owner);
+            // Fewer than the room: no target of this owner is pending any more, whether
+            // this batch closed the last ones or an interrupted earlier registration did.
+            // The state is read from the table, never remembered, so a request a
+            // registration left unsettled is found by the next one.
+            if closed < room && owner != request_id {
+                batch.drained.push(owner);
             }
             batch.closed += closed;
         }
@@ -388,6 +395,9 @@ pub(crate) struct SettleCursor {
     after: Option<String>,
     saw_gap: bool,
     saw_pending: bool,
+    /// [`held_epoch::current`] when the pass began: a change since means a window read
+    /// earlier may be stale, and the pass starts over.
+    epoch: u64,
 }
 
 /// The result of one settle step.
@@ -402,7 +412,8 @@ pub(crate) enum Settled {
 /// its own short transaction. A succeeded target is re-checked against its run (as
 /// `finalize` does); a gap or pending one is only noted. The last window terminalizes
 /// the request (`completed` or `completed_with_gaps`) when no target was pending.
-/// Targets never turn pending again, so what the windows saw stays true; a request that
+/// Targets never turn pending again, but a succeeded one can lose its index between
+/// windows ([`held_epoch`]): the pass then starts over. A request that
 /// is not `pending` any more (settled meanwhile by a step) ends the settling at once.
 pub(crate) fn settle_batch(
     conn: &Connection,
@@ -449,6 +460,9 @@ pub(crate) fn settle_batch(
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         let mut next = cursor.clone();
+        if cursor.after.is_none() {
+            next.epoch = held_epoch::current(conn);
+        }
         for (run_id, state, target, generation, run) in &rows {
             match state.as_str() {
                 "pending" => next.saw_pending = true,
@@ -465,6 +479,11 @@ pub(crate) fn settle_batch(
         if rows.len() >= limit {
             next.after = rows.last().map(|row| row.0.clone());
             return Ok(Settled::More(next));
+        }
+        if cursor.after.is_some() && held_epoch::current(conn) != next.epoch {
+            // A run read in an earlier window changed what it holds since: what the
+            // windows saw is not one state. The targets already closed stay closed.
+            return Ok(Settled::More(SettleCursor::default()));
         }
         if !next.saw_pending {
             conn.execute(

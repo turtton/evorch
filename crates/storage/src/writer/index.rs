@@ -226,9 +226,9 @@ impl Control<'_> {
                         requests::GAP_BATCH,
                     )
                     .map_err(persistence)?;
-                    for touched in batch.touched {
-                        if !registration.touched.contains(&touched) {
-                            registration.touched.push(touched);
+                    for drained in batch.drained {
+                        if !registration.unsettled.contains(&drained) {
+                            registration.unsettled.push(drained);
                         }
                     }
                     if batch.closed >= requests::GAP_BATCH {
@@ -241,7 +241,7 @@ impl Control<'_> {
                 registration.phase = Self::after_gap(registration);
             }
             Phase::Settle(cursor) => {
-                let Some(settling) = registration.touched.first().cloned() else {
+                let Some(settling) = registration.unsettled.first().cloned() else {
                     registration.phase = Phase::Publish;
                     return Ok(RegistrationProgress::InProgress);
                 };
@@ -256,7 +256,7 @@ impl Control<'_> {
                 {
                     requests::Settled::More(next) => registration.phase = Phase::Settle(next),
                     requests::Settled::Done => {
-                        registration.touched.remove(0);
+                        registration.unsettled.remove(0);
                         registration.phase = Self::after_gap(registration);
                     }
                 }
@@ -283,7 +283,7 @@ impl Control<'_> {
     /// The phase after the policy-gap batches: the published requests they left without
     /// a pending target are settled first, then the registration is published.
     fn after_gap(registration: &Registration) -> Phase {
-        if registration.touched.is_empty() {
+        if registration.unsettled.is_empty() {
             Phase::Publish
         } else {
             Phase::Settle(requests::SettleCursor::default())

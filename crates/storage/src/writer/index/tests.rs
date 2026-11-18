@@ -4313,7 +4313,7 @@ fn settle_windows_terminalize_a_request_the_gap_batches_closed() {
         super::requests::gap_batch(fx.conn(), "none", RequestGapReason::CapacityPaused, 100)
             .unwrap();
     assert_eq!(
-        (closed.closed, closed.touched.as_slice()),
+        (closed.closed, closed.drained.as_slice()),
         (1, ["old".to_owned()].as_slice())
     );
     let mut cursor = SettleCursor::default();
@@ -4338,6 +4338,58 @@ fn settle_windows_terminalize_a_request_the_gap_batches_closed() {
             .unwrap(),
         Settled::Done
     ));
+}
+
+#[test]
+fn a_run_that_loses_its_index_between_settle_windows_restarts_the_pass() {
+    use super::requests::{SettleCursor, Settled};
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    seed_published_request(&fx, "old");
+    super::requests::gap_batch(fx.conn(), "none", RequestGapReason::CapacityPaused, 100).unwrap();
+    let target_state = |fx: &Fixture, run_id: &str| -> String {
+        fx.conn()
+            .query_row(
+                "SELECT state FROM thread_index_request_targets \
+                 WHERE request_id = 'old' AND run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    // The first window reads run-000 and run-001 as succeeded.
+    let mut cursor =
+        match super::requests::settle_batch(fx.conn(), "old", &SettleCursor::default(), 2, 9 * S)
+            .unwrap()
+        {
+            Settled::More(next) => next,
+            Settled::Done => panic!("five targets do not fit one window of two"),
+        };
+    assert_eq!(target_state(&fx, "run-000"), "succeeded");
+    // Then run-000 loses its index (retention), as another step of the writer would do.
+    fx.conn()
+        .execute(
+            "UPDATE thread_index_runs SET state = 'deleted', source_present = 0 \
+             WHERE run_id = 'run-000'",
+            [],
+        )
+        .unwrap();
+    crate::repo::thread_index::held_epoch::note_held_change(fx.conn(), "run-000").unwrap();
+    let mut windows = 1;
+    loop {
+        windows += 1;
+        match super::requests::settle_batch(fx.conn(), "old", &cursor, 2, 9 * S).unwrap() {
+            Settled::More(next) => cursor = next,
+            Settled::Done => break,
+        }
+    }
+    assert_eq!(windows, 6, "three windows, then the whole pass again");
+    assert_eq!(
+        target_state(&fx, "run-000"),
+        "gap",
+        "the restarted pass saw the change; it did not end on the first reading"
+    );
+    assert_eq!(request_state(&fx, "old"), "completed_with_gaps");
 }
 
 #[test]

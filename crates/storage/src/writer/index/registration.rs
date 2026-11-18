@@ -24,7 +24,7 @@ pub(crate) enum Phase {
     /// Closing the targets a disabled or paused index cannot work on.
     Gap,
     /// Settling the published requests the gap batches left without a pending target,
-    /// one window of targets at a time (the first of `Registration::touched`).
+    /// one window of targets at a time (the first of `Registration::unsettled`).
     Settle(SettleCursor),
     /// The last short transaction.
     Publish,
@@ -35,9 +35,11 @@ pub(crate) enum Phase {
 pub struct Registration {
     pub(crate) request_id: String,
     pub(crate) phase: Phase,
-    /// Published requests whose pending targets the gap batches closed: they end
-    /// terminal, in bounded windows, before the publish.
-    pub(crate) touched: Vec<String>,
+    /// Published requests the gap batches found without a pending target: they end
+    /// terminal, in bounded windows, before the publish. A cache of what the tables say
+    /// (every gap batch lists them again), so a registration that stops loses nothing: the
+    /// next one finds the same requests.
+    pub(crate) unsettled: Vec<String>,
     /// The gap batches ran under a gap policy and left no target pending, so the
     /// publish can end the request without looking at its targets.
     pub(crate) gap_closed: bool,
@@ -48,7 +50,7 @@ impl Registration {
         Self {
             request_id,
             phase: Phase::Discover,
-            touched: Vec::new(),
+            unsettled: Vec::new(),
             gap_closed: false,
         }
     }
