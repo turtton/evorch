@@ -1,5 +1,6 @@
-//! Planned exit deliberately does not use operator shutdown, release owners, or
-//! stop the SQLite writer. The coordinator retains this object even on failure.
+//! Planned exit retains thread runtime owners and the SQLite writer. The index
+//! owner alone stops at StopRequested, before the storage barrier. The coordinator
+//! retains this object even on failure.
 use super::*;
 mod holds;
 pub use holds::RestartHolds;
@@ -27,6 +28,7 @@ pub enum ExitStage {
 struct Workers {
     services: services::BackgroundServices,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
+    index_owner: Option<thread_index::ThreadIndexOwner>,
     tasks: Vec<JoinHandle<()>>,
 }
 /// Owned, non-serializable cleanup state. No method grants exec permission.
@@ -97,6 +99,7 @@ impl BootstrappedHost {
             workers: Some(Workers {
                 services: std::mem::take(&mut self.services),
                 reclaim: self.reclaim.take(),
+                index_owner: self.thread_index_owner.take(),
                 tasks,
             }),
             joining: None,
@@ -201,6 +204,9 @@ impl PlannedExit {
                 result.map_err(|_| "spawn fence worker panicked")?;
             }
             ExitStage::StopRequested => {
+                if let Some(owner) = self.workers.as_mut().and_then(|w| w.index_owner.as_mut()) {
+                    owner.stop().map_err(|e| e.to_string())?;
+                }
                 if let Some(workers) = self.workers.as_mut() {
                     workers.services.request_planned_stop();
                     if let Some(reclaim) = &workers.reclaim {

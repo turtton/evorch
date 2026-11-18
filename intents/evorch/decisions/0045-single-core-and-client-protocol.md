@@ -49,6 +49,23 @@ Proposed
 - **GUI と CLI の起動**: GUI と CLI はどちらも、コアが稼働していなければ起動してから接続する（connect-or-start）。
 - **維持と終了**: 実行中の作業（turn、tool 実行、待機中の lane 等）が存在する間はコアプロセスを維持する。接続クライアント数が 0 かつ実行中作業がないアイドル状態が一定時間継続した場合に自動終了する。ただし、Web 配信機能が有効な間は Web 配信を常駐クライアント相当の保持理由とみなし、コアをアイドル自動終了しない。
 
+#### 常駐する thread index owner（17d-3 の前提）
+
+明示的に起動される単一コアは、activation から停止まで thread index owner を
+1 つ持ち、クライアント操作がなくても公開済み request を終端まで進める。
+ADR 0041 R5 の「隠れた daemon は起動しない」は、別の索引用 process の暗黙起動を
+禁止するものであり、このコア内の常駐背景処理を禁止しない。lease が取れない間は
+heartbeat ごとに再取得し、有効な lease なしには step しない。通常停止と planned
+exit は lease を返し、planned exit では StopRequested で owner を止めて storage
+barrier 後の索引 commit を防ぐ。異常終了後は lease の期限切れを待つ。
+
+`pending` request が `pending` target を持つ間は idle 終了を抑止し、protocol の
+retention reason は `pending_reindex` とする。背景の discovery だけでは抑止しない。
+コアが lease を持つと、R5 の表どおり `--wait` なしの `reindex-threads` の既定出力は
+`accepted` となり、終端を必要とする呼出しには `--wait` を用いる。19a までは旧 GUI
+との lease 排他を維持する。v27 の `gui`/`cli` 制約に合わせコアは `cli` 種別を流用し、
+独立した種別は follow-up とする（本変更で schema は変更しない）。
+
 ### 3. クライアントとしてのデスクトップ GUI
 
 デスクトップ GUI（egui 描画・GPU 処理・CEF browser）はコア外のクライアントプロセスとする。

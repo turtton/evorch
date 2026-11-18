@@ -32,6 +32,7 @@ mod scratch_archive_tests;
 pub mod services;
 #[cfg(test)]
 mod tests;
+mod thread_index;
 use crate::areas::{AreaHandles, AreaTasks, Areas};
 use crate::projects::ProjectDirectory;
 use crate::{CommandHost, commands::CommandService, projects::StaticProjects};
@@ -139,6 +140,7 @@ pub struct BootstrappedHost {
     bridge: Option<OwnedStorageBridge>,
     planned_exit: Option<Arc<tokio::sync::Mutex<planned_exit::PlannedExit>>>,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
+    thread_index_owner: Option<thread_index::ThreadIndexOwner>,
     executor: Arc<tools::ToolExecutor>,
     _leases: storage::SharedLeases,
 }
@@ -648,6 +650,7 @@ impl BootstrappedHost {
             bridge: Some(bridge),
             planned_exit: None,
             reclaim: None,
+            thread_index_owner: None,
             executor,
             _leases: leases,
         };
@@ -771,6 +774,9 @@ impl BootstrappedHost {
             }
         }
 
+        self.thread_index_owner = Some(thread_index::ThreadIndexOwner::start(
+            deferred.writer.clone(),
+        )?);
         self.reclaim = Some(runtime::thread_retention::ReclaimExecutor::spawn(
             runtime::thread_retention::ExecutorConfig::new(
                 deferred.writer.clone(),
@@ -869,6 +875,9 @@ impl BootstrappedHost {
             .service()
             .restart_gate()
             .transition(u64::MAX, restart::HostRestartPhase::ShuttingDown);
+        if let Some(owner) = &mut self.thread_index_owner {
+            lane_pr::remember(&mut failure, owner.stop());
+        }
         self.area_tasks.request_stop();
         let tasks = self
             .host

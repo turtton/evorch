@@ -1,8 +1,22 @@
 # Conversation index and reindexing
 
-The GUI explicitly starts the shared storage index owner. Merely opening a
-`Storage` does not start indexing. GUI and CLI use the same durable request,
-lease, and step APIs; there is no separate CLI indexing engine.
+The explicitly started core owns one resident thread-index worker, from bootstrap
+activation through shutdown. The legacy GUI also starts an owner until stage 19a;
+the two processes compete for the same fenced SQLite lease, never for concurrent
+index steps. Merely opening a `Storage` does not start indexing. Core, GUI and CLI
+use the same durable request, lease, and step APIs; there is no separate CLI engine.
+
+An owner without a lease retries at each heartbeat. With a live lease it settles
+leftover requests after restart and after retention closes their targets, without
+a new registration or a connected client. Normal shutdown and planned exit release
+the lease; planned exit stops the worker at StopRequested, before the storage
+barrier. A crash instead requires waiting for the old lease to expire.
+
+The core uses the existing `cli` lease kind and a unique `core-…` owner ID because
+`v27.sql` permits only `gui` and `cli`; a distinct core kind is a follow-up, not a
+schema change here. Published pending reindex requests with pending targets retain
+the core (`pending_reindex`). Ordinary background discovery and terminal-wait
+requests without pending targets do not inhibit idle exit.
 
 Search keyset-scans the indexed body within visible runs and does not read FTS;
 matching happens in the runtime after redaction
@@ -94,7 +108,7 @@ The command prints one JSON result:
 
 | Status | Meaning |
 | --- | --- |
-| `accepted` | Another GUI/CLI owner holds a live lease. The request is persisted and delegated; it is **not completed**. Includes `request_id`. |
+| `accepted` | Another core/legacy-GUI/CLI owner holds a live lease. The request is persisted and delegated; it is **not completed**. Includes `request_id`. |
 | `completed` | All fixed targets succeeded, including an empty target set. |
 | `completed_with_gaps` | All targets settled, but some have reasoned gaps. The summary includes success counts, deleted-before-submission counts, and gap reasons/counts. Even an all-gap request is not `failed`. |
 | `failed` | Invalid arguments, an unavailable database, or a control/persistence failure. An ID is present only after acceptance. |
@@ -108,6 +122,13 @@ request. Run a separate reindex request to process the latest revision.
 `accepted`, `completed`, and `completed_with_gaps` exit successfully; `failed`
 exits nonzero. Diagnostics go to stderr.
 
+**Default output change:** while the core resident owner holds its lease,
+`reindex-threads` **without `--wait` returns `accepted`**, rather than waiting for
+completion. This is delegation, not a terminal success; use `--wait` when a
+terminal result is required (ADR 0041 R5). Empty-target and disabled/capacity-gap
+requests that are already terminal still return that terminal result. With no live owner, foreground
+completion remains unchanged.
+
 With another owner, `--wait` polls the common status API with bounded backoff
 until terminal; it does not perform competing work. If that owner dies, the
 waiting CLI can take over only after lease expiry, using a new fencing epoch.
@@ -116,7 +137,7 @@ terminal, with or without `--wait`; it never returns accepted-only and leaves
 no hidden daemon.
 
 Stopping a waiting process does not cancel its durable request. If no owner
-remains after `accepted`, the request waits for the next GUI/CLI owner.
+remains after `accepted`, the request waits for the next core/legacy-GUI/CLI owner.
 If an application externally cancels a request while the CLI waits, the CLI
 prints a cancellation diagnostic to stderr and exits nonzero without fabricating
 a `failed` JSON result or changing the persisted cancelled state.
