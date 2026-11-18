@@ -546,12 +546,21 @@ impl CommandHost {
         self.areas.connections.clone()
     }
 
+    /// Answer `query` for `session`.
+    ///
+    /// `provenance` is what the transport established for the caller (the same
+    /// value commands get); a namespace that decides who may read what uses it,
+    /// never a surface or owner named in the request body. `session` correlates
+    /// the request and is not an authorization basis by itself. There is no
+    /// default: an in-process caller names itself too.
     pub fn handle_query(
         &self,
         session: &SessionId,
         query: &Query,
+        provenance: &Provenance,
     ) -> Result<QueryReply, WorkbenchError> {
-        self.dispatch_query(session, query)
+        provenance.validate()?;
+        self.dispatch_query(session, query, provenance)
     }
 
     /// Complete immutable arguments for an authenticated human's confirmation.

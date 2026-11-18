@@ -17,4 +17,15 @@ impl ArtifactsArea {
     pub(super) fn new(_handles: &AreaHandles) -> Result<Self, BootstrapError> {
         Ok(Self::default())
     }
+
+    /// The provider behind `inspect_artifact`; see [`super::Areas::artifact_pages`].
+    ///
+    /// `None` until the area implements it. The implementation returns `Some`
+    /// unconditionally (not depending on helper state), so the tool catalog
+    /// never changes with the helper's life cycle.
+    pub(super) fn artifact_pages(
+        &self,
+    ) -> Option<std::sync::Arc<dyn runtime::artifacts::ArtifactPages>> {
+        None
+    }
 }

@@ -83,6 +83,19 @@ pub struct AreaHandles {
     /// The connections of the clients and the hooks to run when one leaves; an
     /// area that starts work for a client registers one (ADR 0045 §10).
     pub connections: Arc<crate::connections::ConnectionHooks>,
+    /// The artifact store the runtime already writes to (PR 16a-2). The
+    /// `artifacts` and `browser` areas read through it; they never open a second
+    /// store on the same directory.
+    pub artifacts: Arc<runtime::artifacts::ArtifactStore>,
+    /// The ledger every spawned child of this core is recorded in. A renderer
+    /// helper is spawned and reclaimed through it too; an area never builds a
+    /// ledger of its own (PR 16a-2).
+    pub spawn_ledger: sandbox::SpawnLedger,
+    /// The command service's own restart gate (a clone shares its state). An
+    /// area that must stop its work for a restart watches this one through
+    /// `subscribe()` and `phase()`; it never builds a gate or a notification
+    /// of its own (PR 16a-2).
+    pub restart_gate: crate::bootstrap::restart::HostRestartGate,
 }
 
 /// See [`AreaHandles::reload_models`].
@@ -145,5 +158,19 @@ impl Areas {
             artifacts: artifacts::ArtifactsArea::new(handles)?,
             browser: browser::BrowserArea::new(handles)?,
         })
+    }
+
+    /// The page provider the runtime offers `inspect_artifact` on, or `None`.
+    ///
+    /// The bootstrap asks once, after the areas exist and before startup
+    /// recovery resumes any run, and hands a `Some` to
+    /// [`AgentRuntime::set_artifact_pages`]. Asking before recovery means a
+    /// restored run sees the same tool catalog as a new one from its first
+    /// request. The answer must not depend on whether a helper is running: the
+    /// catalog is stable across helper start, stop and crash. Until the
+    /// `artifacts` area implements it this is `None`, and the catalog and the
+    /// capabilities stay as they were.
+    pub fn artifact_pages(&self) -> Option<Arc<dyn runtime::artifacts::ArtifactPages>> {
+        self.artifacts.artifact_pages()
     }
 }

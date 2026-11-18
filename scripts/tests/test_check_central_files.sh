@@ -78,6 +78,25 @@ expect fail "pr14 does not own the pr15 cache target" "$central" --scope pr14 --
 files crates/evorch-core/tests/core_eval_cache.rs
 expect ok "pr17c owns its cache target" "$central" --scope pr17c --files-from "$work/files"
 expect fail "pr15 does not own the pr17c cache target" "$central" --scope pr15 --files-from "$work/files"
+# 16a-2: pr16a2 owns the renderer wiring leaves and not the central files, the
+# GUI feature files of the namespaces it fills, or the CLI.
+files crates/workbench-host/src/areas/artifacts.rs crates/workbench-host/src/areas/renderer/mod.rs crates/renderer-ipc/src/client.rs crates/evorch-core/tests/core_renderer_cache.rs crates/runtime/src/artifacts/inspect.rs
+expect ok "pr16a2 owns the artifact and renderer leaves" "$central" --scope pr16a2 --files-from "$work/files"
+expect fail "pr15 does not own the artifact leaf" "$central" --scope pr15 --files-from "$work/files"
+for central_file in crates/workbench-host/src/areas/mod.rs crates/workbench-host/src/ingress.rs crates/workbench-host/Cargo.toml scripts/ci-test-groups.json; do
+  files crates/workbench-host/src/areas/artifacts.rs "$central_file"
+  expect fail "pr16a2 may not change the central $central_file" "$central" --scope pr16a2 --files-from "$work/files"
+done
+files crates/workbench-client/src/transport.rs crates/workbench-client/tests/unix_socket.rs docs/renderer-measurement.md docs/single-core-integration.md crates/evorch-core/src/unix.rs crates/evorch-core/src/renderer.rs
+expect ok "pr16a2 owns the frame receive path, the UDS seam and its two documents" "$central" --scope pr16a2 --files-from "$work/files"
+for other in docs/providers.md docs/browser.md crates/workbench-client/src/subscription.rs crates/workbench-client/src/client.rs crates/workbench-client/tests/subscriptions.rs crates/workbench-client/tests/connection.rs; do
+  files "$other"
+  expect fail "pr16a2 does not own $other" "$central" --scope pr16a2 --files-from "$work/files"
+done
+files crates/gui/src/core_client/features/artifacts.rs
+expect fail "pr16a2 does not own the GUI feature file" "$central" --scope pr16a2 --files-from "$work/files"
+files crates/evorch/src/cli/inspect.rs
+expect fail "pr16a2 does not own the CLI" "$central" --scope pr16a2 --files-from "$work/files"
 # The Evaluator's eval_start spawns `evorch eval run` with `--db`, which 17c
 # removes from the CLI: pr17c owns the spawn site and its test, and not the rest
 # of the eval crate.
@@ -115,6 +134,8 @@ expect ok "the cache gate names core_pr_cache" bash -c "grep -q 'binary(=core_pr
 expect ok "core_pr_cache has a test target" test -f crates/evorch-core/tests/core_pr_cache.rs
 expect ok "the cache gate names core_eval_cache" bash -c "grep -q 'binary(=core_eval_cache)' scripts/contract-test-filters.sh"
 expect ok "core_eval_cache has a test target" test -f crates/evorch-core/tests/core_eval_cache.rs
+expect ok "the cache gate names core_renderer_cache" bash -c "grep -q 'binary(=core_renderer_cache)' scripts/contract-test-filters.sh"
+expect ok "core_renderer_cache has a test target" test -f crates/evorch-core/tests/core_renderer_cache.rs
 expect ok "every binary of the cache gate has a test target" no_missing_targets scripts/contract-test-filters.sh
 printf "CACHE_CONTRACT_FILTER='package(=x) & binary(=no_such_cache_target)'\n" > "$work/bad-filter.sh"
 expect fail "a binary without a target is detected" no_missing_targets "$work/bad-filter.sh"

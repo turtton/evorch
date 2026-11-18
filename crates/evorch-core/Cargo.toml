@@ -12,6 +12,16 @@ bench = false
 
 [features]
 bootstrap-test-support = ["core-instance/recovery-test-support", "storage/recovery-test-support", "workbench-web/test-support"]
+# Builds the fake renderer helper the owned-spawn tests start (PR 16a-2). Off by
+# default and never part of a product build; the cache gate does not need it.
+renderer-test-helper = ["dep:renderer-ipc"]
+
+[[bin]]
+name = "evorch-renderer-test-helper"
+path = "tests/support/renderer_test_helper.rs"
+required-features = ["renderer-test-helper"]
+test = false
+bench = false
 
 [[bin]]
 name = "core-bootstrap-harness"
@@ -28,6 +38,7 @@ workbench-host = { path = "../workbench-host" }
 workbench-protocol = { path = "../workbench-protocol" }
 workbench-web = { path = "../workbench-web" }
 config = { path = "../config" }
+renderer-ipc = { path = "../renderer-ipc", optional = true }
 event-bus = { path = "../event-bus" }
 runtime = { path = "../runtime" }
 storage = { path = "../storage" }

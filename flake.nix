@@ -290,7 +290,7 @@
         };
         cefArgs = commonArgs // {
           pname = "evorch-gui-cef";
-          cargoExtraArgs = "-p gui -p browser-cef --features gui/cef,browser-cef/cef";
+          cargoExtraArgs = "-p gui -p browser-cef -p evorch-renderer --features gui/cef,browser-cef/cef";
           CEF_PATH = cefDist;
           # Shared with the deps build so build-script fingerprints (pkg-config
           # for x11-dl/winit, bindgen) match and the cached deps are reused.
@@ -312,7 +312,7 @@
         });
         evorch-gui-cef = craneLib.buildPackage (cefArgs // {
           cargoArtifacts = cefCargoArtifacts;
-          cargoExtraArgs = "${cefArgs.cargoExtraArgs} --bin evorch-gui --bin evorch-cef-helper";
+          cargoExtraArgs = "${cefArgs.cargoExtraArgs} --bin evorch-gui --bin evorch-cef-helper --bin evorch-renderer";
           doCheck = false;
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
           # The GUI starts the helper beside its executable and CEF reads its
@@ -325,7 +325,7 @@
           postInstall = ''
             app=$out/libexec/evorch-gui-cef
             mkdir -p $app
-            mv $out/bin/evorch-gui $out/bin/evorch-cef-helper $app/
+            mv $out/bin/evorch-gui $out/bin/evorch-cef-helper $out/bin/evorch-renderer $app/
             rm -rf $out/bin
             for entry in ${cefDist}/*; do
               case "''${entry##*/}" in
@@ -357,7 +357,12 @@
               | env -u LD_LIBRARY_PATH "$out/libexec/evorch-gui-cef/evorch" js-worker > js-worker.out
             cat js-worker.out
             grep -q '"type":"done".*"value":42' js-worker.out
-            for binary in evorch-gui evorch-cef-helper libcef.so; do
+            # The renderer helper (ADR 0045) finds the CEF helper beside itself, so
+            # both sit in this directory and the CEF files resolve beside them.
+            # Nothing starts it yet; the check only proves it is delivered whole.
+            test -x "$out/libexec/evorch-gui-cef/evorch-renderer"
+            test -x "$out/libexec/evorch-gui-cef/evorch-cef-helper"
+            for binary in evorch-gui evorch-cef-helper evorch-renderer libcef.so; do
               env -u LD_LIBRARY_PATH ${pkgs.stdenv.cc.bintools.dynamicLinker} --list \
                 "$out/libexec/evorch-gui-cef/$binary" > /dev/null
             done
@@ -373,6 +378,7 @@
           meta.mainProgram = "evorch-gui";
           meta.platforms = [ "x86_64-linux" ];
         } ''
+          test -x ${evorch-gui-cef}/libexec/evorch-gui-cef/evorch-renderer
           mkdir -p $out/bin
           ln -s ${evorch}/bin/evorch $out/bin/evorch
           ln -s ${evorch}/bin/evorch-core $out/bin/evorch-core

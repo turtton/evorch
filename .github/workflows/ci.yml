@@ -750,6 +750,13 @@ jobs:
           tool: cargo-nextest
       - name: CEF offline isolation and crash recovery
         run: cargo nextest run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
+      # The real renderer binary beside the CEF helper it starts (16a-2). The
+      # ignored tests are the only ones that run real CEF in the renderer
+      # process; the ordinary matrix runs the fake helper instead.
+      - name: Out-of-process renderer helper through real CEF
+        run: |
+          cargo build -p browser-cef --features cef --bin evorch-cef-helper
+          cargo nextest run -p evorch-renderer --run-ignored all --success-output immediate --no-tests fail
       - name: Card snapshots and agent artifact inspection through CEF
         run: |
           export EVORCH_CEF_HELPER="$PWD/target/debug/evorch-cef-helper"

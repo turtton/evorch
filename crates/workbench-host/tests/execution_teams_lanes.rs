@@ -150,8 +150,11 @@ impl Fixture {
         &self,
         query: Query,
     ) -> Result<QueryReply, workbench_protocol::errors::WorkbenchError> {
-        self.host
-            .handle_query(&SessionId::new("wire").unwrap(), &query)
+        self.host.handle_query(
+            &SessionId::new("wire").unwrap(),
+            &query,
+            &workbench_host::provenance::local_desktop(),
+        )
     }
 
     fn runs(
@@ -301,6 +304,7 @@ async fn a_live_run_and_its_saved_record_are_one_run_and_history_outlives_the_ru
                 scope: RunScope::Roots,
                 page: PageRequest::default(),
             })),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     else {
@@ -326,6 +330,7 @@ async fn a_live_run_and_its_saved_record_are_one_run_and_history_outlives_the_ru
                 thread: ThreadId::new("lead").unwrap(),
                 run: saved.summary.id.clone(),
             })),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     else {
@@ -339,6 +344,7 @@ async fn a_live_run_and_its_saved_record_are_one_run_and_history_outlives_the_ru
                 thread: ThreadId::new("lead").unwrap(),
                 run: workbench_protocol::ids::RunId::new("run-missing").unwrap(),
             })),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap_err();
     assert_eq!(unknown.code, ErrorCode::NotFound);

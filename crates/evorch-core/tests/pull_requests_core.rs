@@ -167,6 +167,7 @@ fn read(core: &BootstrappedHost) -> ThreadPullRequest {
         .handle_query(
             &SessionId::new("session").unwrap(),
             &Query::PullRequests(PullRequestsQuery::GetThreadPullRequest { thread: thread() }),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     {
@@ -385,6 +386,7 @@ async fn a_command_sent_again_is_one_operation_and_another_request_under_its_id_
             &Query::PullRequests(PullRequestsQuery::GetPullRequestOperation {
                 operation_id: op("never-sent"),
             }),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap_err();
     assert_eq!(unknown.code, ErrorCode::NotFound);
@@ -438,6 +440,7 @@ async fn a_refresh_sent_again_while_a_fetch_runs_joins_one_follow_up() {
     let operations = core.host.lock().unwrap().handle_query(
         &SessionId::new("session").unwrap(),
         &Query::PullRequests(PullRequestsQuery::ListPullRequestOperations {}),
+        &workbench_host::provenance::local_desktop(),
     );
     if let Ok(QueryReply::PullRequests(PullRequestsReply::Operations { operations })) = operations {
         assert_eq!(

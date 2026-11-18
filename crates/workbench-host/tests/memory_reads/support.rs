@@ -125,8 +125,11 @@ impl runtime::AgentModel for NeverAnswers {
 
 impl World {
     pub fn query(&self, query: Query) -> Result<QueryReply, WorkbenchError> {
-        self.host
-            .handle_query(&SessionId::new("session").unwrap(), &query)
+        self.host.handle_query(
+            &SessionId::new("session").unwrap(),
+            &query,
+            &workbench_host::provenance::local_desktop(),
+        )
     }
 
     /// Wait until no read is running: the counted tasks have ended.

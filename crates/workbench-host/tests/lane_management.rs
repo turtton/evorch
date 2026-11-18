@@ -120,6 +120,7 @@ impl Fixture {
                     lane_id: workbench_protocol::lane_attention::LaneId::new(&self.lane.lane_id)
                         .unwrap(),
                 }),
+                &workbench_host::provenance::local_desktop(),
             )
             .unwrap()
         {
@@ -587,6 +588,7 @@ async fn the_close_preview_is_the_ledgers_and_follows_the_close_and_detach() {
                 &Query::Lanes(LanesQuery::GetLaneClosePreview {
                     lane_id: lane_id.clone(),
                 }),
+                &workbench_host::provenance::local_desktop(),
             )? {
                 QueryReply::Lanes(LanesReply::LaneClosePreview(preview)) => Ok(*preview),
                 other => panic!("{other:?}"),
@@ -599,6 +601,7 @@ async fn the_close_preview_is_the_ledgers_and_follows_the_close_and_detach() {
             &Query::Lanes(LanesQuery::GetLane {
                 lane_id: lane_id.clone(),
             }),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     {
@@ -658,6 +661,7 @@ async fn the_close_preview_is_the_ledgers_and_follows_the_close_and_detach() {
                     page: Default::default(),
                 },
             )),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     {
@@ -706,6 +710,7 @@ async fn the_close_preview_is_the_ledgers_and_follows_the_close_and_detach() {
         &Query::Lanes(LanesQuery::GetLaneClosePreview {
             lane_id: workbench_protocol::lane_attention::LaneId::new("no-such-lane").unwrap(),
         }),
+        &workbench_host::provenance::local_desktop(),
     );
     assert_eq!(unknown.unwrap_err().code, ErrorCode::NotFound);
     f.stop().await;

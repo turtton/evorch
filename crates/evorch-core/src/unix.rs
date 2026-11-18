@@ -38,9 +38,14 @@ pub async fn connection(
         ));
     }
     let _connected = backend.connected();
-    let (mut read, mut write) = stream.into_split();
+    let (mut read, write) = stream.into_split();
     let mut hello = backend.hello();
     let first = tokio::select! { r = payload(&mut read, hello.limits.max_frame_bytes) => r?, _ = shutdown.changed() => return Ok(()) };
+    let Some((mut read, mut write)) =
+        crate::renderer::route(&first, read, write, &backend, &mut shutdown).await?
+    else {
+        return Ok(());
+    };
     let client: ClientHello = serde_json::from_slice(&first).map_err(invalid)?;
     let negotiated = negotiate(
         &client,

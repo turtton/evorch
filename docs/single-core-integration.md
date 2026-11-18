@@ -320,6 +320,39 @@ Known limits, left for later stages:
 - A command larger than the frame limit fails before it is written; the CLI
   reports it as an unknown outcome rather than a refusal.
 
+## Stage 16a-2: integration PR (renderer helper in the core)
+
+This PR wires the places the later 16a-2 PRs fill. Nothing the product does
+changes: the tool catalog, the capabilities and the start-up behaviour are the
+same, and no helper process is started.
+
+| Contract | Where it is held | Where it is tested |
+|---|---|---|
+| Every query carries the provenance of its connection, validated on entry (`handle_query(session, query, &Provenance)`). A missing provenance is never read as a trusted UDS caller. The core's own health query uses a fixed internal human provenance (`core-health`) | `CommandHost::handle_query`, `dispatch_query`, `browser_query` and `artifacts_query` (which take it unused until the artifact API PR authorizes with it), `HostBackend::raw_request` | the existing query tests, now passing `local_desktop()` |
+| The artifact store and the spawn ledger reach `AreaHandles`; the provider of `ArtifactPages` is `None`, so `inspect_artifact` is not offered | `areas::AreaHandles`, `ArtifactsArea::artifact_pages` | `core_renderer_cache` (tool array frozen across turns and free of `inspect_artifact`, both wire formats, input-derived cache) |
+| The provider is installed after the areas are built and **before** start-up recovery resumes any run, so a restored run sees the same catalog from its first request | `Bootstrap` open in `crates/workbench-host/src/bootstrap/mod.rs` (`Areas::new`, then `set_artifact_pages`, then recovery) | the artifact API PR (the provider is `None` here) |
+| The command service's own `HostRestartGate` (the same instance, a clone shares its state) reaches the areas as `AreaHandles::restart_gate`; an area watches it through `subscribe()` and `phase()`. No notification of its own, no change to `planned_exit.rs` | `AreaHandles::restart_gate`, filled from `CommandService::restart_gate()` in the bootstrap | the owner PR (restart observation) |
+| Every UDS connection is handed to `renderer::route` (first frame and both stream halves) before it is read as a `ClientHello`; the leaf gives the halves back, so the control-plane handling goes on. A leaf that claims the connection keeps the halves and serves it. Runs in release too | `evorch-core/src/renderer.rs`, `unix::connection` | every UDS test (they all pass through it); the frame-delivery PR replaces the leaf |
+| `evorch-renderer` is built with the CEF distribution beside `evorch-cef-helper` and the CEF files, in `libexec/evorch-gui-cef`, and the install check proves it is delivered and loadable. Nothing starts it | `flake.nix` (`evorch-gui-cef`, `evorch-with-cef`) | `nix build` (CI `nix-build`) |
+| The fake helper `evorch-renderer-test-helper` serves `renderer-ipc` on stdio with a backend that renders nothing; it exists only with the feature `renderer-test-helper`, which the runtime test group enables | `evorch-core/tests/support/renderer_test_helper.rs` | the owner PR (owned spawn, fence, partial-failure tests use `CARGO_BIN_EXE_*` at run time) |
+
+- `workbench-host` now depends on `renderer-ipc` and `browser`, not on
+  `browser-cef`: the core links no CEF.
+- `core_renderer_cache` is registered in `CACHE_CONTRACT_FILTER`. It does not
+  need the helper feature, so the ordinary cache gate always runs it.
+- Test split: the ordinary matrix runs everything except real CEF (fake helper,
+  in-thread `renderer_ipc::serve_in_thread`); the `cef-e2e` job runs the ignored
+  real-CEF tests of `evorch-renderer` (`real_helper.rs`).
+- The scope `pr16a2` is in `scripts/feature-scopes.txt` and lists plan §2.2 path
+  by path: the artifacts and browser leaves, the renderer crates, the UDS seam,
+  `workbench-client`'s `transport.rs` and renderer files, and only the
+  measurement and integration documents. The fixtures of
+  `scripts/tests/test_check_central_files.sh` cover it, including the files it
+  must refuse.
+- `handle_query` changed its signature. A branch that calls it (17d-2,
+  4b-d-3) adds `local_desktop()` (or the connection's provenance) as the third
+  argument when it rebases.
+
 ## Reserved migration numbers
 
 Storage migrations are numbered from one shared ledger kept by the

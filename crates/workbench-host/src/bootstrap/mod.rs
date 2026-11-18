@@ -569,6 +569,7 @@ impl BootstrappedHost {
             .with_team_writer(handle.clone())
             .with_ownership(owner.clone());
         service.bind_lane_delivery();
+        let restart_gate = service.restart_gate();
         let projects = known_projects(&options)?;
         for (root, access) in projects.access {
             access.apply(&runtime, root);
@@ -603,7 +604,15 @@ impl BootstrappedHost {
             database: storage_config.db_path.clone(),
             owner: owner.clone(),
             connections: Arc::default(),
+            artifacts: artifacts.clone(),
+            spawn_ledger: spawn_ledger.clone(),
+            restart_gate,
         })?;
+        // Before any run is restored: a restored run builds its first tool
+        // catalog from the runtime as it is now. `None` offers nothing.
+        if let Some(pages) = areas.artifact_pages() {
+            runtime.set_artifact_pages(pages);
+        }
         // What the saved sidebar grants (trust, allowed directories, the
         // read-only directories of threads) is declared before any run starts
         // or recovers, so a restart does not lose a permission the user gave.
