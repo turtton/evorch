@@ -757,6 +757,12 @@ jobs:
         run: |
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
           cargo nextest run -p evorch-renderer --run-ignored all --success-output immediate --no-tests fail
+      # Production core owner tests replace the installation placeholder in F1.
+      - name: Core renderer owner through real CEF
+        run: |
+          cargo build -p evorch-renderer
+          export EVORCH_RENDERER_EXE="$PWD/target/debug/evorch-renderer"
+          cargo nextest run -p evorch-core --features renderer-test-helper --test renderer_owner_cef --run-ignored only --success-output immediate --no-tests fail
       - name: Card snapshots and agent artifact inspection through CEF
         run: |
           export EVORCH_CEF_HELPER="$PWD/target/debug/evorch-cef-helper"
