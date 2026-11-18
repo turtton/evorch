@@ -114,6 +114,7 @@ impl Job {
             identity: ShellJobIdentity {
                 id: self.id.clone(),
                 owner: self.owner.clone(),
+                teardown: Arc::clone(&self.teardown),
             },
             owner_run: self.owner.clone(),
             call_id: self.call_id.clone(),

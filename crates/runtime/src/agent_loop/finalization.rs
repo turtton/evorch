@@ -165,6 +165,9 @@ impl LoopState {
         // Without unknown shell effects, snapshot failure remains a non-fatal
         // diagnostic and does not suppress ordinary completion or workspace cleanup.
         let released = if drained && authority && (saved || !uncertain) {
+            // Releasing handles erases their snapshots. Consume confirmed
+            // teardown first, even if the asynchronous monitor has not run yet.
+            self.sync_scratch_shell_users();
             match self.shared.executor.release_shell_jobs(&run_id) {
                 Ok(()) => true,
                 Err(error) => {
@@ -251,5 +254,33 @@ impl LoopState {
         if let Some(runtime) = self.runtime() {
             self.terminal_dispatch = runtime.publish_terminal(self.task.run_id, event);
         }
+    }
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use crate::scratch::usage::tests::{Harness, has_shell_users};
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn shell_teardown_is_consumed_before_finalization_erases_job_handles() {
+        let mut h = Harness::new().await;
+        h.terminal(false);
+        h.state.sync_scratch_shell_users();
+        assert!(h.has_shell_users());
+        h.terminal(true);
+        *h.shell.release_probe.lock().unwrap() = Some(Box::new({
+            let scratch = h.scratch.clone();
+            let key = h.key.clone();
+            move || {
+                assert!(
+                    !has_shell_users(&scratch, &key),
+                    "teardown must be consumed before the job snapshot disappears"
+                );
+            }
+        }));
+        h.state.finalize().await;
+        assert_eq!(h.shell.released.load(Ordering::SeqCst), 1);
+        assert!(!h.has_users());
     }
 }

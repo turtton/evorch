@@ -478,6 +478,12 @@ impl LoopState {
                 .release_scratch_execution(self.task.run_id, &self.task.publication.incarnation());
         }
     }
+    pub(crate) fn sync_scratch_shell_users(&self) {
+        if let Some((scratch, key, run, _)) = self.scratch.as_ref().and_then(|s| s.binding.as_ref())
+        {
+            scratch.sync_shell_users(key, *run, &self.shared.executor);
+        }
+    }
     pub(crate) fn resume_scratch(&mut self) -> io::Result<()> {
         if let Some(binding) = self.scratch.as_mut()
             && let Some((scratch, key, run, incarnation)) = &binding.binding

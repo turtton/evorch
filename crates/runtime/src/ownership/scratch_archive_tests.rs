@@ -248,3 +248,92 @@ fn archived_notice_once_per_run_and_same_path_reprepared_empty() {
     assert!(f.scratch.take_archived_notice(&f.key, id));
     assert!(!f.scratch.take_archived_notice(&f.key, id));
 }
+
+#[test]
+fn registry_busy_retains_data_then_uses_one_injected_backoff_before_external_retry() {
+    for release_during_backoff in [true, false] {
+        let f = Fixture::new();
+        let connection = rusqlite::Connection::open(f.db()).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let state = Arc::new(Mutex::new(State {
+            pending: HashSet::from(["thread".into()]),
+            checker: Some(archived()),
+            ..Default::default()
+        }));
+        let (wake, rx) = mpsc::sync_channel(1);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let waits = Arc::new(AtomicUsize::new(0));
+        let worker = std::thread::spawn({
+            let state = Arc::clone(&state);
+            let scratch = Arc::clone(&f.scratch);
+            let db = f.db();
+            let owner = f.host.owner_id().to_owned();
+            let waits = Arc::clone(&waits);
+            move || {
+                serve(db, owner, scratch, state, rx, move |_| {
+                    waits.fetch_add(1, Ordering::SeqCst);
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                })
+            }
+        });
+        wake.send(()).unwrap();
+        entered_rx.recv().unwrap(); // First write reservation was Busy, no filesystem detachment.
+        f.present();
+        let (pass_tx, pass_rx) = mpsc::channel();
+        lock(&state).barriers.push(pass_tx);
+        if release_during_backoff {
+            connection.execute_batch("COMMIT").unwrap();
+        }
+        resume_tx.send(()).unwrap();
+        pass_rx.recv().unwrap();
+        assert_eq!(waits.load(Ordering::SeqCst), 1);
+        if !release_during_backoff {
+            f.present();
+            assert!(lock(&state).pending.contains("thread"));
+            connection.execute_batch("COMMIT").unwrap();
+            let (pass_tx, pass_rx) = mpsc::channel();
+            lock(&state).barriers.push(pass_tx);
+            wake.send(()).unwrap(); // Only this external event permits another attempt.
+            pass_rx.recv().unwrap();
+        }
+        assert!(!f.scratch.dir(&f.key).exists());
+        lock(&state).stopped = true;
+        wake.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(waits.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn a_new_archive_hint_survives_an_older_unarchived_result() {
+    let f = Fixture::new();
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    let calls = Arc::new(AtomicUsize::new(0));
+    f.host.set_scratch_archive_checker(Arc::new({
+        let entered = Arc::clone(&entered);
+        let resume = Arc::clone(&resume);
+        let calls = Arc::clone(&calls);
+        move |_| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                entered.wait();
+                resume.wait();
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        }
+    }));
+    f.host.hint_scratch_archive("thread");
+    entered.wait();
+    f.present();
+    f.host.hint_scratch_archive("thread");
+    let next_pass = f.host.scratch_archive_barrier();
+    resume.wait();
+    next_pass.recv().unwrap();
+    assert!(!f.scratch.dir(&f.key).exists());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}

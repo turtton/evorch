@@ -144,6 +144,7 @@ struct Job {
     timeout_ms: Option<u64>,
     ledger: Option<sandbox::ledger::SpawnLedger>,
     state: Mutex<State>,
+    teardown: Arc<std::sync::atomic::AtomicBool>,
     changed: watch::Sender<u64>,
     registry_changes: watch::Sender<u64>,
     cancel: watch::Sender<bool>,
@@ -246,7 +247,7 @@ impl JobRegistry {
                 if jobs.len() >= MAX_RETAINED {
                     let removable = jobs
                         .iter()
-                        .filter(|(_, job)| !job.unobserved())
+                        .filter(|(_, job)| !job.unobserved() && job.teardown_confirmed())
                         .map(|(id, _)| id.clone())
                         .min();
                     if let Some(id) = removable {
@@ -283,6 +284,7 @@ impl JobRegistry {
                         delivered_cursor: 0,
                         last_seen: None,
                     }),
+                    teardown: Arc::default(),
                     changed,
                     registry_changes: self.changes.clone(),
                     cancel,
@@ -399,8 +401,12 @@ impl JobRegistry {
             .by_handle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        jobs.remove(&job.id);
-        handles.remove(&job.handle);
+        // An unknown teardown must remain visible to the run's final snapshot.
+        // Successful synchronous calls retain their existing immediate removal.
+        if job.teardown_confirmed() {
+            jobs.remove(&job.id);
+            handles.remove(&job.handle);
+        }
         launch.delivered = true;
         outcome
     }
@@ -900,6 +906,9 @@ impl Drop for LaunchGuard {
 }
 
 impl Job {
+    fn teardown_confirmed(&self) -> bool {
+        self.teardown.load(std::sync::atomic::Ordering::Acquire)
+    }
     fn cancel_now(&self) {
         self.cancel.send_replace(true);
         let state = self
@@ -970,6 +979,10 @@ impl Job {
             state.final_result = Some(Ok(result));
         }
         state.completion = Some(completion);
+        if state.teardown_confirmed {
+            self.teardown
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         self.observation_changed();
         state.process = None;
         state.sandbox = None;

@@ -36,7 +36,11 @@ impl ArchiveService {
         let shared = Arc::clone(&state);
         let join = std::thread::Builder::new()
             .name("evorch-scratch-archive".into())
-            .spawn(move || serve(db, owner, scratch, shared, rx, Duration::from_millis(100)))?;
+            .spawn(move || {
+                serve(db, owner, scratch, shared, rx, |rx| {
+                    rx.recv_timeout(Duration::from_millis(100))
+                })
+            })?;
         Ok(Self {
             state,
             wake,
@@ -122,12 +126,12 @@ fn serve(
     scratch: Arc<ThreadScratch>,
     state: Arc<Mutex<State>>,
     rx: mpsc::Receiver<()>,
-    backoff: Duration,
+    backoff: impl Fn(&mpsc::Receiver<()>) -> Result<(), mpsc::RecvTimeoutError>,
 ) {
     let mut retry = false;
     loop {
         if retry {
-            match rx.recv_timeout(backoff) {
+            match backoff(&rx) {
                 Ok(()) => retry = false,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,

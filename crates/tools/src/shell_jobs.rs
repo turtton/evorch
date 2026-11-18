@@ -1,9 +1,22 @@
 //! Process-local observation, not a durable restart or replay capability.
-#[derive(Clone, Debug, PartialEq, Eq)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+#[derive(Clone, Debug)]
 pub struct ShellJobIdentity {
     pub(crate) id: String,
     pub(crate) owner: String,
+    pub(crate) teardown: Arc<AtomicBool>,
 }
+
+impl PartialEq for ShellJobIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.owner == other.owner
+    }
+}
+impl Eq for ShellJobIdentity {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellJobState {
@@ -14,6 +27,12 @@ pub enum ShellJobState {
 impl ShellJobIdentity {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Whether the supervisor confirmed terminal process teardown. This proof
+    /// survives removal of the job's registry entry; it grants no replay/control.
+    pub fn teardown_confirmed(&self) -> bool {
+        self.teardown.load(Ordering::Acquire)
     }
 }
 

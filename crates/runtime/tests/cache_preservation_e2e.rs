@@ -4656,6 +4656,195 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
     }
 }
 
+// Given: an interactive thread whose archived scratch is reclaimed while the run waits for input
+// When: the next input resumes it on the same path, then a further input follows
+// Then: the resumed request only appends the one-time removal notice after the new input,
+//       every request keeps the earlier messages, system, tools, settings and affinity
+//       byte for byte, and the next turn reuses the prefix the resumed request sent
+#[cfg(feature = "idle-test-support")]
+#[tokio::test]
+async fn archive_reclaim_resume_appends_one_notice_and_preserves_wire_prefix() {
+    let mut harness = harness(
+        vec![
+            text_response("Initial work"),
+            text_response("Continued after reclaim"),
+            text_response("Followed up"),
+        ],
+        1_000_000,
+    );
+    let root = harness._directory.path();
+    let config = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        routing::ComposeDeps {
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            event_bus: Some(bus.clone()),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            catalog: model::ModelCatalog::new(),
+            factory: routing::factory::FactoryOptions::default(),
+        },
+        Some(test_support::model_catalog_dir()),
+    )
+    .unwrap();
+    let (_repo_guard, repo) = support::init_git_repo();
+    let storage_config = storage::StorageConfig {
+        db_path: root.join("archive-history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    let host = runtime::ownership::OwnerHost::open(
+        harness._directory.sockets(),
+        Default::default(),
+        bus.clone(),
+    )
+    .unwrap();
+    host.start("thread").unwrap();
+    let (consulted_tx, mut consulted) = tokio::sync::mpsc::unbounded_channel();
+    host.set_scratch_archive_checker(Arc::new(move |_| {
+        let _ = consulted_tx.send(());
+        Ok(true)
+    }));
+    let scratch = host.thread_scratch();
+    harness.runtime = AgentRuntime::with_sandbox_factory(
+        bus.clone(),
+        Arc::new(
+            ToolExecutor::with_standard_tools(
+                bus,
+                Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            )
+            .with_web_tools()
+            .unwrap(),
+        ),
+        model,
+        Arc::new(DirectFactory),
+    )
+    .with_sequential_run_ids()
+    .with_system_prompts(contract_prompts())
+    .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap())
+    .with_sandbox_root(repo);
+    harness.runtime.set_thread_scratch(scratch.clone());
+    let dir = scratch.thread_dir("thread");
+
+    let run = harness.runtime.reserve_run_id();
+    harness.runtime.bind_thread_root("thread", run).unwrap();
+    harness.runtime.spawn_reserved(
+        run,
+        None,
+        Role::Worker,
+        "Start work",
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    std::fs::write(dir.join("saved"), "scratch").unwrap();
+
+    // The archive worker reaches the saved-sidebar checker only after the idle
+    // run released its scratch usage, and the same pass renames the directory.
+    host.hint_scratch_archive("thread");
+    consulted.recv().await.unwrap();
+    let barrier = host.scratch_archive_barrier();
+    tokio::task::spawn_blocking(move || barrier.recv().unwrap())
+        .await
+        .unwrap();
+    assert!(!dir.exists(), "the archived scratch must be reclaimed");
+
+    harness
+        .runtime
+        .send_message(run, "After reclaim".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    assert!(dir.is_dir(), "resuming recreates the same path");
+    assert!(!dir.join("saved").exists(), "resumed scratch starts empty");
+    harness
+        .runtime
+        .send_message(run, "Followup".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 3);
+    let removed = format!(
+        "{} was removed after this thread was archived",
+        dir.display()
+    );
+    let note = format!("Temporary files (evorch): $TMPDIR is {}.", dir.display());
+    let systems = wire_texts(&requests[0], "system");
+    assert!(systems.iter().any(|text| text.contains(&note)));
+    for request in &requests {
+        assert_eq!(wire_texts(request, "system"), systems);
+        assert_eq!(
+            request["tools"], requests[0]["tools"],
+            "tool schema and order"
+        );
+        // Chat Completions has no explicit affinity field: the settings besides
+        // the conversation (model, sampling, stream options) are the affinity.
+        let settings = |body: &Value| {
+            let mut settings = body.as_object().unwrap().clone();
+            settings.remove("messages");
+            settings
+        };
+        assert_eq!(
+            settings(request),
+            settings(&requests[0]),
+            "request settings"
+        );
+    }
+    // Independent of the shared assertion: earlier messages never change.
+    for pair in requests.windows(2) {
+        let (previous, current) = (
+            pair[0]["messages"].as_array().unwrap(),
+            pair[1]["messages"].as_array().unwrap(),
+        );
+        assert_eq!(&current[..previous.len()], previous.as_slice());
+    }
+    let count = |request: &Value| {
+        wire_texts(request, "user")
+            .iter()
+            .filter(|text| text.contains(&removed))
+            .count()
+    };
+    assert_eq!(count(&requests[0]), 0, "nothing was reclaimed yet");
+    assert_eq!(count(&requests[1]), 1);
+    assert_eq!(count(&requests[2]), 1, "the notice is never repeated");
+    // The notice is appended after the new input and is the last message.
+    let first = requests[0]["messages"].as_array().unwrap().len();
+    let resumed = requests[1]["messages"].as_array().unwrap();
+    let appended = &resumed[first..];
+    assert!(
+        appended.last().unwrap()["content"]
+            .to_string()
+            .contains(&removed)
+    );
+    assert!(appended.iter().any(|message| {
+        message["role"] == "user" && message["content"].to_string().contains("After reclaim")
+    }));
+    // The next turn appends only its own input after the prefix just sent.
+    let followup = requests[2]["messages"].as_array().unwrap();
+    assert!(followup.len() > resumed.len());
+    assert!(
+        followup[resumed.len()..]
+            .iter()
+            .all(|message| !message["content"].to_string().contains(&removed))
+    );
+    assert!(last_message_text(&requests[2]).contains("Followup"));
+}
+
 /// Gives harness runs `harness`'s directory as their project, so its allowed directories reach them.
 fn allowed_project(harness: &Harness) -> std::path::PathBuf {
     let root = harness._directory.path().canonicalize().unwrap();
