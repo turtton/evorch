@@ -69,6 +69,25 @@ async fn send(write: &mut OwnedWriteHalf, bytes: &[u8]) -> io::Result<()> {
         .map_err(|_| stalled())?
 }
 
+/// Writes `head` and `body` with one vectored write per attempt, so a chunk
+/// is sent from the shared frame without being copied behind its header. Every
+/// attempt must make progress within [`NO_PROGRESS`].
+async fn send_chunk(write: &mut OwnedWriteHalf, head: &[u8], body: &[u8]) -> io::Result<()> {
+    let mut parts = [io::IoSlice::new(head), io::IoSlice::new(body)];
+    let mut parts: &mut [io::IoSlice<'_>] = &mut parts;
+    io::IoSlice::advance_slices(&mut parts, 0);
+    while !parts.is_empty() {
+        let written = timeout(NO_PROGRESS, write.write_vectored(parts))
+            .await
+            .map_err(|_| stalled())??;
+        if written == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        io::IoSlice::advance_slices(&mut parts, written);
+    }
+    Ok(())
+}
+
 /// Says why the connection ends, as far as the peer still listens.
 async fn finish(write: &mut OwnedWriteHalf, code: ErrorCode) -> io::Result<()> {
     let _ = send(write, &ErrorMeta { code }.encode()).await;
@@ -137,7 +156,7 @@ async fn body(write: &mut OwnedWriteHalf, id: u64, bytes: &[u8]) -> io::Result<(
             id,
             offset: (index * CHUNK_BYTES) as u64,
         };
-        send(write, &meta.encode(chunk)).await?;
+        send_chunk(write, &meta.encode_head(chunk.len()), chunk).await?;
     }
     let end = EndMeta {
         id,

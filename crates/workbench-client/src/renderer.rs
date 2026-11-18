@@ -65,12 +65,14 @@ pub enum DataClientError {
 struct Record {
     kind: Kind,
     meta: Vec<u8>,
+    body_len: usize,
 }
 
 /// Reads one record. `Ok(None)` is an end of the stream between records.
 async fn read_record<R: AsyncRead + Unpin>(
     read: &mut R,
     body: &mut Vec<u8>,
+    append: bool,
 ) -> Result<Option<Record>, DataClientError> {
     let mut prefix = [0u8; PREFIX_LEN];
     if read.read(&mut prefix[..1]).await? == 0 {
@@ -80,16 +82,35 @@ async fn read_record<R: AsyncRead + Unpin>(
     let prefix = Prefix::parse(&prefix)?;
     let mut meta = vec![0u8; prefix.meta_len];
     read.read_exact(&mut meta).await.map_err(truncated)?;
-    body.clear();
-    body.resize(prefix.body_len, 0);
-    read.read_exact(body).await.map_err(truncated)?;
+    if !append {
+        body.clear();
+    }
+    read_body(read, body, prefix.body_len).await?;
     if prefix.kind == Kind::Error {
         return Err(DataClientError::Remote(ErrorMeta::decode(&meta)?.code));
     }
     Ok(Some(Record {
         kind: prefix.kind,
         meta,
+        body_len: prefix.body_len,
     }))
+}
+
+/// Appends exactly `len` bytes to `body`, read straight into its spare capacity
+/// (no zero fill, no intermediate buffer).
+async fn read_body<R: AsyncRead + Unpin>(
+    read: &mut R,
+    body: &mut Vec<u8>,
+    len: usize,
+) -> Result<(), DataClientError> {
+    body.reserve(len);
+    let mut limited = (&mut *read).take(len as u64);
+    while limited.limit() > 0 {
+        if limited.read_buf(body).await? == 0 {
+            return Err(DataClientError::Truncated);
+        }
+    }
+    Ok(())
 }
 
 fn truncated(error: std::io::Error) -> DataClientError {
@@ -105,7 +126,7 @@ async fn expect_record<R: AsyncRead + Unpin>(
     body: &mut Vec<u8>,
     kind: Kind,
 ) -> Result<Vec<u8>, DataClientError> {
-    match read_record(read, body).await? {
+    match read_record(read, body, false).await? {
         Some(record) if record.kind == kind => Ok(record.meta),
         Some(_) => Err(DataError::OutOfOrder("unexpected record").into()),
         None => Err(DataClientError::Truncated),
@@ -249,7 +270,7 @@ impl FrameStream {
         &mut self,
         bytes: &mut Vec<u8>,
     ) -> Result<Option<FrameStart>, DataClientError> {
-        let Some(record) = read_record(&mut self.stream, &mut self.body).await? else {
+        let Some(record) = read_record(&mut self.stream, &mut self.body, false).await? else {
             return Ok(None);
         };
         if record.kind != Kind::FrameStart {
@@ -262,13 +283,12 @@ impl FrameStream {
         bytes.reserve_exact(start.total_bytes as usize);
         let mut transfer = Transfer::new(start.sequence, start.total_bytes);
         loop {
-            let record = read_record(&mut self.stream, &mut self.body)
+            let record = read_record(&mut self.stream, bytes, true)
                 .await?
                 .ok_or(DataClientError::Truncated)?;
             match record.kind {
                 Kind::Chunk => {
-                    transfer.chunk(ChunkMeta::decode(&record.meta)?, self.body.len())?;
-                    bytes.extend_from_slice(&self.body);
+                    transfer.chunk(ChunkMeta::decode(&record.meta)?, record.body_len)?;
                 }
                 Kind::End => {
                     transfer.end(EndMeta::decode(&record.meta)?)?;
@@ -340,7 +360,7 @@ impl BlobStream {
         if self.done {
             return Ok(None);
         }
-        let record = read_record(&mut self.stream, &mut self.body)
+        let record = read_record(&mut self.stream, &mut self.body, false)
             .await?
             .ok_or(DataClientError::Truncated)?;
         match record.kind {

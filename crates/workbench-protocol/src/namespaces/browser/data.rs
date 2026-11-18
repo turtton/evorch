@@ -546,10 +546,23 @@ pub struct ChunkMeta {
 impl ChunkMeta {
     pub const LEN: usize = 16;
     pub fn encode(&self, body: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(Self::LEN);
-        out.extend_from_slice(&self.id.to_le_bytes());
-        out.extend_from_slice(&self.offset.to_le_bytes());
-        encode_record(Kind::Chunk, &out, body)
+        let mut out = Vec::from(self.encode_head(body.len()));
+        out.extend_from_slice(body);
+        out
+    }
+    /// The prefix and the metadata of a chunk with `body_len` body bytes: what
+    /// precedes the body on the wire, so a sender can write the body from where
+    /// it already is.
+    ///
+    /// # Panics
+    /// If `body_len` is more than [`CHUNK_BYTES`].
+    pub fn encode_head(&self, body_len: usize) -> [u8; PREFIX_LEN + Self::LEN] {
+        assert!(body_len <= CHUNK_BYTES, "chunk body");
+        let mut out = [0u8; PREFIX_LEN + Self::LEN];
+        out[..PREFIX_LEN].copy_from_slice(&prefix_bytes(Kind::Chunk, Self::LEN, body_len));
+        out[PREFIX_LEN..PREFIX_LEN + 8].copy_from_slice(&self.id.to_le_bytes());
+        out[PREFIX_LEN + 8..].copy_from_slice(&self.offset.to_le_bytes());
+        out
     }
     pub fn decode(meta: &[u8]) -> Result<Self, DataError> {
         exact(meta, Self::LEN, "chunk")?;
