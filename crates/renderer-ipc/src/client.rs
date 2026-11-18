@@ -18,19 +18,28 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::codec::{
-    ACK_LIMITS, CONTROL_LIMITS, CodecError, FRAME_LIMITS, Kind, decode_meta, encode_meta,
-    read_message, write_message,
+    ACK_LIMITS, Admit, CONTROL_LIMITS, CodecError, FRAME_LIMITS, Kind, decode_meta, encode_meta,
+    read_message, read_message_with, write_message,
 };
-use crate::frames::Frame;
 use crate::protocol::{
     Ack, EventFrame, EventKind, FrameMeta, Notices, OpenArtifact, Outcome, PROTOCOL_VERSION,
     RemoteError, RendererGeneration, Reply, Request, RequestFrame, RequestId, ResponseFrame,
     SessionId, TabId, Viewport,
 };
+use crate::shared::{FRAME_BUDGET_BYTES, FramePool, ReceivedFrame};
 
 const MAX_QUEUED_EVENTS: usize = 256;
 
 /// Why the channels ended. Every pending and later request fails with it.
+/// Why [`RendererClient::wait_newer_frame`] can wait no longer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrameWaitEnd {
+    /// The connection ended.
+    Closed(CloseReason),
+    /// The tab was closed or never opened on this connection.
+    TabGone,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloseReason {
     /// This side closed the client.
@@ -71,7 +80,7 @@ impl std::fmt::Display for ClientError {
 
 impl std::error::Error for ClientError {}
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ClientConfig {
     /// The generation the core assigned to this helper incarnation.
     pub generation: RendererGeneration,
@@ -83,6 +92,10 @@ pub struct ClientConfig {
     /// Extra wait, beyond a request's own `timeout_ms`, for the answer to come
     /// back.
     pub reply_grace: Duration,
+    /// Budget and recycling for the pixel memory this connection receives.
+    /// The core passes one pool to every incarnation so frames a data sender
+    /// still holds after a restart stay counted.
+    pub frame_pool: Arc<FramePool>,
 }
 
 impl ClientConfig {
@@ -92,6 +105,7 @@ impl ClientConfig {
             hello_timeout: Duration::from_secs(60),
             io_timeout: Duration::from_secs(10),
             reply_grace: Duration::from_secs(10),
+            frame_pool: FramePool::new(FRAME_BUDGET_BYTES),
         }
     }
 }
@@ -110,6 +124,9 @@ pub struct ClientStats {
     pub late_responses: u64,
     /// Frames of another generation, discarded.
     pub stale_frames: u64,
+    /// Frames read off the socket and discarded because the memory budget
+    /// could not hold them. They are acknowledged like any other frame.
+    pub over_budget_frames: u64,
     pub received_frames: u64,
     /// Received frames replaced before the consumer took them.
     pub dropped_frames: u64,
@@ -122,8 +139,9 @@ type Response = Result<(Reply, Vec<u8>), ClientError>;
 #[derive(Default)]
 struct State {
     closed: Option<CloseReason>,
-    tabs: HashMap<TabId, (SessionId, Option<Frame>)>,
-    spare: Option<Vec<u8>>,
+    /// The single authoritative latest frame of each tab. Data-plane senders
+    /// hold clones of the same `Arc`; nothing copies pixels.
+    tabs: HashMap<TabId, (SessionId, Option<Arc<ReceivedFrame>>)>,
     events: VecDeque<EventKind>,
     stats: ClientStats,
 }
@@ -157,7 +175,6 @@ impl Inner {
             }
             state.closed = Some(reason.clone());
             state.tabs.clear();
-            state.spare = None;
         }
         let _ = self.control_abort.shutdown(Shutdown::Both);
         let _ = self.frames_abort.shutdown(Shutdown::Both);
@@ -251,9 +268,8 @@ impl Inner {
 
     fn frame_loop(&self, stream: &UnixStream) {
         loop {
-            let spare = lock(&self.state).spare.take().unwrap_or_default();
-            let message = match read_message(stream, FRAME_LIMITS, spare, self.config.io_timeout) {
-                Ok(message) => message,
+            match self.read_frame(stream) {
+                Ok(()) => {}
                 // The helper closes this channel around the time it closes the
                 // control channel (an ordered stop, a crash, a kill); the
                 // connection ends when the control channel does, so the reason
@@ -262,57 +278,78 @@ impl Inner {
                 // that is not a close still ends the connection here.
                 Err(CodecError::Closed | CodecError::Truncated) => return,
                 Err(error) => return self.peer_ended(error),
-            };
-            match self.on_frame(stream, message) {
-                Ok(()) => {}
-                Err(CodecError::Closed | CodecError::Truncated) => return,
-                Err(error) => return self.peer_ended(error),
             }
         }
     }
 
-    fn on_frame(
-        &self,
-        stream: &UnixStream,
-        message: crate::codec::Message,
-    ) -> Result<(), CodecError> {
-        if message.kind != Kind::Frame {
-            return Err(CodecError::Malformed(format!(
-                "unexpected {:?} on the frame channel",
-                message.kind
-            )));
-        }
-        let meta: FrameMeta = decode_meta(&message.meta)?;
+    /// Reads and handles one frame. The announced size is checked against the
+    /// frame's own metadata, and room is reserved in the budget, **before** the
+    /// body is buffered, so a hostile header cannot make the core allocate.
+    fn read_frame(&self, stream: &UnixStream) -> Result<(), CodecError> {
+        let pool = &self.config.frame_pool;
+        let mut admitted: Option<(FrameMeta, Option<crate::shared::Reserved>)> = None;
+        let message = read_message_with(
+            stream,
+            FRAME_LIMITS,
+            self.config.io_timeout,
+            |kind, meta, body_len| {
+                if kind != Kind::Frame {
+                    return Err(CodecError::Malformed(format!(
+                        "unexpected {kind:?} on the frame channel"
+                    )));
+                }
+                let meta: FrameMeta = decode_meta(meta)?;
+                if meta.generation != self.generation {
+                    admitted = Some((meta, None));
+                    return Ok(Admit::Discard);
+                }
+                meta.check(body_len)
+                    .map_err(|error| CodecError::Malformed(error.message))?;
+                match pool.reserve(body_len) {
+                    Some(mut reserved) => {
+                        let bytes = std::mem::take(&mut reserved.bytes);
+                        admitted = Some((meta, Some(reserved)));
+                        Ok(Admit::Read(bytes))
+                    }
+                    None => {
+                        admitted = Some((meta, None));
+                        Ok(Admit::Discard)
+                    }
+                }
+            },
+        )?;
+        let Some((meta, reserved)) = admitted else {
+            return Err(CodecError::Malformed("frame without metadata".to_owned()));
+        };
         // A frame is acknowledged even when it is discarded, so the helper
-        // does not stall behind a message this side will not use.
+        // does not stall behind a message this side will not use. The ack never
+        // waits for a data-plane client.
         let ack = encode_meta(&Ack { seq: meta.seq })?;
+        write_message(stream, Kind::Ack, &ack, &[], ACK_LIMITS)?;
         if meta.generation != self.generation {
-            write_message(stream, Kind::Ack, &ack, &[], ACK_LIMITS)?;
-            let mut state = lock(&self.state);
-            state.stats.stale_frames += 1;
-            state.spare = Some(message.body);
+            lock(&self.state).stats.stale_frames += 1;
             return Ok(());
         }
-        meta.check(message.body.len())
-            .map_err(|error| CodecError::Malformed(error.message))?;
-        write_message(stream, Kind::Ack, &ack, &[], ACK_LIMITS)?;
-        let frame = Frame {
-            tab: meta.tab,
-            seq: meta.seq,
-            width: meta.width,
-            height: meta.height,
-            bgra: message.body,
+        let Some(reserved) = reserved else {
+            lock(&self.state).stats.over_budget_frames += 1;
+            return Ok(());
         };
+        let frame = pool.finish(
+            reserved,
+            message.body,
+            meta.tab,
+            meta.seq,
+            meta.width,
+            meta.height,
+        );
         let mut state = lock(&self.state);
         state.stats.received_frames += 1;
         let Some((_, slot)) = state.tabs.get_mut(&frame.tab) else {
             state.stats.stale_frames += 1;
-            state.spare = Some(frame.bgra);
             return Ok(());
         };
-        if let Some(old) = slot.replace(frame) {
+        if slot.replace(frame).is_some() {
             state.stats.dropped_frames += 1;
-            state.spare = Some(old.bgra);
         }
         drop(state);
         self.changed.notify_all();
@@ -691,15 +728,23 @@ impl RendererClient {
 
     /// Takes the newest frame, waiting up to `timeout` (`None`: until one
     /// arrives or the connection ends). `None` means no frame.
-    pub fn wait_frame(&self, timeout: Option<Duration>) -> Option<Frame> {
+    pub fn wait_frame(&self, timeout: Option<Duration>) -> Option<Arc<ReceivedFrame>> {
         self.wait_frame_matching(None, timeout)
     }
 
     /// Take only this tab's latest frame without consuming other tabs.
-    pub fn wait_frame_for(&self, tab: TabId, timeout: Option<Duration>) -> Option<Frame> {
+    pub fn wait_frame_for(
+        &self,
+        tab: TabId,
+        timeout: Option<Duration>,
+    ) -> Option<Arc<ReceivedFrame>> {
         self.wait_frame_matching(Some(tab), timeout)
     }
-    fn wait_frame_matching(&self, tab: Option<TabId>, timeout: Option<Duration>) -> Option<Frame> {
+    fn wait_frame_matching(
+        &self,
+        tab: Option<TabId>,
+        timeout: Option<Duration>,
+    ) -> Option<Arc<ReceivedFrame>> {
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let mut state = lock(&self.inner.state);
         loop {
@@ -735,9 +780,45 @@ impl RendererClient {
         }
     }
 
-    /// Returns a consumed frame's buffer so the next frame reuses it.
-    pub fn recycle_frame(&self, frame: Frame) {
-        lock(&self.inner.state).spare = Some(frame.bgra);
+    /// Gives a consumed frame back. The buffer returns to the pool when the
+    /// last holder drops it, so this is only a statement of intent.
+    pub fn recycle_frame(&self, frame: Arc<ReceivedFrame>) {
+        drop(frame);
+    }
+
+    /// The tab's latest frame without taking it, if its sequence is newer than
+    /// `after`, waiting up to `timeout` for one. `Err` means the tab is gone or
+    /// the connection ended; `Ok(None)` means the wait timed out. Every caller
+    /// gets a clone of the same allocation.
+    pub fn wait_newer_frame(
+        &self,
+        tab: TabId,
+        after: Option<u64>,
+        timeout: Duration,
+    ) -> Result<Option<Arc<ReceivedFrame>>, FrameWaitEnd> {
+        let deadline = Instant::now() + timeout;
+        let mut state = lock(&self.inner.state);
+        loop {
+            if let Some(reason) = state.closed.clone() {
+                return Err(FrameWaitEnd::Closed(reason));
+            }
+            let Some((_, slot)) = state.tabs.get(&tab) else {
+                return Err(FrameWaitEnd::TabGone);
+            };
+            if let Some(frame) = slot.as_ref().filter(|f| after.is_none_or(|s| f.seq > s)) {
+                return Ok(Some(Arc::clone(frame)));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            state = self
+                .inner
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
     }
 
     /// The next event, waiting up to `timeout` (`None`: until one arrives or
@@ -942,13 +1023,21 @@ mod tests {
         // close an ordered stop or a crash brings: the same event as a clean
         // close between frames, only mistimed.
         let (reader, mut writer) = UnixStream::pair().unwrap();
+        let meta = encode_meta(&FrameMeta {
+            generation: client.inner.generation,
+            tab: TabId(1),
+            seq: 1,
+            width: 4,
+            height: 4,
+        })
+        .unwrap();
         let mut header = b"ERIP".to_vec();
         header.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         header.extend_from_slice(&[Kind::Frame as u8, 0]);
-        header.extend_from_slice(&2u32.to_le_bytes());
+        header.extend_from_slice(&(meta.len() as u32).to_le_bytes());
         header.extend_from_slice(&64u32.to_le_bytes());
         writer.write_all(&header).unwrap();
-        writer.write_all(b"{}").unwrap();
+        writer.write_all(&meta).unwrap();
         writer.write_all(&[0; 10]).unwrap();
         drop(writer);
         client.inner.frame_loop(&reader);

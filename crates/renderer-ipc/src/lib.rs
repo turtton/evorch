@@ -26,14 +26,18 @@ pub mod frames;
 pub mod ids;
 pub mod protocol;
 pub mod server;
+pub mod shared;
 
-pub use client::{ClientConfig, ClientError, ClientStats, CloseReason, HelperInfo, RendererClient};
+pub use client::{
+    ClientConfig, ClientError, ClientStats, CloseReason, FrameWaitEnd, HelperInfo, RendererClient,
+};
 pub use frames::{Frame, FrameQueue, FrameStats};
 pub use protocol::*;
 pub use server::{
     Backend, BackendContext, EventSink, ExitReason, MAX_QUEUED_REQUESTS, ServeConfig, serve,
     serve_in_thread,
 };
+pub use shared::{FRAME_BUDGET_BYTES, FrameBudget, FramePool, ReceivedFrame};
 
 use std::io;
 use std::os::fd::OwnedFd;
