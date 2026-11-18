@@ -10,6 +10,13 @@
 //!
 //! * **Client, not connection.** A client may hold more than one connection at
 //!   a time; the hooks run when the last one of the client ends.
+//! * **Epoch.** The connections a client holds from the one that takes it from
+//!   none to one until the one that ends its last make one [`ConnectionEpoch`];
+//!   a later connection of the same client is a later epoch. A hook is told the
+//!   epoch that ended, and an area records [`ConnectionHooks::epoch_of`] when it
+//!   starts work: a notice that reaches the area late, after the client came
+//!   back, then stops only what started in the epoch that ended or before it,
+//!   never what the client started since.
 //! * **Synchronous, short.** A hook runs in the connection's teardown, on the
 //!   task that ends it. It must not wait: it only records a request that the
 //!   area's own task carries out. No lock of this registry is held while a hook
@@ -23,8 +30,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use workbench_protocol::ids::ClientId;
 
-/// What an area does when a client has no connection left.
-pub type ConnectionClosedHook = Arc<dyn Fn(&ClientId) + Send + Sync>;
+/// One run of connections of a client, from its first to its last
+/// (see the module documentation). Later epochs of a client compare greater;
+/// the default is before every epoch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectionEpoch(u64);
+
+/// What an area does when a client has no connection left: it gets the client
+/// and the epoch that ended.
+pub type ConnectionClosedHook = Arc<dyn Fn(&ClientId, ConnectionEpoch) + Send + Sync>;
 
 /// The open connections by client and the hooks to run when a client leaves.
 #[derive(Default)]
@@ -34,8 +48,15 @@ pub struct ConnectionHooks {
 
 #[derive(Default)]
 struct State {
-    open: HashMap<ClientId, usize>,
+    open: HashMap<ClientId, Open>,
+    /// The epochs handed out so far; the next one is one more.
+    epochs: u64,
     hooks: Vec<ConnectionClosedHook>,
+}
+
+struct Open {
+    connections: usize,
+    epoch: ConnectionEpoch,
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -50,30 +71,52 @@ impl ConnectionHooks {
 
     /// A connection of `client` is open until the returned guard is dropped.
     pub fn open(self: &Arc<Self>, client: ClientId) -> ClientConnection {
-        *lock(&self.state).open.entry(client.clone()).or_default() += 1;
+        let epoch = {
+            let mut state = lock(&self.state);
+            let state = &mut *state;
+            let open = state.open.entry(client.clone()).or_insert_with(|| {
+                state.epochs += 1;
+                Open {
+                    connections: 0,
+                    epoch: ConnectionEpoch(state.epochs),
+                }
+            });
+            open.connections += 1;
+            open.epoch
+        };
         ClientConnection {
             hooks: self.clone(),
             client,
+            epoch,
         }
     }
 
     /// How many connections `client` holds.
     pub fn connections_of(&self, client: &ClientId) -> usize {
-        lock(&self.state).open.get(client).copied().unwrap_or(0)
+        lock(&self.state)
+            .open
+            .get(client)
+            .map_or(0, |open| open.connections)
+    }
+
+    /// The epoch of `client`'s connections now, `None` while it holds none.
+    pub fn epoch_of(&self, client: &ClientId) -> Option<ConnectionEpoch> {
+        lock(&self.state).open.get(client).map(|open| open.epoch)
     }
 
     fn closed(&self, client: &ClientId) {
-        let hooks = {
+        let (hooks, epoch) = {
             let mut state = lock(&self.state);
-            let Some(count) = state.open.get_mut(client) else {
+            let Some(open) = state.open.get_mut(client) else {
                 return;
             };
-            *count -= 1;
-            if *count > 0 {
+            open.connections -= 1;
+            if open.connections > 0 {
                 return;
             }
+            let epoch = open.epoch;
             state.open.remove(client);
-            state.hooks.clone()
+            (state.hooks.clone(), epoch)
         };
         // This runs in a guard's drop, possibly while another panic unwinds: a
         // hook that panics must neither escape nor keep the later hooks from
@@ -81,7 +124,8 @@ impl ConnectionHooks {
         // payload of the panic is a value of the hook's choosing whose own drop
         // may panic, so it is leaked rather than dropped here.
         for hook in hooks {
-            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| hook(client))) {
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| hook(client, epoch)))
+            {
                 std::mem::forget(payload);
                 tracing::warn!(client = %client.as_str(), "a connection-closed hook panicked");
             }
@@ -93,6 +137,14 @@ impl ConnectionHooks {
 pub struct ClientConnection {
     hooks: Arc<ConnectionHooks>,
     client: ClientId,
+    epoch: ConnectionEpoch,
+}
+
+impl ClientConnection {
+    /// The epoch this connection belongs to.
+    pub fn epoch(&self) -> ConnectionEpoch {
+        self.epoch
+    }
 }
 
 impl Drop for ClientConnection {
@@ -114,7 +166,7 @@ mod tests {
     fn recording(hooks: &ConnectionHooks) -> Arc<Mutex<Vec<String>>> {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
-        hooks.register(Arc::new(move |client| {
+        hooks.register(Arc::new(move |client, _| {
             sink.lock().unwrap().push(client.as_str().to_owned());
         }));
         seen
@@ -171,12 +223,12 @@ mod tests {
         let inner = hooks.clone();
         let reopened = Arc::new(Mutex::new(Vec::new()));
         let sink = reopened.clone();
-        hooks.register(Arc::new(move |client| {
+        hooks.register(Arc::new(move |client, _| {
             if client.as_str() == "cli-a" {
                 sink.lock()
                     .unwrap()
                     .push(inner.open(ClientId::new("cli-c").unwrap()));
-                inner.register(Arc::new(|_| {}));
+                inner.register(Arc::new(|_, _| {}));
             }
         }));
 
@@ -191,7 +243,7 @@ mod tests {
     fn a_hook_that_panics_neither_escapes_nor_stops_the_later_hooks() {
         // Given: a hook that panics, registered before one that records.
         let hooks = Arc::new(ConnectionHooks::default());
-        hooks.register(Arc::new(|_| panic!("a hook failed")));
+        hooks.register(Arc::new(|_, _| panic!("a hook failed")));
         let seen = recording(&hooks);
         let connection = hooks.open(client("cli-a"));
 
@@ -216,7 +268,7 @@ mod tests {
     fn a_panic_payload_that_panics_when_dropped_does_not_escape_either() {
         // Given: a hook that panics with such a payload, before a recording one.
         let hooks = Arc::new(ConnectionHooks::default());
-        hooks.register(Arc::new(|_| std::panic::panic_any(Bomb)));
+        hooks.register(Arc::new(|_, _| std::panic::panic_any(Bomb)));
         let seen = recording(&hooks);
         let connection = hooks.open(client("cli-a"));
 
@@ -233,7 +285,7 @@ mod tests {
         // that panics itself, so the guard drops while that panic unwinds (a
         // panic escaping the drop there would abort the whole test process).
         let hooks = Arc::new(ConnectionHooks::default());
-        hooks.register(Arc::new(|_| std::panic::panic_any(Bomb)));
+        hooks.register(Arc::new(|_, _| std::panic::panic_any(Bomb)));
         let seen = recording(&hooks);
 
         // When: the holder panics.
@@ -245,6 +297,59 @@ mod tests {
         // Then: only the holder's panic came out, and the later hook ran.
         assert!(outcome.is_err());
         assert_eq!(*seen.lock().unwrap(), ["cli-a"]);
+    }
+
+    #[test]
+    fn a_later_connection_of_a_client_is_a_later_epoch_and_a_hook_gets_the_one_that_ended() {
+        // Given: a hook that records the epoch it is told of.
+        let hooks = Arc::new(ConnectionHooks::default());
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        let sink = ended.clone();
+        hooks.register(Arc::new(move |_, epoch| sink.lock().unwrap().push(epoch)));
+        assert_eq!(hooks.epoch_of(&client("cli-a")), None);
+
+        // When: two connections of the client share one epoch, and it comes back.
+        let first = hooks.open(client("cli-a"));
+        let second = hooks.open(client("cli-a"));
+        let other = hooks.open(client("cli-b"));
+        assert_eq!(first.epoch(), second.epoch());
+        assert_eq!(hooks.epoch_of(&client("cli-a")), Some(first.epoch()));
+        assert_ne!(first.epoch(), other.epoch());
+        let before = first.epoch();
+        drop((first, second));
+        let again = hooks.open(client("cli-a"));
+
+        // Then: it is a later epoch, and the hook was told the epoch that ended.
+        assert!(again.epoch() > before);
+        assert_eq!(*ended.lock().unwrap(), [before]);
+    }
+
+    #[test]
+    fn a_hook_that_runs_after_the_client_came_back_still_names_the_epoch_that_ended() {
+        // Given: a hook that, before it records, lets the client come back (the
+        // notice reaches an area late).
+        let hooks = Arc::new(ConnectionHooks::default());
+        let inner = hooks.clone();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let comeback = Arc::new(Mutex::new(None));
+        let held = comeback.clone();
+        hooks.register(Arc::new(move |client, epoch| {
+            let again = inner.open(client.clone());
+            sink.lock().unwrap().push((epoch, again.epoch()));
+            *held.lock().unwrap() = Some(again);
+        }));
+        let connection = hooks.open(client("cli-a"));
+        let ended = connection.epoch();
+
+        // When: the client leaves.
+        drop(connection);
+
+        // Then: the epoch told is the one that ended, not the new one.
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, ended);
+        assert!(seen[0].1 > ended);
     }
 
     #[test]

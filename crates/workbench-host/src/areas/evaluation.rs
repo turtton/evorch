@@ -100,7 +100,7 @@ impl EvaluationArea {
             // (ADR 0045 §10). The hook only records the request; the jobs
             // stop on their own tasks.
             let jobs = Arc::downgrade(jobs);
-            handles.connections.register(Arc::new(move |client| {
+            handles.connections.register(Arc::new(move |client, _| {
                 if let Some(jobs) = jobs.upgrade() {
                     jobs.stop_jobs_of(client);
                 }
