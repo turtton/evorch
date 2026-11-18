@@ -52,7 +52,7 @@ use workbench_protocol::{
 
 mod jobs;
 
-pub use eval::runner::Isolation;
+pub use eval::runner::{FixedModels, Isolation};
 pub use jobs::{Accepted, JobHook, JobParts, JobSeams, JobStage};
 
 /// Groups one list asks the inspector for (it applies its own, smaller bound).

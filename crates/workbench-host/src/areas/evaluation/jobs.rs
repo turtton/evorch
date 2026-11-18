@@ -74,6 +74,10 @@ pub enum JobStage {
 pub type JobHook =
     Arc<dyn Fn(JobStage, &OperationId) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// What a job asks for its price catalog instead of loading it.
+#[doc(hidden)]
+pub type CatalogSource = Arc<dyn Fn() -> Option<Arc<catalog::ModelCatalog>> + Send + Sync>;
+
 /// The test seams of the jobs; the default is production behaviour.
 #[doc(hidden)]
 #[derive(Clone)]
@@ -88,6 +92,8 @@ pub struct JobSeams {
     /// Load (and refresh) the models.dev catalog the prices come from. A test
     /// turns it off so that no job reaches for the network.
     pub load_catalog: bool,
+    /// Replaces the catalog load, asked once for each job.
+    pub catalog_source: Option<CatalogSource>,
 }
 
 impl Default for JobSeams {
@@ -98,6 +104,7 @@ impl Default for JobSeams {
             models: None,
             judge: None,
             load_catalog: true,
+            catalog_source: None,
         }
     }
 }
@@ -125,7 +132,6 @@ pub struct Accepted {
 pub(super) struct Jobs {
     state: Mutex<State>,
     parts: JobParts,
-    catalog: tokio::sync::OnceCell<Option<Arc<catalog::ModelCatalog>>>,
 }
 
 struct State {
@@ -256,7 +262,6 @@ impl Jobs {
                 running: HashMap::new(),
             }),
             parts,
-            catalog: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -414,7 +419,7 @@ impl Jobs {
         id: OperationId,
         work: Work,
         mut stop: StopSignal,
-        mut cancel: watch::Receiver<bool>,
+        cancel: watch::Receiver<bool>,
     ) -> Result<(), BootstrapError> {
         let mut guard = Settle {
             jobs: self.clone(),
@@ -422,46 +427,66 @@ impl Jobs {
             settled: false,
         };
         // The work is a task of its own so that a panic in it is seen as one
-        // (`unknown`) and a cancel can drop it where it stands.
-        let mut handle = tokio::spawn(self.clone().work(id.clone(), work));
+        // (`unknown`). A stop is asked of the work, which stops what it
+        // started (the replay's runs and their processes) and ends; the task
+        // is dropped where it stands only when it does not within the grace.
+        let (stop_work, work_cancel) = watch::channel(false);
+        let mut handle = tokio::spawn(self.clone().work(id.clone(), work, work_cancel));
         let _abort = AbortOnDrop(handle.abort_handle());
-        let ended = tokio::select! {
+        let reason = tokio::select! {
             biased;
-            () = stop.stopped() => {
-                handle.abort();
-                let _ = (&mut handle).await;
-                Ended::Cancelled(CancelReason::Shutdown)
+            () = stop.stopped() => Some(CancelReason::Shutdown),
+            () = cancelled(&cancel) => Some(CancelReason::Requested),
+            joined = &mut handle => {
+                guard.finish(match joined {
+                    Ok(ended) => ended,
+                    Err(error) if error.is_cancelled() => Ended::Cancelled(CancelReason::Shutdown),
+                    Err(_) => Ended::internal(),
+                });
+                return Ok(());
             }
-            () = async {
-                if cancel.wait_for(|requested| *requested).await.is_err() {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                handle.abort();
-                let _ = (&mut handle).await;
-                Ended::Cancelled(CancelReason::Requested)
-            }
-            joined = &mut handle => match joined {
-                Ok(ended) => ended,
-                Err(error) if error.is_cancelled() => Ended::Cancelled(CancelReason::Shutdown),
-                Err(_) => Ended::internal(),
-            },
         };
+        let reason = reason.unwrap_or(CancelReason::Shutdown);
+        stop_work.send_replace(true);
+        if tokio::time::timeout(STOP_GRACE, &mut handle).await.is_err() {
+            handle.abort();
+            let _ = (&mut handle).await;
+        }
+        let ended = Ended::Cancelled(reason);
         guard.finish(ended);
         Ok(())
     }
 
-    async fn work(self: Arc<Self>, id: OperationId, work: Work) -> Ended {
+    async fn work(
+        self: Arc<Self>,
+        id: OperationId,
+        work: Work,
+        cancel: watch::Receiver<bool>,
+    ) -> Ended {
         self.at(JobStage::Started, &id).await;
         match work {
-            Work::Run(run) => self.run_job(&id, *run).await,
-            Work::Report { targets, rejudge } => self.report_job(&id, targets, rejudge).await,
+            Work::Run(run) => self.run_job(&id, *run, cancel).await,
+            Work::Report { targets, rejudge } => {
+                // A report has no process to stop: dropping it between its
+                // awaits leaves only whole files, and each finished one is
+                // already recorded in the view.
+                tokio::select! {
+                    biased;
+                    () = cancelled(&cancel) => Ended::Cancelled(CancelReason::Requested),
+                    ended = self.report_job(&id, targets, rejudge) => ended,
+                }
+            }
         }
     }
 
     // ---- run ----------------------------------------------------------------
 
-    async fn run_job(&self, id: &OperationId, run: StartEvaluationRun) -> Ended {
+    async fn run_job(
+        &self,
+        id: &OperationId,
+        run: StartEvaluationRun,
+        cancel: watch::Receiver<bool>,
+    ) -> Ended {
         let root = self.parts.root.clone();
         let thread = run.thread.as_str().to_owned();
         let (output, candidate) = (run.output.clone(), run.candidate.clone());
@@ -494,6 +519,7 @@ impl Jobs {
             models: self.parts.seams.models.clone(),
             credentials: Some(self.parts.credentials.clone()),
             catalog: self.catalog().await,
+            cancel: Some(cancel.clone()),
         };
         let result = eval::runner::run_with_cleanup(
             args,
@@ -506,6 +532,10 @@ impl Jobs {
         // The overlay is read: the file is no longer needed.
         drop(prepared.candidate);
         let scrub = self.scrubber(candidate_path.as_deref());
+        if *cancel.borrow() {
+            // The runs were stopped and awaited by the runner.
+            return Ended::Cancelled(CancelReason::Requested);
+        }
         let preflight = match result {
             Ok(_) => None,
             Err(EvalError::Preflight { reason, .. }) => Some(scrub.text(&format!(
@@ -514,9 +544,11 @@ impl Jobs {
             Err(error) => return failed_run(&error, &scrub),
         };
         if run.report
-            && let Err(error) = self
-                .make_reports(id, std::slice::from_ref(&prepared.name), false)
-                .await
+            && let Err(error) = tokio::select! {
+                biased;
+                () = cancelled(&cancel) => return Ended::Cancelled(CancelReason::Requested),
+                made = self.make_reports(id, std::slice::from_ref(&prepared.name), false) => made,
+            }
         {
             let mut ended = failed_report(&error, &scrub, false);
             if let (Some(text), Ended::Failed { message, .. }) = (&preflight, &mut ended) {
@@ -619,7 +651,7 @@ impl Jobs {
         let scrub = self.scrubber(None);
         match self.make_reports(id, &targets, rejudge).await {
             Ok(()) => Ended::Completed,
-            Err(error) => failed_report(&error, &scrub, targets.len() == 1),
+            Err(error) => failed_report(&error, &scrub, true),
         }
     }
 
@@ -642,20 +674,20 @@ impl Jobs {
             credentials: Some(self.parts.credentials.clone()),
             catalog: self.catalog().await,
         };
-        let reports = eval::report(
+        let reports = eval::report::report_with(
             ReportArgs {
                 dirs,
                 user_config_dir: Some(self.parts.config_dir.clone()),
                 rejudge,
             },
             &deps,
+            |index| self.record_report(id, names.get(index)),
         )
         .await?;
         let table = (reports.len() > 1).then(|| {
             crate::areas::diagnostics::read_ops::bounded(&eval::cross_thread_table(&reports))
         });
         let view = lock(&self.state).table.update(id, |view| {
-            view.reports = names.to_vec();
             view.cross_thread = table;
         });
         if let Some(view) = view {
@@ -666,19 +698,33 @@ impl Jobs {
         Ok(())
     }
 
+    /// A report that is complete on disk, recorded the moment it is, so that a
+    /// job stopped partway says which ones it wrote.
+    fn record_report(&self, id: &OperationId, name: Option<&String>) {
+        let Some(name) = name else { return };
+        let view = lock(&self.state).table.update(id, |view| {
+            view.reports.push(name.clone());
+        });
+        if let Some(view) = view {
+            self.publish(EvaluationEvent::EvaluationJobProgress {
+                view: Box::new(view),
+            });
+        }
+    }
+
+    /// The price catalog, read for each job: one that failed to load, or went
+    /// stale, must not decide every later job of a long-lived core.
     async fn catalog(&self) -> Option<Arc<catalog::ModelCatalog>> {
+        if let Some(source) = &self.parts.seams.catalog_source {
+            return source();
+        }
         if !self.parts.seams.load_catalog {
             return None;
         }
-        self.catalog
-            .get_or_init(|| async {
-                catalog::ModelCatalog::load_or_refresh(&self.parts.config_dir.join("catalog"))
-                    .await
-                    .ok()
-                    .map(Arc::new)
-            })
+        catalog::ModelCatalog::load_or_refresh(&self.parts.config_dir.join("catalog"))
             .await
-            .clone()
+            .ok()
+            .map(Arc::new)
     }
 
     // ---- views ----------------------------------------------------------------
@@ -810,10 +856,12 @@ fn failed_run(error: &EvalError, scrub: &Scrub) -> Ended {
     Ended::failed(failure, code, scrub.text(&error.to_string()))
 }
 
-/// The failure of a report. `single` is a report of one directory, whose
-/// read-side failures wrote nothing; any other failure may have written part
-/// of what it was asked to, so its effect is unknown.
-fn failed_report(error: &EvalError, scrub: &Scrub, single: bool) -> Ended {
+/// The failure of a report. `recorded` says that every report written so far
+/// is named in the view, so a read-side failure (which happens before the
+/// failing directory is written) wrote nothing more and the effect is exact;
+/// any other failure may have written part of what it was asked to, so its
+/// effect is unknown.
+fn failed_report(error: &EvalError, scrub: &Scrub, recorded: bool) -> Ended {
     let read_side = matches!(
         error,
         EvalError::Usage(_) | EvalError::Config(_) | EvalError::Database { .. }
@@ -833,7 +881,7 @@ fn failed_report(error: &EvalError, scrub: &Scrub, single: bool) -> Ended {
                 failure,
                 code,
                 message,
-                unknown: !(single && read_side),
+                unknown: !(recorded && read_side),
             }
         }
         other => other,
@@ -945,6 +993,17 @@ fn write_overlay(text: &str) -> Result<OverlayFile, Ended> {
 
 /// Aborts a task when it is dropped, so that a job dropped without an outcome
 /// never leaves its work running.
+/// Resolves when a stop is asked; never when the asker is gone.
+async fn cancelled(cancel: &watch::Receiver<bool>) {
+    let mut cancel = cancel.clone();
+    if cancel.wait_for(|requested| *requested).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// How long a stopped job's work may take to stop its runs before it is dropped.
+const STOP_GRACE: Duration = Duration::from_secs(30);
+
 struct AbortOnDrop(tokio::task::AbortHandle);
 
 impl Drop for AbortOnDrop {

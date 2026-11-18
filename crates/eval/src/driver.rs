@@ -52,6 +52,10 @@ pub struct ReplayOutcome {
     pub conversation: Vec<Entry>,
 }
 
+/// Asks a replay to stop where it is: it observes `true`. Whoever holds the
+/// sender decides; a dropped sender asks nothing.
+pub type CancelSignal = watch::Receiver<bool>;
+
 pub struct Replay<'a> {
     pub runtime: &'a AgentRuntime,
     pub bus: &'a Arc<EventBus>,
@@ -60,6 +64,39 @@ pub struct Replay<'a> {
     pub budget: &'a EvalBudgetConfig,
     /// Authority for the root run and every follow-up sent to it.
     pub chat: RunConfig,
+    /// A stop request: the replay ends as `incomplete`, and the root run and
+    /// its subtree are stopped and awaited before the driver returns.
+    pub cancel: Option<CancelSignal>,
+}
+
+pub(crate) fn is_cancelled(cancel: Option<&CancelSignal>) -> bool {
+    cancel.is_some_and(|cancel| *cancel.borrow())
+}
+
+async fn cancelled(cancel: Option<&CancelSignal>) {
+    if let Some(cancel) = cancel {
+        let mut cancel = cancel.clone();
+        if cancel.wait_for(|requested| *requested).await.is_ok() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
+/// Stops the root run's subtree when the driver is dropped before it did so
+/// itself (its task was aborted). A drop cannot await the stop: it only
+/// requests it, and never fails.
+struct StopOnDrop<'a> {
+    runtime: &'a AgentRuntime,
+    root: Option<runtime::RunId>,
+}
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        if let Some(root) = self.root.take() {
+            let _ = self.runtime.stop(root, StopScope::Subtree);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -343,19 +380,31 @@ async fn drive_with(replay: Replay<'_>, desk: &dyn Desk) -> ReplayOutcome {
     lock(&observer.state).conversation.push(Entry::User {
         text: initial.clone(),
     });
-    let root = replay.runtime.delegate_chat(
-        &replay.thread.thread_id,
-        replay.thread.role,
-        initial,
-        replay.chat.clone(),
-    );
+    let root = if is_cancelled(replay.cancel.as_ref()) {
+        None
+    } else {
+        Some(replay.runtime.delegate_chat(
+            &replay.thread.thread_id,
+            replay.thread.role,
+            initial,
+            replay.chat.clone(),
+        ))
+    };
     let mut user_turns = 1_u32;
     let (status, reason) = match root {
-        Err(error) => (
+        None => (
+            Status::Incomplete,
+            "cancelled before the replay started".to_owned(),
+        ),
+        Some(Err(error)) => (
             Status::Failed,
             format!("the replay could not start: {error}"),
         ),
-        Ok(root) => {
+        Some(Ok(root)) => {
+            let mut stop_on_drop = StopOnDrop {
+                runtime: replay.runtime,
+                root: Some(root),
+            };
             let ended = converse(
                 &replay,
                 desk,
@@ -369,6 +418,7 @@ async fn drive_with(replay: Replay<'_>, desk: &dyn Desk) -> ReplayOutcome {
                 Status::Incomplete => replay.runtime.cancel_subtree(root),
                 _ => replay.runtime.stop(root, StopScope::Subtree),
             };
+            stop_on_drop.root = None;
             if let Err(error) = stopped {
                 tracing::debug!(%error, "replay root was already gone");
             }
@@ -452,10 +502,19 @@ async fn converse(
             ),
         )
     };
+    let stopped_by_request = || {
+        (
+            Status::Incomplete,
+            "cancelled: the evaluation was asked to stop".to_owned(),
+        )
+    };
     let mut handled_turns = 0;
     let mut shown = HashSet::new();
     let is_answered = |id: &str| desk.is_answered(id);
     loop {
+        if is_cancelled(replay.cancel.as_ref()) {
+            return stopped_by_request();
+        }
         reconcile_answered(&observer.state, is_answered);
         let (conversation, pending) = {
             let state = lock(&observer.state);
@@ -514,12 +573,14 @@ async fn converse(
                     return (Status::Failed, "the replay's event bus closed".into());
                 },
                 () = tokio::time::sleep_until(deadline) => return elapsed(),
+                () = cancelled(replay.cancel.as_ref()) => return stopped_by_request(),
             }
             continue;
         };
         let decision = tokio::select! {
             decision = replay.simulator.decide(&replay.thread.turns, &conversation, pending.as_ref()) => decision,
             () = tokio::time::sleep_until(deadline) => return elapsed(),
+            () = cancelled(replay.cancel.as_ref()) => return stopped_by_request(),
         };
         let decision = match decision {
             Ok(decision) => decision,

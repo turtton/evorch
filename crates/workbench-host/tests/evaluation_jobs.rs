@@ -15,6 +15,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use support::{World, operation, world};
 use workbench_host::areas::Areas;
@@ -71,6 +72,14 @@ impl Hold {
 }
 
 fn setup(hook: Option<JobHook>) -> World {
+    setup_with(JobSeams {
+        hook,
+        load_catalog: false,
+        ..JobSeams::default()
+    })
+}
+
+fn setup_with(seams: JobSeams) -> World {
     world(|parts| {
         let config = parts.dir.join("config");
         std::fs::create_dir_all(&config).unwrap();
@@ -82,11 +91,7 @@ fn setup(hook: Option<JobHook>) -> World {
                 config_dir: config.clone(),
                 database: parts.database.clone(),
                 credentials: Arc::new(sandbox::FileCredentialStore::open(&config).unwrap()),
-                seams: JobSeams {
-                    hook,
-                    load_catalog: false,
-                    ..JobSeams::default()
-                },
+                seams,
             }),
             ..Default::default()
         }
@@ -389,4 +394,28 @@ fn a_host_without_jobs_refuses_to_start_one() {
     });
     let refused = start_report(&mut w, report_of("none", &["run-a"], false)).unwrap_err();
     assert_eq!(refused.code, ErrorCode::UnsupportedCapability);
+}
+
+/// The price catalog is asked for by each job: one that could not be loaded
+/// (the source answers nothing) does not decide the jobs after it.
+#[test]
+fn every_job_asks_for_its_own_price_catalog() {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = asked.clone();
+    let mut w = setup_with(JobSeams {
+        load_catalog: false,
+        catalog_source: Some(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            None
+        })),
+        ..JobSeams::default()
+    });
+    let mut events = subscribe(&w);
+    for (id, dir) in [("first", "empty-a"), ("second", "empty-b")] {
+        std::fs::create_dir_all(root(&w).join(dir)).unwrap();
+        start_report(&mut w, report_of(id, &[dir], false)).unwrap();
+        settled(&w, &mut events, id);
+        w.settle();
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
 }

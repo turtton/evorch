@@ -22,6 +22,7 @@
 //! waits for time: a job ends with the settled event it announces.
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mock_openai::cache_contract::{CacheProtocol, assert_append_only};
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
@@ -30,7 +31,9 @@ use serde_json::Value;
 use storage::thread_start::{ThreadStartCapture, ThreadStartSnapshot, ThreadStartState};
 use storage::{ReviewEvidenceRow, RunContextRecord, Storage, StorageConfig};
 use workbench_host::CommandHost;
-use workbench_host::areas::evaluation::{EvaluationArea, Isolation, JobParts, JobSeams};
+use workbench_host::areas::evaluation::{
+    EvaluationArea, FixedModels, Isolation, JobParts, JobSeams,
+};
 use workbench_host::areas::{AreaTasks, Areas};
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
 use workbench_host::commands::CommandService;
@@ -40,9 +43,10 @@ use workbench_protocol::commands::Command;
 use workbench_protocol::events::{Subscribe, SubscriptionScope, UiEvent};
 use workbench_protocol::ids::{OperationId, ProjectId, ThreadId};
 use workbench_protocol::namespaces::evaluation::{
-    EvaluationCommand, EvaluationEvent, EvaluationJobView, EvaluationRunStatus, StartEvaluationRun,
+    CancelEvaluationJob, EvaluationCommand, EvaluationEvent, EvaluationJobEffect,
+    EvaluationJobView, EvaluationRunStatus, StartEvaluationReport, StartEvaluationRun,
 };
-use workbench_protocol::operation::OperationState;
+use workbench_protocol::operation::{CancelReason, OperationState};
 
 #[allow(dead_code)]
 #[path = "../../runtime/tests/mcp_cache_support/mod.rs"]
@@ -256,6 +260,15 @@ async fn idle(tasks: &AreaTasks) {
 /// The host of the first scenarios: the production `evaluation` area over the
 /// recorded database, with only the isolation of the replays' tools switched off.
 fn job_host(root: &Path, config_dir: &Path, database: &Path) -> (CommandHost, AreaTasks) {
+    job_host_with(root, config_dir, database, None)
+}
+
+fn job_host_with(
+    root: &Path,
+    config_dir: &Path,
+    database: &Path,
+    models: Option<FixedModels>,
+) -> (CommandHost, AreaTasks) {
     let bus = Arc::new(event_bus::EventBus::new(64));
     let runtime = runtime::AgentRuntime::new(
         bus.clone(),
@@ -279,6 +292,7 @@ fn job_host(root: &Path, config_dir: &Path, database: &Path) -> (CommandHost, Ar
         credentials: Arc::new(sandbox::FileCredentialStore::open(config_dir).unwrap()),
         seams: JobSeams {
             isolation: Isolation::DirectUnchecked,
+            models,
             load_catalog: false,
             ..JobSeams::default()
         },
@@ -479,7 +493,9 @@ fn assert_preflight_evidence(out: &Path, done: &EvaluationJobView) {
         }),
         "{report}"
     );
-    assert!(out.join("report.md").exists());
+    let markdown = std::fs::read_to_string(out.join("report.md")).unwrap();
+    assert!(markdown.contains("no samples compared"), "{markdown}");
+    assert!(markdown.contains("missing"), "{markdown}");
 }
 
 /// A candidate that names a model the provider does not offer ends the job
@@ -519,6 +535,247 @@ async fn a_failed_preflight_through_the_core_reports_and_sends_no_inference() {
             .all(|request| request.method == "GET"),
         "no replay or judge inference"
     );
+    idle(&tasks).await;
+}
+
+/// A failed preflight of a run that was not asked for a report keeps its
+/// evidence (the manifest and the failure) and writes no report file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_preflight_without_a_report_writes_no_report_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let config_dir = root.join("config");
+    let database = root.join("events.db");
+    record_thread(&root, &database);
+    let provider = StreamingMockOpenAi::spawn_with_models(
+        vec![],
+        mock_openai::WriteMode::default(),
+        vec!["gpt-4o".into()],
+    );
+    configure_preflight(&config_dir, &provider.base_url());
+    let (mut host, tasks) = job_host(&root, &config_dir, &database);
+    let mut events = subscribe(&host);
+    let mut start = run_of("no-report", THREAD);
+    start.candidate = Some(MISSING_MODEL_OVERLAY.into());
+    start.report = false;
+    start.output = Some("out".into());
+    host.handle_command(
+        Command::Evaluation(EvaluationCommand::StartEvaluationRun(Box::new(start))),
+        local_desktop(),
+    )
+    .unwrap();
+    let done = settled(&mut events, "no-report").await;
+    let out = config_dir.join("eval").join("out");
+    assert!(
+        matches!(done.operation.state, OperationState::Failed { .. }),
+        "{done:?}"
+    );
+    let message = done.message.clone().expect("the failure says why");
+    assert!(message.contains("evaluation preflight failed"), "{message}");
+    assert!(message.contains("missing"), "{message}");
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["runs"], serde_json::json!([]));
+    assert!(!out.join("runs").exists());
+    assert!(!out.join("report.json").exists());
+    assert!(!out.join("report.md").exists());
+    assert!(done.reports.is_empty(), "{done:?}");
+    idle(&tasks).await;
+}
+
+/// A model that never answers and counts the requests it holds: a replay
+/// that is stopped must drop them.
+struct Hang {
+    entered: Arc<tokio::sync::Semaphore>,
+    live: Arc<AtomicUsize>,
+}
+
+struct Live(Arc<AtomicUsize>);
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl runtime::AgentModel for Hang {
+    async fn complete(
+        &self,
+        _: &runtime::AgentInvocationContext,
+        _: runtime::Role,
+        _: &[providers::Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        self.live.fetch_add(1, Ordering::SeqCst);
+        let _held = Live(self.live.clone());
+        self.entered.add_permits(1);
+        std::future::pending().await
+    }
+
+    fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
+        "hang".into()
+    }
+}
+
+fn hanging(entered: &Arc<tokio::sync::Semaphore>, live: &Arc<AtomicUsize>) -> FixedModels {
+    let factory = |entered: Arc<tokio::sync::Semaphore>, live: Arc<AtomicUsize>| {
+        Arc::new(move |_: &Arc<event_bus::EventBus>| {
+            Arc::new(Hang {
+                entered: entered.clone(),
+                live: live.clone(),
+            }) as Arc<dyn runtime::AgentModel>
+        })
+    };
+    FixedModels {
+        agent: factory(entered.clone(), live.clone()),
+        simulator: factory(entered.clone(), live.clone()),
+    }
+}
+
+/// A job whose replay is in its first model request, held by a model that
+/// never answers.
+struct Replaying {
+    host: CommandHost,
+    tasks: AreaTasks,
+    events: workbench_host::subscriptions::Subscription,
+    live: Arc<AtomicUsize>,
+    _directory: tempfile::TempDir,
+}
+
+async fn replaying(id: &str) -> Replaying {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let config_dir = root.join("config");
+    let database = root.join("events.db");
+    record_thread(&root, &database);
+    configure(&config_dir, "http://127.0.0.1:9");
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let live = Arc::new(AtomicUsize::new(0));
+    let (mut host, tasks) = job_host_with(
+        &root,
+        &config_dir,
+        &database,
+        Some(hanging(&entered, &live)),
+    );
+    let events = subscribe(&host);
+    host.handle_command(
+        Command::Evaluation(EvaluationCommand::StartEvaluationRun(Box::new(run_of(
+            id, THREAD,
+        )))),
+        local_desktop(),
+    )
+    .unwrap();
+    entered.acquire().await.unwrap().forget();
+    assert_eq!(live.load(Ordering::SeqCst), 1, "the replay is mid-request");
+    Replaying {
+        host,
+        tasks,
+        events,
+        live,
+        _directory: directory,
+    }
+}
+
+fn assert_stopped(done: &EvaluationJobView, reason: CancelReason) {
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled { reason },
+        "{done:?}"
+    );
+    assert!(
+        done.runs
+            .iter()
+            .all(|run| run.status == EvaluationRunStatus::Incomplete),
+        "{done:?}"
+    );
+}
+
+/// A cancel that comes after the replay began stops what it started: the
+/// job settles only once the replay's request is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_after_the_replay_began_stops_it_before_the_job_settles() {
+    let mut replay = replaying("cancel-running").await;
+    replay
+        .host
+        .handle_command(
+            Command::Evaluation(EvaluationCommand::CancelEvaluationJob(
+                CancelEvaluationJob {
+                    operation_id: operation("cancel-running"),
+                },
+            )),
+            local_desktop(),
+        )
+        .unwrap();
+    let done = settled(&mut replay.events, "cancel-running").await;
+    assert_stopped(&done, CancelReason::Requested);
+    assert_eq!(
+        replay.live.load(Ordering::SeqCst),
+        0,
+        "the model request was stopped before the job settled"
+    );
+    idle(&replay.tasks).await;
+}
+
+/// The core's shutdown stops a replay in progress the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shutdown_after_the_replay_began_stops_it_before_the_job_settles() {
+    let mut replay = replaying("shutdown-running").await;
+    replay.tasks.request_stop();
+    let done = settled(&mut replay.events, "shutdown-running").await;
+    assert_stopped(&done, CancelReason::Shutdown);
+    assert_eq!(replay.live.load(Ordering::SeqCst), 0);
+    idle(&replay.tasks).await;
+}
+
+/// A report job that fails on its second directory keeps what it finished:
+/// the first report is named in the view and the effect is partial.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_report_job_that_fails_partway_names_the_reports_it_wrote() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let config_dir = root.join("config");
+    let database = root.join("events.db");
+    record_thread(&root, &database);
+    let provider = StreamingMockOpenAi::spawn_with_prompt_cache_models(
+        vec![text("agent-1", "I fixed the bug."), text("user-1", FINISH)],
+        vec![MODEL.into()],
+    );
+    configure(&config_dir, &provider.base_url());
+    let (mut host, tasks) = job_host(&root, &config_dir, &database);
+    let mut events = subscribe(&host);
+    let mut start = run_of("replay", THREAD);
+    start.report = true;
+    host.handle_command(
+        Command::Evaluation(EvaluationCommand::StartEvaluationRun(Box::new(start))),
+        local_desktop(),
+    )
+    .unwrap();
+    let done = settled(&mut events, "replay").await;
+    assert_eq!(done.operation.state, OperationState::Ready, "{done:?}");
+    idle(&tasks).await;
+
+    // A second directory that holds no replay to report.
+    std::fs::create_dir(config_dir.join("eval").join("second")).unwrap();
+
+    host.handle_command(
+        Command::Evaluation(EvaluationCommand::StartEvaluationReport(
+            StartEvaluationReport {
+                operation_id: operation("partway"),
+                targets: vec!["cache-run".into(), "second".into()],
+                rejudge: false,
+            },
+        )),
+        local_desktop(),
+    )
+    .unwrap();
+    let done = settled(&mut events, "partway").await;
+    assert!(
+        matches!(done.operation.state, OperationState::Failed { .. }),
+        "{done:?}"
+    );
+    assert_eq!(done.reports, vec!["cache-run".to_owned()], "{done:?}");
+    assert_eq!(done.effect, EvaluationJobEffect::Partial, "{done:?}");
     idle(&tasks).await;
 }
 

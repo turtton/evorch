@@ -64,6 +64,7 @@ impl Fixture {
             }),
             credentials: Some(Arc::new(credentials)),
             catalog: None,
+            cancel: None,
         }
     }
 
@@ -670,6 +671,43 @@ async fn verification_runs_in_each_final_workspace_and_the_manifest_keeps_the_in
     assert_eq!(manifest["original_turns"][0]["text"], "fix the bug");
     assert_eq!(manifest["swapped_roles"][0]["role"], "reviewer");
     assert_eq!(manifest["swapped_roles"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_cancel_during_the_first_replay_leaves_it_incomplete_and_starts_no_other() {
+    // Given: a baseline and a candidate, and an agent whose first request never answers.
+    let fixture = Fixture::new().await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let mut deps = fixture.deps(
+        vec![Step::Gated {
+            entered: Arc::clone(&entered),
+            release: Arc::new(tokio::sync::Notify::new()),
+            then: Box::new(Step::Hang),
+        }],
+        Vec::new(),
+    );
+    let (cancel, signal) = tokio::sync::watch::channel(false);
+    deps.cancel = Some(signal);
+    let overlay = "[sandbox]\nweb_tools_enabled = false\n";
+
+    // When: a stop is asked while that request is in flight.
+    let (result, ()) = tokio::join!(run(fixture.args(Some(overlay)), deps, |_| {}), async {
+        entered.notified().await;
+        cancel.send_replace(true);
+    });
+
+    // Then: the evaluation returns with the baseline incomplete, and the candidate never ran.
+    let evaluation = result.unwrap();
+    let [report] = evaluation.runs.as_slice() else {
+        panic!("only the baseline ran: {:?}", evaluation.runs.len());
+    };
+    assert_eq!(report.outcome.status, Status::Incomplete);
+    assert!(
+        report.outcome.reason.contains("cancelled"),
+        "{}",
+        report.outcome.reason
+    );
+    assert_eq!(fixture.agents.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

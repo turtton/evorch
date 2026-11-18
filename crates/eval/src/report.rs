@@ -250,6 +250,20 @@ impl Context<'_> {
 /// evaluation directory, or a report cannot be written. A judge that fails is
 /// reported in the affected pairs instead.
 pub async fn report(args: ReportArgs, deps: &ReportDeps) -> Result<Vec<Report>, EvalError> {
+    report_with(args, deps, |_| {}).await
+}
+
+/// Like [report], telling `on_written` the index in `args.dirs` of each
+/// directory whose report is complete on disk, as soon as it is, so a caller
+/// that stops partway knows which ones were written.
+///
+/// # Errors
+/// As [report].
+pub async fn report_with(
+    args: ReportArgs,
+    deps: &ReportDeps,
+    mut on_written: impl FnMut(usize),
+) -> Result<Vec<Report>, EvalError> {
     if args.dirs.is_empty() {
         return Err(EvalError::Usage("at least one --output is required".into()));
     }
@@ -270,10 +284,11 @@ pub async fn report(args: ReportArgs, deps: &ReportDeps) -> Result<Vec<Report>, 
         judge: None,
     };
     let mut reports = Vec::new();
-    for dir in &args.dirs {
+    for (index, dir) in args.dirs.iter().enumerate() {
         let report = report_dir(dir, &mut context).await?;
         output::write_json(&dir.join(output::REPORT_JSON_FILE), &report)?;
         std::fs::write(dir.join(output::REPORT_MARKDOWN_FILE), markdown(&report))?;
+        on_written(index);
         reports.push(report);
     }
     Ok(reports)

@@ -77,6 +77,9 @@ pub struct RunnerDeps {
     /// `None` opens `<user config dir>/credentials`.
     pub credentials: Option<Arc<dyn CredentialStore>>,
     pub catalog: Option<Arc<catalog::ModelCatalog>>,
+    /// A stop request: the run in progress ends as `incomplete` with its
+    /// processes stopped, and no further run starts.
+    pub cancel: Option<driver::CancelSignal>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -268,8 +271,11 @@ pub async fn run_with_cleanup(
                 report: preflight_path,
             });
         }
-        for (label, overlay) in configurations {
+        'runs: for (label, overlay) in configurations {
             for index in 1..=repeat {
+                if driver::is_cancelled(context.deps.cancel.as_ref()) {
+                    break 'runs;
+                }
                 let run_dir = dir.join("runs").join(format!("{label}-{index}"));
                 let nonce = nonce()?;
                 manifest.runs.push(RunEntry {
@@ -631,6 +637,7 @@ async fn drive_in(
                 project_root: Some(project),
                 ..RunConfig::default()
             },
+            cancel: context.deps.cancel.clone(),
         })
         .await
     };
