@@ -58,8 +58,7 @@ impl ThreadScratch {
         let key = self
             .lock()
             .execution_keys
-            .get(&(run, incarnation.into()))
-            .cloned();
+            .remove(&(run, incarnation.into()));
         if let Some(key) = key {
             self.release_user(
                 &key,

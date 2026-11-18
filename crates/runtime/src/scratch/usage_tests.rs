@@ -320,6 +320,61 @@ async fn older_running_snapshot_cannot_reinsert_a_confirmed_shell_user() {
 }
 
 #[test]
+fn execution_release_forgets_its_incarnation_but_preserves_the_epoch_on_resume() {
+    let temp = tempfile::tempdir().unwrap();
+    let scratch = ThreadScratch::at(temp.path().join("scratch"));
+    let key = ScratchKey::Thread("thread".into());
+    let run = RunId::new(1);
+    let lease = Lease {
+        owner_id: "owner".into(),
+        generation: 1,
+        expires_at: u64::MAX,
+    };
+    scratch.record_scratch_lease("thread", &lease);
+    let path = scratch.prepare(&key).unwrap();
+    for incarnation in ["old", "current"] {
+        scratch.register_execution(&key, run, incarnation).unwrap();
+    }
+    scratch.release_execution(run, "old");
+    {
+        let state = scratch.lock();
+        assert_eq!(state.execution_keys.len(), 1);
+        assert_eq!(
+            state.execution_keys.get(&(run, "current".into())),
+            Some(&key)
+        );
+    }
+    scratch.release_execution(run, "old");
+    assert!(scratch.archive_snapshot("thread").is_none());
+    scratch.release_execution(run, "current");
+    assert!(scratch.lock().execution_keys.is_empty());
+    let (epoch, lease) = scratch.archive_snapshot("thread").unwrap();
+    scratch.register_execution(&key, run, "current").unwrap();
+    assert_eq!(scratch.lock().execution_keys.len(), 1);
+    assert!(scratch.archive_snapshot("thread").is_none());
+    scratch.release_execution(run, "current");
+    assert!(scratch.lock().execution_keys.is_empty());
+    let (resumed_epoch, _) = scratch.archive_snapshot("thread").unwrap();
+    assert_eq!(resumed_epoch, epoch + 1);
+    // Even after the resumed user leaves, a snapshot from before that resume
+    // cannot detach the tree. Removing the execution lookup must not reset it.
+    assert!(
+        scratch
+            .detach_archived("thread", epoch, &lease)
+            .unwrap()
+            .is_none()
+    );
+    assert!(path.exists());
+    assert_eq!(
+        scratch
+            .detach_archived("thread", resumed_epoch, &lease)
+            .unwrap(),
+        Some(true)
+    );
+    assert!(!path.exists());
+}
+
+#[test]
 fn exhausted_epoch_or_notice_counter_keeps_the_tree_without_wrapping() {
     for epoch_exhausted in [true, false] {
         let temp = tempfile::tempdir().unwrap();
