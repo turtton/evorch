@@ -14,7 +14,7 @@ mod common;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use support::{World, operation, world};
 use workbench_host::areas::Areas;
@@ -756,4 +756,97 @@ fn an_operation_without_an_owning_client_is_not_stopped_by_any_client_leaving() 
     let done = settled_view(&seen);
     assert_eq!(done.operation.state, OperationState::Ready);
     assert_eq!(unconverted(&w), 0);
+}
+
+/// A hook that holds up the notices of the first departure: the thread of the leaving
+/// connection waits in it until `release`, so what the client does meanwhile
+/// happens before the later hooks (the area's) hear of the departure.
+struct HeldNotice {
+    entered: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+fn hold_notices(connections: &ConnectionHooks) -> HeldNotice {
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let first = std::sync::atomic::AtomicBool::new(true);
+    connections.register(Arc::new(move |_, _| {
+        // Only the first departure is held up.
+        if !first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        entered_tx.send(()).unwrap();
+        release_rx.lock().unwrap().recv().unwrap();
+    }));
+    HeldNotice { entered, release }
+}
+
+#[test]
+fn a_late_notice_of_an_earlier_connection_does_not_stop_what_the_client_started_since() {
+    // Given: the notices of a departure are held up before they reach the area.
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
+    let connections = Arc::new(ConnectionHooks::default());
+    let notices = hold_notices(&connections);
+    let mut w = setup_with_connections(Some(hold.hook()), &connections);
+    seed_legacy(&w, 6);
+    let mut events = subscribe(&w);
+    let who = client("cli-again");
+    let id = who.client_id.clone().unwrap();
+    let first = connections.open(id.clone());
+    let leaving = std::thread::spawn(move || drop(first));
+    notices.entered.recv().unwrap();
+
+    // When: the client connects again and starts an operation, and only then
+    // the notice of the connection that ended reaches the area.
+    let second = connections.open(id);
+    start(&mut w, who, "since", backfill(2, None)).unwrap();
+    w.rt.block_on(hold.reached());
+    notices.release.send(()).unwrap();
+    leaving.join().unwrap();
+
+    // Then: the operation of the client's current connection is not stopped.
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "since");
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    assert_eq!(unconverted(&w), 0);
+    drop(second);
+}
+
+#[test]
+fn a_late_notice_still_stops_what_the_client_started_before_it_left() {
+    // Given: an operation of a client, and the notices of its departure held up.
+    let hold = Hold::new(MaintenanceStage::BeforeBatch, 1);
+    let connections = Arc::new(ConnectionHooks::default());
+    let notices = hold_notices(&connections);
+    let mut w = setup_with_connections(Some(hold.hook()), &connections);
+    seed_legacy(&w, 10);
+    let mut events = subscribe(&w);
+    let who = client("cli-leaving");
+    let id = who.client_id.clone().unwrap();
+    let first = connections.open(id.clone());
+    start(&mut w, who, "before", backfill(3, None)).unwrap();
+    w.rt.block_on(hold.reached());
+    let leaving = std::thread::spawn(move || drop(first));
+    notices.entered.recv().unwrap();
+
+    // When: the client is back by the time the notice reaches the area (a
+    // count of its connections now would hide that it left).
+    let second = connections.open(id);
+    notices.release.send(()).unwrap();
+    leaving.join().unwrap();
+
+    // Then: what it started before it left stops at the next batch boundary.
+    hold.release();
+    let seen = events_until_settled(&w.rt, &mut events, "before");
+    let done = settled_view(&seen);
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    assert_eq!((done.batches, converted_of(done)), (1, 3));
+    drop(second);
 }

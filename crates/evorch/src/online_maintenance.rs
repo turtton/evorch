@@ -196,10 +196,52 @@ impl Totals {
     }
 }
 
+/// How many of the first batches get a line of their own.
+const EVERY_BATCH_UP_TO: u64 = 16;
+
+/// The progress lines of a backfill, within a budget that does not grow with
+/// the number of batches: one line for each of the first
+/// [`EVERY_BATCH_UP_TO`] batches, then one each time the batch count has
+/// doubled (so about `EVERY_BATCH_UP_TO` + log2(batches) lines whatever the
+/// batch size, 16 + 64 at most), and the last state always. A line states the
+/// totals so far, so the batches between two lines are not lost, only not
+/// announced.
+#[derive(Debug, Default)]
+struct ProgressLines {
+    /// The batch count the next line waits for.
+    next: Cell<u64>,
+    /// The batch count of the last line.
+    printed: Cell<u64>,
+}
+
+impl ProgressLines {
+    /// The line for `totals`, unless the budget skips it.
+    fn offer(&self, totals: Totals) -> Option<String> {
+        if totals.batches < self.next.get().max(1) {
+            return None;
+        }
+        self.printed.set(totals.batches);
+        self.next.set(if totals.batches < EVERY_BATCH_UP_TO {
+            totals.batches + 1
+        } else {
+            totals.batches.saturating_mul(2)
+        });
+        Some(totals.line())
+    }
+
+    /// The line for the last state, unless it was the last one printed.
+    fn last(&self, totals: Totals) -> Option<String> {
+        (totals.batches > self.printed.get()).then(|| {
+            self.printed.set(totals.batches);
+            totals.line()
+        })
+    }
+}
+
 /// Convert the legacy columns of the events table in the core, as many bounded
 /// operations as `request.max_rows` and the work need. The summary (stdout) has
-/// the keys the offline command printed; the progress goes to stderr, one line
-/// per committed batch.
+/// the keys the offline command printed; the progress goes to stderr within a
+/// fixed budget of lines (see [`ProgressLines`]), the last state included.
 ///
 /// The task is one operation at a time in the core: another client's running
 /// backfill makes this one fail as `busy`.
@@ -211,6 +253,7 @@ pub async fn backfill(
     client: &WorkbenchClient,
     request: &BackfillRequest,
 ) -> Result<Rendered, CliError> {
+    let lines = ProgressLines::default();
     let mut totals = Totals::default();
     let mut budget = request.max_rows;
     loop {
@@ -224,10 +267,27 @@ pub async fn backfill(
                 batch_rows: request.batch_rows,
                 max_rows: Some(rows),
             }),
-            &|view| eprintln!("{}", before.after(view).line()),
+            &|view| {
+                if let Some(line) = lines.offer(before.after(view)) {
+                    eprintln!("{line}");
+                }
+            },
         )
-        .await?;
+        .await;
+        // A failed or lost operation still leaves the state it reached.
+        let view = match view {
+            Ok(view) => view,
+            Err(error) => {
+                if let Some(line) = lines.last(totals) {
+                    eprintln!("{line}");
+                }
+                return Err(error);
+            }
+        };
         totals = totals.after(&view);
+        if let Some(line) = lines.last(totals) {
+            eprintln!("{line}");
+        }
         if view.operation.state != OperationState::Ready {
             return Ok(Err(format!(
                 "{}\nbefore it ended: {}",
@@ -258,4 +318,87 @@ pub async fn execute(request: BackfillRequest) -> Result<Rendered, CliError> {
     )
     .await?;
     backfill(&connected.client, &request).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(batches: u64) -> Totals {
+        Totals {
+            batches,
+            converted: batches,
+            ..Totals::default()
+        }
+    }
+
+    /// The lines of a run that commits `batches` batches, one at a time, and
+    /// ends there.
+    fn lines_of(batches: u64) -> Vec<String> {
+        let lines = ProgressLines::default();
+        let mut out: Vec<String> = (1..=batches).filter_map(|n| lines.offer(at(n))).collect();
+        out.extend(lines.last(at(batches)));
+        out
+    }
+
+    #[test]
+    fn a_few_batches_are_each_announced() {
+        // Given/When: a run of three batches.
+        let out = lines_of(3);
+
+        // Then: every batch has its line, in order, and nothing is repeated.
+        let batches: Vec<_> = out.iter().map(|line| &line[..28]).collect();
+        assert_eq!(
+            batches,
+            [
+                "backfill-events: batch 1: co",
+                "backfill-events: batch 2: co",
+                "backfill-events: batch 3: co"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_lines_stay_within_a_budget_however_many_batches_there_are() {
+        // Given/When: runs of growing length, up to a million batches.
+        for batches in [100, 5_000, 1_000_000] {
+            let out = lines_of(batches);
+
+            // Then: the lines do not grow with the batches (16 first ones and
+            // one per doubling), and the last state is always the last line.
+            assert!(
+                out.len() <= 16 + 64 + 1,
+                "{batches} batches gave {} lines",
+                out.len()
+            );
+            assert_eq!(out.last().unwrap(), &at(batches).line());
+        }
+        assert!(lines_of(1_000_000).len() < lines_of(5_000).len() + 10);
+    }
+
+    #[test]
+    fn batches_the_core_coalesced_still_print_the_last_state_once() {
+        // Given: progress observed only at some batch counts (the core joins
+        // the events of batches that finish together).
+        let lines = ProgressLines::default();
+        let seen = [1, 2, 7, 40, 41, 900];
+
+        // When: each is offered and the run ends at 905.
+        let mut out: Vec<_> = seen.iter().filter_map(|n| lines.offer(at(*n))).collect();
+        out.extend(lines.last(at(905)));
+
+        // Then: the budget decides which are printed, and the end is printed once.
+        assert_eq!(out.last().unwrap(), &at(905).line());
+        assert_eq!(lines.last(at(905)), None);
+        assert!(out.len() <= seen.len() + 1);
+    }
+
+    #[test]
+    fn a_run_without_a_batch_prints_nothing() {
+        // Given/When: nothing to convert.
+        let lines = ProgressLines::default();
+
+        // Then: there is no line, as before.
+        assert_eq!(lines.last(Totals::default()), None);
+    }
 }

@@ -22,6 +22,7 @@ use workbench_host::areas::maintenance::{
     MaintenanceArea, MaintenanceHook, MaintenanceSeams, MaintenanceStage,
 };
 use workbench_host::areas::{AreaTasks, Areas};
+use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost};
 use workbench_host::connections::ConnectionHooks;
 use workbench_protocol::events::{Subscribe, SubscriptionScope, UiEvent};
 use workbench_protocol::handshake::Capability;
@@ -104,6 +105,28 @@ fn launcher(identity: &Path, socket: &Path) -> core_launcher::Launcher {
 
 const MESSAGE: &str = r#"{"kind":"Message","payload":{"kind":"MessageCompleted","payload":{"run_id":"run-c","text":"t"}}}"#;
 
+/// `decodable` legacy rows (written before the `subkind` and `run_id` columns
+/// existed) the backfill converts and `undecodable` ones it cannot decode, in
+/// this order, in one transaction.
+fn seed(database: &Path, decodable: u32, undecodable: u32) {
+    let mut conn = rusqlite::Connection::open(database).unwrap();
+    let tx = conn.transaction().unwrap();
+    for n in 0..decodable + undecodable {
+        let payload = if n < decodable {
+            MESSAGE
+        } else {
+            "undecodable"
+        };
+        tx.execute(
+            "INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+             VALUES (1, ?1, ?1, 'Message', ?2)",
+            rusqlite::params![i64::from(n) + 1, payload],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
 /// A core serving its socket: the production maintenance area over the events
 /// database of `dir`, which holds legacy rows (written before the `subkind` and
 /// `run_id` columns existed).
@@ -115,7 +138,8 @@ struct Core {
     connections: Arc<ConnectionHooks>,
     /// Every client whose last connection ended, after the area heard of it.
     departures: tokio::sync::mpsc::UnboundedReceiver<ClientId>,
-    _store: storage::Storage,
+    /// What keeps the core's storage and areas alive.
+    _keep: Box<dyn std::any::Any>,
     _instance: evorch_core::instance::Instance,
     _stop: tokio::sync::watch::Sender<bool>,
     server: tokio::task::JoinHandle<()>,
@@ -133,21 +157,7 @@ impl Core {
             ..Default::default()
         })
         .unwrap();
-        let conn = rusqlite::Connection::open(&database).unwrap();
-        for n in 0..decodable + undecodable {
-            let payload = if n < decodable {
-                MESSAGE
-            } else {
-                "undecodable"
-            };
-            conn.execute(
-                "INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
-                 VALUES (1, ?1, ?1, 'Message', ?2)",
-                rusqlite::params![i64::from(n) + 1, payload],
-            )
-            .unwrap();
-        }
-        drop(conn);
+        seed(&database, decodable, undecodable);
 
         let bus = Arc::new(event_bus::EventBus::new(64));
         let runtime = runtime::AgentRuntime::new(
@@ -170,7 +180,7 @@ impl Core {
         // Registered after the area's hook: a departure seen here has already
         // been told to the area.
         let (left, departures) = tokio::sync::mpsc::unbounded_channel();
-        connections.register(Arc::new(move |client| {
+        connections.register(Arc::new(move |client, _| {
             left.send(client.clone()).unwrap();
         }));
         let host = Arc::new(Mutex::new(host.with_areas(Areas {
@@ -178,7 +188,51 @@ impl Core {
             maintenance,
             ..Default::default()
         })));
+        Self::serve(
+            dir,
+            database,
+            host,
+            connections,
+            departures,
+            Box::new(store),
+        )
+    }
 
+    /// A core of the production composition: the host that
+    /// `BootstrappedHost::open` builds (its maintenance area and its
+    /// connection hooks are the ones the core process has) over the events
+    /// database of `dir`, with the same legacy rows. Nothing holds an operation
+    /// there, so a test that stops one watches the progress it prints.
+    async fn bootstrapped(decodable: u32, undecodable: u32) -> Self {
+        let dir = test_socket_dir::SplitDir::new();
+        let root = dir.path().canonicalize().unwrap();
+        let boot = BootstrappedHost::open(BootstrapOptions {
+            config_dir: root.clone(),
+            project_root: root.clone(),
+            ownership_root: dir.sockets().to_path_buf(),
+        })
+        .await
+        .unwrap();
+        let database = root.join("evorch-events.db");
+        seed(&database, decodable, undecodable);
+        let connections = boot.host.lock().unwrap().connections();
+        let (left, departures) = tokio::sync::mpsc::unbounded_channel();
+        connections.register(Arc::new(move |client, _| {
+            left.send(client.clone()).unwrap();
+        }));
+        let host = boot.host.clone();
+        Self::serve(dir, database, host, connections, departures, Box::new(boot))
+    }
+
+    fn serve(
+        dir: test_socket_dir::SplitDir,
+        database: PathBuf,
+        host: Arc<Mutex<workbench_host::CommandHost>>,
+        connections: Arc<ConnectionHooks>,
+        departures: tokio::sync::mpsc::UnboundedReceiver<ClientId>,
+        keep: Box<dyn std::any::Any>,
+    ) -> Self {
+        let root = dir.path().canonicalize().unwrap();
         let identity = root.join("identity");
         let config = core_instance::ConfigIdentity::new(&identity).unwrap();
         let instance = evorch_core::instance::Instance::acquire(
@@ -211,7 +265,7 @@ impl Core {
             connections,
             departures,
             _dir: dir,
-            _store: store,
+            _keep: keep,
             _instance: instance,
             _stop: stop,
             server,
@@ -240,6 +294,10 @@ impl Core {
 
     /// The CLI as a process of its own, connected to this core.
     fn cli(&self, batch_rows: u32, max_rows: Option<u64>) -> std::process::Child {
+        let mut argv = format!("maintenance backfill-events --batch-rows {batch_rows}");
+        if let Some(max_rows) = max_rows {
+            argv = format!("{argv} --max-rows {max_rows}");
+        }
         let mut cli = Command::new(std::env::current_exe().unwrap());
         cli.args([
             "--exact",
@@ -249,13 +307,10 @@ impl Core {
         ])
         .env(CHILD_SOCKET, &self.socket)
         .env(CHILD_IDENTITY, &self.identity)
-        .env(CHILD_BATCH_ROWS, batch_rows.to_string())
+        .env(CHILD_ARGV, argv)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-        if let Some(max_rows) = max_rows {
-            cli.env(CHILD_MAX_ROWS, max_rows.to_string());
-        }
         cli.spawn().unwrap()
     }
 }
@@ -268,8 +323,7 @@ impl Drop for Core {
 
 const CHILD_SOCKET: &str = "MAINTENANCE_CLI_E2E_SOCKET";
 const CHILD_IDENTITY: &str = "MAINTENANCE_CLI_E2E_IDENTITY";
-const CHILD_BATCH_ROWS: &str = "MAINTENANCE_CLI_E2E_BATCH_ROWS";
-const CHILD_MAX_ROWS: &str = "MAINTENANCE_CLI_E2E_MAX_ROWS";
+const CHILD_ARGV: &str = "MAINTENANCE_CLI_E2E_ARGV";
 
 /// Not a test of its own: the process the tests below start, which stands for
 /// `evorch maintenance backfill-events`. It connects to the core named by the
@@ -282,12 +336,9 @@ fn a_cli_process_that_runs_backfill_events() {
         return;
     };
     let identity = PathBuf::from(std::env::var_os(CHILD_IDENTITY).unwrap());
-    let number = |name: &str| std::env::var(name).ok().map(|text| text.parse().unwrap());
-    let request = BackfillRequest {
-        user_config_dir: None,
-        batch_rows: number(CHILD_BATCH_ROWS).map(|rows| u32::try_from(rows).unwrap()),
-        max_rows: number(CHILD_MAX_ROWS),
-    };
+    // The command line the CLI would get, parsed by the CLI's own parser.
+    let argv = std::env::var(CHILD_ARGV).unwrap();
+    let request = evorch::backfill::parse_args(argv.split(' ').map(str::to_owned)).unwrap();
     let code = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -300,6 +351,14 @@ fn a_cli_process_that_runs_backfill_events() {
             })
         });
     std::process::exit(i32::from(code != ExitCode::SUCCESS));
+}
+
+/// What the CLI wrote to stdout, without the test harness's own lines that
+/// come first (the child is a test binary that ends by `process::exit`, so
+/// nothing of the harness follows the CLI's output).
+fn cli_stdout(out: &str) -> &str {
+    out.strip_prefix("\nrunning 1 test\ntest a_cli_process_that_runs_backfill_events ... ")
+        .unwrap_or_else(|| panic!("stdout lacks the harness lines: {out:?}"))
 }
 
 /// The text the offline command printed for a summary, so that scripts reading
@@ -410,10 +469,7 @@ async fn the_cli_shows_each_batch_on_stderr_and_the_summary_on_stdout_as_before(
         "{lines:?}"
     );
     let summary = summary_text(5, 0, 1, 3, 0);
-    assert!(
-        out.contains(&format!("{summary}\n")),
-        "stdout is {out:?}, which lacks {summary}"
-    );
+    assert_eq!(cli_stdout(&out), format!("{summary}\n"));
     assert_eq!(
         serde_json::from_str::<Value>(&summary).unwrap(),
         json!({"converted":5,"reattributed":0,"undecodable":1,"batches":3,"remaining":0})
@@ -440,7 +496,7 @@ async fn a_row_budget_bounds_the_rows_the_cli_converts_and_leaves_the_rest() {
         String::from_utf8_lossy(&output.stderr)
     );
     let summary = summary_text(4, 0, 0, 2, 6);
-    assert!(out.contains(&format!("{summary}\n")), "{out:?}");
+    assert_eq!(cli_stdout(&out), format!("{summary}\n"));
     assert_eq!(core.unconverted(), 6);
 }
 
@@ -529,4 +585,102 @@ async fn a_cli_killed_by_sigkill_stops_only_its_own_backfill() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cli_interrupted_by_sigint_stops_only_its_own_backfill() {
     a_signalled_cli_stops_only_its_own_backfill(Some("INT")).await;
+}
+
+// ---- the production composition (`BootstrappedHost`) -----------------------
+//
+// The tests above hold the operation with a seam of a hand-built area. These
+// run the CLI against the host the core process builds, where no seam exists:
+// the area, its disconnect hook and the connection counting are the production
+// ones.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bootstrapped_core_runs_the_cli_backfill_and_prints_the_same_summary() {
+    // Given: the production host over four rows to convert and one it cannot decode.
+    let core = Core::bootstrapped(4, 1).await;
+
+    // When: the CLI backfills in a process of its own.
+    let cli = core.cli(2, None);
+    let output = tokio::task::spawn_blocking(move || cli.wait_with_output().unwrap())
+        .await
+        .unwrap();
+
+    // Then: it succeeded, shows its progress on stderr, and prints the summary on stdout.
+    let (out, err) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.status.success(), "{err}");
+    assert!(
+        err.lines()
+            .last()
+            .is_some_and(|line| line.starts_with("backfill-events: batch 3: converted 5,")),
+        "{err}"
+    );
+    let summary = summary_text(5, 0, 1, 3, 0);
+    assert_eq!(cli_stdout(&out), format!("{summary}\n"));
+    assert_eq!(core.unconverted(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cli_killed_while_a_bootstrapped_core_backfills_stops_only_its_own_operation() {
+    // Given: more batches of one row than the CLI can see through before it is
+    // killed, and a client that stays connected and listens.
+    const ROWS: u32 = 100_000;
+    let mut core = Core::bootstrapped(ROWS, 0).await;
+    let staying = core.client().await;
+    let mut events = subscribe(&staying).await;
+
+    // When: a CLI starts its backfill and the core has committed its first batch
+    // (the CLI prints that line once it has heard of it).
+    let mut cli = core.cli(1, None);
+    let mut stderr = BufReader::new(cli.stderr.take().unwrap()).lines();
+    let first = tokio::task::spawn_blocking(move || stderr.next().unwrap().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        first.starts_with("backfill-events: batch 1: converted 1,"),
+        "{first}"
+    );
+
+    // And: a client that started nothing comes and goes, then the CLI is killed.
+    drop(core.client().await);
+    let visitor = core.departures.recv().await.unwrap();
+    cli.kill().unwrap();
+    let status = tokio::task::spawn_blocking(move || cli.wait().unwrap())
+        .await
+        .unwrap();
+    assert!(!status.success(), "the CLI did not finish by itself");
+
+    // Then: the operation the CLI started stops at a batch boundary, with what
+    // it had committed, and nothing else was stopped.
+    let left = core.departures.recv().await.unwrap();
+    assert_ne!(left, visitor);
+    let done = settled(&mut events).await;
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    let converted = converted(&done);
+    assert!((1..u64::from(ROWS)).contains(&converted), "{converted}");
+    assert_eq!(
+        core.unconverted(),
+        i64::from(ROWS) - i64::try_from(converted).unwrap()
+    );
+
+    // And: the client that stayed was not disconnected and finishes the work.
+    let rendered = backfill(
+        &staying,
+        &BackfillRequest {
+            user_config_dir: None,
+            batch_rows: Some(100_000),
+            max_rows: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(rendered.is_ok(), "{rendered:?}");
+    assert_eq!(core.unconverted(), 0);
 }

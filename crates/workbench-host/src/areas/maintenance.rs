@@ -35,7 +35,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use storage::StorageHandle;
 use tokio::sync::watch;
@@ -55,6 +55,7 @@ use super::settings::operations::{Lookup, Operations, Tracked, digest_of};
 use super::{AreaHandles, AreaTasks, ProjectionSource, StopSignal};
 use crate::bootstrap::BootstrapError;
 use crate::bootstrap::restart::HostCommandPermit;
+use crate::connections::{ConnectionEpoch, ConnectionHooks};
 use crate::queries::{Pager, error, revision};
 
 /// Operations the table keeps (running and settled). Beyond it a new id is
@@ -110,6 +111,9 @@ struct Inner {
     source: ProjectionSource,
     storage: StorageHandle,
     seams: MaintenanceSeams,
+    /// Where the clients' connections are counted, once the area stops work on
+    /// a disconnect (see [`MaintenanceArea::stop_on_disconnect`]).
+    connections: OnceLock<Arc<ConnectionHooks>>,
 }
 
 struct State {
@@ -117,10 +121,18 @@ struct State {
     running: HashMap<MaintenanceKind, Running>,
 }
 
+/// Who started an operation and during which run of connections of that client.
+struct Owner {
+    client: ClientId,
+    /// The epoch the client was in when the operation was accepted; before
+    /// every epoch when it held no connection then.
+    epoch: ConnectionEpoch,
+}
+
 struct Running {
     id: OperationId,
     /// The client that started it, when the connection said who it was.
-    owner: Option<ClientId>,
+    owner: Option<Owner>,
     cancel: watch::Sender<bool>,
 }
 
@@ -228,12 +240,18 @@ impl MaintenanceArea {
     /// no one else's (ADR 0045 §10). The hook only records the request; each
     /// operation stops at its next batch boundary on its own task, and a batch
     /// already inside the writer commits first.
-    pub fn stop_on_disconnect(&self, connections: &crate::connections::ConnectionHooks) {
+    ///
+    /// A notice names the epoch of the client's connections that ended
+    /// ([`ConnectionEpoch`]) and stops the operations accepted in it or before
+    /// it, so a notice that reaches the area late, after the client connected
+    /// again and started something, leaves that alone.
+    pub fn stop_on_disconnect(&self, connections: &Arc<ConnectionHooks>) {
         let Some(inner) = &self.inner else { return };
+        let _ = inner.connections.set(connections.clone());
         let inner = Arc::downgrade(inner);
-        connections.register(Arc::new(move |client| {
+        connections.register(Arc::new(move |client, epoch| {
             if let Some(inner) = inner.upgrade() {
-                inner.stop_operations_of(client);
+                inner.stop_operations_of(client, epoch);
             }
         }));
     }
@@ -256,6 +274,7 @@ impl MaintenanceArea {
                 source,
                 storage,
                 seams,
+                connections: OnceLock::new(),
             })),
             pager: Pager::default(),
         }
@@ -296,6 +315,16 @@ impl MaintenanceArea {
         };
         let (view, cancel) = {
             let mut state = lock(&inner.state);
+            // Read under the table's lock: an operation that is accepted is
+            // never older than the epoch it records.
+            let owner = owner.map(|client| Owner {
+                client: client.clone(),
+                epoch: inner
+                    .connections
+                    .get()
+                    .and_then(|connections| connections.epoch_of(client))
+                    .unwrap_or_default(),
+            });
             match state.table.lookup(&start.operation_id, &digest) {
                 Lookup::Same(view) => {
                     return Ok(Accepted {
@@ -349,7 +378,7 @@ impl MaintenanceArea {
                 kind,
                 Running {
                     id: start.operation_id.clone(),
-                    owner: owner.cloned(),
+                    owner,
                     cancel,
                 },
             );
@@ -430,9 +459,10 @@ fn unknown() -> WorkbenchError {
 }
 
 impl Inner {
-    fn stop_operations_of(&self, client: &ClientId) {
+    fn stop_operations_of(&self, client: &ClientId, ended: ConnectionEpoch) {
         for running in lock(&self.state).running.values() {
-            if running.owner.as_ref() == Some(client) {
+            let stale = |owner: &Owner| owner.client == *client && owner.epoch <= ended;
+            if running.owner.as_ref().is_some_and(stale) {
                 running.cancel.send_replace(true);
             }
         }
