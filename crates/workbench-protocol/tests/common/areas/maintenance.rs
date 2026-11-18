@@ -42,6 +42,19 @@ fn backfill(state: Value, batches: u32, effect: &str, extra: Value) -> Value {
     view
 }
 
+fn reindex(state: Value, batches: u32, effect: &str, progress: Value, extra: Value) -> Value {
+    let mut view = json!({
+        "operation": {"operation_id": "op-2", "state": state, "revision": "4"},
+        "task": "reindex_threads", "batches": batches,
+        "progress": {"type": "reindex_threads", "payload": progress},
+        "effect": effect
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        view[key] = value.clone();
+    }
+    view
+}
+
 pub fn samples() -> AreaSamples {
     AreaSamples {
         name: "maintenance",
@@ -85,6 +98,24 @@ pub fn samples() -> AreaSamples {
             reply(
                 "list",
                 json!({"items": [
+                    reindex(
+                    json!({"type": "ready"}),
+                    7,
+                    "complete",
+                    json!({"request_id": "req-1",
+                           "summary": {"target_count": 3, "succeeded": 2,
+                                       "deleted_before_submission": 0,
+                                       "gaps": [{"reason": {"reason": "blocked",
+                                                 "detail": {"reason": "extraction",
+                                                            "detail": {"reason": "provenance_unknown",
+                                                                       "detail": "legacy_unproven"}}},
+                                                 "count": 1}]},
+                           "result": {"status": "completed_with_gaps", "request_id": "req-1",
+                                      "summary": {"target_count": 3, "succeeded": 2,
+                                                  "deleted_before_submission": 0,
+                                                  "gaps": [{"reason": {"reason": "capacity_paused"}, "count": 1}]}}}),
+                    json!({"outcome": "completed"}),
+                ),
                     backfill(json!({"type": "pending"}), 0, "none",
                              json!({"progress": {"type": "backfill_events", "payload": {
                                  "converted": 0, "reattributed": 0, "undecodable": 0}}})),

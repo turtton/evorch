@@ -2460,12 +2460,7 @@ fn wal_wait_expires_requests_individually_and_the_job_waits_for_the_last_deadlin
     waiting(fx.drive(&lease, 2 * S));
     // Exercise the state machine with an already-accepted request. Admission
     // of new requests during a wait is wired separately in U3.
-    let late_id = {
-        let transaction = fx.conn().unchecked_transaction().unwrap();
-        let (id, _) = super::requests::submit_in(&transaction, &all(), 10 * S).unwrap();
-        transaction.commit().unwrap();
-        id
-    };
+    let (late_id, _) = super::requests::submit_for_test(fx.conn(), &all(), 10 * S).unwrap();
     let early_deadline = 2 * S + WAL_WAIT_LIMIT_NS;
     let late_deadline = 10 * S + WAL_WAIT_LIMIT_NS;
     let next = waiting(fx.drive(&lease, early_deadline));
@@ -3187,14 +3182,10 @@ fn wal_job_expiry_rechecks_a_concurrent_submission_inside_immediate() {
     let submit_entering = entering.clone();
     let submit_done = submitted.clone();
     let peer = std::thread::spawn(move || {
-        let mut conn = Connection::open(path).unwrap();
+        let conn = Connection::open(path).unwrap();
         submit_entering.wait();
-        let transaction = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .unwrap();
-        let (request_id, targets) = super::requests::submit_in(&transaction, &all(), at).unwrap();
+        let (request_id, targets) = super::requests::submit_for_test(&conn, &all(), at).unwrap();
         assert_eq!(targets, 1);
-        transaction.commit().unwrap();
         submit_done.wait();
         request_id
     });
@@ -3744,4 +3735,237 @@ fn explicit_reindex_never_revives_an_archived_thread_whatever_the_evict_reason()
         "left as it was, not made pending"
     );
     assert_eq!(fx.row("run-root").state, "indexed");
+}
+
+fn request_state(fx: &Fixture, request_id: &str) -> String {
+    fx.conn()
+        .query_row(
+            "SELECT state FROM thread_index_requests WHERE request_id = ?1",
+            [request_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn target_count(fx: &Fixture, request_id: &str) -> u64 {
+    fx.conn()
+        .query_row(
+            "SELECT COUNT(*) FROM thread_index_request_targets WHERE request_id = ?1",
+            [request_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// Saves `count` runs, indexes them and returns their ids.
+fn indexed_runs(fx: &mut Fixture, count: usize) -> Vec<String> {
+    let lease = fx.lease(&cli(), S);
+    let ids: Vec<String> = (0..count).map(|index| format!("run-{index:03}")).collect();
+    for (index, run_id) in ids.iter().enumerate() {
+        fx.save(&verified(run_id, "alpha", (10 + index as i64) * S));
+    }
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    fx.control(3 * S).release_lease(&lease).unwrap();
+    assert_eq!(searchable_runs(fx, &ids).len(), count);
+    ids
+}
+
+/// Opens a registration, discovers every run and freezes `batches` batches of two runs.
+fn partial_registration(
+    fx: &mut Fixture,
+    batches: usize,
+    now: i64,
+) -> (String, Option<FreezeCursor>) {
+    let request_id = fx.control(now).begin_registration(&all(), now).unwrap();
+    while !fx.control(now).discover_batch(now).unwrap() {}
+    let mut cursor = None;
+    for _ in 0..batches {
+        cursor = super::requests::freeze_batch(fx.conn(), &request_id, cursor.as_ref(), 2)
+            .unwrap()
+            .next;
+    }
+    (request_id, cursor)
+}
+
+use super::requests::FreezeCursor;
+
+#[test]
+fn a_registering_request_is_invisible_to_status_and_to_the_scheduler() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 5);
+    let (request_id, cursor) = partial_registration(&mut fx, 1, 4 * S);
+    assert!(cursor.is_some(), "two of five runs frozen");
+    assert_eq!(request_state(&fx, &request_id), "registering");
+    assert_eq!(target_count(&fx, &request_id), 2);
+    // Unknown, never `cancelled` or `pending`.
+    assert_eq!(
+        fx.control(5 * S).request_status(&request_id, 5 * S),
+        Err(RequestFailure::InvalidArguments)
+    );
+    // Cancelling it from outside cannot touch a registration that is still being frozen.
+    assert_eq!(
+        fx.control(5 * S).cancel_request(&request_id),
+        Err(RequestFailure::InvalidArguments)
+    );
+    assert_eq!(request_state(&fx, &request_id), "registering");
+    // The scheduler sees no pending target: nothing leases or steps for it.
+    let has_pending: bool = fx
+        .conn()
+        .query_row(super::requests::HAS_PENDING_TARGETS_SQL, [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(!has_pending);
+}
+
+#[test]
+fn registration_resumes_at_each_batch_boundary_and_publishes_once() {
+    let mut fx = Fixture::new(512 * MIB);
+    let ids = indexed_runs(&mut fx, 5);
+    let (request_id, mut cursor) = partial_registration(&mut fx, 1, 4 * S);
+    // Each batch is its own committed transaction; the cursor alone resumes the scan.
+    let mut frozen = 2;
+    while cursor.is_some() {
+        let batch =
+            super::requests::freeze_batch(fx.conn(), &request_id, cursor.as_ref(), 2).unwrap();
+        frozen += batch.targets;
+        cursor = batch.next;
+    }
+    assert_eq!(frozen, 5);
+    assert_eq!(target_count(&fx, &request_id), 5);
+    // No run is frozen twice and none is skipped across the batch boundaries.
+    let order: Vec<String> = fx
+        .conn()
+        .prepare(
+            "SELECT run_id FROM thread_index_request_targets WHERE request_id = ?1 \
+             ORDER BY run_id DESC",
+        )
+        .unwrap()
+        .query_map([&request_id], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let mut expected = ids;
+    expected.reverse();
+    assert_eq!(order, expected);
+    let submitted = fx
+        .control(6 * S)
+        .publish_registration(&request_id, &cli(), 6 * S, HOUR)
+        .unwrap();
+    assert!(
+        matches!(submitted.progress, RequestProgress::Pending(ref summary) if summary.target_count == 5)
+    );
+    assert_eq!(request_state(&fx, &request_id), "pending");
+    // A second publish of the same registration is refused, not applied twice.
+    assert!(
+        fx.control(6 * S)
+            .publish_registration(&request_id, &cli(), 6 * S, HOUR)
+            .is_err()
+    );
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("lease");
+    };
+    assert_eq!(fx.drive(&lease, 7 * S), idle());
+    let ReindexResult::Completed { summary, .. } = terminal(&mut fx, &request_id, 8 * S) else {
+        panic!("completed");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (5, 5));
+}
+
+#[test]
+fn a_crash_mid_registration_is_cancelled_by_the_next_registration_and_keeps_the_index() {
+    let mut fx = Fixture::new(512 * MIB);
+    let ids = indexed_runs(&mut fx, 5);
+    let blocks_before: u64 = fx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM conversation_blocks", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let (request_id, _) = partial_registration(&mut fx, 1, 4 * S);
+    // The registering process dies here. Reopening alone leaves the row invisible; the
+    // first registration of the new process closes it.
+    let mut peer = fx.peer();
+    drop(super::IndexJob::new(peer.conn(), &peer.config, false));
+    assert_eq!(request_state(&fx, &request_id), "registering");
+    let next = peer
+        .control(5 * S)
+        .begin_registration(&all(), 5 * S)
+        .unwrap();
+    assert_eq!(request_state(&fx, &request_id), "cancelled");
+    assert_eq!(request_state(&fx, &next), "registering");
+    peer.control(5 * S).abort_registration(&next);
+    assert_eq!(
+        fx.control(5 * S)
+            .request_status(&request_id, 5 * S)
+            .unwrap()
+            .progress,
+        RequestProgress::Cancelled
+    );
+    // The registration only marked two runs for re-index: every block is still stored,
+    // and the ordinary background indexing makes them searchable again.
+    let blocks: u64 = fx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM conversation_blocks", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(blocks, blocks_before);
+    let lease = fx.lease(&cli(), 6 * S);
+    assert_eq!(fx.drive(&lease, 6 * S), idle());
+    assert_eq!(searchable_runs(&fx, &ids).len(), 5);
+    // A new request then settles cleanly.
+    let (new_id, targets) = super::requests::submit_for_test(fx.conn(), &all(), 6 * S).unwrap();
+    assert_eq!(targets, 5);
+    assert_eq!(fx.drive(&lease, 7 * S), idle());
+    assert!(matches!(
+        terminal(&mut fx, &new_id, 8 * S),
+        ReindexResult::Completed { .. }
+    ));
+    assert_eq!(searchable_runs(&fx, &ids).len(), 5);
+}
+
+#[test]
+fn an_aborted_registration_is_cancelled_and_never_pending() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 3);
+    let (request_id, _) = partial_registration(&mut fx, 1, 4 * S);
+    fx.control(5 * S).abort_registration(&request_id);
+    assert_eq!(request_state(&fx, &request_id), "cancelled");
+    // Publishing an aborted registration is refused.
+    assert!(
+        fx.control(5 * S)
+            .publish_registration(&request_id, &cli(), 5 * S, HOUR)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_target_frozen_before_a_later_registration_follows_the_new_generation() {
+    let mut fx = Fixture::new(512 * MIB);
+    indexed_runs(&mut fx, 4);
+    // `slow` froze two runs and waits; `fast` registers and publishes in between,
+    // which bumps the generation of every run.
+    let (slow, mut cursor) = partial_registration(&mut fx, 1, 4 * S);
+    let (fast, fast_targets) = super::requests::submit_for_test(fx.conn(), &all(), 5 * S).unwrap();
+    assert_eq!(fast_targets, 4);
+    while cursor.is_some() {
+        cursor = super::requests::freeze_batch(fx.conn(), &slow, cursor.as_ref(), 2)
+            .unwrap()
+            .next;
+    }
+    let submitted = fx
+        .control(6 * S)
+        .publish_registration(&slow, &cli(), 6 * S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("lease");
+    };
+    assert_eq!(fx.drive(&lease, 7 * S), idle());
+    for request_id in [&slow, &fast] {
+        let ReindexResult::Completed { summary, .. } = terminal(&mut fx, request_id, 8 * S) else {
+            panic!("{request_id} must complete without stale-generation gaps");
+        };
+        assert_eq!(summary.succeeded, summary.target_count);
+    }
 }

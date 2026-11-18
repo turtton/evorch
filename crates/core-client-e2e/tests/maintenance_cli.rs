@@ -1,5 +1,5 @@
-//! `evorch maintenance backfill-events` against a real core (ADR 0045, stage
-//! 17d-2): the CLI's own code (`evorch::online_maintenance`, the entry it shares
+//! `evorch maintenance backfill-events` (stage 17d-2) and `evorch reindex-threads`
+//! (stage 17d-3) against a real core (ADR 0045): the CLI's own code (`evorch::online_maintenance`, the entry it shares
 //! with `evorch eval`) over the Unix socket of a production maintenance area
 //! over a real database.
 //!
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use evorch::cli::core_client::{client_config, connect_core, finish};
-use evorch::online_maintenance::{BackfillRequest, backfill};
+use evorch::online_maintenance::{self, BackfillRequest, ReindexEnd, backfill};
 use serde_json::{Value, json};
 use workbench_client::WorkbenchClient;
 use workbench_host::areas::maintenance::{
@@ -30,7 +30,7 @@ use workbench_protocol::handshake::Capability;
 use workbench_protocol::ids::ClientId;
 use workbench_protocol::namespaces::maintenance::{
     ListMaintenance, MaintenanceEvent, MaintenanceProgress, MaintenanceQuery, MaintenanceReply,
-    MaintenanceView,
+    MaintenanceView, ReindexResult, ReindexThreads,
 };
 use workbench_protocol::operation::{CancelReason, OperationState};
 use workbench_protocol::queries::{Query, QueryReply};
@@ -139,6 +139,8 @@ struct Core {
     connections: Arc<ConnectionHooks>,
     /// Every client whose last connection ended, after the area heard of it.
     departures: tokio::sync::mpsc::UnboundedReceiver<ClientId>,
+    /// The storage of a hand-built core, to put threads in its index.
+    store: Option<storage::StorageHandle>,
     /// What keeps the core's storage and areas alive.
     _keep: Box<dyn std::any::Any>,
     _instance: evorch_core::instance::Instance,
@@ -189,14 +191,17 @@ impl Core {
             maintenance,
             ..Default::default()
         })));
-        Self::serve(
+        let handle = store.handle();
+        let mut core = Self::serve(
             dir,
             database,
             host,
             connections,
             departures,
             Box::new(store),
-        )
+        );
+        core.store = Some(handle);
+        core
     }
 
     /// A core of the production composition: the host that
@@ -265,6 +270,7 @@ impl Core {
             socket: instance.socket.clone(),
             connections,
             departures,
+            store: None,
             _dir: dir,
             _keep: keep,
             _instance: instance,
@@ -316,6 +322,84 @@ impl Core {
     }
 }
 
+impl Core {
+    /// A verified source run the thread index can take, in the project `/project`.
+    fn source(&self, id: &str, at: i64) {
+        use storage::thread_index::{
+            BlockOrigin, BlockProvenance, MessageProvenance, PROVENANCE_FORMAT_VERSION,
+            ProvenanceEvidence, ProvenanceMap, ProvenanceStatus, SnapshotWrite,
+        };
+        let handle = self.store.as_ref().expect("a hand-built core");
+        handle
+            .save_snapshot_bundle(&SnapshotWrite {
+                record: storage::RunContextRecord {
+                    run_id: id.into(),
+                    role: "worker".into(),
+                    name: "worker".into(),
+                    parent_run_id: None,
+                    config_json: json!({"thread_id": id}).to_string(),
+                    messages_json: json!([
+                        {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+                    ])
+                    .to_string(),
+                    checkpoints_json: "[]".into(),
+                    terminal_phase: "Done".into(),
+                    restorable: true,
+                    updated_at_ns: at,
+                    host_inputs_json: "[]".into(),
+                },
+                expected_snapshot_revision: None,
+                binding: None,
+                status: ProvenanceStatus::Verified {
+                    evidence: ProvenanceEvidence::CompletePositionMap,
+                },
+                map: ProvenanceMap {
+                    version: PROVENANCE_FORMAT_VERSION,
+                    raw_message_count: 1,
+                    checkpoint_count: 0,
+                    messages: vec![MessageProvenance {
+                        raw_index: 0,
+                        ordinal: 0,
+                        blocks: vec![BlockProvenance {
+                            block_index: 0,
+                            origin: BlockOrigin::Native,
+                            excluded_reason: None,
+                        }],
+                    }],
+                },
+            })
+            .unwrap();
+        handle
+            .upsert_threads_host(&[storage::threads::ThreadUpsert {
+                thread_id: id.into(),
+                project_root: Some("/project".into()),
+                root_run_id: Some(id.into()),
+                created_at_ns: at,
+                updated_at_ns: at,
+                ..Default::default()
+            }])
+            .unwrap();
+    }
+
+    /// `evorch reindex-threads` as a process of its own, connected to this core.
+    fn cli_reindex(&self, argv: &str) -> std::process::Child {
+        let mut cli = Command::new(std::env::current_exe().unwrap());
+        cli.args([
+            "--exact",
+            "a_cli_process_that_runs_reindex_threads",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_SOCKET, &self.socket)
+        .env(CHILD_IDENTITY, &self.identity)
+        .env(CHILD_ARGV, format!("reindex-threads {argv}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        cli.spawn().unwrap()
+    }
+}
+
 impl Drop for Core {
     fn drop(&mut self) {
         self.server.abort();
@@ -352,6 +436,48 @@ fn a_cli_process_that_runs_backfill_events() {
             })
         });
     std::process::exit(i32::from(code != ExitCode::SUCCESS));
+}
+
+/// Not a test of its own: the process the reindex tests start, which stands for
+/// `evorch reindex-threads`: the CLI's own parser, task, run and way of ending
+/// over the core named by the environment.
+#[test]
+fn a_cli_process_that_runs_reindex_threads() {
+    let Some(socket) = std::env::var_os(CHILD_SOCKET) else {
+        return;
+    };
+    let identity = PathBuf::from(std::env::var_os(CHILD_IDENTITY).unwrap());
+    let argv = std::env::var(CHILD_ARGV).unwrap();
+    let code = match evorch::reindex_threads::parse_args(argv.split_whitespace().map(str::to_owned))
+    {
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+        Ok(args) => {
+            let task = evorch::reindex_threads::task(&args).unwrap();
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let launcher = launcher(&identity, Path::new(&socket));
+                    evorch::cli::reindex::finish(match connect_core(&launcher).await {
+                        Ok(connected) => {
+                            online_maintenance::reindex(&connected.client, &task).await
+                        }
+                        Err(error) => Err(error),
+                    })
+                })
+        }
+    };
+    std::process::exit(i32::from(code != ExitCode::SUCCESS));
+}
+
+/// What the reindex CLI wrote to stdout, without the harness lines.
+fn reindex_stdout(out: &str) -> &str {
+    out.strip_prefix("\nrunning 1 test\ntest a_cli_process_that_runs_reindex_threads ... ")
+        .unwrap_or_else(|| panic!("stdout lacks the harness lines: {out:?}"))
 }
 
 /// What the CLI wrote to stdout, without the test harness's own lines that
@@ -415,7 +541,9 @@ async fn operations(client: &WorkbenchClient) -> Vec<MaintenanceView> {
 }
 
 fn converted(view: &MaintenanceView) -> u64 {
-    let MaintenanceProgress::BackfillEvents { converted, .. } = &view.progress;
+    let MaintenanceProgress::BackfillEvents { converted, .. } = &view.progress else {
+        panic!("a backfill reports its own progress: {view:?}");
+    };
     *converted
 }
 
@@ -707,4 +835,186 @@ async fn a_cli_killed_while_a_bootstrapped_core_backfills_stops_only_its_own_ope
     .unwrap();
     assert!(rendered.is_ok(), "{rendered:?}");
     assert_eq!(core.unconverted(), 0);
+}
+
+// ---- reindex-threads (stage 17d-3) -----------------------------------------
+//
+// `evorch reindex-threads` is a task of the same core: the CLI shows its steps
+// on stderr, prints the result it always printed on stdout, and stops what it
+// started when it goes away.
+
+/// What the reindex CLI printed to stdout, read as the result the offline
+/// command printed: the same JSON the storage's own result serializes to.
+fn printed_result(out: &str) -> storage::thread_index::ReindexResult {
+    let text = reindex_stdout(out).trim_end();
+    let result: storage::thread_index::ReindexResult = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        text,
+        serde_json::to_string_pretty(&result).unwrap(),
+        "the printed JSON is the one of the offline result"
+    );
+    result
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_shows_each_reindex_step_on_stderr_and_the_result_on_stdout_as_before() {
+    // Given: two threads to index, and a core that holds the operation before
+    // its first step.
+    let hold = Hold::after(0);
+    let core = Core::start(0, 0, Some(hold.hook())).await;
+    core.source("first", 10);
+    core.source("second", 20);
+
+    // When: the CLI reindexes in a process of its own, and the core goes on.
+    let cli = core.cli_reindex("");
+    hold.reached().await;
+    hold.release();
+    let output = tokio::task::spawn_blocking(move || cli.wait_with_output().unwrap())
+        .await
+        .unwrap();
+
+    // Then: it succeeded, its steps are on stderr.
+    let (out, err) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.status.success(), "{err}");
+    let lines: Vec<&str> = err.lines().collect();
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.starts_with("reindex-threads: step ")),
+        "{lines:?}"
+    );
+    // The lines are throttled, so the last one need not be the final state:
+    // each names the targets frozen at registration, and the steps count up.
+    assert!(!lines.is_empty(), "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.contains(": targets 2, succeeded ")),
+        "{lines:?}"
+    );
+    let steps: Vec<u64> = lines
+        .iter()
+        .map(|line| {
+            let rest = line.strip_prefix("reindex-threads: step ").unwrap();
+            rest.split(':').next().unwrap().parse().unwrap()
+        })
+        .collect();
+    assert!(steps.windows(2).all(|pair| pair[0] < pair[1]), "{steps:?}");
+
+    // And: stdout holds the `completed` result of the offline command's shape.
+    let storage::thread_index::ReindexResult::Completed { summary, .. } = printed_result(&out)
+    else {
+        panic!("not a completed result: {out}");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+    assert!(summary.gaps.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bootstrapped_core_runs_the_cli_reindex_and_prints_the_result() {
+    // Given: the production host, whose index has no thread yet.
+    let core = Core::bootstrapped(0, 0).await;
+
+    // When: the CLI reindexes in a process of its own.
+    let cli = core.cli_reindex("--include-evicted");
+    let output = tokio::task::spawn_blocking(move || cli.wait_with_output().unwrap())
+        .await
+        .unwrap();
+
+    // Then: it succeeded with an empty `completed` result.
+    let (out, err) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.status.success(), "{err}");
+    let storage::thread_index::ReindexResult::Completed { summary, .. } = printed_result(&out)
+    else {
+        panic!("not a completed result: {out}");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (0, 0));
+}
+
+/// A CLI invocation that ends by `signal` stops the reindex it started before
+/// its next step, and only that one: a client that came and went, and a client
+/// that stays, are not touched, and the one that stays reindexes afterwards.
+async fn a_signalled_cli_stops_only_its_own_reindex(signal: Option<&str>) {
+    // Given: two threads to index, a core that holds an operation before its
+    // first step, and a client that stays connected and listens.
+    let hold = Hold::after(0);
+    let mut core = Core::start(0, 0, Some(hold.hook())).await;
+    core.source("first", 10);
+    core.source("second", 20);
+    let staying = core.client().await;
+    let mut events = subscribe(&staying).await;
+
+    // When: a CLI starts its reindex and is held before the first step.
+    let mut cli = core.cli_reindex("");
+    hold.reached().await;
+    let started = operations(&staying).await;
+    assert_eq!(started.len(), 1);
+    assert!(!started[0].operation.state.is_final());
+
+    // And: a client that started nothing comes and goes.
+    drop(core.client().await);
+    let visitor = core.departures.recv().await.unwrap();
+    assert!(
+        !operations(&staying).await[0].operation.state.is_final(),
+        "a client that started nothing stopped the reindex"
+    );
+
+    // And: the CLI process is signalled.
+    match signal {
+        None => cli.kill().unwrap(),
+        Some(signal) => {
+            let status = Command::new("kill")
+                .args([&format!("-{signal}"), &cli.id().to_string()])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+    }
+    let status = tokio::task::spawn_blocking(move || cli.wait().unwrap())
+        .await
+        .unwrap();
+    assert!(!status.success(), "the CLI did not finish by itself");
+
+    // Then: the core heard of the CLI leaving, and the reindex stops at the
+    // boundary it is held at, without a result.
+    let left = core.departures.recv().await.unwrap();
+    assert_ne!(left, visitor);
+    hold.release();
+    let done = settled(&mut events).await;
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    let MaintenanceProgress::ReindexThreads { result, .. } = &done.progress else {
+        panic!("a reindex reports its own progress: {done:?}");
+    };
+    assert_eq!(result, &None);
+
+    // And: the client that stayed was not disconnected, and its own reindex
+    // takes the threads the stopped one left.
+    let end = online_maintenance::reindex(&staying, &ReindexThreads::default())
+        .await
+        .unwrap();
+    let ReindexEnd::Result(ReindexResult::Completed { summary, .. }) = end else {
+        panic!("the staying client's reindex did not complete: {end:?}");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cli_killed_by_sigkill_stops_only_its_own_reindex() {
+    a_signalled_cli_stops_only_its_own_reindex(None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cli_interrupted_by_sigint_stops_only_its_own_reindex() {
+    a_signalled_cli_stops_only_its_own_reindex(Some("INT")).await;
 }

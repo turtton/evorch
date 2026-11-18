@@ -49,6 +49,62 @@
       "payload": {
         "items": [
           {
+            "batches": 7,
+            "effect": "complete",
+            "operation": {
+              "operation_id": "op-2",
+              "revision": "4",
+              "state": {
+                "type": "ready"
+              }
+            },
+            "outcome": "completed",
+            "progress": {
+              "payload": {
+                "request_id": "req-1",
+                "result": {
+                  "request_id": "req-1",
+                  "status": "completed_with_gaps",
+                  "summary": {
+                    "deleted_before_submission": 0,
+                    "gaps": [
+                      {
+                        "count": 1,
+                        "reason": {
+                          "reason": "capacity_paused"
+                        }
+                      }
+                    ],
+                    "succeeded": 2,
+                    "target_count": 3
+                  }
+                },
+                "summary": {
+                  "deleted_before_submission": 0,
+                  "gaps": [
+                    {
+                      "count": 1,
+                      "reason": {
+                        "detail": {
+                          "detail": {
+                            "detail": "legacy_unproven",
+                            "reason": "provenance_unknown"
+                          },
+                          "reason": "extraction"
+                        },
+                        "reason": "blocked"
+                      }
+                    }
+                  ],
+                  "succeeded": 2,
+                  "target_count": 3
+                }
+              },
+              "type": "reindex_threads"
+            },
+            "task": "reindex_threads"
+          },
+          {
             "batches": 0,
             "effect": "none",
             "operation": {

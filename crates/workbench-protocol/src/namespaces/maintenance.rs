@@ -2,13 +2,12 @@
 //! event database, run by the core through its one storage writer. A client
 //! never opens the database.
 //!
-//! One task exists: `backfill_events` (convert the legacy `subkind` / `run_id`
-//! columns of the events table). The thread-index rebuild (`reindex-threads`) is
-//! not here yet: its request registration is one unbounded writer transaction,
-//! which would block every other write. Stage 17d-3 bounds that transaction in
-//! storage and then adds the task (it must be done before 19a). Offline tools
-//! (`evorch maintenance <other>`, `inspect`) stay outside the core and are not
-//! part of this namespace.
+//! Two tasks exist: `backfill_events` (convert the legacy `subkind` / `run_id`
+//! columns of the events table) and `reindex_threads` (rebuild the thread
+//! search index: register a request whose targets are frozen in bounded writer
+//! transactions, then step the shared index work as its foreground owner, one
+//! step per batch; stage 17d-3). Offline tools (`evorch maintenance <other>`,
+//! `inspect`) stay outside the core and are not part of this namespace.
 //!
 //! # Operations
 //!
@@ -44,6 +43,15 @@
 //! * **Bounded.** A backfill operation handles at most `max_rows` rows (the
 //!   core applies [`DEFAULT_MAX_ROWS`] when none is named); start another
 //!   operation to continue, the counters show what is left.
+//! * **Reindex.** A `reindex_threads` operation counts one batch for each index
+//!   step that made progress. The request it registers is durable: an operation
+//!   that is cancelled, stopped or lost leaves the request `pending` in the
+//!   database (its lease is released), and the next index owner, or the next
+//!   `reindex_threads` operation, continues the shared work; the operation
+//!   names the request id (`request_id`). With `wait` unset and another live
+//!   owner holding the index lease the operation ends `ready` with the outcome
+//!   `delegated` (the request was accepted, not done). The result a command line
+//!   prints is [`ReindexResult`], in the progress of the settled view.
 use super::diagnostics::OperationTarget;
 use crate::{
     errors::ErrorCode,
@@ -51,7 +59,7 @@ use crate::{
     ids::OperationId,
     operation::{OperationState, OperationView},
     queries::PageRequest,
-    validation::{ValidationError, check_bytes},
+    validation::{ValidationError, check_bytes, check_count},
     views::Page,
 };
 use serde::{Deserialize, Serialize};
@@ -61,7 +69,7 @@ pub const QUERY_OPERATIONS: &[&str] = &["get_maintenance", "list_maintenance"];
 pub const EVENT_TYPES: &[&str] = &["maintenance_progress", "maintenance_settled"];
 
 /// The tasks `start_maintenance` names, by wire name.
-pub const MAINTENANCE_TASKS: &[&str] = &["backfill_events"];
+pub const MAINTENANCE_TASKS: &[&str] = &["backfill_events", "reindex_threads"];
 /// Tagged choices inside a command's payload that classification names.
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[super::NestedOperation {
     operation: "start_maintenance",
@@ -92,6 +100,32 @@ pub struct BackfillEvents {
     pub max_rows: Option<u64>,
 }
 
+/// Rebuild the thread search index of a selection of runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReindexThreads {
+    /// Only the runs of the threads of this project (a canonical, absolute
+    /// directory path); every project when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_project: Option<String>,
+    /// Only runs whose source changed at or after this Unix nanosecond time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ns: Option<i64>,
+    /// Revive runs that were evicted too.
+    #[serde(default)]
+    pub include_evicted: bool,
+    /// Wait for another live owner of the index instead of ending `delegated`.
+    #[serde(default)]
+    pub wait: bool,
+}
+
+/// Longest [`ReindexThreads::canonical_project`], in bytes.
+pub const MAX_PROJECT_BYTES: usize = 4096;
+/// Longest request id of a reindex, in bytes.
+pub const MAX_REQUEST_ID_BYTES: usize = 128;
+/// Most gap classes a [`ReindexSummary`] lists.
+pub const MAX_REINDEX_GAPS: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -101,17 +135,31 @@ pub struct BackfillEvents {
 )]
 pub enum MaintenanceTask {
     BackfillEvents(BackfillEvents),
+    ReindexThreads(ReindexThreads),
 }
 
 impl MaintenanceTask {
     pub fn kind(&self) -> MaintenanceKind {
         match self {
             Self::BackfillEvents(_) => MaintenanceKind::BackfillEvents,
+            Self::ReindexThreads(_) => MaintenanceKind::ReindexThreads,
         }
     }
 
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
+            Self::ReindexThreads(task) => {
+                if let Some(project) = &task.canonical_project {
+                    check_bytes("canonical_project", project, MAX_PROJECT_BYTES, false)?;
+                }
+                if task.since_ns.is_some_and(|since| since < 0) {
+                    return Err(ValidationError::OutOfRange {
+                        field: "since_ns",
+                        reason: "must not be negative",
+                    });
+                }
+                Ok(())
+            }
             Self::BackfillEvents(task) => {
                 if let Some(rows) = task.batch_rows
                     && !(1..=MAX_BATCH_ROWS).contains(&rows)
@@ -140,6 +188,7 @@ impl MaintenanceTask {
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceKind {
     BackfillEvents,
+    ReindexThreads,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +266,132 @@ pub enum MaintenanceOutcome {
     /// All targeted work is done (or the bound of the operation was reached;
     /// the counters tell what is left).
     Completed,
+    /// A reindex that did not wait: another live owner of the index holds the
+    /// request, which is accepted and durable, not done.
+    Delegated,
+}
+
+/// Why a run of a reindex has no index (the wire form of the storage reasons,
+/// the same JSON).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceUnknown {
+    MissingSidecar,
+    SnapshotMismatch,
+    IncompleteMap,
+    LegacyUnproven,
+    UnsupportedVersion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "reason", content = "detail", rename_all = "snake_case")]
+pub enum ExtractionFailure {
+    InvalidJson,
+    ProvenanceUnknown(ProvenanceUnknown),
+    NoteRunMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "reason", content = "detail", rename_all = "snake_case")]
+pub enum BlockedReason {
+    Extraction(ExtractionFailure),
+    AttemptsExhausted,
+}
+
+/// Why a target of a reindex did not reach the index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "reason", content = "detail", rename_all = "snake_case")]
+pub enum ReindexGapReason {
+    Blocked(BlockedReason),
+    CapacityPaused,
+    CapacityWaitExpired,
+    IndexDisabled,
+    OversizedBudget,
+    OversizedStep,
+    EvictedByBudget,
+    Deleted,
+    Superseded,
+    VersionSuperseded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReindexGap {
+    pub reason: ReindexGapReason,
+    pub count: u64,
+}
+
+/// What a request has done: the targets frozen at registration and how they
+/// stand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReindexSummary {
+    pub target_count: u64,
+    pub succeeded: u64,
+    pub deleted_before_submission: u64,
+    pub gaps: Vec<ReindexGap>,
+}
+
+impl ReindexSummary {
+    fn validate(&self) -> Result<(), ValidationError> {
+        check_count("gaps", self.gaps.len(), MAX_REINDEX_GAPS)
+    }
+}
+
+/// Why a reindex failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReindexFailure {
+    InvalidArguments,
+    DatabaseUnavailable,
+    PersistenceUnavailable,
+    UnrecoverableControlFailure,
+}
+
+/// The result a command line prints (`accepted`, `completed`,
+/// `completed_with_gaps` or `failed`); the JSON is the same as the offline
+/// command's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReindexResult {
+    /// Not a result of the work: the request was handed to another live owner.
+    Accepted { request_id: String },
+    Completed {
+        request_id: String,
+        summary: ReindexSummary,
+    },
+    CompletedWithGaps {
+        request_id: String,
+        summary: ReindexSummary,
+    },
+    Failed {
+        request_id: Option<String>,
+        reason: ReindexFailure,
+    },
+}
+
+impl ReindexResult {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::Accepted { request_id } => check_request_id(request_id),
+            Self::Completed {
+                request_id,
+                summary,
+            }
+            | Self::CompletedWithGaps {
+                request_id,
+                summary,
+            } => {
+                check_request_id(request_id)?;
+                summary.validate()
+            }
+            Self::Failed { request_id, .. } => {
+                request_id.as_deref().map_or(Ok(()), check_request_id)
+            }
+        }
+    }
+}
+
+fn check_request_id(request_id: &str) -> Result<(), ValidationError> {
+    check_bytes("request_id", request_id, MAX_REQUEST_ID_BYTES, false)
 }
 
 /// What the committed batches did so far, by task.
@@ -241,12 +416,45 @@ pub enum MaintenanceProgress {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining_unattributed: Option<u64>,
     },
+    ReindexThreads {
+        /// The durable request, once it is registered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        /// How the request's targets stand after the last committed step;
+        /// absent before the request is registered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<ReindexSummary>,
+        /// The result a command line prints; present exactly when the operation
+        /// ended `ready`, or failed with a reason of the reindex.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<ReindexResult>,
+    },
 }
 
 impl MaintenanceProgress {
     pub fn kind(&self) -> MaintenanceKind {
         match self {
             Self::BackfillEvents { .. } => MaintenanceKind::BackfillEvents,
+            Self::ReindexThreads { .. } => MaintenanceKind::ReindexThreads,
+        }
+    }
+
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::BackfillEvents { .. } => Ok(()),
+            Self::ReindexThreads {
+                request_id,
+                summary,
+                result,
+            } => {
+                if let Some(request_id) = request_id {
+                    check_request_id(request_id)?;
+                }
+                if let Some(summary) = summary {
+                    summary.validate()?;
+                }
+                result.as_ref().map_or(Ok(()), ReindexResult::validate)
+            }
         }
     }
 }
@@ -272,6 +480,7 @@ pub struct MaintenanceView {
 impl MaintenanceView {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.operation.validate()?;
+        self.progress.validate()?;
         if self.progress.kind() != self.task {
             return Err(ValidationError::Inconsistent {
                 field: "progress",
@@ -282,6 +491,22 @@ impl MaintenanceView {
             check_bytes("message", message, MAX_MESSAGE_BYTES, true)?;
         }
         let ready = self.operation.state == OperationState::Ready;
+        if let MaintenanceProgress::ReindexThreads { result, .. } = &self.progress {
+            let named = result.is_some();
+            let failed_result = matches!(result, Some(ReindexResult::Failed { .. }));
+            if ready && (!named || failed_result) {
+                return Err(ValidationError::Inconsistent {
+                    field: "progress",
+                    reason: "a ready reindex names the result it ended with",
+                });
+            }
+            if named && !self.operation.state.is_final() {
+                return Err(ValidationError::Inconsistent {
+                    field: "progress",
+                    reason: "only a final operation names a result",
+                });
+            }
+        }
         if self.outcome.is_some() && !ready {
             return Err(ValidationError::Inconsistent {
                 field: "outcome",
