@@ -19,6 +19,8 @@ use sha2::{Digest, Sha256};
 use crate::agent_loop::LoopState;
 use crate::{AgentContext, AgentRuntime, RunId};
 
+pub(crate) mod usage;
+
 const NOTE_PREFIX: &str = "Temporary files (evorch): ";
 
 pub(crate) fn scratch_note(dir: &Path) -> String {
@@ -137,6 +139,7 @@ pub struct ThreadScratch {
     root: ScratchRoot,
     attachments: sandbox::attachments::AttachmentRoot,
     state: Mutex<State>,
+    archive_wake: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +150,11 @@ struct State {
     seen: HashMap<RunId, (String, u64)>,
     /// Unbound root-run directories, which no thread owner releases.
     run_dirs: HashSet<String>,
+    usage: HashMap<ScratchKey, usage::Usage>,
+    leases: HashMap<String, crate::ownership::Lease>,
+    archived: HashMap<String, u64>,
+    archive_seen: HashMap<RunId, (String, u64)>,
+    execution_keys: HashMap<(RunId, String), ScratchKey>,
 }
 
 impl ThreadScratch {
@@ -185,6 +193,7 @@ impl ThreadScratch {
             attachments: sandbox::attachments::AttachmentRoot::for_scope(root.parent()),
             root,
             state: Mutex::default(),
+            archive_wake: Mutex::default(),
         }
     }
 
@@ -356,6 +365,9 @@ pub(crate) struct RunScratch {
     pub(crate) dir: PathBuf,
     guidance_pending: bool,
     emptied_pending: bool,
+    archived_pending: bool,
+    binding: Option<(Arc<ThreadScratch>, ScratchKey, RunId, String)>,
+    monitor: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RunScratch {
@@ -364,6 +376,9 @@ impl RunScratch {
             dir,
             guidance_pending: false,
             emptied_pending: emptied,
+            archived_pending: false,
+            binding: None,
+            monitor: None,
         }
     }
 
@@ -390,6 +405,9 @@ impl RunScratch {
         if std::mem::take(&mut self.emptied_pending) {
             parts.push(emptied_notice(&self.dir));
         }
+        if std::mem::take(&mut self.archived_pending) {
+            parts.push(format!("[runtime temporary files] {} was removed after this thread was archived and all scratch users finished. Files saved there before are gone; recreate any you still need.", self.dir.display()));
+        }
         (!parts.is_empty()).then(|| parts.join("\n"))
     }
 }
@@ -406,11 +424,79 @@ impl LoopState {
         let scratch = runtime.thread_scratch()?;
         let run = self.task.run_id;
         let key = runtime.scratch_key(run);
+        let incarnation = self.task.publication.incarnation();
+        scratch.register_execution(&key, run, &incarnation)?;
         let dir = scratch.prepare(&key)?;
         let emptied = scratch.take_emptied_notice(&key, run, restored);
-        Ok(Some(RunScratch::new(dir, emptied)))
+        let mut binding = RunScratch::new(dir, emptied);
+        binding.archived_pending = scratch.take_archived_notice(&key, run);
+        binding.binding = Some((scratch, key, run, incarnation));
+        Ok(Some(binding))
     }
 
+    pub(crate) fn start_scratch_monitor(&mut self) {
+        let Some(binding) = self.scratch.as_mut() else {
+            return;
+        };
+        let Some((scratch, key, run, incarnation)) = binding.binding.clone() else {
+            return;
+        };
+        if binding.monitor.is_some() {
+            return;
+        }
+        let executor = Arc::clone(&self.shared.executor);
+        // Subscribe before the first snapshot: terminal teardown cannot be missed.
+        let Some(mut changed) = executor.subscribe_shell_job_changes() else {
+            return;
+        };
+        scratch.sync_shell_users(&key, run, &executor);
+        binding.monitor = Some(tokio::spawn(async move {
+            loop {
+                if changed.changed().await.is_err() {
+                    let _ = scratch.register_user(
+                        &key,
+                        usage::ScratchUser::ObserverLost {
+                            run,
+                            incarnation: incarnation.clone(),
+                        },
+                    );
+                    tracing::warn!(%run, "scratch shell observation closed; scratch retained");
+                    return;
+                }
+                scratch.sync_shell_users(&key, run, &executor);
+            }
+        }));
+    }
+    pub(crate) fn release_scratch_usage(&self) {
+        if let Some((scratch, key, run, incarnation)) =
+            self.scratch.as_ref().and_then(|s| s.binding.as_ref())
+        {
+            scratch.sync_shell_users(key, *run, &self.shared.executor);
+            scratch.release_execution(*run, incarnation);
+        } else if let Some(runtime) = self.runtime() {
+            runtime
+                .release_scratch_execution(self.task.run_id, &self.task.publication.incarnation());
+        }
+    }
+    pub(crate) fn sync_scratch_shell_users(&self) {
+        if let Some((scratch, key, run, _)) = self.scratch.as_ref().and_then(|s| s.binding.as_ref())
+        {
+            scratch.sync_shell_users(key, *run, &self.shared.executor);
+        }
+    }
+    pub(crate) fn resume_scratch(&mut self) -> io::Result<()> {
+        if let Some(binding) = self.scratch.as_mut()
+            && let Some((scratch, key, run, incarnation)) = &binding.binding
+        {
+            scratch.register_execution(key, *run, incarnation)?;
+            let dir = scratch.prepare(key)?;
+            if dir != binding.dir {
+                return Err(io::Error::other("scratch path changed on resume"));
+            }
+            binding.archived_pending |= scratch.take_archived_notice(key, *run);
+        }
+        Ok(())
+    }
     /// Called with the procedure context, so an interrupted request still
     /// retries its exact saved input first. Existing history is never edited.
     pub(crate) fn append_scratch_context(&mut self) {
@@ -424,7 +510,26 @@ impl LoopState {
     }
 }
 
+impl Drop for RunScratch {
+    fn drop(&mut self) {
+        if let Some(monitor) = self.monitor.take() {
+            monitor.abort();
+        }
+    }
+}
 impl AgentRuntime {
+    pub(crate) fn release_scratch_execution(&self, run: RunId, incarnation: &str) {
+        let scratch = self
+            .shared
+            .thread_scratch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(scratch) = scratch {
+            scratch.release_execution(run, incarnation);
+        }
+    }
+
     /// Share thread scratch directories with an ownership host, which empties
     /// and deletes them on ownership transitions (ADR 0024, ADR 0033).
     pub fn set_thread_scratch(&self, scratch: Arc<ThreadScratch>) {

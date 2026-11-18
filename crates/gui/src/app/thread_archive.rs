@@ -91,6 +91,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(ArchiveChange { archived, family }) = change else {
             return Ok(());
         };
+        // The archive is saved and its lock released. Hint the scratch owner
+        // before attachment removal, which may fail, so scratch recovery never
+        // depends on it. Only IDs are sent from the UI thread.
+        if archived && let Some(owner) = &self.ownership {
+            for member in &family {
+                owner.hint_scratch_archive(&member.to_string());
+            }
+        }
         self.forget_family_attachment_drafts(&family);
         if archived && let Some(guard) = attachment_guard {
             guard.remove().map_err(|e| {

@@ -648,6 +648,38 @@ impl Registry {
         Ok(())
     }
 
+    /// Archive detachment is a read-only write reservation: never change a generation.
+    pub(super) fn archive_scratch(
+        &mut self,
+        thread: &str,
+        expected: &super::Lease,
+        clean: impl FnOnce() -> std::io::Result<Option<bool>>,
+    ) -> Result<Option<bool>, RegistryError> {
+        self.connection.busy_timeout(Duration::ZERO)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let json: Option<String> = transaction
+            .query_row(
+                "SELECT state FROM thread_owners WHERE thread_id=?1",
+                [thread],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(json) = json else {
+            return Ok(None);
+        };
+        let owner: ThreadOwner = serde_json::from_str(&json)?;
+        if owner.lease.owner_id != expected.owner_id
+            || owner.lease.generation != expected.generation
+            || owner.state == super::OwnerState::Released
+            || owner.protects_scratch()
+        {
+            return Ok(None);
+        }
+        Ok(clean()?)
+    }
+
     /// Hold a write transaction while building the live set and sweeping, so
     /// a concurrent install/claim cannot invalidate the decision mid-deletion.
     pub(super) fn scratch_sweep(

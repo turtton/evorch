@@ -1,0 +1,58 @@
+//! Wiring of archive-time thread scratch recovery.
+//!
+//! The runtime owns the archive worker, the fenced rename and the trash
+//! collector. It knows nothing about the sidebar, so the host and the native
+//! GUI inject the saved shared-sidebar state here, through the one function
+//! both production paths call ([`install`]).
+//!
+//! The checker runs only on the runtime's archive worker thread. It reads the
+//! shared sidebar file without its save lock ([`SidebarStore::read_unlocked`]:
+//! the write is atomic, so a reader sees the old or the new file) and never
+//! writes it. Anything it cannot establish keeps the scratch:
+//!
+//! - no shared sidebar configured, or the file cannot be read or parsed;
+//! - the thread is not listed, or its family cannot be resolved.
+//!
+//! Only a resolved family decides: archived (collect) or not archived (the
+//! hint is dropped). Attachments are never touched from here.
+use runtime::ownership::{OwnerHost, ScratchArchiveChecker};
+use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
+use workspace_state::{SidebarStore, ThreadId};
+
+/// The checker over the saved shared sidebar at `sidebar` (`None`: no shared
+/// sidebar, every query keeps the scratch).
+#[must_use]
+pub fn sidebar_checker(sidebar: Option<PathBuf>) -> Arc<ScratchArchiveChecker> {
+    Arc::new(move |thread: &str| {
+        let Some(path) = &sidebar else {
+            return Err(io::Error::other(
+                "no shared sidebar to confirm the archive; keeping the scratch",
+            ));
+        };
+        let document = SidebarStore::new(path.clone())
+            .read_unlocked()
+            .map_err(|error| io::Error::other(format!("shared sidebar unreadable: {error}")))?;
+        match document
+            .sidebar
+            .resolve_states()
+            .get(&ThreadId::new(thread))
+        {
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "thread is not in the shared sidebar; keeping the scratch",
+            )),
+            Some(state) if !state.is_resolved() => Err(io::Error::other(
+                "thread family is unresolved; keeping the scratch",
+            )),
+            Some(state) => Ok(state.archived),
+        }
+    })
+}
+
+/// Connects `owner` to the saved shared sidebar. Call once per owner host
+/// before archive hints can arrive.
+pub fn install(owner: &OwnerHost, sidebar: Option<PathBuf>) {
+    owner.set_scratch_archive_checker(sidebar_checker(sidebar));
+}

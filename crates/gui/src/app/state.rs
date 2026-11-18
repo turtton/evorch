@@ -478,6 +478,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn with_sidebar_path(mut self, path: PathBuf) -> Self {
         self.sidebar_path = Some(path);
+        self.wire_scratch_archive();
         self
     }
 

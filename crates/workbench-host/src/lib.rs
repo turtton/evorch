@@ -25,6 +25,7 @@ pub mod projects;
 pub mod provenance;
 pub mod queries;
 pub mod receipts;
+pub mod scratch_archive;
 pub mod subscriptions;
 
 pub use ingress::CommandHost;

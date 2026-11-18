@@ -34,6 +34,7 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
             delivered_cursor: 0,
             last_seen: None,
         }),
+        teardown: Arc::default(),
         changed,
         registry_changes: watch::channel(0).0,
         cancel,
@@ -52,6 +53,29 @@ fn fixture() -> (JobRegistry, Arc<Job>, mpsc::Receiver<Input>) {
         .unwrap()
         .insert(job.handle.clone(), Arc::clone(&job));
     (registry, job, received)
+}
+
+#[test]
+fn opaque_identity_keeps_only_confirmed_terminal_teardown_after_registry_release() {
+    for confirmed in [false, true] {
+        let (registry, job, _input) = fixture();
+        let identity = registry.snapshots("owner").pop().unwrap().identity;
+        assert!(!identity.teardown_confirmed());
+        job.state.lock().unwrap().teardown_confirmed = confirmed;
+        job.complete(Completion {
+            status: "done",
+            exit_code: Some(0),
+            error: None,
+        });
+        assert_eq!(identity.teardown_confirmed(), confirmed);
+        registry.release("owner").unwrap();
+        assert!(registry.snapshots("owner").is_empty());
+        assert_eq!(identity.teardown_confirmed(), confirmed);
+        assert!(
+            registry.interrupt(&identity).is_err(),
+            "proof grants no control"
+        );
+    }
 }
 
 fn owner() -> ToolExecutionContext {

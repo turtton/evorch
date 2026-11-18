@@ -483,9 +483,53 @@ it off deletes the directory. Opening an ownership host deletes discarded
 trees, directories of threads without a live owner (unknown liveness keeps
 them), and unbound-run directories when no other owner process may be live.
 Runtimes without an ownership host use a private parent removed with the
-runtime. Removal renames the tree aside immediately, then a bounded background
-queue deletes it with throttled, symlink-safe traversal; nothing scans or
+runtime. Removal renames the tree aside immediately, then a process-wide background
+collector deletes it with throttled, symlink-safe traversal; nothing scans or
 deletes on the UI thread.
+
+A saved family archive also releases its scratch directories while the process
+stays up. Existing archive eligibility checks are unchanged; recovery adds no
+new rejection and stops no runs. The host's `SetFamilyArchived` command and the native window's
+archive action each send a hint (thread IDs only, for every family member) once
+the archive is saved and the sidebar save lock is released, and before any
+attachment removal; a repeated archive request hints again, and a failed save,
+a busy attachment lock or a restore sends none. The sender only queues the IDs
+in memory: sidebar reads, ownership transactions and renames run on a
+dedicated archive thread of the ownership host, never on the UI thread or in a
+host command, and an archive's result never waits for or depends on scratch
+recovery. For each hinted thread that no run uses, the archive thread asks the
+checker both entry points inject whether the saved shared sidebar says the
+thread's family is archived. Only that answer allows the same rename-aside as a
+release; the tree is then deleted by the background collector. A thread still in use
+is collected after its last user ends, and a finished turn that waits for input
+counts as idle. Tool/question waits do not: run bodies, child runs and shell
+jobs hold separate identities, and a shell job remains a user until terminal
+state and confirmed teardown are both observed. Resuming an archived thread
+prepares the same path again, and a separate archive-disappearance notice is
+appended once to new input; the existing reset notice is unchanged. The checker reads the sidebar
+without taking the save lock. A thread whose family cannot be resolved, a
+missing shared sidebar and a read error all keep the directory; a known
+unarchived thread drops the hint. Attachments are not touched: scratch
+recovery never calls the attachment removal API, takes no attachment lock and
+does not open the attachment root. The existing restart/takeover reset
+contract is unchanged.
+
+On disk the `.trash-*` entries under the scratch parent are the source of
+truth for pending physical deletion. They are discovered at startup and when
+notified, so a crash after a rename leaves nothing the next start cannot
+collect. Deletion is throttled: 2 ms after every 256 entries, and a Busy
+ownership transaction is retried once after 100 ms. A failed tree is not retried
+again in that pass or self-scheduled: another notification or startup retries it.
+Normal shutdown stops producers, attempts drain and ownership release, then
+stops the archive worker and collector; failures are reported without skipping
+collector shutdown.
+
+Known limits: a thread archived by a process that does not own it is not
+collected by this one, so its directory can remain; pending hints live in
+memory only, so a planned handoff drops them and the next release or a normal
+start collects the directory; without a shared sidebar archive-time detachment is skipped;
+a saved archive and the physical deletion are separate events, and the second
+finishes later; a tree that cannot be deleted stays, with a diagnostic.
 
 New runs carry a `Temporary files (evorch): $TMPDIR is <path>.` block in their
 system message, separate from the workspace note and never rewritten on

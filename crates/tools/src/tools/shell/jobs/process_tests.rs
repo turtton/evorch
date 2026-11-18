@@ -37,6 +37,7 @@ fn job() -> (Arc<Job>, mpsc::Receiver<Input>, watch::Receiver<bool>) {
             delivered_cursor: 0,
             last_seen: None,
         }),
+        teardown: Arc::default(),
         changed,
         registry_changes: watch::channel(0).0,
         cancel,

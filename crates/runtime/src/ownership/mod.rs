@@ -23,7 +23,9 @@ pub use retry::RetryPolicy;
 pub(crate) use retry::virtual_time::VirtualClock;
 pub use state::{HeartbeatTick, OwnershipError, ThreadOwner};
 mod registry;
+mod scratch_archive;
 pub use registry::{OwnerVerdict, Registry, RegistryError};
+pub use scratch_archive::ScratchArchiveChecker;
 #[cfg(unix)]
 mod host;
 #[cfg(unix)]

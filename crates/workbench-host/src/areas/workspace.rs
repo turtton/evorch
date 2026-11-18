@@ -49,6 +49,8 @@ use workspace_state::{
 
 type Deleted = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 type Tombstones = dyn Fn() -> Result<Deleted, String> + Send + Sync;
+/// Sends one thread ID to the scratch archive worker. Never blocks or does IO.
+pub type ScratchHint = Arc<dyn Fn(&str) + Send + Sync>;
 
 struct Service {
     store: SidebarStore,
@@ -69,6 +71,8 @@ struct Service {
     /// Reproject all saved state at startup too: a failed mirror may have been
     /// followed by a crash, leaving no in-memory retry information.
     needs_projection: AtomicBool,
+    /// Tells the scratch owner that a family was archived (hint only).
+    scratch_hint: Option<ScratchHint>,
 }
 
 /// A conversation the core created, to be listed in the sidebar.
@@ -226,8 +230,22 @@ impl WorkspaceArea {
                 changes: AtomicU64::new(0),
                 registered: Default::default(),
                 needs_projection: AtomicBool::new(true),
+                scratch_hint: Some({
+                    let owner = handles.owner.clone();
+                    Arc::new(move |thread: &str| owner.hint_scratch_archive(thread))
+                }),
             }),
         })
+    }
+
+    /// Reports every archived family member to `hint` once the archive is
+    /// saved (the scratch owner of the production wiring, or a test probe).
+    #[must_use]
+    pub fn with_scratch_hint(mut self, hint: ScratchHint) -> Self {
+        if let Some(service) = self.inner.as_mut() {
+            service.scratch_hint = Some(hint);
+        }
+        self
     }
 
     /// A service over an explicit sidebar file, for hosts and tests that have
@@ -252,6 +270,7 @@ impl WorkspaceArea {
                 changes: AtomicU64::new(0),
                 registered: Default::default(),
                 needs_projection: AtomicBool::new(true),
+                scratch_hint: None,
             }),
         }
     }
@@ -679,6 +698,21 @@ impl Service {
         }
         self.project_saved(&lock, &mut document, snapshot);
         drop(lock);
+        // The archive is saved and its lock released. Hint the scratch owner
+        // before attachment removal, which may fail, so scratch recovery never
+        // depends on it. A repeated archive request hints again. Only IDs are
+        // sent; the owner's archive worker reads the sidebar and renames.
+        if let WorkspaceCommand::SetFamilyArchived(c) = command
+            && c.archived
+            && let Some(hint) = &self.scratch_hint
+            && let Ok(key) = document
+                .sidebar
+                .family_key(&ThreadId::new(c.thread.as_str()))
+        {
+            for member in document.sidebar.family_members(&key) {
+                hint(&member.to_string());
+            }
+        }
         if let Some(guard) = attachment_guard
             && matches!(command, WorkspaceCommand::SetFamilyArchived(c) if c.archived)
         {
