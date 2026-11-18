@@ -15,14 +15,16 @@ impl CommandHost {
     pub(in crate::ingress) fn evaluation_command(
         &mut self,
         command: EvaluationCommand,
-        _provenance: &Provenance,
+        provenance: &Provenance,
         restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         let evaluation = &self.areas.evaluation;
         let accepted = match &command {
-            EvaluationCommand::StartEvaluationRun(start) => evaluation.start_run(start, restart)?,
+            EvaluationCommand::StartEvaluationRun(start) => {
+                evaluation.start_run(start, provenance.client_id.as_ref(), restart)?
+            }
             EvaluationCommand::StartEvaluationReport(start) => {
-                evaluation.start_report(start, restart)?
+                evaluation.start_report(start, provenance.client_id.as_ref(), restart)?
             }
             // Cancelling holds the restart gate only for this call; the job it
             // names keeps the permit of its own start.

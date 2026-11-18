@@ -49,8 +49,9 @@ comment_checker. --problem describes what went wrong in the thread and is judged
 The output is a directory of <user-config-dir>/eval, named by --output (a bare name, or an
 absolute path that is a direct child of that directory: no `..`, no links); it must be missing or empty. The default is
 <UTC YYYYmmdd-HHMMSS>-<thread-id>. Workspaces are removed after finish/verification, including on
-failure; --keep-workspace preserves them. Interrupting this command does not stop the job: it
-runs on in the core, and an interrupted or cancelled one leaves workspaces for eval clean.
+failure; --keep-workspace preserves them. Interrupting or killing this command, or losing its
+connection, stops the job it started (and no other job): the core cancels it when the command's
+last connection to it ends. A stopped job leaves workspaces for eval clean.
 Unless --no-report is given, the directory is then reported as by `eval report`.
 `eval report` reprices every run from one price table, judges each baseline/candidate pair
 in both orders (cached in <dir>/judgments; --rejudge asks again), and writes

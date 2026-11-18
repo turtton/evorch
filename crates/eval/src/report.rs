@@ -3,7 +3,7 @@
 //! (ADR 0036 §7–§10).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -262,19 +262,37 @@ pub async fn report(args: ReportArgs, deps: &ReportDeps) -> Result<Vec<Report>, 
 pub async fn report_with(
     args: ReportArgs,
     deps: &ReportDeps,
+    on_written: impl FnMut(usize),
+) -> Result<Vec<Report>, EvalError> {
+    let dirs = args
+        .dirs
+        .iter()
+        .map(|dir| output::PinnedDir::open_path(dir))
+        .collect::<Result<Vec<_>, _>>()?;
+    report_pinned(dirs, args.user_config_dir, args.rejudge, deps, on_written).await
+}
+
+/// Like [report_with] over directories that are already open: every file of the
+/// report is read and written through them, so a directory that is swapped for
+/// a link after it was chosen, or a link inside it, leads nowhere else.
+///
+/// # Errors
+/// As [report].
+pub async fn report_pinned(
+    dirs: Vec<output::PinnedDir>,
+    user_config_dir: Option<PathBuf>,
+    rejudge: bool,
+    deps: &ReportDeps,
     mut on_written: impl FnMut(usize),
 ) -> Result<Vec<Report>, EvalError> {
-    if args.dirs.is_empty() {
+    if dirs.is_empty() {
         return Err(EvalError::Usage("at least one --output is required".into()));
     }
-    let user_config_dir = args
-        .user_config_dir
-        .clone()
-        .or_else(config::user_config_dir);
+    let user_config_dir = user_config_dir.or_else(config::user_config_dir);
     let base = runner::load_config(user_config_dir.as_deref(), None, None)?;
     let (judge_config, judge_summary) = judge_config(&base);
     let mut context = Context {
-        rejudge: args.rejudge,
+        rejudge,
         user_config_dir,
         table: PriceTable::new(base.providers.clone(), deps.catalog.clone()),
         judge_config,
@@ -284,18 +302,21 @@ pub async fn report_with(
         judge: None,
     };
     let mut reports = Vec::new();
-    for (index, dir) in args.dirs.iter().enumerate() {
+    for (index, dir) in dirs.iter().enumerate() {
         let report = report_dir(dir, &mut context).await?;
-        output::write_json(&dir.join(output::REPORT_JSON_FILE), &report)?;
-        std::fs::write(dir.join(output::REPORT_MARKDOWN_FILE), markdown(&report))?;
+        dir.write_json(output::REPORT_JSON_FILE, &report)?;
+        dir.write(output::REPORT_MARKDOWN_FILE, markdown(&report).as_bytes())?;
         on_written(index);
         reports.push(report);
     }
     Ok(reports)
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+fn read_json<T: DeserializeOwned>(dir: &output::PinnedDir, name: &str) -> Result<T, String> {
+    let path = dir.join(name);
+    let bytes = dir
+        .read(name)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))
 }
 
@@ -307,20 +328,27 @@ struct LoadedRun {
 }
 
 fn load_run(
-    dir: &Path,
+    dir: &output::PinnedDir,
     entry: &output::RunEntry,
     table: &PriceTable,
 ) -> Result<LoadedRun, EvalError> {
-    let run_dir = dir.join(&entry.dir);
-    let outcome: Outcome =
-        read_json(&run_dir.join(output::OUTCOME_FILE)).map_err(EvalError::Usage)?;
+    let run_dir = dir.open_below(&entry.dir)?;
+    let outcome: Outcome = read_json(&run_dir, output::OUTCOME_FILE).map_err(EvalError::Usage)?;
     let conversation: Vec<Entry> =
-        read_json(&run_dir.join(output::CONVERSATION_FILE)).unwrap_or_default();
-    let diff = std::fs::read(run_dir.join(output::DIFF_FILE))
+        read_json(&run_dir, output::CONVERSATION_FILE).unwrap_or_default();
+    let diff = run_dir
+        .read(output::DIFF_FILE)
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
     let database = run_dir.join(output::DATABASE_FILE);
-    let record = RunRecord::load(&database).map_err(|source| EvalError::Database {
+    // The database is opened by its path, read-only; only a regular file that
+    // is not a link is handed to it.
+    let record = if run_dir.is_regular_file(output::DATABASE_FILE)? {
+        RunRecord::load(&database)
+    } else {
+        Ok(RunRecord::default())
+    }
+    .map_err(|source| EvalError::Database {
         path: database.clone(),
         source,
     })?;
@@ -344,16 +372,19 @@ fn load_run(
     })
 }
 
-async fn report_dir(dir: &Path, context: &mut Context<'_>) -> Result<Report, EvalError> {
-    let manifest: Manifest = read_json(&dir.join(output::MANIFEST_FILE))
+async fn report_dir(
+    dir: &output::PinnedDir,
+    context: &mut Context<'_>,
+) -> Result<Report, EvalError> {
+    let manifest: Manifest = read_json(dir, output::MANIFEST_FILE)
         .map_err(|error| EvalError::Usage(format!("not an evaluation directory: {error}")))?;
     let mut runs = Vec::new();
     let mut warnings = Vec::new();
-    let preflight = dir.join(runner::preflight::REPORT_FILE);
-    if preflight.exists()
-        && let Some(reason) = read_json::<runner::preflight::Report>(&preflight)
-            .map_err(EvalError::Usage)?
-            .failure()
+    if dir.is_regular_file(runner::preflight::REPORT_FILE)?
+        && let Some(reason) =
+            read_json::<runner::preflight::Report>(dir, runner::preflight::REPORT_FILE)
+                .map_err(EvalError::Usage)?
+                .failure()
     {
         warnings.push(Warning {
             kind: WarningKind::PreflightFailed,
@@ -604,7 +635,7 @@ struct JudgedPair {
 
 async fn judge_pair(
     context: &mut Context<'_>,
-    dir: &Path,
+    dir: &output::PinnedDir,
     manifest: &Manifest,
     aspects: &[&str],
     index: u32,
@@ -612,12 +643,11 @@ async fn judge_pair(
     candidate: &LoadedRun,
 ) -> JudgedPair {
     let names = (baseline.summary.name(), candidate.summary.name());
-    let judgments = dir.join(output::JUDGMENTS_DIR);
     let mut usage = Vec::new();
     let mut errors = Vec::new();
     let mut orders: BTreeMap<&str, Verdicts> = BTreeMap::new();
     for order in [Order::BaselineFirst, Order::CandidateFirst] {
-        let path = judgments.join(format!("pair-{index}-{}.json", order.as_str()));
+        let file = format!("pair-{index}-{}.json", order.as_str());
         let valid =
             |verdicts: &Verdicts| aspects.iter().all(|aspect| verdicts.contains_key(*aspect));
         let (first, second) = match order {
@@ -634,7 +664,7 @@ async fn judge_pair(
         match cached_or_judge(
             context,
             &manifest.thread_id,
-            &path,
+            (dir, &file),
             &names,
             valid,
             async |judge: Judge| judge.compare(&payload, aspects).await,
@@ -672,7 +702,7 @@ async fn judge_pair(
     let process = cached_or_judge(
         context,
         &manifest.thread_id,
-        &judgments.join(format!("pair-{index}-process.json")),
+        (dir, &format!("pair-{index}-process.json")),
         &names,
         |_: &ProcessAnalysis| true,
         async |judge: Judge| judge.analyze(&payload).await,
@@ -708,13 +738,14 @@ type Spent<T> = Result<(T, Vec<RequestUsage>), (String, Vec<RequestUsage>)>;
 async fn cached_or_judge<T: Serialize + DeserializeOwned>(
     context: &mut Context<'_>,
     thread: &str,
-    path: &Path,
+    (dir, file): (&output::PinnedDir, &str),
     names: &(String, String),
     valid: impl Fn(&T) -> bool,
     ask: impl AsyncFnOnce(Judge) -> Judged<T>,
 ) -> Spent<T> {
     if !context.rejudge
-        && let Ok(cached) = read_json::<Cached<T>>(path)
+        && let Ok(judgments) = dir.open_dir(output::JUDGMENTS_DIR)
+        && let Ok(cached) = read_json::<Cached<T>>(&judgments, file)
         && (&cached.baseline, &cached.candidate) == (&names.0, &names.1)
         && valid(&cached.result)
     {
@@ -736,11 +767,11 @@ async fn cached_or_judge<T: Serialize + DeserializeOwned>(
         usage: judged.usage,
         judged_at: output::timestamp(SystemTime::now()),
     };
-    if let Some(parent) = path.parent()
-        && let Err(error) =
-            std::fs::create_dir_all(parent).and_then(|()| output::write_json(path, &cached))
+    if let Err(error) = dir
+        .ensure_dir(output::JUDGMENTS_DIR)
+        .and_then(|judgments| judgments.write_json(file, &cached))
     {
-        tracing::warn!(%error, path = %path.display(), "judgment could not be cached");
+        tracing::warn!(%error, path = %dir.join(output::JUDGMENTS_DIR).join(file).display(), "judgment could not be cached");
     }
     Ok((cached.result, cached.usage))
 }

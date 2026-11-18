@@ -887,3 +887,247 @@ async fn a_real_core_process_fails_a_preflight_without_inference() {
     );
     child.kill().await.unwrap();
 }
+
+// ---- a client that leaves stops its own jobs (ADR 0045 §10) ----------------
+
+/// A core process of its own, serving one configuration directory.
+struct CoreProcess {
+    socket: String,
+    _child: tokio::process::Child,
+}
+
+async fn start_core_process(dir: &test_socket_dir::SplitDir, config_dir: &Path) -> CoreProcess {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+    // The core process has no keyring entry of this test: it reads the key from its environment.
+    let config_file = config_dir.join("config.toml");
+    let keyring = format!(
+        r#"credential = {{ type = "keyring", service = "evorch", account = "{ACCOUNT}" }}"#
+    );
+    let text = std::fs::read_to_string(&config_file).unwrap();
+    assert!(text.contains(&keyring));
+    std::fs::write(
+        &config_file,
+        text.replace(
+            &keyring,
+            r#"credential = { type = "env", var = "EVAL_CACHE_E2E_KEY" }"#,
+        ),
+    )
+    .unwrap();
+    let mut child = tokio::process::Command::new(
+        std::env::var_os("CARGO_BIN_EXE_evorch-core").expect("CARGO_BIN_EXE_evorch-core"),
+    )
+    .args(["--config-dir", config_dir.to_str().unwrap(), "--foreground"])
+    .env("XDG_STATE_HOME", dir.sockets().join("state"))
+    .env("XDG_RUNTIME_DIR", dir.sockets())
+    .env("EVAL_CACHE_E2E_KEY", "fixture-key")
+    .current_dir(config_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .kill_on_drop(true)
+    .spawn()
+    .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let ready: Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().expect("readiness line")).unwrap();
+    assert_eq!(ready["status"], "ready");
+    // The core's output stays open for as long as the child lives.
+    tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+    CoreProcess {
+        socket: ready["socket"].as_str().unwrap().to_owned(),
+        _child: child,
+    }
+}
+
+async fn connect_client(socket: &str, name: &str) -> workbench_client::WorkbenchClient {
+    use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
+    use workbench_protocol::handshake::BuildInfo;
+    use workbench_protocol::ids::ClientId;
+
+    WorkbenchClient::connect(
+        UnixTransport::connect(socket).await.unwrap(),
+        ClientConfig::new(
+            ClientId::new(name).unwrap(),
+            BuildInfo {
+                name: "test".into(),
+                version: "1".into(),
+                revision: None,
+            },
+        ),
+    )
+    .await
+    .unwrap()
+}
+
+const CHILD_SOCKET: &str = "EVAL_CACHE_E2E_CHILD_SOCKET";
+const CHILD_READY: &str = "EVAL-CACHE-E2E-CHILD-READY";
+const CHILD_JOB: &str = "child-job";
+
+/// Not a test of its own: the process the tests below start, which stands for a
+/// CLI invocation. It connects to the core named by the environment, starts a
+/// job, says so and then waits to be signalled. Without the environment it does
+/// nothing.
+#[test]
+fn a_client_process_that_holds_a_job_until_it_is_signalled() {
+    let Some(socket) = std::env::var_os(CHILD_SOCKET) else {
+        return;
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let client = connect_client(socket.to_str().unwrap(), "child-client").await;
+            let mut start = run_of(CHILD_JOB, THREAD);
+            start.output = Some("child-out".into());
+            client
+                .command(Command::Evaluation(EvaluationCommand::StartEvaluationRun(
+                    Box::new(start),
+                )))
+                .await
+                .unwrap();
+            println!("{CHILD_READY}");
+            std::future::pending::<()>().await;
+        });
+}
+
+async fn settled_over_the_wire(
+    events: &mut workbench_client::Subscription,
+    id: &str,
+) -> EvaluationJobView {
+    loop {
+        let envelope = events.next().await.expect("the subscription stays open");
+        if let UiEvent::Evaluation(EvaluationEvent::EvaluationJobSettled { view }) = envelope.event
+            && view.operation.operation_id.as_str() == id
+        {
+            return *view;
+        }
+    }
+}
+
+/// A CLI invocation that ends by `signal` stops the job it started, and only
+/// that one: a job another client started in the same core goes on.
+async fn a_signalled_client_stops_only_its_own_job(signal: rustix::process::Signal) {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    use workbench_protocol::namespaces::evaluation::{EvaluationQuery, EvaluationReply};
+    use workbench_protocol::queries::{Query, QueryReply};
+
+    let dir = test_socket_dir::SplitDir::new();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config_dir = dir.path().canonicalize().unwrap();
+    record_thread(&config_dir, &config_dir.join("evorch-events.db"));
+    // Both replays send their first request and are held there.
+    let (gate, arrivals) = mock_openai::ResponseGate::new();
+    let provider = StreamingMockOpenAi::spawn_with_models(
+        vec![
+            text("agent-1", "held").with_gate(gate.clone()),
+            text("agent-2", "held").with_gate(gate.clone()),
+        ],
+        mock_openai::WriteMode::default(),
+        vec![MODEL.into()],
+    );
+    configure(&config_dir, &provider.base_url());
+    let core = start_core_process(&dir, &config_dir).await;
+
+    let owner = connect_client(&core.socket, "survivor-client").await;
+    let mut events = owner
+        .subscribe(Subscribe {
+            scope: SubscriptionScope::All,
+            after: None,
+        })
+        .await
+        .unwrap();
+    let mut own = run_of("own-job", THREAD);
+    own.output = Some("own-out".into());
+    owner
+        .command(Command::Evaluation(EvaluationCommand::StartEvaluationRun(
+            Box::new(own),
+        )))
+        .await
+        .unwrap();
+
+    let mut cli = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_client_process_that_holds_a_job_until_it_is_signalled",
+            "--nocapture",
+        ])
+        .env(CHILD_SOCKET, &core.socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(cli.stdout.take().unwrap()).lines();
+    while lines
+        .next_line()
+        .await
+        .unwrap()
+        .expect("the client ends only when signalled")
+        != CHILD_READY
+    {}
+    tokio::task::spawn_blocking(move || {
+        arrivals.recv().unwrap();
+        arrivals.recv().unwrap();
+        arrivals
+    })
+    .await
+    .unwrap();
+
+    let pid = rustix::process::Pid::from_raw(i32::try_from(cli.id().unwrap()).unwrap()).unwrap();
+    rustix::process::kill_process(pid, signal).unwrap();
+    let status = cli.wait().await.unwrap();
+    assert!(!status.success(), "the client did not finish by itself");
+
+    let stopped = settled_over_the_wire(&mut events, CHILD_JOB).await;
+    assert!(
+        matches!(stopped.operation.state, OperationState::Cancelled { .. }),
+        "{stopped:?}"
+    );
+    let QueryReply::Evaluation(EvaluationReply::Job(survivor)) = owner
+        .query(Query::Evaluation(EvaluationQuery::GetEvaluationJob(
+            workbench_protocol::namespaces::diagnostics::OperationTarget {
+                operation_id: operation("own-job"),
+            },
+        )))
+        .await
+        .unwrap()
+    else {
+        panic!("not a job");
+    };
+    assert_eq!(
+        survivor.operation.state,
+        OperationState::Pending,
+        "the other client's job goes on: {survivor:?}"
+    );
+
+    // The client that is still here stops its own job the explicit way.
+    owner
+        .command(Command::Evaluation(EvaluationCommand::CancelEvaluationJob(
+            CancelEvaluationJob {
+                operation_id: operation("own-job"),
+            },
+        )))
+        .await
+        .unwrap();
+    let done = settled_over_the_wire(&mut events, "own-job").await;
+    assert!(matches!(
+        done.operation.state,
+        OperationState::Cancelled { .. }
+    ));
+    gate.release();
+    drop(core);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_interrupted_by_sigint_stops_only_its_own_job() {
+    a_signalled_client_stops_only_its_own_job(rustix::process::Signal::INT).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_killed_by_sigkill_stops_only_its_own_job() {
+    a_signalled_client_stops_only_its_own_job(rustix::process::Signal::KILL).await;
+}

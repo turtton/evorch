@@ -35,14 +35,13 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use eval::output::PinnedDir;
 use eval::runner::ModelFactory;
-use eval::{
-    EvalArgs, EvalError, FixedModels, Isolation, ReportArgs, ReportDeps, RunReport, RunnerDeps,
-};
+use eval::{EvalArgs, EvalError, FixedModels, Isolation, ReportDeps, RunReport, RunnerDeps};
 use tokio::sync::watch;
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::events::UiEvent;
-use workbench_protocol::ids::OperationId;
+use workbench_protocol::ids::{ClientId, OperationId};
 use workbench_protocol::limits::{MAX_NAME_BYTES, MAX_TITLE_BYTES};
 use workbench_protocol::management::EvaluationJobKind;
 use workbench_protocol::namespaces::evaluation::{
@@ -141,6 +140,9 @@ struct State {
 
 struct Running {
     cancel: watch::Sender<bool>,
+    /// The client that started the job; it stops with that client's last
+    /// connection.
+    owner: Option<ClientId>,
     /// The directory names the job uses.
     names: Vec<String>,
 }
@@ -268,16 +270,20 @@ impl Jobs {
     pub(super) fn start_run(
         self: &Arc<Self>,
         start: &StartEvaluationRun,
+        owner: Option<&ClientId>,
         permit: HostCommandPermit,
     ) -> Result<Accepted, WorkbenchError> {
         let digest = digest_of(&[b"run", &encode(start)?]);
         let names = start.output.iter().cloned().collect();
         self.accept(
-            &start.operation_id,
-            EvaluationJobKind::Run,
-            digest,
-            names,
+            JobRequest {
+                id: &start.operation_id,
+                kind: EvaluationJobKind::Run,
+                digest,
+                names,
+            },
             Work::Run(Box::new(start.clone())),
+            owner,
             permit,
         )
     }
@@ -285,29 +291,36 @@ impl Jobs {
     pub(super) fn start_report(
         self: &Arc<Self>,
         start: &StartEvaluationReport,
+        owner: Option<&ClientId>,
         permit: HostCommandPermit,
     ) -> Result<Accepted, WorkbenchError> {
         let digest = digest_of(&[b"report", &encode(start)?]);
         self.accept(
-            &start.operation_id,
-            start.kind(),
-            digest,
-            start.targets.clone(),
+            JobRequest {
+                id: &start.operation_id,
+                kind: start.kind(),
+                digest,
+                names: start.targets.clone(),
+            },
             Work::Report {
                 targets: start.targets.clone(),
                 rejudge: start.rejudge,
             },
+            owner,
             permit,
         )
     }
 
     fn accept(
         self: &Arc<Self>,
-        id: &OperationId,
-        kind: EvaluationJobKind,
-        digest: [u8; 32],
-        names: Vec<String>,
+        JobRequest {
+            id,
+            kind,
+            digest,
+            names,
+        }: JobRequest<'_>,
         work: Work,
+        owner: Option<&ClientId>,
         permit: HostCommandPermit,
     ) -> Result<Accepted, WorkbenchError> {
         let (view, cancel) = {
@@ -355,7 +368,14 @@ impl Jobs {
             }
             state.table.insert(view.clone(), digest)?;
             let (cancel, observed) = watch::channel(false);
-            state.running.insert(id.clone(), Running { cancel, names });
+            state.running.insert(
+                id.clone(),
+                Running {
+                    cancel,
+                    owner: owner.cloned(),
+                    names,
+                },
+            );
             (view, observed)
         };
         let this = self.clone();
@@ -398,6 +418,16 @@ impl Jobs {
             view,
             already_applied,
         })
+    }
+
+    /// Ask every running job `client` started to stop, as a cancel does. A
+    /// job of another client, or one nobody owns, is left alone.
+    pub(super) fn stop_jobs_of(&self, client: &ClientId) {
+        for running in lock(&self.state).running.values() {
+            if running.owner.as_ref() == Some(client) {
+                running.cancel.send_replace(true);
+            }
+        }
     }
 
     /// One job, running or finished.
@@ -674,12 +704,10 @@ impl Jobs {
             credentials: Some(self.parts.credentials.clone()),
             catalog: self.catalog().await,
         };
-        let reports = eval::report::report_with(
-            ReportArgs {
-                dirs,
-                user_config_dir: Some(self.parts.config_dir.clone()),
-                rejudge,
-            },
+        let reports = eval::report::report_pinned(
+            dirs,
+            Some(self.parts.config_dir.clone()),
+            rejudge,
             &deps,
             |index| self.record_report(id, names.get(index)),
         )
@@ -814,6 +842,15 @@ impl Jobs {
     }
 }
 
+/// What identifies a job that is asked for: its id, its kind, the digest of its
+/// request and the directories it uses.
+struct JobRequest<'a> {
+    id: &'a OperationId,
+    kind: EvaluationJobKind,
+    digest: [u8; 32],
+    names: Vec<String>,
+}
+
 fn encode<T: serde::Serialize>(request: &T) -> Result<Vec<u8>, WorkbenchError> {
     serde_json::to_vec(request)
         .map_err(|_| error(ErrorCode::InvalidRequest, "the request cannot be encoded"))
@@ -890,28 +927,33 @@ fn failed_report(error: &EvalError, scrub: &Scrub, recorded: bool) -> Ended {
 
 /// The directories of a report, by name under the root: each must be a plain
 /// directory there (a link is not followed).
-fn resolve_targets(root: &Path, names: &[String]) -> Result<Vec<PathBuf>, EvalError> {
-    let root = root.canonicalize().map_err(|error| {
+fn resolve_targets(root: &Path, names: &[String]) -> Result<Vec<PinnedDir>, EvalError> {
+    let root = PinnedDir::open_root(root).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             EvalError::Usage("there is no evaluation directory yet".into())
         } else {
             EvalError::Io(error)
         }
     })?;
+    // Each directory is opened from the pinned root without following a link,
+    // and stays open: the report is read and written through the descriptors,
+    // so nothing that is swapped in afterwards is followed.
     names
         .iter()
         .map(|name| {
-            let dir = root.join(name);
-            match std::fs::symlink_metadata(&dir) {
-                Ok(meta) if meta.is_dir() => Ok(dir),
-                Ok(_) => Err(EvalError::Usage(format!(
-                    "{name} is not an evaluation directory"
-                ))),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
-                    EvalError::Usage(format!("{name} is not an evaluation directory")),
-                ),
-                Err(error) => Err(EvalError::Io(error)),
-            }
+            root.open_dir(name).map_err(|error| {
+                let not_a_directory = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) || [rustix::io::Errno::LOOP, rustix::io::Errno::NOTDIR]
+                    .iter()
+                    .any(|errno| error.raw_os_error() == Some(errno.raw_os_error()));
+                if not_a_directory {
+                    EvalError::Usage(format!("{name} is not an evaluation directory"))
+                } else {
+                    EvalError::Io(error)
+                }
+            })
         })
         .collect()
 }

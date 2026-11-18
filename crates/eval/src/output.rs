@@ -166,6 +166,208 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     std::fs::rename(partial, path)
 }
 
+/// A directory held open by descriptor. Everything done through it is relative
+/// to the descriptor and follows no symbolic link, so a link planted in the
+/// directory, or the directory swapped for a link after it was chosen, cannot
+/// send a read or a write elsewhere.
+#[derive(Debug)]
+pub struct PinnedDir {
+    fd: rustix::fd::OwnedFd,
+    path: PathBuf,
+}
+
+/// A name that is one ordinary path component.
+fn is_plain(name: &str) -> bool {
+    !name.is_empty() && !matches!(name, "." | "..") && !name.contains(['/', '\0'])
+}
+
+fn plain(name: &str) -> io::Result<()> {
+    if is_plain(name) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name:?} is not a plain file name"),
+        ))
+    }
+}
+
+impl PinnedDir {
+    /// Open `path` itself, which is trusted and may be a link: the evaluation
+    /// root.
+    ///
+    /// # Errors
+    /// The directory cannot be opened.
+    pub fn open_root(path: &Path) -> io::Result<Self> {
+        use rustix::fs::{Mode, OFlags};
+        let fd = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(Self {
+            fd,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// The directory `path` names, refusing one whose last component is a link.
+    ///
+    /// # Errors
+    /// The parent cannot be opened, or the directory is missing or a link.
+    pub fn open_path(path: &Path) -> io::Result<Self> {
+        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "no directory name");
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(invalid)?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        Self::open_root(parent.unwrap_or_else(|| Path::new(".")))?.open_dir(name)
+    }
+
+    /// The directory `name` inside this one, never through a link.
+    ///
+    /// # Errors
+    /// `name` is not a plain name, or it is missing, not a directory or a link.
+    pub fn open_dir(&self, name: &str) -> io::Result<Self> {
+        use rustix::fs::{Mode, OFlags};
+        plain(name)?;
+        let fd = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(Self {
+            fd,
+            path: self.path.join(name),
+        })
+    }
+
+    /// The directory `relative` (components separated by `/`) below this one,
+    /// opened one component at a time; a link or a `..` anywhere in it is refused.
+    ///
+    /// # Errors
+    /// As [`Self::open_dir`] for any component.
+    pub fn open_below(&self, relative: &str) -> io::Result<Self> {
+        let mut parts = relative.split('/');
+        let mut dir = self.open_dir(parts.next().unwrap_or_default())?;
+        for part in parts {
+            dir = dir.open_dir(part)?;
+        }
+        Ok(dir)
+    }
+
+    /// The directory `name` inside this one, made when it is missing.
+    ///
+    /// # Errors
+    /// As [`Self::open_dir`], or it cannot be made.
+    pub fn ensure_dir(&self, name: &str) -> io::Result<Self> {
+        use rustix::fs::Mode;
+        plain(name)?;
+        match rustix::fs::mkdirat(&self.fd, name, Mode::RWXU) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(errno) => return Err(errno.into()),
+        }
+        self.open_dir(name)
+    }
+
+    /// Where the directory is, for messages and for a reader that takes a path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn join(&self, name: &str) -> PathBuf {
+        self.path.join(name)
+    }
+
+    /// The bytes of the regular file `name`, never through a link and never
+    /// blocking on a FIFO or a device.
+    ///
+    /// # Errors
+    /// `NotFound` when there is no such file; otherwise it is a link, not a
+    /// regular file or unreadable.
+    pub fn read(&self, name: &str) -> io::Result<Vec<u8>> {
+        use rustix::fs::{Mode, OFlags};
+        use std::io::Read as _;
+        plain(name)?;
+        let fd = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut file = std::fs::File::from(fd);
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not a regular file", self.join(name).display()),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Whether `name` is a regular file here, found without following a link.
+    ///
+    /// # Errors
+    /// The directory cannot be inspected.
+    pub fn is_regular_file(&self, name: &str) -> io::Result<bool> {
+        plain(name)?;
+        match rustix::fs::statat(&self.fd, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok(rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                == rustix::fs::FileType::RegularFile),
+            Err(rustix::io::Errno::NOENT) => Ok(false),
+            Err(errno) => Err(errno.into()),
+        }
+    }
+
+    /// Put `bytes` in `name` through a new temporary file renamed over it. A
+    /// link that is already called `name` is replaced, not followed.
+    ///
+    /// # Errors
+    /// The file cannot be written.
+    pub fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        use rustix::fs::{AtFlags, Mode, OFlags};
+        use std::io::Write as _;
+        plain(name)?;
+        let partial = format!(".{name}.partial");
+        match rustix::fs::unlinkat(&self.fd, &partial, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+            Err(errno) => return Err(errno.into()),
+        }
+        let fd = rustix::fs::openat(
+            &self.fd,
+            &partial,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH,
+        )?;
+        let mut file = std::fs::File::from(fd);
+        let written = file.write_all(bytes).and_then(|()| file.flush());
+        drop(file);
+        let renamed = written.and_then(|()| {
+            rustix::fs::renameat(&self.fd, &partial, &self.fd, name).map_err(Into::into)
+        });
+        if renamed.is_err() {
+            let _ = rustix::fs::unlinkat(&self.fd, &partial, AtFlags::empty());
+        }
+        renamed
+    }
+
+    /// [`Self::write`] of `value` as pretty JSON.
+    ///
+    /// # Errors
+    /// As [`Self::write`].
+    pub fn write_json(&self, name: &str, value: &impl Serialize) -> io::Result<()> {
+        let mut text = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
+        text.push(b'\n');
+        self.write(name, &text)
+    }
+}
+
 pub fn write_run(
     dir: &Path,
     outcome: &Outcome,

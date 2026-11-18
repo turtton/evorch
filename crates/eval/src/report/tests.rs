@@ -523,7 +523,11 @@ async fn reports_reprice_judge_both_orders_and_write_json_and_markdown() {
     );
 
     // Then: both files are written, the JSON holds the same report, and judgments are cached.
-    let written: Report = read_json(&fixture.dir().join(output::REPORT_JSON_FILE)).unwrap();
+    let written: Report = read_json(
+        &output::PinnedDir::open_root(&fixture.dir()).unwrap(),
+        output::REPORT_JSON_FILE,
+    )
+    .unwrap();
     assert_eq!(&written, report);
     let markdown =
         std::fs::read_to_string(fixture.dir().join(output::REPORT_MARKDOWN_FILE)).unwrap();
@@ -910,4 +914,96 @@ fn a_run_without_a_usable_answer_has_no_output_and_the_root_is_never_listed() {
     assert!(entries[1]["final_output"].is_null());
     assert_eq!(entries[1]["phase"], "Error");
     assert_eq!(entries[2]["final_output"], "second");
+}
+
+/// A link planted among the files of a report must be replaced, never followed,
+/// and one standing in for the judgment cache must not be read or written through.
+#[tokio::test]
+async fn links_inside_an_evaluation_directory_are_never_followed() {
+    use std::os::unix::fs::symlink;
+
+    // Given: report files and the judgments directory are links to places outside.
+    let fixture = Fixture::new(None, CONFIG);
+    let outside = fixture.root.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let victim = outside.join("victim.txt");
+    std::fs::write(&victim, "untouched").unwrap();
+    symlink(&victim, fixture.dir().join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    symlink(&victim, fixture.dir().join(output::REPORT_JSON_FILE)).unwrap();
+    symlink(&outside, fixture.dir().join(output::JUDGMENTS_DIR)).unwrap();
+    let answers = vec![
+        verdicts(["A", "A", "A", "A", ""], false),
+        verdicts(["B", "B", "B", "B", ""], false),
+        analysis(),
+    ];
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &fixture.deps(answers).await)
+        .await
+        .unwrap();
+
+    // Then: the outside file and directory are untouched; the report is in the directory.
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    for name in [output::REPORT_MARKDOWN_FILE, output::REPORT_JSON_FILE] {
+        let meta = std::fs::symlink_metadata(fixture.dir().join(name)).unwrap();
+        assert!(meta.is_file(), "{name} is a regular file now");
+    }
+    let written: Report = read_json(
+        &output::PinnedDir::open_root(&fixture.dir()).unwrap(),
+        output::REPORT_JSON_FILE,
+    )
+    .unwrap();
+    assert_eq!(written, reports[0]);
+}
+
+/// A directory that is swapped for a link after it was opened is not followed:
+/// the report goes where the descriptor points.
+#[tokio::test]
+async fn a_directory_swapped_for_a_link_after_it_was_pinned_is_not_followed() {
+    use std::os::unix::fs::symlink;
+
+    // Given: the directory is pinned, and then replaced by a link to another place.
+    let fixture = Fixture::new(None, CONFIG);
+    let pinned = output::PinnedDir::open_path(&fixture.dir()).unwrap();
+    let moved = fixture.root.path().join("moved");
+    let elsewhere = fixture.root.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::rename(fixture.dir(), &moved).unwrap();
+    symlink(&elsewhere, fixture.dir()).unwrap();
+    let answers = vec![
+        verdicts(["A", "A", "A", "A", ""], false),
+        verdicts(["B", "B", "B", "B", ""], false),
+        analysis(),
+    ];
+
+    // When: the pinned directory is reported.
+    super::report_pinned(
+        vec![pinned],
+        Some(fixture.user()),
+        false,
+        &fixture.deps(answers).await,
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    // Then: the files are in the directory that was pinned, and nowhere else.
+    assert!(moved.join(output::REPORT_JSON_FILE).is_file());
+    assert!(moved.join(output::REPORT_MARKDOWN_FILE).is_file());
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+/// A directory that is itself a link is refused when it is opened.
+#[test]
+fn a_directory_that_is_a_link_cannot_be_pinned() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, root.path().join("link")).unwrap();
+    let pinned = output::PinnedDir::open_root(root.path()).unwrap();
+    assert!(pinned.open_dir("real").is_ok());
+    assert!(pinned.open_dir("link").is_err());
+    assert!(output::PinnedDir::open_path(&root.path().join("link")).is_err());
+    assert!(pinned.open_dir("../real").is_err());
 }

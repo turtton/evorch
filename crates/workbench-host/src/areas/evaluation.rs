@@ -34,7 +34,7 @@ use std::sync::Arc;
 use workbench_protocol::{
     errors::{ErrorCode, WorkbenchError},
     events::UiEvent,
-    ids::{EvaluationGroupId, EvaluationMemberId, OperationId},
+    ids::{ClientId, EvaluationGroupId, EvaluationMemberId, OperationId},
     management::{ArtifactPresence, EvaluationArtifactKind, EvaluationArtifactRef},
     namespaces::{
         diagnostics::ReadOutcome,
@@ -86,7 +86,7 @@ impl EvaluationArea {
         let source = handles
             .source("evaluation")
             .map_err(|e| BootstrapError::from(e.message))?;
-        Ok(Self::from_job_parts(JobParts {
+        let area = Self::from_job_parts(JobParts {
             tasks: handles.tasks.clone(),
             source,
             root: handles.config_dir.join("eval"),
@@ -94,7 +94,19 @@ impl EvaluationArea {
             database: handles.database.clone(),
             credentials: handles.credentials.clone(),
             seams: JobSeams::default(),
-        }))
+        });
+        if let Some(jobs) = &area.jobs {
+            // A client that leaves stops the jobs it started, and no one's else
+            // (ADR 0045 §10). The hook only records the request; the jobs
+            // stop on their own tasks.
+            let jobs = Arc::downgrade(jobs);
+            handles.connections.register(Arc::new(move |client| {
+                if let Some(jobs) = jobs.upgrade() {
+                    jobs.stop_jobs_of(client);
+                }
+            }));
+        }
+        Ok(area)
     }
 
     /// The service with its jobs: reads and the run, report and rejudge jobs.
@@ -117,7 +129,8 @@ impl EvaluationArea {
         })
     }
 
-    /// Accept a replay job: start it, or answer from the table.
+    /// Accept a replay job: start it, or answer from the table. `owner` is the
+    /// client that asked: its jobs are stopped when it disconnects.
     ///
     /// # Errors
     /// `Conflict` for an id used by a different request, `Busy` when another
@@ -126,9 +139,10 @@ impl EvaluationArea {
     pub fn start_run(
         &self,
         start: &StartEvaluationRun,
+        owner: Option<&ClientId>,
         accepted: HostCommandPermit,
     ) -> Result<Accepted, WorkbenchError> {
-        self.jobs()?.start_run(start, accepted)
+        self.jobs()?.start_run(start, owner, accepted)
     }
 
     /// Accept a report or rejudge job.
@@ -138,9 +152,10 @@ impl EvaluationArea {
     pub fn start_report(
         &self,
         start: &StartEvaluationReport,
+        owner: Option<&ClientId>,
         accepted: HostCommandPermit,
     ) -> Result<Accepted, WorkbenchError> {
-        self.jobs()?.start_report(start, accepted)
+        self.jobs()?.start_report(start, owner, accepted)
     }
 
     /// Ask a running job to stop; the view of one that already ended.
