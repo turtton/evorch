@@ -1211,4 +1211,68 @@ pub fn cross_thread_table(reports: &[Report]) -> String {
 }
 
 #[cfg(test)]
+mod pinned_database_tests {
+    use super::*;
+    use crate::test_support::{usage, write_run_db};
+
+    #[test]
+    fn the_database_is_read_from_the_pinned_directory_even_if_its_place_is_swapped() {
+        use std::os::unix::fs::symlink;
+
+        // Given: a run directory with one request, pinned, and another database elsewhere.
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("run");
+        let moved = root.path().join("moved");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        write_run_db(
+            &run.join(output::DATABASE_FILE),
+            &[],
+            vec![usage("own", "claude", "claude-sonnet-9", "agent", 10)],
+        );
+        write_run_db(
+            &outside.join(output::DATABASE_FILE),
+            &[],
+            vec![
+                usage("a", "claude", "claude-sonnet-9", "agent", 10),
+                usage("b", "claude", "claude-sonnet-9", "agent", 10),
+            ],
+        );
+        let pinned = output::PinnedDir::open_path(&run).unwrap();
+
+        // When: the directory is replaced by a link to the other place, and then read.
+        std::fs::rename(&run, &moved).unwrap();
+        symlink(&outside, &run).unwrap();
+        let record = load_database(&pinned).unwrap();
+
+        // Then: the pinned directory's own database was read.
+        assert_eq!(record.agent_requests().count(), 1);
+    }
+
+    #[test]
+    fn a_database_that_is_a_link_or_missing_gives_an_empty_record() {
+        // Given: a run directory whose database is a link to a real one, and an empty one.
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("run");
+        let empty = root.path().join("empty");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        let real = root.path().join("real.db");
+        write_run_db(
+            &real,
+            &[],
+            vec![usage("a", "claude", "claude-sonnet-9", "agent", 10)],
+        );
+        std::os::unix::fs::symlink(&real, run.join(output::DATABASE_FILE)).unwrap();
+
+        // When / Then: neither is followed or required.
+        for dir in [&run, &empty] {
+            let pinned = output::PinnedDir::open_path(dir).unwrap();
+            assert_eq!(load_database(&pinned).unwrap().agent_requests().count(), 0);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests;
