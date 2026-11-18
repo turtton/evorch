@@ -988,7 +988,16 @@ async fn the_cli_shows_each_reindex_step_on_stderr_and_the_result_on_stdout_as_b
             rest.split(':').next().unwrap().parse().unwrap()
         })
         .collect();
-    assert!(steps.windows(2).all(|pair| pair[0] < pair[1]), "{steps:?}");
+    // The end state is printed once, also when it only changes the totals of the last
+    // step line (same step, no line repeated).
+    assert!(steps.windows(2).all(|pair| pair[0] <= pair[1]), "{steps:?}");
+    assert!(lines.windows(2).all(|pair| pair[0] != pair[1]), "{lines:?}");
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.ends_with("targets 2, succeeded 2, gaps 0")),
+        "the last line is not the end state: {lines:?}"
+    );
 
     // And: stdout holds the `completed` result of the offline command's shape.
     let storage::thread_index::ReindexResult::Completed { summary, .. } = printed_result(&out)
