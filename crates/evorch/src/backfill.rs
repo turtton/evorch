@@ -19,8 +19,9 @@ when none is running; it does not work without it, and the core reads its own da
 user config directory (--user-config), so there is no --db. It is safe next to live writers: the
 work is done in bounded batches (--batch-rows, default 1000), and at most --max-rows rows are
 handled in all (default: every row). Progress goes to stderr: a line for each of the first
-16 batches, then one each time the batch count has doubled, and always the last state (each line
-has the totals so far, so a long run prints a bounded number of lines); the result goes
+16 batches, then one each time the batch count has doubled, and the last state of every operation the
+command runs (one operation handles up to 10 million rows; each line has the totals so far, so
+a long run prints a bounded number of lines); the result goes
 to stdout as JSON {converted, undecodable, batches, reattributed, remaining}. Only one backfill
 runs at a time; a second one fails as busy. Interrupting or killing this command, or losing its
 connection, stops the backfill it started (and no other work): the core ends it at its next batch

@@ -203,9 +203,10 @@ const EVERY_BATCH_UP_TO: u64 = 16;
 /// the number of batches: one line for each of the first
 /// [`EVERY_BATCH_UP_TO`] batches, then one each time the batch count has
 /// doubled (so about `EVERY_BATCH_UP_TO` + log2(batches) lines whatever the
-/// batch size, 16 + 64 at most), and the last state always. A line states the
-/// totals so far, so the batches between two lines are not lost, only not
-/// announced.
+/// batch size, 16 + 64 at most), and the last state of each bounded operation
+/// ([`backfill`] runs one per 10 million rows, so a run has one line more for
+/// each operation after the first). A line states the totals so far, so the
+/// batches between two lines are not lost, only not announced.
 #[derive(Debug, Default)]
 struct ProgressLines {
     /// The batch count the next line waits for.
@@ -241,7 +242,8 @@ impl ProgressLines {
 /// Convert the legacy columns of the events table in the core, as many bounded
 /// operations as `request.max_rows` and the work need. The summary (stdout) has
 /// the keys the offline command printed; the progress goes to stderr within a
-/// fixed budget of lines (see [`ProgressLines`]), the last state included.
+/// fixed budget of lines (see [`ProgressLines`]), the last state of each
+/// operation included.
 ///
 /// The task is one operation at a time in the core: another client's running
 /// backfill makes this one fail as `busy`.
@@ -365,7 +367,7 @@ mod tests {
             let out = lines_of(batches);
 
             // Then: the lines do not grow with the batches (16 first ones and
-            // one per doubling), and the last state is always the last line.
+            // one per doubling), and the last state is the last line of a run of one operation.
             assert!(
                 out.len() <= 16 + 64 + 1,
                 "{batches} batches gave {} lines",

@@ -9,6 +9,7 @@
 //! between two batches by a gate the test opens, so every wait is for an event
 //! the core, the gate or the child sends, never for time to pass.
 use std::io::{BufRead as _, BufReader, Read as _};
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
@@ -631,26 +632,49 @@ async fn a_cli_killed_while_a_bootstrapped_core_backfills_stops_only_its_own_ope
     let staying = core.client().await;
     let mut events = subscribe(&staying).await;
 
-    // When: a CLI starts its backfill and the core has committed its first batch
-    // (the CLI prints that line once it has heard of it).
+    // When: a CLI starts its backfill and the core has committed a batch (the
+    // CLI prints a line once it has heard of one; which batch that is, is not
+    // fixed). The reader stays open to the end of the process, so that the CLI
+    // never fails writing to a closed pipe: it is the kill that ends it.
     let mut cli = core.cli(1, None);
-    let mut stderr = BufReader::new(cli.stderr.take().unwrap()).lines();
-    let first = tokio::task::spawn_blocking(move || stderr.next().unwrap().unwrap())
-        .await
-        .unwrap();
-    assert!(
-        first.starts_with("backfill-events: batch 1: converted 1,"),
-        "{first}"
-    );
+    let stderr = BufReader::new(cli.stderr.take().unwrap());
+    let (first_line, first) = tokio::sync::oneshot::channel();
+    let reader = std::thread::spawn(move || {
+        let mut first_line = Some(first_line);
+        let mut lines = Vec::new();
+        for line in stderr.lines() {
+            let line = line.unwrap();
+            if let Some(first_line) = first_line.take() {
+                let _ = first_line.send(line.clone());
+            }
+            lines.push(line);
+        }
+        lines
+    });
+    let first = first.await.unwrap();
+    assert!(first.starts_with("backfill-events: batch "), "{first}");
 
     // And: a client that started nothing comes and goes, then the CLI is killed.
     drop(core.client().await);
     let visitor = core.departures.recv().await.unwrap();
     cli.kill().unwrap();
-    let status = tokio::task::spawn_blocking(move || cli.wait().unwrap())
-        .await
-        .unwrap();
-    assert!(!status.success(), "the CLI did not finish by itself");
+    let (status, lines) = tokio::task::spawn_blocking(move || {
+        let status = cli.wait().unwrap();
+        (status, reader.join().unwrap())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        status.signal(),
+        Some(9),
+        "the CLI was killed, it did not end by itself: {status:?}, {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.starts_with("backfill-events: batch ")),
+        "everything the CLI said is a progress line: {lines:?}"
+    );
 
     // Then: the operation the CLI started stops at a batch boundary, with what
     // it had committed, and nothing else was stopped.
