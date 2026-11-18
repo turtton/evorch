@@ -31,9 +31,10 @@ fn between_turns(entry: &RunEntry) -> bool {
         && !entry.compaction_busy.load(Ordering::Acquire)
         && input.pending == 0
         && !input.next_turn_requested
-        // claim publishes adoption before removing pending. Read it after the
-        // inbox snapshot so old Waiting cannot look idle before phase publication.
-        && !entry.user_inbox.adopting()
         && entry.inbox_tx.capacity() == entry.inbox_tx.max_capacity()
         && !entry.mailbox.has_interrupting_message()
+        // Every wake guards before consuming. Read adoption AFTER all queues:
+        // an earlier zero could race a later dequeue. The run-map lock prevents
+        // public Running from releasing this guard during the observation.
+        && !entry.user_inbox.adopting()
 }

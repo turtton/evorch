@@ -37,7 +37,12 @@ impl super::UserInbox {
             let adoption = self.begin_adoption();
             match future.as_mut().poll(cx) {
                 std::task::Poll::Ready(value) => std::task::Poll::Ready((value, adoption)),
-                std::task::Poll::Pending => std::task::Poll::Pending,
+                std::task::Poll::Pending => {
+                    drop(adoption);
+                    #[cfg(any(test, feature = "idle-test-support"))]
+                    self.hold_passive_wait_gate();
+                    std::task::Poll::Pending
+                }
             }
         })
         .await
@@ -54,7 +59,17 @@ impl super::UserInbox {
 }
 
 #[cfg(any(test, feature = "idle-test-support"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GatePoint {
+    Claim,
+    PublishWake,
+    IgnoredWake,
+    PassiveWait,
+}
+
+#[cfg(any(test, feature = "idle-test-support"))]
 pub(super) struct Gate {
+    point: GatePoint,
     reached: tokio::sync::oneshot::Sender<()>,
     resume: std::sync::mpsc::Receiver<()>,
 }
@@ -69,7 +84,11 @@ impl super::UserInbox {
         *self
             .adoption_gate
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Gate { reached, resume });
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Gate {
+            point: GatePoint::Claim,
+            reached,
+            resume,
+        });
     }
 
     pub(super) fn hold_adoption_gate(&self) {
@@ -89,18 +108,59 @@ impl super::UserInbox {
         reached: tokio::sync::oneshot::Sender<()>,
         resume: std::sync::mpsc::Receiver<()>,
     ) {
+        self.set_wake_gate(GatePoint::PublishWake, reached, resume);
+    }
+
+    pub(crate) fn gate_ignored_wake_adoption(
+        &self,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.set_wake_gate(GatePoint::IgnoredWake, reached, resume);
+    }
+
+    pub(crate) fn gate_passive_wait(
+        &self,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.set_wake_gate(GatePoint::PassiveWait, reached, resume);
+    }
+
+    fn set_wake_gate(
+        &self,
+        point: GatePoint,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) {
         *self
             .wake_adoption_gate
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Gate { reached, resume });
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Gate {
+            point,
+            reached,
+            resume,
+        });
     }
 
     pub(crate) fn hold_wake_adoption_gate(&self) {
+        self.hold_wake_gate(GatePoint::PublishWake);
+    }
+
+    pub(crate) fn hold_ignored_wake_adoption_gate(&self) {
+        self.hold_wake_gate(GatePoint::IgnoredWake);
+    }
+
+    fn hold_passive_wait_gate(&self) {
+        self.hold_wake_gate(GatePoint::PassiveWait);
+    }
+
+    fn hold_wake_gate(&self, point: GatePoint) {
         let gate = self
             .wake_adoption_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+            .take_if(|gate| gate.point == point);
         if let Some(gate) = gate {
             let _ = gate.reached.send(());
             let _ = gate.resume.recv();

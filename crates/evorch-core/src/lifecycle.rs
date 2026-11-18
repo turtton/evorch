@@ -3,6 +3,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 #[path = "lifecycle/idle/activity.rs"]
 mod idle_activity;
+#[path = "lifecycle/idle/clock.rs"]
+mod idle_clock;
 
 pub struct IdleGrace {
     grace: Duration,
@@ -106,8 +108,30 @@ impl LifecycleDriver {
         backend: std::sync::Arc<crate::backend::HostBackend>,
         listener: tokio::net::UnixListener,
         web_enabled: bool,
+        web: Option<workbench_web::WebServer>,
+        signals: OperatorSignals,
+    ) -> std::io::Result<()> {
+        self.run_with_clock(
+            host,
+            backend,
+            listener,
+            web_enabled,
+            web,
+            signals,
+            &idle_clock::TokioClock,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn run_with_clock<C: idle_clock::Clock>(
+        &mut self,
+        host: &workbench_host::bootstrap::BootstrappedHost,
+        backend: std::sync::Arc<crate::backend::HostBackend>,
+        listener: tokio::net::UnixListener,
+        web_enabled: bool,
         mut web: Option<workbench_web::WebServer>,
         mut signals: OperatorSignals,
+        clock: &C,
     ) -> std::io::Result<()> {
         let (shutdown, _) = tokio::sync::watch::channel(false);
         let mut web_activity = idle_activity::WebActivity::new(web.as_ref(), &backend);
@@ -117,23 +141,20 @@ impl LifecycleDriver {
         let mut events = host.runtime.event_bus().subscribe();
         let background = host.host.lock().unwrap().service().background_work_notify();
         let area_work = host.area_work_notify();
+        let adoption = host.runtime.input_adoption_notifier();
         let mut restart = self.restart.subscribe();
         let outcome = loop {
             host.host.lock().unwrap().service_mut().poll();
             let (web_count, web_busy) = web_activity.observe(&mut self.idle);
-            let deadline = self.idle.update(
+            let deadline = self.idle.update_at(
+                clock.now(),
                 // The legacy entry point cannot prove an externally owned web
                 // listener empty. Production always transfers the actual owner.
                 web_enabled && web.is_none(),
                 clients.len() + web_count,
                 host.busy() || self.restart.busy() || web_busy,
             );
-            let expired = async {
-                match deadline {
-                    Some(d) => tokio::time::sleep_until(d).await,
-                    None => std::future::pending().await,
-                }
-            };
+            let expired = clock.expired(deadline);
             tokio::select! {
                 _ = signals.received() => break Ok(()),
                 Some(request) = self.control_requests.recv() => {
@@ -177,6 +198,7 @@ impl LifecycleDriver {
                 },
                 _ = background.notified() => self.idle.reset(),
                 _ = area_work.notified() => self.idle.reset(),
+                _ = adoption.notified() => self.idle.reset(),
                 _ = restart.changed() => self.idle.reset(),
                 _ = web_activity.changed() => self.idle.reset(),
                 _ = expired => {

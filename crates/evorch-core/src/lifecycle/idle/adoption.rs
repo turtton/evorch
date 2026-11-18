@@ -79,10 +79,12 @@ async fn claimed_input_retains_core_even_with_no_clients_and_zero_grace() {
         },
     );
     waiting(&mut events, run).await;
+    let passive = hold_passive_wait(&host.runtime, run).await;
     assert!(host.runtime.is_between_chat_turns(run));
     assert!(!host.busy());
 
     let start = Instant::now();
+    let clock = clock::ManualClock::new(start);
     let grace = Duration::from_secs(60);
     let mut idle = IdleGrace::new(grace);
     assert!(idle.update_at(start, false, 1, host.busy()).is_none());
@@ -98,6 +100,7 @@ async fn claimed_input_retains_core_even_with_no_clients_and_zero_grace() {
     host.runtime
         .send_user_input(run, "accepted next turn".into(), None)
         .unwrap();
+    passive.send(()).unwrap();
     held.await.unwrap();
     assert_eq!(host.runtime.follow_up_status(run).unwrap().pending, 0);
     assert!(host.runtime.is_adopting_user_input(run));
@@ -121,8 +124,11 @@ async fn claimed_input_retains_core_even_with_no_clients_and_zero_grace() {
     ));
     let mut driver = LifecycleDriver::new(&host);
     {
-        let running = driver.run_with_web(&host, backend, listener, None, signals());
+        let running =
+            driver.run_with_clock(&host, backend, listener, false, None, signals(), &clock);
         tokio::pin!(running);
+        assert_pending(running.as_mut()).await;
+        clock.advance(grace * 2);
         assert_pending(running.as_mut()).await;
         assert!(host.runtime.is_adopting_user_input(run));
         resume.send(()).unwrap();
@@ -130,8 +136,10 @@ async fn claimed_input_retains_core_even_with_no_clients_and_zero_grace() {
         assert!(!host.runtime.is_adopting_user_input(run));
         assert!(host.busy(), "published Running still retains the core");
         assert_pending(running.as_mut()).await;
+        let (passive_reached, passive_resume) = install_passive_wait(&host.runtime, run);
         model.release.notify_one();
         waiting(&mut events, run).await;
+        passive_reached.await.unwrap();
         assert!(host.runtime.is_between_chat_turns(run));
         assert!(!host.busy());
         let disconnected = advanced + grace;
@@ -141,6 +149,7 @@ async fn claimed_input_retains_core_even_with_no_clients_and_zero_grace() {
             "adoption reset the old grace origin"
         );
         running.await.unwrap();
+        passive_resume.send(()).unwrap();
     }
     host.runtime
         .stop(run, runtime::StopScope::SelfOnly)
@@ -148,3 +157,31 @@ async fn claimed_input_retains_core_even_with_no_clients_and_zero_grace() {
     host.runtime.wait(run).await.unwrap();
     host.shutdown().await.unwrap();
 }
+
+// Passive polling has a deliberately transient conservative guard. These test-only
+// barriers observe the stable boundary after that guard has dropped, not a race
+// between the Waiting event and the next receiver poll.
+fn install_passive_wait(
+    runtime: &runtime::AgentRuntime,
+    run: runtime::RunId,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (reached, held) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    runtime
+        .gate_next_passive_input_wait(run, reached, resumed)
+        .unwrap();
+    (held, resume)
+}
+async fn hold_passive_wait(
+    runtime: &runtime::AgentRuntime,
+    run: runtime::RunId,
+) -> std::sync::mpsc::Sender<()> {
+    let (held, resume) = install_passive_wait(runtime, run);
+    held.await.unwrap();
+    resume
+}
+mod clock;
+mod wake;
