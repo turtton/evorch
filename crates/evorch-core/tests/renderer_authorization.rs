@@ -84,9 +84,21 @@ struct Fixture {
     /// Every event the first subscription delivered, in order.
     seen: Vec<EventEnvelope>,
     secrets: Vec<String>,
+    /// Operations that ran as a task: they publish `OperationChanged` when accepted and
+    /// again when they end. The others (a session, a grant, a subscription) are
+    /// answered at once and publish it once.
+    tasks: std::sync::Mutex<std::collections::HashSet<RendererId>>,
 }
 impl Fixture {
     fn command(&self, command: BrowserCommand, p: &Provenance) -> Result<RendererId, ErrorCode> {
+        let immediate = matches!(
+            command,
+            BrowserCommand::CreateRendererSession {}
+                | BrowserCommand::ResumeRendererSession { .. }
+                | BrowserCommand::UnsubscribeRendererFrames { .. }
+                | BrowserCommand::GrantRendererObserver { .. }
+                | BrowserCommand::SubscribeRendererFrames { .. }
+        );
         let reply = self
             .core
             .host
@@ -96,6 +108,9 @@ impl Fixture {
             .map_err(|error| error.code)?;
         match reply.result.as_deref() {
             Some(CommandResult::Browser(BrowserResult::Accepted { operation_id })) => {
+                if !immediate {
+                    self.tasks.lock().unwrap().insert(operation_id.clone());
+                }
                 Ok(operation_id.clone())
             }
             other => panic!("unexpected receipt: {other:?}"),
@@ -126,6 +141,7 @@ impl Fixture {
             .map_err(|error| error.code)?;
         match reply.result.as_deref() {
             Some(CommandResult::Artifacts(ArtifactsResult::Accepted { operation_id })) => {
+                self.tasks.lock().unwrap().insert(operation_id.clone());
                 Ok(operation_id.clone())
             }
             other => panic!("unexpected receipt: {other:?}"),
@@ -180,16 +196,39 @@ impl Fixture {
             other => panic!("unexpected reply: {other:?}"),
         }
     }
-    /// The terminal state of an operation: the stream tells when it changed.
+    /// The terminal state of an operation. An operation publishes
+    /// `OperationChanged` once when a task is accepted and once when it ends
+    /// (an immediate operation once), so the stream is read until they are here: whatever the operation put on the
+    /// shared stream is then in `seen` before anything is checked.
     async fn finished(&mut self, id: &RendererId, p: &Provenance) -> RendererOperationState {
-        loop {
+        let state = loop {
             let state = self.operation(id, p).unwrap();
             if state != RendererOperationState::Running {
-                return state;
+                break state;
             }
             let event = self.events.recv().await.expect("the stream stays open");
             self.seen.push(event);
+        };
+        let expected = if self.tasks.lock().unwrap().contains(id) {
+            2
+        } else {
+            1
+        };
+        while self
+            .seen
+            .iter()
+            .filter(|e| {
+                matches!(&e.event,
+                    UiEvent::Browser(BrowserEvent::OperationChanged { id: changed })
+                        if changed == id)
+            })
+            .count()
+            < expected
+        {
+            let event = self.events.recv().await.expect("the stream stays open");
+            self.seen.push(event);
         }
+        state
     }
     async fn output(&mut self, id: &RendererId, p: &Provenance) -> RendererOutput {
         match self.finished(id, p).await {
@@ -245,6 +284,7 @@ impl Fixture {
         for needle in [
             "FAKE-PIXELS",
             "HELPER-FREE-TEXT",
+            "HELPER-CDP-SECRET",
             "日本語の本文",
             "QUJD",
             "data:image",
@@ -395,6 +435,7 @@ async fn run(
         events,
         seen: Vec::new(),
         secrets: Vec::new(),
+        tasks: Default::default(),
     };
     f.assert_no_leak("the first snapshot", &first_started);
 
@@ -545,23 +586,48 @@ async fn run(
         ErrorCode::PermissionDenied
     );
 
-    // A helper failure reaches the client as a structured reason only.
-    let failing = f
-        .command(
-            BrowserCommand::RendererCdp {
-                tab: a1.reference.clone(),
-                method: "Test.fail".into(),
-                params: serde_json::json!({}),
-            },
-            &a,
-        )
-        .unwrap();
-    let state = f.finished(&failing, &a).await;
-    assert!(
-        matches!(state, RendererOperationState::Failed { .. }),
-        "{state:?}"
+    // A helper failure reaches the client as a structured reason only. The
+    // probe is an allowed CDP method, so it passes the real validation and
+    // reaches the helper, which answers with free text.
+    let cdp = |probe: &str| BrowserCommand::RendererCdp {
+        tab: a1.reference.clone(),
+        method: "DOM.getDocument".into(),
+        params: serde_json::json!({ "probe": probe }),
+    };
+    let failing = f.command(cdp("error"), &a).unwrap();
+    assert_eq!(
+        f.finished(&failing, &a).await,
+        RendererOperationState::Failed {
+            reason: RendererFailure::Unavailable
+        },
+        "the helper's error becomes a structured reason"
     );
-    assert!(!format!("{state:?}").contains("HELPER-FREE-TEXT"));
+    // The same helper still serves the owner's next request, and the result
+    // (which carries a secret) reaches the owner alone. `served == 2` shows the
+    // failing probe really reached the helper.
+    let reading = f.command(cdp("secret"), &a).unwrap();
+    match f.output(&reading, &a).await {
+        RendererOutput::Cdp { result } => {
+            assert_eq!(result["secret"], "HELPER-CDP-SECRET");
+            assert_eq!(result["served"], 2, "both probes reached the helper");
+        }
+        other => panic!("unexpected output: {other:?}"),
+    }
+    assert_eq!(
+        f.operation(&reading, &b).unwrap_err(),
+        ErrorCode::PermissionDenied
+    );
+    assert_eq!(
+        f.operation(&reading, &web).unwrap_err(),
+        ErrorCode::PermissionDenied
+    );
+    assert_eq!(
+        f.query(BrowserQuery::GetRendererStatus {}, &a).map(
+            |reply| matches!(reply, BrowserReply::Status(s) if s.phase == RendererPhase::Ready)
+        ),
+        Ok(true),
+        "an expected failure does not fail the renderer"
+    );
 
     // A run that did not create the artifact but belongs to the same
     // conversation shows it (`inspect_artifact` allows that): its tab is kept.

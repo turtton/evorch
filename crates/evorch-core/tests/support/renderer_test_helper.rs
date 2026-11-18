@@ -1,7 +1,7 @@
 //! A fake `evorch-renderer` for the owned-spawn tests (PR 16a-2): it takes the
 //! control channel from stdin and the frame channel from stdout exactly as the
 //! real helper does, serves the `renderer-ipc` protocol with a backend that
-//! renders no page (a capture is a fixed PNG, `Test.fail` fails with free text), and exits when the core shuts it down or closes the
+//! renders no page (a capture is a fixed PNG, a `DOM.getDocument` probe answers with free text or a secret CDP result), and exits when the core shuts it down or closes the
 //! control channel. No CEF, no timers: every step waits on a message.
 //!
 //! `evorch-renderer-test-helper --cache-dir <absolute dir>` (the flag is
@@ -20,6 +20,8 @@ use std::time::Duration;
 const FAKE_PIXELS: &[u8] = b"\x89PNG\r\n\x1a\nFAKE-PIXELS";
 
 struct Blank {
+    /// How many `DOM.getDocument` probes reached this helper.
+    probes: std::sync::atomic::AtomicUsize,
     shutdown_gate: Option<std::path::PathBuf>,
 }
 
@@ -47,11 +49,26 @@ impl Backend for Blank {
         &self,
         _: TabId,
         method: &str,
-        _: serde_json::Value,
+        params: serde_json::Value,
         _: Duration,
     ) -> Result<serde_json::Value, RemoteError> {
-        if method == "Test.fail" {
-            return Err(RemoteError::internal("HELPER-FREE-TEXT"));
+        // `DOM.getDocument` is an allowed method, so a probe reaches this helper
+        // through the real validation. `{"probe":"error"}` answers with free text
+        // and `{"probe":"secret"}` with a result the owner may read and nobody
+        // else may see; both report how many probes this helper has served.
+        if method == "DOM.getDocument"
+            && let Some(probe) = params["probe"].as_str()
+        {
+            let served = self
+                .probes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            return match probe {
+                "error" => Err(RemoteError::internal("HELPER-FREE-TEXT")),
+                _ => Ok(serde_json::json!({
+                    "secret": "HELPER-CDP-SECRET", "served": served
+                })),
+            };
         }
         // Enough of a page for `inspect_artifact`'s snapshot and click.
         Ok(match method {
@@ -225,7 +242,12 @@ fn main() -> ExitCode {
         control,
         frames,
         ServeConfig::default(),
-        move |_: BackendContext| Ok(Blank { shutdown_gate }),
+        move |_: BackendContext| {
+            Ok(Blank {
+                probes: Default::default(),
+                shutdown_gate,
+            })
+        },
     );
     drop(descendant.stdin.take());
     descendant.wait().unwrap();
