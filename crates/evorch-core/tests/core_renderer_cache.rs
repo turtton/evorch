@@ -557,6 +557,106 @@ fn assert_frozen_with_artifact_tool(provider: &cache::Provider, requests: &[Valu
     }
 }
 
+#[cfg(feature = "renderer-test-helper")]
+#[path = "renderer_support/data_peer.rs"]
+mod data_peer;
+
+/// A client of the running core on its Unix socket opens a preview of the
+/// agent's artifact and moves bytes over data connections: raw frames, a
+/// refused binding and an artifact that has no image form. None of it may
+/// reach the provider, so the caller's assertions on the recorded requests
+/// cover the data plane too. Everything it opens is closed again.
+#[cfg(feature = "renderer-test-helper")]
+async fn data_plane_traffic(running: &Running, world: &World, artifact: &str) {
+    use data_peer::{Peer, refusal};
+    use sha2::{Digest, Sha256};
+    use workbench_protocol::errors::ErrorCode;
+    use workbench_protocol::ids::{ProjectId, ThreadId};
+    use workbench_protocol::namespaces::artifacts::ArtifactRef;
+    use workbench_protocol::namespaces::browser::*;
+
+    let socket = world.project.sockets().join("data-plane-cache.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let backend = Arc::new(evorch_core::backend::HostBackend::new(
+        running.core.host.clone(),
+        "data-plane-cache".into(),
+    ));
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (backend, stopped) = (backend.clone(), stopped.clone());
+            tokio::spawn(async move {
+                let _ = evorch_core::unix::connection(stream, backend, stopped).await;
+            });
+        }
+    });
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(world.root.join("page.html")).unwrap())
+    );
+    let page = ArtifactRef {
+        project: ProjectId::new("p").unwrap(),
+        thread: ThreadId::new("t1").unwrap(),
+        artifact_id: artifact.into(),
+        digest,
+    };
+    let mut a = Peer::connect(&socket, "client-a").await;
+    let b = Peer::connect(&socket, "client-b").await;
+    let session = a.session().await;
+    let tab = a.open(&page, &session).await;
+    let subscribe = a
+        .browser(BrowserCommand::SubscribeRendererFrames {
+            tab: tab.reference.clone(),
+        })
+        .await
+        .unwrap();
+    let RendererOutput::Subscription {
+        subscription,
+        token,
+        ..
+    } = a.output(&subscribe).await
+    else {
+        panic!("not a subscription")
+    };
+    assert_eq!(
+        refusal(
+            b.channel()
+                .await
+                .bind_frames(&b.client, subscription.clone(), token.clone())
+                .await
+        ),
+        ErrorCode::PermissionDenied
+    );
+    let mut frames = a
+        .channel()
+        .await
+        .bind_frames(&a.client, subscription, token)
+        .await
+        .unwrap();
+    a.browser(BrowserCommand::SetRendererStreaming {
+        tab: tab.reference.clone(),
+        enabled: true,
+    })
+    .await
+    .unwrap();
+    assert!(frames.next_frame().await.unwrap().is_some());
+    assert_eq!(
+        refusal(a.channel().await.bind_artifact(&a.client, page).await),
+        ErrorCode::InvalidRequest
+    );
+    let close = a
+        .browser(BrowserCommand::CloseRendererSession { session })
+        .await
+        .unwrap();
+    a.output(&close).await;
+    drop((a, b, frames));
+    let _ = stop.send(true);
+    server.abort();
+}
+
 /// The catalog is the same whether the helper was never started, is running, was
 /// killed, or cannot be started at all; the tool results differ, the wire prefix
 /// only grows.
@@ -610,6 +710,8 @@ async fn catalog_scenario(subscription: bool, helper: Helper) {
         )
         .await;
     if helper != Helper::Absent {
+        #[cfg(feature = "renderer-test-helper")]
+        data_plane_traffic(&running, &world, &id).await;
         // The helper is stopped cleanly and a later open starts a new one.
         let owner = running.core.host.lock().unwrap().renderer_owner().unwrap();
         owner.stop().await.unwrap();

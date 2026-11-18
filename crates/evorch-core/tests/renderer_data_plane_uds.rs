@@ -9,21 +9,16 @@ use std::sync::Arc;
 
 use evorch_core::{backend::HostBackend, unix};
 use runtime::artifacts::{CaptureRequest, store_with_refs};
-use workbench_client::renderer::{DataChannel, DataClientError};
-use workbench_client::{ClientConfig, ClientError, Subscription, UnixTransport, WorkbenchClient};
+use workbench_client::renderer::DataClientError;
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
 use workbench_protocol::{
-    commands::{Command, CommandResult},
     errors::ErrorCode,
-    events::{Subscribe, SubscriptionScope},
-    handshake::BuildInfo,
-    ids::{ClientId, ProjectId, ThreadId},
+    ids::{ProjectId, ThreadId},
     namespaces::{
-        artifacts::{ArtifactRef, ArtifactsCommand, ArtifactsResult},
+        artifacts::ArtifactRef,
         browser::data::{self, BlobSource, MediaType},
         browser::*,
     },
-    queries::{Query, QueryReply},
 };
 use workspace_state::{
     ProjectId as StateProject, SidebarDocument, SidebarStore, ThreadId as StateThread, ThreadRecord,
@@ -67,122 +62,9 @@ impl runtime::SandboxFactory for Direct {
     }
 }
 
-struct Peer {
-    client: WorkbenchClient,
-    events: Subscription,
-    socket: std::path::PathBuf,
-}
-impl Peer {
-    async fn connect(socket: &std::path::Path, name: &str) -> Self {
-        let client = WorkbenchClient::connect(
-            UnixTransport::connect(socket).await.unwrap(),
-            ClientConfig::new(
-                ClientId::new(name).unwrap(),
-                BuildInfo {
-                    name: "test".into(),
-                    version: "1".into(),
-                    revision: None,
-                },
-            ),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{name} could not connect: {error:?}"));
-        let events = client
-            .subscribe(Subscribe {
-                scope: SubscriptionScope::All,
-                after: None,
-            })
-            .await
-            .unwrap();
-        Self {
-            client,
-            events,
-            socket: socket.to_path_buf(),
-        }
-    }
-    async fn accepted(&self, command: Command) -> Result<RendererId, ErrorCode> {
-        let reply = self.client.command(command).await.map_err(code)?;
-        match reply.result.as_deref() {
-            Some(CommandResult::Browser(BrowserResult::Accepted { operation_id }))
-            | Some(CommandResult::Artifacts(ArtifactsResult::Accepted { operation_id })) => {
-                Ok(operation_id.clone())
-            }
-            other => panic!("unexpected receipt: {other:?}"),
-        }
-    }
-    async fn browser(&self, command: BrowserCommand) -> Result<RendererId, ErrorCode> {
-        self.accepted(Command::Browser(command)).await
-    }
-    async fn operation(&self, id: &RendererId) -> RendererOperationState {
-        match self
-            .client
-            .query(Query::Browser(BrowserQuery::GetRendererOperation {
-                operation_id: id.clone(),
-            }))
-            .await
-            .unwrap()
-        {
-            QueryReply::Browser(BrowserReply::Operation(operation)) => operation.state,
-            other => panic!("unexpected reply: {other:?}"),
-        }
-    }
-    /// The operation's output; the subscription says when it changed.
-    async fn output(&mut self, id: &RendererId) -> RendererOutput {
-        loop {
-            match self.operation(id).await {
-                RendererOperationState::Running => {
-                    self.events.next().await.expect("the stream stays open");
-                }
-                RendererOperationState::Completed { output } => return output,
-                other => panic!("the operation did not complete: {other:?}"),
-            }
-        }
-    }
-    async fn session(&mut self) -> RendererSessionRef {
-        let id = self
-            .browser(BrowserCommand::CreateRendererSession {})
-            .await
-            .unwrap();
-        match self.output(&id).await {
-            RendererOutput::Session { session, .. } => session,
-            other => panic!("unexpected output: {other:?}"),
-        }
-    }
-    async fn open(&mut self, artifact: &ArtifactRef, session: &RendererSessionRef) -> RendererTab {
-        let id = self
-            .accepted(Command::Artifacts(ArtifactsCommand::OpenPreview {
-                artifact: artifact.clone(),
-                session: session.clone(),
-                viewport: RendererViewport {
-                    width: 1024,
-                    height: 768,
-                },
-            }))
-            .await
-            .unwrap();
-        match self.output(&id).await {
-            RendererOutput::Tab(tab) => *tab,
-            other => panic!("unexpected output: {other:?}"),
-        }
-    }
-    async fn channel(&self) -> DataChannel {
-        DataChannel::connect(&self.socket).await.unwrap()
-    }
-}
-fn code(error: ClientError) -> ErrorCode {
-    match error {
-        ClientError::Server(error) => error.code,
-        other => panic!("not a refusal of the core: {other:?}"),
-    }
-}
-/// The code of a refused binding.
-fn refusal<T>(result: Result<T, DataClientError>) -> ErrorCode {
-    match result {
-        Err(DataClientError::Bind(error)) => code(error),
-        Err(other) => panic!("not a refused binding: {other:?}"),
-        Ok(_) => panic!("the binding was accepted"),
-    }
-}
+#[path = "renderer_support/data_peer.rs"]
+mod data_peer;
+use data_peer::{Peer, refusal};
 
 #[test]
 fn frames_captures_and_images_travel_on_data_connections_that_only_their_owner_can_bind() {
