@@ -293,6 +293,52 @@ fn a_backfill_runs_in_bounded_batches_and_announces_each_committed_batch() {
 }
 
 #[test]
+fn a_backfill_adds_the_undecodable_rows_of_both_of_its_targets() {
+    // Given: a row the first target converts, one it cannot decode (no `subkind`
+    // and a payload that is not JSON), and an Orchestrator event the second
+    // target attributes whose payload no longer decodes.
+    let mut w = setup(None);
+    let conn = rusqlite::Connection::open(db_path(&w)).unwrap();
+    conn.execute_batch(
+        "INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+         VALUES (1, 1, 1, 'Message', '{\"kind\":\"Message\",\"payload\":{\"kind\":\"MessageCompleted\",\"payload\":{\"run_id\":\"run-c\",\"text\":\"t\"}}}');
+         INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+         VALUES (1, 2, 2, 'Message', '{');
+         INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind) \
+         VALUES (1, 3, 3, 'Orchestrator', '{', 'TaskProgressed');",
+    )
+    .unwrap();
+    drop(conn);
+    let mut events = subscribe(&w);
+
+    // When: the backfill runs one row at a time.
+    start(&mut w, web(), "both", backfill(1, None)).unwrap();
+    let seen = events_until_settled(&w.rt, &mut events, "both");
+
+    // Then: the operation counts the undecodable rows of both targets.
+    let done = settled_view(&seen);
+    assert_eq!(done.operation.state, OperationState::Ready);
+    let MaintenanceProgress::BackfillEvents {
+        converted,
+        reattributed,
+        undecodable,
+        remaining_unconverted,
+        remaining_unattributed,
+    } = &done.progress;
+    assert_eq!(
+        (
+            *converted,
+            *reattributed,
+            *undecodable,
+            *remaining_unconverted,
+            *remaining_unattributed
+        ),
+        (2, 1, 2, Some(0), Some(0))
+    );
+    assert_eq!(&get(&w, "both").unwrap(), done);
+}
+
+#[test]
 fn a_backfill_stops_at_its_row_bound_and_says_what_is_left() {
     let mut w = setup(None);
     seed_legacy(&w, 10);
