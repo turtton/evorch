@@ -119,8 +119,11 @@ const C_GC: u64 = 24;
 // the 13 v65 left unused.
 // v65: four small restart evidence schema edits; measured 567 frames/100,000 rows
 // versus 547 at v64. The allowance stays independent of existing content rows.
+// v68: rebuild of thread_index_requests (new table, copy, rename, one index): the full-chain
+// probe measured 604 frames with 100,000 rows (8 above the prior ceiling of 596). Reserve 12
+// more fixed schema frames (the measured 8 plus 4 of placement headroom); no row-scaled work.
 const MIGRATION_FRAMES: u64 =
-    24 + 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4 + 32 + 24 + 32 + 16;
+    24 + 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4 + 32 + 24 + 32 + 16 + 12;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -357,6 +360,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v68.sql"),
                     include_str!("../undo/undo_v67.sql"),
                     include_str!("../undo/undo_v66.sql"),
                     include_str!("../undo/undo_v65.sql"),

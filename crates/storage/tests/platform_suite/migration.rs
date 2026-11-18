@@ -11,7 +11,7 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 67;
+const LATEST_SCHEMA: u32 = 68;
 
 const EXPECTED_TABLES: [&str; 121] = [
     "restart_learning_inventory",
@@ -309,6 +309,31 @@ fn v67_drops_the_retired_todo_column_from_lane_handoffs() {
         !columns.iter().any(|name| name == "todo_json"),
         "{columns:?}"
     );
+}
+
+#[test]
+fn v68_lets_a_reindex_request_register_before_it_is_visible() {
+    // Given: a fresh database at the latest schema
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let path = database_path(&temp_dir);
+    Database::open(&config_for(&path)).expect("fresh database must open");
+    let connection = Connection::open(path).expect("migrated database must reopen");
+    let insert = |id: &str, state: &str, finished: Option<i64>| {
+        connection.execute(
+            "INSERT INTO thread_index_requests(request_id, include_evicted, state, \
+             failure_reason, created_at_ns, finished_at_ns) VALUES (?1, 0, ?2, NULL, 1, ?3)",
+            rusqlite::params![id, state, finished],
+        )
+    };
+
+    // Then: a registering request is unfinished like a pending one, and a finished
+    // state still needs its finish time
+    insert("registering", "registering", None).expect("registering has no finish time");
+    insert("pending", "pending", None).expect("pending has no finish time");
+    assert!(insert("registering-finished", "registering", Some(2)).is_err());
+    assert!(insert("completed-unfinished", "completed", None).is_err());
+    assert!(insert("unknown", "unknown", None).is_err());
+    insert("completed", "completed", Some(2)).expect("completed has a finish time");
 }
 
 #[test]
@@ -1245,6 +1270,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v68.sql"),
                 include_str!("../../undo/undo_v67.sql"),
                 include_str!("../../undo/undo_v66.sql"),
                 include_str!("../../undo/undo_v65.sql"),
