@@ -6,7 +6,7 @@
 use super::*;
 
 /// Automatic wakes allowed in one conversation between user inputs.
-pub(crate) const AUTO_WAKE_LIMIT: u32 = 20;
+pub(crate) const AUTO_WAKE_LIMIT: u32 = 200;
 
 impl AgentRuntime {
     /// How many messages wait for a recipient that is not running.
@@ -543,7 +543,7 @@ mod tests {
         );
         let mut events = bus.subscribe();
         let root = RunId::new(7);
-        for _ in 0..AUTO_WAKE_LIMIT {
+        for _ in 0..200 {
             assert!(runtime.take_auto_wake(root));
         }
         assert!(!runtime.take_auto_wake(root));

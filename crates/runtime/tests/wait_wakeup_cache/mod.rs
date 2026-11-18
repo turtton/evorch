@@ -74,6 +74,141 @@ fn history(request: &Value) -> String {
 }
 
 #[tokio::test]
+async fn resumed_child_completion_preserves_parent_and_child_wire_prefixes() {
+    for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
+        let read = Arc::new(GatedRead {
+            started: Notify::new(),
+            release: Notify::new(),
+            child_started: Notify::new(),
+        });
+        let mut harness = harness_with_wire(
+            wire,
+            vec![text_response("waiting for the child")],
+            1_000_000,
+            read.clone(),
+            Vec::new(),
+            None,
+            0.9,
+            |_| {},
+        );
+        let config = storage::StorageConfig {
+            db_path: harness._directory.path().join("resumed-completion.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        harness.runtime = harness
+            .runtime
+            .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        let parent_goal = "Coordinate repeated completion generations";
+        let child_goal = "Produce two independent child results";
+        let parent = harness.runtime.delegate_background(
+            Role::Orchestrator,
+            parent_goal.into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        );
+        let mut events = Vec::new();
+        until_waiting(&mut harness, &mut events, parent, 1).await;
+        harness.mock.enqueue(vec![
+            text_response("first child result"),
+            text_response("observed first completion"),
+        ]);
+        let child = harness
+            .runtime
+            .delegate_background_as_child(parent, Role::Worker, child_goal, RunConfig::default())
+            .unwrap();
+        assert_eq!(
+            harness.runtime.wait(child).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        until_waiting(&mut harness, &mut events, parent, 2).await;
+        harness.mock.enqueue(vec![read_response(0)]);
+        harness
+            .runtime
+            .send_agent_message(
+                parent,
+                child,
+                event_bus::AgentMessageKind::Send,
+                "continue the child",
+                None,
+            )
+            .unwrap();
+        read.started.notified().await;
+        harness.mock.enqueue(vec![
+            text_response("second child result"),
+            text_response("observed second completion"),
+        ]);
+        read.release.notify_one();
+        assert_eq!(
+            harness.runtime.wait(child).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        until_waiting(&mut harness, &mut events, parent, 3).await;
+
+        let requests = harness
+            .mock
+            .recorded_requests()
+            .into_iter()
+            .filter(|request| request.path == wire.path())
+            .map(|request| request.body)
+            .collect::<Vec<_>>();
+        for (run, goal) in [(parent, parent_goal), (child, child_goal)] {
+            let requests = requests
+                .iter()
+                .filter(|body| history(body).contains(goal))
+                .collect::<Vec<_>>();
+            assert_eq!(requests.len(), 3, "{goal}");
+            for pair in requests.windows(2) {
+                assert_eq!(pair[0]["tools"], pair[1]["tools"]);
+                assert_append_only(wire.protocol(), pair[0], pair[1]).unwrap();
+            }
+            let usage = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::Provider(ProviderEvent::RequestCompleted {
+                        run_id: Some(id),
+                        input_tokens,
+                        cache_read_tokens,
+                        ..
+                    }) if id == &run.to_string() => Some((*input_tokens, *cache_read_tokens)),
+                    EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                        panic!("{diagnostic:?}")
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(usage.len(), requests.len());
+            if run == parent {
+                assert_eq!(usage[0].1, 0);
+            }
+            for pair in usage.windows(2) {
+                assert!(pair[0].0 > 0 && pair[1].1 >= pair[0].0, "{usage:?}");
+            }
+        }
+        let last_parent = requests
+            .iter()
+            .rev()
+            .find(|body| history(body).contains(parent_goal))
+            .unwrap();
+        assert_eq!(
+            history(last_parent).matches("first child result").count(),
+            1
+        );
+        assert_eq!(
+            history(last_parent).matches("second child result").count(),
+            1
+        );
+        assert!(harness.runtime.take_inbox(parent).unwrap().is_empty());
+        assert_eq!(harness.mock.remaining_scripts(), 0);
+        harness.runtime.cancel(parent).unwrap();
+        harness.runtime.wait(parent).await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn answer_and_host_input_wakeups_of_waits_preserve_the_wire_prefix() {
     for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
         let read = Arc::new(GatedRead {
