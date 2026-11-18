@@ -4434,50 +4434,94 @@ fn seed_targets(
         .unwrap();
 }
 
-#[test]
-fn a_gap_window_costs_the_same_wherever_it_is_and_whatever_else_is_pending() {
-    let window_costs = |others: usize| -> (u64, u64) {
-        let fx = Fixture::new(512 * MIB);
-        seed_targets(&fx, "registering-one", "registering", 5_000, "pending");
-        for index in 0..others {
-            seed_targets(&fx, &format!("other-{index:05}"), "pending", 1, "pending");
+/// Costs (VM steps) of the first, a middle and the last window of a registration of
+/// `total` targets, with `others` other pending requests alongside.
+fn gap_window_costs(total: usize, others: usize) -> (u64, u64, u64) {
+    let fx = Fixture::new(512 * MIB);
+    seed_targets(&fx, "registering-one", "registering", total, "pending");
+    for index in 0..others {
+        seed_targets(&fx, &format!("other-{index:05}"), "pending", 1, "pending");
+    }
+    let (first, mut cursor) = gap_window_cost(&fx, "registering-one", None);
+    let windows_total = total.div_ceil(256);
+    let (mut middle, mut last, mut windows) = (0, 0, 1);
+    while cursor.is_some() {
+        let (steps, next) = gap_window_cost(&fx, "registering-one", cursor.as_ref());
+        windows += 1;
+        if windows == windows_total / 2 {
+            middle = steps;
         }
-        let (first, mut cursor) = gap_window_cost(&fx, "registering-one", None);
-        let mut middle = 0;
-        let mut windows = 1;
-        while cursor.is_some() {
-            let (steps, next) = gap_window_cost(&fx, "registering-one", cursor.as_ref());
-            windows += 1;
-            if windows == 15 {
-                middle = steps;
-            }
-            cursor = next;
-        }
-        assert_eq!(windows, 20, "5000 targets in windows of 256");
-        let pending: u64 = fx
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending' \
-                 AND request_id = 'registering-one'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(pending, 0);
-        (first, middle)
-    };
-    let (alone_first, alone_middle) = window_costs(0);
-    let (crowded_first, crowded_middle) = window_costs(3_000);
-    assert!(alone_first > 0);
+        last = steps;
+        cursor = next;
+    }
+    assert_eq!(windows, windows_total, "{total} targets in windows of 256");
+    let pending: u64 = fx
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending' \
+             AND request_id = 'registering-one'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+    (first, middle, last)
+}
+
+/// `a` and `b` are within a quarter of each other, in both directions.
+fn same_cost(what: &str, a: u64, b: u64) {
+    assert!(a > 0 && b > 0, "{what}: no cost measured ({a}, {b})");
     assert!(
-        alone_middle <= alone_first + alone_first / 4,
-        "a later window re-read the earlier ones: {alone_first} -> {alone_middle}"
+        a <= b + b / 4 && b <= a + a / 4,
+        "{what}: the cost depends on where the window is or how many targets there are \
+         ({a} vs {b})"
     );
+}
+
+#[test]
+fn a_gap_window_costs_the_same_wherever_it_is_and_however_many_targets_there_are() {
+    let (small_first, small_middle, _) = gap_window_costs(5_000, 0);
+    let (large_first, large_middle, large_last) = gap_window_costs(20_000, 0);
+    // A window anywhere in the registration costs what the first one does.
+    same_cost("5000: middle vs first", small_middle, small_first);
+    same_cost("20000: middle vs first", large_middle, large_first);
+    // A window of the same size costs the same whatever the total (the window that
+    // ends the scan reads fewer targets, so it is not held to the full-window cost).
+    same_cost("first, 5000 vs 20000", small_first, large_first);
+    same_cost("middle, 5000 vs 20000", small_middle, large_middle);
+    assert!(large_last <= large_first + large_first / 4);
+}
+
+#[test]
+fn a_gap_window_costs_the_same_whatever_else_is_pending() {
+    let (alone_first, alone_middle, _) = gap_window_costs(5_000, 0);
+    let (crowded_first, crowded_middle, _) = gap_window_costs(5_000, 3_000);
+    same_cost("first, alone vs crowded", alone_first, crowded_first);
+    same_cost("middle, alone vs crowded", alone_middle, crowded_middle);
+}
+
+#[test]
+fn a_gap_window_update_is_a_range_of_the_primary_key_closed_by_the_window() {
+    let fx = Fixture::new(512 * MIB);
+    seed_targets(&fx, "registering-one", "registering", 600, "pending");
+    let plan: String = fx
+        .conn()
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            super::requests::GAP_CLOSED_WINDOW_SQL
+        ))
+        .unwrap()
+        .query_map(
+            rusqlite::params!["registering-one", "gap", "", "run-000255"],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        crowded_first <= alone_first + alone_first / 4
-            && crowded_middle <= alone_middle + alone_middle / 4,
-        "other pending requests changed the cost: {alone_first}/{alone_middle} -> \
-         {crowded_first}/{crowded_middle}"
+        plan.contains("run_id>?") && plan.contains("run_id<?"),
+        "the window is not bounded above in the index range: {plan}"
     );
 }
 

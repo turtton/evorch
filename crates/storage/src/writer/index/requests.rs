@@ -333,6 +333,12 @@ pub(crate) struct GapBatch {
     pub next: Option<GapCursor>,
 }
 
+/// The update of a gap window that has a last run: a range of the primary key closed on
+/// both sides (a test pins its query plan).
+pub(crate) const GAP_CLOSED_WINDOW_SQL: &str = "UPDATE thread_index_request_targets \
+     SET state = 'gap', gap_reason = ?2 \
+     WHERE request_id = ?1 AND run_id > ?3 AND run_id <= ?4 AND state = 'pending'";
+
 /// Closes the pending targets of the registration `request_id`, and only those, with
 /// `reason`: the targets of a disabled or paused index cannot be worked on. One short
 /// transaction per call over a window of at most `limit` targets after `cursor` in
@@ -367,12 +373,21 @@ pub(crate) fn gap_batch(
                 |row| row.get(0),
             )
             .optional()?;
-        conn.execute(
-            "UPDATE thread_index_request_targets SET state = 'gap', gap_reason = ?2 \
-             WHERE request_id = ?1 AND run_id > ?3 AND (?4 IS NULL OR run_id <= ?4) \
-             AND state = 'pending'",
-            params![request_id, reason, after, last],
-        )?;
+        // Two statements, not one with `(?4 IS NULL OR run_id <= ?4)`: that OR keeps the
+        // upper bound out of the index range, so a window would read every remaining
+        // target. Each form is a range of the primary key closed by the window (the
+        // last window is open-ended, and holds fewer than `limit` targets).
+        match &last {
+            Some(last) => conn.execute(
+                GAP_CLOSED_WINDOW_SQL,
+                params![request_id, reason, after, last],
+            )?,
+            None => conn.execute(
+                "UPDATE thread_index_request_targets SET state = 'gap', gap_reason = ?2 \
+                 WHERE request_id = ?1 AND run_id > ?3 AND state = 'pending'",
+                params![request_id, reason, after],
+            )?,
+        };
         Ok(GapBatch {
             next: last.map(|run_id| GapCursor { run_id }),
         })
