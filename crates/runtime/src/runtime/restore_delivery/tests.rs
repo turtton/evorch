@@ -212,18 +212,8 @@ async fn restored_registration_has_a_fresh_completion_receipt() {
         .completion_notice
         .unwrap();
     assert_ne!(old.generation, new.generation);
-    let report = AgentMessage {
-        message_id: "new-report".into(),
-        sender_run_id: child.to_string(),
-        recipient_run_id: parent.to_string(),
-        kind: AgentMessageKind::Send,
-        content: "done".into(),
-        reply_to: None,
-    };
-    runtime.hold_queued_message(
-        parent,
-        crate::mailbox::QueuedMessage::completion(report, new.clone()),
-    );
+    // The real terminal relay must have held the new report; fabricating one
+    // here would hide a registration that accidentally inherited relay=true.
     runtime.observe_completion(&old);
     assert_eq!(
         runtime.shared.held_messages.lock().unwrap()[&parent].len(),

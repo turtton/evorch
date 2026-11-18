@@ -106,6 +106,283 @@ async fn wake_requested(receiver: &mut EventReceiver, root: RunId) {
     }
 }
 
+async fn waiting(receiver: &mut EventReceiver, run: RunId) {
+    loop {
+        if matches!(receiver.recv().await.unwrap().kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id, to: AgentRunPhase::Waiting, ..
+            }) if run_id == run.to_string())
+        {
+            return;
+        }
+    }
+}
+
+// runtime.wait fences terminal relay publication. A bus marker then bounds the
+// synchronous deliveries, so a missing notification fails without a timeout.
+async fn completion_delivery(
+    fixture: &Fixture,
+    events: &mut EventReceiver,
+    child: RunId,
+    parent: RunId,
+    content: &str,
+    expected: DeliveryDisposition,
+) -> String {
+    fixture
+        .bus
+        .emit(event_bus::Event::new(LifecycleEvent::Started {
+            session_id: "completion-fence".into(),
+        }));
+    let mut reports = Vec::new();
+    loop {
+        match events.recv().await.unwrap().kind {
+            EventKind::AgentMessage(AgentMessageEvent::Delivered {
+                message,
+                disposition,
+            }) if message.sender_run_id == child.to_string()
+                && message.recipient_run_id == parent.to_string()
+                && disposition == expected =>
+            {
+                reports.push((message, disposition));
+            }
+            EventKind::Lifecycle(LifecycleEvent::Started { session_id })
+                if session_id == "completion-fence" =>
+            {
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(reports.len(), 1, "one report per completion generation");
+    let (message, disposition) = reports.pop().unwrap();
+    assert_eq!(message.content, content);
+    assert_eq!(disposition, expected);
+    message.message_id
+}
+
+#[tokio::test]
+async fn resumed_child_completion_wakes_waiting_root_once_per_generation() {
+    let fixture = fixture().await;
+    fixture
+        .script("ROOT", &["idle", "first observed", "second observed"])
+        .await;
+    fixture
+        .script("CHILD", &["first result", "second result"])
+        .await;
+    let gate = fixture.gate("CHILD").await;
+    let mut phases = fixture.bus.subscribe();
+    let mut reports = fixture.bus.subscribe();
+    let root = fixture.runtime.delegate_background(
+        Role::Orchestrator,
+        "ROOT".into(),
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    waiting(&mut phases, root).await;
+    let child = fixture
+        .runtime
+        .delegate_background_as_child(root, Role::Worker, "CHILD", RunConfig::default())
+        .unwrap();
+    fixture.model.wait_for_request(1).await;
+    gate.notify_one();
+    assert_eq!(
+        fixture.runtime.wait(child).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    let first = completion_delivery(
+        &fixture,
+        &mut reports,
+        child,
+        root,
+        "first result",
+        DeliveryDisposition::Wake,
+    )
+    .await;
+    let first_request = fixture.model.wait_for_request(2).await;
+    waiting(&mut phases, root).await;
+    assert!(fixture.runtime.take_inbox(root).unwrap().is_empty());
+
+    fixture
+        .runtime
+        .send_agent_message(
+            root,
+            child,
+            AgentMessageKind::Send,
+            "continue the work",
+            None,
+        )
+        .unwrap();
+    fixture.model.wait_for_request(3).await;
+    assert_eq!(
+        fixture.runtime.inspect_agent(root).unwrap().phase,
+        AgentRunPhase::Waiting
+    );
+    gate.notify_one();
+    assert_eq!(
+        fixture.runtime.wait(child).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    let second = completion_delivery(
+        &fixture,
+        &mut reports,
+        child,
+        root,
+        "second result",
+        DeliveryDisposition::Wake,
+    )
+    .await;
+    assert_ne!(first, second);
+    let second_request = fixture.model.wait_for_request(4).await;
+    // Already-sent parent history is append-only across both automatic wakes.
+    assert_eq!(
+        &second_request[..first_request.len()],
+        first_request.as_slice()
+    );
+    assert_eq!(
+        serde_json::to_string(&second_request)
+            .unwrap()
+            .matches("second result")
+            .count(),
+        1
+    );
+    waiting(&mut phases, root).await;
+    assert!(fixture.runtime.take_inbox(root).unwrap().is_empty());
+    assert_eq!(
+        fixture.runtime.run_result(child).unwrap().as_deref(),
+        Some("second result")
+    );
+    fixture.runtime.cancel(root).unwrap();
+    fixture.runtime.wait(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn resumed_child_completion_wakes_terminal_root_and_subagent() {
+    for is_root in [true, false] {
+        let fixture = fixture().await;
+        let mut wakes = fixture.bus.subscribe();
+        let mut reports = fixture.bus.subscribe();
+        let ancestor = if is_root {
+            None
+        } else {
+            fixture.gate("ANCESTOR").await;
+            let ancestor = fixture.runtime.delegate_background(
+                Role::Orchestrator,
+                "ANCESTOR".into(),
+                RunConfig::default(),
+            );
+            fixture.model.wait_for_request(0).await;
+            Some(ancestor)
+        };
+        if is_root {
+            fixture
+                .model
+                .add_keyed(
+                    "PARENT",
+                    (0..3).map(|n| {
+                        Ok(tool_response(
+                            &format!("finish-{n}"),
+                            "finish",
+                            serde_json::json!({"result":"handled"}),
+                        ))
+                    }),
+                )
+                .await;
+        } else {
+            fixture
+                .script("PARENT", &["initial", "first observed", "second observed"])
+                .await;
+        }
+        fixture
+            .script("CHILD", &["first result", "second result"])
+            .await;
+        let gate = fixture.gate("CHILD").await;
+        let parent = match ancestor {
+            None => fixture.runtime.delegate_background(
+                Role::Orchestrator,
+                "PARENT".into(),
+                RunConfig::default(),
+            ),
+            Some(ancestor) => fixture
+                .runtime
+                .delegate_background_as_child(
+                    ancestor,
+                    Role::Worker,
+                    "PARENT",
+                    RunConfig::default(),
+                )
+                .unwrap(),
+        };
+        assert_eq!(
+            fixture.runtime.wait(parent).await.unwrap(),
+            AgentRunPhase::Done
+        );
+        let child = fixture
+            .runtime
+            .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
+            .unwrap();
+        let offset = usize::from(!is_root);
+        fixture.model.wait_for_request(offset + 1).await;
+        let mut ids = Vec::new();
+        for (generation, content) in ["first result", "second result"].into_iter().enumerate() {
+            gate.notify_one();
+            assert_eq!(
+                fixture.runtime.wait(child).await.unwrap(),
+                AgentRunPhase::Done
+            );
+            ids.push(
+                completion_delivery(
+                    &fixture,
+                    &mut reports,
+                    child,
+                    parent,
+                    content,
+                    DeliveryDisposition::Held,
+                )
+                .await,
+            );
+            if is_root {
+                wake_requested(&mut wakes, parent).await;
+                fixture
+                    .runtime
+                    .wake_chat(parent, RunConfig::default())
+                    .unwrap();
+            }
+            let request = fixture
+                .model
+                .wait_for_request(offset + 2 + generation * 2)
+                .await;
+            assert_eq!(
+                serde_json::to_string(&request)
+                    .unwrap()
+                    .matches(content)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                fixture.runtime.wait(parent).await.unwrap(),
+                AgentRunPhase::Done
+            );
+            assert_eq!(fixture.runtime.held_message_count(), 0);
+            assert!(fixture.runtime.take_inbox(parent).unwrap().is_empty());
+            if generation == 0 {
+                fixture
+                    .runtime
+                    .send_agent_message(parent, child, AgentMessageKind::Send, "continue", None)
+                    .unwrap();
+                fixture.model.wait_for_request(offset + 3).await;
+            }
+        }
+        assert_ne!(ids[0], ids[1]);
+        if let Some(ancestor) = ancestor {
+            fixture.runtime.cancel(ancestor).unwrap();
+            fixture.runtime.wait(ancestor).await.unwrap();
+        }
+    }
+}
+
 #[tokio::test]
 async fn woken_root_receives_held_report_once_while_another_child_is_live() {
     // Given: a root finished while both background children were still working.

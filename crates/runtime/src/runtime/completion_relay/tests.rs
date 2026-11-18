@@ -79,6 +79,78 @@ fn publish(runtime: &AgentRuntime, run_id: RunId, to: AgentRunPhase) {
 }
 
 #[tokio::test]
+async fn restored_generation_relays_once_despite_old_output_ack() {
+    use crate::escalation_review::support::{ScriptedModel, text_response};
+    use providers::FinishReason;
+    use tokio::sync::Notify;
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("completion.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(128));
+    let model = Arc::new(ScriptedModel::new([]));
+    model.gate_key("PARENT", Arc::new(Notify::new())).await;
+    let gate = Arc::new(Notify::new());
+    model.gate_key("CHILD", gate.clone()).await;
+    model
+        .add_keyed(
+            "CHILD",
+            (0..2).map(|_| Ok(text_response("same result", FinishReason::Stop))),
+        )
+        .await;
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
+    model.wait_for_request(0).await;
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
+        .unwrap();
+    model.wait_for_request(1).await;
+    gate.notify_one();
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    let old = runtime
+        .run_output(parent, child)
+        .unwrap()
+        .completion_notice
+        .unwrap();
+    assert!(!old.observed());
+    publish(&runtime, child, AgentRunPhase::Done);
+    assert_eq!(runtime.run_mailbox(parent).unwrap().len(), 1);
+
+    runtime
+        .send_agent_message(parent, child, AgentMessageKind::Send, "again", None)
+        .unwrap();
+    model.wait_for_request(2).await;
+    // An output snapshot can be presented after same-ID registration replaced
+    // its entry. Its ACK must retire only its original generation's queue item.
+    runtime.observe_completion(&old);
+    assert!(old.observed());
+    assert!(runtime.take_inbox(parent).unwrap().is_empty());
+    gate.notify_one();
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    let new = runtime
+        .run_output(parent, child)
+        .unwrap()
+        .completion_notice
+        .unwrap();
+    assert_ne!(new.generation, old.generation);
+    assert!(!new.observed());
+    runtime.observe_completion(&old);
+    publish(&runtime, child, AgentRunPhase::Done);
+    let messages = runtime.take_inbox(parent).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "same result");
+    assert!(new.observed());
+    assert!(runtime.take_inbox(parent).unwrap().is_empty());
+    runtime.cancel(parent).unwrap();
+    runtime.wait(parent).await.unwrap();
+}
+
+#[tokio::test]
 async fn stopped_child_publishes_terminal_output_and_relays_once_without_legacy_events() {
     let runtime = fixture();
     let parent =

@@ -148,10 +148,6 @@ impl AgentRuntime {
             restored: None,
             initial_prompt_id: None,
         });
-        let completion_relayed = !history_only
-            && runs
-                .get(&run_id)
-                .is_none_or(|entry| entry.completion_relayed);
         runs.insert(
             run_id,
             RunEntry {
@@ -163,7 +159,9 @@ impl AgentRuntime {
                 config,
                 parent,
                 escalated_from: None,
-                completion_relayed,
+                // This registration owns a new completion generation. The old
+                // generation's relay/observation state stays on its own receipt.
+                completion_relayed: false,
                 completion_notice: crate::mailbox::CompletionNotice::new(
                     parent,
                     run_id,

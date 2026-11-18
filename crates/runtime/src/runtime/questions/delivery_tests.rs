@@ -394,8 +394,9 @@ async fn separate_child_guards_bound_twentieth_and_reset_only_on_user_signal() {
 
 #[tokio::test]
 async fn mixed_held_batch_uses_auto_budget_or_falls_back_to_question_budget() {
-    for initial_auto in [0, 20, 21] {
-        let auto_paused = initial_auto >= 20;
+    let limit = crate::runtime::held_messages::AUTO_WAKE_LIMIT;
+    for initial_auto in [0, limit, limit + 1] {
+        let auto_paused = initial_auto >= limit;
         let f = fixture();
         let (root, child) = pair(&f, false).await;
         f.model.finish.notify_one();
