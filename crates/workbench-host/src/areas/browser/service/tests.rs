@@ -259,6 +259,8 @@ async fn disconnect_revokes_frame_leases_and_resume_rotates_token_without_transf
                 id: renderer_ipc::TabId(1),
             },
             expires: Instant::now() + GRACE,
+            token: id(),
+            bound: None,
         },
     );
     assert_eq!(f.service.reconnect_grace().until, None);

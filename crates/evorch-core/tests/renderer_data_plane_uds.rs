@@ -20,7 +20,7 @@ use workbench_protocol::{
     ids::{ClientId, ProjectId, ThreadId},
     namespaces::{
         artifacts::{ArtifactRef, ArtifactsCommand, ArtifactsResult},
-        browser::data::{BlobSource, MediaType},
+        browser::data::{self, BlobSource, MediaType},
         browser::*,
     },
     queries::{Query, QueryReply},
@@ -320,6 +320,23 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     else {
         panic!("not a subscription")
     };
+    // At most eight subscriptions are live at once; the ninth is refused
+    // until one is released, and a refusal leaves the others untouched.
+    for _ in 1..data::MAX_FRAME_SUBSCRIPTIONS {
+        a.browser(BrowserCommand::SubscribeRendererFrames {
+            tab: tab.reference.clone(),
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        a.browser(BrowserCommand::SubscribeRendererFrames {
+            tab: tab.reference.clone(),
+        })
+        .await
+        .unwrap_err(),
+        ErrorCode::Busy
+    );
 
     // Another client cannot use what A was given, even knowing the token;
     // a refused binding does not consume it.

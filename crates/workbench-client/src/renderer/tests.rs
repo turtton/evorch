@@ -174,7 +174,7 @@ async fn a_repeated_or_older_sequence_ends_the_stream() {
 
 #[tokio::test]
 async fn a_gap_a_foreign_chunk_or_a_short_end_is_a_violation() {
-    let bytes = vec![3u8; 8];
+    let bytes = [3u8; 8];
     let gap = ChunkMeta { id: 1, offset: 4 }.encode(&bytes[..4]);
     let foreign = ChunkMeta { id: 2, offset: 0 }.encode(&bytes[..4]);
     let short = [
