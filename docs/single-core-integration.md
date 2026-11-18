@@ -277,6 +277,15 @@ the scope `pr17c`; the rest of the eval crate does not. The child stays a CLI:
 it connects to the core of the same configuration directory and the evaluation
 runs there, so the group's completion is still the child's exit.
 
+### The verification command runner (scope of pr17c)
+
+`crates/eval/src/verify.rs` runs the optional `--verify` command of a replay.
+17c routes `evorch eval run` through the core, where a cancelled or shut-down
+job must also stop a verification that is running (ADR 0045 §10), so `run`
+learns to take a cancel signal and to wait until the command's process group is
+reaped. The file belongs to the scope `pr17c`; its only caller is
+`crates/eval/src/runner.rs`.
+
 ## Reserved migration numbers
 
 Storage migrations are numbered from one shared ledger kept by the
