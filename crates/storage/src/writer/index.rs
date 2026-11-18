@@ -186,9 +186,10 @@ impl Control<'_> {
         now_ns: i64,
     ) -> Result<Registration, RequestFailure> {
         requests::validate(request)?;
-        let request_id =
-            requests::begin_registration(self.env.conn, request, now_ns).map_err(persistence)?;
-        registration::mark_live(self.env.db_path, &request_id);
+        let request_id = registration::begin_live(self.env.db_path, || {
+            requests::begin_registration(self.env.conn, request, now_ns)
+        })
+        .map_err(persistence)?;
         Ok(Registration::new(request_id))
     }
 
@@ -216,22 +217,58 @@ impl Control<'_> {
             }
             Phase::Gap => {
                 let policy = self.policy().map_err(persistence)?;
+                registration.gap_closed = false;
                 if let Policy::Gap(reason) = policy {
-                    let closed = requests::gap_batch(
+                    let batch = requests::gap_batch(
                         self.env.conn,
                         &request_id,
                         reason,
                         requests::GAP_BATCH,
                     )
                     .map_err(persistence)?;
-                    if closed >= requests::GAP_BATCH {
+                    for touched in batch.touched {
+                        if !registration.touched.contains(&touched) {
+                            registration.touched.push(touched);
+                        }
+                    }
+                    if batch.closed >= requests::GAP_BATCH {
                         return Ok(RegistrationProgress::InProgress);
                     }
+                    // Fewer than a batch closed: no target of the registration or of a
+                    // published request is pending any more.
+                    registration.gap_closed = true;
                 }
-                registration.phase = Phase::Publish;
+                registration.phase = Self::after_gap(registration);
+            }
+            Phase::Settle(cursor) => {
+                let Some(settling) = registration.touched.first().cloned() else {
+                    registration.phase = Phase::Publish;
+                    return Ok(RegistrationProgress::InProgress);
+                };
+                match requests::settle_batch(
+                    self.env.conn,
+                    &settling,
+                    &cursor,
+                    requests::SETTLE_BATCH,
+                    now_ns,
+                )
+                .map_err(persistence)?
+                {
+                    requests::Settled::More(next) => registration.phase = Phase::Settle(next),
+                    requests::Settled::Done => {
+                        registration.touched.remove(0);
+                        registration.phase = Self::after_gap(registration);
+                    }
+                }
             }
             Phase::Publish => {
-                match self.publish_registration(&request_id, owner, now_ns, lease_duration_ns)? {
+                match self.publish_registration(
+                    &request_id,
+                    registration.gap_closed,
+                    owner,
+                    now_ns,
+                    lease_duration_ns,
+                )? {
                     PublishOutcome::Published(submission) => {
                         registration::unmark_live(self.env.db_path, &request_id);
                         return Ok(RegistrationProgress::Published(submission));
@@ -241,6 +278,16 @@ impl Control<'_> {
             }
         }
         Ok(RegistrationProgress::InProgress)
+    }
+
+    /// The phase after the policy-gap batches: the published requests they left without
+    /// a pending target are settled first, then the registration is published.
+    fn after_gap(registration: &Registration) -> Phase {
+        if registration.touched.is_empty() {
+            Phase::Publish
+        } else {
+            Phase::Settle(requests::SettleCursor::default())
+        }
     }
 
     /// One discovery batch; `true` once every run has an index row.
@@ -292,18 +339,31 @@ impl Control<'_> {
     }
 
     /// The last short transaction: the request becomes pending and the owner is elected.
-    /// The policy is evaluated again inside it: when it turned into a gap while targets
-    /// are still pending, nothing is committed and the caller closes them in batches
-    /// first (`Replan`), so this transaction never closes more than a finalize.
+    /// Its work does not depend on the number of targets. The policy is evaluated again
+    /// inside it: when it turned into a gap and the gap batches have not run under it
+    /// (`gap_closed` is false), nothing is committed and the caller closes the targets in
+    /// batches first (`Replan`). When they did run, no target is pending and the request
+    /// ends `completed_with_gaps` here, at acceptance, without reading its targets.
     pub(crate) fn publish_registration(
         &mut self,
         request_id: &str,
+        gap_closed: bool,
         owner: &IndexOwner,
         now_ns: i64,
         lease_duration_ns: i64,
     ) -> Result<PublishOutcome, RequestFailure> {
+        // The policy is read before the write transaction: it looks at the whole index (sizes,
+        // the charges of every run), and the writer is the only thread that changes it.
+        let policy = self.policy().map_err(persistence)?;
         let Some((lease, wal_pending)) = self
-            .publish_transaction(request_id, owner, now_ns, lease_duration_ns)
+            .publish_transaction(
+                request_id,
+                gap_closed,
+                policy,
+                owner,
+                now_ns,
+                lease_duration_ns,
+            )
             .map_err(persistence)?
         else {
             return Ok(PublishOutcome::Replan);
@@ -328,6 +388,8 @@ impl Control<'_> {
     fn publish_transaction(
         &mut self,
         request_id: &str,
+        gap_closed: bool,
+        policy: Policy,
         owner: &IndexOwner,
         now_ns: i64,
         lease_duration_ns: i64,
@@ -335,17 +397,16 @@ impl Control<'_> {
         let conn = self.env.conn;
         let transaction =
             rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-        let policy = self.policy()?;
         let gap = matches!(policy, Policy::Gap(_));
-        if gap && requests::has_gappable_pending(&transaction, request_id)? {
+        if gap && !gap_closed {
             return Ok(None);
         }
         requests::publish_registration(&transaction, request_id, now_ns)?;
         let lease = lease::acquire_in(&transaction, owner, now_ns, lease_duration_ns)?;
-        if gap {
+        if gap_closed {
             // A parked owner does not run another step for each request: what the gap
             // batches closed finishes at acceptance instead of waiting forever.
-            requests::finalize(&transaction, now_ns)?;
+            requests::complete_closed_registration(&transaction, request_id, now_ns)?;
         }
         transaction.commit()?;
         Ok(Some((lease, policy == Policy::WalWait)))
@@ -526,11 +587,11 @@ impl IndexJob {
         // submitter is gone. It ends `cancelled` (the index itself was never touched).
         // One writer process per database (ADR 0045): the registrations of this process
         // that are still running are the only ones kept.
-        match requests::cancel_stale_registering(
-            conn,
-            &registration::live_ids(&config.db_path),
-            now_ns(),
-        ) {
+        // The sweep and the creation of a registration exclude each other, so a registration
+        // that is committed but not yet marked live is never taken for a dead one.
+        match registration::sweep_dead(&config.db_path, |live| {
+            requests::cancel_stale_registering(conn, live, now_ns())
+        }) {
             Ok(closed) if closed > 0 => {
                 tracing::info!(
                     closed,
