@@ -3,7 +3,9 @@
 2026-11 時点。ADR 0045 §3 は、CEF/browser を「オンデマンドで起動される
 renderer helper」としてコア外へ分離する。この文書は 16a-2（helper をコアへ
 組み込み、Admission → SpawnLedger に接続する PR）の設計に必要な数値を集める。
-2 つの計測を載せる。
+2 つの計測を載せる。計測の窓と startup の手順は PR #673 の後で直した（§1）。
+修正後の手順で測り直した baseline は §5.5。§3〜§5.4 の表の値は #673 の旧手順の
+もので、§3 の startup だけ修正後の手順で置き換えた。
 
 1. **spike（16a-1 の前段）**: 試作 harness による方式選択（Unix socket か共有
    メモリか）の計測。元データは main に無かったので、結果と判断の要点だけを
@@ -64,8 +66,17 @@ scripts/measure-renderer.sh --check                           # ツール自身�
   - `startup`: **spawn → 最初のフレーム**を、spawn の直前に取った 1 つの
     `Instant` から最初のフレームを手にするまでの経過時間として測る（途中で
     `/proc` を読まない）。停止時間（`Shutdown` と process group への SIGKILL）と
-    停止後の残留 process も測る。メモリは別の試行（`mem=1`）で最初のフレームの
-    後にだけ読み、その試行の latency には「読み取りで伸びた」と印を付ける。
+    停止後の残留 process も測る。各 run は新しい helper process と新しい
+    profile dir で始める（process は使い回さない）。timing 試行は spawn から最初の
+    フレームまでの間に何も読まず、メモリは最初のフレームの後に 1 回だけ読む
+    （その読み取りはどの latency 区間にも入らない。所要時間は
+    `after_first_frame_read_ms`）。別の試行（`mem=1`）は、さらに `Hello` の後と
+    `open_artifact` の後にもメモリを読む。この 2 回は spawn → 最初のフレームの
+    区間の内側にあるので、その試行の spawn → 最初のフレームは読み取りの分だけ
+    伸びる（`mode` に印を付ける）。読み取りの合計は
+    `memory_read_before_first_frame_ms`、それを引いた値は
+    `spawn_to_first_frame_excluding_memory_reads_ms`。`open_artifact_ms` は
+    その呼び出し自身の区間で、どちらの試行でも読み取りを含まない。
   - `tabs`: tab を 1〜4 個開いたときの process 数・RSS・PSS・USS、5 個目の拒否、
     全 tab を閉じた後の残り。
   - `stream`: 実 helper。毎フレーム色が変わり、時刻を画素に埋め込む canvas
@@ -75,14 +86,33 @@ scripts/measure-renderer.sh --check                           # ツール自身�
     pass-through の proxy（`proxy.rs`）を挟む。実 helper の sender が出す
     1 フレームについて、最初の byte が読める時刻、全 byte を読み終えた時刻
     （`wire`）、client へ書き終えるまで（`forward`）、client が手にするまでを
-    測る。**実 helper → client の転送 p50/p95 はここで出す**。
+    測る。**実 helper → client の転送 p50/p95 はここで出す**。ただし proxy は
+    受信側で観測するので、これは「proxy が最初の byte を読んでから client が
+    フレームを手にするまで」の 2 hop の区間である。helper が paint を始めた時刻、
+    GUI が表示し終えた時刻は含まない（後者は 16b で測る）。
   - `ipc`: helper の代わりに同じ process 内の合成 backend が `FrameQueue::publish`
     でフレームを出す。CEF を除いた IPC（queue→送信→socket→client reader）だけの
     latency。先頭 8 byte の publish 時刻から測る。`fps=0` は上限まで出す飽和
     試験、`hold_ms` は遅い consumer。
-- 窓: `stream`/`transfer`/`ipc` は先頭 10 フレームを捨て、その後の 20 秒を測る。
-  到着の seq を見る `stats::Window` は、窓の先頭の 1 フレーム（基準）を数えず、
-  次のフレームからを fps・drop・欠落に数える。
+- 窓: `stream`/`transfer`/`ipc` は先頭 10 フレーム（warm-up）を捨て、次に受けた
+  1 フレーム（基準）の到着時刻を窓の開始とする。窓は `stats::Span` の半開区間
+  `[開始, 開始 + 20 秒)` で、開始と終了は同じ `Instant`（単調時計）の基準に
+  ある。
+  - `wait_frame` は窓の残り時間を上限に待つので、期限を過ぎて待ち続けない。
+  - 受信した直後にも到着時刻を窓と照らし、期限後に着いたフレームは数えずに
+    捨てる（JSON の `late_frame_discarded`）。
+  - 基準のフレームは数えず（`stats::Window`）、次のフレームから fps・drop・欠落に
+    数える。
+  - proxy の sample は、転送の開始と終了の両方が窓の内側にあるものだけを使う
+    （`Sample::within`）。終了は `write_message` が返った直後に取った時刻で、読み取りと
+    書き込みの間の処理（meta の decode、stamp、lock）も転送に含める。窓をまたぐ転送は
+    入れない。client 側の「最初の byte → client」も、最初の byte の時刻が窓の内側に
+    あるものだけを sample にする（窓の前に始まった転送は途中の観測）。
+  - process の読み取り（helper tree の CPU とメモリ、client の CPU）は、窓の
+    開始の直後と、期限の直後に行う。CPU% は 2 回の読み取りの間の時間
+    （JSON の `cpu_reading_secs`）で割る。名目の 20 秒ではない。
+  - 窓の内に 1 フレームも無ければ失敗にする。
+  - 境界の直前・直後の扱いは `stats.rs` と `proxy.rs` の unit test で見る。
 - 数値の読み方: RSS は共有ページ（libcef）を process ごとに数える。**PSS が
   足し算できる値**で、USS はその process 専用分。CPU% は 1 論理 CPU = 100%。
   role は `--type=` で分類。`zygote` は zygote とそれが fork した renderer/GPU
@@ -97,7 +127,7 @@ scripts/measure-renderer.sh --check                           # ツール自身�
 | CEF | cef-minimal 154.0.34 |
 | toolchain | cargo（turtton fork）、rustc 1.99.0 |
 | ビルド | helper: dev profile（CEF 本体は prebuilt、Rust 側は薄い）。計測ツール: release |
-| 負荷 | 共有 workstation（全量実行の開始時 loadavg 2.8〜4.3）。専用機ではない |
+| 負荷 | 共有 workstation（#673 の全量実行の開始時 loadavg 2.8〜4.3。2026-11-18 の再測定は 5.0〜9.4）。専用機ではない |
 | 試行 | 各 scenario 1 回（`stream`/`transfer`/`ipc` は 20 秒窓）。startup の timing は 8 回、kill 3 回、memory 3 回 |
 
 数値は 1 回の測定で、誤差は載せていない。向きを見る材料として読むこと。
@@ -136,65 +166,90 @@ queue 滞留・転送・受信 copy を含み、HTML 描画と GPU upload は含
 
 ## 3. 起動と終了（`startup`）
 
-timing 8 回。spawn の直前から最初のフレームまでを 1 つの `Instant` で測る。
-メモリの読み取りは含まない。
+修正後の手順（§1 の `startup`）で 2026-11-18 に測り直した値（最終の全量実行。旧手順の
+#673 の値は下の注）。timing 8 回。各 run は新しい helper process で、spawn の直前から
+最初のフレームまでを 1 つの `Instant` で測る。メモリの読み取りは含まない。
 
 | 区間 | 値（ms） |
 |---|---|
-| `spawn` の呼び出し | 0.13–0.19 |
-| spawn → `Hello` 応答（CEF 初期化を含む） | 104.8–114.8（p50 108.6） |
-| `open_artifact`（1280×720、30fps、1 tab 目） | 118.0–120.3（5 回）、184.2–185.9（3 回） |
-| `set_streaming` → 最初のフレーム | 1.0–2.4 |
-| **spawn → 最初のフレーム（1 つの `Instant`）** | **226.8–294.3（p50 234.5）** |
+| `spawn` の呼び出し | 0.1〜0.2（`spawn_call_ms`） |
+| spawn → `Hello` 応答（CEF 初期化を含む） | 109.5–214.5（中央値 114.9） |
+| `open_artifact`（1280×720、30fps、1 tab 目） | 119.9–126.6（7 回）、190.3（1 回） |
+| `set_streaming` → 最初のフレーム | 1.3–3.2 |
+| **spawn → 最初のフレーム（1 つの `Instant`）** | **232.9–342.9（中央値 238.7）** |
 
-- spawn → 最初のフレームは 5 回が 227–235ms、3 回が 291–294ms。差は
-  `open_artifact` の 118ms と 185ms の二峰に一致する（原因は未調査）。kill 試験の
-  3 回でも 230 / 297 / 261ms で同じ範囲。
+- spawn → 最初のフレームは 6 回が 232.9–242.1ms、残り 2 回が 312.1 / 342.9ms。遅い
+  2 回は、1 回が `Hello`（214.5ms。ほかは 109.5–116 台）、もう 1 回が
+  `open_artifact`（190.3ms）の遅れに当たる（原因は未調査）。kill 試験の 3 回は
+  235.6 / 237.0 / 241.0ms で、速い側の範囲。
+- 旧手順（#673）の値は spawn → 最初のフレーム 226.8–294.3ms（中央値 234.5）、
+  `Hello` 104.8–114.8ms、`open_artifact` 118〜120ms（5 回）と 184〜186ms
+  （3 回）。範囲は同じだが、別の測定なので値は付け替えていない。
 - 上の値は warm（libcef がページキャッシュにある状態）。ビルド直後の smoke 実行
   で、最初の 1 回だけ `Hello` まで 905ms かかったのを見た（再現手順には含めて
   いない。キャッシュを落とせないため）。cold では最初の起動が ~1 秒に伸びる
   ものとして扱う。
 - 停止（shutdown 8 回）:
-  - `RendererClient::shutdown` の復帰は 2.0–2.6ms。これは `Shutdown` の ack に加え、
-    2 本の channel の close と reader thread の終了まで待った時間で、ack だけの
-    時間ではない（値の名前は `shutdown_returned_ms`）。
-  - helper の終了は 25.9–28.3ms、CEF の子孫 3 process の reap までで 29.2–31.8ms。
-- process group への SIGKILL（3 回）は終了 8.9–9.9ms、子孫 5 process の reap まで
-  9.0–10.1ms で、subreaper に戻る。どちらの停止でも、残留 process は 0。
-- 起動直後（tab なし）: **8 process**（helper 1、utility 1、zygote 系 6）、
-  **PSS 239MiB**（RSS 555–558MiB、USS 133MiB）。
-- 1 tab 開き、最初のフレームを受けた後: 10 process、PSS 327–331MiB
-  （RSS 約 800MiB）。memory 試行（読み取りが latency を伸ばすので、spawn → 最初の
-  フレームは 259–261ms と印を付けた別試行）の値。
+  - `RendererClient::shutdown` の復帰は 2.4–4.0ms（中央値 2.7）。これは `Shutdown` の
+    ack に加え、2 本の channel の close と reader thread の終了まで待った時間で、
+    ack だけの時間ではない（値の名前は `shutdown_returned_ms`）。
+  - helper の終了は 25.6–39.4ms（中央値 27.6）、CEF の子孫 3 process の reap までで
+    29.7–42.7ms（中央値 31.9）。
+- process group への SIGKILL（3 回）は終了 7.7–9.2ms、子孫 5 process の reap まで
+  7.9–9.4ms で、subreaper に戻る。どちらの停止でも、残留 process は 0。
+- 起動直後（tab なし、`tabs` の 0 tab）: **8 process**（helper 1、utility 1、
+  zygote 系 6）、**PSS 267MiB**（RSS 634–638MiB、USS 141〜142MiB）。
+- 1 tab 開き、最初のフレームを受けた後: 10 process、PSS 359–362MiB（memory 試行）。
+  timing 試行の最初のフレームの後の値は PSS 364–369MiB（8 回、RSS 941–961MiB）。
+- PSS は同じコードの 1 つ前の全量実行（同日、PSS 241MiB / 331MiB 前後）より、同じ
+  状態で約 26MiB 高い（起動直後 241→267MiB、1 tab 後 330→362MiB）。helper の
+  RSS（160→186MiB）も上がっていて、再現手順が同じ build を使ったのに差が出た。
+  PSS は共有ページ（libcef）を同時に動いている process と分け合うので、共有
+  workstation の状態で動く可能性がある。原因は調べていない。この文書の PSS は、
+  この実行の値で揃え、実行間で 30MiB 程度動くものとして読む。
+- memory 試行（`mem=1`、3 回）: `Hello` の後に PSS 267MiB（8 process）、
+  `open_artifact` の後に 363–366MiB、最初のフレームの後に 359–362MiB（10 process）。
+  `Hello` の後と `open_artifact` の後の読み取りが spawn → 最初のフレームの内側
+  にあるので、この試行の spawn → 最初のフレームは 245 / 271 / 336ms と
+  timing 試行より長い（読み取りの合計 35–40ms を引くと 205 / 236 / 300ms）。この
+  3 回の値は latency としては使わない。`open_artifact_ms`（その呼び出し自身の区間）は
+  88 / 120 / 186ms。
 
 ## 4. tab と解像度（`tabs`）
 
-`MAX_TABS = 4`。5 個目は `Busy` で拒否された（どちらの解像度でも）。
+§5.5 と同じ最終の全量実行（2026-11-18）の値。`MAX_TABS = 4`。5 個目は `Busy` で
+拒否された（どちらの解像度でも）。
 
 | viewport | tab 数 | process | PSS MiB | RSS MiB | USS MiB | `open_artifact` ms |
 |---|---|---|---|---|---|---|
-| 1280×720 | 0 | 8 | 240 | 556 | 133 | – |
-| | 1 | 10 | 331 | 805 | 179 | 118 |
-| | 2 | 11 | 364 | 954 | 181 | 118 |
-| | 3 | 12 | 393 | 1099 | 199 | 116 |
-| | 4 | 13 | 422 | 1244 | 217 | 117 |
-| | 全部閉じた後 | 8 | 263 | 591 | 151 | – |
-| 3840×2160 | 0 | 8 | 240 | 559 | 133 | – |
-| | 1 | 10 | 496 | 1089 | 229 | 264 |
-| | 2 | 11 | 793 | 1618 | 378 | 247 |
-| | 3 | 12 | 1043 | 2117 | 485 | 290 |
-| | 4 | 13 | 1322 | 2674 | 592 | 310 |
-| | 全部閉じた後 | 8 | **738** | – | – | – |
+| 1280×720 | 0 | 8 | 267 | 638 | 142 | – |
+| | 1 | 10 | 362 | 950 | 175 | 120 |
+| | 2 | 11 | 395 | 1133 | 178 | 118 |
+| | 3 | 12 | 428 | 1318 | 196 | 150 |
+| | 4 | 13 | 457 | 1496 | 215 | 117 |
+| | 全部閉じた後 | 8 | 300 | 690 | 165 | – |
+| 3840×2160 | 0 | 8 | 267 | 634 | 142 | – |
+| | 1 | 10 | 528 | 1227 | 224 | 269 |
+| | 2 | 11 | 841 | 1791 | 407 | 258 |
+| | 3 | 12 | 1091 | 2353 | 482 | 282 |
+| | 4 | 13 | 1351 | 2937 | 557 | 314 |
+| | 全部閉じた後 | 8 | **765** | – | – | – |
 
 - 1 tab 目で +2 process（GPU/renderer）、以降は +1 process/tab。
-- PSS は tab あたり約 30MiB/Mpix（720p ≈ +30MiB、4K ≈ +250〜300MiB）に、最初の
-  tab の固定分が少し乗る。
-- 4K の tab を閉じても PSS は戻りきらない（738MiB。起動直後は 240MiB）。720p では
-  263MiB でほぼ戻る。
+- PSS は 2 tab 目以降で tab あたり約 30MiB/Mpix（720p は +29〜33MiB、4K は
+  +250〜313MiB）。1 tab 目はそれに GPU/renderer の分が乗り、720p で +95MiB、4K で
+  +261MiB。
+- 4K の tab を閉じても PSS は戻りきらない（765MiB。起動直後は 267MiB）。720p でも
+  300MiB 残り、起動直後より 33MiB 高い。
+- 起動直後の PSS は、同日の 1 つ前の全量実行（240MiB）より 27MiB 高い（§3 の注）。
+  この表の差分（tab あたりの増分）は 2 回でほぼ同じ（720p の 2〜4 tab 目は
+  +29〜33MiB と +29〜33MiB）で、絶対値だけが動いた。
 
 ## 5. フレーム配送
 
 ### 5.1 実 helper（`stream`、20 秒窓）
+
+（#673 の旧手順の値。修正後の手順で測り直した値は §5.5。）
 
 age = 画素に埋めたページ時刻から client がフレームを手にするまで。**転送の
 時間ではない**。ページの描画、CEF の paint、frame の copy、queue 滞留を含み、
@@ -244,6 +299,10 @@ client の ack も helper へ戻す。helper の「ack まで 1 フレームだ�
 - 最初の byte → client: 最初の byte が読めてから、client の `wait_frame` が
   フレームを返すまで。`wire` + `forward` + client の reader の受信。socket の
   hop を 2 回通るので、helper と client が直結なら概ね `wire` に近い値になる。
+  **これは受信側で観測した 2 hop の区間である。** helper の paint の開始、
+  GUI が表示し終えるまでの latency とは別の量で、それらは含まない。
+
+（#673 の旧手順の値。修正後の手順で測り直した値は §5.5。）
 
 | viewport | tab | 要求 fps | 配送 fps | フレーム数 | wire p50/p95/p99 ms | forward p50/p95 ms | 最初の byte → client p50/p95/p99 ms | drop（lost） |
 |---|---|---|---|---|---|---|---|---|
@@ -303,50 +362,114 @@ consumer が 200ms 止まっても、producer は止まらず、古いフレー�
 メモリは頭打ち（4K で 130MiB は 33MiB のフレームバッファ数枚分）。基準の
 「queue は上限付きでメモリが増え続けない」を満たす。
 
+### 5.5 baseline の再測定（修正後の手順、2026-11-18）
+
+§1 の窓（開始と終了を同じ単調時計に置き、残り時間で待ち、受信後に期限を再確認し、
+proxy sample と `first byte → client` の sample を、転送の開始と終了（proxy は
+`write_message` が返った直後の時刻）が窓の内にあるものだけにする）で、
+`scripts/measure-renderer.sh` を全量（既定の 20 秒窓）で測り直した。環境は §1 と
+同じ（Ryzen 9 7900、cef-minimal 154.0.34、dev profile の helper、display なし）。
+共有 workstation で、各 scenario の開始時 loadavg（1 分値）は 5.0〜9.4（32 回）。
+`late_frame_discarded` は、期限後に着いたフレームを数えずに捨てた場合だけ true に
+なる。`stream`・`transfer` は全窓で false、`ipc` は飽和の 720p の 1 本だけが
+true。CPU% の分母は `cpu_reading_secs`（19.997〜20.011 秒）。比較のための baseline は
+直結の `stream` と、proxy を挟む `transfer` の 2 つ。この表は、1 つ前の全量実行
+（proxy の終了時刻と 2 hop 区間の開始境界を直す前の窓）の値を置き換える。
+
+**直結（`stream`）**
+
+| viewport | tab | 要求 fps | 配送 fps | 到着間隔 p50/p95 ms | age p50/p95 ms | drop（lost） | CPU% helper tree / client | PSS 窓の開始→peak MiB |
+|---|---|---|---|---|---|---|---|---|
+| 1280×720 | 1 | 1 | 0.95 | 999.9 / 1001.2 | 1001.8 / 1002.6 | 0 | 0.5 / 1.3 | 363 → 366 |
+| | 1 | 10 | 10.0 | 100.0 / 100.5 | 1.7 / 2.3 | 0 | 3.2 / 1.6 | 359 → 367 |
+| | 1 | **30** | **30.0** | 33.3 / 33.8 | 34.6 / 35.0 | 0 | 9.1 / 2.6 | 362 → 371 |
+| | 1 | 60 | 60.0 | 16.7 / 17.1 | 1.6 / 2.1 | 0 | 14.1 / 3.8 | 359 → 368 |
+| | 4 | 10 | 40.0 | 18.3 / 47.3 | 1.8 / 101.5 | 0 | 11.8 / 3.1 | 465 → 482 |
+| | 4 | **30** | **119.9** | 4.8 / 16.3 | 27.6 / 35.0 | 2（lost 2） | 37.8 / 7.5 | 468 → 487 |
+| 3840×2160 | 1 | **30** | **29.95**（948MiB/s） | 33.3 / 34.4 | 49.7 / 50.9 | 0 | 76.3 / 13.1 | 560 → 569 |
+| | 4 | 30 | 77.3（要求 120） | 12.9 / 14.2 | 154.2 / 158.4 | 2（lost 2） | 219.5 / 32.7 | 1451 → 1469 |
+
+age は §5.1 のとおりページの描画 timer と helper の paint の位相を含み、同じ設定でも
+run ごとに大きく動く（720p×30fps の 1 tab は、旧手順で 1.4ms、1 つ前の全量実行で
+1.9ms、今回は 34.6ms。1fps は今回、1 フレーム間隔の位相に当たって 1,002ms）。age は
+比較の対象にしない。
+
+**proxy を挟む（`transfer`）**: 最初の byte → client は §5.2 のとおり「受信側で観測した
+2 hop の区間」。
+
+| viewport | tab | 要求 fps | 配送 fps | フレーム数 | wire p50/p95/p99 ms | forward p50/p95 ms | 最初の byte → client p50/p95/p99 ms | drop（lost） |
+|---|---|---|---|---|---|---|---|---|
+| 1280×720 | 1 | 10 | 10.0 | 200 | 0.51 / 0.65 / 0.70 | 0.45 / 0.62 | 1.00 / 1.26 / 1.63 | 0 |
+| | 1 | **30** | 30.0 | 600 | 0.51 / 0.76 / 1.11 | 0.44 / 0.60 | **0.98 / 1.35 / 1.82** | 0 |
+| | 1 | 60 | 60.0 | 1200 | 0.47 / 0.59 / 0.68 | 0.42 / 0.53 | 0.92 / 1.11 / 1.35 | 0 |
+| | 4 | **30** | 119.95 | 2399 | 0.47 / 0.73 / 1.68 | 0.44 / 0.73 | 0.95 / 1.43 / 3.56 | 1（lost 1） |
+| 320×180 | 1 | 30 | 30.0 | 600 | 0.04 / 0.05 / 0.07 | 0.02 / 0.05 | 0.09 / 0.12 / 0.14 | 0 |
+| 3840×2160 | 1 | **30** | 29.95 | 599 | 4.15 / 5.03 / 5.52 | 3.58 / 4.12 | **7.77 / 8.78 / 9.38** | 0 |
+| | 4 | 30 | 74.25 | 1485 | 3.93 / 5.67 / 7.59 | 5.12 / 6.82 | 9.15 / 12.08 / 13.93 | 2（lost 2） |
+
+- 太字が 16a-2 の比較対象にする組（720p×30fps の 1 tab と 4 tab、4K×30fps の
+  1 tab）。1 回ずつの測定で、誤差は載せていない。
+- 旧手順（§5.2）の 2 hop 区間 p95 は 720p×1 tab で 1.16ms、4K×1 tab で 8.64ms、
+  720p×4 tab で 1.31ms、4K×4 tab の fps は 76.9。今回は 1.35 / 8.78 / 1.43 / 74.25。
+  p50 も 720p×1 tab 0.96→0.98ms、4K×1 tab 7.79→7.77ms で、旧手順と同じ範囲に
+  戻った。修正前の窓（1 つ前の全量実行）で 4K×1 tab の p95 が 10.98ms まで上がった
+  のは、窓をまたぐ転送の扱いの影響を含んでいた可能性が高い。ただし 2 回の間は負荷も
+  違う（loadavg）ので、窓の修正だけが原因だとは言い切れない。どちらの手順でも基準
+  （30fps で p95 33ms 以内）は満たす。
+- 同じ全量実行で `ipc`、`tabs`、`startup` も測り直した。`startup` は §3、
+  `tabs` は §4 に載せた。`ipc` は 720p×30fps で 30.0fps・drop 0（latency
+  p50/p95/p99 0.61 / 0.82 / 0.92ms）、4K×30fps で 29.95fps・drop 0（5.6 / 6.2 /
+  7.2ms）、4K×4 tab×30fps は 119.95fps・drop 0（9.1 / 11.3 / 12.0ms）で、§5.3 の
+  値と同じ範囲に収まった。4K×4 tab で 101.4fps まで落ちた 1 つ前の全量実行は、
+  この再測定では再現しなかった（原因は調べていない）。§5.3・§5.4 の表は旧手順の値の
+  まま残してある（今回の飽和側は 720p が 3,237fps・lost 258,962、4K が 216fps・
+  lost 3,311。`hold_ms=200` は 5.0fps・queue による置き換え 1,089、どちらの
+  解像度でも）。
+
 ## 6. 16a-2 への提案
 
 1. **helper は事前起動せず、必要になった時に起動する。** 起動は warm で spawn →
-   最初のフレームまで p50 235ms（227–294ms。うち CEF 初期化 約 109ms、
-   `open_artifact` 118〜185ms）。一方、常駐は tab が無くても 8 process・
-   PSS 240MiB を食う。起動を待たせる側のコストは artifact を開く 1 回に
-   0.23〜0.3 秒で、常駐のコストより小さい。最後の tab を閉じたら idle
+   最初のフレームまで p50 239ms（233–343ms。うち CEF 初期化 約 110〜115ms、
+   `open_artifact` 120〜190ms）。一方、常駐は tab が無くても 8 process・
+   PSS 267MiB を食う。起動を待たせる側のコストは artifact を開く 1 回に
+   0.23〜0.35 秒で、常駐のコストより小さい。最後の tab を閉じたら idle
    timeout（例: 30〜60 秒）で停止する。cold のときは最初の `Hello` が約 1 秒に
    なりうる（1 回だけの観測）ので、`Hello` の待ちは 1 秒より十分長く取る。
    コアの起動時に先に温めるなら、Admission を通さずに常駐させないこと。
 2. **helper は core に 1 つ、tab は共有する。** 2 tab 目以降の追加は PSS +30MiB
-   （720p）だが、helper 1 個の基礎は 240MiB。tab ごとに helper を立てない。
+   （720p）だが、helper 1 個の基礎は 267MiB。tab ごとに helper を立てない。
    `MAX_TABS = 4` は妥当（5 個目は `Busy` で拒否されることを確認した）。
 3. **Admission の見積もりは「基礎 + tab × 画素数」で出す。**
-   基礎 PSS 約 240MiB、tab あたり約 30MiB/Mpix（最初の tab は GPU/renderer の分で
-   さらに +60MiB 程度）。720p×4 で約 420MiB、4K×4 で約 1.3GiB（RSS は 2.7GiB）。
-   予約は PSS 基準で、1 tab 720p なら 350MiB、720p×4 なら 512MiB、4K を含むなら
+   基礎 PSS 約 267MiB、tab あたり約 30MiB/Mpix（最初の tab は GPU/renderer の分で
+   さらに +60MiB 程度）。720p×4 で約 460MiB、4K×4 で約 1.35GiB（RSS は 2.9GiB）。
+   予約は PSS 基準で、1 tab 720p なら 400MiB、720p×4 なら 512MiB、4K を含むなら
    1.5GiB を目安にする。
 4. **SpawnLedger の process 数は 1 helper あたり 16 を上限に。** 実測は tab 0 で 8、
    4 tab で 13（1 tab 目 +2、以降 +1/tab）。
 5. **停止は `Shutdown` → 期限で process group への SIGKILL。** orderly は
-   `shutdown` の復帰 2〜3ms、helper の終了 26〜28ms、子孫 reap まで 29〜32ms。
-   SIGKILL は 9〜10ms。いずれも group の全員を reap できた（コアは subreaper に
+   `shutdown` の復帰 2〜4ms、helper の終了 26〜39ms、子孫 reap まで 30〜43ms。
+   SIGKILL は 8〜9ms。いずれも group の全員を reap できた（コアは subreaper に
    なるか、group 単位で待つこと）。期限は 1 秒もあれば十分。
 6. **frame rate と解像度に予算を置く。** 既定は 30fps。helper の CPU は
-   配送する画素レート 1Mpix/s あたり 1 論理 CPU の 0.25〜0.33%（720p×30fps で
-   6.7%、720p×4 tab×30fps で 36%、4K×30fps で 75%）で、画素レートにほぼ
+   配送する画素レート 1Mpix/s あたり 1 論理 CPU の 0.31〜0.34%（720p×30fps で
+   9.1%、720p×4 tab×30fps で 38%、4K×30fps で 76%）で、画素レートにほぼ
    比例する。集計で約 250Mpix/s（4K×1 tab×30fps、または 720p×9 tab 相当。
    helper が 1 論理 CPU の約 75〜80%）を上限にする。これを超える 4K×4 tab×30fps
-   （約 1,000Mpix/s）は配送が飽和した（83.8fps、helper 230%）。背景 tab は
+   （約 1,000Mpix/s）は配送が飽和した（77.3fps、helper 220%）。背景 tab は
    10fps に下げる。
-7. **フレームを開く fps は 10 以上にする。** 1fps で `open_artifact` を開くと 3 秒
-   かかる。低い rate が欲しいなら、10fps 以上で開き client 側で間引くか、
+7. **フレームを開く fps は 10 以上にする。** 1fps で `open_artifact` を開くと 3〜4 秒
+   かかる（旧手順 3.0 秒、今回 4.0 秒）。低い rate が欲しいなら、10fps 以上で開き client 側で間引くか、
    frame rate を変える request を足す（protocol の拡張）。
 8. **client の frame slot を tab ごとにする（16a-2 か 16b）。** 今は 1 slot なので
    複数 tab でフレームが tab 間で上書きされる（720p×4 tab×30fps で 0.08〜0.8%
    落ちる）。前景 tab だけを stream するなら不要。
 9. **大きい tab を閉じたら helper を再起動する。** 4K の tab を閉じても PSS は
-   738MiB 残る（起動直後は 240MiB）。最後の tab が閉じたら、4K を使った helper は
+   765MiB 残る（起動直後は 267MiB）。最後の tab が閉じたら、4K を使った helper は
    停止して次回に起動し直す（再起動は 0.23〜0.3 秒）。常駐させる helper には
    1 回あたりの画素数の上限を置いてもよい。
 10. **転送は Unix socket + raw BGRA のまま確定。** 出荷する helper の転送（proxy 込み
-    の 2 hop）は 30fps の p95 が 720p で 1.2ms、4K で 8.6ms と、基準 33ms の
-    1/3 以下（720p は 1/25）。共有メモリ（spike で 0.2〜0.3ms 速いだけ）は不要。
+    の 2 hop）は 30fps の p95 が 720p で 1.35ms、4K で 8.8ms と、基準 33ms の
+    1/3 以下（720p は 1/24）。共有メモリ（spike で 0.2〜0.3ms 速いだけ）は不要。
     4K×30fps の 950MiB/s でも client の CPU は 13%。
 11. 16a-2 の `core_renderer_cache` E2E で確認する項目: helper の予定再起動後の
     artifact 再 open、停止後の残留 process 0、lock FD と credential を helper が
@@ -360,9 +483,10 @@ consumer が 200ms 止まっても、producer は止まらず、古いフレー�
 - production の core からの spawn、Admission/SpawnLedger 経由の起動は 16a-2。
   この文書の起動時間は、コアの手前（`RendererClient` の直接起動）の値。
 - 実 helper の転送は proxy を挟んだ 2 hop の値で、直結の値ではない（`wire` が
-  直結に近い下限）。helper 内の OnPaint の時刻と、ページ描画から送信開始までの
+  直結に近い下限）。受信側で観測した区間なので、paint の開始や GUI の表示完了までの
+  latency は含まない。helper 内の OnPaint の時刻と、ページ描画から送信開始までの
   内訳は取っていない（age と `page_to_first_byte` は位相を含む）。
-- `open_artifact` の 118ms / 185ms の二峰の原因は調べていない。
+- `open_artifact` の 120ms 前後と 190ms 前後の二峰の原因は調べていない。
 - 長時間 soak は 120 秒まで（spike）。20 秒窓の本計測では、メモリは増えなかった。
   数時間の soak は未実施。
 - macOS/Windows は未実施。process 計測は Linux の `/proc` 前提。

@@ -126,35 +126,53 @@ fn environment() -> Value {
 
 // ---------------------------------------------------------------- startup
 
-/// Timing runs take no measurement between spawn and the first frame: one
-/// `Instant` started before `spawn` covers the whole span, and the stage times are
-/// read from it. Memory is read after the first frame (`after_first_frame`).
-/// The `mem=1` runs read memory at each stage instead, so their latencies are
-/// inflated by the readings and are labelled as such.
+/// Every run starts a fresh helper process. Timing runs take no measurement
+/// between spawn and the first frame: one `Instant` started before `spawn` covers
+/// the whole span, and the stage times are read from it. Memory is read once
+/// after the first frame (`after_first_frame`, outside every latency interval).
+/// The `mem=1` runs also read memory after Hello and after the open, which sit
+/// inside the spawn-to-first-frame span, so their `spawn_to_first_frame_ms` is
+/// inflated and labelled as such; the time spent on those readings is reported
+/// apart (`memory_read_before_first_frame_ms`) and subtracted in
+/// `spawn_to_first_frame_excluding_memory_reads_ms`. `open_artifact_ms` is the
+/// open call's own interval in both modes.
 fn startup(config: &Config, args: &Args) {
     let runs: u32 = args.get("runs", 5);
     let kill: u32 = args.get("kill", 0);
     let mem: u32 = args.get("mem", 0);
     for run in 1..=runs {
         let label = format!("startup{run}");
+        // Each run starts a fresh helper process and a fresh profile directory:
+        // nothing is reused from an earlier run.
+        let mut memory_read = Duration::ZERO;
         let begun = Instant::now();
         let mut l = match helper::launch(config, &label, 1) {
             Ok(l) => l,
             Err(error) => fail(&error),
         };
         let hello_at = begun.elapsed();
-        let after_hello = (mem == 1).then(|| l.helper.snapshot().to_json());
+        // `mem=1` reads memory after Hello and after the open, both inside the
+        // spawn-to-first-frame span; the time they take is summed in
+        // `memory_read` and reported apart from the latency intervals.
+        let after_hello = (mem == 1).then(|| read_memory(&l, &mut memory_read));
         let (open, body) = open_request(1, 1280, 720, 30);
+        let open_began = Instant::now();
         l.client
             .open_artifact(open, &body)
             .unwrap_or_else(|e| fail(&e.to_string()));
+        // The open's own interval: it does not contain the reading above.
+        let open_took = open_began.elapsed();
         let opened_at = begun.elapsed();
-        let after_open = (mem == 1).then(|| l.helper.snapshot().to_json());
+        let after_open = (mem == 1).then(|| read_memory(&l, &mut memory_read));
         let streaming_at = begun.elapsed();
         l.client.set_streaming(TabId(1), true).unwrap();
         let first = l.client.wait_frame(Some(Duration::from_secs(30)));
         let first_frame_at = first.as_ref().map(|_| begun.elapsed());
+        // Always read after the first frame, so outside every latency interval
+        // (its own duration is reported as `after_first_frame_read_ms`).
+        let final_read_began = Instant::now();
         let after_first_frame = l.helper.snapshot().to_json();
+        let after_first_frame_read = final_read_began.elapsed();
         let stop = if kill == 1 {
             helper::stop_forced(&mut l)
         } else {
@@ -168,16 +186,28 @@ fn startup(config: &Config, args: &Args) {
             "spawn_call_ms": l.spawn_ms,
             "hello_ms": helper::ms(hello_at),
             "open_artifact_done_ms": helper::ms(opened_at),
-            "open_artifact_ms": helper::ms(opened_at - hello_at),
+            "open_artifact_ms": helper::ms(open_took),
             "streaming_requested_at_ms": helper::ms(streaming_at),
             "first_frame_after_streaming_ms": first_frame_at.map(|f| helper::ms(f - streaming_at)),
             "spawn_to_first_frame_ms": first_frame_at.map(helper::ms),
+            "memory_read_before_first_frame_ms": helper::ms(memory_read),
+            "spawn_to_first_frame_excluding_memory_reads_ms":
+                first_frame_at.map(|f| helper::ms(f.saturating_sub(memory_read))),
+            "after_first_frame_read_ms": helper::ms(after_first_frame_read),
             "after_hello": after_hello,
             "after_open": after_open,
             "after_first_frame": after_first_frame,
             "stop": stop_json(&stop),
         }));
     }
+}
+
+/// A memory reading of the helper tree, with the time it took added to `spent`.
+fn read_memory(l: &Launched, spent: &mut Duration) -> Value {
+    let began = Instant::now();
+    let snapshot = l.helper.snapshot().to_json();
+    *spent += began.elapsed();
+    snapshot
 }
 
 // ----------------------------------------------------------------- stream
@@ -245,61 +275,80 @@ fn stream(config: &Config, args: &Args, proxy: bool) {
     let began = Instant::now();
     let mut delivery = Delivery::default();
     let mut first_frame_ms = None;
-    let mut counted_from: Option<(Instant, Snapshot, u64, u64, renderer_ipc::ClientStats)> = None;
     let mut skipped = 0u64;
     let mut window = stats::Window::default();
-    let mut last_arrival: Option<Instant> = None;
-    let mut window_end: Option<Instant> = None;
-    loop {
-        if let Some(end) = window_end
-            && Instant::now() >= end
-        {
-            break;
-        }
+    // Before the window: drop the warm-up frames, then take the baseline frame.
+    // The baseline's arrival (one `Instant`, read as soon as `wait_frame`
+    // returns) is the start of the window; the deadline is that start plus
+    // `secs`, on the same clock as every later arrival.
+    let (span, baseline) = loop {
         let Some(frame) = l.client.wait_frame(Some(Duration::from_secs(30))) else {
             fail("no frame within 30 s: the helper stopped delivering");
         };
         let arrived = Instant::now();
-        let now_ticks = fixture::now_ticks();
         first_frame_ms.get_or_insert(helper::ms(began.elapsed()));
+        if let Some(p) = &l.proxy {
+            // Frames replaced before the client took them leave entries behind.
+            p.first_seen
+                .lock()
+                .unwrap()
+                .retain(|seq, _| *seq > frame.seq);
+        }
+        let seq = frame.seq;
+        l.client.recycle_frame(frame);
+        if skipped < warm {
+            skipped += 1;
+            continue;
+        }
+        break (stats::Span::new(arrived, Duration::from_secs(secs)), seq);
+    };
+    // The client's counters first (cheap), then the process readings; the CPU
+    // rate uses the time between the two readings, not the nominal window.
+    let stats0 = l.client.stats();
+    let (own_mem0, own_ticks0) = procfs::own();
+    let start_snapshot = l.helper.snapshot();
+    let read0_at = Instant::now();
+    window.observe(baseline);
+    let mut last_arrival = span.start;
+    let mut late_frame_discarded = false;
+    loop {
+        let left = span.left(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        // The wait never outlasts the window, so a frame is not waited for
+        // past the deadline. `None` before the deadline is a closed connection.
+        let Some(frame) = l.client.wait_frame(Some(left)) else {
+            if Instant::now() < span.end {
+                fail("the frame channel closed inside the window");
+            }
+            break;
+        };
+        let arrived = Instant::now();
+        let now_ticks = fixture::now_ticks();
+        // Checked again after the receive: a frame that came in after the
+        // deadline is not one of the window's frames.
+        if !span.contains(arrived) {
+            late_frame_discarded = true;
+            l.client.recycle_frame(frame);
+            break;
+        }
         let first_seen = l.proxy.as_ref().and_then(|p| {
             let mut seen = p.first_seen.lock().unwrap();
             let first = seen.remove(&frame.seq);
-            // Frames replaced before the client took them leave entries behind.
             seen.retain(|seq, _| *seq > frame.seq);
             first
         });
-        if skipped < warm {
-            skipped += 1;
-            l.client.recycle_frame(frame);
-            continue;
-        }
-        if counted_from.is_none() {
-            let (own_mem, own_ticks) = procfs::own();
-            let snapshot = l.helper.snapshot();
-            counted_from = Some((
-                Instant::now(),
-                snapshot,
-                own_ticks,
-                own_mem.rss_kib,
-                l.client.stats(),
-            ));
-            window_end = Some(Instant::now() + Duration::from_secs(secs));
-            last_arrival = Some(Instant::now());
-            window.observe(frame.seq);
-            l.client.recycle_frame(frame);
-            continue;
-        }
         window.observe(frame.seq);
         delivery.bytes += frame.bgra.len() as u64;
         *delivery.per_tab.entry(frame.tab.0).or_default() += 1;
-        if let Some(last) = last_arrival {
-            delivery
-                .arrival_ms
-                .push(arrived.duration_since(last).as_secs_f64() * 1000.0);
-        }
-        last_arrival = Some(arrived);
-        if let Some(first) = first_seen {
+        delivery
+            .arrival_ms
+            .push(arrived.duration_since(last_arrival).as_secs_f64() * 1000.0);
+        last_arrival = arrived;
+        // The same rule as the proxy's samples: a transfer that began before the
+        // window is a partial observation and is not a sample.
+        if let Some(first) = first_seen.filter(|first| span.contains(*first)) {
             delivery
                 .first_byte_to_client_ms
                 .push(arrived.duration_since(first).as_secs_f64() * 1000.0);
@@ -310,19 +359,27 @@ fn stream(config: &Config, args: &Args, proxy: bool) {
         }
         l.client.recycle_frame(frame);
     }
-    let (start, start_snapshot, own_ticks0, own_rss0, stats0) = counted_from.unwrap();
-    let wall = start.elapsed().as_secs_f64();
+    if window.frames == 0 {
+        fail("no frame inside the whole window: the helper stopped delivering");
+    }
+    // Read at the deadline: the counters and the process readings.
+    let stats1 = l.client.stats();
     let end_snapshot = l.helper.snapshot();
     let (own_mem, own_ticks1) = procfs::own();
-    let stats1 = l.client.stats();
+    let read1_at = Instant::now();
+    let wall = span.len().as_secs_f64();
+    let cpu_wall = read1_at.duration_since(read0_at).as_secs_f64();
     let _ = stop_sampler.send(());
     let (peak, samples) = sampler_thread.join().expect("sampler thread");
-    let helper_cpu = procfs::cpu_percent(&start_snapshot.ticks, &end_snapshot.ticks, wall);
-    let client_cpu = (own_ticks1 - own_ticks0) as f64 / procfs::CLK_TCK / wall * 100.0;
+    let helper_cpu = procfs::cpu_percent(&start_snapshot.ticks, &end_snapshot.ticks, cpu_wall);
+    let client_cpu = (own_ticks1 - own_ticks0) as f64 / procfs::CLK_TCK / cpu_wall * 100.0;
+    let own_rss0 = own_mem0.rss_kib;
     // The helper's own transfer of each full frame, as seen on the proxy.
     let helper_side = l.proxy.as_ref().map(|p| {
         let samples = p.samples.lock().unwrap();
-        let inside: Vec<_> = samples.iter().filter(|s| s.first >= start).collect();
+        // Both ends: a transfer that began before the window or ended after it
+        // is not counted.
+        let inside: Vec<_> = samples.iter().filter(|s| s.within(&span)).collect();
         json!({
             "frames": inside.len(),
             "wire_ms": stats::dist(inside.iter().map(|s| s.wire_ms).collect()),
@@ -348,6 +405,8 @@ fn stream(config: &Config, args: &Args, proxy: bool) {
         "viewport": format!("{w}x{h}"),
         "frame_bytes": u64::from(w) * u64::from(h) * 4,
         "window_secs": stats::round(wall),
+        "cpu_reading_secs": stats::round(cpu_wall),
+        "late_frame_discarded": late_frame_discarded,
         "spawn_to_hello_ms": l.hello_ms,
         "open_artifact_ms": open,
         "first_frame_after_streaming_ms": first_frame_ms,
@@ -444,44 +503,54 @@ fn ipc(args: &Args) {
     let mut bytes = 0u64;
     let mut window = stats::Window::default();
     let mut skipped = 0u64;
-    let mut begin: Option<(Instant, renderer_ipc::ClientStats, u64)> = None;
-    let mut end: Option<Instant> = None;
-    let mut last: Option<Instant> = None;
     let mut peak_rss = rss0;
-    let mut next_sample = Instant::now();
-    loop {
-        if let Some(end) = end
-            && Instant::now() >= end
-        {
-            break;
-        }
+    // Warm-up, then the baseline frame: its arrival is the start of the window
+    // (see `stream`), and the deadline is on the same `Instant` clock.
+    let (span, baseline) = loop {
         let Some(frame) = client.wait_frame(Some(Duration::from_secs(30))) else {
             fail("no frame within 30 s");
         };
-        let arrived = synthetic::stamp_nanos();
         let now = Instant::now();
+        let seq = frame.seq;
+        client.recycle_frame(frame);
         if skipped < warm {
             skipped += 1;
-            client.recycle_frame(frame);
             continue;
         }
-        if begin.is_none() {
-            // The frame that fixes the start is the baseline, not a delivery of
-            // the window: counting it would add one frame to `count`.
-            begin = Some((now, client.stats(), procfs::own().1));
-            end = Some(now + Duration::from_secs(secs));
-            last = Some(now);
-            window.observe(frame.seq);
+        break (stats::Span::new(now, Duration::from_secs(secs)), seq);
+    };
+    let stats0 = client.stats();
+    let ticks_start = procfs::own().1;
+    let read0_at = Instant::now();
+    window.observe(baseline);
+    let mut last = span.start;
+    let mut next_sample = span.start;
+    let mut late_frame_discarded = false;
+    loop {
+        let left = span.left(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let Some(frame) = client.wait_frame(Some(left)) else {
+            if Instant::now() < span.end {
+                fail("the frame channel closed inside the window");
+            }
+            break;
+        };
+        let arrived = synthetic::stamp_nanos();
+        let now = Instant::now();
+        if !span.contains(now) {
+            late_frame_discarded = true;
             client.recycle_frame(frame);
-            continue;
+            break;
         }
         window.observe(frame.seq);
         bytes += frame.bgra.len() as u64;
         if let Some(sent) = synthetic::read_stamp(&frame.bgra) {
             latency.push(arrived.saturating_sub(sent) as f64 / 1e6);
         }
-        arrival.push(now.duration_since(last.unwrap()).as_secs_f64() * 1000.0);
-        last = Some(now);
+        arrival.push(now.duration_since(last).as_secs_f64() * 1000.0);
+        last = now;
         client.recycle_frame(frame);
         if hold_ms > 0 {
             // A slow consumer: it keeps the frame for a while.
@@ -492,10 +561,13 @@ fn ipc(args: &Args) {
             next_sample = now + Duration::from_secs(2);
         }
     }
-    let (start, stats0, ticks_start) = begin.unwrap();
-    let wall = start.elapsed().as_secs_f64();
+    if window.frames == 0 {
+        fail("no frame inside the whole window");
+    }
     let stats1 = client.stats();
     let (own_mem, ticks1) = procfs::own();
+    let cpu_wall = read0_at.elapsed().as_secs_f64();
+    let wall = span.len().as_secs_f64();
     let close = client.shutdown(Duration::from_secs(30));
     let exit = server.join().map(|r| format!("{r:?}")).unwrap_or_default();
     let _ = ticks0;
@@ -508,6 +580,8 @@ fn ipc(args: &Args) {
         "viewport": format!("{w}x{h}"),
         "frame_bytes": u64::from(w) * u64::from(h) * 4,
         "window_secs": stats::round(wall),
+        "cpu_reading_secs": stats::round(cpu_wall),
+        "late_frame_discarded": late_frame_discarded,
         "delivered_frames": count,
         "delivered_fps": stats::round(count as f64 / wall),
         "delivered_mib_per_s": stats::round(bytes as f64 / wall / 1048576.0),
@@ -517,7 +591,7 @@ fn ipc(args: &Args) {
         "publish_to_available_ms": stats::dist(latency),
         "inter_arrival_ms": stats::dist(arrival),
         "cpu_percent_one_core_whole_process": stats::round(
-            (ticks1 - ticks_start) as f64 / procfs::CLK_TCK / wall * 100.0),
+            (ticks1 - ticks_start) as f64 / procfs::CLK_TCK / cpu_wall * 100.0),
         "process_rss_mib": { "start": procfs::mib(rss0), "peak_sample": procfs::mib(peak_rss), "end": procfs::mib(own_mem.rss_kib) },
         "close": format!("{close:?}"),
         "server_exit": exit,
