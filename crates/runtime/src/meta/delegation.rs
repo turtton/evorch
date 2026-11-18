@@ -21,6 +21,8 @@ pub(super) struct DelegateArgs {
     name: Option<String>,
     #[serde(default)]
     load_skills: Vec<String>,
+    #[serde(default)]
+    output_attachments: serde_json::Value,
 }
 
 /// Stable public role order shared by the schema and runtime validation.
@@ -224,6 +226,7 @@ pub(crate) fn spawn_delegate(
     if input.get("role").is_some() || input.get("category").is_some() {
         return Err(error(misplaced_target_error(&input)));
     }
+    let attachments_present = input.get("output_attachments").is_some();
     let args = match parse::<DelegateArgs>(input) {
         Ok(args) => args,
         Err(message) => return Err(error(message)),
@@ -241,6 +244,25 @@ pub(crate) fn spawn_delegate(
         Ok(load_skills) => load_skills,
         Err(message) => return Err(error(message)),
     };
+    let attachments = if attachments_present {
+        serde_json::from_value::<Vec<crate::output_attachments::OutputAttachment>>(args.output_attachments)
+            .map_err(|_| error(crate::output_attachments::invalid("output_attachments must be an array of {run_id, output_ref} objects, with no extra fields or nulls.")))?
+    } else {
+        Vec::new()
+    };
+    let sources = crate::output_attachments::validate(attachments).map_err(error)?;
+    let prompt =
+        crate::output_attachments::expand(runtime, state.caller_run_id(), args.prompt, &sources)
+            .map_err(error)?;
+    if !sources.is_empty() {
+        crate::output_attachments::validate_saved_prompt(
+            state.caller_run_id(),
+            role,
+            args.name.as_deref(),
+            &prompt,
+        )
+        .map_err(error)?;
+    }
     let config = RunConfig {
         team_task: args.task,
         interactive: args.interactive,
@@ -252,12 +274,8 @@ pub(crate) fn spawn_delegate(
     };
     if args.background {
         return Err(
-            match runtime.delegate_background_as_child(
-                state.caller_run_id(),
-                role,
-                args.prompt,
-                config,
-            ) {
+            match runtime.delegate_background_as_child(state.caller_run_id(), role, prompt, config)
+            {
                 Ok(run_id) => {
                     state.record_background_delegate(run_id.to_string(), target);
                     success(run_id.to_string())
@@ -266,11 +284,11 @@ pub(crate) fn spawn_delegate(
             },
         );
     }
-    let child =
-        match runtime.delegate_awaited_child(state.caller_run_id(), (role, args.prompt, config)) {
-            Ok(child) => child,
-            Err(runtime_error) => return Err(error(runtime_error.to_string())),
-        };
+    let child = match runtime.delegate_awaited_child(state.caller_run_id(), (role, prompt, config))
+    {
+        Ok(child) => child,
+        Err(runtime_error) => return Err(error(runtime_error.to_string())),
+    };
     state.emit_delegated(&state.caller_run_id().to_string(), &child.to_string());
     Ok(child)
 }

@@ -56,6 +56,7 @@ pub mod model;
 pub mod model_grouping;
 pub mod model_resolve;
 pub mod network;
+mod output_attachments;
 pub mod ownership;
 pub mod panic_capture;
 pub mod policy;

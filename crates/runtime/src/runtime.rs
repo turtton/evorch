@@ -2774,10 +2774,19 @@ impl AgentRuntime {
                 ));
                 Ok::<_, RuntimeError>(())
             };
+            // Linearize attachment invalidation with successful input delivery,
+            // not the later Running publication. No storage runs under this lock.
+            let mut runs = lock_runs(&self.shared.runs);
             if trusted_user {
                 inbox.enqueue(prompt_id.as_deref(), enqueue)?;
             } else {
                 enqueue(0)?;
+            }
+            if let Some(turn) = runs
+                .get_mut(&run_id)
+                .and_then(|entry| entry.idle_turn.as_mut())
+            {
+                turn.attachable = false;
             }
             Ok::<_, RuntimeError>(())
         };
@@ -3835,7 +3844,7 @@ impl AgentRuntime {
         if let Ok(execution) = self.execution_snapshot(recipient) {
             self.execution_hook(HookPoint::LiveMessagePrepared, &execution);
         }
-        let runs = lock_runs(&self.shared.runs);
+        let mut runs = lock_runs(&self.shared.runs);
         if queued.observed() {
             return Ok(None);
         }
@@ -3931,6 +3940,12 @@ impl AgentRuntime {
             sent.insert(message_id.clone(), SentRecord { sender, recipient });
         }
         drop(sent);
+        if let Some(turn) = runs
+            .get_mut(&recipient)
+            .and_then(|entry| entry.idle_turn.as_mut())
+        {
+            turn.attachable = false;
+        }
         drop(runs);
 
         let disposition = match phase {
