@@ -156,6 +156,24 @@ fn assemble(
     Ok(prompt)
 }
 
+/// Validate the final input, including runtime-added task instructions.
+pub(crate) fn validate_final_prompt(
+    caller: RunId,
+    role: Role,
+    name: Option<&str>,
+    prompt: &str,
+) -> Result<(), String> {
+    if prompt.len() > MAX_PROMPT_BYTES {
+        return Err(too_large(
+            None,
+            "expanded_prompt",
+            prompt.len(),
+            MAX_PROMPT_BYTES,
+        ));
+    }
+    validate_saved_prompt(caller, role, name, prompt)
+}
+
 /// Bound the exact serialized lifecycle shape using the longest generated ID.
 /// No run ID is allocated and no event is emitted. The real event can only be
 /// shorter (sequential test IDs); reserve those bytes instead of risking a lost

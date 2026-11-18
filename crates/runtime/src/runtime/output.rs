@@ -72,15 +72,27 @@ impl AgentRuntime {
         event: event_bus::LifecycleEvent,
         completed_turn: Option<Option<String>>,
         phase_tx: &tokio::sync::watch::Sender<AgentRunPhase>,
+        release_adopted: impl FnOnce(),
     ) {
         let event_bus::LifecycleEvent::AgentRunStateChanged { to, .. } = &event else {
             return;
         };
         let mut runs = lock_runs(&self.shared.runs);
+        // Releasing this turn's adopted inputs and publishing its replacement
+        // boundary are one registry operation. New sends use this same lock.
+        phase_tx.send_replace(*to);
+        release_adopted();
         if let Some(entry) = runs.get_mut(&run) {
+            let input = entry.user_inbox.status();
+            let attachable = input.pending == 0
+                && !input.next_turn_requested
+                && entry.inbox_tx.capacity() == entry.inbox_tx.max_capacity()
+                && !entry.mailbox.has_interrupting_message()
+                // Read after the queues: a dequeue must first hold adoption.
+                && !entry.user_inbox.adopting();
             entry.idle_turn = completed_turn.map(|output| IdleTurn {
                 output,
-                attachable: true,
+                attachable,
                 notice: crate::mailbox::CompletionNotice::new(
                     entry.parent,
                     run,
@@ -96,7 +108,6 @@ impl AgentRuntime {
             }
         }
         let became_running = *to == AgentRunPhase::Running;
-        phase_tx.send_replace(*to);
         self.shared
             .turn_version
             .send_modify(|v| *v = v.wrapping_add(1));

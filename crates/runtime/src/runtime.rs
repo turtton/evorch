@@ -1334,6 +1334,23 @@ impl AgentRuntime {
         self.spawn_run(None, role, prompt, config)
     }
 
+    /// Prepare the exact final input before attachment validation or registration.
+    pub(crate) fn prepare_child_initial_prompt(
+        &self,
+        parent: RunId,
+        prompt: String,
+        config: &RunConfig,
+    ) -> String {
+        let in_team = lock_runs(&self.shared.runs)
+            .get(&parent)
+            .is_some_and(|entry| entry.config.team.is_some());
+        augment_initial_prompt(
+            prompt,
+            config.memory.as_ref(),
+            config.team_task.as_ref().filter(|_| in_team),
+        )
+    }
+
     /// 指定した親 run の子として run を登録してバックグラウンド実行を開始し、その ID を返す。
     ///
     /// # Errors
@@ -1969,17 +1986,19 @@ impl AgentRuntime {
         } else {
             crate::escalation_review::ReviewRunContext::empty(&run_id.to_string())
         };
-        let prompt = match &config.memory {
-            Some(memory) if handoff.is_none() && !history_only => memory.augment(prompt),
-            Some(_) | None => prompt,
-        };
-        let prompt = match (&config.team, &config.team_task) {
-            (Some(_), Some(task)) if !history_only => format!(
-                "{prompt}\nTeam task id: {:?}. Claim it with task_claim before editing; pass its generation to task_complete. Owned paths: {:?}",
-                task.id, task.paths
-            ),
-            _ => prompt,
-        };
+        let prompt = config.prepared_initial_prompt.take().unwrap_or_else(|| {
+            augment_initial_prompt(
+                prompt,
+                config
+                    .memory
+                    .as_ref()
+                    .filter(|_| handoff.is_none() && !history_only),
+                config
+                    .team_task
+                    .as_ref()
+                    .filter(|_| config.team.is_some() && !history_only),
+            )
+        });
         let name = config
             .name
             .clone()
@@ -4221,6 +4240,23 @@ pub(crate) fn loop_shared(
             runtime: Arc::downgrade(&shared),
         }
     })
+}
+
+fn augment_initial_prompt(
+    mut prompt: String,
+    memory: Option<&crate::memory::MemoryBoundary>,
+    task: Option<&crate::team::TaskSpec>,
+) -> String {
+    if let Some(memory) = memory {
+        prompt = memory.augment(prompt);
+    }
+    match task {
+        Some(task) => format!(
+            "{prompt}\nTeam task id: {:?}. Claim it with task_claim before editing; pass its generation to task_complete. Owned paths: {:?}",
+            task.id, task.paths
+        ),
+        None => prompt,
+    }
 }
 
 #[cfg(test)]

@@ -468,6 +468,8 @@ pub(super) fn lane_cancellation_error(run: RunId, error: crate::lanes::LaneError
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookPoint {
+    CompletedTurnBeforePublish,
+    CompletedTurnPublished,
     CancelSnapshot,
     TerminalRegistered,
     TerminalRetiring,

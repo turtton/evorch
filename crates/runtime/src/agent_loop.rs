@@ -1932,12 +1932,37 @@ impl LoopState {
                 self.channels.user_inbox.hold_wake_adoption_gate();
             }
             if let Some(runtime) = self.runtime() {
+                #[cfg(test)]
+                if completed_turn.is_some()
+                    && let Ok(execution) = runtime.execution_snapshot(self.task.run_id)
+                {
+                    runtime.execution_hook(
+                        crate::runtime::HookPoint::CompletedTurnBeforePublish,
+                        &execution,
+                    );
+                }
                 runtime.publish_live_phase(
                     self.task.run_id,
                     event,
                     completed_turn,
                     &self.channels.phase_tx,
+                    || {
+                        if adopted {
+                            self.input_adoptions.clear();
+                            self.wake_adoption = None;
+                        }
+                    },
                 );
+                #[cfg(test)]
+                if phase == AgentRunPhase::Waiting
+                    && adopted
+                    && let Ok(execution) = runtime.execution_snapshot(self.task.run_id)
+                {
+                    runtime.execution_hook(
+                        crate::runtime::HookPoint::CompletedTurnPublished,
+                        &execution,
+                    );
+                }
             } else {
                 self.channels.phase_tx.send_replace(phase);
                 self.shared.bus.emit(Event::new(event));

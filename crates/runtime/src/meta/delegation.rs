@@ -254,16 +254,7 @@ pub(crate) fn spawn_delegate(
     let prompt =
         crate::output_attachments::expand(runtime, state.caller_run_id(), args.prompt, &sources)
             .map_err(error)?;
-    if !sources.is_empty() {
-        crate::output_attachments::validate_saved_prompt(
-            state.caller_run_id(),
-            role,
-            args.name.as_deref(),
-            &prompt,
-        )
-        .map_err(error)?;
-    }
-    let config = RunConfig {
+    let mut config = RunConfig {
         team_task: args.task,
         interactive: args.interactive,
         name: args.name,
@@ -272,6 +263,18 @@ pub(crate) fn spawn_delegate(
         load_skills,
         ..RunConfig::default()
     };
+    if !sources.is_empty() {
+        let final_prompt =
+            runtime.prepare_child_initial_prompt(state.caller_run_id(), prompt.clone(), &config);
+        crate::output_attachments::validate_final_prompt(
+            state.caller_run_id(),
+            role,
+            config.name.as_deref(),
+            &final_prompt,
+        )
+        .map_err(error)?;
+        config.prepared_initial_prompt = Some(final_prompt);
+    }
     if args.background {
         return Err(
             match runtime.delegate_background_as_child(state.caller_run_id(), role, prompt, config)
