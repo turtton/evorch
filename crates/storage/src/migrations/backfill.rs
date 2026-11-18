@@ -138,6 +138,9 @@ pub(crate) fn backfill_pending(conn: &Connection) -> Result<bool, StorageError> 
 pub struct BackfillProgress {
     pub converted: u64,
     pub reattributed: u64,
+    /// Rows among the two counts above whose payload no longer decodes: they got
+    /// a blank `subkind` and no `run_id` (see [`EventBackfillSummary::undecodable`]).
+    pub undecodable: u64,
     pub remaining_unconverted: u64,
     pub remaining_unattributed: u64,
 }
@@ -153,12 +156,14 @@ pub(crate) fn backfill_step(
     let mut progress = BackfillProgress::default();
     if let Some(batch) = convert_batch(conn, i64::MIN, rows)? {
         progress.converted = batch.converted;
+        progress.undecodable += batch.undecodable;
     }
     let left = rows.saturating_sub(usize::try_from(progress.converted).unwrap_or(usize::MAX));
     if left > 0
         && let Some(batch) = reattribute_batch(conn, i64::MIN, left)?
     {
         progress.reattributed = batch.converted;
+        progress.undecodable += batch.undecodable;
     }
     progress.remaining_unconverted = unbackfilled_count(conn)?;
     progress.remaining_unattributed = unattributed_count(conn)?;
@@ -183,6 +188,7 @@ impl Database {
             let done = step.converted + step.reattributed;
             total.converted += step.converted;
             total.reattributed += step.reattributed;
+            total.undecodable += step.undecodable;
             total.remaining_unconverted = step.remaining_unconverted;
             total.remaining_unattributed = step.remaining_unattributed;
             handled += done;

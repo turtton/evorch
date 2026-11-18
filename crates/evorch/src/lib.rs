@@ -8,4 +8,5 @@ pub mod headless;
 pub mod inspect;
 pub mod js_worker;
 pub mod maintenance;
+pub mod online_maintenance;
 pub mod reindex_threads;
