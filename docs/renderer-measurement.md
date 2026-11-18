@@ -498,3 +498,41 @@ run ごとに大きく動く（720p×30fps の 1 tab は、旧手順で 1.4ms、
   再現手順に含めていない。
 - 計測ツールは単独 package のため lefthook と CI の対象外。手で
   `scripts/measure-renderer.sh --check` を実行する（§1）。
+
+## 8. 16a-2 F3: data plane の fan-out（`fanout`、2026-11、同一 process の prototype）
+
+F3 の設計（1 tab の latest frame を複数の data 接続へ配る）の前に、構造だけを
+同じにした prototype で決めた。helper も CEF も使わない。helper 役の thread が
+socket pair へ frame を書き（ack を待つ）、core 役の reader が 1 つの buffer に読んで
+tab の latest として公開し、subscriber ごとの sender thread が自分の socket へ書き、
+client 役の reader が全 byte を受ける。latency は core が最初の byte を観測した時刻から
+client が frame の全 byte を持つまで（受け入れ基準の p95 ≤ 33ms と同じ区間）。
+`share=1` は全 sender が 1 つの `Arc` の allocation を書く。`share=0` は sender ごとに
+copy する。stalled は接続して読まない subscriber。4K（33,177,600 byte）、30fps、8 秒、
+24 論理 CPU の共有 workstation、1 回ずつ。
+
+| tab | subscriber | share | chunk | p50 ms | p95 ms | max ms | 欠落 frame | 最大の生存 frame memory | CPU（1 core 比） |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | 共有 | 64KiB | 9.3 | 10.8 | 12.8 | 0 | 63 MiB | 46% |
+| 1 | 4 | 共有 | 64KiB | 12.5 | 15.0 | 16.6 | 0 | 63 MiB | 183% |
+| 1 | 4 | copy | 64KiB | 24.4 | 26.8 | 29.9 | 0 | 190 MiB | 336% |
+| 4 | 8 | 共有 | 64KiB | 28.3 | 32.1 | 42.1 | 0 | 253 MiB | 844% |
+| 4 | 8 | copy | 64KiB | 112.9 | 140.5 | 172.0 | 577 | 633 MiB | 1396% |
+| 4 | 8（+読まない 4） | 共有 | 64KiB | 26.8 | 29.4 | 34.6 | 0 | 380 MiB | 811% |
+| 1 | 4 | 共有 | 1 write | 11.7 | 14.3 | 16.2 | 0 | 63 MiB | 167% |
+| 1 | 4 | 共有 | 1MiB | 13.3 | 15.0 | 16.2 | 0 | 63 MiB | 191% |
+| 4 | 8（720p、60fps） | 共有 | 64KiB | 3.1 | 3.6 | 4.4 | 0 | 28 MiB | 189% |
+
+決めたこと:
+
+- **1 つの allocation を全 subscriber で共有する（`Arc`）。** copy は 4K の 4 tab × 8
+  subscriber で p95 140ms、frame の欠落、peak 633MiB となり、基準も memory の予算も
+  満たさない。共有なら p95 32.1ms。
+- **write の単位は 64KiB。** 1 write、64KiB、1MiB の差は誤差内（p95 14.3〜15.0ms）。
+  1 write は flow control の細かさを失うので、64KiB を採る。
+- **S ≤ 8 subscriber、T ≤ 4 tab を上限にする。値は上げない。** 4K の最悪構成の p95 は
+  32.1ms で、33ms の基準に余裕がほとんどない（max は 42ms）。
+- **読まない subscriber は frame を握ったままになる**（上の +4 行で peak が +127 MiB）。
+  よって no-progress timeout（5 秒）で切り、その間に握れる量を予算で数える。
+- 限界: 同一 process・thread の prototype で、実 helper、core の async 層、GUI の表示は
+  含まない。実装後に同じ区間を実装の上で再測定し（F3 の最終 commit）、基準を確かめる。

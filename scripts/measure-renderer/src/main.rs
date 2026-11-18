@@ -12,6 +12,7 @@
 //! timed parking is the synthetic producer's frame pacing and the consumer
 //! hold of `hold_ms`, which are load shapes, not synchronization.
 
+mod fanout;
 mod fixture;
 mod helper;
 mod procfs;
@@ -624,6 +625,17 @@ fn main() {
         "transfer" => stream(&config, &args, true),
         "tabs" => tabs(&config, &args),
         "ipc" => ipc(&args),
+        "fanout" => emit(fanout::run(fanout::Params {
+            width: args.get("w", 1280),
+            height: args.get("h", 720),
+            fps: args.get("fps", 30),
+            secs: args.get("secs", 20),
+            tabs: args.get("tabs", 1),
+            subs: args.get("subs", 1),
+            stalled: args.get("stalled", 0),
+            chunk: args.get("chunk", 65536),
+            share: args.get::<u8>("share", 1) != 0,
+        })),
         other => fail(&format!("unknown scenario {other}")),
     }
 }

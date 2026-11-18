@@ -6,7 +6,7 @@
 #
 #   --check   fmt, clippy and unit tests of the tool only (no measurement)
 #
-# SCENARIO: env startup tabs stream transfer ipc  (default: all)
+# SCENARIO: env startup tabs stream transfer ipc fanout  (default: all)
 #
 # Needs the dev shell environment (CEF_PATH, LD_LIBRARY_PATH, LIBCLANG_PATH):
 # run it inside `nix develop`, or through
@@ -35,7 +35,7 @@ while (($#)); do
     *) scenarios+=("$1"); shift ;;
   esac
 done
-((${#scenarios[@]})) || scenarios=(env startup tabs stream transfer ipc)
+((${#scenarios[@]})) || scenarios=(env startup tabs stream transfer ipc fanout)
 if ((check)); then
   # What lefthook and CI do not cover: the tool is a standalone package.
   m=scripts/measure-renderer/Cargo.toml
@@ -119,6 +119,20 @@ for scenario in "${scenarios[@]}"; do
       run ipc ipc fps=30 secs="$secs" tabs=4 w=3840 h=2160
       run ipc ipc fps=60 secs="$secs" w=1280 h=720 hold_ms=200
       run ipc ipc fps=60 secs="$secs" w=3840 h=2160 hold_ms=200
+      ;;
+    fanout)
+      # The F3 data-plane prototype (no helper): one tab's latest frame to
+      # several subscriber sockets. share=1 is one allocation for all senders.
+      run fanout fanout w=3840 h=2160 fps=30 secs="$secs" tabs=1 subs=1 share=1
+      run fanout fanout w=3840 h=2160 fps=30 secs="$secs" tabs=1 subs=4 share=1
+      run fanout fanout w=3840 h=2160 fps=30 secs="$secs" tabs=1 subs=4 share=0
+      run fanout fanout w=3840 h=2160 fps=30 secs="$secs" tabs=4 subs=8 share=1
+      run fanout fanout w=3840 h=2160 fps=30 secs="$secs" tabs=4 subs=8 share=0
+      run fanout fanout w=3840 h=2160 fps=30 secs="$secs" tabs=4 subs=8 stalled=4 share=1
+      for chunk in 0 65536 1048576; do
+        run fanout fanout w=3840 h=2160 fps=30 secs="$secs" tabs=1 subs=4 share=1 chunk="$chunk"
+      done
+      run fanout fanout w=1280 h=720 fps=60 secs="$secs" tabs=4 subs=8 share=1
       ;;
     *) echo "unknown scenario $scenario" >&2; exit 2 ;;
   esac
