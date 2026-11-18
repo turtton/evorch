@@ -117,6 +117,13 @@ for other in crates/evorch-core/src/lifecycle/signals.rs crates/evorch-core/src/
 done
 files crates/workbench-protocol/src/handshake.rs
 expect ok "only integration may register the renderer wire reason" "$central" --scope integration --files-from "$work/files"
+files crates/workbench-client/src/lib.rs crates/gui/src/html_preview/agent_pages.rs crates/gui/tests/artifact_pages_cache.rs
+expect ok "F3 owns the client module wiring and the two mechanical open_artifact leaves" "$central" --scope pr16a2 --files-from "$work/files"
+expect fail "pr15 does not own the F3 wiring leaves" "$central" --scope pr15 --files-from "$work/files"
+for other in crates/gui/src/html_preview/mod.rs crates/gui/src/html_preview/other.rs crates/gui/tests/other.rs crates/workbench-client/src/client.rs; do
+  files "$other"
+  expect fail "pr16a2 does not own $other" "$central" --scope pr16a2 --files-from "$work/files"
+done
 files crates/gui/src/core_client/features/artifacts.rs
 expect fail "pr16a2 does not own the GUI feature file" "$central" --scope pr16a2 --files-from "$work/files"
 files crates/evorch/src/cli/inspect.rs
