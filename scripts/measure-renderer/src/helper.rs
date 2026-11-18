@@ -6,9 +6,12 @@
 //! CEF descendants orphaned by a dying parent can be reaped and counted.
 
 use std::fs::File;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use renderer_ipc::{ClientConfig, CloseReason, RendererClient, RendererGeneration, stdio_channels};
@@ -88,6 +91,7 @@ impl Drop for Helper {
 /// group is stopped and reaped, and the run directory goes last.
 pub struct Launched {
     pub client: RendererClient,
+    pub proxy: Option<Arc<crate::proxy::Shared>>,
     pub helper: Helper,
     #[allow(dead_code)]
     pub dir: RunDir,
@@ -108,6 +112,16 @@ fn run_dir(config: &Config, label: &str) -> Result<RunDir, String> {
 }
 
 pub fn launch(config: &Config, label: &str, generation: u64) -> Result<Launched, String> {
+    launch_with(config, label, generation, false)
+}
+
+/// `proxy`: put the frame-channel proxy between the helper and the client.
+pub fn launch_with(
+    config: &Config,
+    label: &str,
+    generation: u64,
+    proxy: bool,
+) -> Result<Launched, String> {
     let cef_helper = config.renderer.with_file_name("evorch-cef-helper");
     if !cef_helper.is_file() {
         return Err(format!(
@@ -117,7 +131,15 @@ pub fn launch(config: &Config, label: &str, generation: u64) -> Result<Launched,
     }
     let dir = run_dir(config, label)?;
     let stderr = File::create(dir.0.join("helper.stderr")).map_err(|e| e.to_string())?;
-    let channels = stdio_channels().map_err(|e| e.to_string())?;
+    let mut channels = stdio_channels().map_err(|e| e.to_string())?;
+    let mut proxy_shared = None;
+    if proxy {
+        let (client_frames, proxy_client) = UnixStream::pair().map_err(|e| e.to_string())?;
+        let (proxy_helper, helper_frames) = UnixStream::pair().map_err(|e| e.to_string())?;
+        channels.frames = client_frames;
+        channels.helper_stdout = Stdio::from(OwnedFd::from(helper_frames));
+        proxy_shared = Some(crate::proxy::start(proxy_helper, proxy_client));
+    }
     let mut command = Command::new(&config.renderer);
     command
         .arg("--cache-dir")
@@ -163,6 +185,7 @@ pub fn launch(config: &Config, label: &str, generation: u64) -> Result<Launched,
         client,
         helper,
         dir,
+        proxy: proxy_shared,
     })
 }
 
@@ -172,8 +195,9 @@ pub fn ms(duration: Duration) -> f64 {
 
 #[derive(Debug)]
 pub struct StopTimings {
-    /// Until `client.shutdown` returned (orderly stop only; 0 when forced).
-    pub ack_ms: f64,
+    /// Until `client.shutdown` returned: the helper acknowledged and both
+    /// channels were closed (orderly stop only; 0 when forced).
+    pub shutdown_returned_ms: f64,
     /// From the start of the stop until the helper process had exited.
     pub exit_ms: f64,
     /// From the start of the stop until every group member was reaped.
@@ -186,14 +210,19 @@ pub struct StopTimings {
     pub leftover: usize,
 }
 
-fn finish(l: &mut Launched, started: Instant, ack_ms: f64, close: String) -> StopTimings {
+fn finish(
+    l: &mut Launched,
+    started: Instant,
+    shutdown_returned_ms: f64,
+    close: String,
+) -> StopTimings {
     let status: ExitStatus = l.helper.child.wait().expect("wait for the helper");
     let exit_ms = ms(started.elapsed());
     let reaped_orphans = l.helper.reap_descendants();
     let reaped_ms = ms(started.elapsed());
     let leftover = l.helper.live_members().len() + procfs::children_of_self().len();
     StopTimings {
-        ack_ms,
+        shutdown_returned_ms,
         exit_ms,
         reaped_ms,
         close,
@@ -207,11 +236,11 @@ fn finish(l: &mut Launched, started: Instant, ack_ms: f64, close: String) -> Sto
 pub fn stop_orderly(l: &mut Launched) -> StopTimings {
     let started = Instant::now();
     let close = l.client.shutdown(Duration::from_secs(60));
-    let ack_ms = ms(started.elapsed());
+    let shutdown_returned_ms = ms(started.elapsed());
     let close = format!("{close:?}");
     debug_assert!(close.contains("Shutdown") || close.contains("Local"));
     let _ = CloseReason::LocalClose;
-    finish(l, started, ack_ms, close)
+    finish(l, started, shutdown_returned_ms, close)
 }
 
 /// SIGKILL to the whole group, as a crash of the core would not do but a

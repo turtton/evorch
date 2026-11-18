@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -35,6 +35,8 @@ pub fn read_stamp(bgra: &[u8]) -> Option<u64> {
 struct Shared {
     tabs: Mutex<BTreeMap<TabId, (Viewport, bool)>>,
     stop: AtomicBool,
+    /// Signalled when a tab opens, closes or changes streaming, and on stop.
+    changed: Condvar,
 }
 
 pub struct Synthetic {
@@ -53,6 +55,7 @@ impl Backend for Synthetic {
             .lock()
             .unwrap()
             .insert(open.tab, (open.viewport, false));
+        self.shared.changed.notify_all();
         Ok(open.viewport)
     }
     fn resize(&self, _tab: TabId, _viewport: Viewport) -> Result<(), RemoteError> {
@@ -62,6 +65,7 @@ impl Backend for Synthetic {
         if let Some(entry) = self.shared.tabs.lock().unwrap().get_mut(&tab) {
             entry.1 = enabled;
         }
+        self.shared.changed.notify_all();
         Ok(())
     }
     fn capture(&self, _tab: TabId, _timeout: Duration) -> Result<Vec<u8>, RemoteError> {
@@ -84,11 +88,17 @@ impl Backend for Synthetic {
     }
     fn close_tab(&self, tab: TabId) {
         self.shared.tabs.lock().unwrap().remove(&tab);
+        self.shared.changed.notify_all();
     }
     fn shutdown(&self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
+        {
+            // Under the lock, so the producer cannot check `stop` and then miss
+            // the signal.
+            let _tabs = self.shared.tabs.lock().unwrap();
+            self.shared.stop.store(true, Ordering::SeqCst);
+        }
+        self.shared.changed.notify_all();
         if let Some(handle) = self.producer.lock().unwrap().take() {
-            handle.thread().unpark();
             let _ = handle.join();
         }
     }
@@ -99,18 +109,19 @@ fn produce(shared: Arc<Shared>, queue: Arc<FrameQueue>, fps: u32) {
     let mut buffers: BTreeMap<TabId, Vec<u8>> = BTreeMap::new();
     let mut next = Instant::now();
     while !shared.stop.load(Ordering::SeqCst) {
-        let streaming: Vec<(TabId, Viewport)> = shared
-            .tabs
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, (_, on))| *on)
-            .map(|(tab, (viewport, _))| (*tab, *viewport))
-            .collect();
+        let streaming: Vec<(TabId, Viewport)> = {
+            let mut tabs = shared.tabs.lock().unwrap();
+            // Nothing to paint: wait for a state change (a condition, not a time).
+            while !shared.stop.load(Ordering::SeqCst) && !tabs.values().any(|(_, on)| *on) {
+                tabs = shared.changed.wait(tabs).unwrap();
+                next = Instant::now();
+            }
+            tabs.iter()
+                .filter(|(_, (_, on))| *on)
+                .map(|(tab, (viewport, _))| (*tab, *viewport))
+                .collect()
+        };
         if streaming.is_empty() {
-            // Nothing to paint: wait for a state change (bounded park).
-            std::thread::park_timeout(Duration::from_millis(5));
-            next = Instant::now();
             continue;
         }
         for (tab, viewport) in streaming {
@@ -145,6 +156,7 @@ pub fn start(fps: u32) -> (UnixStream, UnixStream, JoinHandle<ExitReason>) {
             let shared = Arc::new(Shared {
                 tabs: Mutex::new(BTreeMap::new()),
                 stop: AtomicBool::new(false),
+                changed: Condvar::new(),
             });
             let producer = {
                 let shared = Arc::clone(&shared);
@@ -158,4 +170,38 @@ pub fn start(fps: u32) -> (UnixStream, UnixStream, JoinHandle<ExitReason>) {
         },
     );
     (control, frames, handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use renderer_ipc::{ClientConfig, RendererClient, RendererGeneration};
+
+    /// The window baseline, the count and the stop all hold on the real server
+    /// and client, with the producer woken by notification only.
+    #[test]
+    fn window_over_the_synthetic_backend_counts_whole_frames() {
+        let (control, frames, server) = start(0);
+        let (client, _) =
+            RendererClient::connect(control, frames, ClientConfig::new(RendererGeneration(1)))
+                .unwrap();
+        let (open, body) = crate::open_request(1, 64, 64, 60);
+        client.open_artifact(open, &body).unwrap();
+        client.set_streaming(TabId(1), true).unwrap();
+
+        let mut window = crate::stats::Window::default();
+        let mut received = 0u64;
+        while window.frames < 20 {
+            let frame = client
+                .wait_frame(Some(Duration::from_secs(30)))
+                .expect("frame");
+            received += 1;
+            window.observe(frame.seq);
+            client.recycle_frame(frame);
+        }
+        // Every received frame is counted except the baseline.
+        assert_eq!(window.frames, received - 1);
+        let _ = client.shutdown(Duration::from_secs(30));
+        server.join().unwrap();
+    }
 }

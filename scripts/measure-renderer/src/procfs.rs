@@ -246,3 +246,41 @@ pub fn own() -> (Mem, u64) {
         read_proc(pid).map(|p| p.ticks).unwrap_or(0),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stat_with_spaces_and_parentheses_in_comm() {
+        // pid (comm) state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime
+        let text = "42 (a (b) c) S 7 9 9 0 -1 4194560 100 0 0 0 30 12 0 0 20 0 1 0 1";
+        let proc = parse_stat(42, text).expect("parses");
+        assert_eq!(
+            (proc.ppid, proc.pgrp, proc.state, proc.ticks),
+            (7, 9, 'S', 42)
+        );
+    }
+
+    #[test]
+    fn truncated_stat_is_refused() {
+        assert!(parse_stat(1, "1 (x) S 0").is_none());
+        assert!(parse_stat(1, "garbage").is_none());
+    }
+
+    #[test]
+    fn own_process_is_readable() {
+        let me = read_proc(std::process::id() as i32).expect("own stat");
+        assert_eq!(me.pid, std::process::id() as i32);
+        assert!(own().0.rss_kib > 0);
+    }
+
+    #[test]
+    fn cpu_percent_is_the_tick_difference_over_wall_time() {
+        let start = HashMap::from([(1, 100), (2, 50)]);
+        let end = HashMap::from([(1, 150), (2, 60), (3, 5)]);
+        // (50 + 10 + 5) ticks of 10 ms in 2 s = 32.5 %; the new process 3 counts from 0.
+        let got = cpu_percent(&start, &end, 2.0);
+        assert!((got - 32.5).abs() < 1e-9, "{got}");
+    }
+}

@@ -64,3 +64,48 @@ pub fn age_ms(stamp: u32, now: u32) -> Option<f64> {
     let ms = f64::from(signed) / 10.0;
     (-5.0..60_000.0).contains(&ms).then_some(ms)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A BGRA frame whose stamp blocks carry `value`, as the page draws them.
+    fn frame_with(value: u32, width: usize, height: usize) -> Vec<u8> {
+        let mut bgra = vec![0x40; width * height * 4];
+        for i in 0..4 {
+            for y in 0..BLOCK {
+                for x in 0..BLOCK {
+                    let at = (y * width + i * BLOCK + x) * 4;
+                    bgra[at] = (value >> (8 * i)) as u8;
+                }
+            }
+        }
+        bgra
+    }
+
+    #[test]
+    fn stamp_round_trips() {
+        for value in [0, 1, 0x1234_5678, u32::MAX] {
+            assert_eq!(stamp(&frame_with(value, 64, 16), 64), Some(value));
+        }
+    }
+
+    #[test]
+    fn stamp_needs_room_for_the_blocks() {
+        assert_eq!(stamp(&[0; 100], 8), None);
+        assert_eq!(stamp(&vec![0; 64 * 4], 64), None); // one row, blocks need 8
+    }
+
+    #[test]
+    fn age_is_in_milliseconds_and_survives_wrap() {
+        assert_eq!(age_ms(1000, 1500), Some(50.0));
+        assert_eq!(age_ms(u32::MAX - 9, 10), Some(2.0)); // 20 ticks across the wrap
+    }
+
+    #[test]
+    fn implausible_ages_are_rejected() {
+        assert_eq!(age_ms(2_000_000, 0), None); // far in the future
+        assert_eq!(age_ms(0, 700_000), None); // older than a minute
+        assert!(age_ms(100, 99).is_some()); // 0.1 ms of clock noise is accepted
+    }
+}
