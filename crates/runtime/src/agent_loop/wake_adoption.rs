@@ -22,6 +22,10 @@ impl LoopState {
     ) -> InputWake {
         // A wake that did not resume execution has finished handling its input.
         // Resuming and terminal paths instead release after publication or drop.
+        #[cfg(any(test, feature = "idle-test-support"))]
+        if self.wake_adoption.is_some() {
+            self.channels.user_inbox.hold_ignored_wake_adoption_gate();
+        }
         self.wake_adoption = None;
         let inbox = self.channels.user_inbox.clone();
         let (wake, adoption) = inbox

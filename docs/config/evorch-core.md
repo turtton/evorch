@@ -53,14 +53,21 @@ startup lock と、プロセス終了まで保持する flock は canonical conf
 起動間でも同じ DB の lifetime lock を共有する。
 stale socket は lifetime lock の取得後だけ回収する。lock ファイルは unlink しない。
 
-クライアント 0・実行中作業なし・Web 無効が猶予中継続した場合だけ自動終了する。
-**Web 配信有効中は、接続がなくてもアイドル終了しない。**
+GUI・CLI（Unix socket）と Web の実接続がすべて 0 件で、かつ実行中作業なしの
+状態が `idle_grace_secs` 継続した場合だけ自動終了する（段階 18a）。Web 配信が
+有効なだけでは保持しない。HTTP keep-alive と SSE も接続の存続中は保持する。
+接続・切断を観測すると猶予をリセットし、最後の切断から改めて全猶予を取る。
 0 秒は即時アイドル終了。プラットフォームの時計で表現できない巨大な猶予は
 期限なしとして扱い、overflow させない。
-P7a では非終端の run（ユーザー入力・質問・承認待ちの `Waiting` を含む）と
-shell job・保存済み chat の compaction を保持理由として扱う。
-TODO(P9): 安全点再起動・自動再開で通常 chat の `Waiting` を復元できるように
-なった後は、通常 chat の入力待ちを「作業なし」に変更する。現在の保持は暫定措置。
+
+完了済み interactive turn の通常の次回チャット入力待ちは「作業なし」とする。
+phase が `Waiting` であるだけでは idle とせず、turn 完了記録と未処理入力・
+割り込みメッセージ・compaction の有無を確認する。active turn、tool・子 run・
+lane・escalation などの active wait、shell job、background/area 作業、評価、
+復旧の再試行・lane admission/停止の永続化、restart/drain は引き続き保持する。
+P9（段階 06）の復旧が完了するまでは、未回答の質問（blocking でないものや
+停止済み requester の質問を含む）と承認権限も保持理由とし、保存済み質問の
+読み取りに失敗した場合は終了しない。18a はそれらの復旧や自動回答を追加しない。
 SIGTERM/SIGINT も同じ終了経路（受付停止、接続/SSE 閉鎖、owner quiesce、
 run/checkpoint と shell の drain、永続化 flush、lease・lock 解放）を使う。
 
@@ -98,13 +105,16 @@ backend を通らない decode エラーも入力値を反射しない。未知 
 runtime の入力・既送信 prompt は transport が書き換えない。
 SafeRestart capability はまだ提供しない。
 
-`CoreStatus` は Unix 実接続数を `running.clients` に集計し、接続中の
-`connected_clients`、Web 有効中の `web_serving`、Running turn の `active_turn` を
-`retention_reasons` に公開する。hello・health・GetCoreStatus は同じ集計を使用する。
-P7a の clients は Unix 接続だけで、HTTP/SSE の browser 数ではない。
+`CoreStatus` は Unix と Web の実接続数を `running.clients` に集計し、接続中の
+`connected_clients` と Running turn の `active_turn` を `retention_reasons` に
+公開する。hello・health・GetCoreStatus は同じ集計を使用する。HTTP keep-alive と
+SSE は TCP 接続単位で数え、タブや session ID の重複排除はしない。実 Web owner を
+引き渡さない旧 embedding API だけは、保守的な `web_serving` 保持を継続する。
 `tool_calls` / `waiting_lanes` / `shell_jobs` の公開 counter と、それらの保持理由は
 まだ未集計（0 / 未掲載）。実際の idle 判定は公開 status ではなく、runtime・shell・
-compaction の作業状態と Web 有効状態で行う。
+compaction の作業状態と接続 census、切断後も残る accepted Web command / SSE
+delivery の活動で行う。これらの完了通知でも猶予をリセットする。detached work の
+panic / abort で正常完了を確認できない場合は、保守的に自動終了を抑止する。
 
 TODO(P10/P11): GUI と headless の composition は今回は変更せず、bootstrap と
 重複している。両者の bootstrap 利用、GUI/CLI の自動接続・起動、旧所有権撤去、

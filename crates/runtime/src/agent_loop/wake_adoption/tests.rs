@@ -156,4 +156,66 @@ async fn an_ignored_wake_releases_when_the_loop_waits_again() {
     runtime.wait(run).await.unwrap();
 }
 
+#[tokio::test]
+async fn simultaneous_ready_wakes_keep_priority_and_leave_losers_unconsumed() {
+    let (cancel, cancel_rx) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) = started_fixture(cancel_rx).await;
+    let run = state.caller_run_id();
+    let (quiesce, mut q) = watch::channel(0);
+    let (deliveries, mut d) = watch::channel(0);
+    let (answers, mut a) = watch::channel(0);
+    let (sender, receiver) = mpsc::channel(1);
+    state.channels.inbox_rx = receiver.into();
+    quiesce.send_replace(1);
+    cancel.send_replace(RunInterrupt::Cancel);
+    deliveries.send_replace(1);
+    answers.send_replace(1);
+    sender
+        .send(("preserved inbox".into(), false, None, 0))
+        .await
+        .unwrap();
+    state
+        .task
+        .mailbox
+        .try_push(AgentMessage {
+            message_id: "preserved mailbox".into(),
+            sender_run_id: "sender".into(),
+            recipient_run_id: run.to_string(),
+            kind: AgentMessageKind::Send,
+            content: "preserved payload".into(),
+            reply_to: None,
+        })
+        .unwrap();
+    for source in 0..6 {
+        let wake = state.next_input_wake(&mut q, &mut d, &mut a).await;
+        match (source, wake) {
+            (0, InputWake::Quiesce)
+            | (1, InputWake::Cancel(Ok(())))
+            | (2, InputWake::Deliveries(Ok(())))
+            | (3, InputWake::Answers(Ok(())))
+            | (5, InputWake::Mailbox(Ok(()))) => {}
+            (4, InputWake::Inbox(Some((text, _, _, _)))) => assert_eq!(text, "preserved inbox"),
+            _ => panic!("simultaneously ready wake lost priority at {source}"),
+        }
+        assert!(!q.has_changed().unwrap());
+        assert_eq!(state.channels.cancel_rx.has_changed().unwrap(), source < 1);
+        assert_eq!(d.has_changed().unwrap(), source < 2);
+        assert_eq!(a.has_changed().unwrap(), source < 3);
+        assert_eq!(sender.capacity(), usize::from(source >= 4));
+        assert_eq!(
+            state.channels.mailbox_version_rx.has_changed().unwrap(),
+            source < 5
+        );
+        assert_eq!(state.task.mailbox.len(), 1);
+        assert!(state.channels.user_inbox.adopting());
+    }
+    let messages = state.task.mailbox.drain_where(|_| true);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].message_id, "preserved mailbox");
+    assert_eq!(messages[0].content, "preserved payload");
+    drop(state);
+    runtime.cancel(run).unwrap();
+    runtime.wait(run).await.unwrap();
+}
+
 mod public_gate;

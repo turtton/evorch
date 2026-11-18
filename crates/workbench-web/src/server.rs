@@ -1,5 +1,7 @@
 //! Router construction, the listener and the start/stop API.
 
+mod idle;
+
 use crate::api;
 use crate::assets::{StaticAsset, UI_ASSETS};
 use crate::backend::WorkbenchBackend;
@@ -124,6 +126,7 @@ impl WebApp {
 /// [`WebServer::shutdown`] but does not wait for it.
 pub struct WebServer {
     local_addr: SocketAddr,
+    clients: idle::Clients,
     shutdown: ShutdownSignal,
     task: Option<JoinHandle<io::Result<()>>>,
     tasks: crate::RestartTasks,
@@ -168,6 +171,7 @@ impl WebServer {
             slots: Arc::new(Semaphore::new(config.max_connections)),
         };
         let shutdown = app.shutdown_signal();
+        let clients = idle::Clients::default();
         let task = tokio::spawn(serve(
             listener,
             app.router(),
@@ -176,9 +180,11 @@ impl WebServer {
                 shutdown_grace: config.shutdown_grace,
             },
             shutdown.clone(),
+            clients.clone(),
         ));
         Ok(Some(Self {
             local_addr,
+            clients,
             shutdown,
             task: Some(task),
             tasks: app.tasks.clone(),
@@ -196,6 +202,12 @@ impl WebServer {
     /// The address actually bound (useful with port 0).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Observe admitted connection lifetimes, not whether the listener is enabled.
+    /// A change must reset idle grace even if the latest count is already zero.
+    pub fn connected_clients(&self) -> crate::ActivityObserver {
+        self.clients.subscribe()
     }
 
     /// Stop accepting connections, end SSE streams and join connections within
@@ -261,6 +273,7 @@ async fn serve(
     router: Router,
     settings: ServeSettings,
     shutdown: ShutdownSignal,
+    clients: idle::Clients,
 ) -> io::Result<()> {
     let service = TowerToHyperService::new(router);
     let mut connections: JoinSet<()> = JoinSet::new();
@@ -270,12 +283,16 @@ async fn serve(
             () = shutdown.triggered() => break,
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             (stream, _peer) = listener.accept() => {
-                connections.spawn(serve_connection(
-                    stream,
-                    service.clone(),
-                    settings.header_read_timeout,
-                    shutdown.clone(),
-                ));
+                let Some(connected) = clients.connect(&shutdown) else {
+                    continue;
+                };
+                let connection = serve_connection(
+                    stream, service.clone(), settings.header_read_timeout, shutdown.clone(),
+                );
+                connections.spawn(async move {
+                    let _connected = connected;
+                    connection.await;
+                });
             }
         }
     }

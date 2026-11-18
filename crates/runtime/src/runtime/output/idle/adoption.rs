@@ -51,4 +51,48 @@ impl AgentRuntime {
         entry.user_inbox.gate_next_wake_adoption(reached, resume);
         Ok(())
     }
+
+    /// Generate a message-free mailbox version wake and hold it after its no-op
+    /// handler, before releasing adoption. Arrange a passive run first.
+    #[cfg(any(test, feature = "idle-test-support"))]
+    pub fn gate_ignored_mailbox_wake(
+        &self,
+        run: RunId,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), crate::RuntimeError> {
+        let mailbox = {
+            let runs = lock_runs(&self.shared.runs);
+            let entry = runs
+                .get(&run)
+                .ok_or_else(|| super::super::unknown_run(run))?;
+            entry.user_inbox.gate_ignored_wake_adoption(reached, resume);
+            entry.mailbox.clone()
+        };
+        // An empty drain advances the real watch without consuming any input.
+        mailbox.drain_where(|_| false);
+        Ok(())
+    }
+
+    /// Hold a truly passive poll AFTER its transient guard is released. The
+    /// message-free watch kick makes this deterministic for already-waiting runs.
+    /// No runtime/inbox lock is held while either test gate blocks.
+    #[cfg(any(test, feature = "idle-test-support"))]
+    pub fn gate_next_passive_input_wait(
+        &self,
+        run: RunId,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), crate::RuntimeError> {
+        let mailbox = {
+            let runs = lock_runs(&self.shared.runs);
+            let entry = runs
+                .get(&run)
+                .ok_or_else(|| super::super::unknown_run(run))?;
+            entry.user_inbox.gate_passive_wait(reached, resume);
+            entry.mailbox.clone()
+        };
+        mailbox.drain_where(|_| false);
+        Ok(())
+    }
 }
