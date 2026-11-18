@@ -1,5 +1,7 @@
 //! Percentiles over raw samples.
 
+use std::time::{Duration, Instant};
+
 use serde_json::{Value, json};
 
 /// Nearest-rank percentile of an ascending slice.
@@ -32,6 +34,43 @@ pub fn dist(mut values: Vec<f64>) -> Value {
 
 pub fn round(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
+}
+
+/// A measurement window on one monotonic clock.
+///
+/// Its start is the arrival of the baseline frame, taken from the same `Instant`
+/// clock as every later arrival and as the deadline, so the start, the end, the
+/// per-frame arrivals and the proxy samples are all compared on one timeline.
+/// The window is half-open: a frame that arrives exactly at the end belongs to
+/// the next interval, not to this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: Instant,
+    pub end: Instant,
+}
+
+impl Span {
+    pub fn new(start: Instant, len: Duration) -> Self {
+        Self {
+            start,
+            end: start + len,
+        }
+    }
+
+    pub fn len(&self) -> Duration {
+        self.end - self.start
+    }
+
+    /// Time left at `now`, zero at and after the end. This bounds a wait so a
+    /// frame is never waited for past the deadline.
+    pub fn left(&self, now: Instant) -> Duration {
+        self.end.saturating_duration_since(now)
+    }
+
+    /// Whether an event at `at` lies in `[start, end)`.
+    pub fn contains(&self, at: Instant) -> bool {
+        self.start <= at && at < self.end
+    }
 }
 
 /// Counts the frames of a measurement window by their `seq`.
@@ -87,6 +126,54 @@ mod tests {
         assert_eq!(d["max"], 3.0);
         assert_eq!(d["p50"], 2.0);
         assert!(dist(vec![]).is_null());
+    }
+
+    #[test]
+    fn span_is_half_open_around_its_boundaries() {
+        let t0 = Instant::now();
+        let ns = Duration::from_nanos(1);
+        let span = Span::new(t0, Duration::from_secs(20));
+        assert_eq!(span.len(), Duration::from_secs(20));
+        assert!(!span.contains(t0 - ns), "just before the start");
+        assert!(span.contains(t0), "the start itself");
+        assert!(span.contains(span.end - ns), "just before the deadline");
+        assert!(!span.contains(span.end), "the deadline itself");
+        assert!(!span.contains(span.end + ns), "just after the deadline");
+    }
+
+    #[test]
+    fn span_left_bounds_a_wait_and_never_goes_past_the_deadline() {
+        let t0 = Instant::now();
+        let span = Span::new(t0, Duration::from_secs(20));
+        assert_eq!(span.left(t0), Duration::from_secs(20));
+        assert_eq!(
+            span.left(t0 + Duration::from_secs(19)),
+            Duration::from_secs(1)
+        );
+        // At and after the deadline there is nothing left to wait for.
+        assert_eq!(span.left(span.end), Duration::ZERO);
+        assert_eq!(span.left(span.end + Duration::from_secs(5)), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_frame_arriving_after_the_deadline_is_not_counted() {
+        // The consumer's rule: count an arrival only if it is inside the span,
+        // and stop at the first one that is not.
+        let t0 = Instant::now();
+        let span = Span::new(t0, Duration::from_secs(2));
+        let step = Duration::from_millis(500);
+        // Arrivals every 500 ms; the fifth lands exactly on the deadline and the
+        // sixth is late. The baseline arrives at the start.
+        let arrivals: Vec<Instant> = (0..=6).map(|i| t0 + step * i).collect();
+        let mut window = Window::default();
+        for (i, at) in arrivals.iter().enumerate() {
+            if i > 0 && !span.contains(*at) {
+                break;
+            }
+            window.observe(i as u64);
+        }
+        assert_eq!(window.frames, 3, "arrivals at 0.5, 1.0 and 1.5 s");
+        assert_eq!(window.frames as f64 / span.len().as_secs_f64(), 1.5);
     }
 
     #[test]

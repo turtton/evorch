@@ -39,6 +39,20 @@ pub struct Sample {
     pub page_to_first_byte_ms: Option<f64>,
 }
 
+impl Sample {
+    /// When the proxy had finished writing the frame to the client.
+    pub fn finished(&self) -> Instant {
+        self.first + std::time::Duration::from_secs_f64((self.wire_ms + self.forward_ms) / 1000.0)
+    }
+
+    /// Whether the whole transfer, from the first byte to the last byte written,
+    /// lies inside the window. A transfer that began before the window or ended
+    /// after it is a partial observation and is not counted.
+    pub fn within(&self, span: &crate::stats::Span) -> bool {
+        span.contains(self.first) && self.finished() <= span.end
+    }
+}
+
 #[derive(Default)]
 pub struct Shared {
     pub samples: Mutex<Vec<Sample>>,
@@ -170,5 +184,33 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert!(samples[0].wire_ms >= 0.0 && samples[0].forward_ms >= 0.0);
         assert!(shared.first_seen.lock().unwrap().contains_key(&7));
+    }
+
+    fn sample(first: Instant, wire_ms: f64, forward_ms: f64) -> Sample {
+        Sample {
+            first,
+            wire_ms,
+            forward_ms,
+            page_to_first_byte_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_sample_counts_only_when_its_whole_transfer_is_in_the_window() {
+        let t0 = Instant::now();
+        let ns = Duration::from_nanos(1);
+        let span = crate::stats::Span::new(t0, Duration::from_secs(10));
+        // Starts at the window start, ends well inside.
+        assert!(sample(t0, 1.0, 1.0).within(&span));
+        // Starts just before the start side: excluded.
+        assert!(!sample(t0 - ns, 1.0, 1.0).within(&span));
+        // Ends exactly at the deadline is still inside; one tick later is not.
+        let last = span.end - Duration::from_millis(2);
+        assert!(sample(last, 1.0, 1.0).within(&span));
+        assert!(!sample(last + Duration::from_micros(1), 1.0, 1.0).within(&span));
+        // Starts inside but finishes after the deadline: excluded.
+        assert!(!sample(span.end - Duration::from_millis(1), 1.0, 1.0).within(&span));
+        // Starts after the window: excluded.
+        assert!(!sample(span.end + ns, 0.0, 0.0).within(&span));
     }
 }
