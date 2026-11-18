@@ -152,6 +152,75 @@ async fn four_k_generation_stops_at_last_close_even_after_shrinking() {
     shutdown(tasks, &ledger).await;
     tree.assert_clean();
 }
+fn partial_profile_delete(path: &std::path::Path) -> std::io::Result<()> {
+    if path.parent().unwrap().join("block-reclaim").exists() {
+        for name in ["marker", "confirmed", "owner.lock"] {
+            match std::fs::remove_file(path.join(name)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "partial deletion",
+        ));
+    }
+    std::fs::remove_dir_all(path)
+}
+#[tokio::test]
+async fn isolated_partial_profile_deletion_does_not_disable_next_generation_and_is_retried() {
+    let mut tree = support::Tree::new();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("profiles");
+    let tasks = AreaTasks::new(tokio::runtime::Handle::current());
+    let ledger = SpawnLedger::new();
+    let exe = std::env::var_os("CARGO_BIN_EXE_evorch-renderer-test-helper")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("evorch-renderer-test-helper")
+        });
+    let mut config = OwnerConfig::new(exe, root.clone());
+    config.remove_profile = Some(partial_profile_delete);
+    let owner = RendererOwner::new(&tasks, ledger.clone(), config).unwrap();
+    let (o, b) = request(3840, 2160);
+    let old = owner.open(o, b).await.unwrap();
+    tree.track(&ledger);
+    std::fs::write(root.join("block-reclaim"), "hold deletion").unwrap();
+    owner.close(old).await.unwrap();
+    assert_eq!(owner.status().phase, Phase::Stopped);
+    assert!(ledger.children().is_empty());
+    assert!(ledger.workers().is_empty());
+    let queued = std::fs::read_dir(&root)
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with(".reclaim-"))
+        .unwrap()
+        .path();
+    assert!(queued.exists());
+    for name in ["marker", "confirmed", "owner.lock"] {
+        assert!(!queued.join(name).exists());
+    }
+    let (o, b) = request(1, 1);
+    let next = owner.open(o, b).await.unwrap();
+    tree.track(&ledger);
+    assert!(next.generation > old.generation);
+    assert!(queued.exists()); // Startup retried, but deletion STILL fails.
+    assert_eq!(ledger.child_stats().reaped, 1);
+    std::fs::remove_file(root.join("block-reclaim")).unwrap();
+    owner.stop().await.unwrap(); // Reclamation also retries older queue entries.
+    assert!(!queued.exists());
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    shutdown(tasks, &ledger).await;
+    tree.assert_clean();
+}
+
 #[tokio::test]
 async fn held_hello_does_not_hold_admission_and_shutdown_reclaims_every_worker() {
     let mut tree = support::Tree::new();
@@ -203,6 +272,64 @@ async fn idle_deadline_and_reopen_are_serialized_without_new_spawn() {
     shutdown(tasks, &ledger).await;
     tree.assert_clean();
 }
+
+#[tokio::test]
+async fn open_during_stopping_waits_for_old_group_reap_and_actual_worker_joins() {
+    let mut tree = support::Tree::new();
+    let dir = test_socket_dir::SocketDir::new();
+    let root = dir.path().join("p");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    std::fs::write(root.join("fixture-mode"), "gate-shutdown").unwrap();
+    let listener = tokio::net::UnixListener::bind(root.join("gate.sock")).unwrap();
+    let (tasks, ledger, owner) = fixture(&root);
+    let (o, b) = request(1, 1);
+    let old = owner.open(o, b).await.unwrap();
+    tree.track(&ledger);
+    let old_workers: Vec<_> = ledger.workers().iter().map(|w| w.id).collect();
+    let stop = owner.stop();
+    tokio::pin!(stop);
+    let mut gate = tokio::select! {
+        result = &mut stop => panic!("Shutdown must wait for its event: {result:?}"),
+        accepted = listener.accept() => accepted.unwrap().0,
+    };
+    gate.read_exact(&mut [0]).await.unwrap();
+    assert_eq!(owner.status().phase, Phase::Stopping);
+    let (o, b) = request(1, 1);
+    let reopen = owner.open(o, b);
+    tokio::pin!(reopen);
+    // Poll once to enqueue open while Shutdown is held, without sleeps/time
+    // assertions. The old process and its workers must still be the sole owner.
+    tokio::select! { biased;
+        result = &mut reopen => panic!("open completed before old reclamation: {result:?}"),
+        _ = std::future::ready(()) => {}
+    }
+    assert_eq!(owner.status().phase, Phase::Stopping);
+    assert_eq!(ledger.child_stats().registered, 1);
+    assert_eq!(ledger.children().len(), 1);
+    assert_eq!(
+        ledger.workers().iter().map(|w| w.id).collect::<Vec<_>>(),
+        old_workers
+    );
+    std::fs::remove_file(root.join("fixture-mode")).unwrap();
+    gate.write_all(b"R").await.unwrap();
+    let (stopped, next) = tokio::join!(&mut stop, &mut reopen);
+    stopped.unwrap();
+    let next = next.unwrap();
+    tree.track(&ledger);
+    assert!(next.generation > old.generation);
+    assert_eq!(ledger.child_stats().reaped, 1);
+    assert_eq!(ledger.child_stats().registered, 2);
+    assert!(
+        ledger
+            .workers()
+            .iter()
+            .all(|w| !old_workers.contains(&w.id))
+    );
+    shutdown(tasks, &ledger).await;
+    tree.assert_clean();
+}
+
 #[tokio::test]
 async fn failed_hello_remains_owned_and_fenced_spawn_never_starts() {
     let mut tree = support::Tree::new();

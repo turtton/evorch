@@ -64,11 +64,17 @@ pub struct OwnerConfig {
     pub idle: Duration,
     pub hello_timeout: Duration,
     #[cfg(feature = "test-support")]
+    pub remove_profile: Option<fn(&std::path::Path) -> std::io::Result<()>>,
+    #[cfg(feature = "test-support")]
     pub fail_after_readers: Option<usize>,
     #[cfg(feature = "test-support")]
     pub spawned: Option<blocking::Sender<i32>>,
 }
 impl OwnerConfig {
+    /// Assumes a colocated installation: `evorch-renderer` is next to the core.
+    /// Nix currently installs it in a separate derivation/libexec directory;
+    /// distribution-aware resolution is a separate integration BEFORE F2 enables
+    /// this owner. Tests with explicit executables do not validate that layout.
     pub fn installed(profiles: PathBuf) -> std::io::Result<Self> {
         Ok(Self::new(
             std::env::current_exe()?.with_file_name("evorch-renderer"),
@@ -81,6 +87,8 @@ impl OwnerConfig {
             profiles,
             idle: Duration::from_secs(30),
             hello_timeout: Duration::from_secs(60),
+            #[cfg(feature = "test-support")]
+            remove_profile: None,
             #[cfg(feature = "test-support")]
             fail_after_readers: None,
             #[cfg(feature = "test-support")]
@@ -217,7 +225,14 @@ impl Generation {
         config: &OwnerConfig,
         generation: u64,
     ) -> Result<(Self, Option<OwnerError>), OwnerError> {
-        let mut profile = Profile::create(&config.profiles).map_err(|_| OwnerError::Unavailable)?;
+        #[cfg(feature = "test-support")]
+        let profile = config.remove_profile.map_or_else(
+            || Profile::create(&config.profiles),
+            |remove| Profile::create_with(&config.profiles, remove),
+        );
+        #[cfg(not(feature = "test-support"))]
+        let profile = Profile::create(&config.profiles);
+        let mut profile = profile.map_err(|_| OwnerError::Unavailable)?;
         let channels = renderer_ipc::stdio_channels().map_err(|_| OwnerError::Unavailable)?;
         let mut client_config = ClientConfig::new(RendererGeneration(generation));
         client_config.hello_timeout = config.hello_timeout;
@@ -346,8 +361,11 @@ impl Generation {
             .join_worker_ids(&self.workers)
             .await
             .map_err(|_| OwnerError::Unavailable)?;
-        if let Some(profile) = self.profile.take() {
+        if let Some(profile) = self.profile.as_mut() {
+            // Keep this owner until deletion OR durable isolation succeeds.
+            // Failed deletion then belongs to the bounded persistent queue.
             profile.remove().map_err(|_| OwnerError::Unavailable)?;
+            self.profile.take();
         }
         Ok(())
     }

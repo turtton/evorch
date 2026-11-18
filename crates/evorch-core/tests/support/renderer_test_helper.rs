@@ -16,7 +16,9 @@ use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::time::Duration;
 
-struct Blank;
+struct Blank {
+    shutdown_gate: Option<std::path::PathBuf>,
+}
 
 impl Backend for Blank {
     fn open_artifact(
@@ -54,7 +56,14 @@ impl Backend for Blank {
         Ok(Notices::default())
     }
     fn close_tab(&self, _: TabId) {}
-    fn shutdown(&self) {}
+    fn shutdown(&self) {
+        if let Some(path) = &self.shutdown_gate {
+            use std::io::{Read, Write};
+            let mut gate = UnixStream::connect(path).unwrap();
+            gate.write_all(b"R").unwrap();
+            gate.read_exact(&mut [0]).unwrap();
+        }
+    }
 }
 
 fn adopt(fd: impl AsFd) -> std::io::Result<UnixStream> {
@@ -69,6 +78,14 @@ fn fixture_root() -> std::path::PathBuf {
         .expect("cache directory");
     std::path::PathBuf::from(&args[index + 1])
 }
+fn assert_not_subreaper() {
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        rustix::process::child_subreaper().unwrap(),
+        None,
+        "core must not become a subreaper"
+    );
+}
 fn owner_core() -> ExitCode {
     use std::io::Write;
     use workbench_host::areas::{
@@ -78,11 +95,7 @@ fn owner_core() -> ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
     let executable = std::path::PathBuf::from(&args[2]);
     let profiles = std::path::PathBuf::from(&args[3]);
-    assert_eq!(
-        rustix::process::child_subreaper().unwrap(),
-        None,
-        "core must not become a subreaper"
-    );
+    assert_not_subreaper();
     // Intentionally inheritable sentinel: apply_launch_policy must close it.
     let sentinel = std::fs::File::open("/dev/null").unwrap();
     rustix::io::fcntl_setfd(&sentinel, rustix::io::FdFlags::empty()).unwrap();
@@ -115,6 +128,7 @@ fn owner_core() -> ExitCode {
                 )],
             );
             owner.open(open, body).await.unwrap();
+            assert_not_subreaper();
             println!("{}", ledger.children()[0].leader.unwrap());
             std::io::stdout().flush().unwrap();
             std::future::pending::<()>().await;
@@ -137,6 +151,7 @@ fn main() -> ExitCode {
         std::env::var_os("EVORCH_RENDERER_TEST_SECRET").is_none(),
         "credential environment inherited"
     );
+    #[cfg(target_os = "linux")]
     for entry in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
         let fd: i32 = entry.file_name().to_string_lossy().parse().unwrap();
         if fd <= 2 {
@@ -189,11 +204,12 @@ fn main() -> ExitCode {
         descendant.wait().unwrap();
         return ExitCode::from(2);
     };
+    let shutdown_gate = (mode == "gate-shutdown").then(|| root.join("gate.sock"));
     let reason = serve(
         control,
         frames,
         ServeConfig::default(),
-        |_: BackendContext| Ok(Blank),
+        move |_: BackendContext| Ok(Blank { shutdown_gate }),
     );
     drop(descendant.stdin.take());
     descendant.wait().unwrap();
