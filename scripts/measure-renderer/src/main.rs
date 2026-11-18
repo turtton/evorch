@@ -346,7 +346,9 @@ fn stream(config: &Config, args: &Args, proxy: bool) {
             .arrival_ms
             .push(arrived.duration_since(last_arrival).as_secs_f64() * 1000.0);
         last_arrival = arrived;
-        if let Some(first) = first_seen {
+        // The same rule as the proxy's samples: a transfer that began before the
+        // window is a partial observation and is not a sample.
+        if let Some(first) = first_seen.filter(|first| span.contains(*first)) {
             delivery
                 .first_byte_to_client_ms
                 .push(arrived.duration_since(first).as_secs_f64() * 1000.0);

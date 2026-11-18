@@ -35,21 +35,21 @@ pub struct Sample {
     pub wire_ms: f64,
     /// Writing the message to the client.
     pub forward_ms: f64,
+    /// When the write to the client returned, read right after it. The window is
+    /// judged on this instant, not on `first` plus the two intervals: the work
+    /// between the read and the write (decoding the meta, the stamp, the lock) is
+    /// part of the transfer and is in neither interval.
+    pub finished: Instant,
     /// Page time stamp to first byte, `None` when the stamp is unreadable.
     pub page_to_first_byte_ms: Option<f64>,
 }
 
 impl Sample {
-    /// When the proxy had finished writing the frame to the client.
-    pub fn finished(&self) -> Instant {
-        self.first + std::time::Duration::from_secs_f64((self.wire_ms + self.forward_ms) / 1000.0)
-    }
-
     /// Whether the whole transfer, from the first byte to the last byte written,
     /// lies inside the window. A transfer that began before the window or ended
     /// after it is a partial observation and is not counted.
     pub fn within(&self, span: &crate::stats::Span) -> bool {
-        span.contains(self.first) && self.finished() <= span.end
+        span.contains(self.first) && self.finished <= span.end
     }
 }
 
@@ -116,10 +116,14 @@ pub fn start(helper_side: UnixStream, client_side: UnixStream) -> Arc<Shared> {
                 {
                     break;
                 }
+                // One reading serves both: the end of the write is the end of the
+                // transfer.
+                let finished = Instant::now();
                 shared.samples.lock().unwrap().push(Sample {
                     first,
                     wire_ms,
-                    forward_ms: forward_started.elapsed().as_secs_f64() * 1000.0,
+                    forward_ms: finished.duration_since(forward_started).as_secs_f64() * 1000.0,
+                    finished,
                     page_to_first_byte_ms,
                 });
                 spare = message.body;
@@ -186,11 +190,20 @@ mod tests {
         assert!(shared.first_seen.lock().unwrap().contains_key(&7));
     }
 
+    /// A sample with no work between the read and the write: it finishes at
+    /// `first` plus the two intervals.
     fn sample(first: Instant, wire_ms: f64, forward_ms: f64) -> Sample {
+        with_gap(first, wire_ms, 0.0, forward_ms)
+    }
+
+    /// A sample with `gap_ms` of work between the end of the read and the start
+    /// of the write, which is in neither interval but is part of the transfer.
+    fn with_gap(first: Instant, wire_ms: f64, gap_ms: f64, forward_ms: f64) -> Sample {
         Sample {
             first,
             wire_ms,
             forward_ms,
+            finished: first + Duration::from_secs_f64((wire_ms + gap_ms + forward_ms) / 1000.0),
             page_to_first_byte_ms: None,
         }
     }
@@ -212,5 +225,22 @@ mod tests {
         assert!(!sample(span.end - Duration::from_millis(1), 1.0, 1.0).within(&span));
         // Starts after the window: excluded.
         assert!(!sample(span.end + ns, 0.0, 0.0).within(&span));
+    }
+
+    #[test]
+    fn work_between_the_read_and_the_write_counts_toward_the_end() {
+        let t0 = Instant::now();
+        let span = crate::stats::Span::new(t0, Duration::from_millis(25));
+        // 10 ms read + 10 ms write is 20 ms by the two intervals, but with 10 ms
+        // of work in between the write ends at 30 ms, after the 25 ms deadline.
+        assert!(!with_gap(t0, 10.0, 10.0, 10.0).within(&span));
+        // The same intervals with no work in between end at 20 ms: inside.
+        assert!(with_gap(t0, 10.0, 0.0, 10.0).within(&span));
+        // A 5 ms gap ends exactly at the deadline: inside, as for an arrival.
+        assert!(with_gap(t0, 10.0, 5.0, 10.0).within(&span));
+        // One tick later is outside.
+        let mut over = with_gap(t0, 10.0, 5.0, 10.0);
+        over.finished += Duration::from_nanos(1);
+        assert!(!over.within(&span));
     }
 }
