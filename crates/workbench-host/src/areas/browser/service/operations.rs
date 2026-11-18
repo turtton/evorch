@@ -258,6 +258,7 @@ impl RendererService {
                 state.subscriptions.remove(subscription.as_str());
                 (None, Some(tab), Some(RendererOutput::Done), None)
             }
+            BrowserCommand::BindRendererData { .. } => return Err(denied()),
             _ => {
                 let reference = match &command {
                     BrowserCommand::ResizeRendererTab { tab, .. }

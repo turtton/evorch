@@ -11,6 +11,8 @@ use serde_json::Value;
 
 use super::artifacts::ArtifactRef;
 
+pub mod data;
+
 pub const COMMAND_OPERATIONS: &[&str] = &[
     "create_renderer_session",
     "resume_renderer_session",
@@ -26,6 +28,7 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "grant_renderer_observer",
     "subscribe_renderer_frames",
     "unsubscribe_renderer_frames",
+    "bind_renderer_data",
 ];
 pub const QUERY_OPERATIONS: &[&str] = &[
     "get_renderer_status",
@@ -158,6 +161,35 @@ pub enum BrowserCommand {
     },
     UnsubscribeRendererFrames {
         subscription: RendererId,
+    },
+    /// Binds a data connection (opened with a data hello) to a frame
+    /// subscription or a Capture result. Only this control connection can
+    /// grant the binding: it is where the caller's provenance is known.
+    BindRendererData {
+        channel_id: RendererId,
+        source: RendererDataSource,
+    },
+}
+
+/// What a bound data connection receives. The ids are the ones a caller got
+/// from `Subscription` and `Capture` outputs on its own control connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum RendererDataSource {
+    /// Raw frames of the subscribed tab. The token is consumed once.
+    Frames {
+        subscription: RendererId,
+        token: RendererId,
+    },
+    /// The PNG of one Capture operation of this caller.
+    Capture {
+        operation_id: RendererId,
+        capture_id: RendererId,
     },
 }
 impl BrowserCommand {

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::browser::{RendererId, RendererSessionRef, RendererViewport};
 
-pub const COMMAND_OPERATIONS: &[&str] = &["open_preview"];
+pub const COMMAND_OPERATIONS: &[&str] = &["open_preview", "bind_artifact_content"];
 pub const QUERY_OPERATIONS: &[&str] = &["list", "get", "read_content"];
 pub const EVENT_TYPES: &[&str] = &[];
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
@@ -68,6 +68,13 @@ pub enum ArtifactsCommand {
         session: RendererSessionRef,
         viewport: RendererViewport,
     },
+    /// Binds a data connection (opened with a data hello) to the original
+    /// bytes of an image artifact. Verified like `ReadContent`, but the bytes
+    /// travel as binary records, and only for a caller allowed to read content.
+    BindArtifactContent {
+        channel_id: RendererId,
+        artifact: ArtifactRef,
+    },
 }
 impl ArtifactsCommand {
     pub fn required_capability(&self) -> Capability {
@@ -81,6 +88,7 @@ impl ArtifactsCommand {
                 artifact.validate()?;
                 viewport.validate()
             }
+            Self::BindArtifactContent { artifact, .. } => artifact.validate(),
         }
     }
 }

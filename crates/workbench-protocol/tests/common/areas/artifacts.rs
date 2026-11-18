@@ -38,11 +38,17 @@ pub fn metadata() -> ArtifactMetadata {
 }
 pub fn samples() -> AreaSamples {
     let mut out = AreaSamples::none("artifacts");
-    out.commands = vec![Command::Artifacts(ArtifactsCommand::OpenPreview {
-        artifact: reference(),
-        session: session(),
-        viewport: viewport(),
-    })];
+    out.commands = vec![
+        Command::Artifacts(ArtifactsCommand::OpenPreview {
+            artifact: reference(),
+            session: session(),
+            viewport: viewport(),
+        }),
+        Command::Artifacts(ArtifactsCommand::BindArtifactContent {
+            channel_id: id(),
+            artifact: reference(),
+        }),
+    ];
     out.queries = vec![
         ArtifactsQuery::List {
             project: reference().project,

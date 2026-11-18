@@ -57,7 +57,10 @@ impl CommandHost {
             artifact,
             session,
             viewport,
-        } = command;
+        } = command
+        else {
+            return Err(surface_denied());
+        };
         let record = self.renderer_artifact_record(&artifact)?;
         let operation_id = self
             .areas
