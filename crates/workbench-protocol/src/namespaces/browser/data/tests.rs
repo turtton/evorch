@@ -321,6 +321,7 @@ fn sequences_only_move_forward() {
 #[test]
 fn limits_match_the_plan() {
     assert_eq!(MAX_FRAME_SUBSCRIPTIONS, 8);
+    assert_eq!(MAX_FOUR_K_FRAME_SUBSCRIPTIONS, 4);
     assert_eq!(MAX_FRAME_TABS, 4);
     assert_eq!(MAX_BLOB_TRANSFERS, 4);
     assert_eq!(BIND_WINDOW_MS, 30_000);

@@ -327,6 +327,21 @@ impl RendererService {
                         if state.subscriptions.len() >= data::MAX_FRAME_SUBSCRIPTIONS {
                             return Err(busy());
                         }
+                        // A 4K stream at 30fps or more is bounded tighter: eight
+                        // readers of it do not hold the latency bound (docs/renderer-measurement.md §9).
+                        // Only a new subscription is refused; the ones that exist
+                        // when a tab grows to 4K keep their stream.
+                        let physical = tab.physical;
+                        if is_four_k_stream(tab.public.viewport, tab.public.fps)
+                            && state
+                                .subscriptions
+                                .values()
+                                .filter(|lease| lease.tab == physical)
+                                .count()
+                                >= data::MAX_FOUR_K_FRAME_SUBSCRIPTIONS
+                        {
+                            return Err(four_k_busy());
+                        }
                         let subscription = id();
                         let token = id();
                         state.subscriptions.insert(

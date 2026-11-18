@@ -84,6 +84,24 @@ fn frames_captures_and_images_travel_on_data_connections_that_only_their_owner_c
         .block_on(run(dir, root));
 }
 
+async fn resize(a: &mut Peer, tab: &RendererTab, width: u32, height: u32) {
+    let op = a
+        .browser(BrowserCommand::ResizeRendererTab {
+            tab: tab.reference.clone(),
+            viewport: RendererViewport { width, height },
+        })
+        .await
+        .unwrap();
+    a.output(&op).await;
+}
+
+async fn subscribe_to(a: &Peer, tab: &RendererTab) -> Result<RendererId, ErrorCode> {
+    a.browser(BrowserCommand::SubscribeRendererFrames {
+        tab: tab.reference.clone(),
+    })
+    .await
+}
+
 async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     let project_root = root.join("one");
     let other_root = root.join("two");
@@ -363,6 +381,53 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
             Err(other) => panic!("unexpected end of the frames: {other:?}"),
         }
     }
+
+    // A 4K stream at 30fps has at most four subscriptions of its own; any
+    // other size keeps the general limit of eight.
+    let tab4k = a.open(&page, &session_a).await;
+    resize(&mut a, &tab4k, 3840, 2160).await;
+    let mut held = Vec::new();
+    for _ in 0..data::MAX_FOUR_K_FRAME_SUBSCRIPTIONS {
+        let op = subscribe_to(&a, &tab4k).await.unwrap();
+        held.push(a.output(&op).await);
+    }
+    assert_eq!(subscribe_to(&a, &tab4k).await.unwrap_err(), ErrorCode::Busy);
+    // The refusal leaves the four as they were: the first still binds.
+    let RendererOutput::Subscription {
+        subscription,
+        token,
+        ..
+    } = held[0].clone()
+    else {
+        panic!("not a subscription")
+    };
+    a.channel()
+        .await
+        .bind_frames(&a.client, subscription, token)
+        .await
+        .unwrap();
+    // Below 4K the same tab takes eight, and the ninth meets the general limit.
+    resize(&mut a, &tab4k, 1920, 1080).await;
+    for _ in data::MAX_FOUR_K_FRAME_SUBSCRIPTIONS..data::MAX_FRAME_SUBSCRIPTIONS {
+        subscribe_to(&a, &tab4k).await.unwrap();
+    }
+    assert_eq!(subscribe_to(&a, &tab4k).await.unwrap_err(), ErrorCode::Busy);
+    // Growing to 4K keeps all eight; only a new one is refused.
+    resize(&mut a, &tab4k, 3840, 2160).await;
+    assert_eq!(subscribe_to(&a, &tab4k).await.unwrap_err(), ErrorCode::Busy);
+    let RendererOutput::Subscription {
+        subscription,
+        token,
+        ..
+    } = held[1].clone()
+    else {
+        panic!("not a subscription")
+    };
+    a.channel()
+        .await
+        .bind_frames(&a.client, subscription, token)
+        .await
+        .unwrap();
 
     let close = a
         .browser(BrowserCommand::CloseRendererSession { session: session_a })

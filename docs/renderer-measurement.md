@@ -562,8 +562,8 @@ client が全 byte を持つまで」になる。
   CPU、共有 workstation。実行中の loadavg は 1 分値で 7〜10。他の作業が常時動いている）。
   client は core と同じ process にいるので、CPU と RSS は core と全 client の合計。
 - 製品の上限が先に効く構成がある。subscription は **core 全体で 8**、tab は 4、4K は 30fps 以上
-  では 1 つの stream だけ（`budget.rs`）。よって §8 の「4 tab × 8 subscriber」は製品では作れず、
-  720p は 4 tab × 2、1080p は 4 tab × 2、4K は 1 tab × 8 が最大。4K の複数 tab は
+  では 1 つの stream だけ（`budget.rs`）で、その subscription は 4 まで。よって §8 の「4 tab × 8 subscriber」は製品では作れず、
+  720p は 4 tab × 2、1080p は 4 tab × 2、4K は 1 tab × 4 が最大（下記の制限）。4K の複数 tab は
   `Busy` で拒否される（これは設計どおり。F3 の前から同じ）。
 
 **製品実装（chunk を共有 frame から vectored write、client は body を `Vec` へ直接 read）**
@@ -578,32 +578,52 @@ client が全 byte を持つまで」になる。
 | 3840×2160 | 1 × 1 | 30.00 | 11.72 | 13.84 | 14.94 | 16.5 | 13.84 | 0.36 | 149 |
 | | 1 × 4 | 30.00 | 15.46 | 18.53 | 19.44 | 20.3 | 18.56 | 1.88 | 244 |
 | | 1 × 4（+停止 1） | 29.99 | 15.23 | 17.22 | 18.42 | 20.3 | 17.33 | 1.78 | 275 |
-| | 1 × 8 | 29.99 | 28.78 | **30.72** | 31.54 | 32.3 | 30.82 | 7.81 | 370 |
 
 1 回ずつの測定で誤差は載せていない。停止 reader は latency の判定から外してあり、4K の 4 reader
 で停止 1 つを足しても通常 reader は劣化しない（p95 18.5 → 17.2ms。差は誤差内）。全 reader が
 全 frame を受け、配送 fps は要求の 30.0 と同じ（欠落は 1 reader あたり 0.1 frame 未満）。
 
-**4K × 8 reader は余裕がない**。上の表の 30.72ms は 1 回目で、同じ構成の繰り返しは次のように動く。
+**4K × 8 reader は基準を安定して満たさず、製品で 4 に制限した**。8 reader の 4K（1 tab）を
+繰り返し測ると、次のようになった（`renderer_data_plane_measure` の旧 scenario
+`k4_1tab_8reader`。制限の後は作れないので scenario からは外した）。
 
 | 実装 | p95 ms（実行順） |
 |---|---|
 | 変更前（chunk ごとに `Vec` へ copy して write、client は一度 `body` に読んでから copy） | 34.65（最悪 reader 35.20） |
 | 現在（vectored write、client の直接 read） | 30.18、31.21、30.72、80.72、61.20、36.83、85.04、32.40、31.02、39.43、98.65、32.29 |
 
-12 回のうち 33ms 以下は 7 回（30.2〜32.4）で、残りの 5 回（36.8〜98.7）は他の作業が動いて
-いる間の外れ値。同じ負荷（loadavg 約 8）でも外れる回と通る回があり、原因は切り分けられて
-いない。4K × 8 は 8 × 33MB × 30 = 約 8GB/s を UDS で送る（kernel の copy が送受で 2 回）ので、
-この workstation では CPU とメモリ帯域の上限に近く、**この構成は plan の基準（p95 ≤ 33ms）を
-安定して満たしたとは言えない**。1〜4 reader（p95 13.8〜18.5ms）と、720p・1080p のすべての構成は
-基準に対して大きな余裕がある。閾値は緩めていない。
+12 回のうち 33ms 以下は 6 回（30.2〜32.4）で、残りの 6 回（36.8〜98.7）は外れ値（他の
+作業が動いている間に起きたと見ているが、確かめていない）。同じ負荷（loadavg 約 8）でも
+外れる回と通る回があった。4K × 8 は 8 × 33MB × 30 = 約 8GB/s を UDS で送る（kernel の copy が
+送受で 2 回）ので、この workstation では CPU とメモリ帯域の上限に近い。**基準（p95 ≤ 33ms）を
+安定して満たしたとは言えない**ので、閾値は緩めず、構成を制限した（親の承認済みの判断）。
+
+- **制限**: 1 tab の frame が 4K（`3840×2160`）かつ 30fps 以上のとき、その tab の frame
+  subscription は **4**（`MAX_FOUR_K_FRAME_SUBSCRIPTIONS`）。一般の上限（core 全体で 8）は
+  変えない。4K・30fps 以上は budget でも 1 つの stream しか持てない（排他）ので、実際の
+  使い方（4K を 8 つの表示先が同時に見る）は想定外としてよい。
+- **5 つ目の拒否**: `Busy`、`RetryAdvice::AfterResync`（subscription が 1 つ終われば空くので、
+  状態を読み直して決め直せる）。拒否は既存の subscription、data 接続、stream に触れない。
+- **途中で 4K になる場合**: 新しく追加する subscription だけを拒否し、すでにあるもの
+  （最大 8）は保つ（切らない）。試験（`renderer_data_plane_uds`）で固定した: 4K で 4 つまで
+  受け付け 5 つ目は `Busy`、1080p に下げると同じ tab が 8 つまで受け付け 9 つ目は一般の上限で
+  `Busy`、その 8 つを保ったまま 4K に戻すと新規は `Busy`・既存の binding は有効。
+- **その残りの p95**: 4 を超えた subscription が残った 4K の tab の p95 は、この制限では
+  保証しない。8 reader の測定（上の表）が当てはまり、基準を外れうる（33ms 超が 12 回中
+  6 回）。この状態は、既存の subscription を保つ方針の帰結で、tab を 4K へ resize した
+  利用者が、すでに 5 つ以上の表示先を持っているときに限る。subscription の終了で
+  4 以下に戻れば、次の表の値に戻る。
+- **4K × 4 reader の p95**: 同じ構成を 12 回（各 8 秒、loadavg 5.5〜9.7）測って
+  p95 は 18.8〜25.7ms（中央 19.9ms、1 回だけ 25.7、他は 21.5 以下）、p50 は 15.5〜19.3ms、
+  最悪 reader の p95 は 19.1〜26.1ms、CPU は 1.85〜2.38 core。12 回すべて 33ms 以下。
+  最初の 1 回（上の表）は 18.5ms。
 
 比較した変更（plan §5「不合格時は chunk、vectored write、再利用、単一購読経路を比較する」）:
 
 - **vectored write と client の直接 read（採用）**: header と共有 frame の slice を 1 回の
   `write_vectored` で送り、chunk ごとの `Vec` の確保と copy をなくした。client は body を
   `read_buf` で呼び出し側の `Vec` に直接読み、`resize` の zero 埋めと中間 buffer からの copy を
-  なくした。4K × 8 の p95 は 34.65 → 30.2〜32.4ms（quiet な回）。
+  なくした。4K × 8 の p95 は 34.65 → 30.2〜32.4ms（quiet な回。外れ値は残った）。
 - **送信側の `SO_SNDBUF` を 4MiB にする（不採用）**: 5 回とも p95 33.0〜44.1ms で CPU は 7.8 → 11.2
   core に増え、悪化した。戻した。
 - **chunk の大きさ**: §8 の prototype で 1 write・64KiB・1MiB の差が誤差内だったので、
@@ -614,7 +634,7 @@ client が全 byte を持つまで」になる。
 **ベースラインとの比較**（§5.5）。720p×30fps の 1 tab は、直結の配送 30.0fps に対し proxy の
 「最初の byte → client」p95 が 1.35ms、製品は 2.24ms（helper の stamp から。上の区間の違いを
 含む）。4K×30fps の 1 tab は、同 8.78ms に対し 13.84ms。どちらも基準の 33ms の半分以下で、
-frame は欠落していない。4 tab は 720p で配送 119.9fps（4 tab 合計。同 119.95）に相当する
+frame は欠落していない。4 tab（720p）は、baseline の 4 tab 合計 119.95fps に当たる
 29.99fps / tab を保った。
 
 **測れていないもの**
@@ -623,6 +643,6 @@ frame は欠落していない。4 tab は 720p で配送 119.9fps（4 tab 合�
   helper → core の区間は §5.5 の実測（4K×1 tab で 2 hop 区間 p95 8.78ms）が最新。
 - PSS、retained bytes、allocation 回数。RSS peak は上の表のとおり core と全 client の合計。frame の
   生存 memory は §8（`Arc` 共有で 4K×1 tab 63MiB、停止 reader 4 つで +127MiB）。
-- 専用機での測定。共有 workstation のため、4K × 8 reader のばらつきが load によるものか実装に
-  よるものかは切り分けられていない。
+- 専用機での測定。共有 workstation のため、4K × 8 reader のばらつき（制限の理由）が load による
+  ものか実装によるものかは切り分けられていない。
 - macOS / Windows。この data plane は Linux の UDS だけ（既存の方針）。

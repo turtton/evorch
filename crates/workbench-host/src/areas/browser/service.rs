@@ -50,6 +50,25 @@ fn denied() -> WorkbenchError {
 fn busy() -> WorkbenchError {
     error(ErrorCode::Busy, "renderer private resource budget is full")
 }
+/// The tab's 4K stream has all the subscriptions it may have. A subscription
+/// ending frees a place, so deciding again after a fresh read is right.
+fn four_k_busy() -> WorkbenchError {
+    WorkbenchError::new(
+        ErrorCode::Busy,
+        "a 4K frame stream has reached its subscription limit",
+        RetryAdvice::AfterResync,
+    )
+}
+/// Whether the tab's frames are a 4K stream at 30fps or more, as the budget counts it.
+fn is_four_k_stream(viewport: RendererViewport, fps: u8) -> bool {
+    fps >= 30
+        && renderer_ipc::Viewport {
+            width: viewport.width,
+            height: viewport.height,
+        }
+        .frame_bytes()
+            == renderer_ipc::MAX_FRAME_BYTES
+}
 fn local(p: &Provenance) -> Result<&ClientId, WorkbenchError> {
     p.validate().map_err(|_| denied())?;
     if p.actor != Actor::Human || !matches!(p.surface, Surface::Desktop | Surface::Cli) {

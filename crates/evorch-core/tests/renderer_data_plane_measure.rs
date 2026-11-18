@@ -393,4 +393,3 @@ scenario!(p1080_4tab_2reader, 1920, 1080, 4, 2, 0);
 scenario!(k4_1tab_1reader, 3840, 2160, 1, 1, 0);
 scenario!(k4_1tab_4reader, 3840, 2160, 1, 4, 0);
 scenario!(k4_1tab_4reader_1stalled, 3840, 2160, 1, 4, 1);
-scenario!(k4_1tab_8reader, 3840, 2160, 1, 8, 0);

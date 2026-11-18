@@ -45,6 +45,10 @@ pub const MAX_IMAGE_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_CAPTURE_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 /// Frame subscriptions held at once (pending, active and closing).
 pub const MAX_FRAME_SUBSCRIPTIONS: usize = 8;
+/// Subscriptions of one tab whose frames are 4K at 30fps or more. The product
+/// path with eight readers of a 4K stream missed the 33ms p95 bound on the
+/// measurement machine; four holds it (docs/renderer-measurement.md §9).
+pub const MAX_FOUR_K_FRAME_SUBSCRIPTIONS: usize = 4;
 /// Frame transfers one tab's data may be fanned out to is bounded by the
 /// subscription limit; the tab limit is the browser namespace's.
 pub const MAX_FRAME_TABS: usize = MAX_RENDERER_TABS;
