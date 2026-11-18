@@ -8,7 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 use workbench_host::bootstrap::{BootstrapError, BootstrapOptions, BootstrappedHost};
 use workbench_web::{WebServer, WebServerConfig};
 
-const USAGE: &str = "usage: evorch-core [--config-dir <dir>] [--web] [--foreground]";
+mod args;
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -34,28 +34,20 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<(), BootstrapError> {
     #[cfg(target_os = "linux")]
     let mask = core_instance::handoff::BlockedShutdownSignals::at_entry()?;
-    let mut config_dir = config::user_config_dir();
-    let mut web = false;
-    let mut launch_fd = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--config-dir" => config_dir = Some(PathBuf::from(args.next().ok_or(USAGE)?)),
-            "--web" => web = true,
-            "--launch-fd" if launch_fd.is_none() => {
-                launch_fd = Some(args.next().ok_or(USAGE)?.parse::<i32>()?)
-            }
-            "--foreground" => (), // P7a always foreground; no daemonisation or GUI autostart.
-            "--help" | "-h" => {
-                println!("{USAGE}");
-                return Ok(());
-            }
-            _ => return Err(USAGE.into()),
-        }
+    let args = args::parse(std::env::args().skip(1))?;
+    if args::write_read_only(
+        &args.mode,
+        &mut std::io::stdout(),
+        workbench_host::areas::browser::renderer::OwnerConfig::installed_executable,
+    )? {
+        return Ok(());
     }
-    let config_dir = config_dir.ok_or("cannot resolve config directory; pass --config-dir")?;
+    let config_dir = args
+        .config_dir
+        .or_else(config::user_config_dir)
+        .ok_or("cannot resolve config directory; pass --config-dir")?;
     let identity = ConfigIdentity::new(&config_dir)?;
-    let launch = match launch_fd {
+    let launch = match args.launch_fd {
         // SAFETY: parsed once at entry, before the Tokio runtime/other threads;
         // inherited descriptor ownership is transferred and validated by adopt.
         Some(fd) => unsafe { LaunchGuard::adopt(&identity, fd)? },
@@ -66,7 +58,7 @@ fn run() -> Result<(), BootstrapError> {
         .build()?
         .block_on(serve(
             identity.config_dir().to_path_buf(),
-            web,
+            args.web,
             launch,
             #[cfg(target_os = "linux")]
             mask,

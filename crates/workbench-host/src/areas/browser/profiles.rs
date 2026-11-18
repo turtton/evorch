@@ -17,9 +17,10 @@ pub struct Profile {
 }
 const MARKER: &str = "evorch-renderer-profile-v1";
 const RECLAIM: &str = ".reclaim-";
-// Allow transient cleanup failures without disabling rendering, but retain at
-// most eight failed generations per single-core profile root. At capacity,
-// retry cleanup before allocating anything and fail closed if still full.
+// Allow transient cleanup failures without disabling rendering. Eight queued
+// generations is the threshold that stops NEW allocations, not an absolute
+// queue bound: startup collection of preexisting profiles may exceed it.
+// Retry cleanup before allocating anything and fail closed while still full.
 const MAX_RECLAIMS: usize = 8;
 fn remove_tree(path: &Path) -> io::Result<()> {
     fs::remove_dir_all(path)
@@ -251,6 +252,37 @@ mod tests {
         assert!(!path.exists());
     }
 
+    #[test]
+    fn startup_migration_can_exceed_the_new_allocation_threshold() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("profiles");
+        private_dir(&root).unwrap();
+        for _ in 0..(MAX_RECLAIMS + 1) {
+            let path = root.join(uuid::Uuid::new_v4().to_string());
+            private_dir(&path).unwrap();
+            fs::write(path.join("marker"), MARKER).unwrap();
+            fs::write(path.join("confirmed"), MARKER).unwrap();
+            fs::write(path.join("owner.lock"), "").unwrap();
+            fs::write(path.join("retained-data"), "retry").unwrap();
+        }
+        assert_eq!(
+            Profile::create_with(&root, fail_partial)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let entries: Vec<_> = fs::read_dir(&root).unwrap().map(Result::unwrap).collect();
+        assert_eq!(entries.len(), MAX_RECLAIMS + 1);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.file_name().to_string_lossy().starts_with(RECLAIM))
+        );
+        // Repairing deletion drains all preexisting debt before a new allocation.
+        drop(Profile::create(&root).unwrap());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
     fn fail_partial(path: &Path) -> io::Result<()> {
         for name in ["marker", "confirmed", "owner.lock"] {
             match fs::remove_file(path.join(name)) {
@@ -265,7 +297,7 @@ mod tests {
         ))
     }
     #[test]
-    fn partial_deletion_allows_next_generations_but_bounds_persistent_recovery_queue() {
+    fn partial_deletion_allows_next_generations_until_the_allocation_threshold() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("profiles");
         for count in 1..=MAX_RECLAIMS {

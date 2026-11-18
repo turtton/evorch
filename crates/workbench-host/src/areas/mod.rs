@@ -140,7 +140,7 @@ impl Areas {
     /// # Errors
     /// The first area that cannot be constructed; the bootstrap then fails.
     pub fn new(handles: &AreaHandles) -> Result<Self, BootstrapError> {
-        Ok(Self {
+        let mut areas = Self {
             connections: handles.connections.clone(),
             workspace: workspace::WorkspaceArea::new(handles)?,
             mcp: mcp::McpArea::new(handles)?,
@@ -155,9 +155,15 @@ impl Areas {
             evaluation: evaluation::EvaluationArea::new(handles)?,
             pull_requests: pull_requests::PullRequestsArea::new(handles)?,
             maintenance: maintenance::MaintenanceArea::new(handles)?,
-            artifacts: artifacts::ArtifactsArea::new(handles)?,
+            artifacts: artifacts::ArtifactsArea::default(),
             browser: browser::BrowserArea::new(handles)?,
-        })
+        };
+        // Capture the same store/owner now; F2 changes only the leaf provider.
+        areas.bind_artifacts(handles.artifacts.clone());
+        Ok(areas)
+    }
+    fn bind_artifacts(&mut self, store: Arc<runtime::artifacts::ArtifactStore>) {
+        self.artifacts = artifacts::ArtifactsArea::new(store, self.browser.renderer.clone());
     }
 
     /// The page provider the runtime offers `inspect_artifact` on, or `None`.

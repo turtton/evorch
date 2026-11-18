@@ -340,6 +340,7 @@
             # The Evaluator starts `evorch eval run`, which this build leaves out.
             makeWrapper $app/evorch-gui $out/bin/evorch-gui-cef \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}" \
+              --set-default EVORCH_RENDERER_EXEC "$app/evorch-renderer" \
               --suffix PATH : "${evorch}/bin"
           '';
           doInstallCheck = true;
@@ -375,15 +376,34 @@
         # with `evorch-gui` launching the CEF build so presented HTML opens in
         # the app (ADR 0034 B). Other systems fall back to `evorch`.
         evorch-with-cef = pkgs.runCommand "evorch-with-cef-${commonArgs.version}" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
           meta.mainProgram = "evorch-gui";
           meta.platforms = [ "x86_64-linux" ];
         } ''
           test -x ${evorch-gui-cef}/libexec/evorch-gui-cef/evorch-renderer
           mkdir -p $out/bin
-          ln -s ${evorch}/bin/evorch $out/bin/evorch
-          ln -s ${evorch}/bin/evorch-core $out/bin/evorch-core
+          # current_exe resolves symlinks to the CLI/core-only derivation.
+          # Pass the separate helper as startup configuration, not PATH lookup.
+          renderer=${evorch-gui-cef}/libexec/evorch-gui-cef/evorch-renderer
+          makeWrapper ${evorch}/bin/evorch $out/bin/evorch \
+            --set-default EVORCH_RENDERER_EXEC "$renderer"
+          makeWrapper ${evorch}/bin/evorch-core $out/bin/evorch-core \
+            --set-default EVORCH_RENDERER_EXEC "$renderer"
           ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui
           ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui-cef
+          # Exercise the installed core's SAME default resolver through its
+          # real wrapper, without bootstrap, a helper process or ambient CEF.
+          resolved="$(env -u EVORCH_RENDERER_EXEC -u LD_LIBRARY_PATH \
+            "$out/bin/evorch-core" --print-renderer-helper)"
+          test "$resolved" = "$renderer"
+          test -f "$resolved"
+          test -x "$resolved"
+          env -u LD_LIBRARY_PATH ${pkgs.stdenv.cc.bintools.dynamicLinker} --list \
+            "$resolved" > /dev/null
+          # Explicit user settings must survive all wrapper defaults.
+          override="$(EVORCH_RENDERER_EXEC=/explicit/user/renderer \
+            "$out/bin/evorch-core" --print-renderer-helper)"
+          test "$override" = /explicit/user/renderer
         '';
         defaultPackage = if isCefSystem then evorch-with-cef else evorch;
         # The client CI pushes to attic with. attic builds its HTTP client with
