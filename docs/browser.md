@@ -288,6 +288,21 @@ writes a verbose CEF log.
 
 ### Building
 
+- The core resolves its offline renderer from `EVORCH_RENDERER_EXEC` (a
+  nonempty absolute path), or from `evorch-renderer` beside its executable when
+  unset. Nix CEF wrappers supply the libexec path as a default and preserve an
+  explicit user setting. CLI/core-only packages do not install CEF.
+- `evorch-core --print-renderer-helper` is a **read-only diagnostic** using the
+  same resolver as the owner. It prints the configured path without starting
+  the core/helper, creating files/sockets, taking ownership locks or opening a
+  database. Invalid overrides/resolution failures exit nonzero with a reason on
+  stderr. Printing a candidate does not check its existence; Nix's package
+  check additionally verifies that the default exists, is executable and loads
+  without an ambient `LD_LIBRARY_PATH`. This does not enable the F2 provider.
+- Renderer profile reclamation retries at startup and after a generation is
+  reclaimed. Eight queued generations is the threshold that stops **new
+  allocations**, not a maximum queue length: startup migration of preexisting
+  profiles can exceed eight. Cleanup is retried before allocation resumes.
 - Nix: on x86_64-linux, `nix build` (`packages.default`, also `.#evorch-gui`)
   is the CLI and tools from `.#evorch` with `bin/evorch-gui` starting
   `evorch-gui-cef`. `.#evorch` holds the CLI and `evorch-core` only, on every

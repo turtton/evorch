@@ -71,15 +71,19 @@ pub struct OwnerConfig {
     pub spawned: Option<blocking::Sender<i32>>,
 }
 impl OwnerConfig {
-    /// Assumes a colocated installation: `evorch-renderer` is next to the core.
-    /// Nix currently installs it in a separate derivation/libexec directory;
-    /// distribution-aware resolution is a separate integration BEFORE F2 enables
-    /// this owner. Tests with explicit executables do not validate that layout.
+    /// Configures the installed helper without starting or probing it. Missing
+    /// helpers remain an execution-time error, never a tool-catalog condition.
     pub fn installed(profiles: PathBuf) -> std::io::Result<Self> {
-        Ok(Self::new(
-            std::env::current_exe()?.with_file_name("evorch-renderer"),
-            profiles,
-        ))
+        Ok(Self::new(Self::installed_executable()?, profiles))
+    }
+    /// Resolve a trusted startup override, otherwise the colocated executable.
+    /// Nix wrappers supply the absolute libexec path as a default, preserving an
+    /// explicit user override. This performs no filesystem writes or bootstrap.
+    pub fn installed_executable() -> std::io::Result<PathBuf> {
+        resolve_installed_executable(
+            std::env::var_os("EVORCH_RENDERER_EXEC"),
+            std::env::current_exe,
+        )
     }
     pub fn new(executable: PathBuf, profiles: PathBuf) -> Self {
         Self {
@@ -95,6 +99,22 @@ impl OwnerConfig {
             spawned: None,
         }
     }
+}
+fn resolve_installed_executable(
+    configured: Option<std::ffi::OsString>,
+    current_exe: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> std::io::Result<PathBuf> {
+    if let Some(configured) = configured {
+        let path = PathBuf::from(configured);
+        if !path.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "EVORCH_RENDERER_EXEC must be a nonempty absolute executable path",
+            ));
+        }
+        return Ok(path);
+    }
+    Ok(current_exe()?.with_file_name("evorch-renderer"))
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tab {
@@ -661,5 +681,75 @@ impl Actor {
         self.end(false, false)
             .await
             .map_err(|e| crate::bootstrap::BootstrapError::from(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod installation_tests {
+    use super::*;
+    #[test]
+    fn startup_override_wins_without_probing_the_running_executable() {
+        let configured = PathBuf::from("/nix/store/distribution/libexec/renderer with spaces");
+        let resolved =
+            resolve_installed_executable(Some(configured.clone().into_os_string()), || {
+                panic!("an explicit startup path must not need current_exe")
+            })
+            .unwrap();
+        assert_eq!(resolved, configured);
+    }
+    #[test]
+    fn invalid_override_is_not_a_path_search_or_colocated_fallback() {
+        for invalid in ["", "renderer", "./renderer", "../bin/renderer"] {
+            let error = resolve_installed_executable(Some(invalid.into()), || {
+                panic!("invalid startup configuration must fail closed")
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+    #[test]
+    fn unconfigured_resolution_uses_the_colocated_candidate_and_propagates_failure() {
+        assert_eq!(
+            resolve_installed_executable(None, || Ok("/core/bin/core".into())).unwrap(),
+            PathBuf::from("/core/bin/evorch-renderer")
+        );
+        assert!(
+            resolve_installed_executable(None, || Err(std::io::Error::other("no executable")))
+                .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn central_binding_shares_the_single_owner_and_store_but_keeps_provider_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let profiles = temp.path().join("profiles");
+        let tasks = AreaTasks::new(tokio::runtime::Handle::current());
+        let ledger = SpawnLedger::new();
+        let owner = RendererOwner::new(
+            &tasks,
+            ledger.clone(),
+            OwnerConfig::new(temp.path().join("not-installed"), profiles.clone()),
+        )
+        .unwrap();
+        let store = Arc::new(
+            runtime::artifacts::ArtifactStore::new(temp.path().join("artifacts")).unwrap(),
+        );
+        let mut areas = crate::areas::Areas::default();
+        areas.browser.renderer = Some(owner.clone());
+        areas.bind_artifacts(store.clone());
+        assert!(Arc::ptr_eq(areas.artifacts.store.as_ref().unwrap(), &store));
+        assert!(
+            owner
+                .commands
+                .same_channel(&areas.artifacts.renderer.as_ref().unwrap().commands)
+        );
+        assert!(areas.artifact_pages().is_none());
+        assert_eq!(owner.status().phase, Phase::Stopped);
+        assert!(ledger.children().is_empty());
+        assert!(!profiles.exists());
+        ledger.close_fence();
+        tasks.request_stop();
+        tasks.shutdown().await.unwrap();
+        ledger.join_workers().await.unwrap();
+        assert!(!profiles.exists());
     }
 }
