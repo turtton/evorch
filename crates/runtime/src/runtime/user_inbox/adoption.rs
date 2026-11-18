@@ -6,18 +6,46 @@ use std::sync::{
 /// Ownership of consumed input until its execution phase has been published.
 /// It owns no inbox lock and also releases on an error, cancellation or unwind.
 /// This is execution-local state, never part of the persisted inbox/receipt.
-pub(crate) struct InputAdoption(Arc<AtomicUsize>);
+pub(crate) struct InputAdoption(Arc<AtomicUsize>, Arc<tokio::sync::Notify>);
 
 impl Drop for InputAdoption {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
+        // Even ignored wakes and Pending polls need a recheck: no phase event
+        // necessarily follows an observer seeing their short-lived guard.
+        self.1.notify_one();
     }
 }
 
 impl super::UserInbox {
+    pub(crate) fn with_adoption_notifier(changed: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            adoption_changed: changed,
+            ..Self::default()
+        }
+    }
+
+    /// Guard readiness polling before a receiver can remove input. Only a ready
+    /// wake transfers ownership to the loop, through handling and publication.
+    /// Pending polls release immediately and notify any idle observer.
+    pub(crate) async fn adopt_wake<F: std::future::Future>(
+        &self,
+        future: F,
+    ) -> (F::Output, InputAdoption) {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|cx| {
+            let adoption = self.begin_adoption();
+            match future.as_mut().poll(cx) {
+                std::task::Poll::Ready(value) => std::task::Poll::Ready((value, adoption)),
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        })
+        .await
+    }
+
     pub(super) fn begin_adoption(&self) -> InputAdoption {
         self.adoptions.fetch_add(1, Ordering::AcqRel);
-        InputAdoption(self.adoptions.clone())
+        InputAdoption(self.adoptions.clone(), self.adoption_changed.clone())
     }
 
     pub(crate) fn adopting(&self) -> bool {
@@ -55,12 +83,90 @@ impl super::UserInbox {
             let _ = gate.resume.recv();
         }
     }
+
+    pub(crate) fn gate_next_wake_adoption(
+        &self,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self
+            .wake_adoption_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Gate { reached, resume });
+    }
+
+    pub(crate) fn hold_wake_adoption_gate(&self) {
+        let gate = self
+            .wake_adoption_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            let _ = gate.resume.recv();
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::UserInbox;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn wake_poll_guards_consumption_and_notifies_release_even_without_a_phase() {
+        use std::{
+            cell::Cell,
+            future::Future,
+            task::{Context, Poll},
+        };
+        let inbox = UserInbox::default();
+        let ready = Cell::new(false);
+        let mut wake = Box::pin(inbox.adopt_wake(std::future::poll_fn(|_| {
+            assert!(inbox.adopting(), "guard must precede receiver polling");
+            if ready.get() {
+                Poll::Ready(42)
+            } else {
+                Poll::Pending
+            }
+        })));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(wake.as_mut().poll(&mut cx).is_pending());
+        assert!(
+            !inbox.adopting(),
+            "a passive waiter cannot retain the process"
+        );
+        inbox.adoption_changed.notified().await;
+        ready.set(true);
+        let Poll::Ready((value, guard)) = wake.as_mut().poll(&mut cx) else {
+            panic!("ready input must be adopted");
+        };
+        assert_eq!(value, 42);
+        assert!(inbox.adopting(), "handling outlives receiver readiness");
+        drop(wake);
+        assert!(inbox.adopting());
+        drop(guard);
+        assert!(!inbox.adopting());
+        // Release before registering an observer must leave a stored permit.
+        inbox.adoption_changed.notified().await;
+    }
+
+    #[tokio::test]
+    async fn panicking_wake_poll_releases_and_notifies() {
+        use std::{future::Future, task::Context};
+        let inbox = UserInbox::default();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut wake = Box::pin(inbox.adopt_wake(std::future::poll_fn::<(), _>(|_| {
+                assert!(inbox.adopting());
+                panic!("receiver failed");
+            })));
+            wake.as_mut()
+                .poll(&mut Context::from_waker(std::task::Waker::noop()))
+        }));
+        assert!(result.is_err());
+        assert!(!inbox.adopting());
+        inbox.adoption_changed.notified().await;
+    }
 
     fn enqueue(inbox: &UserInbox) {
         inbox.enqueue(None, |_| Ok::<_, ()>(())).unwrap();

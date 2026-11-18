@@ -171,6 +171,7 @@ pub(crate) struct Shared {
     pub(crate) learning_runs: LearningRunReceivers,
     pub(crate) learning_sources: Mutex<HashMap<RunId, String>>,
     pub(crate) learning_jobs_changed: watch::Sender<u64>,
+    pub(crate) input_adoption_changed: Arc<tokio::sync::Notify>,
     pub(crate) learning_executions: crate::learning_suspend::LearningExecutions,
     topology: OnceLock<crate::CoordinationTopology>,
     pub(crate) bus: Arc<EventBus>,
@@ -836,6 +837,7 @@ impl AgentRuntime {
                 learning_runs: Mutex::new(HashMap::new()),
                 learning_sources: Mutex::new(HashMap::new()),
                 learning_jobs_changed: watch::channel(0).0,
+                input_adoption_changed: Arc::default(),
                 learning_executions: crate::learning_suspend::LearningExecutions::default(),
                 bus,
                 executor: Mutex::new(executor),
@@ -1271,6 +1273,7 @@ impl AgentRuntime {
                 learning_runs: Mutex::new(HashMap::new()),
                 learning_sources: Mutex::new(HashMap::new()),
                 learning_jobs_changed: watch::channel(0).0,
+                input_adoption_changed: Arc::default(),
                 learning_executions: crate::learning_suspend::LearningExecutions::default(),
                 artifacts: OnceLock::new(),
                 artifact_pages: OnceLock::new(),
@@ -1964,7 +1967,9 @@ impl AgentRuntime {
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
-        let user_inbox = Arc::new(UserInbox::default());
+        let user_inbox = Arc::new(UserInbox::with_adoption_notifier(
+            self.shared.input_adoption_changed.clone(),
+        ));
         let inbox_rx = crate::runtime::user_inbox::InboxReceiver::new(inbox_rx, &user_inbox);
         let cancel_rx = execution.cancel_tx.subscribe();
         let (compact_tx, compact_rx) = watch::channel(0_u64);

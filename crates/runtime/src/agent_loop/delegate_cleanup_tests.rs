@@ -103,6 +103,7 @@ fn fixture_with_model(
         provider_request_started: false,
         consumed_intent_inputs: Vec::new(),
         input_adoptions: Vec::new(),
+        wake_adoption: None,
         lane_failure_episode: "test-execution".into(),
         meta_call_id: None,
         thread_id: None,

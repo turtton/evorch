@@ -38,6 +38,7 @@ mod stop_context;
 mod team;
 mod tool_calls;
 pub(crate) mod tools_waiting;
+mod wake_adoption;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
@@ -168,6 +169,7 @@ pub(crate) struct LoopState {
     pub(crate) consumed_intent_inputs: Vec<String>,
     /// Bridge inbox consumption to published execution, including unwinding.
     input_adoptions: Vec<crate::runtime::user_inbox::InputAdoption>,
+    wake_adoption: Option<crate::runtime::user_inbox::InputAdoption>,
     /// One harness episode per execution incarnation, never per model report.
     lane_failure_episode: String,
     pub(crate) thread_id: Option<String>,
@@ -278,6 +280,7 @@ impl LoopState {
             provider_request_started: false,
             consumed_intent_inputs: Vec::new(),
             input_adoptions: Vec::new(),
+            wake_adoption: None,
             lane_failure_episode: providers::RequestTurnContext::unattributed(false).prompt_id,
             thread_id: None,
             turn: task.turn.clone(),
@@ -1780,38 +1783,57 @@ impl LoopState {
             {
                 return false;
             }
-            tokio::select! {
-                biased;
-                _ = quiesce.changed() => { continue; }
-                changed = self.channels.cancel_rx.changed() => {
-                    if changed.is_ok() && let Some(kind) = self.interrupted() {
+            use wake_adoption::InputWake;
+            match self
+                .next_input_wake(&mut quiesce, &mut deliveries, &mut answers)
+                .await
+            {
+                InputWake::Quiesce => {
+                    continue;
+                }
+                InputWake::Cancel(changed) => {
+                    if changed.is_ok()
+                        && let Some(kind) = self.interrupted()
+                    {
                         self.finish_interrupted(kind);
                     }
                     return false;
                 }
-                changed = deliveries.changed() => {
-                    if changed.is_err() { return false; }
+                InputWake::Deliveries(changed) => {
+                    if changed.is_err() {
+                        return false;
+                    }
                     match self.flush_lane_deliveries() {
                         Ok(true) => return self.transition(AgentRunPhase::Running, None).is_ok(),
-                        Ok(false) => {},
-                        Err(error) => { self.finish_error(error); return false; }
+                        Ok(false) => {}
+                        Err(error) => {
+                            self.finish_error(error);
+                            return false;
+                        }
                     }
                 }
-                changed = answers.changed() => {
-                    if changed.is_err() { return false; }
+                InputWake::Answers(changed) => {
+                    if changed.is_err() {
+                        return false;
+                    }
                     match self.flush_user_answers() {
                         Ok(true) => return self.transition(AgentRunPhase::Running, None).is_ok(),
-                        Ok(false) => {},
-                        Err(error) => { self.finish_error(error); return false; }
+                        Ok(false) => {}
+                        Err(error) => {
+                            self.finish_error(error);
+                            return false;
+                        }
                     }
                 }
-                message = self.channels.inbox_rx.recv() => {
+                InputWake::Inbox(message) => {
                     let Some(message) = message else {
                         self.finish_error("interactive inbox closed".to_string());
                         return false;
                     };
                     if !message.1 && message.0 == crate::thread_goals::CHECKS_WAKE {
-                        if self.user_question_completion_check().is_ok() && self.thread_goal_boundary().await {
+                        if self.user_question_completion_check().is_ok()
+                            && self.thread_goal_boundary().await
+                        {
                             return self.transition(AgentRunPhase::Running, None).is_ok();
                         }
                         continue;
@@ -1823,7 +1845,7 @@ impl LoopState {
                     self.resumed = true;
                     return self.transition(AgentRunPhase::Running, None).is_ok();
                 }
-                changed = self.channels.mailbox_version_rx.changed() => {
+                InputWake::Mailbox(changed) => {
                     if changed.is_err() {
                         continue;
                     }
@@ -1892,6 +1914,10 @@ impl LoopState {
         } else {
             self.publish_durable_task(phase, reason);
             let adopted = phase == AgentRunPhase::Running || completed_turn.is_some();
+            #[cfg(any(test, feature = "idle-test-support"))]
+            if adopted && self.wake_adoption.is_some() {
+                self.channels.user_inbox.hold_wake_adoption_gate();
+            }
             if let Some(runtime) = self.runtime() {
                 runtime.publish_live_phase(
                     self.task.run_id,
@@ -1907,6 +1933,7 @@ impl LoopState {
             // Failure/cancellation also releases on LoopState drop.
             if adopted {
                 self.input_adoptions.clear();
+                self.wake_adoption = None;
             }
         }
         Ok(())

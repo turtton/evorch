@@ -121,7 +121,11 @@ async fn terminal_error_cancel_and_abandoned_loop_state_release_adoption() {
 
 // The public seam used by the core regression must hold a real interactive
 // loop, not just a standalone inbox. Lifecycle events are completion signals.
-async fn wait_for_phase(events: &mut event_bus::EventReceiver, run: RunId, phase: AgentRunPhase) {
+pub(super) async fn wait_for_phase(
+    events: &mut event_bus::EventReceiver,
+    run: RunId,
+    phase: AgentRunPhase,
+) {
     loop {
         if let event_bus::EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
             run_id,
@@ -156,15 +160,13 @@ async fn public_gate_observes_real_adoption_and_cannot_stall_another_runtime() {
             ..Default::default()
         };
         let storage = storage::Storage::open(config.clone()).unwrap();
-        let runtime = crate::AgentRuntime::new(
-            bus.clone(),
-            Arc::new(ToolExecutor::new(bus)),
-            Arc::new(ScriptedModel::new([
-                Ok(text_response("first", FinishReason::Stop)),
-                Ok(text_response("second", FinishReason::Stop)),
-            ])),
-        )
-        .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let model = Arc::new(ScriptedModel::new([
+            Ok(text_response("first", FinishReason::Stop)),
+            Ok(text_response("second", FinishReason::Stop)),
+        ]));
+        let runtime =
+            crate::AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+                .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
         let run = runtime
             .delegate_chat(
                 "adoption",
@@ -178,6 +180,10 @@ async fn public_gate_observes_real_adoption_and_cannot_stall_another_runtime() {
             )
             .unwrap();
         wait_for_phase(&mut events, run, AgentRunPhase::Waiting).await;
+        // Hold the resumed model: Waiting publication alone does not signal
+        // completion of subsequent readiness polls or ignored wakes.
+        let model_resume = Arc::new(tokio::sync::Notify::new());
+        model.gate_key("first", model_resume.clone()).await;
         let (reached, held) = tokio::sync::oneshot::channel();
         let (resume, resumed) = std::sync::mpsc::channel();
         runtime
@@ -213,10 +219,12 @@ async fn public_gate_observes_real_adoption_and_cannot_stall_another_runtime() {
         if cancel {
             runtime.wait(run).await.unwrap();
         } else {
-            wait_for_phase(&mut events, run, AgentRunPhase::Waiting).await;
+            model.wait_for_request(1).await;
         }
         assert!(!runtime.is_adopting_user_input(run));
         if !cancel {
+            model_resume.notify_one();
+            wait_for_phase(&mut events, run, AgentRunPhase::Waiting).await;
             cleanup(runtime, run).await;
         }
     }

@@ -52,7 +52,9 @@ impl AgentRuntime {
         let (message_count_tx, message_count_rx) =
             watch::channel(restored.messages.len() + usize::from(!history_only));
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
-        let user_inbox = Arc::new(UserInbox::default());
+        let user_inbox = Arc::new(UserInbox::with_adoption_notifier(
+            self.shared.input_adoption_changed.clone(),
+        ));
         let inbox_rx = crate::runtime::user_inbox::InboxReceiver::new(inbox_rx, &user_inbox);
         let cancel_rx = execution.cancel_tx.subscribe();
         let (compact_tx, compact_rx) = watch::channel(0_u64);
