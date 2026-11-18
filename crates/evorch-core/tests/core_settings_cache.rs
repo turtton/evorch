@@ -382,6 +382,7 @@ async fn saved_provider_replaces_the_model_and_the_next_request_still_extends_th
         .handle_query(
             &SessionId::new("settings-cache").unwrap(),
             &Query::Settings(SettingsQuery::GetSettingsSnapshot {}),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     {

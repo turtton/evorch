@@ -23,6 +23,7 @@ impl CommandHost {
         &self,
         _query: &Query,
         query: &ArtifactsQuery,
+        _provenance: &Provenance,
     ) -> Result<QueryReply, WorkbenchError> {
         match *query {}
     }

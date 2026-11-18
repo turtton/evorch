@@ -369,7 +369,11 @@ impl Fixture {
     fn query(&self, query: AuthQuery) -> AuthReply {
         match self
             .host
-            .handle_query(&SessionId::new("session").unwrap(), &Query::Auth(query))
+            .handle_query(
+                &SessionId::new("session").unwrap(),
+                &Query::Auth(query),
+                &workbench_host::provenance::local_desktop(),
+            )
             .unwrap()
         {
             QueryReply::Auth(reply) => reply,
@@ -794,8 +798,7 @@ async fn a_slow_login_preparation_does_not_block_the_handler_and_keeps_the_permi
     assert!(matches!(
         f.host.handle_query(
             &SessionId::new("session").unwrap(),
-            &Query::Auth(AuthQuery::GetLogin { login_id: op("login-1") }),
-        ),
+            &Query::Auth(AuthQuery::GetLogin { login_id: op("login-1") }), &workbench_host::provenance::local_desktop()),
         Err(error) if error.code == ErrorCode::NotFound
     ));
     f.probe.release_begin();

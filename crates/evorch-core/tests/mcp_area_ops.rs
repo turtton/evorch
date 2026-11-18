@@ -305,13 +305,11 @@ impl Area {
     }
 
     fn query(&self, query: McpQuery) -> Result<McpReply, WorkbenchError> {
-        match self
-            .boot
-            .host
-            .lock()
-            .unwrap()
-            .handle_query(&session(), &Query::Mcp(query))?
-        {
+        match self.boot.host.lock().unwrap().handle_query(
+            &session(),
+            &Query::Mcp(query),
+            &workbench_host::provenance::local_desktop(),
+        )? {
             QueryReply::Mcp(reply) => Ok(reply),
             other => panic!("not an MCP reply: {other:?}"),
         }
@@ -964,6 +962,7 @@ async fn a_secret_appears_in_no_event_reply_receipt_snapshot_or_log() {
             &Query::Projection(ProjectionQuery::GetCommandReceipt {
                 request_id: RequestId::new(format!("req-{}", id.as_str())).unwrap(),
             }),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap();
     area.observed.push(serde_json::to_string(&receipt).unwrap());

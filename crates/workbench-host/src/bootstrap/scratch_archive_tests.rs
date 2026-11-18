@@ -131,6 +131,7 @@ impl World {
             .handle_query(
                 &session,
                 &Query::Workspace(WorkspaceQuery::ListFamilies(PageRequest::default())),
+                &crate::provenance::local_desktop(),
             )
             .unwrap()
         else {
@@ -142,6 +143,7 @@ impl World {
                 &Query::Workspace(WorkspaceQuery::GetThreadDetail(ThreadTarget {
                     thread: wire.clone(),
                 })),
+                &crate::provenance::local_desktop(),
             )
             .unwrap()
         else {

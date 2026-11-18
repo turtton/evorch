@@ -210,6 +210,7 @@ fn receipt_state(
             &Query::Projection(ProjectionQuery::GetCommandReceipt {
                 request_id: request.clone(),
             }),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     {

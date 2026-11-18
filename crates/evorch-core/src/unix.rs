@@ -41,6 +41,10 @@ pub async fn connection(
     let (mut read, mut write) = stream.into_split();
     let mut hello = backend.hello();
     let first = tokio::select! { r = payload(&mut read, hello.limits.max_frame_bytes) => r?, _ = shutdown.changed() => return Ok(()) };
+    debug_assert!(
+        !crate::renderer::claims(&first),
+        "the frame connection is not served before the frame-delivery PR"
+    );
     let client: ClientHello = serde_json::from_slice(&first).map_err(invalid)?;
     let negotiated = negotiate(
         &client,

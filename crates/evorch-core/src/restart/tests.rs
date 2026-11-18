@@ -894,6 +894,7 @@ async fn accepted_unpolled_mcp_operation_finishes_before_seal_and_late_request_i
         .handle_query(
             &SessionId::new("test").unwrap(),
             &Query::Mcp(McpQuery::GetOperation { operation_id }),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap();
     assert!(matches!(result, QueryReply::Mcp(McpReply::Operation(view))

@@ -31,6 +31,12 @@ impl Drop for ConnectedClient<'_> {
         self.0.unix_clients.fetch_sub(1, Ordering::SeqCst);
     }
 }
+/// The caller of the core's own status query behind `hello`. It is named, not
+/// defaulted: the query is a fixed `Lifecycle` one, so no namespace that
+/// authorizes reads per caller (artifacts, browser) can be reached with it.
+fn internal_health_provenance() -> Provenance {
+    Provenance::human(Surface::Cli, ClientId::new("core-health").unwrap())
+}
 pub fn error(code: ErrorCode, message: &str) -> WorkbenchError {
     WorkbenchError::new(code, message, RetryAdvice::Never)
 }
@@ -168,6 +174,7 @@ impl HostBackend {
         ))) = self.host.lock().unwrap().handle_query(
             &SessionId::new("core-health").unwrap(),
             &workbench_protocol::queries::Query::Lifecycle(LifecycleQuery::GetCoreStatus),
+            &internal_health_provenance(),
         ) {
             hello.status = status;
         }
@@ -201,16 +208,19 @@ impl HostBackend {
                         .map(ReplyPayload::Command)
                 }
                 RequestBody::Query(query) => {
-                    host.handle_query(&request.session_id, &query).map(|reply| {
-                        ReplyPayload::Query(match reply {
-                            workbench_protocol::queries::QueryReply::Lifecycle(
-                                LifecycleReply::CoreStatus(status),
-                            ) => workbench_protocol::queries::QueryReply::Lifecycle(
-                                LifecycleReply::CoreStatus(self.transport_status(status)),
-                            ),
-                            reply => reply,
+                    // The transport's provenance, as for commands: never a surface
+                    // or owner the request body names.
+                    host.handle_query(&request.session_id, &query, &provenance)
+                        .map(|reply| {
+                            ReplyPayload::Query(match reply {
+                                workbench_protocol::queries::QueryReply::Lifecycle(
+                                    LifecycleReply::CoreStatus(status),
+                                ) => workbench_protocol::queries::QueryReply::Lifecycle(
+                                    LifecycleReply::CoreStatus(self.transport_status(status)),
+                                ),
+                                reply => reply,
+                            })
                         })
-                    })
                 }
                 RequestBody::Control(Control::Ping { nonce }) => Ok(ReplyPayload::Pong { nonce }),
                 RequestBody::Control(_) => Err(error(

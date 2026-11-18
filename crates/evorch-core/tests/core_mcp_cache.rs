@@ -250,6 +250,7 @@ async fn core_mcp_cache_e2e_area_commands_change_new_runs_and_never_the_old_pref
             &Query::Mcp(McpQuery::GetSettings {
                 project: scope.project.clone(),
             }),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     else {

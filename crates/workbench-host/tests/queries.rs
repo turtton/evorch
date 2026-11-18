@@ -74,7 +74,11 @@ impl Fixture {
     }
     fn query(&self, query: Query) -> QueryReply {
         self.host
-            .handle_query(&SessionId::new("session").unwrap(), &query)
+            .handle_query(
+                &SessionId::new("session").unwrap(),
+                &query,
+                &workbench_host::provenance::local_desktop(),
+            )
             .unwrap()
     }
     fn subscribe(&self) -> workbench_host::subscriptions::Subscription {
@@ -143,6 +147,7 @@ fn queries_page_by_snapshot_and_refuse_reused_or_stale_cursors() {
         .handle_query(
             &SessionId::new("session").unwrap(),
             &Query::Workspace(WorkspaceQuery::ListProjects(next.page.clone())),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap_err();
     assert_eq!(foreign.code, ErrorCode::Conflict);
@@ -152,6 +157,7 @@ fn queries_page_by_snapshot_and_refuse_reused_or_stale_cursors() {
         .handle_query(
             &SessionId::new("session").unwrap(),
             &Query::Workspace(WorkspaceQuery::ListThreads(next)),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap_err();
     assert_eq!(stale.code, ErrorCode::Conflict);
@@ -1259,6 +1265,7 @@ fn history_cursor_rejects_retained_row_removal_or_deleted_run() {
                         cursor: page.next_cursor,
                         limit: 1,
                     }),
+                    &workbench_host::provenance::local_desktop(),
                 )
                 .unwrap_err();
             assert_eq!(err.code, ErrorCode::Conflict);
@@ -1824,7 +1831,11 @@ fn approval_input_request(ticket: &sandbox::approval::PendingApproval) -> GetApp
 }
 fn query_error(f: &Fixture, query: Query) -> ErrorCode {
     f.host
-        .handle_query(&SessionId::new("session").unwrap(), &query)
+        .handle_query(
+            &SessionId::new("session").unwrap(),
+            &query,
+            &workbench_host::provenance::local_desktop(),
+        )
         .unwrap_err()
         .code
 }
@@ -2070,6 +2081,7 @@ fn snapshot_query_reads_every_frozen_item_after_connection_closure() {
                         limit: 17,
                     },
                 })),
+                &workbench_host::provenance::local_desktop(),
             )
             .unwrap()
         else {

@@ -82,11 +82,13 @@ impl CommandHost {
 
     /// Route a validated query: what the host itself owns (lane management,
     /// approval inputs, command receipts) is answered by its adapter, the rest
-    /// by the projection.
+    /// by the projection. `provenance` is the transport's, already validated;
+    /// only the namespaces that authorize reads per caller take it.
     pub(in crate::ingress) fn dispatch_query(
         &self,
         session: &SessionId,
         query: &Query,
+        provenance: &Provenance,
     ) -> Result<QueryReply, WorkbenchError> {
         match query {
             Query::Conversation(q) => self.conversation_query(query, q),
@@ -106,8 +108,8 @@ impl CommandHost {
             Query::Evaluation(q) => self.evaluation_query(query, q),
             Query::Improvement(q) => self.improvement_query(query, q),
             Query::PullRequests(q) => self.pull_requests_query(query, q),
-            Query::Browser(q) => self.browser_query(query, q),
-            Query::Artifacts(q) => self.artifacts_query(query, q),
+            Query::Browser(q) => self.browser_query(query, q, provenance),
+            Query::Artifacts(q) => self.artifacts_query(query, q, provenance),
             Query::Maintenance(q) => self.maintenance_query(query, q),
         }
     }

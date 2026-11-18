@@ -37,8 +37,11 @@ impl Fixture {
     }
 
     fn query(&self, query: Query) -> Result<QueryReply, workbench_protocol::WorkbenchError> {
-        self.host
-            .handle_query(&SessionId::new("session").unwrap(), &query)
+        self.host.handle_query(
+            &SessionId::new("session").unwrap(),
+            &query,
+            &workbench_host::provenance::local_desktop(),
+        )
     }
 }
 

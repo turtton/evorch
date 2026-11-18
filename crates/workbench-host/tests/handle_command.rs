@@ -452,6 +452,7 @@ fn every_request_is_looked_up_by_its_receipt_within_its_session() {
             &Query::Projection(ProjectionQuery::GetCommandReceipt {
                 request_id: id.clone(),
             }),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     {

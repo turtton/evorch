@@ -22,6 +22,12 @@ eval = { path = "../eval" }
 model = { path = "../model" }
 providers = { path = "../providers" }
 runtime = { path = "../runtime" }
+# The renderer helper's IPC (free of CEF and of every core crate) and the agent
+# browser's page types, for the artifact/browser areas' adapters (PR 16a-2).
+# browser-cef must never be added here: the host links no CEF
+# (scripts/check-workbench-boundaries.sh).
+renderer-ipc = { path = "../renderer-ipc" }
+browser = { path = "../browser" }
 tools = { path = "../tools" }
 sandbox = { path = "../sandbox", features = ["keychain"] }
 catalog = { path = "../catalog" }

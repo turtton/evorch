@@ -157,6 +157,7 @@ fn read(core: &BootstrappedHost) -> ThreadPullRequest {
         .handle_query(
             &SessionId::new("pr-cache").unwrap(),
             &Query::PullRequests(PullRequestsQuery::GetThreadPullRequest { thread: thread() }),
+            &workbench_host::provenance::local_desktop(),
         )
         .unwrap()
     {

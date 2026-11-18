@@ -120,6 +120,7 @@ impl Fixture {
             .handle_query(
                 &SessionId::new("session").unwrap(),
                 &Query::Settings(SettingsQuery::GetSettingsSnapshot {}),
+                &workbench_host::provenance::local_desktop(),
             )
             .unwrap()
         {

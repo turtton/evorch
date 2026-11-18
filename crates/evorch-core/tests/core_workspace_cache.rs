@@ -42,7 +42,11 @@ impl Core<'_> {
             .host
             .lock()
             .unwrap()
-            .handle_query(&SessionId::new("test").unwrap(), &Query::Workspace(query))
+            .handle_query(
+                &SessionId::new("test").unwrap(),
+                &Query::Workspace(query),
+                &workbench_host::provenance::local_desktop(),
+            )
             .unwrap()
         {
             QueryReply::Workspace(reply) => reply,

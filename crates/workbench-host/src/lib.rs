@@ -11,6 +11,11 @@
 //! check (`scripts/check-workbench-boundaries.sh`) keeps GUI and client crates
 //! out of its dependency graph.
 
+// The renderer helper's IPC is a dependency of the host from PR 16a-2's
+// integration PR on, so the later PRs (the renderer service, the artifact
+// adapters) need no manifest or lockfile change. Nothing uses it yet.
+use renderer_ipc as _;
+
 pub mod areas;
 pub mod attachments;
 pub mod bootstrap;
