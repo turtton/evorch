@@ -80,7 +80,7 @@ impl std::error::Error for BoundedError {
 #[derive(Debug)]
 pub struct ScratchRoot {
     parent: PathBuf,
-    ephemeral: bool,
+    ephemeral: Option<cleanup::Identity>,
     /// The full identity a fixed parent's marker must hold. The parent name carries
     /// only a short prefix of it, so two identities can share a parent.
     identity: Option<String>,
@@ -120,7 +120,7 @@ impl ScratchRoot {
     pub fn at(parent: PathBuf) -> Self {
         Self {
             parent,
-            ephemeral: false,
+            ephemeral: None,
             identity: None,
         }
     }
@@ -134,9 +134,10 @@ impl ScratchRoot {
             .prefix(&format!("evo-{}-", euid()))
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in("/var/tmp")?;
+        let identity = cleanup::created_identity(directory.path())?;
         Ok(Self {
             parent: directory.keep(),
-            ephemeral: true,
+            ephemeral: Some(identity),
             identity: None,
         })
     }
@@ -194,8 +195,13 @@ impl ScratchRoot {
     /// Detach only; the caller must call purge_trash after releasing its gates.
     pub fn discard_deferred(&self, name: &str) -> io::Result<bool> {
         let dir = self.dir(name)?;
-        if !self.owned_parent()? || dir.symlink_metadata().is_err() {
+        if !self.owned_parent()? {
             return Ok(false);
+        }
+        match dir.symlink_metadata() {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
         }
         let trash = tempfile::Builder::new()
             .prefix(TRASH_PREFIX)
@@ -397,16 +403,27 @@ fn read_marker(path: &Path) -> io::Result<String> {
     use rustix::fs::{Mode, OFlags, open};
     let fd = open(
         path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )?;
+    read_marker_fd(fd)
+}
+
+fn read_marker_fd(fd: std::os::fd::OwnedFd) -> io::Result<String> {
+    let metadata = rustix::fs::fstat(&fd)?;
+    if metadata.st_uid != euid()
+        || rustix::fs::FileType::from_raw_mode(metadata.st_mode)
+            != rustix::fs::FileType::RegularFile
+    {
+        return Err(not_private());
+    }
     io::read_to_string(io::Read::take(fs::File::from(fd), 4096))
 }
 
 impl Drop for ScratchRoot {
     fn drop(&mut self) {
-        if self.ephemeral {
-            cleanup::service().request_exact(&self.parent);
+        if let Some(expected) = self.ephemeral {
+            cleanup::service().request_exact(&self.parent, expected);
         }
     }
 }
@@ -414,6 +431,7 @@ impl Drop for ScratchRoot {
 #[derive(Debug)]
 pub(super) struct Scratch {
     path: PathBuf,
+    identity: cleanup::Identity,
 }
 
 impl Scratch {
@@ -423,8 +441,9 @@ impl Scratch {
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in("/var/tmp")?;
         ensure_layout(directory.path())?;
+        let identity = cleanup::created_identity(directory.path())?;
         let path = directory.keep();
-        Ok(Self { path })
+        Ok(Self { path, identity })
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -434,7 +453,7 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        cleanup::service().request_exact(&self.path);
+        cleanup::service().request_exact(&self.path, self.identity);
     }
 }
 

@@ -22,7 +22,7 @@ const FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::CLOEXEC);
 const BATCH: usize = 256;
 const DELAY: Duration = Duration::from_millis(2);
-type Identity = (u64, u64);
+pub(super) type Identity = (u64, u64);
 // Darwin's dev_t differs from Linux's; normalize the cross-platform identity.
 #[allow(clippy::unnecessary_cast)]
 fn identity(s: &Stat) -> Identity {
@@ -36,6 +36,15 @@ fn changed() -> io::Error {
         io::ErrorKind::PermissionDenied,
         "scratch directory identity changed",
     )
+}
+/// Capture only freshly-created private directories, before handing them to callers.
+pub(super) fn created_identity(path: &Path) -> io::Result<Identity> {
+    let fd = open(path, FLAGS, Mode::empty())?;
+    let s = fstat(&fd)?;
+    if s.st_uid != euid() || s.st_mode & 0o077 != 0 {
+        return Err(changed());
+    }
+    Ok(identity(&s))
 }
 #[derive(Clone)]
 struct Root {
@@ -54,10 +63,10 @@ impl Root {
             let marker = openat(
                 &fd,
                 IDENTITY_MARKER,
-                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
                 Mode::empty(),
             )?;
-            let found = io::read_to_string(io::Read::take(std::fs::File::from(marker), 4096))?;
+            let found = super::read_marker_fd(marker)?;
             if &found != expected {
                 return Err(changed());
             }
@@ -71,6 +80,8 @@ struct Work {
     exact: HashMap<PathBuf, Identity>,
     exact_dirty: bool,
     stop: bool,
+    #[cfg(test)]
+    completed: HashMap<PathBuf, Vec<std::sync::mpsc::Sender<()>>>,
 }
 #[derive(Default)]
 struct Shared {
@@ -87,6 +98,8 @@ pub(super) struct CleanupService {
     shared: Arc<Shared>,
     delay: Duration,
     #[cfg(test)]
+    fail_start: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
     events: Option<std::sync::mpsc::Sender<TestEvent>>,
     #[cfg(test)]
     step: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -97,6 +110,8 @@ impl CleanupService {
             lifecycle: Mutex::default(),
             shared: Arc::default(),
             delay,
+            #[cfg(test)]
+            fail_start: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             events: None,
             #[cfg(test)]
@@ -120,24 +135,12 @@ impl CleanupService {
             .insert(root.path.clone(), (root, true));
         self.start()
     }
-    pub(super) fn request_exact(&self, path: &Path) {
-        // Only directories created by Scratch/ScratchRoot can reach this method.
-        let result = (|| -> io::Result<()> {
-            let fd = open(path, FLAGS, Mode::empty())?;
-            let s = fstat(&fd)?;
-            if s.st_uid != euid() || s.st_mode & 0o077 != 0 {
-                return Err(changed());
-            }
+    pub(super) fn request_exact(&self, path: &Path, expected: Identity) {
+        // Capability captured when creating Scratch/ScratchRoot, never an arbitrary path.
+        {
             let mut work = lock(&self.shared.work);
-            work.exact.insert(path.into(), identity(&s));
+            work.exact.insert(path.into(), expected);
             work.exact_dirty = true;
-            Ok(())
-        })();
-        if let Err(error) = result {
-            if error.kind() != io::ErrorKind::NotFound {
-                tracing::warn!(%error, path = %path.display(), "scratch deletion request rejected");
-            }
-            return;
         }
         if let Err(error) = self.start() {
             tracing::warn!(%error, "scratch collector start failed");
@@ -154,6 +157,13 @@ impl CleanupService {
             tracing::error!("scratch collector panicked; restarting on notification");
         }
         if life.join.is_none() {
+            #[cfg(test)]
+            if self
+                .fail_start
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(io::Error::other("injected thread spawn failure"));
+            }
             lock(&self.shared.work).stop = false;
             let shared = Arc::clone(&self.shared);
             let delay = self.delay;
@@ -228,8 +238,19 @@ struct Pace<'a> {
     entries: usize,
     #[cfg(test)]
     step: Option<&'a (dyn Fn() + Send + Sync)>,
+    #[cfg(test)]
+    enumeration_error: Option<Errno>,
+    #[cfg(test)]
+    throttle: Option<&'a std::sync::mpsc::Sender<TestEvent>>,
 }
 impl Pace<'_> {
+    fn next(&mut self, dir: &mut Dir) -> Option<Result<rustix::fs::DirEntry, Errno>> {
+        #[cfg(test)]
+        if let Some(error) = self.enumeration_error.take() {
+            return Some(Err(error));
+        }
+        dir.next()
+    }
     fn stopped(&self) -> bool {
         lock(&self.shared.work).stop
     }
@@ -243,6 +264,10 @@ impl Pace<'_> {
             let work = lock(&self.shared.work);
             if work.stop {
                 return true;
+            }
+            #[cfg(test)]
+            if let Some(events) = self.throttle {
+                let _ = events.send(TestEvent::Throttle);
             }
             let (work, _) = self
                 .shared
@@ -309,7 +334,7 @@ fn remove_tree(
         if pace.stopped() {
             return Ok(Outcome::Stopped);
         }
-        match entries.next() {
+        match pace.next(entries) {
             Some(Ok(entry)) => {
                 let name = entry.file_name();
                 if name == c"." || name == c".." {
@@ -436,16 +461,25 @@ fn worker(
             entries: 0,
             #[cfg(test)]
             step: step.as_deref(),
+            #[cfg(test)]
+            enumeration_error: None,
+            #[cfg(test)]
+            throttle: events.as_ref(),
         };
         for root in roots {
+            if pace.stopped() {
+                break;
+            }
             #[cfg(test)]
             if let Some(events) = &events {
                 let _ = events.send(TestEvent::Scan(root.path.clone()));
             }
-            if let Err(error) = scan(&root, &mut pace, &mut failures)
-                && failures.insert(root.path.clone())
-            {
-                tracing::warn!(%error, parent = %root.path.display(), "scratch root scan failed");
+            match scan(&root, &mut pace, &mut failures) {
+                Ok(Outcome::Stopped) => break,
+                Err(error) if failures.insert(root.path.clone()) => {
+                    tracing::warn!(%error, parent = %root.path.display(), "scratch root scan failed");
+                }
+                _ => {}
             }
         }
         for (path, id) in exact {
@@ -464,7 +498,16 @@ fn worker(
             })();
             match result {
                 Ok(Outcome::Complete) => {
-                    lock(&shared.work).exact.remove(&path);
+                    let mut work = lock(&shared.work);
+                    if work.exact.get(&path) == Some(&id) {
+                        work.exact.remove(&path);
+                        #[cfg(test)]
+                        if let Some(waiters) = work.completed.remove(&path) {
+                            for waiter in waiters {
+                                let _ = waiter.send(());
+                            }
+                        }
+                    }
                     failures.remove(&path);
                 }
                 Ok(Outcome::Stopped) => {}
@@ -494,6 +537,7 @@ enum TestEvent {
     Scan(PathBuf),
     Pass,
     Stopped,
+    Throttle,
 }
 #[cfg(test)]
 pub(super) fn remove_for_test(path: &Path) -> io::Result<()> {
@@ -503,6 +547,8 @@ pub(super) fn remove_for_test(path: &Path) -> io::Result<()> {
         delay: Duration::ZERO,
         entries: 0,
         step: None,
+        enumeration_error: None,
+        throttle: None,
     };
     let parent = open(path.parent().unwrap(), FLAGS, Mode::empty())?;
     let name = CString::new(path.file_name().unwrap().as_encoded_bytes())?;
