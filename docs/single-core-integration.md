@@ -369,15 +369,42 @@ depend on it.
 | `ReadContent` returns HTML and text only, as UTF-8 chunks; the byte offset and limit are validated and a chunk never ends inside a character. Image bodies are refused with `InvalidRequest` | `areas/artifacts/content.rs` | `content.rs` unit tests, `renderer_artifacts.rs` |
 | No base64 DTO is public: `ReadRendererCapture`, `CaptureContent` and a base64 `ReadContent` do not decode | `workbench-protocol/src/namespaces/{artifacts,browser}` | `namespaces/browser/tests.rs`, protocol golden files |
 | A capture is a PNG held privately by the owner (bounded by count and by bytes, reclaimed on its terms), fetched only through a reference the owner and the surface are authorized for. The runtime's `inspect_artifact` screenshot is unchanged | `areas/browser/service/operations.rs` | `areas/browser/service/tests.rs` |
-| `ArtifactPages::open_artifact(key, html, &ArtifactRecord)` defaults to `open`; only the core adapter overrides it, so the tab's `ArtifactRef` comes from the record whose ownership `inspect_artifact` already checked. The GUI adapter and `ToolSpec` are untouched | `runtime/src/artifacts/inspect.rs`, `areas/browser/run_pages.rs` | `runtime/src/artifacts/tests/inspect.rs` (default delegates to `open`; an override receives the verified record), `renderer_owner.rs` (the core adapter tags the run tab with its record, a plain `open` does not), `renderer_owner_cef.rs` (real CEF, 1024x768) |
+| `ArtifactPages::open_artifact(key, html, &ArtifactRecord)` is a required method (F3 removed the default that called `open`): every implementation says what it does with the record. The core adapter keeps it, so the tab's `ArtifactRef` comes from the record whose ownership `inspect_artifact` already checked; the GUI adapter and the test pages open as before, with no change in behaviour. `ToolSpec` is untouched | `runtime/src/artifacts/inspect.rs`, `areas/browser/run_pages.rs` | `runtime/src/artifacts/tests/inspect.rs` (default delegates to `open`; an override receives the verified record), `renderer_owner.rs` (the core adapter tags the run tab with its record, a plain `open` does not), `renderer_owner_cef.rs` (real CEF, 1024x768) |
 | A detached preview session keeps the core up for the 30 s reconnect grace (`RetentionReason::RendererReconnectGrace`), after which the ordinary idle grace starts. It is not a `ConnectedClients` entry and not running work; a helper watcher never counts as work | `CommandHost::renderer_reconnect_grace`, `lifecycle/idle/renderer.rs`, `backend.rs` | `lifecycle/idle/renderer.rs` (virtual time) |
 
 - HTML returned by `ReadContent` is the stored blob byte for byte: the inline
   `data:` URIs that capture put there are not touched.
-- Follow-ups. **F3**: the binary transfer of image artifacts and of capture
-  PNGs (the frame/binary route). **Web**: whether the Web surface may later read
-  bodies or captures is open; until then it is refused as above, and that needs
-  its own decision and threat model before it changes.
+- Follow-ups. **F3** is below. **Web**: whether the Web surface may later read
+  bodies, captures or frames is open and belongs to the Web client plan; until
+  then it is refused as above (metadata only), and that needs its own decision
+  and threat model before it changes.
+
+### Stage 16a-2 F3: the binary data plane (raw frames, image bodies, Capture PNGs)
+
+Bodies do not travel as JSON. A client opens a second Unix-socket connection to
+the core, which only says it is a data connection; the core answers with a
+one-time channel id and nothing else flows until an authorized control
+connection binds that id (two steps, control-bound). The bind happens with the
+frame subscription token (frames), with an artifact reference (image body) or
+with a Capture operation id (PNG). The data connection never decides what it
+reads, and the receipt, events, snapshot and replay still carry no payload.
+
+| Contract | Value / where |
+|---|---|
+| Authorization | the same owner, surface and client as the control command; Desktop and Cli only. A different client, a different surface, a used or expired token, a stale generation and a revoked lease are all one `PermissionDenied`. The Web surface is refused (metadata only) |
+| Finite values | 8 frame subscriptions, 8 unbound connections, 4 concurrent blob transfers, 30 s to bind, 5 s without progress; frame at most 3840x2160x4 bytes, image body 8 MiB, Capture 16 MiB. Checked before any payload is allocated |
+| Frames | the helper's frame is read once into one shared allocation; every subscriber's sender writes that one allocation in 64 KiB chunks. A slow reader skips to the latest frame by sequence, and a reader that stops is cut after the no-progress time. The helper's acknowledgment does not wait for any client |
+| Image bodies | read by the stored artifact's thread and project (never by a client's claim), checked as a regular file with the recorded size and digest, then sent byte for byte. They need no helper |
+| Teardown | unsubscribe, observer revoke, tab close, control disconnect, helper crash and restart all drop the lease: the sender stops, the socket closes and the frame or blob is released |
+| Idle | a data connection is not a connected client and does not extend the idle grace; the 30 s preview grace is unchanged |
+| Client | `workbench_client::renderer::DataChannel` (bounded reassembly, cancel, no payload in errors) |
+| Cache | the tool catalog is unchanged by any of this; `core_renderer_cache` drives data traffic inside its scenarios and asserts the wire prefix |
+
+Measurements and the design they decided (shared allocation, 64 KiB, the
+limits above) are in `docs/renderer-measurement.md` section 8. Remaining for
+F4: the restart integration test that execs the production binary (the
+catalog-toggle tests here do not replace it) and the remaining integration
+fixes. The Web decision stays with the Web client plan.
 
 ## Stage 17d-2: `maintenance backfill-events` in the core (reindex is 17d-3)
 
