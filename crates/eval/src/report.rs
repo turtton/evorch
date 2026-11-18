@@ -312,12 +312,27 @@ pub async fn report_pinned(
     Ok(reports)
 }
 
-fn read_json<T: DeserializeOwned>(dir: &output::PinnedDir, name: &str) -> Result<T, String> {
+fn read_json_in<T: DeserializeOwned>(dir: &output::PinnedDir, name: &str) -> Result<T, String> {
     let path = dir.join(name);
     let bytes = dir
         .read(name)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// Read the JSON file at `path`: its directory is opened first and the file is
+/// then read without following a link, as [`read_json_in`] does.
+#[cfg(test)]
+fn read_json<T: DeserializeOwned>(path: &std::path::Path) -> Result<T, String> {
+    let invalid = || format!("{}: not a file path", path.display());
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(invalid)?;
+    let parent = path.parent().ok_or_else(invalid)?;
+    let dir =
+        output::PinnedDir::open_root(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    read_json_in(&dir, name)
 }
 
 struct LoadedRun {
@@ -333,9 +348,10 @@ fn load_run(
     table: &PriceTable,
 ) -> Result<LoadedRun, EvalError> {
     let run_dir = dir.open_below(&entry.dir)?;
-    let outcome: Outcome = read_json(&run_dir, output::OUTCOME_FILE).map_err(EvalError::Usage)?;
+    let outcome: Outcome =
+        read_json_in(&run_dir, output::OUTCOME_FILE).map_err(EvalError::Usage)?;
     let conversation: Vec<Entry> =
-        read_json(&run_dir, output::CONVERSATION_FILE).unwrap_or_default();
+        read_json_in(&run_dir, output::CONVERSATION_FILE).unwrap_or_default();
     let diff = run_dir
         .read(output::DIFF_FILE)
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -376,13 +392,13 @@ async fn report_dir(
     dir: &output::PinnedDir,
     context: &mut Context<'_>,
 ) -> Result<Report, EvalError> {
-    let manifest: Manifest = read_json(dir, output::MANIFEST_FILE)
+    let manifest: Manifest = read_json_in(dir, output::MANIFEST_FILE)
         .map_err(|error| EvalError::Usage(format!("not an evaluation directory: {error}")))?;
     let mut runs = Vec::new();
     let mut warnings = Vec::new();
     if dir.is_regular_file(runner::preflight::REPORT_FILE)?
         && let Some(reason) =
-            read_json::<runner::preflight::Report>(dir, runner::preflight::REPORT_FILE)
+            read_json_in::<runner::preflight::Report>(dir, runner::preflight::REPORT_FILE)
                 .map_err(EvalError::Usage)?
                 .failure()
     {
@@ -745,7 +761,7 @@ async fn cached_or_judge<T: Serialize + DeserializeOwned>(
 ) -> Spent<T> {
     if !context.rejudge
         && let Ok(judgments) = dir.open_dir(output::JUDGMENTS_DIR)
-        && let Ok(cached) = read_json::<Cached<T>>(&judgments, file)
+        && let Ok(cached) = read_json_in::<Cached<T>>(&judgments, file)
         && (&cached.baseline, &cached.candidate) == (&names.0, &names.1)
         && valid(&cached.result)
     {

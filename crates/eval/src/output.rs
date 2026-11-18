@@ -419,4 +419,84 @@ mod tests {
             io::ErrorKind::AlreadyExists
         );
     }
+
+    /// A link among the files of an evaluation directory is replaced, never
+    /// followed, and a link standing in for a directory or a file to read is
+    /// refused; this is what keeps a report inside the evaluation root.
+    #[test]
+    fn links_inside_a_pinned_directory_are_never_followed() {
+        use std::os::unix::fs::symlink;
+
+        // Given: report files and the judgments directory are links to places outside.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("eval");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        symlink(&victim, dir.join(REPORT_MARKDOWN_FILE)).unwrap();
+        symlink(&victim, dir.join(REPORT_JSON_FILE)).unwrap();
+        symlink(&outside, dir.join(JUDGMENTS_DIR)).unwrap();
+        let pinned = PinnedDir::open_path(&dir).unwrap();
+
+        // When: the report files are written and the links are used as a directory and a file.
+        pinned
+            .write_json(REPORT_JSON_FILE, &serde_json::json!({}))
+            .unwrap();
+        pinned.write(REPORT_MARKDOWN_FILE, b"# report").unwrap();
+
+        // Then: the outside file is untouched, the files are regular, and reading refuses links.
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        for name in [REPORT_MARKDOWN_FILE, REPORT_JSON_FILE] {
+            assert!(std::fs::symlink_metadata(dir.join(name)).unwrap().is_file());
+        }
+        assert!(pinned.open_dir(JUDGMENTS_DIR).is_err());
+        assert!(pinned.ensure_dir(JUDGMENTS_DIR).is_err());
+        symlink(&victim, dir.join("linked.json")).unwrap();
+        assert!(pinned.read("linked.json").is_err());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    /// A directory swapped for a link after it was pinned is not followed: what
+    /// is written goes where the descriptor points.
+    #[test]
+    fn a_directory_swapped_for_a_link_after_it_was_pinned_is_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        // Given: the directory is pinned, and then replaced by a link to another place.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("eval");
+        let moved = root.path().join("moved");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let pinned = PinnedDir::open_path(&dir).unwrap();
+        std::fs::rename(&dir, &moved).unwrap();
+        symlink(&elsewhere, &dir).unwrap();
+
+        // When: files are written and a subdirectory is made through the pinned directory.
+        pinned.write(REPORT_MARKDOWN_FILE, b"# report").unwrap();
+        pinned.ensure_dir(JUDGMENTS_DIR).unwrap();
+
+        // Then: they are in the directory that was pinned, and nowhere else.
+        assert!(moved.join(REPORT_MARKDOWN_FILE).is_file());
+        assert!(moved.join(JUDGMENTS_DIR).is_dir());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    /// A directory that is itself a link, or a name that climbs out, is refused.
+    #[test]
+    fn a_directory_that_is_a_link_or_climbs_out_cannot_be_opened() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, root.path().join("link")).unwrap();
+        let pinned = PinnedDir::open_root(root.path()).unwrap();
+        assert!(pinned.open_dir("real").is_ok());
+        assert!(pinned.open_dir("link").is_err());
+        assert!(PinnedDir::open_path(&root.path().join("link")).is_err());
+        assert!(pinned.open_dir("../real").is_err());
+        assert!(pinned.open_below("real/../real").is_err());
+    }
 }
