@@ -150,9 +150,15 @@ impl Backend for CefBackend {
 
     fn set_streaming(&self, tab: TabId, enabled: bool) -> Result<(), RemoteError> {
         let tab = self.tab(tab)?;
+        tab.page.set_streaming(enabled);
         if enabled {
             tab.page.request_repaint();
         }
+        Ok(())
+    }
+
+    fn set_frame_rate(&self, tab: TabId, frame_rate: u8) -> Result<(), RemoteError> {
+        self.tab(tab)?.page.set_frame_rate(frame_rate);
         Ok(())
     }
 

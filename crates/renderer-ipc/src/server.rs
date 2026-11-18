@@ -54,6 +54,10 @@ pub trait Backend: Send + Sync + 'static {
     /// Frame delivery for `tab` was switched; when enabled the backend should
     /// repaint so the first frame does not wait for the page to change.
     fn set_streaming(&self, tab: TabId, enabled: bool) -> Result<(), RemoteError>;
+    /// Dynamic painting limit. Backends that cannot change it refuse explicitly.
+    fn set_frame_rate(&self, _tab: TabId, _frame_rate: u8) -> Result<(), RemoteError> {
+        Err(RemoteError::invalid("dynamic frame rate is unavailable"))
+    }
     /// A PNG of the loaded page.
     fn capture(&self, tab: TabId, timeout: Duration) -> Result<Vec<u8>, RemoteError>;
     fn cdp(
@@ -532,6 +536,10 @@ fn execute<B: Backend>(
                 shared.queue.set_streaming(tab, false);
             }
             done(result)
+        }
+        Request::SetFrameRate { tab, frame_rate } => {
+            shared.require_tab(tab)?;
+            done(backend.set_frame_rate(tab, frame_rate))
         }
         Request::Capture { tab, timeout_ms } => {
             shared.require_tab(tab)?;

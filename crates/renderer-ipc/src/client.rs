@@ -122,7 +122,7 @@ type Response = Result<(Reply, Vec<u8>), ClientError>;
 #[derive(Default)]
 struct State {
     closed: Option<CloseReason>,
-    frame: Option<Frame>,
+    tabs: HashMap<TabId, (SessionId, Option<Frame>)>,
     spare: Option<Vec<u8>>,
     events: VecDeque<EventKind>,
     stats: ClientStats,
@@ -156,6 +156,8 @@ impl Inner {
                 return;
             }
             state.closed = Some(reason.clone());
+            state.tabs.clear();
+            state.spare = None;
         }
         let _ = self.control_abort.shutdown(Shutdown::Both);
         let _ = self.frames_abort.shutdown(Shutdown::Both);
@@ -303,7 +305,12 @@ impl Inner {
         };
         let mut state = lock(&self.state);
         state.stats.received_frames += 1;
-        if let Some(old) = state.frame.replace(frame) {
+        let Some((_, slot)) = state.tabs.get_mut(&frame.tab) else {
+            state.stats.stale_frames += 1;
+            state.spare = Some(frame.bgra);
+            return Ok(());
+        };
+        if let Some(old) = slot.replace(frame) {
             state.stats.dropped_frames += 1;
             state.spare = Some(old.bgra);
         }
@@ -313,18 +320,50 @@ impl Inner {
     }
 }
 
+struct ReaderCompletion {
+    remaining: Mutex<usize>,
+    changed: Condvar,
+}
+
+/// A reader loop for an external owner (the core starts it through Admission).
+/// Running or dropping a job always publishes completion, including unwinding.
+pub struct ReaderJob {
+    inner: Arc<Inner>,
+    stream: UnixStream,
+    frames: bool,
+    completion: Arc<ReaderCompletion>,
+}
+impl ReaderJob {
+    pub fn run(self) {
+        if self.frames {
+            self.inner.frame_loop(&self.stream);
+        } else {
+            self.inner.control_loop(&self.stream);
+        }
+    }
+}
+impl Drop for ReaderJob {
+    fn drop(&mut self) {
+        *lock(&self.completion.remaining) -= 1;
+        self.completion.changed.notify_all();
+    }
+}
+
 pub struct RendererClient {
     inner: Arc<Inner>,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    completion: Arc<ReaderCompletion>,
 }
 
 impl RendererClient {
-    /// Starts the readers and performs the `Hello` exchange.
-    pub fn connect(
+    /// Constructs a connection without starting threads or waiting for Hello.
+    /// The caller owns both jobs even if starting one fails. Dropping an
+    /// unstarted job releases its completion; jobs never own the process.
+    pub fn prepare(
         control: UnixStream,
         frames: UnixStream,
         config: ClientConfig,
-    ) -> Result<(Self, HelperInfo), ClientError> {
+    ) -> Result<(Self, [ReaderJob; 2]), ClientError> {
         let io = |error: std::io::Error| ClientError::Local(error.to_string());
         let writer = control.try_clone().map_err(io)?;
         writer
@@ -346,39 +385,92 @@ impl RendererClient {
             changed: Condvar::new(),
             config,
         });
-        let control_reader = {
-            let inner = Arc::clone(&inner);
-            std::thread::spawn(move || inner.control_loop(&control))
-        };
-        let frame_reader = {
-            let inner = Arc::clone(&inner);
-            std::thread::spawn(move || inner.frame_loop(&frames))
-        };
-        let client = Self {
-            inner,
-            threads: Mutex::new(vec![control_reader, frame_reader]),
-        };
-        let reply = client.request(
+        let completion = Arc::new(ReaderCompletion {
+            remaining: Mutex::new(2),
+            changed: Condvar::new(),
+        });
+        let jobs = [
+            ReaderJob {
+                inner: inner.clone(),
+                stream: control,
+                frames: false,
+                completion: completion.clone(),
+            },
+            ReaderJob {
+                inner: inner.clone(),
+                stream: frames,
+                frames: true,
+                completion: completion.clone(),
+            },
+        ];
+        Ok((
+            Self {
+                inner,
+                threads: Mutex::new(Vec::new()),
+                completion,
+            },
+            jobs,
+        ))
+    }
+
+    /// Standalone path: owns its threads and performs Hello as before.
+    pub fn connect(
+        control: UnixStream,
+        frames: UnixStream,
+        config: ClientConfig,
+    ) -> Result<(Self, HelperInfo), ClientError> {
+        let (client, jobs) = Self::prepare(control, frames, config)?;
+        for job in jobs {
+            match std::thread::Builder::new()
+                .name("renderer-reader".into())
+                .spawn(move || job.run())
+            {
+                Ok(thread) => lock(&client.threads).push(thread),
+                Err(error) => {
+                    client.close();
+                    return Err(ClientError::Local(error.to_string()));
+                }
+            }
+        }
+        let info = client.hello()?;
+        Ok((client, info))
+    }
+
+    /// Waits for Hello. Core calls this only after releasing spawn Admission.
+    pub fn hello(&self) -> Result<HelperInfo, ClientError> {
+        match self.request(
             Request::Hello {
                 protocol: PROTOCOL_VERSION,
             },
             &[],
-            config.hello_timeout,
-        );
-        match reply {
-            Ok((Reply::Hello { protocol, helper }, _)) => {
-                Ok((client, HelperInfo { protocol, helper }))
+            self.inner.config.hello_timeout,
+        ) {
+            Ok((Reply::Hello { protocol, helper }, _)) if protocol == PROTOCOL_VERSION => {
+                Ok(HelperInfo { protocol, helper })
             }
             Ok((other, _)) => {
-                client.close();
+                self.close();
                 Err(ClientError::Local(format!(
                     "unexpected Hello reply {other:?}"
                 )))
             }
             Err(error) => {
-                client.close();
+                self.close();
                 Err(error)
             }
+        }
+    }
+
+    /// Wait for externally owned reader jobs after closing the connection.
+    /// It does not join a thread; the owning ledger retains those join handles.
+    pub fn wait_readers(&self) {
+        let mut remaining = lock(&self.completion.remaining);
+        while *remaining != 0 {
+            remaining = self
+                .completion
+                .changed
+                .wait(remaining)
+                .unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -396,6 +488,34 @@ impl RendererClient {
         if let Some(reason) = self.inner.closed() {
             return Err(ClientError::Closed(reason));
         }
+        // Reserve the tab slot before Open can produce its initial paint. The
+        // slot is never copied into a second hub queue. Timeout is uncertain:
+        // retain the reservation until close or connection invalidation.
+        let opened = if let Request::OpenArtifact(open) = &request {
+            let mut state = lock(&self.inner.state);
+            if state.tabs.contains_key(&open.tab) {
+                None
+            } else {
+                if state.tabs.len() >= crate::MAX_TABS {
+                    return Err(ClientError::Remote(RemoteError::new(
+                        crate::ErrorKind::Busy,
+                        "tab frame slots exhausted",
+                    )));
+                }
+                state.tabs.insert(open.tab, (open.session, None));
+                Some(open.tab)
+            }
+        } else {
+            None
+        };
+        let close_tab = match &request {
+            Request::CloseTab { tab } => Some(*tab),
+            _ => None,
+        };
+        let close_session = match &request {
+            Request::CloseSession { session } => Some(*session),
+            _ => None,
+        };
         let id = RequestId(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
         let is_shutdown = matches!(request, Request::Shutdown);
         let frame = RequestFrame {
@@ -403,7 +523,16 @@ impl RendererClient {
             id,
             request,
         };
-        let meta = encode_meta(&frame).map_err(|e| ClientError::Local(e.to_string()))?;
+        let meta = match encode_meta(&frame) {
+            Ok(meta) => meta,
+            Err(error) => {
+                if let Some(tab) = opened {
+                    lock(&self.inner.state).tabs.remove(&tab);
+                    self.inner.changed.notify_all();
+                }
+                return Err(ClientError::Local(error.to_string()));
+            }
+        };
         let (reply_tx, reply_rx) = channel();
         lock(&self.inner.pending).insert(id, reply_tx);
         if is_shutdown {
@@ -417,14 +546,20 @@ impl RendererClient {
             lock(&self.inner.pending).remove(&id);
             return Err(match error {
                 // Nothing was sent; the channel is still usable.
-                CodecError::TooLarge { .. } => ClientError::Local(error.to_string()),
+                CodecError::TooLarge { .. } => {
+                    if let Some(tab) = opened {
+                        lock(&self.inner.state).tabs.remove(&tab);
+                        self.inner.changed.notify_all();
+                    }
+                    ClientError::Local(error.to_string())
+                }
                 other => {
                     self.inner.peer_ended(other);
                     ClientError::Closed(self.inner.closed().unwrap_or(CloseReason::PeerClosed))
                 }
             });
         }
-        match reply_rx.recv_timeout(timeout) {
+        let result = match reply_rx.recv_timeout(timeout) {
             Ok(result) => result,
             Err(_) => {
                 // Either the wait ran out or the connection ended; a response
@@ -435,7 +570,23 @@ impl RendererClient {
                     None => Err(ClientError::Timeout),
                 }
             }
+        };
+        let mut state = lock(&self.inner.state);
+        if result.is_ok() {
+            if let Some(tab) = close_tab {
+                state.tabs.remove(&tab);
+            }
+            if let Some(session) = close_session {
+                state.tabs.retain(|_, (s, _)| *s != session);
+            }
+        } else if matches!(result, Err(ClientError::Remote(_)))
+            && let Some(tab) = opened
+        {
+            state.tabs.remove(&tab);
         }
+        drop(state);
+        self.inner.changed.notify_all();
+        result
     }
 
     fn wait_for(&self, helper_timeout_ms: u32) -> Duration {
@@ -467,6 +618,13 @@ impl RendererClient {
     pub fn set_streaming(&self, tab: TabId, enabled: bool) -> Result<(), ClientError> {
         self.expect_done(
             Request::SetStreaming { tab, enabled },
+            self.inner.config.reply_grace,
+        )
+    }
+
+    pub fn set_frame_rate(&self, tab: TabId, frame_rate: u8) -> Result<(), ClientError> {
+        self.expect_done(
+            Request::SetFrameRate { tab, frame_rate },
             self.inner.config.reply_grace,
         )
     }
@@ -534,13 +692,26 @@ impl RendererClient {
     /// Takes the newest frame, waiting up to `timeout` (`None`: until one
     /// arrives or the connection ends). `None` means no frame.
     pub fn wait_frame(&self, timeout: Option<Duration>) -> Option<Frame> {
+        self.wait_frame_matching(None, timeout)
+    }
+
+    /// Take only this tab's latest frame without consuming other tabs.
+    pub fn wait_frame_for(&self, tab: TabId, timeout: Option<Duration>) -> Option<Frame> {
+        self.wait_frame_matching(Some(tab), timeout)
+    }
+    fn wait_frame_matching(&self, tab: Option<TabId>, timeout: Option<Duration>) -> Option<Frame> {
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let mut state = lock(&self.inner.state);
         loop {
-            if let Some(frame) = state.frame.take() {
+            if let Some(frame) = state
+                .tabs
+                .iter_mut()
+                .filter(|(id, _)| tab.is_none_or(|tab| **id == tab))
+                .find_map(|(_, (_, slot))| slot.take())
+            {
                 return Some(frame);
             }
-            if state.closed.is_some() {
+            if state.closed.is_some() || tab.is_some_and(|id| !state.tabs.contains_key(&id)) {
                 return None;
             }
             state = match deadline {

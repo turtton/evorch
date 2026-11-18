@@ -21,6 +21,32 @@ fn connect_to_raw_helper() -> (RendererClient, RawPeer) {
     assert!(matches!(hello.request, Request::Hello { .. }));
     raw_response(&control_helper, GENERATION, hello.id.0, hello_ok(), &[]);
     let (client, _) = connecting.join().unwrap().unwrap();
+    let client = std::sync::Arc::new(client);
+    let opening = {
+        let client = client.clone();
+        std::thread::spawn(move || {
+            let (open, body) = index_only();
+            client.open_artifact(open, &body)
+        })
+    };
+    let (open, _) = read_request_frame(&control_helper);
+    raw_response(
+        &control_helper,
+        GENERATION,
+        open.id.0,
+        Outcome::Ok {
+            reply: Reply::Opened {
+                tab: TabId(1),
+                viewport: Viewport {
+                    width: 1,
+                    height: 1,
+                },
+            },
+        },
+        &[],
+    );
+    opening.join().unwrap().unwrap();
+    let client = std::sync::Arc::try_unwrap(client).ok().unwrap();
     (
         client,
         RawPeer {
@@ -220,4 +246,67 @@ fn shutdown_returns_when_the_helper_acknowledges_and_then_keeps_the_channels_ope
         ended,
         Err(renderer_ipc::codec::CodecError::Closed)
     ));
+}
+
+#[test]
+fn latest_slots_are_tab_scoped_and_close_discards_late_frames() {
+    let (client, peer) = connect_to_raw_helper();
+    let (mut open, body) = index_only();
+    open.tab = TabId(2);
+    std::thread::scope(|scope| {
+        let opening = scope.spawn(|| client.open_artifact(open, &body));
+        let (request, _) = read_request_frame(&peer.control);
+        raw_response(
+            &peer.control,
+            GENERATION,
+            request.id.0,
+            Outcome::Ok {
+                reply: Reply::Opened {
+                    tab: TabId(2),
+                    viewport: Viewport {
+                        width: 64,
+                        height: 48,
+                    },
+                },
+            },
+            &[],
+        );
+        opening.join().unwrap().unwrap();
+    });
+    send_frame(&peer, &frame_meta(GENERATION, 1, 1, 1), &[1; 4]);
+    read_ack(&peer);
+    let meta = encode_meta(&FrameMeta {
+        generation: GENERATION,
+        tab: TabId(2),
+        seq: 2,
+        width: 1,
+        height: 1,
+    })
+    .unwrap();
+    send_frame(&peer, &meta, &[2; 4]);
+    read_ack(&peer);
+    assert_eq!(
+        client.wait_frame_for(TabId(2), None).unwrap().bgra,
+        vec![2; 4]
+    );
+    assert_eq!(
+        client.wait_frame_for(TabId(1), None).unwrap().bgra,
+        vec![1; 4]
+    );
+    std::thread::scope(|scope| {
+        let closing = scope.spawn(|| client.close_tab(TabId(1)));
+        let (request, _) = read_request_frame(&peer.control);
+        raw_response(
+            &peer.control,
+            GENERATION,
+            request.id.0,
+            Outcome::Ok { reply: Reply::Done },
+            &[],
+        );
+        closing.join().unwrap().unwrap();
+    });
+    send_frame(&peer, &frame_meta(GENERATION, 3, 1, 1), &[3; 4]);
+    read_ack(&peer);
+    assert!(client.wait_frame_for(TabId(1), None).is_none());
+    client.close();
 }

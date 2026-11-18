@@ -395,6 +395,21 @@ impl OsrBrowser {
         }
     }
 
+    /// Suspend offscreen painting while the owner has disabled streaming.
+    pub fn set_frame_rate(&self, frame_rate: u8) {
+        if let Some(host) = self.host() {
+            let host = SendCell(host);
+            post_ui(move || host.0.set_windowless_frame_rate(i32::from(frame_rate)));
+        }
+    }
+
+    pub fn set_hidden(&self, hidden: bool) {
+        if let Some(host) = self.host() {
+            let host = SendCell(host);
+            post_ui(move || host.0.was_hidden(i32::from(hidden)));
+        }
+    }
+
     pub fn reload(&self) {
         if let Some(browser) = self.shared.browser() {
             browser.reload();

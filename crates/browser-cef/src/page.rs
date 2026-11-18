@@ -64,6 +64,14 @@ impl ArtifactPage {
         self.browser.request_repaint();
     }
 
+    pub fn set_frame_rate(&self, frame_rate: u8) {
+        self.browser.set_frame_rate(frame_rate);
+    }
+
+    pub fn set_streaming(&self, enabled: bool) {
+        self.browser.set_hidden(!enabled);
+    }
+
     pub fn resize(&self, width: i32, height: i32) {
         self.browser.resize(width, height, 1.0);
     }
