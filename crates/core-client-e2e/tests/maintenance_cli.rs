@@ -25,12 +25,13 @@ use workbench_host::areas::maintenance::{
 use workbench_host::areas::{AreaTasks, Areas};
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost};
 use workbench_host::connections::ConnectionHooks;
+use workbench_protocol::commands::Command as UiCommand;
 use workbench_protocol::events::{Subscribe, SubscriptionScope, UiEvent};
 use workbench_protocol::handshake::Capability;
 use workbench_protocol::ids::ClientId;
 use workbench_protocol::namespaces::maintenance::{
-    ListMaintenance, MaintenanceEvent, MaintenanceProgress, MaintenanceQuery, MaintenanceReply,
-    MaintenanceView, ReindexResult, ReindexThreads,
+    CancelMaintenance, ListMaintenance, MaintenanceCommand, MaintenanceEvent, MaintenanceProgress,
+    MaintenanceQuery, MaintenanceReply, MaintenanceView, ReindexResult, ReindexThreads,
 };
 use workbench_protocol::operation::{CancelReason, OperationState};
 use workbench_protocol::queries::{Query, QueryReply};
@@ -132,7 +133,9 @@ fn seed(database: &Path, decodable: u32, undecodable: u32) {
 /// database of `dir`, which holds legacy rows (written before the `subkind` and
 /// `run_id` columns existed).
 struct Core {
-    _dir: test_socket_dir::SplitDir,
+    dir: Option<test_socket_dir::SplitDir>,
+    /// The production host of a bootstrapped core, which a test restarts.
+    boot: Option<BootstrappedHost>,
     database: PathBuf,
     identity: PathBuf,
     socket: PathBuf,
@@ -210,7 +213,16 @@ impl Core {
     /// database of `dir`, with the same legacy rows. Nothing holds an operation
     /// there, so a test that stops one watches the progress it prints.
     async fn bootstrapped(decodable: u32, undecodable: u32) -> Self {
-        let dir = test_socket_dir::SplitDir::new();
+        Self::bootstrapped_in(test_socket_dir::SplitDir::new(), decodable, undecodable).await
+    }
+
+    /// As [`Self::bootstrapped`] over the directories of `dir`: the ones of a
+    /// core that was restarted ([`Self::restart`]) hold its database.
+    async fn bootstrapped_in(
+        dir: test_socket_dir::SplitDir,
+        decodable: u32,
+        undecodable: u32,
+    ) -> Self {
         let root = dir.path().canonicalize().unwrap();
         let boot = BootstrappedHost::open(BootstrapOptions {
             config_dir: root.clone(),
@@ -227,7 +239,11 @@ impl Core {
             left.send(client.clone()).unwrap();
         }));
         let host = boot.host.clone();
-        Self::serve(dir, database, host, connections, departures, Box::new(boot))
+        let writer = boot.composition.storage_writer.clone();
+        let mut core = Self::serve(dir, database, host, connections, departures, Box::new(()));
+        core.store = Some(writer);
+        core.boot = Some(boot);
+        core
     }
 
     fn serve(
@@ -271,7 +287,8 @@ impl Core {
             connections,
             departures,
             store: None,
-            _dir: dir,
+            dir: Some(dir),
+            boot: None,
             _keep: keep,
             _instance: instance,
             _stop: stop,
@@ -379,6 +396,67 @@ impl Core {
                 ..Default::default()
             }])
             .unwrap();
+    }
+
+    /// The core of the production composition stops as an operator stops it (its
+    /// resident index owner gives the lease back) and leaves its directories
+    /// to the next one.
+    async fn restart(mut self) -> test_socket_dir::SplitDir {
+        self.server.abort();
+        let _ = (&mut self.server).await;
+        let mut boot = self.boot.take().expect("a bootstrapped core");
+        boot.shutdown().await.unwrap();
+        self.dir.take().expect("the directories of the core")
+        // The socket instance is released as `self` goes.
+    }
+
+    /// A hand-built core whose index has an owner of its own that steps in the
+    /// background, as the one the production core starts.
+    async fn resident(hook: Option<MaintenanceHook>) -> Self {
+        let core = Self::start(0, 0, hook).await;
+        let owner = storage::thread_index::IndexOwner {
+            id: "core-resident".into(),
+            kind: storage::thread_index::IndexOwnerKind::Cli,
+        };
+        core.store
+            .as_ref()
+            .unwrap()
+            .start_thread_index_owner(owner)
+            .unwrap();
+        core
+    }
+
+    /// How the durable request `id` stands, read from the file.
+    fn request_state(&self, id: &str) -> String {
+        rusqlite::Connection::open(&self.database)
+            .unwrap()
+            .query_row(
+                "SELECT state FROM thread_index_requests WHERE request_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The state the request `id` ends in, driven by the index owner alone. The
+    /// owner tells when the pending reindex work changes; every such event is a
+    /// reason to read the request again.
+    async fn request_ends(&self, id: &str) -> String {
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let notify = changed.clone();
+        let observer: Arc<dyn Fn() + Send + Sync> = Arc::new(move || notify.notify_one());
+        self.store
+            .as_ref()
+            .expect("a core with a storage")
+            .observe_pending_reindex(&observer)
+            .unwrap();
+        loop {
+            let state = self.request_state(id);
+            if state != "pending" {
+                return state;
+            }
+            changed.notified().await;
+        }
     }
 
     /// `evorch reindex-threads` as a process of its own, connected to this core.
@@ -545,6 +623,14 @@ fn converted(view: &MaintenanceView) -> u64 {
         panic!("a backfill reports its own progress: {view:?}");
     };
     *converted
+}
+
+/// The durable request a reindex operation drives (shown once it is registered).
+fn request_of(view: &MaintenanceView) -> String {
+    let MaintenanceProgress::ReindexThreads { request_id, .. } = &view.progress else {
+        panic!("a reindex reports its own progress: {view:?}");
+    };
+    request_id.clone().expect("the request is registered")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -940,22 +1026,29 @@ async fn a_bootstrapped_core_runs_the_cli_reindex_and_prints_the_result() {
 /// A CLI invocation that ends by `signal` stops the reindex it started before
 /// its next step, and only that one: a client that came and went, and a client
 /// that stays, are not touched, and the one that stays reindexes afterwards.
-async fn a_signalled_cli_stops_only_its_own_reindex(signal: Option<&str>) {
+async fn a_signalled_cli_stops_only_its_own_reindex(signal: Option<&str>, resident: bool) {
     // Given: two threads to index, a core that holds an operation before its
     // first step, and a client that stays connected and listens.
     let hold = Hold::after(0);
-    let mut core = Core::start(0, 0, Some(hold.hook())).await;
+    let mut core = if resident {
+        Core::resident(Some(hold.hook())).await
+    } else {
+        Core::start(0, 0, Some(hold.hook())).await
+    };
     core.source("first", 10);
     core.source("second", 20);
     let staying = core.client().await;
     let mut events = subscribe(&staying).await;
 
-    // When: a CLI starts its reindex and is held before the first step.
-    let mut cli = core.cli_reindex("");
+    // When: a CLI starts its reindex and is held before the first step. (With an
+    // index owner of the core it waits for the owner: without `--wait` it would
+    // be told the work is accepted and leave.)
+    let mut cli = core.cli_reindex(if resident { "--wait" } else { "" });
     hold.reached().await;
     let started = operations(&staying).await;
     assert_eq!(started.len(), 1);
     assert!(!started[0].operation.state.is_final());
+    let request_id = request_of(&started[0]);
 
     // And: a client that started nothing comes and goes.
     drop(core.client().await);
@@ -998,11 +1091,23 @@ async fn a_signalled_cli_stops_only_its_own_reindex(signal: Option<&str>) {
     };
     assert_eq!(result, &None);
 
+    // And: with an index owner in the core, the request the CLI left ends
+    // through that owner, though nobody drives it any more.
+    if resident {
+        assert_eq!(core.request_ends(&request_id).await, "completed");
+    }
+
     // And: the client that stayed was not disconnected, and its own reindex
     // takes the threads the stopped one left.
-    let end = online_maintenance::reindex(&staying, &ReindexThreads::default())
-        .await
-        .unwrap();
+    let end = online_maintenance::reindex(
+        &staying,
+        &ReindexThreads {
+            wait: resident,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let ReindexEnd::Result(ReindexResult::Completed { summary, .. }) = end else {
         panic!("the staying client's reindex did not complete: {end:?}");
     };
@@ -1011,12 +1116,22 @@ async fn a_signalled_cli_stops_only_its_own_reindex(signal: Option<&str>) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cli_killed_by_sigkill_stops_only_its_own_reindex() {
-    a_signalled_cli_stops_only_its_own_reindex(None).await;
+    a_signalled_cli_stops_only_its_own_reindex(None, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cli_killed_by_sigkill_leaves_its_reindex_to_the_resident_owner() {
+    a_signalled_cli_stops_only_its_own_reindex(None, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cli_interrupted_by_sigint_stops_only_its_own_reindex() {
-    a_signalled_cli_stops_only_its_own_reindex(Some("INT")).await;
+    a_signalled_cli_stops_only_its_own_reindex(Some("INT"), false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cli_interrupted_by_sigint_leaves_its_reindex_to_the_resident_owner() {
+    a_signalled_cli_stops_only_its_own_reindex(Some("INT"), true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1066,4 +1181,333 @@ async fn two_cli_processes_reindexing_at_once_are_not_refused_and_the_second_is_
         panic!("not a completed result: {out}");
     };
     assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+}
+
+// ---- reindex-threads with the index owner of the core (stage 17d-3) ----------
+//
+// The production core starts a resident index owner (it holds the index lease
+// and steps in the background, whoever registers). A reindex is then not its own
+// owner: without `--wait` the CLI is told the request is accepted, with
+// `--wait` it waits for the terminal result, and a request that nobody drives
+// any more (its CLI left, the core restarted) still ends through the owner.
+
+const HOUR_NS: i64 = 3_600_000_000_000;
+
+fn wall_ns() -> i64 {
+    storage::system_time_to_ns(std::time::SystemTime::now()).unwrap()
+}
+
+fn legacy_gui() -> storage::thread_index::IndexOwner {
+    storage::thread_index::IndexOwner {
+        id: "legacy-gui".into(),
+        kind: storage::thread_index::IndexOwnerKind::Gui,
+    }
+}
+
+/// How the request `id` stands for its owner: the summary of a terminal one.
+fn terminal_summary(
+    store: &storage::StorageHandle,
+    id: &str,
+) -> storage::thread_index::RequestSummary {
+    use storage::thread_index::{ReindexResult as Stored, RequestProgress};
+    match store
+        .thread_index_request_status(id, wall_ns())
+        .unwrap()
+        .progress
+    {
+        RequestProgress::Terminal(
+            Stored::Completed { summary, .. } | Stored::CompletedWithGaps { summary, .. },
+        ) => summary,
+        other => panic!("the request did not end with a result: {other:?}"),
+    }
+}
+
+async fn finished(cli: std::process::Child) -> (std::process::ExitStatus, String, String) {
+    let output = tokio::task::spawn_blocking(move || cli.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    (
+        output.status,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_wait_the_cli_is_told_the_work_is_accepted_and_the_resident_owner_does_it() {
+    // Given: the production core, whose owner holds the index, and two threads.
+    let core = Core::bootstrapped(0, 0).await;
+    core.source("first", 10);
+    core.source("second", 20);
+
+    // When: the CLI reindexes without `--wait`.
+    let (status, out, err) = finished(core.cli_reindex("")).await;
+
+    // Then: it succeeded and printed `accepted`, the shape the offline command
+    // printed when another owner took the work.
+    assert!(status.success(), "{err}");
+    let storage::thread_index::ReindexResult::Accepted { request_id } = printed_result(&out) else {
+        panic!("not an accepted result: {out}");
+    };
+
+    // And: the request ends through the owner, with both threads indexed.
+    assert_eq!(core.request_ends(&request_id).await, "completed");
+    let summary = terminal_summary(core.store.as_ref().unwrap(), &request_id);
+    assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_wait_the_cli_waits_for_the_resident_owner_and_prints_the_terminal_result() {
+    // Given: the production core and two threads.
+    let core = Core::bootstrapped(0, 0).await;
+    core.source("first", 10);
+    core.source("second", 20);
+
+    // When: the CLI reindexes with `--wait`.
+    let (status, out, err) = finished(core.cli_reindex("--wait")).await;
+
+    // Then: it printed the `completed` result of the shape it always had.
+    assert!(status.success(), "{err}");
+    let storage::thread_index::ReindexResult::Completed {
+        request_id,
+        summary,
+    } = printed_result(&out)
+    else {
+        panic!("not a completed result: {out}");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+    assert_eq!(core.request_state(&request_id), "completed");
+}
+
+/// A disabled index, or one a capacity limit pauses, cannot work on what a
+/// request froze: the registration settles at the admission, so that no pending
+/// target is left for an owner that would never work on it.
+async fn a_registration_the_index_cannot_serve_ends_at_its_admission(
+    settings: storage::thread_index::ThreadIndexSettings,
+    reason: workbench_protocol::namespaces::maintenance::ReindexGapReason,
+    wait: bool,
+) {
+    // Given: the production core whose index cannot take work, and a thread.
+    let core = Core::bootstrapped(0, 0).await;
+    let store = core.store.clone().unwrap();
+    store.apply_thread_index_settings(settings).unwrap();
+    core.source("first", 10);
+    // The index of a disabled core does not discover runs: a header exists, as
+    // the enabled core made it earlier.
+    rusqlite::Connection::open(&core.database)
+        .unwrap()
+        .execute_batch(
+            "INSERT OR IGNORE INTO thread_index_runs(run_id, state, source_revision, \
+             snapshot_revision, source_context_sha256, extractor_version, accounting_version, \
+             source_updated_at_ns, retention_at_ns) SELECT run_id, 'pending', snapshot_revision, \
+             snapshot_revision, '', 1, 1, updated_at_ns, 1 FROM run_contexts WHERE run_id = 'first'",
+        )
+        .unwrap();
+
+    // When: the CLI reindexes.
+    let argv = if wait {
+        "--include-evicted --wait"
+    } else {
+        "--include-evicted"
+    };
+    let (status, out, err) = finished(core.cli_reindex(argv)).await;
+
+    // Then: it printed the terminal result at once, with the gap the index gave.
+    assert!(status.success(), "{err}");
+    let storage::thread_index::ReindexResult::CompletedWithGaps {
+        request_id,
+        summary,
+    } = printed_result(&out)
+    else {
+        panic!("not a completed_with_gaps result: {out}");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (1, 0));
+    assert_eq!(summary.gaps.len(), 1);
+    assert_eq!(
+        serde_json::to_value(summary.gaps[0].reason).unwrap(),
+        serde_json::to_value(reason).unwrap()
+    );
+    assert_eq!(core.request_state(&request_id), "completed_with_gaps");
+
+    // And: no target is left pending, so that nothing keeps the core busy.
+    let pending: i64 = rusqlite::Connection::open(&core.database)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+    assert!(!core.boot.as_ref().unwrap().busy());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disabled_index_ends_the_cli_registration_at_its_admission() {
+    for wait in [false, true] {
+        a_registration_the_index_cannot_serve_ends_at_its_admission(
+            storage::thread_index::ThreadIndexSettings {
+                enabled: false,
+                max_bytes: 512 * 1024 * 1024,
+            },
+            workbench_protocol::namespaces::maintenance::ReindexGapReason::IndexDisabled,
+            wait,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_a_cli_left_published_is_ended_by_the_core_that_restarts() {
+    // Given: the production core, whose index another owner (a legacy GUI) holds,
+    // and two threads.
+    let core = Core::bootstrapped(0, 0).await;
+    let store = core.store.clone().unwrap();
+    store.stop_thread_index_owner().unwrap();
+    let storage::thread_index::LeaseResult::Acquired(gui) = store
+        .acquire_thread_index_lease(&legacy_gui(), wall_ns(), HOUR_NS)
+        .unwrap()
+    else {
+        panic!("the legacy GUI did not get the free lease");
+    };
+    // Run ids the restarted core accepts when it recovers them.
+    core.source("run-1", 10);
+    core.source("run-2", 20);
+    let staying = core.client().await;
+    let mut events = subscribe(&staying).await;
+
+    // When: a CLI reindexes with `--wait`: its request is published and
+    // nobody can work on it, so the CLI waits.
+    let mut cli = core.cli_reindex("--wait");
+    let request_id = loop {
+        let envelope = events.next().await.expect("the subscription stays open");
+        if let UiEvent::Maintenance(MaintenanceEvent::MaintenanceProgress { view }) = envelope.event
+            && let MaintenanceProgress::ReindexThreads {
+                request_id: Some(id),
+                ..
+            } = view.progress
+        {
+            break id;
+        }
+    };
+
+    // And: the CLI is killed. Its operation stops, and its request stays.
+    cli.kill().unwrap();
+    tokio::task::spawn_blocking(move || cli.wait().unwrap())
+        .await
+        .unwrap();
+    let done = settled(&mut events).await;
+    assert_eq!(
+        done.operation.state,
+        OperationState::Cancelled {
+            reason: CancelReason::Requested
+        }
+    );
+    assert_eq!(core.request_state(&request_id), "pending");
+
+    // And: the legacy GUI goes, and the core stops and starts again, with no
+    // other registration.
+    store.release_thread_index_lease(&gui).unwrap();
+    drop((staying, events));
+    let dir = core.restart().await;
+    let core = Core::bootstrapped_in(dir, 0, 0).await;
+
+    // Then: the owner of the new core ends the request, and the status of the
+    // request says so: both threads are indexed.
+    assert_eq!(core.request_ends(&request_id).await, "completed");
+    let summary = terminal_summary(core.store.as_ref().unwrap(), &request_id);
+    assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+    let requests: i64 = rusqlite::Connection::open(&core.database)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM thread_index_requests", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(requests, 1, "nothing registered another request");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_waiting_reindex_leaves_its_request_to_the_resident_owner() {
+    // Given: a core with a resident owner, two threads, and a CLI waiting for the
+    // owner, held before its first look at the request.
+    let hold = Hold::after(0);
+    let core = Core::resident(Some(hold.hook())).await;
+    core.source("first", 10);
+    core.source("second", 20);
+    let staying = core.client().await;
+    let cli = core.cli_reindex("--wait");
+    hold.reached().await;
+    let started = operations(&staying).await;
+    assert_eq!(started.len(), 1);
+    let request_id = request_of(&started[0]);
+
+    // When: the operation is cancelled.
+    staying
+        .command(UiCommand::Maintenance(
+            MaintenanceCommand::CancelMaintenance(CancelMaintenance {
+                operation_id: started[0].operation.operation_id.clone(),
+            }),
+        ))
+        .await
+        .unwrap();
+    hold.release();
+    let (status, out, err) = finished(cli).await;
+
+    // Then: the CLI printed no result and said why on stderr, and failed.
+    assert!(!status.success());
+    assert!(err.contains("cancelled"), "{err}");
+    assert!(
+        reindex_stdout(&out).trim().is_empty(),
+        "a cancelled reindex prints no result: {out:?}"
+    );
+
+    // And: the request ends through the owner.
+    assert_eq!(core.request_ends(&request_id).await, "completed");
+    let summary = terminal_summary(core.store.as_ref().unwrap(), &request_id);
+    assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_cli_reindexes_with_a_resident_owner_each_get_their_own_request() {
+    // Given: a core with a resident owner, two threads, and two CLIs that wait
+    // for the owner, each held before its first look at its request.
+    let hold = Hold::after(0);
+    let core = Core::resident(Some(hold.hook())).await;
+    core.source("first", 10);
+    core.source("second", 20);
+    let first = core.cli_reindex("--wait");
+    let second = core.cli_reindex("--wait");
+    hold.reached().await;
+    hold.reached().await;
+
+    // When: a third one reindexes without `--wait` meanwhile.
+    let (status, out, err) = finished(core.cli_reindex("")).await;
+
+    // Then: it is not refused as busy: the work is accepted.
+    assert!(status.success(), "{err}");
+    assert!(
+        matches!(
+            printed_result(&out),
+            storage::thread_index::ReindexResult::Accepted { .. }
+        ),
+        "{out}"
+    );
+
+    // And: the two that wait print their own completed results.
+    hold.release();
+    let mut ids = Vec::new();
+    for cli in [first, second] {
+        let (status, out, err) = finished(cli).await;
+        assert!(status.success(), "{err}");
+        let storage::thread_index::ReindexResult::Completed {
+            request_id,
+            summary,
+        } = printed_result(&out)
+        else {
+            panic!("not a completed result: {out}");
+        };
+        assert_eq!((summary.target_count, summary.succeeded), (2, 2));
+        ids.push(request_id);
+    }
+    assert_ne!(ids[0], ids[1], "each registered a request of its own");
 }
