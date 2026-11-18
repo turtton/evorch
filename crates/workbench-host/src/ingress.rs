@@ -539,6 +539,13 @@ impl CommandHost {
         &self.projection
     }
 
+    /// The registry a transport reports its clients' connections to (see
+    /// [`crate::connections`]). Cloned out like [`Self::projection`], so that a
+    /// connection ends without taking the host's lock.
+    pub fn connections(&self) -> std::sync::Arc<crate::connections::ConnectionHooks> {
+        self.areas.connections.clone()
+    }
+
     pub fn handle_query(
         &self,
         session: &SessionId,
