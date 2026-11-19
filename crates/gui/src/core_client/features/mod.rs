@@ -593,7 +593,7 @@ impl Features {
         }
     }
     /// Local artifact-to-browser routing. Only references cross the boundary. The
-    /// browser section opens and is scrolled into view: a preview queued while it is
+    /// browser section opens and is pinned near the top: a preview queued while it is
     /// collapsed would otherwise never start.
     pub fn open_preview(&mut self, artifact: ArtifactRef) {
         if let Some(f) = self
